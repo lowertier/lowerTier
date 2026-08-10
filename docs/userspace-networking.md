@@ -64,7 +64,9 @@ It rejects a socket mark because that option can require operating system privil
 
 The SOCKS5 listener supports TCP connections and the existing SOCKS5 UDP association path.
 The HTTP listener supports `CONNECT` tunnels and normal HTTP proxy requests.
-Both listeners use EasyTier peer selection and overlay routing.
+Both proxy protocols use EasyTier peer selection and overlay routing.
+The userspace overlay target path currently supports IPv4 destinations.
+One SOCKS5 UDP association can use at most 256 active targets.
 
 This mode does not add host routes.
 It does not create a TUN or TAP interface.
@@ -90,3 +92,4 @@ See the [Tailscale userspace networking guide](https://tailscale.com/docs/concep
 See the [Tailscale daemon reference](https://tailscale.com/docs/reference/tailscaled).
 See the [Tailscale router comparison](https://tailscale.com/kb/1177/kernel-vs-userspace-routers).
 
+See the [measured EasyTier results](performance/userspace-networking-results.md).
