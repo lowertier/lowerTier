@@ -122,12 +122,16 @@ impl UdpBatchReceiver {
             match socket.try_io(Interest::READABLE, || {
                 #[cfg(target_os = "linux")]
                 {
-                    return try_recv_batch(socket, max_datagram_size, gro_enabled, &mut self.slots);
+                    try_recv_batch(socket, max_datagram_size, gro_enabled, &mut self.slots)
                 }
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
-                return try_recv_batch(socket, max_datagram_size, &mut self.slots);
+                {
+                    try_recv_batch(socket, max_datagram_size, &mut self.slots)
+                }
                 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
-                try_recv_batch(socket, max_datagram_size)
+                {
+                    try_recv_batch(socket, max_datagram_size)
+                }
             }) {
                 Ok(datagrams) if !datagrams.is_empty() => return Ok(datagrams),
                 Ok(_) => continue,

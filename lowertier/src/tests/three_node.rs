@@ -77,17 +77,22 @@ pub fn get_inst_config(
     config.set_netns(ns.map(|s| s.to_owned()));
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
-    let mut listeners = vec![
+    let listeners = vec![
         "tcp://0.0.0.0:11010".parse().unwrap(),
         "udp://0.0.0.0:11010".parse().unwrap(),
     ];
-    #[cfg(feature = "wireguard")]
-    listeners.push("wg://0.0.0.0:11011".parse().unwrap());
-    #[cfg(feature = "websocket")]
-    listeners.extend([
-        "ws://0.0.0.0:11011".parse().unwrap(),
-        "wss://0.0.0.0:11012".parse().unwrap(),
-    ]);
+    #[cfg(any(feature = "wireguard", feature = "websocket"))]
+    let listeners = {
+        let mut listeners = listeners;
+        #[cfg(feature = "wireguard")]
+        listeners.push("wg://0.0.0.0:11011".parse().unwrap());
+        #[cfg(feature = "websocket")]
+        listeners.extend([
+            "ws://0.0.0.0:11011".parse().unwrap(),
+            "wss://0.0.0.0:11012".parse().unwrap(),
+        ]);
+        listeners
+    };
     config.set_listeners(listeners);
     config.set_socks5_portal(Some("socks5://0.0.0.0:12345".parse().unwrap()));
     config
