@@ -6,20 +6,21 @@ Date: 2026-08-10
 
 The unprivileged proxy mode passed TCP, UDP, HTTP, and interface tests.
 
-The median steady-state RTT overhead was 0.026 ms on the local encrypted overlay.
-SOCKS5 reached 124.483 Mbit/s median throughput.
-HTTP CONNECT reached 132.321 Mbit/s median throughput.
+The median steady-state RTT overhead was 0.022 ms for SOCKS5.
+The median overhead was 0.116 ms for HTTP CONNECT.
+SOCKS5 reached 124.560 Mbit/s median throughput.
+HTTP CONNECT reached 105.891 Mbit/s median throughput.
 
-The shared proxy process used 24.031 MiB of idle resident memory.
-The same process used 23.969 MiB with only SOCKS5 enabled.
-The measured 0.062 MiB difference is allocator noise.
-The shared process reached 26.078 MiB during transfers.
+The shared proxy process used 23.953 MiB of idle resident memory.
+The same process used 23.984 MiB with only SOCKS5 enabled.
+The measured 0.031 MiB difference is allocator noise.
+The shared process reached 25.750 MiB during transfers.
 
 ## Test boundary
 
 The test ran two release EasyTier processes on one Apple M4 Max host.
 The host ran macOS 27.0 on ARM64.
-Rust 1.95.0 built commit `4a57854c4bd7090594860d50f7d6d945eb0affb8`.
+Rust 1.95.0 built commit `b0a3c41638731521e516801f0e738b2b81c179f1`.
 
 The build used only the `socks5` and `quic` features.
 Both nodes used the default ChaCha20-Poly1305 overlay encryption.
@@ -52,9 +53,9 @@ The test then recorded 101 request and response exchanges.
 
 | Path | Minimum | Median | Maximum | Overhead versus direct median |
 | --- | ---: | ---: | ---: | ---: |
-| Direct loopback | 0.073 ms | 0.084 ms | 0.105 ms | Baseline |
-| SOCKS5 over EasyTier | 0.104 ms | 0.110 ms | 0.127 ms | 0.026 ms |
-| HTTP CONNECT over EasyTier | 0.103 ms | 0.110 ms | 0.152 ms | 0.026 ms |
+| Direct loopback | 0.070 ms | 0.087 ms | 0.129 ms | Baseline |
+| SOCKS5 over EasyTier | 0.101 ms | 0.109 ms | 0.142 ms | 0.022 ms |
+| HTTP CONNECT over EasyTier | 0.130 ms | 0.203 ms | 0.278 ms | 0.116 ms |
 
 The measured overhead is below the 0.2 ms target.
 
@@ -65,9 +66,9 @@ The median uses 11 runs.
 
 | Path | Minimum | Median | Maximum |
 | --- | ---: | ---: | ---: |
-| Direct loopback | 0.201 ms | 0.259 ms | 0.316 ms |
-| SOCKS5 over EasyTier | 0.461 ms | 0.640 ms | 0.685 ms |
-| HTTP CONNECT over EasyTier | 0.558 ms | 0.583 ms | 0.901 ms |
+| Direct loopback | 0.207 ms | 0.217 ms | 0.357 ms |
+| SOCKS5 over EasyTier | 0.398 ms | 0.428 ms | 0.677 ms |
+| HTTP CONNECT over EasyTier | 0.577 ms | 0.606 ms | 0.871 ms |
 
 ## Throughput
 
@@ -76,9 +77,9 @@ The reported value is the median of five runs.
 
 | Path | Runs in Mbit/s | Median |
 | --- | --- | ---: |
-| Direct loopback | 38925.550, 45916.653, 84566.017, 92710.481, 92094.206 | 84566.017 Mbit/s |
-| SOCKS5 over EasyTier | 146.218, 144.134, 124.483, 54.725, 92.327 | 124.483 Mbit/s |
-| HTTP CONNECT over EasyTier | 142.654, 143.235, 122.982, 132.321, 118.893 | 132.321 Mbit/s |
+| Direct loopback | 44243.195, 43276.410, 83391.477, 82659.109, 82514.597 | 82514.597 Mbit/s |
+| SOCKS5 over EasyTier | 121.067, 124.560, 127.369, 129.481, 124.399 | 124.560 Mbit/s |
+| HTTP CONNECT over EasyTier | 113.273, 102.832, 102.969, 106.671, 105.891 | 105.891 Mbit/s |
 
 A separate 512 MiB run reached 105.894 Mbit/s through SOCKS5.
 The same run reached 121.630 Mbit/s through HTTP CONNECT.
@@ -95,9 +96,9 @@ The active value is the highest sample during the transfer series.
 
 | Client process mode | Resident memory |
 | --- | ---: |
-| SOCKS5 only, idle | 23.969 MiB |
-| Shared SOCKS5 and HTTP, idle | 24.031 MiB |
-| Shared SOCKS5 and HTTP, active peak | 26.078 MiB |
+| SOCKS5 only, idle | 23.984 MiB |
+| Shared SOCKS5 and HTTP, idle | 23.953 MiB |
+| Shared SOCKS5 and HTTP, active peak | 25.750 MiB |
 
 One shared address creates one listener and one userspace network stack.
 The UDP association limits one client to 256 active targets.
