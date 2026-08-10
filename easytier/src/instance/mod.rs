@@ -6,7 +6,7 @@ pub mod listeners;
 
 pub(crate) mod l2_tun;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(all(feature = "tun", any(target_os = "macos", target_os = "ios")))]
 mod darwin_tun;
 
 #[cfg(all(target_os = "linux", feature = "tun"))]
