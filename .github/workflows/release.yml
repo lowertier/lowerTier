@@ -1,6 +1,8 @@
 name: lowertier release
 
 on:
+  push:
+    tags: ["v*-lowertier.*"]
   workflow_dispatch:
     inputs:
       core_run_id:
@@ -19,6 +21,7 @@ on:
         required: true
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -30,7 +33,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Download core artifacts
+      - name: Download selected core artifacts
+        if: github.event_name == 'workflow_dispatch'
         uses: dawidd6/action-download-artifact@v11
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -38,9 +42,22 @@ jobs:
           repo: ${{ github.repository }}
           path: release-assets
 
+      - name: Download latest core artifacts
+        if: github.event_name == 'push'
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: core.yml
+          workflow_conclusion: success
+          branch: main
+          event: push
+          check_artifacts: true
+          repo: ${{ github.repository }}
+          path: release-assets
+
       - name: Create release archives
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
           mkdir -p zipped-assets
           while IFS= read -r -d '' artifact_dir; do
@@ -49,13 +66,22 @@ jobs:
             (cd "$artifact_dir" && zip -r "$archive" .)
           done < <(find release-assets -mindepth 1 -maxdepth 1 -type d -print0)
           test -n "$(find zipped-assets -type f -name '*.zip' -print -quit)"
+          (cd zipped-assets && sha256sum ./*.zip > SHA256SUMS)
 
-      - name: Create draft release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ inputs.version }}
-          draft: true
-          make_latest: ${{ inputs.make_latest }}
+          name: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          body: |
+            This release contains only the lean lowertier command-line programs.
+
+            Each archive contains `lowertier-core` and `lowertier-cli`.
+            Windows archives also contain required driver files.
+            Verify each archive with `SHA256SUMS`.
+          draft: false
+          prerelease: false
+          make_latest: ${{ github.event_name == 'push' || inputs.make_latest }}
+          fail_on_unmatched_files: true
           files: zipped-assets/*
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ inputs.version }}
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
