@@ -62,6 +62,10 @@ jobs:
           mkdir -p zipped-assets
           while IFS= read -r -d '' artifact_dir; do
             artifact_name="$(basename "$artifact_dir")"
+            case "$artifact_name" in
+              *-windows-*) ;;
+              *) chmod 0755 "$artifact_dir/lowertier-core" "$artifact_dir/lowertier-cli" ;;
+            esac
             archive="$GITHUB_WORKSPACE/zipped-assets/${artifact_name}-${VERSION}.zip"
             (cd "$artifact_dir" && zip -r "$archive" .)
           done < <(find release-assets -mindepth 1 -maxdepth 1 -type d -print0)
