@@ -477,15 +477,25 @@ fn try_recv_batch(
         messages[index].msg_hdr.msg_iov = &mut iovecs[index];
         messages[index].msg_hdr.msg_iovlen = 1;
         messages[index].msg_hdr.msg_control = controls[index].as_mut_ptr().cast();
+        #[cfg(not(target_env = "musl"))]
         messages[index].msg_hdr.msg_controllen = mem::size_of_val(&controls[index]);
+        #[cfg(target_env = "musl")]
+        {
+            messages[index].msg_hdr.msg_controllen =
+                mem::size_of_val(&controls[index]) as libc::socklen_t;
+        }
     }
 
+    #[cfg(not(target_env = "musl"))]
+    let flags = libc::MSG_DONTWAIT;
+    #[cfg(target_env = "musl")]
+    let flags = libc::MSG_DONTWAIT as libc::c_uint;
     let result = unsafe {
         libc::recvmmsg(
             socket.as_raw_fd(),
             messages.as_mut_ptr(),
             message_count as libc::c_uint,
-            libc::MSG_DONTWAIT,
+            flags,
             ptr::null_mut(),
         )
     };
@@ -568,7 +578,9 @@ fn udp_gro_stride(message: &nix::libc::msghdr) -> io::Result<Option<usize>> {
     while !cmsg.is_null() {
         let header = unsafe { &*cmsg };
         if header.cmsg_level == SOL_UDP && header.cmsg_type == UDP_GRO {
-            let minimum = unsafe { libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint) } as usize;
+            let minimum = unsafe { libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint) };
+            #[cfg(not(target_env = "musl"))]
+            let minimum = minimum as usize;
             if header.cmsg_len < minimum {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -718,12 +730,16 @@ fn try_send_batch(
         message.msg_hdr.msg_iovlen = 1;
     }
 
+    #[cfg(not(target_env = "musl"))]
+    let flags = libc::MSG_DONTWAIT;
+    #[cfg(target_env = "musl")]
+    let flags = libc::MSG_DONTWAIT as libc::c_uint;
     let result = unsafe {
         libc::sendmmsg(
             socket.as_raw_fd(),
             messages.as_mut_ptr(),
             buffers.len() as libc::c_uint,
-            libc::MSG_DONTWAIT,
+            flags,
         )
     };
     checked_message_count(result as isize, buffers.len())
@@ -736,7 +752,7 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
     use nix::libc;
 
     // These values are part of Linux's stable UDP userspace ABI but are not
-    // exported by every libc release supported by LowTier.
+    // exported by every libc release supported by lowertier.
     const SOL_UDP: libc::c_int = 17;
     const UDP_SEGMENT: libc::c_int = 103;
 
@@ -762,9 +778,19 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
     message.msg_name = destination.as_ptr().cast_mut().cast();
     message.msg_namelen = destination.len();
     message.msg_iov = iovecs.as_mut_ptr();
+    #[cfg(not(target_env = "musl"))]
     message.msg_iovlen = buffers.len();
+    #[cfg(target_env = "musl")]
+    {
+        message.msg_iovlen = buffers.len() as libc::c_int;
+    }
     message.msg_control = control.as_mut_ptr().cast();
+    #[cfg(not(target_env = "musl"))]
     message.msg_controllen = control_len;
+    #[cfg(target_env = "musl")]
+    {
+        message.msg_controllen = control_len as libc::socklen_t;
+    }
 
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&message) };
     if cmsg.is_null() {
@@ -776,7 +802,12 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
     unsafe {
         (*cmsg).cmsg_level = SOL_UDP;
         (*cmsg).cmsg_type = UDP_SEGMENT;
+        #[cfg(not(target_env = "musl"))]
         (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint) as usize;
+        #[cfg(target_env = "musl")]
+        {
+            (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint);
+        }
         ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<u16>(), buffers[0].len() as u16);
     }
 
