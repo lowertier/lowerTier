@@ -106,6 +106,22 @@ when an interface name cannot be re-proven from connection metadata.
 
 Direct connection races now keep a short grace period after the first success so a lower-latency physical path can still complete instead of losing immediately to a Tailscale-backed handshake. Peer selection ignores unsampled zero-latency values and retains a healthy connection until measured alternatives are available. Set `latency_first = true` in `[flags]` when forwarding decisions should also prefer measured path latency.
 
+### Userspace networking without TUN or TAP
+
+EasyTier can run without a kernel network interface.
+Applications can use local SOCKS5 and HTTP proxies on one port.
+Both proxy protocols use the existing EasyTier encrypted overlay route.
+
+```bash
+easytier-core \
+  --tun=userspace-networking \
+  --socks5-server=127.0.0.1:1055 \
+  --outbound-http-proxy-listen=127.0.0.1:1055
+```
+
+This mode does not provide transparent IP or complete L2 access to local applications.
+See the [userspace networking guide](docs/userspace-networking.md) for proxy settings, behavior, and security limits.
+
 ### Ethernet fabric and macOS TUN edge
 
 On Linux and FreeBSD, `port_mode = "ethernet"` carries full Ethernet frames through
