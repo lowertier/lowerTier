@@ -151,7 +151,8 @@ fn parse_request(data: &[u8]) -> Result<ParsedProxyRequest, HttpProxyError> {
     }
 
     let mut host_header = None;
-    let mut forwarded_headers = Vec::new();
+    let mut request_headers = Vec::new();
+    let mut connection_header_names = Vec::new();
     for line in lines {
         let (name, value) = line
             .split_once(':')
@@ -164,12 +165,16 @@ fn parse_request(data: &[u8]) -> Result<ParsedProxyRequest, HttpProxyError> {
         if name.eq_ignore_ascii_case("host") && host_header.is_none() {
             host_header = Some(value.to_string());
         }
-        if name.eq_ignore_ascii_case("proxy-authorization")
-            || name.eq_ignore_ascii_case("proxy-connection")
-        {
-            continue;
+        if name.eq_ignore_ascii_case("connection") {
+            connection_header_names.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_ascii_lowercase),
+            );
         }
-        forwarded_headers.push((name, value));
+        request_headers.push((name, value));
     }
 
     if method.eq_ignore_ascii_case("CONNECT") {
@@ -222,12 +227,22 @@ fn parse_request(data: &[u8]) -> Result<ParsedProxyRequest, HttpProxyError> {
     let mut outbound_prefix = Vec::with_capacity(data.len());
     outbound_prefix
         .extend_from_slice(format!("{method} {forwarded_target} {version}\r\n").as_bytes());
-    for (name, value) in forwarded_headers {
+    for (name, value) in request_headers {
+        if name.eq_ignore_ascii_case("proxy-authorization")
+            || name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("connection")
+            || connection_header_names
+                .iter()
+                .any(|connection_name| name.eq_ignore_ascii_case(connection_name))
+        {
+            continue;
+        }
         outbound_prefix.extend_from_slice(name.as_bytes());
         outbound_prefix.extend_from_slice(b": ");
         outbound_prefix.extend_from_slice(value.as_bytes());
         outbound_prefix.extend_from_slice(b"\r\n");
     }
+    outbound_prefix.extend_from_slice(b"Connection: close\r\n");
     outbound_prefix.extend_from_slice(b"\r\n");
     outbound_prefix.extend_from_slice(&data[header_end..]);
 
@@ -400,7 +415,7 @@ mod tests {
     #[test]
     fn rewrites_absolute_http_request_and_removes_proxy_headers() {
         let parsed = parse_request(
-            b"GET http://node.example:8080/status?q=1 HTTP/1.1\r\nHost: node.example:8080\r\nProxy-Authorization: Basic secret\r\nProxy-Connection: keep-alive\r\nAccept: */*\r\n\r\n",
+            b"GET http://node.example:8080/status?q=1 HTTP/1.1\r\nHost: node.example:8080\r\nProxy-Authorization: Basic secret\r\nProxy-Connection: keep-alive\r\nConnection: keep-alive\r\nAccept: */*\r\n\r\n",
         )
         .unwrap();
 
@@ -409,7 +424,7 @@ mod tests {
         assert_eq!(parsed.target.port, 8080);
         assert_eq!(
             String::from_utf8(parsed.outbound_prefix).unwrap(),
-            "GET /status?q=1 HTTP/1.1\r\nHost: node.example:8080\r\nAccept: */*\r\n\r\n"
+            "GET /status?q=1 HTTP/1.1\r\nHost: node.example:8080\r\nAccept: */*\r\nConnection: close\r\n\r\n"
         );
     }
 
