@@ -1101,6 +1101,19 @@ impl PeerManager {
         Self::is_relay_data_packet(hdr.packet_type)
     }
 
+    async fn credential_ethernet_peer_is_allowed(
+        peers: &PeerMap,
+        packet_type: u8,
+        peer_id: PeerId,
+    ) -> bool {
+        packet_type != PacketType::Ethernet as u8
+            || !matches!(
+                peers.get_peer_identity_type(peer_id),
+                Some(PeerIdentityType::Credential)
+            )
+            || peers.has_route_to_peer(peer_id).await
+    }
+
     async fn start_peer_recv(&self) {
         let mut recv = self.packet_recv.lock().await.take().unwrap();
         let my_peer_id = self.my_peer_id;
@@ -1180,6 +1193,15 @@ impl PeerManager {
                     let to_peer_id = hdr.to_peer_id.get();
                     let packet_type = hdr.packet_type;
                     let is_encrypted = hdr.is_encrypted();
+                    if !Self::credential_ethernet_peer_is_allowed(&peers, packet_type, from_peer_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            from_peer_id,
+                            "drop ethernet packet from suppressed credential peer"
+                        );
+                        continue;
+                    }
                     if to_peer_id != my_peer_id {
                         if disable_relay_data && is_relay_data_packet {
                             tracing::debug!(
@@ -2201,6 +2223,10 @@ impl PeerManager {
             Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first());
         let is_latency_first = msg.peer_manager_header().unwrap().is_latency_first();
         let packet_type = msg.peer_manager_header().unwrap().packet_type;
+        if !Self::credential_ethernet_peer_is_allowed(peers, packet_type, dst_peer_id).await {
+            tracing::warn!(dst_peer_id, "block suppressed credential ethernet peer");
+            return Err(Error::RouteError(None));
+        }
         let msg_len = msg.buf_len() as u64;
         let latency_first_gateway = if is_latency_first {
             peers
@@ -2263,6 +2289,10 @@ impl PeerManager {
         let header = first.peer_manager_header().unwrap();
         let is_latency_first = header.is_latency_first();
         let packet_type = header.packet_type;
+        if !Self::credential_ethernet_peer_is_allowed(peers, packet_type, dst_peer_id).await {
+            tracing::warn!(dst_peer_id, "block suppressed credential ethernet peer");
+            return Err(Error::RouteError(None));
+        }
         let policy = Self::get_next_hop_policy(is_latency_first);
         let bytes = batch.buffer_byte_len() as u64;
         let packets = batch.len() as u64;

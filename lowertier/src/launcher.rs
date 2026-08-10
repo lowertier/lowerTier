@@ -1383,6 +1383,9 @@ mod tests {
             network_config.quic_datagram_alternate_path_parity,
             Some(false)
         );
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        assert_eq!(network_config.port_mode, None);
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         assert_eq!(network_config.port_mode.as_deref(), Some("tap"));
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
         assert_eq!(network_config.l2_fdb_age_seconds, Some(600));

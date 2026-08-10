@@ -393,6 +393,15 @@ impl PeerMap {
             .and_then(|p| p.get_peer_identity_type())
     }
 
+    pub async fn has_route_to_peer(&self, peer_id: PeerId) -> bool {
+        for route in self.routes.read().await.iter() {
+            if route.get_next_hop(peer_id).await.is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn get_peer_public_key(&self, peer_id: PeerId) -> Option<Vec<u8>> {
         self.get_peer_by_id(peer_id)
             .and_then(|p| p.get_peer_public_key())

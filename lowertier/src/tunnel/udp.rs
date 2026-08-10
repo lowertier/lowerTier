@@ -1366,10 +1366,15 @@ mod tests {
             sender.send_to(payload, destination).await.unwrap();
         }
 
-        let datagrams = tokio::time::timeout(
-            Duration::from_secs(1),
-            crate::tunnel::udp_vector_io::recv_batch(&receiver, UDP_DATA_MTU),
-        )
+        let datagrams = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut datagrams = Vec::new();
+            while datagrams.len() < 3 {
+                datagrams.extend(
+                    crate::tunnel::udp_vector_io::recv_batch(&receiver, UDP_DATA_MTU).await?,
+                );
+            }
+            Ok::<_, std::io::Error>(datagrams)
+        })
         .await
         .unwrap()
         .unwrap();

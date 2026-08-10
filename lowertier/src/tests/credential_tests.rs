@@ -383,21 +383,32 @@ async fn wait_foreign_network_count(inst: &Instance, expected: usize, timeout: D
     .await;
 }
 
-/// Regression coverage for a public-server-mediated credential topology:
-/// Public server <- admin peer (need_p2p) <- two credential peers.
-///
-/// Credential peers set `disable_p2p=true`, while the admin peer advertises `need_p2p=true`.
-/// The credential peers should still proactively build direct peers with the admin peer through
-/// peer RPC forwarded by the public server, even when the admin listener binds an ephemeral port.
+/// Test credential paths through a public server.
+/// The credential peers disable P2P.
+/// The admin peer requires P2P.
+/// The public server forwards peer RPC to the admin peer.
+/// The test uses an ephemeral admin port.
 #[rstest]
 #[case("quic")]
-#[case("wss")]
 #[case("tcp")]
 #[case("udp")]
 #[tokio::test]
 #[serial_test::serial]
 async fn credential_peers_p2p_to_need_p2p_admin_through_public_server(
     #[case] admin_listener_scheme: &str,
+) {
+    run_credential_peers_p2p_to_need_p2p_admin_through_public_server(admin_listener_scheme).await;
+}
+
+#[cfg(feature = "websocket")]
+#[tokio::test]
+#[serial_test::serial]
+async fn credential_peers_p2p_to_need_p2p_admin_through_public_server_wss() {
+    run_credential_peers_p2p_to_need_p2p_admin_through_public_server("wss").await;
+}
+
+async fn run_credential_peers_p2p_to_need_p2p_admin_through_public_server(
+    admin_listener_scheme: &str,
 ) {
     prepare_credential_network();
 
