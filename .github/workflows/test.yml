@@ -89,23 +89,29 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Build test archive
+        run: >-
+          cargo nextest archive --locked --package lowertier
+          --no-default-features --features lean
+          --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
+
       - name: Run unit and component tests
         run: >-
-          sudo -E env "PATH=$PATH" cargo nextest run --locked
-          --package lowertier --no-default-features --features lean
+          sudo -E env "PATH=$PATH" cargo nextest run
+          --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
           -E 'not test(tests::three_node)'
           --test-threads 1 --no-fail-fast
 
       - name: Run three-node tests
         run: >-
-          sudo -E env "PATH=$PATH" cargo nextest run --locked
-          --package lowertier --no-default-features --features lean
+          sudo -E env "PATH=$PATH" cargo nextest run
+          --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
           -E 'test(tests::three_node) and not test(subnet_proxy_three_node_test)'
           --test-threads 1 --no-fail-fast
 
       - name: Run subnet proxy tests
         run: >-
-          sudo -E env "PATH=$PATH" cargo nextest run --locked
-          --package lowertier --no-default-features --features lean
+          sudo -E env "PATH=$PATH" cargo nextest run
+          --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
           -E 'test(subnet_proxy_three_node_test)'
           --test-threads 1 --no-fail-fast
