@@ -23,7 +23,8 @@ use crate::{
     gateway::{
         fast_socks5::{
             server::{
-                AcceptAuthentication, AsyncTcpConnector, Config, SimpleUserPassword, Socks5Socket,
+                AcceptAuthentication, AsyncTcpConnector, AsyncUdpConnector, AsyncUdpSocket, Config,
+                SimpleUserPassword, Socks5Socket,
             },
             util::stream::tcp_connect_with_timeout,
         },
@@ -150,6 +151,7 @@ enum Socks5EntryData {
     // key distinguishes a listen route from an actively outbound route.
     DataPlaneRoute,
     Udp((Arc<SocksUdpSocket>, UdpClientKey)), // hold the socket to send data to dst
+    ProxyUdp,
 }
 
 const UDP_ENTRY: u8 = 1;
@@ -372,6 +374,34 @@ struct Socks5AutoConnector {
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
 }
 
+struct Socks5UdpConnection {
+    socket: Arc<SocksUdpSocket>,
+    target: SocketAddr,
+    entries: Socks5EntrySet,
+    entry_count: Arc<AtomicUsize>,
+    entry: Option<Socks5Entry>,
+    _port_holder: Option<Arc<UdpSocket>>,
+}
+
+#[async_trait::async_trait]
+impl AsyncUdpSocket for Socks5UdpConnection {
+    async fn send(&self, data: &[u8]) -> std::io::Result<usize> {
+        self.socket.send_to(data, self.target).await
+    }
+
+    async fn recv(&self, data: &mut [u8]) -> std::io::Result<usize> {
+        self.socket.recv_from(data).await.map(|(size, _)| size)
+    }
+}
+
+impl Drop for Socks5UdpConnection {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            remove_entry_and_decrement_count(&self.entries, &self.entry_count, &entry);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProxyProtocol {
     Socks5,
@@ -564,6 +594,78 @@ impl AsyncTcpConnector for Socks5AutoConnector {
     }
 }
 
+#[async_trait::async_trait]
+impl AsyncUdpConnector for Socks5AutoConnector {
+    type S = Socks5UdpConnection;
+
+    async fn udp_connect(
+        &self,
+        mut addr: SocketAddr,
+        _timeout_s: u64,
+    ) -> crate::gateway::fast_socks5::Result<Self::S> {
+        let Some(peer_manager) = self.peer_mgr.upgrade() else {
+            return Err(anyhow::anyhow!("peer manager is dropped").into());
+        };
+
+        if let Some(local_addr) = self.smoltcp_net.as_ref().map(|net| net.get_address())
+            && local_addr == addr.ip()
+        {
+            addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        }
+
+        let use_overlay = if self.smoltcp_net.is_some() && !addr.ip().is_loopback() {
+            !peer_manager.get_msg_dst_peer(&addr.ip()).await.0.is_empty()
+        } else {
+            false
+        };
+
+        if !use_overlay {
+            let bind_addr = if addr.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
+            let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
+            return Ok(Socks5UdpConnection {
+                socket: Arc::new(SocksUdpSocket::UdpSocket(socket.clone())),
+                target: addr,
+                entries: self.entries.clone(),
+                entry_count: self.entry_count.clone(),
+                entry: None,
+                _port_holder: Some(socket),
+            });
+        }
+
+        let port_holder = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+        let port = port_holder.local_addr()?.port();
+        let smoltcp_net = self.smoltcp_net.as_ref().unwrap();
+        let local_addr = SocketAddr::new(smoltcp_net.get_address(), port);
+        let socket = Arc::new(SocksUdpSocket::SmolUdpSocket(
+            smoltcp_net.udp_bind(local_addr).await?,
+        ));
+        let entry = Socks5Entry {
+            src: local_addr,
+            dst: addr,
+            entry_type: UDP_ENTRY,
+        };
+        insert_entry_and_increment_count(
+            &self.entries,
+            &self.entry_count,
+            entry.clone(),
+            Socks5EntryData::ProxyUdp,
+        );
+
+        Ok(Socks5UdpConnection {
+            socket,
+            target: addr,
+            entries: self.entries.clone(),
+            entry_count: self.entry_count.clone(),
+            entry: Some(entry),
+            _port_holder: Some(port_holder),
+        })
+    }
+}
+
 struct Socks5ServerNet {
     ipv4_addr: cidr::Ipv4Inet,
     auth: Option<SimpleUserPassword>,
@@ -659,12 +761,18 @@ impl Socks5ServerNet {
     }
 
     async fn handle_socks5_stream_task(stream: TcpStream, connector: Socks5AutoConnector) {
+        let reply_ip = stream
+            .local_addr()
+            .map(|address| address.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let mut config = Config::<AcceptAuthentication>::default();
         config.set_request_timeout(10);
+        config.set_udp_support(true);
         config.set_skip_auth(false);
         config.set_allow_no_auth(true);
 
-        let socket = Socks5Socket::new(stream, Arc::new(config), connector);
+        let mut socket = Socks5Socket::new(stream, Arc::new(config), connector);
+        socket.set_reply_ip(reply_ip);
 
         match socket.upgrade_to_socks5().await {
             Ok(_) => {

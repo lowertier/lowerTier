@@ -6,19 +6,20 @@ use super::util::stream::tcp_connect_with_timeout;
 use super::util::target_addr::{TargetAddr, read_address};
 use super::{AuthenticationMethod, ReplyError, Result, SocksError, consts};
 use anyhow::Context;
+use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
-use tokio::try_join;
+use tokio::task::JoinSet;
 
 use tracing::{debug, error, info, trace};
 
@@ -188,6 +189,19 @@ pub trait AsyncTcpConnector {
     async fn tcp_connect(&self, addr: SocketAddr, timeout_s: u64) -> Result<Self::S>;
 }
 
+#[async_trait::async_trait]
+pub trait AsyncUdpSocket: Send + Sync {
+    async fn send(&self, data: &[u8]) -> io::Result<usize>;
+    async fn recv(&self, data: &mut [u8]) -> io::Result<usize>;
+}
+
+#[async_trait::async_trait]
+pub trait AsyncUdpConnector: Send + Sync {
+    type S: AsyncUdpSocket + 'static;
+
+    async fn udp_connect(&self, addr: SocketAddr, timeout_s: u64) -> Result<Self::S>;
+}
+
 pub struct DefaultTcpConnector {}
 
 #[async_trait::async_trait]
@@ -199,9 +213,41 @@ impl AsyncTcpConnector for DefaultTcpConnector {
     }
 }
 
+pub struct DefaultUdpSocket(UdpSocket);
+
+#[async_trait::async_trait]
+impl AsyncUdpSocket for DefaultUdpSocket {
+    async fn send(&self, data: &[u8]) -> io::Result<usize> {
+        self.0.send(data).await
+    }
+
+    async fn recv(&self, data: &mut [u8]) -> io::Result<usize> {
+        self.0.recv(data).await
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncUdpConnector for DefaultTcpConnector {
+    type S = DefaultUdpSocket;
+
+    async fn udp_connect(&self, addr: SocketAddr, _timeout_s: u64) -> Result<Self::S> {
+        let bind_addr = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = UdpSocket::bind(bind_addr).await?;
+        socket.connect(addr).await?;
+        Ok(DefaultUdpSocket(socket))
+    }
+}
+
 /// Wrap TcpStream and contains Socks5 protocol implementation.
-pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector>
-{
+pub struct Socks5Socket<
+    T: AsyncRead + AsyncWrite + Unpin,
+    A: Authentication,
+    C: AsyncTcpConnector + AsyncUdpConnector,
+> {
     inner: T,
     config: Arc<Config<A>>,
     auth: AuthenticationMethod,
@@ -215,7 +261,7 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C:
     tcp_connector: C,
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector>
+impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector + AsyncUdpConnector>
     Socks5Socket<T, A, C>
 {
     pub fn new(socket: T, config: Arc<Config<A>>, tcp_connector: C) -> Self {
@@ -661,7 +707,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector>
 
         debug!("Wrote success");
 
-        transfer_udp(peer_sock).await?;
+        let timeout_s = self.config.request_timeout;
+        let connector = &self.tcp_connector;
+        let control = &mut self.inner;
+        tokio::select! {
+            result = transfer_udp(peer_sock, connector, timeout_s) => result?,
+            result = wait_for_control_close(control) => result?,
+        }
 
         Ok(())
     }
@@ -711,69 +763,87 @@ where
     Ok(())
 }
 
-async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
-    let mut buf = vec![0u8; 0x10000];
+const MAX_UDP_ASSOCIATION_TARGETS: usize = 256;
+
+async fn wait_for_control_close<T: AsyncRead + Unpin>(control: &mut T) -> Result<()> {
+    let mut buffer = [0_u8; 1024];
+    while control.read(&mut buffer).await? != 0 {}
+    Ok(())
+}
+
+async fn transfer_udp<C: AsyncUdpConnector>(
+    inbound: UdpSocket,
+    connector: &C,
+    timeout_s: u64,
+) -> Result<()> {
+    let inbound = Arc::new(inbound);
+    let client_addr = Arc::new(OnceLock::<SocketAddr>::new());
+    let mut targets = HashMap::<TargetAddr, Arc<C::S>>::new();
+    let mut response_tasks = JoinSet::new();
+    let mut buffer = vec![0_u8; 8192];
+
     loop {
-        let (size, client_addr) = inbound.recv_from(&mut buf).await?;
-        debug!("Server recieve udp from {}", client_addr);
-        inbound.connect(client_addr).await?;
-
-        let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
-
-        if frag != 0 {
-            debug!("Discard UDP frag packets sliently.");
-            return Ok(());
+        let (size, source_addr) = inbound.recv_from(&mut buffer).await?;
+        let expected_source = *client_addr.get_or_init(|| source_addr);
+        if source_addr != expected_source {
+            debug!("Discard a SOCKS5 UDP packet from a second client.");
+            continue;
         }
 
-        debug!("Server forward to packet to {}", target_addr);
-        let mut target_addr = target_addr
-            .to_socket_addrs()?
-            .next()
-            .context("unreachable")?;
+        let (fragment, target, data) = parse_udp_request(&buffer[..size]).await?;
+        if fragment != 0 {
+            debug!("Discard a fragmented SOCKS5 UDP packet.");
+            continue;
+        }
 
-        target_addr.set_ip(match target_addr.ip() {
-            std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
-            v6 @ std::net::IpAddr::V6(_) => v6,
-        });
-        outbound.send_to(data, target_addr).await?;
+        let target_socket = if let Some(socket) = targets.get(&target) {
+            socket.clone()
+        } else {
+            if targets.len() >= MAX_UDP_ASSOCIATION_TARGETS {
+                return Err(anyhow::anyhow!("The SOCKS5 UDP target limit was reached.").into());
+            }
+            let resolved_target = match target.clone().resolve_dns().await? {
+                TargetAddr::Ip(address) => address,
+                TargetAddr::Domain(_, _) => unreachable!("DNS resolution returned a domain"),
+            };
+            let socket = Arc::new(connector.udp_connect(resolved_target, timeout_s).await?);
+            targets.insert(target, socket.clone());
+
+            let response_socket = socket.clone();
+            let response_inbound = inbound.clone();
+            let response_client_addr = client_addr.clone();
+            response_tasks.spawn(async move {
+                let mut response_buffer = vec![0_u8; 8192];
+                loop {
+                    let size = response_socket.recv(&mut response_buffer).await?;
+                    let mut response = new_udp_header(resolved_target)?;
+                    response.extend_from_slice(&response_buffer[..size]);
+                    let Some(client_addr) = response_client_addr.get().copied() else {
+                        continue;
+                    };
+                    response_inbound.send_to(&response, client_addr).await?;
+                }
+                #[allow(unreachable_code)]
+                Ok::<(), anyhow::Error>(())
+            });
+            socket
+        };
+
+        target_socket.send(data).await?;
     }
-}
-
-async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
-    let mut buf = vec![0u8; 0x10000];
-    loop {
-        let (size, remote_addr) = outbound.recv_from(&mut buf).await?;
-        debug!("Recieve packet from {}", remote_addr);
-
-        let mut data = new_udp_header(remote_addr)?;
-        data.extend_from_slice(&buf[..size]);
-        inbound.send(&data).await?;
-    }
-}
-
-async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
-    let outbound = UdpSocket::bind("[::]:0").await?;
-
-    let req_fut = handle_udp_request(&inbound, &outbound);
-    let res_fut = handle_udp_response(&inbound, &outbound);
-    match try_join!(req_fut, res_fut) {
-        Ok(_) => {}
-        Err(error) => return Err(error),
-    }
-
-    Ok(())
 }
 
 // Fixes the issue "cannot borrow data in dereference of `Pin<&mut >` as mutable"
 //
 // cf. https://users.rust-lang.org/t/take-in-impl-future-cannot-borrow-data-in-a-dereference-of-pin/52042
-impl<T, A: Authentication, S: AsyncTcpConnector> Unpin for Socks5Socket<T, A, S> where
+impl<T, A: Authentication, S: AsyncTcpConnector + AsyncUdpConnector> Unpin for Socks5Socket<T, A, S> where
     T: AsyncRead + AsyncWrite + Unpin
 {
 }
 
 /// Allow us to read directly from the struct
-impl<T, A: Authentication, S: AsyncTcpConnector> AsyncRead for Socks5Socket<T, A, S>
+impl<T, A: Authentication, S: AsyncTcpConnector + AsyncUdpConnector> AsyncRead
+    for Socks5Socket<T, A, S>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -787,7 +857,8 @@ where
 }
 
 /// Allow us to write directly into the struct
-impl<T, A: Authentication, S: AsyncTcpConnector> AsyncWrite for Socks5Socket<T, A, S>
+impl<T, A: Authentication, S: AsyncTcpConnector + AsyncUdpConnector> AsyncWrite
+    for Socks5Socket<T, A, S>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
