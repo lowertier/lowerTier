@@ -28,33 +28,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality:
-    name: Format, lint, and validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Prepare build environment
-        uses: ./.github/actions/prepare-build
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          components: rustfmt,clippy
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check lints
-        run: >-
-          cargo clippy --locked --package lowertier --all-targets
-          --no-default-features --features lean -- -D warnings
-
-      - name: Check lock file
-        run: cargo metadata --format-version 1 --locked > /dev/null
-
   tests:
-    name: Test CLI and network behavior
+    name: Build once and verify CLI
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -65,9 +40,21 @@ jobs:
         uses: ./.github/actions/prepare-build
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          components: rustfmt,clippy
 
       - name: Restore Cargo cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check lock file
+        run: cargo metadata --format-version 1 --locked > /dev/null
+
+      - name: Check lints
+        run: >-
+          cargo clippy --locked --package lowertier --all-targets
+          --no-default-features --features lean -- -D warnings
 
       - name: Install network test tools
         run: |
