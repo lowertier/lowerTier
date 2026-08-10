@@ -78,7 +78,7 @@ Install a stable Rust toolchain and the platform build tools.
 Then build only the command-line package.
 
 ```bash
-git clone https://github.com/lowertier/lowertier.git
+git clone https://github.com/lowertier/lowerTier.git
 cd lowertier
 cargo build --release --locked -p lowertier --bins \
   --no-default-features --features lean
