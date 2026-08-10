@@ -14,6 +14,8 @@ pub mod udp_proxy;
 #[cfg(feature = "socks5")]
 pub mod fast_socks5;
 #[cfg(feature = "socks5")]
+pub mod http_proxy;
+#[cfg(feature = "socks5")]
 pub mod socks5;
 
 #[cfg(feature = "kcp")]
