@@ -1,6 +1,6 @@
 use crate::common::config::{
     ConfigFileControl, ConfigSource, PortForwardConfig, parse_mapped_listener_urls,
-    process_secure_mode_cfg,
+    parse_proxy_listener_url, process_secure_mode_cfg,
 };
 #[cfg(feature = "ffi-dataplane")]
 use crate::gateway::socks5::Socks5Server;
@@ -630,6 +630,15 @@ pub fn add_proxy_network_to_config(
 pub type NetworkingMethod = crate::proto::api::manage::NetworkingMethod;
 pub type NetworkConfig = crate::proto::api::manage::NetworkConfig;
 
+fn proxy_listener_authority(url: &url::Url) -> Option<String> {
+    let host = match url.host()? {
+        url::Host::Ipv6(address) => format!("[{address}]"),
+        url::Host::Ipv4(address) => address.to_string(),
+        url::Host::Domain(domain) => domain.to_string(),
+    };
+    Some(format!("{host}:{}", url.port_or_known_default()?))
+}
+
 impl NetworkConfig {
     fn parse_peer(peer: &manage::NetworkPeerConfig) -> Result<Option<PeerConfig>, anyhow::Error> {
         let uri = peer.uri.trim();
@@ -842,12 +851,26 @@ impl NetworkConfig {
             cfg.set_exit_nodes(exit_nodes);
         }
 
-        if self.enable_socks5.unwrap_or_default()
+        if let Some(socks5_server) = self
+            .socks5_server
+            .as_deref()
+            .filter(|address| !address.is_empty())
+        {
+            cfg.set_socks5_portal(Some(parse_proxy_listener_url(socks5_server, "socks5")?));
+        } else if self.enable_socks5.unwrap_or_default()
             && let Some(socks5_port) = self.socks5_port
         {
             cfg.set_socks5_portal(Some(
                 format!("socks5://0.0.0.0:{}", socks5_port).parse().unwrap(),
             ));
+        }
+
+        if let Some(http_proxy) = self
+            .outbound_http_proxy_listen
+            .as_deref()
+            .filter(|address| !address.is_empty())
+        {
+            cfg.set_outbound_http_proxy(Some(parse_proxy_listener_url(http_proxy, "http")?));
         }
 
         if !self.mapped_listeners.is_empty() {
@@ -1199,6 +1222,11 @@ impl NetworkConfig {
         if let Some(socks5_portal) = config.get_socks5_portal() {
             result.enable_socks5 = Some(true);
             result.socks5_port = socks5_portal.port().map(|p| p as i32);
+            result.socks5_server = proxy_listener_authority(&socks5_portal);
+        }
+
+        if let Some(http_proxy) = config.get_outbound_http_proxy() {
+            result.outbound_http_proxy_listen = proxy_listener_authority(&http_proxy);
         }
 
         let mapped_listeners = config.get_mapped_listeners();
@@ -1406,6 +1434,32 @@ mod tests {
             flags.l2_fdb_age_seconds
         );
         assert_eq!(regenerated_flags.l2_flood_bps, flags.l2_flood_bps);
+        Ok(())
+    }
+
+    #[test]
+    fn network_config_round_trips_userspace_proxy_addresses() -> anyhow::Result<()> {
+        let config = gen_default_config();
+        config.set_socks5_portal(Some("socks5://127.0.0.1:1055".parse()?));
+        config.set_outbound_http_proxy(Some("http://localhost:1055".parse()?));
+
+        let network_config = super::NetworkConfig::new_from_config(&config)?;
+
+        assert_eq!(
+            network_config.socks5_server.as_deref(),
+            Some("127.0.0.1:1055")
+        );
+        assert_eq!(
+            network_config.outbound_http_proxy_listen.as_deref(),
+            Some("localhost:1055")
+        );
+
+        let regenerated = network_config.gen_config()?;
+        assert_eq!(regenerated.get_socks5_portal(), config.get_socks5_portal());
+        assert_eq!(
+            regenerated.get_outbound_http_proxy(),
+            config.get_outbound_http_proxy()
+        );
         Ok(())
     }
 

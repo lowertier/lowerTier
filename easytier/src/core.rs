@@ -7,7 +7,7 @@ use crate::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
             FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
             TomlConfigLoader, VpnPortalConfig, load_config_from_file, parse_mapped_listener_urls,
-            process_secure_mode_cfg, validate_flags,
+            parse_proxy_listener_url, process_secure_mode_cfg, validate_flags,
         },
         constants::EASYTIER_VERSION,
         log,
@@ -341,6 +341,13 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_TUN",
+        help = t!("core_clap.tun").to_string()
+    )]
+    tun: Option<String>,
+
+    #[arg(
+        long,
         env = "ET_MTU",
         help = t!("core_clap.mtu").to_string()
     )]
@@ -518,6 +525,22 @@ struct NetworkOptions {
         help = t!("core_clap.socks5").to_string()
     )]
     socks5: Option<u16>,
+
+    #[cfg(feature = "socks5")]
+    #[arg(
+        long,
+        env = "ET_SOCKS5_SERVER",
+        help = t!("core_clap.socks5_server").to_string()
+    )]
+    socks5_server: Option<String>,
+
+    #[cfg(feature = "socks5")]
+    #[arg(
+        long,
+        env = "ET_OUTBOUND_HTTP_PROXY_LISTEN",
+        help = t!("core_clap.outbound_http_proxy_listen").to_string()
+    )]
+    outbound_http_proxy_listen: Option<String>,
 
     #[arg(
         long,
@@ -1131,12 +1154,23 @@ impl NetworkOptions {
         }
 
         #[cfg(feature = "socks5")]
-        if let Some(socks5_proxy) = self.socks5 {
-            cfg.set_socks5_portal(Some(
-                format!("socks5://0.0.0.0:{}", socks5_proxy)
-                    .parse()
-                    .unwrap(),
-            ));
+        {
+            if self.socks5.is_some() && self.socks5_server.is_some() {
+                anyhow::bail!("--socks5 and --socks5-server cannot be used together");
+            }
+            if let Some(socks5_server) = self.socks5_server.as_deref() {
+                cfg.set_socks5_portal(Some(parse_proxy_listener_url(socks5_server, "socks5")?));
+            } else if let Some(socks5_port) = self.socks5 {
+                cfg.set_socks5_portal(Some(
+                    format!("socks5://0.0.0.0:{socks5_port}")
+                        .parse()
+                        .expect("legacy SOCKS5 listener should be valid"),
+                ));
+            }
+
+            if let Some(http_proxy) = self.outbound_http_proxy_listen.as_deref() {
+                cfg.set_outbound_http_proxy(Some(parse_proxy_listener_url(http_proxy, "http")?));
+            }
         }
 
         for port_forward in self.port_forward.iter() {
@@ -1209,8 +1243,19 @@ impl NetworkOptions {
             f.enable_ipv6 = !v;
         }
         f.latency_first = self.latency_first.unwrap_or(f.latency_first);
-        if let Some(dev_name) = &self.dev_name {
-            f.dev_name = dev_name.clone()
+        if let Some(tun) = self.tun.as_deref()
+            && tun != "userspace-networking"
+            && self.dev_name.as_deref().is_some_and(|name| name != tun)
+        {
+            anyhow::bail!("--tun and --dev-name must use the same device name");
+        }
+        if let Some(dev_name) = self
+            .tun
+            .as_deref()
+            .filter(|tun| *tun != "userspace-networking")
+            .or(self.dev_name.as_deref())
+        {
+            f.dev_name = dev_name.to_string();
         }
         if let Some(mtu) = self.mtu {
             f.mtu = mtu as u32;
@@ -1248,6 +1293,7 @@ impl NetworkOptions {
             .into();
         }
         f.bind_device = self.bind_device.unwrap_or(f.bind_device);
+
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         {
             f.socket_mark = self.socket_mark.or(f.socket_mark);
@@ -1315,6 +1361,20 @@ impl NetworkOptions {
         // Configure tld_dns_zone: use provided value if set
         if let Some(tld_dns_zone) = &self.tld_dns_zone {
             f.tld_dns_zone = tld_dns_zone.clone();
+        }
+        if self.tun.as_deref() == Some("userspace-networking") {
+            if self.dev_name.is_some() {
+                anyhow::bail!("--tun=userspace-networking cannot be used with --dev-name");
+            }
+            if f.socket_mark.is_some() {
+                anyhow::bail!("--tun=userspace-networking cannot use --socket-mark");
+            }
+            f.no_tun = true;
+            f.use_smoltcp = true;
+            f.bind_device = false;
+            f.proxy_forward_by_system = false;
+            f.accept_dns = false;
+            f.enable_udp_broadcast_relay = false;
         }
         validate_flags(&f)?;
         cfg.set_flags(f);
@@ -1967,5 +2027,71 @@ enabled = true
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);
+    }
+
+    #[test]
+    fn userspace_networking_cli_sets_proxy_mode() {
+        let cli = Cli::try_parse_from([
+            "easytier-core",
+            "--tun=userspace-networking",
+            "--socks5-server=localhost:1055",
+            "--outbound-http-proxy-listen=localhost:1055",
+        ])
+        .unwrap();
+        let cfg = TomlConfigLoader::default();
+
+        cli.network_options.merge_into(&cfg).unwrap();
+
+        let flags = cfg.get_flags();
+        assert!(flags.no_tun);
+        assert!(flags.use_smoltcp);
+        assert_eq!(
+            cfg.get_socks5_portal().unwrap().as_str(),
+            "socks5://localhost:1055"
+        );
+        assert_eq!(
+            cfg.get_outbound_http_proxy().unwrap().as_str(),
+            "http://localhost:1055/"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tun")]
+    fn tun_cli_sets_device_name() {
+        let cli = Cli::try_parse_from(["easytier-core", "--tun=lower0"]).unwrap();
+        let cfg = TomlConfigLoader::default();
+
+        cli.network_options.merge_into(&cfg).unwrap();
+
+        assert_eq!(cfg.get_flags().dev_name, "lower0");
+        assert!(!cfg.get_flags().no_tun);
+    }
+
+    #[test]
+    fn tun_cli_rejects_conflicting_device_name() {
+        let cli =
+            Cli::try_parse_from(["easytier-core", "--tun=lower0", "--dev-name=lower1"]).unwrap();
+        let cfg = TomlConfigLoader::default();
+
+        let error = cli.network_options.merge_into(&cfg).unwrap_err();
+
+        assert!(error.to_string().contains("--tun"));
+        assert!(error.to_string().contains("--dev-name"));
+    }
+
+    #[test]
+    fn new_socks5_option_rejects_legacy_socks5_option() {
+        let cli = Cli::try_parse_from([
+            "easytier-core",
+            "--socks5=1080",
+            "--socks5-server=127.0.0.1:1055",
+        ])
+        .unwrap();
+        let cfg = TomlConfigLoader::default();
+
+        let error = cli.network_options.merge_into(&cfg).unwrap_err();
+
+        assert!(error.to_string().contains("--socks5"));
+        assert!(error.to_string().contains("--socks5-server"));
     }
 }

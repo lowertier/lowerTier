@@ -143,6 +143,40 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn parse_proxy_listener_url(value: &str, scheme: &str) -> anyhow::Result<url::Url> {
+    let authority = value.trim();
+    if authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.contains('@')
+    {
+        anyhow::bail!("proxy listener must use the form host:port");
+    }
+
+    let port_text = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once("]:")
+            .map(|(_, port)| port)
+            .ok_or_else(|| anyhow::anyhow!("proxy listener must include a port"))?
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .ok_or_else(|| anyhow::anyhow!("proxy listener must include a port"))?
+    };
+    port_text
+        .parse::<u16>()
+        .with_context(|| format!("invalid proxy listener port: {port_text}"))?;
+
+    let url: url::Url = format!("{scheme}://{authority}")
+        .parse()
+        .with_context(|| format!("invalid {scheme} proxy listener: {authority}"))?;
+    if url.host_str().is_none() {
+        anyhow::bail!("proxy listener must include a host");
+    }
+    Ok(url)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, VariantArray)]
 #[strum(ascii_case_insensitive)]
 pub enum PortMode {
@@ -358,6 +392,9 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_socks5_portal(&self) -> Option<url::Url>;
     fn set_socks5_portal(&self, addr: Option<url::Url>);
+
+    fn get_outbound_http_proxy(&self) -> Option<url::Url>;
+    fn set_outbound_http_proxy(&self, addr: Option<url::Url>);
 
     fn get_port_forwards(&self) -> Vec<PortForwardConfig>;
     fn set_port_forwards(&self, forwards: Vec<PortForwardConfig>);
@@ -684,6 +721,8 @@ struct Config {
     routes: Option<Vec<cidr::Ipv4Cidr>>,
 
     socks5_proxy: Option<url::Url>,
+
+    outbound_http_proxy: Option<url::Url>,
 
     port_forward: Option<Vec<PortForwardConfig>>,
 
@@ -1129,6 +1168,14 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_socks5_portal(&self, addr: Option<url::Url>) {
         self.config.lock().unwrap().socks5_proxy = addr;
+    }
+
+    fn get_outbound_http_proxy(&self) -> Option<url::Url> {
+        self.config.lock().unwrap().outbound_http_proxy.clone()
+    }
+
+    fn set_outbound_http_proxy(&self, addr: Option<url::Url>) {
+        self.config.lock().unwrap().outbound_http_proxy = addr;
     }
 
     fn get_port_forwards(&self) -> Vec<PortForwardConfig> {
@@ -1828,6 +1875,32 @@ stun_servers = [
         assert_eq!(stun_servers[0], "stun.l.google.com:19302");
         assert_eq!(stun_servers[1], "stun1.l.google.com:19302");
         assert_eq!(stun_servers[2], "txt:stun.easytier.cn");
+    }
+
+    #[test]
+    fn userspace_proxy_addresses_round_trip_through_toml() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+socks5_proxy = "socks5://127.0.0.1:1055"
+outbound_http_proxy = "http://localhost:1055"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.get_socks5_portal().unwrap().as_str(),
+            "socks5://127.0.0.1:1055"
+        );
+        assert_eq!(
+            config.get_outbound_http_proxy().unwrap().as_str(),
+            "http://localhost:1055/"
+        );
+
+        let reloaded = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+        assert_eq!(
+            reloaded.get_outbound_http_proxy(),
+            config.get_outbound_http_proxy()
+        );
     }
 
     #[test]

@@ -117,6 +117,8 @@ message NetworkConfig {
   optional uint32 quic_datagram_fec_parity = 80;
   optional bool quic_critical_l2_duplication = 81;
   optional bool quic_datagram_alternate_path_parity = 82;
+  optional string socks5_server = 83;
+  optional string outbound_http_proxy_listen = 84;
 }
 
 message NetworkPeerConfig {
