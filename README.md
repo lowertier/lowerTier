@@ -1,82 +1,814 @@
-# EasyTier
+# LowTier
 
-[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
-[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
-[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
-[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
-[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
-[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
+LowTier is an L2-first mesh VPN for command-line deployments.
 
-[简体中文](/README_CN.md) | [English](/README.md)
+LowTier carries Ethernet frames between peers through the LowTier routing and transport engine.
+The project provides the `lowertier-core` and `lowertier-cli` binaries.
 
-> ✨ A simple, secure, decentralized virtual private network solution powered by Rust and Tokio
+This guide covers only the command-line programs.
+It does not cover a web interface or graphical client.
 
-<p align="center">
-<img src="assets/config-page.png" width="300" alt="config page">
-<img src="assets/running-page.png" width="300" alt="running page">
-</p>
+## What LowTier provides
 
-📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/EasyTier/EasyTier/releases)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)** | ❤️ **[Sponsor](#sponsor)**
+- Native TAP transport for complete Ethernet behavior on Linux and FreeBSD.
+- An Ethernet overlay with an IP-only TUN edge on macOS, Windows, Android, and iOS.
+- Routed TUN mode for lower packet overhead.
+- Unprivileged SOCKS5 and HTTP proxy mode without TUN or TAP.
+- UDP, QUIC, TCP, WebSocket, WireGuard, and FakeTCP underlay transports.
+- Peer discovery, NAT traversal, subnet routes, exit nodes, ACLs, and port forwarding.
+- ChaCha20-Poly1305 authenticated encryption by default.
+- An optional secure mode with Noise authentication and replay protection.
 
-## Features
+## Program model
 
-### Core Features
+LowTier uses two command-line programs.
 
-- 🔒 **Decentralized**: Nodes are equal and independent, no centralized services required  
-- 🚀 **Easy to Use**: Multiple operation methods via web, client, and command line  
-- 🌍 **Cross-Platform**: Supports Win/MacOS/Linux/FreeBSD/Android and X86/ARM/MIPS architectures  
-- 🔐 **Secure**: AES-GCM or WireGuard encryption, prevents man-in-the-middle attacks  
+| Program | Purpose |
+| --- | --- |
+| `lowertier-core` | Runs the VPN instance, virtual interface, peer links, routing, and proxies. |
+| `lowertier-cli` | Reads status and changes supported runtime settings through the RPC portal. |
 
-### Advanced Capabilities
+`lowertier-cli` prints tables by default.
+Use `--output json` for scripts.
+The repository does not provide a separate TUI binary.
 
-- 🔌 **Efficient NAT Traversal**: Supports UDP and IPv6 traversal, works with NAT4-NAT4 networks  
-- 🌐 **Subnet Proxy**: Nodes can share subnets for other nodes to access  
-- 🔄 **Intelligent Routing**: Latency priority and automatic route selection for best network experience  
-- ⚡ **High Performance**: Zero-copy throughout the entire link, supports TCP/UDP/WSS/WG protocols  
+The packet path has four main parts.
 
-### Network Optimization
+```text
+Application or Ethernet host
+        |
+TAP, TUN, or local proxy
+        |
+LowTier route and Ethernet fabric
+        |
+Encrypted UDP, QUIC, TCP, WS, WSS, WG, or FakeTCP link
+        |
+Remote LowTier peer
+```
 
-- 📊 **UDP Loss Resistance**: KCP/QUIC proxy optimizes latency and bandwidth in high packet loss environments  
-- 🔧 **Web Management**: Easy configuration and monitoring through web interface  
-- 🛠️ **Zero Config**: Simple deployment with statically linked executables  
+## Select a network mode
 
-## Quick Start
+Select the mode that matches the operating system and application.
 
-### Strict underlay path control and aggressive QUIC
+| Mode | Configuration | Local interface | Ethernet support | Privilege |
+| --- | --- | --- | --- | --- |
+| Native Ethernet | `port_mode = "ethernet"` | TAP | Complete L2 | Required |
+| Compatible Ethernet | `port_mode = "compatible-ethernet"` | TUN | IPv4 and IPv6 over the Ethernet overlay | Required |
+| Routed | `port_mode = "routed"` | TUN | No | Required |
+| Userspace networking | `--tun=userspace-networking` | None | No | Not required |
 
-EasyTier can fail closed when a local interface or IP range must never carry its underlay traffic. Denied CIDRs apply to both local source addresses and remote destinations. The policy covers listeners, outbound connectors, STUN discovery, direct probes, and TCP/UDP hole punching. Strict mode disables automatic UPnP and NAT-PMP port mapping because those libraries cannot guarantee a selected source interface.
+Native Ethernet supports ARP, VLAN, QinQ, LLDP, broadcast, multicast, and unknown EtherTypes.
+Native Ethernet requires Linux or FreeBSD.
 
-For Tailscale, deny its stable address ranges even if you also deny an interface name. Tailscale uses [`100.64.0.0/10`](https://tailscale.com/docs/concepts/tailscale-ip-addresses) for device IPv4 addresses and [`fd7a:115c:a1e0::/48`](https://tailscale.com/docs/concepts/ip-and-dns-addresses) for device IPv6 addresses. Interface names such as macOS `utun5` can change after a restart.
+Compatible Ethernet supports mixed TAP and TUN peers.
+The local TUN interface receives only IPv4 and IPv6 packets.
+Use this mode on macOS and other systems without TAP support.
+
+Routed mode has the lowest interface overhead.
+LowTier selects native Ethernet by default on Linux and FreeBSD.
+LowTier selects compatible Ethernet by default on other systems.
+Set `routed` only when the node must use the L3 packet path.
+
+Userspace networking follows the Tailscale application-proxy model.
+It does not provide ARP, raw Ethernet, transparent ping, or host routes.
+
+## Build the command-line programs
+
+Install a stable Rust toolchain and the platform build tools.
+Then build only the command-line package.
+
+```bash
+git clone https://github.com/lowertier/lowerTier.git
+cd lowerTier
+cargo build --release --locked -p lowertier --bins
+```
+
+The build creates these files.
+
+```text
+target/release/lowertier-core
+target/release/lowertier-cli
+```
+
+Install both files in a directory from `PATH`.
+
+```bash
+sudo install -m 0755 target/release/lowertier-core /usr/local/bin/lowertier-core
+sudo install -m 0755 target/release/lowertier-cli /usr/local/bin/lowertier-cli
+```
+
+Check the installed revision.
+
+```bash
+lowertier-core --version
+lowertier-cli --version
+```
+
+## Start a native L2 network
+
+The following example connects two Linux or FreeBSD nodes.
+Both nodes must use the same network name and secret.
+
+Generate a strong secret once.
+
+```bash
+openssl rand -hex 32
+```
+
+Start node A.
+
+```bash
+sudo lowertier-core \
+  --hostname node-a \
+  --ipv4 10.44.0.1/24 \
+  --network-name office-l2 \
+  --network-secret '<same-secret>' \
+  --port-mode ethernet \
+  --secure-mode true \
+  --listeners udp://0.0.0.0:11010
+```
+
+Start node B.
+
+```bash
+sudo lowertier-core \
+  --hostname node-b \
+  --ipv4 10.44.0.2/24 \
+  --network-name office-l2 \
+  --network-secret '<same-secret>' \
+  --port-mode ethernet \
+  --secure-mode true \
+  --peers udp://192.0.2.10:11010
+```
+
+Replace `192.0.2.10` with the reachable address of node A.
+Permit UDP port `11010` through the host and network firewalls.
+
+Check the network from either node.
+
+```bash
+lowertier-cli node info
+lowertier-cli peer list
+lowertier-cli route list
+ping 10.44.0.2
+```
+
+Command-line secrets can appear in process inspection tools.
+Use a protected configuration file for a production deployment.
+
+## Start a mixed Linux and macOS network
+
+Use native Ethernet on Linux or FreeBSD.
+Use compatible Ethernet on macOS.
+
+Linux or FreeBSD:
+
+```bash
+sudo lowertier-core \
+  --ipv4 10.44.0.1/24 \
+  --network-name office-l2 \
+  --network-secret '<same-secret>' \
+  --port-mode ethernet \
+  --secure-mode true
+```
+
+macOS:
+
+```bash
+sudo lowertier-core \
+  --ipv4 10.44.0.2/24 \
+  --network-name office-l2 \
+  --network-secret '<same-secret>' \
+  --port-mode compatible-ethernet \
+  --secure-mode true \
+  --peers udp://192.0.2.10:11010
+```
+
+The macOS edge carries IP through the Ethernet overlay.
+The macOS `utun` interface does not expose arbitrary Ethernet frames.
+
+## Run without administrator privileges
+
+Userspace networking creates no TUN or TAP interface.
+Applications connect through a local SOCKS5 or HTTP proxy.
+
+```bash
+lowertier-core \
+  --tun=userspace-networking \
+  --network-name office-l2 \
+  --network-secret '<same-secret>' \
+  --peers udp://192.0.2.10:11010 \
+  --socks5-server 127.0.0.1:1055 \
+  --outbound-http-proxy-listen 127.0.0.1:1055
+```
+
+Configure an application with standard proxy variables.
+
+```bash
+export ALL_PROXY=socks5h://127.0.0.1:1055
+export HTTP_PROXY=http://127.0.0.1:1055
+export HTTPS_PROXY=http://127.0.0.1:1055
+```
+
+The shared listener detects SOCKS5 or HTTP from the first client byte.
+SOCKS5 supports TCP and UDP association.
+HTTP supports `CONNECT` and ordinary forwarding.
+
+The local proxy has no authentication.
+Bind the proxy to `127.0.0.1` or `::1`.
+
+See [userspace networking](docs/userspace-networking.md) for protocol limits and measured results.
+
+## Use a configuration file
+
+Create one TOML file for each instance.
+Protect files that contain a network secret or private key.
+
+```bash
+install -m 0600 /dev/null /etc/lowtier/office.toml
+```
+
+The following file is a production-oriented native L2 example.
 
 ```toml
-# Strict mode permits only numeric STUN servers so it never invokes the system resolver.
+instance_name = "office"
+hostname = "node-a"
+ipv4 = "10.44.0.1/24"
+listeners = [
+  "udp://0.0.0.0:11010",
+  "quic://0.0.0.0:11012",
+  "tcp://0.0.0.0:11010",
+]
+
+[network_identity]
+network_name = "office-l2"
+network_secret = "${LOWTIER_NETWORK_SECRET}"
+
+[[peer]]
+uri = "udp://192.0.2.11:11010"
+
+[secure_mode]
+enabled = true
+
+[flags]
+port_mode = "ethernet"
+default_protocol = "udp"
+enable_encryption = true
+encryption_algorithm = "chacha20-poly1305"
+mtu = 1380
+bind_device = true
+latency_first = true
+l2_fdb_capacity = 16384
+l2_fdb_age_seconds = 300
+l2_flood_bps = 67108864
+quic_congestion = "bbr"
+quic_datagram_fec_parity = 2
+quic_critical_l2_duplication = true
+quic_datagram_alternate_path_parity = true
+```
+
+Validate the file before startup.
+
+```bash
+LOWTIER_NETWORK_SECRET='<same-secret>' \
+  lowertier-core --config-file /etc/lowtier/office.toml --check-config
+```
+
+Start the instance.
+
+```bash
+sudo env LOWTIER_NETWORK_SECRET='<same-secret>' \
+  lowertier-core --config-file /etc/lowtier/office.toml
+```
+
+LowTier expands `${NAME}`, `$NAME`, and `${NAME:-default}` in TOML files.
+A file with an expanded variable becomes read-only through remote configuration APIs.
+Use `--disable-env-parsing` to keep dollar signs literal.
+
+Command-line values override matching file values.
+Use `--config-file` more than once to start several files.
+Use `--config-dir` to load every `.toml` file from one directory.
+
+## Complete TOML reference
+
+The following tables cover every user configuration field.
+The internal `source` table records configuration ownership.
+Normal CLI deployments must omit the `source` table.
+
+### Top-level fields
+
+| Field | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `netns` | string | unset | Use a Linux network namespace. |
+| `hostname` | string | operating system hostname | Set the peer name. LowTier keeps at most 32 non-control characters. |
+| `instance_name` | string | `default` | Select the local instance name. |
+| `instance_id` | UUID | generated | Keep a stable instance identity. |
+| `ipv4` | IPv4 interface | unset | Set the overlay IPv4 address and prefix. A missing prefix becomes `/24`. |
+| `ipv6` | IPv6 interface | unset | Set the overlay IPv6 address and prefix. |
+| `ipv6_public_addr_provider` | boolean | `false` | Share a public IPv6 prefix on Linux. |
+| `ipv6_public_addr_auto` | boolean | `false` | Request a public IPv6 address from a provider peer. |
+| `ipv6_public_addr_prefix` | IPv6 CIDR | unset | Set the public IPv6 prefix to share. |
+| `dhcp` | boolean | `false` | Let LowTier select the overlay IPv4 address. |
+| `listeners` | URL array | generated by CLI | Set inbound underlay listeners. An empty array disables listeners. |
+| `mapped_listeners` | URL array | empty | Advertise manually mapped public listener addresses. |
+| `exit_nodes` | IP array | empty | Forward default traffic through these overlay addresses in listed order. |
+| `routes` | IPv4 CIDR array | automatic | Replace propagated subnet and WireGuard routes with manual routes. |
+| `socks5_proxy` | URL | unset | Listen for SOCKS5 clients. Example: `socks5://127.0.0.1:1055`. |
+| `outbound_http_proxy` | URL | unset | Listen for HTTP proxy clients. Example: `http://127.0.0.1:1055`. |
+| `tcp_whitelist` | port string array | empty | Allow only listed inbound TCP ports. Supports ports and ranges. |
+| `udp_whitelist` | port string array | empty | Allow only listed inbound UDP ports. Supports ports and ranges. |
+| `stun_servers` | string array | built-in list | Replace the IPv4 STUN server list. An empty array disables the list. |
+| `stun_servers_v6` | string array | built-in list | Replace the IPv6 STUN server list. An empty array disables the list. |
+| `credential_file` | path | unset | Persist issued temporary credentials on an administrator node. |
+
+### Network identity
+
+```toml
+[network_identity]
+network_name = "office-l2"
+network_secret = "${LOWTIER_NETWORK_SECRET}"
+```
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `network_name` | Yes | Identifies the overlay network. |
+| `network_secret` | Usually | Authenticates normal network membership and derives default traffic keys. |
+
+Credential nodes omit `network_secret`.
+Credential nodes must enable secure mode and supply a credential.
+
+### Peers
+
+Add one `peer` table for each initial connector.
+
+```toml
+[[peer]]
+uri = "udp://192.0.2.10:11010"
+peer_public_key = "<base64-x25519-public-key>"
+```
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `uri` | Yes | Selects the peer address and transport or discovery method. |
+| `peer_public_key` | No | Pins the peer X25519 public key in secure mode. |
+
+Direct peer schemes are `udp`, `quic`, `tcp`, `ws`, `wss`, `wg`, `faketcp`, and `ring`.
+Connector-only discovery schemes are `http`, `https`, `txt`, and `srv`.
+Unix builds also support `unix` sockets.
+
+### Listeners
+
+Use explicit URLs when predictable firewall rules are required.
+
+```toml
+listeners = [
+  "udp://0.0.0.0:11010",
+  "quic://0.0.0.0:11012",
+  "tcp://0.0.0.0:11010",
+]
+```
+
+The full CLI build supports these listener schemes.
+
+| Scheme | Network protocol | Default port from base `11010` |
+| --- | --- | ---: |
+| `udp` | UDP | 11010 |
+| `quic` | UDP | 11012 |
+| `wg` | UDP | 11011 |
+| `tcp` | TCP | 11010 |
+| `ws` | TCP | 11011 |
+| `wss` | TCP with TLS | 11012 |
+| `faketcp` | Raw or emulated TCP path | 11013 |
+
+`--listeners 11010` creates every compiled IP listener with its standard offset.
+`--no-listener` creates an outbound-only node.
+
+### Subnet proxy
+
+Add one table for each local subnet.
+
+```toml
+[[proxy_network]]
+cidr = "10.20.0.0/16"
+mapped_cidr = "172.20.0.0/16"
+allow = ["tcp", "udp", "icmp"]
+```
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `cidr` | Yes | Selects the real local IPv4 subnet. |
+| `mapped_cidr` | No | Presents the subnet through another equal-length CIDR. |
+| `allow` | No | Limits the exported protocols to `tcp`, `udp`, or `icmp`. |
+
+The CLI shorthand is `--proxy-networks 10.20.0.0/16->172.20.0.0/16`.
+
+### WireGuard portal
+
+```toml
+[vpn_portal_config]
+wireguard_listen = "0.0.0.0:11013"
+client_cidr = "10.14.14.0/24"
+```
+
+`wireguard_listen` selects the local WireGuard listener.
+`client_cidr` reserves addresses for WireGuard clients.
+
+The CLI form is `--vpn-portal wg://0.0.0.0:11013/10.14.14.0/24`.
+
+### Port forwarding
+
+```toml
+[[port_forward]]
+bind_addr = "127.0.0.1:8080"
+dst_addr = "10.44.0.2:80"
+proto = "tcp"
+```
+
+`proto` accepts `tcp` or `udp`.
+Repeat the table for more forwarding rules.
+
+### Secure mode
+
+```toml
+[secure_mode]
+enabled = true
+local_private_key = "<base64-x25519-private-key>"
+local_public_key = "<base64-x25519-public-key>"
+```
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `false` | Enables Noise peer authentication and protected link envelopes. |
+| `local_private_key` | generated | Sets a stable 32-byte X25519 private key in base64 form. |
+| `local_public_key` | derived | Sets the matching X25519 public key in base64 form. |
+
+LowTier uses Noise XX for direct authentication and Noise IK on relay paths.
+Secure mode uses X25519, ChaCha20-Poly1305, SHA-256, sequence nonces, and replay windows.
+Enable secure mode on every node in one deployment.
+Mixed secure versions can fail after the handshake.
+
+Secure mode is a native LowTier protocol.
+It is not WireGuard wire format.
+The protected protocol has not received an external security audit.
+
+### ACL configuration
+
+ACL chains inspect inbound, outbound, or forwarded IP traffic.
+Native Ethernet frames do not enter IP ACL parsing.
+
+```toml
+[[acl.acl_v1.chains]]
+name = "protect-exported-subnet"
+description = "Permit administrators and drop other forwarded traffic."
+chain_type = 3
+enabled = true
+default_action = 2
+
+[[acl.acl_v1.chains.rules]]
+name = "allow-administrators"
+description = "Permit the administrator overlay range."
+priority = 1000
+enabled = true
+protocol = 5
+ports = []
+source_ports = []
+source_ips = ["10.44.0.0/24"]
+destination_ips = ["10.20.0.0/16"]
+source_groups = []
+destination_groups = []
+action = 1
+rate_limit = 0
+burst_limit = 0
+stateful = true
+```
+
+ACL numeric values use the following mappings.
+
+| Type | Values |
+| --- | --- |
+| `chain_type` | `1` inbound, `2` outbound, `3` forward |
+| `protocol` | `0` unspecified, `1` TCP, `2` UDP, `3` ICMP, `4` ICMPv6, `5` any |
+| `action` and `default_action` | `0` no operation, `1` allow, `2` drop |
+
+Each rule supports every field shown in the example.
+Higher `priority` values run first.
+`ports` selects destination ports.
+`source_ports` selects source ports.
+A zero `rate_limit` disables the packet rate limit.
+
+ACL groups use shared group names and secrets.
+
+```toml
+[acl.acl_v1.group]
+members = ["administrators"]
+
+[[acl.acl_v1.group.declares]]
+group_name = "administrators"
+group_secret = "<group-secret>"
+```
+
+### Runtime flags
+
+Put runtime flags under `[flags]`.
+The table includes every supported flag.
+
+| Field | Default | Purpose | CLI option |
+| --- | --- | --- | --- |
+| `default_protocol` | `udp` | Select the preferred direct transport. | `--default-protocol` |
+| `dev_name` | empty | Set the TUN or TAP interface name. | `--dev-name` or `--tun` |
+| `enable_encryption` | `true` | Encrypt peer payloads. | `--disable-encryption false` |
+| `enable_ipv6` | `true` | Enable overlay IPv6. | `--disable-ipv6 false` |
+| `mtu` | `1380` | Set the overlay MTU. Encryption gives the kernel interface a 1360-byte effective MTU. | `--mtu` |
+| `latency_first` | `false` | Prefer the measured low-latency route. | `--latency-first` |
+| `enable_exit_node` | `false` | Permit other peers to use this node as an exit node. | `--enable-exit-node` |
+| `no_tun` | `false` | Disable local virtual-interface creation. | `--no-tun` |
+| `use_smoltcp` | `false` | Enable the userspace IP stack for proxy paths. | `--use-smoltcp` |
+| `relay_network_whitelist` | `*` | Select network names that this node can relay. | `--relay-network-whitelist` |
+| `disable_p2p` | `false` | Disable ordinary automatic direct links. | `--disable-p2p` |
+| `relay_all_peer_rpc` | `false` | Relay peer RPC outside the relay whitelist. | `--relay-all-peer-rpc` |
+| `disable_udp_hole_punching` | `false` | Disable UDP NAT hole punching. | `--disable-udp-hole-punching` |
+| `multi_thread` | `true` | Use the multithread Tokio runtime. | `--multi-thread` |
+| `data_compress_algo` | `1` | Select `1` for none or `2` for Zstandard. | `--compression none|zstd` |
+| `bind_device` | `true` | Bind underlay sockets to selected physical devices. | `--bind-device` |
+| `enable_kcp_proxy` | `false` | Convert eligible TCP streams to KCP. | `--enable-kcp-proxy` |
+| `disable_kcp_input` | `false` | Reject inbound KCP stream conversion. | `--disable-kcp-input` |
+| `disable_relay_kcp` | `false` | Reject relayed KCP packets from the local network. | `--disable-relay-kcp` |
+| `proxy_forward_by_system` | `false` | Use kernel forwarding for exported subnets. | `--proxy-forward-by-system` |
+| `accept_dns` | `false` | Install and accept Magic DNS settings. | `--accept-dns` |
+| `private_mode` | `false` | Require verified foreign-network membership. | `--private-mode` |
+| `enable_quic_proxy` | `false` | Convert eligible TCP streams to QUIC. | `--enable-quic-proxy` |
+| `disable_quic_input` | `false` | Reject inbound QUIC stream conversion. | `--disable-quic-input` |
+| `foreign_relay_bps_limit` | unlimited | Limit foreign-network relay bytes per second. | `--foreign-relay-bps-limit` |
+| `multi_thread_count` | `2` | Set the multithread runtime worker count. | `--multi-thread-count` |
+| `enable_relay_foreign_network_kcp` | `false` | Relay KCP packets for foreign networks. | `--enable-relay-foreign-network-kcp` |
+| `encryption_algorithm` | `chacha20-poly1305` | Select `chacha20-poly1305`, `aes-gcm`, or `aes-256-gcm`. | `--encryption-algorithm` |
+| `disable_sym_hole_punching` | `false` | Disable symmetric-NAT UDP punching. | `--disable-sym-hole-punching` |
+| `tld_dns_zone` | `et.net.` | Set the Magic DNS suffix. | `--tld-dns-zone` |
+| `p2p_only` | `false` | Send data only through established direct links. | `--p2p-only` |
+| `quic_listen_port` | deprecated | Keep only for old configuration compatibility. | Use `--listeners quic://...` |
+| `disable_tcp_hole_punching` | `false` | Disable TCP NAT hole punching. | `--disable-tcp-hole-punching` |
+| `disable_relay_quic` | `false` | Reject relayed QUIC packets from the local network. | `--disable-relay-quic` |
+| `enable_relay_foreign_network_quic` | `false` | Relay QUIC packets for foreign networks. | `--enable-relay-foreign-network-quic` |
+| `lazy_p2p` | `false` | Create direct links only when traffic needs them. | `--lazy-p2p` |
+| `need_p2p` | `false` | Ask lazy peers to connect before traffic arrives. | `--need-p2p` |
+| `instance_recv_bps_limit` | unlimited | Limit total received bytes per second. | `--instance-recv-bps-limit` |
+| `disable_upnp` | `false` | Disable automatic UPnP and NAT-PMP mapping. | `--disable-upnp` |
+| `disable_relay_data` | `false` | Disable data relay while retaining control functions. | Configuration file only |
+| `enable_udp_broadcast_relay` | `false` | Relay physical-interface UDP broadcasts on Windows. | `--enable-udp-broadcast-relay` |
+| `socket_mark` | unset | Apply Linux `SO_MARK` to underlay sockets. | `--socket-mark` on Linux |
+| `underlay_deny_interfaces` | empty | Deny exact local interface names for underlay traffic. | `--underlay-deny-interfaces` |
+| `underlay_deny_cidrs` | empty | Deny local sources and remote destinations in listed CIDRs. | `--underlay-deny-cidrs` |
+| `quic_congestion` | `bbr` | Select `adaptive`, `bbr`, or `brutal`. | `--quic-congestion` |
+| `quic_brutal_send_bps` | `0` | Set the Brutal target send rate in bits per second. | `--quic-brutal-send-bps` |
+| `quic_brutal_loss_compensation` | `true` | Add bounded Brutal attempts for measured loss. | `--quic-brutal-loss-compensation` |
+| `quic_initial_receive_window` | `1250000` | Set the QUIC initial per-stream receive window. | `--quic-initial-receive-window` |
+| `quic_receive_window` | `2^62-1` | Set the QUIC connection receive window. | `--quic-receive-window` |
+| `port_mode` | platform L2 mode | Select `routed`, `ethernet`, `compatible-ethernet`, or `auto`. | `--port-mode` |
+| `l2_fdb_capacity` | `16384` | Limit learned source MAC entries. | `--l2-fdb-capacity` |
+| `l2_fdb_age_seconds` | `300` | Expire idle MAC entries after this interval. | `--l2-fdb-age-seconds` |
+| `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
+| `quic_datagram_fec_parity` | `2` | Select `0` off, `2` for 16+2, or `3` for 16+3 ETQ4 FEC. | `--quic-datagram-fec-parity` |
+| `quic_critical_l2_duplication` | `true` | Duplicate critical ARP, DHCP, and neighbor-discovery frames. | `--quic-critical-l2-duplication` |
+| `quic_datagram_alternate_path_parity` | `true` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
+
+`auto` selects native Ethernet on Linux and FreeBSD.
+`auto` selects routed mode on other systems.
+
+`l2_fdb_capacity` accepts values from 1 through 1,048,576.
+`l2_fdb_age_seconds` accepts values from 1 through 86,400.
+`quic_receive_window` must not be smaller than `quic_initial_receive_window`.
+Brutal mode requires a positive `quic_brutal_send_bps` value.
+
+## Complete `lowertier-core` startup reference
+
+Network values have matching `ET_` environment variables when `--help` shows an environment name.
+For example, `--port-mode` maps to `ET_PORT_MODE`.
+
+### Instance and configuration input
+
+| Option | Purpose |
+| --- | --- |
+| `--config-server`, `-w` | Read configuration from a UDP, TCP, WS, or WSS configuration server. |
+| `--machine-id` | Set the stable machine identifier used for configuration recovery. |
+| `--config-file`, `-c` | Load one or more TOML files. Use `-` to read one file from standard input. |
+| `--config-dir` | Load every `.toml` file in one directory. |
+| `--network-name` | Set `network_identity.network_name`. |
+| `--network-secret` | Set `network_identity.network_secret`. |
+| `--hostname` | Set the peer hostname. |
+| `--instance-name`, `-m` | Set the local instance name. |
+| `--ipv4`, `-i` | Set the overlay IPv4 interface address. |
+| `--ipv6` | Set the overlay IPv6 interface address. |
+| `--dhcp`, `-d` | Request an automatic overlay IPv4 address. |
+| `--ipv6-public-addr-provider` | Share a public IPv6 prefix on Linux. |
+| `--ipv6-public-addr-auto` | Request a public IPv6 address from a provider peer. |
+| `--ipv6-public-addr-prefix` | Set the public IPv6 prefix to share. |
+
+### Peers, listeners, and routes
+
+| Option | Purpose |
+| --- | --- |
+| `--peers`, `-p` | Add one or more initial peer URLs. |
+| `--external-node`, `-e` | Use a public shared node for peer discovery. |
+| `--listeners`, `-l` | Add inbound listener URLs, ports, addresses, or `scheme:port` pairs. |
+| `--mapped-listeners` | Advertise public addresses that map to local listeners. |
+| `--no-listener` | Disable all inbound listeners. |
+| `--proxy-networks`, `-n` | Export or map local IPv4 subnets. |
+| `--manual-routes` | Replace propagated subnet and WireGuard routes. |
+| `--exit-nodes` | Select ordered exit-node overlay addresses. |
+| `--enable-exit-node` | Permit this node to forward exit traffic. |
+| `--vpn-portal` | Start a WireGuard portal for external clients. |
+| `--port-forward` | Add a TCP or UDP local-to-overlay forwarding rule. |
+
+### Interface and userspace selection
+
+| Option | Purpose |
+| --- | --- |
+| `--port-mode` | Select routed, native Ethernet, compatible Ethernet, or automatic mode. |
+| `--dev-name` | Set the TUN or TAP interface name. |
+| `--tun` | Set the interface name or select `userspace-networking`. |
+| `--mtu` | Set the overlay MTU. |
+| `--no-tun` | Disable the virtual interface. |
+| `--use-smoltcp` | Enable the userspace IP stack. |
+| `--socks5` | Start the legacy port-only SOCKS5 listener. |
+| `--socks5-server` | Start a SOCKS5 listener at `host:port`. |
+| `--outbound-http-proxy-listen` | Start an HTTP proxy listener at `host:port`. |
+
+`--tun=userspace-networking` sets the safe userspace flag combination.
+The mode disables TUN, device binding, system proxy forwarding, Magic DNS acceptance, and UDP broadcast relay.
+The mode rejects `--socket-mark` and `--dev-name`.
+
+### Security, relay, transport, and limits
+
+All matching runtime options appear in the `[flags]` table above.
+The remaining security options configure keys, credentials, and port access.
+
+| Option | Purpose |
+| --- | --- |
+| `--secure-mode` | Enable secure peer sessions. |
+| `--local-private-key` | Set the base64 X25519 private key. |
+| `--local-public-key` | Set the matching base64 X25519 public key. |
+| `--credential` | Join with a base64 temporary credential instead of a network secret. |
+| `--credential-file` | Persist issued credentials on an administrator node. |
+| `--tcp-whitelist` | Allow listed inbound TCP ports or ranges. |
+| `--udp-whitelist` | Allow listed inbound UDP ports or ranges. |
+| `--stun-servers` | Replace the IPv4 STUN server list. |
+| `--stun-servers-v6` | Replace the IPv6 STUN server list. |
+
+### Logging, RPC, and process control
+
+| Option | Purpose |
+| --- | --- |
+| `--console-log-level` | Set the console log filter. |
+| `--file-log-level` | Set the file log filter. |
+| `--file-log-dir` | Set the log directory. |
+| `--file-log-size` | Set the maximum file size in MiB. The default is 100. |
+| `--file-log-count` | Set the retained file count. The default is 10. |
+| `--rpc-portal`, `-r` | Set the management RPC listener. The default tries `127.0.0.1:15888`. |
+| `--rpc-portal-whitelist` | Restrict RPC clients by address or CIDR. |
+| `--daemon` | Run in daemon mode. |
+| `--check-config` | Validate configuration and exit. |
+| `--disable-env-parsing` | Disable TOML environment-variable expansion. |
+| `--gen-autocomplete` | Generate completion data for bash, elvish, fish, PowerShell, zsh, or Nushell. |
+| `--version`, `-V` | Print the build version. |
+| `--help`, `-h` | Print the generated option reference. |
+
+## Complete `lowertier-cli` reference
+
+The CLI connects to `127.0.0.1:15888` by default.
+Use the root options to select another RPC portal or instance.
+
+| Root option | Purpose |
+| --- | --- |
+| `--rpc-portal`, `-p` | Select the core RPC address. |
+| `--verbose`, `-v` | Print additional command details. |
+| `--output`, `-o` | Select `table` or `json`. |
+| `--no-trunc` | Disable table truncation. |
+| `--instance-id`, `-i` | Select an instance by ID. |
+| `--instance-name`, `-n` | Select an instance by name. |
+
+### Inspection commands
+
+| Command | Purpose |
+| --- | --- |
+| `peer list` | List connected peers. |
+| `peer ipv6` | Show public IPv6 information. |
+| `peer list-foreign [--trusted-keys]` | List discovered foreign networks. |
+| `peer list-global-foreign` | List foreign networks from the peer center. |
+| `route list` | List propagated routes. |
+| `route dump` | Print routes as CIDRs. |
+| `peer-center` | Show global peer information. |
+| `node info` | Show local node information. |
+| `node config` | Show the active node configuration. |
+| `stun` | Run a STUN test. |
+| `vpn-portal` | Print WireGuard portal information. |
+| `proxy` | Show TCP, KCP, and QUIC proxy status. |
+| `acl stats` | Show ACL rule counters. |
+| `stats show` | Show general counters. |
+| `stats prometheus` | Print counters in Prometheus text format. |
+
+### Runtime change commands
+
+| Command | Purpose |
+| --- | --- |
+| `connector add URL` | Add an initial connector. |
+| `connector remove URL` | Remove a connector. |
+| `connector list` | List connectors. |
+| `mapped-listener add URL` | Add an advertised mapped listener. |
+| `mapped-listener remove URL` | Remove a mapped listener. |
+| `mapped-listener list` | List mapped listeners. |
+| `port-forward add PROTOCOL BIND_ADDR DST_ADDR` | Add a TCP or UDP forwarding rule. |
+| `port-forward remove PROTOCOL BIND_ADDR [DST_ADDR]` | Remove a forwarding rule. |
+| `port-forward list` | List forwarding rules. |
+| `whitelist set-tcp PORTS` | Replace the TCP port whitelist. |
+| `whitelist set-udp PORTS` | Replace the UDP port whitelist. |
+| `whitelist clear-tcp` | Remove the TCP whitelist. |
+| `whitelist clear-udp` | Remove the UDP whitelist. |
+| `whitelist show` | Show both port whitelists. |
+| `logger get` | Show the active logger configuration. |
+| `logger set LEVEL` | Set `disabled`, `error`, `warning`, `info`, `debug`, or `trace`. |
+
+### Credential commands
+
+| Command | Purpose |
+| --- | --- |
+| `credential generate --ttl SECONDS` | Create a temporary credential. |
+| `credential revoke CREDENTIAL_ID` | Revoke a credential. |
+| `credential list` | List active credentials. |
+
+`credential generate` also accepts these options.
+
+| Option | Purpose |
+| --- | --- |
+| `--credential-id` | Reuse a caller-selected credential ID. |
+| `--groups` | Assign comma-separated ACL groups. |
+| `--allow-relay` | Permit the credential node to relay traffic. |
+| `--allowed-proxy-cidrs` | Limit exported subnets to comma-separated CIDRs. |
+| `--reusable true|false` | Permit or reject concurrent reuse. The default is `true`. |
+
+### Service commands
+
+| Command | Purpose |
+| --- | --- |
+| `service install [CORE_ARGS...]` | Register `lowertier-core` with the operating system service manager. |
+| `service uninstall` | Remove the registered service. |
+| `service status` | Show service status. |
+| `service start` | Start the service. |
+| `service stop` | Stop the service. |
+
+Select a service name with `lowertier-cli service --name NAME`.
+The install command accepts `--description`, `--display-name`, `--core-path`, and `--service-work-dir`.
+The install command also accepts `--disable-autostart` and `--disable-restart-on-failure`.
+
+Generate shell completions with `lowertier-cli gen-autocomplete SHELL`.
+
+## L2 forwarding behavior
+
+LowTier learns valid unicast source MAC addresses in a bounded forwarding database.
+Known unicast frames go to one routed destination peer.
+Unknown unicast, multicast, and broadcast frames go only to peers that advertise Ethernet input.
+
+LowTier removes forwarding entries after their age limit or peer disconnection.
+The flood limiter controls replicated bytes for each second.
+Keep a finite flood limit on production meshes.
+
+Compatible Ethernet derives a locally administered MAC address from the peer ID.
+The mode answers ARP for its overlay IPv4 address.
+The mode sends normal unicast through the existing IP route table.
+
+Restart an instance after a `port_mode` change.
+Native Ethernet fails when the operating system does not provide TAP.
+LowTier selects the interface mode before it creates the virtual interface.
+LowTier does not change the interface mode while an instance runs.
+
+See [the Ethernet operator guide](docs/l2-tap.md) for frame-level details.
+
+## Underlay path control
+
+Use deny rules when LowTier must avoid another VPN or physical interface.
+
+```toml
 stun_servers = ["192.0.2.20:3478"]
 stun_servers_v6 = ["[2001:db8::20]:3478"]
 
 [flags]
-underlay_deny_interfaces = ["utun5", "tailscale0"]
+underlay_deny_interfaces = ["tailscale0", "utun5"]
 underlay_deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 ```
 
-Start or restart the EasyTier instance after changing deny rules so existing tunnels and listeners are closed before the new policy takes effect.
+Deny CIDRs match local source addresses and remote destinations.
+Interface names must match exactly.
+Interface names such as macOS `utun5` can change after restart.
 
-When any deny rule is active, peer URLs must use literal IP addresses. HTTP, HTTPS, TXT, and SRV peer discovery are disabled, and hostname-based STUN entries are ignored. This prevents EasyTier from falling back to system resolver or discovery-library sockets whose source interface cannot be guaranteed. Replace the documentation-only STUN addresses above with servers you operate or trust.
+Strict deny policy requires literal peer and STUN addresses.
+The policy disables hostname and HTTP-based discovery paths.
+The policy also disables automatic UPnP and NAT-PMP mapping.
 
-The equivalent CLI options accept repeated or comma-separated values:
+Restart the instance after an underlay policy change.
 
-```bash
-easytier-core \
-  --underlay-deny-interfaces utun5,tailscale0 \
-  --underlay-deny-cidrs 100.64.0.0/10,fd7a:115c:a1e0::/48
-```
+## QUIC on lossy links
 
-QUIC keeps BBR as the safe default when capacity is unknown. For a measured,
-known-capacity lossy L2 path, configured `brutal` is the recommended profile.
-It uses a fixed sender rate and bounded loss compensation, similar to Hysteria
-2's fixed-rate model. Keep the configured rate at or below measured available
-capacity. A higher rate increases queueing delay, loss, and wasted traffic.
+Use BBR when available capacity is unknown.
+Use Brutal only when measured capacity is stable and known.
 
 ```toml
 [flags]
@@ -90,339 +822,128 @@ quic_critical_l2_duplication = true
 quic_datagram_alternate_path_parity = true
 ```
 
-The rate is local and controls what this node sends. Configure both nodes when
-both directions need Brutal behavior. ETQ4 uses systematic SIMD 16+2 FEC by
-default. Set `quic_datagram_fec_parity = 0` to disable it or `3` for the 16+3
-high-loss benchmark profile. See the [Hysteria 2 congestion-control guidance](https://v2.hysteria.network/docs/advanced/Full-Server-Config/)
-for the fixed-rate tradeoffs.
+Set the Brutal rate at or below measured available capacity.
+An excessive value increases queueing, loss, and wasted traffic.
 
-When two live, authenticated QUIC connections to the same direct L2 peer use
-different local or remote IP surfaces, alternate-path parity keeps source
-frames pinned to the selected connection and sends only the bounded parity
-records on the second one. Same-IP connections with different ports do not
-qualify. The second path is rechecked against the strict deny policy before
-every block; interface-deny configurations conservatively disable this feature
-when an interface name cannot be re-proven from connection metadata.
+ETQ4 parity `2` uses a 16+2 profile.
+Parity `3` uses the higher-overhead 16+3 profile.
+Parity `0` disables FEC.
 
-Direct connection races now keep a short grace period after the first success so a lower-latency physical path can still complete instead of losing immediately to a Tailscale-backed handshake. Peer selection ignores unsampled zero-latency values and retains a healthy connection until measured alternatives are available. Set `latency_first = true` in `[flags]` when forwarding decisions should also prefer measured path latency.
+Alternate-path parity requires two authenticated QUIC paths with distinct IP surfaces.
+The primary frame stays on its selected path.
+Only bounded parity records use the second path.
 
-### Userspace networking without TUN or TAP
+## Security and traffic visibility
 
-EasyTier can run without a kernel network interface.
-Applications can use local SOCKS5 and HTTP proxies on one port.
-Both proxy protocols use the existing EasyTier encrypted overlay route.
+LowTier enables ChaCha20-Poly1305 authenticated encryption by default.
+The default encryption protects the payload and authentication tag.
+Relay routing fields remain outside the default payload AEAD.
 
-```bash
-easytier-core \
-  --tun=userspace-networking \
-  --socks5-server=127.0.0.1:1055 \
-  --outbound-http-proxy-listen=127.0.0.1:1055
-```
+Secure mode protects the complete peer header and payload inside the link envelope.
+Secure mode also adds peer authentication, key epochs, and replay rejection.
 
-This mode does not provide transparent IP or complete L2 access to local applications.
-See the [userspace networking guide](docs/userspace-networking.md) for proxy settings, behavior, and security limits.
+Do not use `--disable-encryption` on an untrusted network.
+Pin public peer keys when a shared or relay node must have a stable verified identity.
 
-### Ethernet fabric and macOS TUN edge
+An observer can still see endpoints, packet sizes, timing, direction, transport type, and a random connection identifier.
+UDP setup packets and QUIC traffic remain classifiable.
+LowTier does not claim active-probing resistance or covert transport.
 
-On Linux and FreeBSD, `port_mode = "ethernet"` carries full Ethernet frames through
-the existing EasyTier route and transport stack. On macOS and other platforms
-with an IP-only virtual interface, `port_mode = "compatible-ethernet"` wraps TUN IPv4/IPv6
-packets in the same Ethernet overlay and removes the header on delivery. The
-TUN edge does not expose ARP or arbitrary non-IP frames to local applications.
+See [dataplane cryptography](docs/security/dataplane-crypto.md) for the protocol boundary.
 
-Use `port_mode = "routed"` for the lowest-overhead IP path.
+## Measured performance
 
-The existing `l3`, `tap`, and `l2-tun` names remain valid.
+The latest protected native TAP test used a QEMU ARM64 environment.
 
-The default direct path now prefers raw UDP, then QUIC, with TCP as a fallback.
-Override `default_protocol` when a network requires another order.
-See [the L2 operator guide](docs/l2-tap.md) for configuration, compatibility,
-and broadcast behavior.
+| Path | Median throughput |
+| --- | ---: |
+| Protected LowTier TAP | 3.35 Gbit/s |
+| Basic LowTier TAP | 3.84 Gbit/s |
+| Kernel WireGuard L3 | 5.76 Gbit/s |
 
-### 📥 Installation
+Protected TAP used about 39 MiB of combined memory for two processes.
+Native TAP carries complete Ethernet frames.
+Kernel WireGuard carries L3 packets.
+The comparison is not feature equivalent.
 
-Choose the installation method that best suits your needs:
+The unprivileged proxy path reached about 106 through 125 Mbit/s.
+Its steady-state RTT overhead remained below 0.2 ms in the same-host test.
+The shared proxy process used about 24 MiB of idle resident memory.
 
-Linux (Recommended):
-```bash
-curl -fsSL "https://github.com/EasyTier/EasyTier/blob/main/script/install.sh?raw=true" | sudo bash -s install
-```
+See [L2 profile results](docs/performance/l2-profile-memory-results.md).
+See [WireGuard comparison](docs/performance/wireguard-resource-comparison.md).
+See [userspace networking results](docs/performance/userspace-networking-results.md).
 
-Homebrew (MacOS/Linux):
-```bash
-brew tap brewforge/chinese
-brew install --cask easytier-gui
-```
+## Troubleshooting
 
-Windows (Recommended, run with administrator privileges):
-```powershell
-irm "https://github.com/EasyTier/EasyTier/blob/main/script/install.ps1?raw=true" | iex
-```
-
-Install via cargo (Latest development version): 
-```bash
-cargo install --git https://github.com/EasyTier/EasyTier.git easytier
-```
-
-[Install pre-built binary](https://github.com/EasyTier/EasyTier/releases) (Recommended, All platforms supported)
-
-[Install via Docker](https://easytier.cn/en/guide/installation.html#installation-methods)
-
-[Install OpenWrt ipk package](https://github.com/EasyTier/luci-app-easytier)
-
-Additional steps:
-
-[One-Click Register Service](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) (Automatically start when the system boots and run in the background)
-
-### 🚀 Basic Usage
-
-#### Quick Networking with Shared Nodes
-
-EasyTier supports quick networking using shared public nodes. When you don't have a public IP, you can use the free shared nodes provided by the EasyTier community. Nodes will automatically attempt NAT traversal and establish P2P connections. When P2P fails, data will be relayed through shared nodes.
-
-When using shared nodes, each node entering the network needs to provide the same `--network-name` and `--network-secret` parameters as the unique identifier of the network.
-
-Taking two nodes as an example (Please use more complex network name to avoid conflicts):
-
-1. Run on Node A:
+### Validate configuration
 
 ```bash
-# Run with administrator privileges
-sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<SharedNodeIP>:11010
+lowertier-core --config-file /etc/lowtier/office.toml --check-config
 ```
 
-2. Run on Node B:
+The error report includes the file, line, and invalid field.
+
+### Confirm the selected interface mode
 
 ```bash
-# Run with administrator privileges
-sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<SharedNodeIP>:11010
+lowertier-cli node config
+lowertier-cli node info
 ```
 
-After successful execution, you can check the network status using `easytier-cli`:
+Check `port_mode` and the reported interface name.
+Use `ethernet` only when the operating system provides TAP.
 
-```text
-| ipv4         | hostname       | cost  | lat_ms | loss_rate | rx_bytes | tx_bytes | tunnel_proto | nat_type | id         | version         |
-| ------------ | -------------- | ----- | ------ | --------- | -------- | -------- | ------------ | -------- | ---------- | --------------- |
-| 10.126.126.1 | abc-1          | Local | *      | *         | *        | *        | udp          | FullCone | 439804259  | 2.6.2-70e69a38~ |
-| 10.126.126.2 | abc-2          | p2p   | 3.452  | 0         | 17.33 kB | 20.42 kB | udp          | FullCone | 390879727  | 2.6.2-70e69a38~ |
-|              | PublicServer_a | p2p   | 27.796 | 0.000     | 50.01 kB | 67.46 kB | tcp          | Unknown  | 3771642457 | 2.6.2-70e69a38~ |
-```
-
-You can test connectivity between nodes:
+### Check peer and route state
 
 ```bash
-# Test connectivity
-ping 10.126.126.1
-ping 10.126.126.2
+lowertier-cli peer list
+lowertier-cli connector list
+lowertier-cli route list
+lowertier-cli stun
 ```
 
-Note: If you cannot ping through, it may be that the firewall is blocking incoming traffic. Please turn off the firewall or add allow rules.
+Check firewall access to every configured listener.
+Try an explicit UDP or TCP peer URL when automatic discovery cannot connect.
 
-To improve availability, you can connect to multiple shared nodes simultaneously:
+### Check L2 discovery
+
+Confirm that both peers advertise Ethernet input.
+Confirm that both peers use `ethernet` or `compatible-ethernet`.
+Check the configured flood limit when broadcast discovery fails.
+
+VLAN, QinQ, LLDP, and unknown EtherTypes require native Ethernet on both local edges.
+
+### Check RPC access
 
 ```bash
-# Connect to multiple shared nodes
-sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<SharedNodeIP1>:11010 -p udp://<SharedNodeIP2>:11010
+lowertier-cli --rpc-portal 127.0.0.1:15888 node info
 ```
 
-Once your network is set up successfully, you can easily configure it to start automatically on system boot. Refer to the [One-Click Register Service guide](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) for step-by-step instructions on registering EasyTier as a system service.
+Confirm the core RPC address and whitelist.
+Do not expose the RPC portal to an untrusted network.
 
-#### Decentralized Networking
-
-EasyTier is fundamentally decentralized, with no distinction between server and client. As long as one device can communicate with any node in the virtual network, it can join the virtual network. Here's how to set up a decentralized network:
-
-1. Start First Node (Node A):
+### Get complete generated help
 
 ```bash
-# Start the first node
-sudo easytier-core -i 10.144.144.1
+lowertier-core --help
+lowertier-cli --help
+lowertier-cli COMMAND --help
 ```
 
-After startup, this node will listen on the following ports by default:
-- TCP: 11010
-- UDP: 11010
-- WebSocket: 11011
-- WebSocket SSL: 11012
-- WireGuard: 11013
+Generated help reflects the features compiled into the current binary.
 
-2. Connect Second Node (Node B):
+## Compatibility names
 
-```bash
-# Connect to the first node using its public IP
-sudo easytier-core -i 10.144.144.2 -p udp://FIRST_NODE_PUBLIC_IP:11010
-```
+LowTier accepts both descriptive and legacy mode names.
 
-3. Verify Connection:
-
-```bash
-# Test connectivity
-ping 10.144.144.2
-
-# View connected peers
-easytier-cli peer
-
-# View routing information
-easytier-cli route
-
-# View local node information
-easytier-cli node
-```
-
-For more nodes to join the network, they can connect to any existing node in the network using the `-p` parameter:
-
-```bash
-# Connect to any existing node using its public IP
-sudo easytier-core -i 10.144.144.3 -p udp://ANY_EXISTING_NODE_PUBLIC_IP:11010
-```
-
-### 🔍 Advanced Features
-
-#### Subnet Proxy
-
-Assuming the network topology is as follows, Node B wants to share its accessible subnet 10.1.1.0/24 with other nodes:
-
-```mermaid
-flowchart LR
-
-subgraph Node A Public IP 22.1.1.1
-nodea[EasyTier<br/>10.144.144.1]
-end
-
-subgraph Node B
-nodeb[EasyTier<br/>10.144.144.2]
-end
-
-id1[[10.1.1.0/24]]
-
-nodea <--> nodeb <-.-> id1
-```
-
-To share a subnet, add the `-n` parameter when starting EasyTier:
-
-```bash
-# Share subnet 10.1.1.0/24 with other nodes
-sudo easytier-core -i 10.144.144.2 -n 10.1.1.0/24
-```
-
-Subnet proxy information will automatically sync to each node in the virtual network, and each node will automatically configure the corresponding route. You can verify the subnet proxy setup:
-
-1. Check if the routing information has been synchronized (the proxy_cidrs column shows the proxied subnets):
-
-```bash
-# View routing information
-easytier-cli route
-```
-
-![Routing Information](/assets/image-3.png)
-
-2. Test if you can access nodes in the proxied subnet:
-
-```bash
-# Test connectivity to proxied subnet
-ping 10.1.1.2
-```
-
-#### WireGuard Integration
-
-EasyTier can act as a WireGuard server, allowing any device with a WireGuard client (including iOS and Android) to access the EasyTier network. Here's an example setup:
-
-```mermaid
-flowchart LR
-
-ios[[iPhone<br/>WireGuard Installed]]
-
-subgraph Node A Public IP 22.1.1.1
-nodea[EasyTier<br/>10.144.144.1]
-end
-
-subgraph Node B
-nodeb[EasyTier<br/>10.144.144.2]
-end
-
-id1[[10.1.1.0/24]]
-
-ios <-.-> nodea <--> nodeb <-.-> id1
-```
-
-1. Start EasyTier with WireGuard portal enabled:
-
-```bash
-# Listen on 0.0.0.0:11013 and use 10.14.14.0/24 subnet for WireGuard clients
-sudo easytier-core -i 10.144.144.1 --vpn-portal wg://0.0.0.0:11013/10.14.14.0/24
-```
-
-2. Get WireGuard client configuration:
-
-```bash
-# Get WireGuard client configuration
-easytier-cli vpn-portal
-```
-
-3. In the output configuration:
-   - Set `Interface.Address` to an available IP from the WireGuard subnet
-   - Set `Peer.Endpoint` to the public IP/domain of your EasyTier node
-   - Import the modified configuration into your WireGuard client
-
-#### Self-Hosted Public Shared Node
-
-You can run your own public shared node to help other nodes discover each other. A public shared node is just a regular EasyTier network (with same network name and secret) that other networks can connect to.
-
-To run a public shared node:
-
-```bash
-# No need to specify IPv4 address for public shared nodes
-sudo easytier-core --network-name mysharednode --network-secret mysharednode
-```
-
-## Source archive
-
-The `EasyTier Source Archive` GitHub Actions workflow runs manually or for
-`v*` tags and uploads a ZIP containing the committed source tree. It does not
-install toolchains, download dependencies, vendor packages, run tests, or build
-the project.
-
-## Related Projects
-
-- [ZeroTier](https://www.zerotier.com/): A global virtual network for connecting devices.
-- [TailScale](https://tailscale.com/): A VPN solution aimed at simplifying network configuration.
-
-### Contact Us
-
-- 💬 **[Telegram Group](https://t.me/easytier)**
-- 👥 **[QQ Group]**
-  - No.1 [949700262](https://qm.qq.com/q/wFoTUChqZW)
-  - No.2 [837676408](https://qm.qq.com/q/4V33DrfgHe)
-  - No.3 [957189589](https://qm.qq.com/q/YNyTQjwlai)
+| Descriptive name | Legacy name |
+| --- | --- |
+| `routed` | `l3` |
+| `ethernet` | `tap` |
+| `compatible-ethernet` | `l2-tun` |
 
 ## License
 
-EasyTier is released under the [LGPL-3.0](https://github.com/EasyTier/EasyTier/blob/main/LICENSE).
-
-## Sponsor
-
-CDN acceleration and security protection for this project are sponsored by Tencent EdgeOne.
-
-<p align="center">
-  <a href="https://edgeone.ai/?from=github" target="_blank">
-    <img src="assets/edgeone.png" width="200" alt="EdgeOne Logo">
-  </a>
-</p>
-
-Special thanks to [Langlang Cloud](https://langlangy.cn/?i26c5a5)  and [RainCloud](https://www.rainyun.com/NjM0NzQ1_) for sponsoring our public servers.
-
-<p align="center">
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/langlang.png" width="200">
-</a>
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/raincloud.png" width="200">
-</a>
-</p>
-
-
-If you find EasyTier helpful, please consider sponsoring us. Software development and maintenance require a lot of time and effort, and your sponsorship will help us better maintain and improve EasyTier.
-
-<p align="center">
-<img src="assets/wechat.png" width="200">
-<img src="assets/alipay.png" width="200">
-</p>
+LowTier remains under the repository license.
+See [LICENSE](LICENSE) for the complete terms.

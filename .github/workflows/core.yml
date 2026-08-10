@@ -1,4 +1,4 @@
-name: EasyTier Core
+name: LowTier Core
 
 on:
   push:
@@ -36,7 +36,7 @@ jobs:
           concurrent_skipping: 'same_content_newer'
           skip_after_successful_duplicate: 'true'
           cancel_others: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", ".github/workflows/core.yml", ".github/actions/**", "easytier-web/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "lowertier/**", ".github/workflows/core.yml", ".github/actions/**", "lowertier-web/**"]'
   build_web:
     runs-on: ubuntu-latest
     needs: pre_job
@@ -47,14 +47,14 @@ jobs:
       - name: Setup Frontend Environment
         uses: ./.github/actions/prepare-pnpm
         with:
-          build-filter: './easytier-web/*'
+          build-filter: './lowertier-web/*'
 
       - name: Archive artifact
         uses: actions/upload-artifact@v5
         with:
-          name: easytier-web-dashboard
+          name: lowertier-web-dashboard
           path: |
-            easytier-web/frontend/dist/*
+            lowertier-web/frontend/dist/*
   build:
     strategy:
       fail-fast: true
@@ -118,7 +118,7 @@ jobs:
 
     runs-on: ${{ matrix.OS }}
     env:
-      NAME: easytier
+      NAME: lowertier
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
@@ -136,8 +136,8 @@ jobs:
       - name: Download web artifact
         uses: actions/download-artifact@v4
         with:
-          name: easytier-web-dashboard
-          path: easytier-web/frontend/dist/
+          name: lowertier-web-dashboard
+          path: lowertier-web/frontend/dist/
 
       - name: Prepare build environment
         uses: ./.github/actions/prepare-build
@@ -187,8 +187,8 @@ jobs:
             FEATURES="jemalloc"
           fi
           
-          cargo $BUILD --release --target $TARGET --package=easytier-web --features=embed
-          mv ./target/$TARGET/release/easytier-web"$SUFFIX" ./target/$TARGET/release/easytier-web-embed"$SUFFIX"
+          cargo $BUILD --release --target $TARGET --package=lowertier-web --features=embed
+          mv ./target/$TARGET/release/lowertier-web"$SUFFIX" ./target/$TARGET/release/lowertier-web-embed"$SUFFIX"
           
           cargo $BUILD --release --target $TARGET --features=$FEATURES
 
@@ -197,7 +197,7 @@ jobs:
         env:
           RUSTC_BOOTSTRAP: 1
         run: |
-          cargo build -r --target $TARGET -Z build-std=std,panic_abort --package=easytier --features=jemalloc
+          cargo build -r --target $TARGET -Z build-std=std,panic_abort --package=lowertier --features=jemalloc
 
       - name: Compress
         run: |
@@ -212,7 +212,7 @@ jobs:
                   aarch64*) ARCH_DIR=arm64 ;;
               esac
               if [[ -n "$ARCH_DIR" ]]; then
-                  find "easytier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/objects/ \;
+                  find "lowertier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/objects/ \;
               fi
           fi
 
@@ -237,7 +237,7 @@ jobs:
             UPX_BIN=./upx
           fi
 
-          for BIN in ./target/$TARGET/release/easytier-{core,cli,web,web-embed}"$SUFFIX"; do
+          for BIN in ./target/$TARGET/release/lowertier-{core,cli,web,web-embed}"$SUFFIX"; do
             if [[ -f "$BIN" ]]; then
               if [[ -n "$UPX_BIN" ]]; then
                 $UPX_BIN --lzma --best "$BIN" || true
@@ -253,7 +253,7 @@ jobs:
       - name: Archive artifact
         uses: actions/upload-artifact@v5
         with:
-          name: easytier-${{ matrix.ARTIFACT_NAME }}
+          name: lowertier-${{ matrix.ARTIFACT_NAME }}
           path: |
             ./artifacts/*
 
@@ -269,26 +269,26 @@ jobs:
       - name: Download Linux aarch64 binaries
         uses: actions/download-artifact@v4
         with:
-          name: easytier-linux-aarch64
+          name: lowertier-linux-aarch64
           path: ./downloaded-binaries/  # 独立目录避免冲突
 
       # 将二进制文件复制到 Magisk 模块目录
       - name: Prepare binaries
         run: |
-          mkdir -p ./easytier-contrib/easytier-magisk/
-          cp ./downloaded-binaries/easytier-core ./easytier-contrib/easytier-magisk/
-          cp ./downloaded-binaries/easytier-cli ./easytier-contrib/easytier-magisk/
-          cp ./downloaded-binaries/easytier-web ./easytier-contrib/easytier-magisk/
+          mkdir -p ./lowertier-contrib/lowertier-magisk/
+          cp ./downloaded-binaries/lowertier-core ./lowertier-contrib/lowertier-magisk/
+          cp ./downloaded-binaries/lowertier-cli ./lowertier-contrib/lowertier-magisk/
+          cp ./downloaded-binaries/lowertier-web ./lowertier-contrib/lowertier-magisk/
 
       # 上传生成的模块
       - name: Upload Magisk Module
         uses: actions/upload-artifact@v5
         with:
-          name: Easytier-Magisk
+          name: LowTier-Magisk
           path: |
-            ./easytier-contrib/easytier-magisk
-            !./easytier-contrib/easytier-magisk/build.sh
-            !./easytier-contrib/easytier-magisk/magisk_update.json
+            ./lowertier-contrib/lowertier-magisk
+            !./lowertier-contrib/lowertier-magisk/build.sh
+            !./lowertier-contrib/lowertier-magisk/magisk_update.json
           if-no-files-found: error
 
   core-result:

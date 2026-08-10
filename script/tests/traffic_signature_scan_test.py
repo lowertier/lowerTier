@@ -34,25 +34,25 @@ class TrafficSignatureScanTest(unittest.TestCase):
 
     def test_reports_forbidden_values_and_repeated_edges(self) -> None:
         packets = [
-            b"AB" + bytes([value]) + b"easytier" + b"ZZ" for value in range(8)
+            b"AB" + bytes([value]) + b"lowertier" + b"ZZ" for value in range(8)
         ]
 
-        report = SCANNER.scan_packets(packets, [b"easytier"])
+        report = SCANNER.scan_packets(packets, [b"lowertier"])
 
         self.assertEqual(report["packet_count"], 8)
         self.assertEqual(report["common_prefix_bytes"], 2)
-        self.assertEqual(report["common_suffix_bytes"], 10)
-        self.assertEqual(report["forbidden_hits"]["easytier"], 8)
+        self.assertEqual(report["common_suffix_bytes"], 11)
+        self.assertEqual(report["forbidden_hits"]["lowertier"], 8)
 
     def test_varied_ciphertext_has_no_repeated_edge(self) -> None:
         packets = [bytes((index * 31 + position * 17) & 0xFF for position in range(64))
                    for index in range(32)]
 
-        report = SCANNER.scan_packets(packets, [b"easytier"])
+        report = SCANNER.scan_packets(packets, [b"lowertier"])
 
         self.assertEqual(report["common_prefix_bytes"], 0)
         self.assertEqual(report["common_suffix_bytes"], 0)
-        self.assertEqual(report["forbidden_hits"]["easytier"], 0)
+        self.assertEqual(report["forbidden_hits"]["lowertier"], 0)
         self.assertEqual(report["unique_packet_ratio"], 1.0)
 
 

@@ -1,4 +1,4 @@
-# Copyright 2024-present Easytier Programme within The Commons Conservancy
+# Copyright 2024-present LowTier Programme within The Commons Conservancy
 # SPDX-License-Identifier: Apache-2.0
 
 name: 💡 新功能请求 / Feature Request
@@ -11,10 +11,10 @@ body:
     attributes:
       value: |
         ## 提交功能请求前请注意 / Before Submitting
-        1. 请先搜索 [现有的功能请求](https://github.com/EasyTier/EasyTier/issues?q=is%3Aissue+label%3A%22type%3A+feature+request%22) 确保您的想法尚未被提出。
-        1. Please search [existing feature requests](https://github.com/EasyTier/EasyTier/issues?q=is%3Aissue+label%3A%22type%3A+feature+request%22) to ensure your idea hasn't been suggested already.
-        2. 请确保这个功能确实适合 EasyTier 项目的目标和范围。
-        2. Please ensure this feature fits within EasyTier's goals and scope.
+        1. 请先搜索 [现有的功能请求](https://github.com/lowertier/lowerTier/issues?q=is%3Aissue+label%3A%22type%3A+feature+request%22) 确保您的想法尚未被提出。
+        1. Please search [existing feature requests](https://github.com/lowertier/lowerTier/issues?q=is%3Aissue+label%3A%22type%3A+feature+request%22) to ensure your idea hasn't been suggested already.
+        2. 请确保这个功能确实适合 LowTier 项目的目标和范围。
+        2. Please ensure this feature fits within LowTier's goals and scope.
         3. 考虑这个功能是否能让更多用户受益，而不只是解决个人需求。
         3. Consider whether this feature would benefit many users, not just personal needs.
 
@@ -58,7 +58,7 @@ body:
     id: current-limitations
     attributes:
       label: 当前限制 / Current Limitations
-      description: 描述当前 EasyTier 的哪些限制阻止了您实现这个使用场景 / Describe what current limitations in EasyTier prevent you from achieving this use case
+      description: 描述当前 LowTier 的哪些限制阻止了您实现这个使用场景 / Describe what current limitations in LowTier prevent you from achieving this use case
       placeholder: |
         例如：
         - 目前不支持基于用户角色的访问控制

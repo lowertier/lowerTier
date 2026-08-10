@@ -10,7 +10,7 @@ The median p99 RTT overhead decreased by 11.5 percent.
 
 The median RTT overhead increased by 0.132 ms.
 
-Combined mean EasyTier RSS decreased by 0.43 MiB, or 1.1 percent.
+Combined mean LowTier RSS decreased by 0.43 MiB, or 1.1 percent.
 
 The complete Ethernet, L2-TUN, mixed-edge, and L3 correctness tests passed.
 
@@ -24,13 +24,13 @@ The replay microbenchmark measured a 120.6 times faster shift operation.
 
 The replay window still uses 32 bytes.
 
-The Ethernet forwarding table now allocates entries when EasyTier learns MAC addresses.
+The Ethernet forwarding table now allocates entries when LowTier learns MAC addresses.
 
 The fresh default table capacity changed from 28,672 backing slots to zero.
 
 The configured 16,384-entry logical limit did not change.
 
-The benchmark now records mean RSS, peak RSS, and thread counts for both EasyTier nodes.
+The benchmark now records mean RSS, peak RSS, and thread counts for both LowTier nodes.
 
 The `port_mode` field now accepts these profile names:
 
@@ -44,11 +44,11 @@ The default remains `l3` to preserve existing deployments.
 
 ## Test Environment
 
-The tests used the `easytier-l2` Colima QEMU profile.
+The tests used the `lowertier-l2` Colima QEMU profile.
 
 The virtual machine used four ARM64 virtual CPUs.
 
-EasyTier used UDP transport, secure mode, and native TAP.
+LowTier used UDP transport, secure mode, and native TAP.
 
 Each primary run used 1000 ping samples and a 10-second throughput test.
 
@@ -85,11 +85,11 @@ The table combines this result with the prior same-profile comparison.
 
 | QEMU throughput | Median |
 | --- | ---: |
-| New protected EasyTier TAP | 3.35 Gbit/s |
-| Basic EasyTier TAP | 3.84 Gbit/s |
+| New protected LowTier TAP | 3.35 Gbit/s |
+| Basic LowTier TAP | 3.84 Gbit/s |
 | Kernel WireGuard | 5.76 Gbit/s |
 
-The new protected TAP path is 12.7 percent slower than basic EasyTier TAP.
+The new protected TAP path is 12.7 percent slower than basic LowTier TAP.
 
 The previous protected path was 16.3 percent slower.
 
@@ -97,7 +97,7 @@ The new protected TAP path is 41.8 percent slower than kernel WireGuard.
 
 WireGuard carries L3 packets.
 
-EasyTier TAP carries complete Ethernet frames.
+LowTier TAP carries complete Ethernet frames.
 
 The comparison is not feature equivalent.
 
@@ -127,20 +127,20 @@ The exact frame cases included VLAN, QinQ, LLDP, broadcast, unicast, MAC movemen
 
 The `ethernet` profile fails when native TAP is unavailable.
 
-EasyTier does not silently replace complete Ethernet behavior with L2-TUN.
+LowTier does not silently replace complete Ethernet behavior with L2-TUN.
 
 ## Verification Commands
 
 ```text
 cargo fmt --all -- --check
-cargo test --locked -p easytier --no-default-features --features tun port_mode
-cargo test --locked -p easytier --no-default-features --features tun link_envelope::tests -- --nocapture
-cargo test --locked -p easytier --no-default-features --features tun l2_fabric::tests -- --nocapture
-cargo test --locked -p easytier --no-default-features --features tun l2 -- --nocapture
-cargo test --locked -p easytier --no-default-features --features tun peer_conn_secure_mode -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun port_mode
+cargo test --locked -p lowertier --no-default-features --features tun link_envelope::tests -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun l2_fabric::tests -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun l2 -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun peer_conn_secure_mode -- --nocapture
 bash script/tests/colima-l2-static-test.sh
 bash script/tests/colima-l2-benchmark-static-test.sh
-COLIMA_DOCKER_CONTEXT=colima-easytier-l2 SKIP_IMAGE_BUILD=1 bash script/colima-l2/e2e.sh
+COLIMA_DOCKER_CONTEXT=colima-lowertier-l2 SKIP_IMAGE_BUILD=1 bash script/colima-l2/e2e.sh
 ```
 
 ## Limits

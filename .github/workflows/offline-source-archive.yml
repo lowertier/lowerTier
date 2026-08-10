@@ -1,4 +1,4 @@
-name: EasyTier Source Archive
+name: LowTier Source Archive
 
 "on":
   workflow_dispatch:
@@ -28,9 +28,9 @@ jobs:
         run: |
           safe_ref="${REF_NAME//\//-}"
           if [[ "$REF_TYPE" == "tag" ]]; then
-            basename="easytier-${safe_ref}-source"
+            basename="lowertier-${safe_ref}-source"
           else
-            basename="easytier-${safe_ref}-${REVISION:0:12}-source"
+            basename="lowertier-${safe_ref}-${REVISION:0:12}-source"
           fi
           echo "basename=$basename" >> "$GITHUB_OUTPUT"
 

@@ -18,7 +18,7 @@ The shared process reached 25.750 MiB during transfers.
 
 ## Test boundary
 
-The test ran two release EasyTier processes on one Apple M4 Max host.
+The test ran two release LowTier processes on one Apple M4 Max host.
 The host ran macOS 27.0 on ARM64.
 Rust 1.95.0 built commit `b0a3c41638731521e516801f0e738b2b81c179f1`.
 
@@ -43,7 +43,7 @@ It does not represent Internet capacity or latency.
 | Effective user identifier | 501 |
 
 The test used no administrator privileges.
-EasyTier created no TUN, TAP, or other network interface.
+LowTier created no TUN, TAP, or other network interface.
 
 ## RTT
 
@@ -54,8 +54,8 @@ The test then recorded 101 request and response exchanges.
 | Path | Minimum | Median | Maximum | Overhead versus direct median |
 | --- | ---: | ---: | ---: | ---: |
 | Direct loopback | 0.070 ms | 0.087 ms | 0.129 ms | Baseline |
-| SOCKS5 over EasyTier | 0.101 ms | 0.109 ms | 0.142 ms | 0.022 ms |
-| HTTP CONNECT over EasyTier | 0.130 ms | 0.203 ms | 0.278 ms | 0.116 ms |
+| SOCKS5 over LowTier | 0.101 ms | 0.109 ms | 0.142 ms | 0.022 ms |
+| HTTP CONNECT over LowTier | 0.130 ms | 0.203 ms | 0.278 ms | 0.116 ms |
 
 The measured overhead is below the 0.2 ms target.
 
@@ -67,8 +67,8 @@ The median uses 11 runs.
 | Path | Minimum | Median | Maximum |
 | --- | ---: | ---: | ---: |
 | Direct loopback | 0.207 ms | 0.217 ms | 0.357 ms |
-| SOCKS5 over EasyTier | 0.398 ms | 0.428 ms | 0.677 ms |
-| HTTP CONNECT over EasyTier | 0.577 ms | 0.606 ms | 0.871 ms |
+| SOCKS5 over LowTier | 0.398 ms | 0.428 ms | 0.677 ms |
+| HTTP CONNECT over LowTier | 0.577 ms | 0.606 ms | 0.871 ms |
 
 ## Throughput
 
@@ -78,8 +78,8 @@ The reported value is the median of five runs.
 | Path | Runs in Mbit/s | Median |
 | --- | --- | ---: |
 | Direct loopback | 44243.195, 43276.410, 83391.477, 82659.109, 82514.597 | 82514.597 Mbit/s |
-| SOCKS5 over EasyTier | 121.067, 124.560, 127.369, 129.481, 124.399 | 124.560 Mbit/s |
-| HTTP CONNECT over EasyTier | 113.273, 102.832, 102.969, 106.671, 105.891 | 105.891 Mbit/s |
+| SOCKS5 over LowTier | 121.067, 124.560, 127.369, 129.481, 124.399 | 124.560 Mbit/s |
+| HTTP CONNECT over LowTier | 113.273, 102.832, 102.969, 106.671, 105.891 | 105.891 Mbit/s |
 
 A separate 512 MiB run reached 105.894 Mbit/s through SOCKS5.
 The same run reached 121.630 Mbit/s through HTTP CONNECT.
@@ -118,8 +118,8 @@ A larger gain requires a structural stream or batch path change.
 
 ## WireGuard status
 
-The existing controlled macOS comparison measured native EasyTier L2-TUN against `wireguard-go`.
-That comparison measured 496.0 Mbit/s for EasyTier and 376.3 Mbit/s for WireGuard in the forward direction.
+The existing controlled macOS comparison measured native LowTier L2-TUN against `wireguard-go`.
+That comparison measured 496.0 Mbit/s for LowTier and 376.3 Mbit/s for WireGuard in the forward direction.
 The reverse results were 432.8 Mbit/s and 426.9 Mbit/s.
 
 The userspace proxy result is lower than both native interface paths.
@@ -135,11 +135,11 @@ Use userspace networking when the process cannot create a kernel interface.
 ```bash
 export CARGO_TARGET_DIR=/tmp/lowerTier-target
 cargo build --release --locked \
-  -p easytier \
-  --bin easytier-core \
+  -p lowertier \
+  --bin lowertier-core \
   --no-default-features \
   --features socks5,quic
 
-EASYTIER_CORE=/tmp/lowerTier-target/release/easytier-core \
+LOWTIER_CORE=/tmp/lowerTier-target/release/lowertier-core \
   bash script/tests/userspace-proxy-test.sh
 ```

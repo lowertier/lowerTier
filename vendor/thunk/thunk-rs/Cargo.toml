@@ -1,0 +1,33 @@
+[package]
+name = "thunk-rs"
+version = "0.3.5"
+edition = "2021"
+authors = ["felixmaker"]
+description = "Thunk the Rust program to support Windows XP, Vista and more!"
+license = "Apache-2.0 OR MIT"
+keywords = ["build-dependencies"]
+readme = "README.md"
+categories = ["development-tools::build-utils"]
+repository = "https://github.com/felixmaker/thunk"
+documentation = "https://docs.rs/thunk-rs"
+
+[lib]
+name = "thunk"
+path = "src/lib.rs"
+
+[dependencies]
+
+[features]
+default = ["xp"]
+xp = []
+vista = []
+win7 = []
+win8 = []
+win10_10240 = []
+win10_19041 = []
+vc_ltl_only = []
+lib = []
+subsystem_windows = []
+windows_xp = ["xp"]
+windows_vista = ["vista"]
+win10 = ["win10_10240"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test the EasyTier userspace proxy path."""
+"""Test the LowTier userspace proxy path."""
 
 from __future__ import annotations
 

@@ -20,7 +20,7 @@ RUN ARTIFACT_ARCH=""; \
         echo "Unsupported architecture: $TARGETPLATFORM"; \
         exit 1; \
     fi; \
-    cp /tmp/artifacts/easytier-linux-${ARTIFACT_ARCH}/* /tmp/output;
+    cp /tmp/artifacts/lowertier-linux-${ARTIFACT_ARCH}/* /tmp/output;
 
 FROM base
 
@@ -43,6 +43,6 @@ EXPOSE 11011/tcp
 EXPOSE 11012/tcp
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-    CMD ["/usr/local/bin/easytier-cli", "--rpc-portal", "127.0.0.1:15888", "--output", "json", "node", "info"]
+    CMD ["/usr/local/bin/lowertier-cli", "--rpc-portal", "127.0.0.1:15888", "--output", "json", "node", "info"]
 
-ENTRYPOINT ["/sbin/tini", "--", "easytier-core"]
+ENTRYPOINT ["/sbin/tini", "--", "lowertier-core"]

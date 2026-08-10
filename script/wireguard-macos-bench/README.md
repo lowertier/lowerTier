@@ -2,11 +2,11 @@
 
 This harness runs the pinned Tailscale `wireguard-go` implementation on native macOS and kernel
 WireGuard in the existing QEMU Colima profile. It uses the same UDP port-forwarding boundary,
-inner MTU, `iperf3` workloads, latency sampling, and CPU-per-Gbit calculation as the EasyTier
+inner MTU, `iperf3` workloads, latency sampling, and CPU-per-Gbit calculation as the LowTier
 native L2-TUN benchmark.
 
 The primary comparison is production-shaped rather than feature-equivalent. WireGuard carries L3
-traffic with a compact direct-peer header. EasyTier carries an L2 frame and routed-overlay metadata.
+traffic with a compact direct-peer header. LowTier carries an L2 frame and routed-overlay metadata.
 
 The harness creates ephemeral keys, keeps private keys out of the result directory, chooses an
 unused high-numbered `utun`, and removes the host route, userspace process, UAPI socket, and test
@@ -20,7 +20,7 @@ RUNS=1 DURATION=5 CPU_DURATION=5 \
   script/wireguard-macos-bench/e2e.sh
 ```
 
-The default `WIREGUARD_GO_SOURCE` is the pinned Tailscale module already used for the EasyTier
+The default `WIREGUARD_GO_SOURCE` is the pinned Tailscale module already used for the LowTier
 reference analysis. Override it only for an explicit version comparison.
 
 Set `PROFILE_DURATION=8` to add separate macOS `sample`, `sc_usage`, `vmmap`, utun counter, RSS,

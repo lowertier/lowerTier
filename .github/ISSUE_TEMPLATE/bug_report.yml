@@ -1,4 +1,4 @@
-# Copyright 2024-present Easytier Programme within The Commons Conservancy
+# Copyright 2024-present LowTier Programme within The Commons Conservancy
 # SPDX-License-Identifier: Apache-2.0
 
 name: 🐞 问题报告 / Bug Report
@@ -11,12 +11,12 @@ body:
     attributes:
       value: |
         ## 在提交问题之前 / First of all
-        1. 请先搜索有关此问题的 [现有问题](https://github.com/EasyTier/EasyTier/issues?q=is%3Aissue)。
-        1. Please search for [existing issues](https://github.com/EasyTier/EasyTier/issues?q=is%3Aissue) about this problem first.
-        2. 请确保所使用的 Easytier 版本都是最新的。
-        2. Make sure that all Easytier versions are up-to-date.
-        3. 请确保这是 EasyTier 的问题，而不是你正在使用的其他内容引起的问题。
-        3. Make sure it's an issue with EasyTier and not something else you are using.
+        1. 请先搜索有关此问题的 [现有问题](https://github.com/lowertier/lowerTier/issues?q=is%3Aissue)。
+        1. Please search for [existing issues](https://github.com/lowertier/lowerTier/issues?q=is%3Aissue) about this problem first.
+        2. 请确保所使用的 LowTier 版本都是最新的。
+        2. Make sure that all LowTier versions are up-to-date.
+        3. 请确保这是 LowTier 的问题，而不是你正在使用的其他内容引起的问题。
+        3. Make sure it's an issue with LowTier and not something else you are using.
         4. 请记得遵守我们的社区准则并保持友好态度。
         4. Remember to follow our community guidelines and be friendly.
 
@@ -37,7 +37,7 @@ body:
       label: 环境信息 / Environment Information
       description: 请提供网络拓扑、节点信息和系统环境详情。 / Please provide network topology, node information and system environment details.
       placeholder: |
-        **EasyTier 版本（非常重要）/ EasyTier Version (Very Important):** v1.2.0
+        **LowTier 版本（非常重要）/ LowTier Version (Very Important):** v1.2.0
         
         **网络拓扑 / Network Topology:**
         - 节点 A (10.1.1.1): Windows 11 Pro 22H2, Wifi，有 IPV6 地址
@@ -59,12 +59,12 @@ body:
       placeholder: |
         **节点 A 配置 / Node A Config:**
         ```
-        easytier-core --config-file config.toml
+        lowertier-core --config-file config.toml
         ```
         
         **节点 B 配置 / Node B Config:**
         ```
-        easytier-core --ipv4 10.1.1.2 --peers tcp://1.2.3.4:11010
+        lowertier-core --ipv4 10.1.1.2 --peers tcp://1.2.3.4:11010
         ```
         
         请贴出完整的配置文件内容或命令行参数

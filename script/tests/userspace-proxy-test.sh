@@ -3,13 +3,13 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 probe="$repo_root/script/tests/userspace_proxy_probe.py"
-core=${EASYTIER_CORE:-"$repo_root/target/debug/easytier-core"}
+core=${LOWTIER_CORE:-"$repo_root/target/debug/lowertier-core"}
 benchmark_bytes=${USERSPACE_BENCHMARK_BYTES:-67108864}
 benchmark_runs=${USERSPACE_BENCHMARK_RUNS:-5}
 rtt_runs=${USERSPACE_RTT_RUNS:-101}
 setup_runs=${USERSPACE_SETUP_RUNS:-11}
 result_file=${USERSPACE_RESULT_FILE:-}
-run_dir=$(mktemp -d -t easytier-userspace-proxy.XXXXXX)
+run_dir=$(mktemp -d -t lowertier-userspace-proxy.XXXXXX)
 
 server_pid=
 client_pid=
@@ -36,8 +36,8 @@ if [[ ! -x "$core" ]]; then
     cargo build \
         --manifest-path "$repo_root/Cargo.toml" \
         --locked \
-        -p easytier \
-        --bin easytier-core \
+        -p lowertier \
+        --bin lowertier-core \
         --no-default-features \
         --features socks5,quic
 fi

@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    EasyTier Windows Installer
+    LowTier Windows Installer
 
 .DESCRIPTION
-    Download EasyTier from GitHub Release and install it.
+    Download LowTier from GitHub Release and install it.
     Copies binaries to the install directory and updates the system PATH.
 
 .PARAMETER Version
@@ -11,18 +11,18 @@
     Default: "latest"
 
 .PARAMETER InstallDir
-    Directory to install EasyTier binaries.
-    Default: "$env:ProgramFiles\EasyTier"
+    Directory to install LowTier binaries.
+    Default: "$env:ProgramFiles\LowTier"
 
 .EXAMPLE
     .\install.ps1
     .\install.ps1 -Version v2.6.2
-    .\install.ps1 -InstallDir "C:\EasyTier"
+    .\install.ps1 -InstallDir "C:\LowTier"
 
 .NOTES
     Administrator privileges are required.
-    After installation, run: easytier-cli service install
-    to register EasyTier as a system service.
+    After installation, run: lowertier-cli service install
+    to register LowTier as a system service.
 #>
 param(
     [Parameter(Position = 0)]
@@ -30,7 +30,7 @@ param(
     [string]$Version = 'latest',
 
     [Parameter(Position = 1)]
-    [string]$InstallDir = "$env:ProgramFiles\EasyTier"
+    [string]$InstallDir = "$env:ProgramFiles\LowTier"
 )
 
 Set-StrictMode -Version Latest
@@ -43,7 +43,7 @@ $ProgressPreference = 'SilentlyContinue'
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-$GITHUB_REPO        = 'EasyTier/EasyTier'
+$GITHUB_REPO        = 'lowertier/lowerTier'
 $GITHUB_API         = "https://api.github.com/repos/$GITHUB_REPO"
 $GITHUB_RELEASE_URL = "https://github.com/$GITHUB_REPO/releases"
 
@@ -72,11 +72,11 @@ switch ($cpuArch) {
         exit 1
     }
 }
-$assetBaseName = "easytier-windows-$arch"
+$assetBaseName = "lowertier-windows-$arch"
 
 Write-Host ''
 Write-Host '  ===============================================' -ForegroundColor Cyan
-Write-Host '        EasyTier Windows Installer              ' -ForegroundColor Cyan
+Write-Host '        LowTier Windows Installer              ' -ForegroundColor Cyan
 Write-Host '  ===============================================' -ForegroundColor Cyan
 Write-Host ''
 Write-Host "  Architecture : $arch" -ForegroundColor White
@@ -91,14 +91,14 @@ try {
     if ($Version -eq 'latest' -or $Version -eq 'stable') {
         $releaseInfo = Invoke-RestMethod `
             -Uri "$GITHUB_API/releases/latest" `
-            -Headers @{ 'User-Agent' = 'EasyTier-Installer/1.0' } `
+            -Headers @{ 'User-Agent' = 'LowTier-Installer/1.0' } `
             -ErrorAction Stop
     }
     else {
         $tag = if ($Version -notmatch '^v') { "v$Version" } else { $Version }
         $releaseInfo = Invoke-RestMethod `
             -Uri "$GITHUB_API/releases/tags/$tag" `
-            -Headers @{ 'User-Agent' = 'EasyTier-Installer/1.0' } `
+            -Headers @{ 'User-Agent' = 'LowTier-Installer/1.0' } `
             -ErrorAction Stop
     }
 }
@@ -136,7 +136,7 @@ Write-Host "  URL     : $downloadUrl" -ForegroundColor DarkGray
 Write-Host ''
 Write-Host "[3/5] Downloading $assetZipName ..." -ForegroundColor Yellow
 
-$tempDir = Join-Path $env:TEMP "easytier-install-$(Get-Random)"
+$tempDir = Join-Path $env:TEMP "lowertier-install-$(Get-Random)"
 $zipPath = Join-Path $tempDir $assetZipName
 
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
@@ -225,10 +225,10 @@ catch {
 # Done
 # ---------------------------------------------------------------------------
 Write-Host ''
-Write-Host "  [OK] EasyTier $releaseVersion installation complete!" -ForegroundColor Green
+Write-Host "  [OK] LowTier $releaseVersion installation complete!" -ForegroundColor Green
 Write-Host ''
 Write-Host "  Install dir : $InstallDir" -ForegroundColor White
-Write-Host '  User guide  : https://easytier.cn/en/guide/network/decentralized-networking.html' -ForegroundColor DarkGray
+Write-Host '  User guide  : https://github.com/lowertier/lowerTier' -ForegroundColor DarkGray
 Write-Host ''
 Write-Host '  NOTE: If PATH was just updated, please restart your terminal.' -ForegroundColor DarkYellow
 Write-Host ''

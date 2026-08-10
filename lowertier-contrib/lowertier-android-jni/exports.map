@@ -1,0 +1,7 @@
+{
+    global:
+        Java_com_lowertier_jni_LowTierJNI_*;
+        Java_com_lowertier_jni_LowTierDataPlaneJNI_*;
+    local:
+        *;
+};

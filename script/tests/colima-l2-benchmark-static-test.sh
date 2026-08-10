@@ -6,7 +6,7 @@ benchmark="$repo_root/script/colima-l2/benchmark.sh"
 
 test -f "$benchmark"
 grep -q '^set -euo pipefail$' "$benchmark"
-grep -q 'EASYTIER_L2_SECURE_MODE' "$benchmark"
+grep -q 'LOWTIER_L2_SECURE_MODE' "$benchmark"
 grep -q 'direct-underlay' "$benchmark"
 grep -q 'overlay-tap' "$benchmark"
 grep -q 'summary.tsv' "$benchmark"

@@ -12,7 +12,7 @@ importers:
 
   .: {}
 
-  easytier-gui:
+  lowertier-gui:
     dependencies:
       '@primeuix/themes':
         specifier: ^1.2.3
@@ -35,9 +35,9 @@ importers:
       '@vueuse/core':
         specifier: ^11.2.0
         version: 11.3.0(vue@3.5.21(typescript@5.6.3))
-      easytier-frontend-lib:
+      lowertier-frontend-lib:
         specifier: workspace:*
-        version: link:../easytier-web/frontend-lib
+        version: link:../lowertier-web/frontend-lib
       ip-num:
         specifier: 1.5.1
         version: 1.5.1
@@ -145,7 +145,7 @@ importers:
         specifier: ^2.1.10
         version: 2.2.12(typescript@5.6.3)
 
-  easytier-web/frontend:
+  lowertier-web/frontend:
     dependencies:
       '@modyfi/vite-plugin-yaml':
         specifier: ^1.1.0
@@ -156,7 +156,7 @@ importers:
       axios:
         specifier: ^1.13.5
         version: 1.13.6
-      easytier-frontend-lib:
+      lowertier-frontend-lib:
         specifier: workspace:*
         version: link:../frontend-lib
       primevue:
@@ -209,7 +209,7 @@ importers:
         specifier: ^2.1.10
         version: 2.2.12(typescript@5.6.3)
 
-  easytier-web/frontend-lib:
+  lowertier-web/frontend-lib:
     dependencies:
       '@primeuix/themes':
         specifier: ^1.2.3

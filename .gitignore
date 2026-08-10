@@ -29,7 +29,7 @@ components.d.ts
 musl_gcc
 
 # log
-easytier-panic.log
+lowertier-panic.log
 *.log
 *.log.*
 *.trace
@@ -78,13 +78,13 @@ easytier-panic.log
 
 # web
 node_modules
-easytier-web/frontend-lib/src/generated/
+lowertier-web/frontend-lib/src/generated/
 
 .vite
 
-easytier-gui/src-tauri/*.dll
-easytier-gui/src-tauri/*.sys
-/easytier-contrib/easytier-ohrs/dist/
+lowertier-gui/src-tauri/*.dll
+lowertier-gui/src-tauri/*.sys
+/lowertier-contrib/lowertier-ohrs/dist/
 
 # contrib
 go.sum

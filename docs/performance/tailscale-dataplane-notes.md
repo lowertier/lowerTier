@@ -7,29 +7,29 @@ This review uses these pinned local source snapshots:
 - ZeroTierOne `5951981622a8d1216a64a8df065d87b9a0dbd21e`
 
 The purpose is implementation reuse, not an assumption that the projects have identical routing
-or security models. No Tailscale, WireGuard, or ZeroTier code is copied into EasyTier by this
+or security models. No Tailscale, WireGuard, or ZeroTier code is copied into LowTier by this
 document. Tailscale and wireguard-go provide the throughput model. ZeroTier provides useful L2
 forwarding and flow-sharding patterns. Its current scalar UDP transmit path is not a 10GbE model.
 
 ## Current wire cost
 
-For an encrypted EasyTier raw-UDP data packet, the fixed inner overhead is:
+For an encrypted LowTier raw-UDP data packet, the fixed inner overhead is:
 
 | Field | Bytes |
 | --- | ---: |
-| EasyTier peer-manager header | 16 |
-| EasyTier UDP tunnel header | 8 |
+| LowTier peer-manager header | 16 |
+| LowTier UDP tunnel header | 8 |
 | AEAD tag | 16 |
 | Transmitted AEAD nonce | 12 |
 | Total before outer IP/UDP | 52 |
 
 WireGuard transport data uses a 16-byte transport header and a 16-byte tag, or
-32 bytes before outer IP/UDP. EasyTier therefore pays 20 more fixed bytes for
+32 bytes before outer IP/UDP. LowTier therefore pays 20 more fixed bytes for
 normal L3 packets. `l2-tun` adds a 14-byte Ethernet header, making its fixed
 inner overhead 66 bytes. Outer IPv4 plus UDP adds 28 bytes in both cases; IPv6
 plus UDP adds 48 bytes.
 
-The peer-manager header carries real EasyTier functionality: source and
+The peer-manager header carries real LowTier functionality: source and
 destination peer IDs, packet type, relay counter, flags, and payload length.
 Removing it globally would trade away routing features. The transmitted random
 nonce is a better future target: a per-session monotonic counter with a replay
@@ -76,37 +76,37 @@ The limits matter as much as the useful ideas:
 - `PacketMultiplexer` is disabled on Apple, BSD, and Windows builds.
 - The macOS TAP implementation uses a helper process and `writev`; it is not a modern utun fast
   path.
-- ZeroTier's protocol and crypto are not substitutes for EasyTier's established
+- ZeroTier's protocol and crypto are not substitutes for LowTier's established
   ChaCha20-Poly1305 implementation.
 
-EasyTier should therefore adopt flow-stable bounded workers and direct L2 peer selection only
+LowTier should therefore adopt flow-stable bounded workers and direct L2 peer selection only
 after packet vectors exist. It should not copy ZeroTier's scalar UDP transmit or old macOS TAP
 backend.
 
-## Current EasyTier hot-path difference
+## Current LowTier hot-path difference
 
-EasyTier now carries a bounded packet vector from TUN/TAP ingress through L2 classification,
+LowTier now carries a bounded packet vector from TUN/TAP ingress through L2 classification,
 next-hop grouping, direct/relay selection, peer queues, and platform UDP I/O. Linux uses
 `sendmmsg`/`recvmmsg` plus coupled UDP GSO/GRO. Darwin keeps its utun `recvmsg_x`/`sendmsg_x`
 backend, uses socket `recvmsg_x`, and defaults socket transmit to scalar `send_to` because native
 A/B testing rejected Darwin UDP `sendmsg_x` for this workload.
 
-EasyTier now assigns symmetric flows to 64 stable FIFO send lanes and pins their chosen path in a
+LowTier now assigns symmetric flows to 64 stable FIFO send lanes and pins their chosen path in a
 bounded TTL cache. The six-bit shard is carried in the existing reserved peer-header byte, so it
 survives encryption and relay hops without increasing the header. This adopts ZeroTier's ordering
 model without copying its scalar UDP backend.
 The remaining structural difference is crypto worker ownership: Tailscale and wireguard-go
-amortize crypto across persistent workers, while EasyTier's available parallel implementation is
+amortize crypto across persistent workers, while LowTier's available parallel implementation is
 still batch-scoped Rayon. Experiments reject that fork/join path as a default, so parallel crypto
 remains opt-in and the singleton/vector inline path is the measured default.
 
 Eagerly turning every mixed vector into one queue job per shard is also opt-in through
-`EASYTIER_ENABLE_FLOW_SHARD_SPLIT=1`. On four-vCPU QEMU it reduced TCP p4 from
+`LOWTIER_ENABLE_FLOW_SHARD_SPLIT=1`. On four-vCPU QEMU it reduced TCP p4 from
 3.913/3.942 Gbit/s to 2.706/2.608 Gbit/s and roughly doubled CPU/Gbit. The retained default stamps
 the flow identity and preserves the intact vector; future persistent flow workers can consume the
 same metadata without repeating classification.
 
-Other recurring EasyTier work includes route and DashMap lookups, asynchronous
+Other recurring LowTier work includes route and DashMap lookups, asynchronous
 traffic-metric updates, compression dispatch even when compression is disabled,
 and deep packet clones during fanout. These are secondary to batching for bulk
 traffic, but they can matter for small-packet p99 latency.
@@ -122,7 +122,7 @@ Two clean VZ experiments disproved the old recommendation to add socket batching
 | Late `quinn-udp` GSO | 3.426 Gbit/s | 3.416 Gbit/s | 0.923 / 1.017 | 0.785 ms | remove |
 
 The first GSO prototype also exposed an integration hazard. `quinn-udp::UdpSocketState::new`
-enables UDP GRO opportunistically. EasyTier's scalar `recv_from` then received several logical
+enables UDP GRO opportunistically. LowTier's scalar `recv_from` then received several logical
 datagrams as one buffer and rejected it. A Linux regression test reproduced the behavior. After
 GRO was disabled and packet boundaries were restored, the candidate still regressed and was
 removed.
@@ -141,11 +141,11 @@ Two established mechanisms remain implemented with measured gates:
 - `quincy-tun` ports WireGuard-go's Linux checksum, TSO/GRO, and virtio-header logic. x86_64 uses
   its AVX2/SSE4.1 checksum acceleration by default. aarch64 defaults off because forced scalar
   checksum handling fell to about 86 Mbit/s in QEMU; it can be enabled with
-  `EASYTIER_ENABLE_LINUX_TUN_OFFLOAD=1` for capable ARM implementations.
+  `LOWTIER_ENABLE_LINUX_TUN_OFFLOAD=1` for capable ARM implementations.
 - Rayon packet encryption preserves per-peer order after the parallel phase, but direct Rayon
   reached 1.88-1.93 Gbit/s in earlier QEMU trials and a final adjacent A/B reached only
   3.271/2.902 Gbit/s versus 4.029/3.845 Gbit/s inline. It requires
-  `EASYTIER_ENABLE_PARALLEL_CRYPTO=1`.
+  `LOWTIER_ENABLE_PARALLEL_CRYPTO=1`.
 
 ## Correct implementation order
 

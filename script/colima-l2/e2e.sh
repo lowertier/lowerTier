@@ -2,10 +2,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-docker_context="${COLIMA_DOCKER_CONTEXT:-colima-easytier-l2}"
-image_name="easytier-l2-qemu-test:local"
-network_name="easytier-l2-qemu-net"
-nodes=(easytier-qemu-a easytier-qemu-b easytier-qemu-c)
+docker_context="${COLIMA_DOCKER_CONTEXT:-colima-lowertier-l2}"
+image_name="lowertier-l2-qemu-test:local"
+network_name="lowertier-l2-qemu-net"
+nodes=(lowertier-qemu-a lowertier-qemu-b lowertier-qemu-c)
 
 docker_cmd=(docker --context "${docker_context}")
 
@@ -26,7 +26,7 @@ wait_for_interface() {
         sleep 1
     done
     echo "${node} did not create et0" >&2
-    "${docker_cmd[@]}" exec "${node}" cat /tmp/easytier.log || true
+    "${docker_cmd[@]}" exec "${node}" cat /tmp/lowertier.log || true
     return 1
 }
 
@@ -224,7 +224,7 @@ start_node() {
         "${image_name}" sleep infinity >/dev/null
 
     local args=(
-        easytier-core
+        lowertier-core
         --network-name colima-l2
         --network-secret colima-l2-secret
         --secure-mode
@@ -240,7 +240,7 @@ start_node() {
         args+=(--peers "${peer_url}")
     fi
     "${docker_cmd[@]}" exec -d "${node}" \
-        sh -c 'exec "$@" >/tmp/easytier.log 2>&1' \
+        sh -c 'exec "$@" >/tmp/lowertier.log 2>&1' \
         sh "${args[@]}"
 }
 
@@ -303,7 +303,7 @@ if [[ "${SKIP_IMAGE_BUILD:-0}" != "1" ]]; then
     "${docker_cmd[@]}" build -f "${repo_root}/script/colima-l2/Dockerfile" -t "${image_name}" "${repo_root}"
 fi
 
-case "${EASYTIER_L2_TEST_SCOPE:-all}" in
+case "${LOWTIER_L2_TEST_SCOPE:-all}" in
     tap)
         run_suite tap 10.77.0
         ;;
@@ -314,7 +314,7 @@ case "${EASYTIER_L2_TEST_SCOPE:-all}" in
         run_mixed_suite
         ;;
     *)
-        echo "Unsupported test scope: ${EASYTIER_L2_TEST_SCOPE}" >&2
+        echo "Unsupported test scope: ${LOWTIER_L2_TEST_SCOPE}" >&2
         exit 2
         ;;
 esac

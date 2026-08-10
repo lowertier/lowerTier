@@ -19,14 +19,14 @@ for path in "${removed_paths[@]}"; do
 done
 
 retained_paths=(
-  "easytier-gui/package.json"
-  "easytier-gui/src-tauri/Cargo.toml"
+  "lowertier-gui/package.json"
+  "lowertier-gui/src-tauri/Cargo.toml"
   "tauri-plugin-vpnservice/Cargo.toml"
   ".github/workflows/gui.yml"
   ".github/workflows/mobile.yml"
-  "easytier-web/Cargo.toml"
-  "easytier-web/frontend/package.json"
-  "easytier-web/frontend-lib/package.json"
+  "lowertier-web/Cargo.toml"
+  "lowertier-web/frontend/package.json"
+  "lowertier-web/frontend-lib/package.json"
   ".github/actions/prepare-pnpm/action.yml"
   ".github/workflows/core.yml"
 )
@@ -39,7 +39,7 @@ active_files=(
   "$repo_root/Cargo.toml"
   "$repo_root/pnpm-workspace.yaml"
   "$repo_root/.gitignore"
-  "$repo_root/EasyTier.code-workspace"
+  "$repo_root/LowTier.code-workspace"
   "$repo_root/README.md"
   "$repo_root/README_CN.md"
   "$repo_root/CONTRIBUTING.md"
@@ -57,12 +57,12 @@ if grep -En 'flake\.nix|android\.nix|\.flake-profile|\.direnv|\[nix\]' "${active
   exit 1
 fi
 
-grep -Fq '"easytier-gui/src-tauri"' "$repo_root/Cargo.toml"
-grep -Fq '"easytier-web"' "$repo_root/Cargo.toml"
-grep -Fq "'easytier-gui'" "$repo_root/pnpm-workspace.yaml"
+grep -Fq '"lowertier-gui/src-tauri"' "$repo_root/Cargo.toml"
+grep -Fq '"lowertier-web"' "$repo_root/Cargo.toml"
+grep -Fq "'lowertier-gui'" "$repo_root/pnpm-workspace.yaml"
 grep -Fq "'tauri-plugin-vpnservice'" "$repo_root/pnpm-workspace.yaml"
-grep -Fq "'easytier-web/frontend'" "$repo_root/pnpm-workspace.yaml"
-grep -Fq "'easytier-web/frontend-lib'" "$repo_root/pnpm-workspace.yaml"
-grep -Fq 'easytier-web/**' "$repo_root/.github/workflows/core.yml"
+grep -Fq "'lowertier-web/frontend'" "$repo_root/pnpm-workspace.yaml"
+grep -Fq "'lowertier-web/frontend-lib'" "$repo_root/pnpm-workspace.yaml"
+grep -Fq 'lowertier-web/**' "$repo_root/.github/workflows/core.yml"
 
 echo "minimal repository surface tests passed"

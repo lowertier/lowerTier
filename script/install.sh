@@ -9,13 +9,13 @@ SHAN='\e[1;33;5m'
 RES='\e[0m'
 
 HELP() {
-  echo -e "\r\n${GREEN_COLOR}EasyTier Installation Script Help${RES}\r\n"
+  echo -e "\r\n${GREEN_COLOR}LowTier Installation Script Help${RES}\r\n"
   echo "Usage: ./install.sh [command] [options]"
   echo
   echo "Commands:"
-  echo "  install    Install EasyTier"
-  echo "  uninstall  Uninstall EasyTier"
-  echo "  update     Update EasyTier to the latest version"
+  echo "  install    Install LowTier"
+  echo "  uninstall  Uninstall LowTier"
+  echo "  update     Update LowTier to the latest version"
   echo "  help       Show this help message"
   echo
   echo "Options:"
@@ -25,7 +25,7 @@ HELP() {
   echo "  --gh-proxy URL       Set custom GitHub proxy URL"
   echo
   echo "Examples:"
-  echo "  ./install.sh install /opt/easytier"
+  echo "  ./install.sh install /opt/lowertier"
   echo "  ./install.sh install --skip-folder-verify"
   echo "  ./install.sh install --no-gh-proxy"
   echo "  ./install.sh install --gh-proxy https://your-proxy.com/"
@@ -76,15 +76,15 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [ -z "$INSTALL_PATH" ]; then
-    INSTALL_PATH='/opt/easytier'
+    INSTALL_PATH='/opt/lowertier'
 fi
 
 if [[ "$INSTALL_PATH" == */ ]]; then
     INSTALL_PATH=${INSTALL_PATH%?}
 fi
 
-if ! $SKIP_FOLDER_FIX && ! [[ "$INSTALL_PATH" == */easytier ]]; then
-    INSTALL_PATH="$INSTALL_PATH/easytier"
+if ! $SKIP_FOLDER_FIX && ! [[ "$INSTALL_PATH" == */lowertier ]]; then
+    INSTALL_PATH="$INSTALL_PATH/lowertier"
 fi
 
 echo INSTALL PATH : $INSTALL_PATH
@@ -106,11 +106,11 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 echo -e "\r\n${RED_COLOR}----------------------NOTICE----------------------${RES}\r\n"
-echo " This is a temporary script to install EasyTier "
-echo " EasyTier requires a dedicated empty folder to install"
-echo " EasyTier is a developing product and may have some issues "
-echo " Using EasyTier requires some basic skills "
-echo " You need to face the risks brought by using EasyTier at your own risk "
+echo " This is a temporary script to install LowTier "
+echo " LowTier requires a dedicated empty folder to install"
+echo " LowTier is a developing product and may have some issues "
+echo " Using LowTier requires some basic skills "
+echo " You need to face the risks brought by using LowTier at your own risk "
 echo -e "\r\n${RED_COLOR}-------------------------------------------------${RES}\r\n"
 
 # Get platform
@@ -174,8 +174,8 @@ fi
 
 CHECK() {
   if ! $SKIP_FOLDER_VERIFY; then
-    if [ -f "$INSTALL_PATH/easytier-core" ]; then
-      echo "There is EasyTier in $INSTALL_PATH. Please choose other path or use \"update\""
+    if [ -f "$INSTALL_PATH/lowertier-core" ]; then
+      echo "There is LowTier in $INSTALL_PATH. Please choose other path or use \"update\""
         echo -e "Or use Try ${GREEN_COLOR}--skip-folder-verify${RES} to skip"
       exit 0
     fi
@@ -187,7 +187,7 @@ CHECK() {
     # Check weather path is empty
     if ! $SKIP_FOLDER_VERIFY; then
       if [ -n "$(ls -A $INSTALL_PATH)" ]; then
-        echo "EasyTier requires to be installed in an empty directory. Please choose a empty path"
+        echo "LowTier requires to be installed in an empty directory. Please choose a empty path"
         echo -e "Or use Try ${GREEN_COLOR}--skip-folder-verify${RES} to skip"
         echo -e "Current path: $INSTALL_PATH ( use ${GREEN_COLOR}--skip-folder-fix${RES} to disable folder fix )"
         exit 1
@@ -198,7 +198,7 @@ CHECK() {
 
 INSTALL() {
   # Get version number
-  RESPONSE=$(curl -s "https://api.github.com/repos/EasyTier/EasyTier/releases/latest")
+  RESPONSE=$(curl -s "https://api.github.com/repos/lowertier/lowerTier/releases/latest")
   LATEST_VERSION=$(echo "$RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
   LATEST_VERSION=$(echo -e "$LATEST_VERSION" | tr -d '[:space:]')
 
@@ -208,21 +208,21 @@ INSTALL() {
   fi
 
   # Download
-  echo -e "\r\n${GREEN_COLOR}Downloading EasyTier $LATEST_VERSION ...${RES}"
-  rm -rf /tmp/easytier_tmp_install.zip
-  BASE_URL="https://github.com/EasyTier/EasyTier/releases/latest/download/easytier-linux-${ARCH}-${LATEST_VERSION}.zip"
+  echo -e "\r\n${GREEN_COLOR}Downloading LowTier $LATEST_VERSION ...${RES}"
+  rm -rf /tmp/lowertier_tmp_install.zip
+  BASE_URL="https://github.com/lowertier/lowerTier/releases/latest/download/lowertier-linux-${ARCH}-${LATEST_VERSION}.zip"
   DOWNLOAD_URL=$($NO_GH_PROXY && echo "$BASE_URL" || echo "${GH_PROXY}${BASE_URL}")
   echo -e "Download URL: ${GREEN_COLOR}${DOWNLOAD_URL}${RES}"
-  curl -L ${DOWNLOAD_URL} -o /tmp/easytier_tmp_install.zip $CURL_BAR
+  curl -L ${DOWNLOAD_URL} -o /tmp/lowertier_tmp_install.zip $CURL_BAR
 
   # Unzip resource
   echo -e "\r\n${GREEN_COLOR}Unzip resource ...${RES}"
-  unzip -o /tmp/easytier_tmp_install.zip -d $INSTALL_PATH/
+  unzip -o /tmp/lowertier_tmp_install.zip -d $INSTALL_PATH/
   mkdir $INSTALL_PATH/config
-  mv $INSTALL_PATH/easytier-linux-${ARCH}/* $INSTALL_PATH/
-  rm -rf $INSTALL_PATH/easytier-linux-${ARCH}/
-  chmod +x $INSTALL_PATH/easytier-core $INSTALL_PATH/easytier-cli
-  if [ -f $INSTALL_PATH/easytier-core ] || [ -f $INSTALL_PATH/easytier-cli ]; then
+  mv $INSTALL_PATH/lowertier-linux-${ARCH}/* $INSTALL_PATH/
+  rm -rf $INSTALL_PATH/lowertier-linux-${ARCH}/
+  chmod +x $INSTALL_PATH/lowertier-core $INSTALL_PATH/lowertier-cli
+  if [ -f $INSTALL_PATH/lowertier-core ] || [ -f $INSTALL_PATH/lowertier-cli ]; then
     echo -e "${GREEN_COLOR} Download successfully! ${RES}"
   else
     echo -e "${RED_COLOR} Download failed! ${RES}"
@@ -231,8 +231,8 @@ INSTALL() {
 }
 
 INIT() {
-  if [ ! -f "$INSTALL_PATH/easytier-core" ]; then
-    echo -e "\r\n${RED_COLOR}Opus${RES}, unable to find EasyTier\r\n"
+  if [ ! -f "$INSTALL_PATH/lowertier-core" ]; then
+    echo -e "\r\n${RED_COLOR}Opus${RES}, unable to find LowTier\r\n"
     exit 1
   fi
 
@@ -248,10 +248,8 @@ listeners = [
     "wss://0.0.0.0:11012/",
 ]
 exit_nodes = []
+peer = []
 rpc_portal = "0.0.0.0:0"
-
-[[peer]]
-uri = "tcp://public.easytier.top:11010"
 
 [network_identity]
 network_name = "default"
@@ -278,12 +276,12 @@ EOF
 
   # Create init script
   if [ "$INIT_SYSTEM" = "openrc" ]; then
-    cat >/etc/init.d/easytier <<EOF
+    cat >/etc/init.d/lowertier <<EOF
 #!/sbin/openrc-run
 
-name="EasyTier"
-description="EasyTier Service"
-command="$INSTALL_PATH/easytier-core"
+name="LowTier"
+description="LowTier Service"
+command="$INSTALL_PATH/lowertier-core"
 command_args="-c $INSTALL_PATH/config/default.conf"
 command_user="nobody:nobody"
 command_background=true
@@ -296,14 +294,14 @@ depend() {
 
 
 EOF
-    chmod +x /etc/init.d/easytier
+    chmod +x /etc/init.d/lowertier
   fi
 
   # Create systemd
   if [ "$INIT_SYSTEM" = "systemd" ]; then
-    cat >/etc/systemd/system/easytier@.service <<EOF
+    cat >/etc/systemd/system/lowertier@.service <<EOF
 [Unit]
-Description=EasyTier Service
+Description=LowTier Service
 Wants=network.target
 After=network.target network.service
 StartLimitIntervalSec=0
@@ -311,7 +309,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_PATH
-ExecStart=$INSTALL_PATH/easytier-core -c $INSTALL_PATH/config/%i.conf
+ExecStart=$INSTALL_PATH/lowertier-core -c $INSTALL_PATH/config/%i.conf
 Restart=always
 RestartSec=1s
 
@@ -322,85 +320,85 @@ EOF
 
 #   # Create run script
 #   cat >$INSTALL_PATH/run.sh <<EOF
-# $INSTALL_PATH/easytier-core
+# $INSTALL_PATH/lowertier-core
 # EOF
 
   # Startup
   if [ "$INIT_SYSTEM" = "systemd" ]; then
     systemctl daemon-reload
-    systemctl enable easytier@default >/dev/null 2>&1
-    systemctl start easytier@default
+    systemctl enable lowertier@default >/dev/null 2>&1
+    systemctl start lowertier@default
   else
-    rc-update add easytier default
-    rc-service easytier start
+    rc-update add lowertier default
+    rc-service lowertier start
   fi
 
   # For issues from the previous version
-  rm -rf /etc/systemd/system/easytier.service
-  rm -rf /usr/bin/easytier-core
-  rm -rf /usr/bin/easytier-cli
+  rm -rf /etc/systemd/system/lowertier.service
+  rm -rf /usr/bin/lowertier-core
+  rm -rf /usr/bin/lowertier-cli
 
   # Add link
-  ln -s $INSTALL_PATH/easytier-core /usr/sbin/easytier-core
-  ln -s $INSTALL_PATH/easytier-cli /usr/sbin/easytier-cli
+  ln -s $INSTALL_PATH/lowertier-core /usr/sbin/lowertier-core
+  ln -s $INSTALL_PATH/lowertier-cli /usr/sbin/lowertier-cli
 }
 
 SUCCESS() {
   clear
-  echo " Install EasyTier successfully!"
+  echo " Install LowTier successfully!"
   echo -e "\r\nDefault Port: ${GREEN_COLOR}11010(UDP+TCP)${RES}, Notice allowing in firewall!\r\n"
   echo -e "Default Network Name: ${GREEN_COLOR}default${RES}, Please change it to your own network name!\r\n"
 
-  echo -e "Now EasyTier supports multiple config files. You can create config files in the ${GREEN_COLOR}${INSTALL_PATH}/config/${RES} folder"
+  echo -e "Now LowTier supports multiple config files. You can create config files in the ${GREEN_COLOR}${INSTALL_PATH}/config/${RES} folder"
   echo -e "For more information, please check the documents in official site"
   echo -e "The management example of a single configuration file is as follows"
 
   echo
   if [ "$INIT_SYSTEM" = "systemd" ]; then
-    echo -e "Status: ${GREEN_COLOR}systemctl status easytier@default${RES}"
-    echo -e "Start: ${GREEN_COLOR}systemctl start easytier@default${RES}"
-    echo -e "Restart: ${GREEN_COLOR}systemctl restart easytier@default${RES}"
-    echo -e "Stop: ${GREEN_COLOR}systemctl stop easytier@default${RES}"
+    echo -e "Status: ${GREEN_COLOR}systemctl status lowertier@default${RES}"
+    echo -e "Start: ${GREEN_COLOR}systemctl start lowertier@default${RES}"
+    echo -e "Restart: ${GREEN_COLOR}systemctl restart lowertier@default${RES}"
+    echo -e "Stop: ${GREEN_COLOR}systemctl stop lowertier@default${RES}"
   else
-    echo -e "Status: ${GREEN_COLOR}rc-service easytier status${RES}"
-    echo -e "Start: ${GREEN_COLOR}rc-service easytier start${RES}"
-    echo -e "Restart: ${GREEN_COLOR}rc-service easytier restart${RES}"
-    echo -e "Stop: ${GREEN_COLOR}rc-service easytier stop${RES}"
+    echo -e "Status: ${GREEN_COLOR}rc-service lowertier status${RES}"
+    echo -e "Start: ${GREEN_COLOR}rc-service lowertier start${RES}"
+    echo -e "Restart: ${GREEN_COLOR}rc-service lowertier restart${RES}"
+    echo -e "Stop: ${GREEN_COLOR}rc-service lowertier stop${RES}"
   fi
   echo
 }
 
 UNINSTALL() {
-  echo -e "\r\n${GREEN_COLOR}Uninstall EasyTier ...${RES}\r\n"
+  echo -e "\r\n${GREEN_COLOR}Uninstall LowTier ...${RES}\r\n"
   echo -e "${GREEN_COLOR}Stop process ...${RES}"
   if [ "$INIT_SYSTEM" = "systemd" ]; then
-    systemctl disable "easytier@*" >/dev/null 2>&1
-    systemctl stop "easytier@*" >/dev/null 2>&1
+    systemctl disable "lowertier@*" >/dev/null 2>&1
+    systemctl stop "lowertier@*" >/dev/null 2>&1
   else
-    rc-update del easytier
-    rc-service easytier stop
+    rc-update del lowertier
+    rc-service lowertier stop
   fi
   echo -e "${GREEN_COLOR}Delete files ...${RES}"
   if [ "$INIT_SYSTEM" = "systemd" ]; then
-    rm -rf $INSTALL_PATH /etc/systemd/system/easytier.service /usr/bin/easytier-core /usr/bin/easytier-cli /etc/systemd/system/easytier@.service /usr/sbin/easytier-core /usr/sbin/easytier-cli
+    rm -rf $INSTALL_PATH /etc/systemd/system/lowertier.service /usr/bin/lowertier-core /usr/bin/lowertier-cli /etc/systemd/system/lowertier@.service /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
     systemctl daemon-reload
   else
-    rm -rf $INSTALL_PATH /etc/init.d/easytier /usr/bin/easytier-core /usr/bin/easytier-cli /usr/sbin/easytier-core /usr/sbin/easytier-cli
+    rm -rf $INSTALL_PATH /etc/init.d/lowertier /usr/bin/lowertier-core /usr/bin/lowertier-cli /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
   fi
-  echo -e "\r\n${GREEN_COLOR}EasyTier was removed successfully! ${RES}\r\n"
+  echo -e "\r\n${GREEN_COLOR}LowTier was removed successfully! ${RES}\r\n"
 }
 
 # Minimizes downtime by preparing new files before stopping the service.
 # Correctly handles restarting multiple systemd service instances.
 UPDATE() {
-  if [ ! -f "$INSTALL_PATH/easytier-core" ]; then
-    echo -e "\r\n${RED_COLOR}Error${RES}: EasyTier not found in $INSTALL_PATH. Cannot perform update.\r\n"
+  if [ ! -f "$INSTALL_PATH/lowertier-core" ]; then
+    echo -e "\r\n${RED_COLOR}Error${RES}: LowTier not found in $INSTALL_PATH. Cannot perform update.\r\n"
     exit 1
   fi
 
   # 1. Get the latest version info (while service is still running)
   echo -e "${GREEN_COLOR}Checking for the latest version...${RES}"
-  RESPONSE=$(curl -s "https://api.github.com/repos/EasyTier/EasyTier/releases/latest")
+  RESPONSE=$(curl -s "https://api.github.com/repos/lowertier/lowerTier/releases/latest")
   LATEST_VERSION=$(echo "$RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
   LATEST_VERSION=$(echo -e "$LATEST_VERSION" | tr -d '[:space:]')
 
@@ -412,23 +410,23 @@ UPDATE() {
   echo -e "Latest version found: ${GREEN_COLOR}$LATEST_VERSION${RES}"
 
   # 2. Download and extract the new version to a temporary directory (while service is still running)
-  TEMP_UPDATE_DIR=$(mktemp -d /tmp/easytier_update_XXXXXX)
+  TEMP_UPDATE_DIR=$(mktemp -d /tmp/lowertier_update_XXXXXX)
   echo -e "${GREEN_COLOR}Downloading new version to temporary directory: $TEMP_UPDATE_DIR${RES}"
   
-  BASE_URL="https://github.com/EasyTier/EasyTier/releases/latest/download/easytier-linux-${ARCH}-${LATEST_VERSION}.zip"
+  BASE_URL="https://github.com/lowertier/lowerTier/releases/latest/download/lowertier-linux-${ARCH}-${LATEST_VERSION}.zip"
   DOWNLOAD_URL=$($NO_GH_PROXY && echo "$BASE_URL" || echo "${GH_PROXY}${BASE_URL}")
   
   echo -e "Download URL: ${GREEN_COLOR}${DOWNLOAD_URL}${RES}"
-  curl -L ${DOWNLOAD_URL} -o "$TEMP_UPDATE_DIR/easytier.zip" $CURL_BAR
+  curl -L ${DOWNLOAD_URL} -o "$TEMP_UPDATE_DIR/lowertier.zip" $CURL_BAR
   if [ $? -ne 0 ]; then
       echo -e "${RED_COLOR}Download failed!${RES}"
       rm -rf "$TEMP_UPDATE_DIR"
       exit 1
   fi
   
-  unzip -o "$TEMP_UPDATE_DIR/easytier.zip" -d "$TEMP_UPDATE_DIR/"
+  unzip -o "$TEMP_UPDATE_DIR/lowertier.zip" -d "$TEMP_UPDATE_DIR/"
   
-  NEW_CORE_FILE="$TEMP_UPDATE_DIR/easytier-linux-${ARCH}/easytier-core"
+  NEW_CORE_FILE="$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}/lowertier-core"
   if [ ! -f "$NEW_CORE_FILE" ]; then
       echo -e "${RED_COLOR}Extraction failed or the downloaded archive is invalid.${RES}"
       rm -rf "$TEMP_UPDATE_DIR"
@@ -443,34 +441,34 @@ UPDATE() {
   ACTIVE_SERVICES=()
   if [ "$INIT_SYSTEM" = "systemd" ]; then
     # Get the list of active instances and store them in an array
-    mapfile -t ACTIVE_SERVICES < <(systemctl list-units --type=service --state=active | grep "easytier@" | awk '{print $1}')
+    mapfile -t ACTIVE_SERVICES < <(systemctl list-units --type=service --state=active | grep "lowertier@" | awk '{print $1}')
     if [ ${#ACTIVE_SERVICES[@]} -gt 0 ]; then
         echo -e "\r\n${YELLOW_COLOR}Found running services: ${ACTIVE_SERVICES[*]}${RES}"
-        echo -e "${YELLOW_COLOR}Stopping EasyTier services...${RES}"
+        echo -e "${YELLOW_COLOR}Stopping LowTier services...${RES}"
         systemctl stop "${ACTIVE_SERVICES[@]}"
     else
-        echo -e "\r\n${YELLOW_COLOR}No running EasyTier services found. Nothing to stop.${RES}"
+        echo -e "\r\n${YELLOW_COLOR}No running LowTier services found. Nothing to stop.${RES}"
     fi
   else # openrc
     # openrc script seems to handle a single service, so keep it simple
-    echo -e "\r\n${YELLOW_COLOR}Stopping EasyTier service...${RES}"
-    rc-service easytier stop
+    echo -e "\r\n${YELLOW_COLOR}Stopping LowTier service...${RES}"
+    rc-service lowertier stop
   fi
 
   # Backup critical files, primarily the configuration
   echo "Backing up configuration..."
-  BACKUP_CONFIG_DIR=$(mktemp -d /tmp/easytier_config_backup_XXXXXX)
+  BACKUP_CONFIG_DIR=$(mktemp -d /tmp/lowertier_config_backup_XXXXXX)
   if [ -d "$INSTALL_PATH/config" ]; then
       cp -a "$INSTALL_PATH/config" "$BACKUP_CONFIG_DIR/"
   fi
   
   echo "Replacing files..."
   # Remove old binaries and docs, but not the config directory
-  rm -f "$INSTALL_PATH/easytier-core" "$INSTALL_PATH/easytier-cli" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
+  rm -f "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
   
   # Move new files into the installation directory
-  mv "$TEMP_UPDATE_DIR/easytier-linux-${ARCH}"/* "$INSTALL_PATH/"
-  chmod +x "$INSTALL_PATH/easytier-core" "$INSTALL_PATH/easytier-cli"
+  mv "$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}"/* "$INSTALL_PATH/"
+  chmod +x "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli"
 
   # Restore configuration to prevent user-defined settings from being overwritten
   if [ -d "$BACKUP_CONFIG_DIR/config" ]; then
@@ -480,14 +478,14 @@ UPDATE() {
   # 4. Start the services, restoring operation
   if [ "$INIT_SYSTEM" = "systemd" ]; then
     if [ ${#ACTIVE_SERVICES[@]} -gt 0 ]; then
-        echo -e "${GREEN_COLOR}Starting new version of EasyTier services: ${ACTIVE_SERVICES[*]}${RES}"
+        echo -e "${GREEN_COLOR}Starting new version of LowTier services: ${ACTIVE_SERVICES[*]}${RES}"
         systemctl start "${ACTIVE_SERVICES[@]}"
     else
         echo -e "${GREEN_COLOR}No services were running before the update. Update complete.${RES}"
     fi
   else # openrc
-    echo -e "${GREEN_COLOR}Starting new version of EasyTier service...${RES}"
-    rc-service easytier start
+    echo -e "${GREEN_COLOR}Starting new version of LowTier service...${RES}"
+    rc-service lowertier start
   fi
   
   # 5. Clean up temporary files
@@ -495,7 +493,7 @@ UPDATE() {
   rm -rf "$TEMP_UPDATE_DIR"
   rm -rf "$BACKUP_CONFIG_DIR"
   
-  echo -e "\r\n${GREEN_COLOR}EasyTier was successfully updated to version $LATEST_VERSION!${RES}\r\n"
+  echo -e "\r\n${GREEN_COLOR}LowTier was successfully updated to version $LATEST_VERSION!${RES}\r\n"
 }
 
 
@@ -519,7 +517,7 @@ elif [ "$COMMEND" = "install" ]; then
   CHECK
   INSTALL
   INIT
-  if [ -f "$INSTALL_PATH/easytier-core" ]; then
+  if [ -f "$INSTALL_PATH/lowertier-core" ]; then
     SUCCESS
   else
     echo -e "${RED_COLOR} Install fail, try install by hand${RES}"
@@ -530,4 +528,4 @@ else
   echo -e "\n\r${GREEN_COLOR} install, uninstall, update, help ${RES}"
 fi
 
-rm -rf /tmp/easytier_tmp_*
+rm -rf /tmp/lowertier_tmp_*

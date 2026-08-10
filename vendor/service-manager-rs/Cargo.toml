@@ -1,0 +1,41 @@
+[package]
+name = "service-manager"
+description = "Provides adapters to communicate with various operating system service managers"
+categories = ["config"]
+keywords = ["generator"]
+version = "0.8.0"
+authors = ["Chip Senkbeil <chip@senkbeil.org>"]
+edition = "2021"
+homepage = "https://github.com/chipsenkbeil/service-manager-rs"
+repository = "https://github.com/chipsenkbeil/service-manager-rs"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["encoding"]
+encoding = [
+    "dep:encoding_rs",
+    "dep:encoding-utils",
+] # probe OsStr encoding while parsing
+
+[workspace]
+members = ["system-tests"]
+
+[dependencies]
+cfg-if = "1.0"
+clap = { version = "4", features = ["derive"], optional = true }
+dirs = "4.0"
+plist = "1.1"
+serde = { version = "1", features = ["derive"], optional = true }
+which = "4.0"
+xml-rs = "0.8.19"
+encoding_rs = { version = "0.8", optional = true }
+encoding-utils = { version = "0.1", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sys-info = "0.9.1"
+
+[dev-dependencies]
+assert_fs = "1.0.13"
+indoc = "2.0.4"
+predicates = "3.0.4"

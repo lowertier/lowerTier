@@ -10,9 +10,9 @@ inputs:
     required: true
     default: 'true'
   pnpm-build-filter:
-    description: 'The filter argument for pnpm build (e.g. ./easytier-web/*)'
+    description: 'The filter argument for pnpm build (e.g. ./lowertier-web/*)'
     required: false
-    default: './easytier-web/*'
+    default: './lowertier-web/*'
   gui:
     description: 'Whether to prepare the GUI build environment'
     required: true
@@ -23,7 +23,7 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - run: mkdir -p easytier-gui/dist
+    - run: mkdir -p lowertier-gui/dist
       shell: bash
 
     - name: Install dependencies

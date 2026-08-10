@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  msrv:
+    name: "Verify builds on minimum stable rust version of ${{ matrix.rust }}"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rust: 1.58.1, os: ubuntu-latest }
+          - { rust: 1.58.1, os: macos-latest }
+          - { rust: 1.58.1, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust ${{ matrix.rust }}
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v1
+      - name: Build against Rust ${{ matrix.rust }}
+        run: cargo build --release
+  unit_tests:
+    name: "Unit tests for Rust stable"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust ${{ matrix.rust }}
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v1
+      - run: cargo test
+  tests:
+    name: "Test Rust ${{ matrix.rust }} for ${{ matrix.test }} w/ ${{ matrix.manager }} (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    env:
+      WINSW_URL: https://github.com/winsw/winsw/releases/download/v3.0.0-alpha.11/WinSW-x64.exe
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rust: stable, os: ubuntu-latest, manager: systemd, test: systemd_for_user }
+          - { rust: stable, os: ubuntu-latest, manager: systemd, test: systemd_for_system, elevated: sudo env PATH="$PATH" }
+          - { rust: stable, os: macos-latest, manager: launchd, test: launchd_for_user }
+          - { rust: stable, os: macos-latest, manager: launchd, test: should_support_launchd_for_system_services, elevated: sudo, args: "--exact" }
+          - { rust: stable, os: macos-latest, manager: launchd, test: should_support_launchd_for_system_services_running_as_specific_user, elevated: sudo, args: "--exact" }
+          - { rust: stable, os: windows-latest, manager: sc, test: sc_for_system }
+          - { rust: stable, os: windows-latest, manager: winsw, test: winsw_for_system }
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust ${{ matrix.rust }}
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+
+      - name: Download WinSW for Windows
+        if: matrix.os == 'windows-latest' && matrix.manager == 'winsw'
+        run: |
+          $winsw_dir = "$env:GITHUB_WORKSPACE\winsw"
+          New-Item -ItemType directory -Path $winsw_dir -Force
+          Invoke-WebRequest -Uri ${{ env.WINSW_URL }} -OutFile "$winsw_dir\WinSW.exe"
+          echo "$winsw_dir" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v1
+      - name: Run ${{ matrix.test }} for ${{ matrix.manager }}
+        run: |
+          ${{ matrix.elevated }} rustup default stable
+          ${{ matrix.elevated }} cargo test -p system-tests ${{ matrix.test }} -- ${{ matrix.args }} --nocapture
+  # NOTE: This is disabled via `if: false` due to failures related to the test environment.
+  test-freebsd:
+    name: "Test Rust stable for ${{ matrix.test }} w/ ${{ matrix.manager }} (FreeBSD)"
+    runs-on: macos-12
+    if: false
+    env:
+      IGNORE_OSVERSION: yes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { manager: rc.d, test: rc_d_for_system }
+    steps:
+      - uses: actions/checkout@v2
+      - name: Run ${{ matrix.test }} for ${{ matrix.manager }}
+        uses: cross-platform-actions/action@no-vm-shutdown
+        with:
+          operating_system: freebsd
+          version: '13.2'
+          environment_variables: IGNORE_OSVERSION
+          shell: bash
+          sync_files: runner-to-vm
+          run: |
+            sudo pkg install -y curl && \
+              curl https://sh.rustup.rs -sSf | \
+              sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            sudo --preserve-env cargo test -p system-tests ${{ matrix.test }} -- --nocapture
+            # Note: We need to delete target otherwise the vm teardown fails!
+            sudo rm -rf target/
+  test-alpine-openrc:
+    name: "Test Rust stable for ${{ matrix.test }} w/ ${{ matrix.manager }} (Alpine Linux)"
+    runs-on: ubuntu-latest
+    container: dockage/alpine:3.16-openrc
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { manager: OpenRC, test: openrc_for_system }
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set Alpine repositories
+        run: |
+          echo "http://dl-cdn.alpinelinux.org/alpine/v3.16/main" > /etc/apk/repositories
+          echo "http://dl-cdn.alpinelinux.org/alpine/v3.16/community" >> /etc/apk/repositories
+          apk update && apk upgrade
+      - name: Install base dependencies
+        run: apk add --update --no-cache openrc busybox-initscripts build-base libc6-compat curl sudo
+      - name: Configure passwordless sudo
+        run: echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+      - name: Force OpenRC to work inside container
+        run: |
+          sudo mkdir -p /run/openrc
+          sudo touch /run/openrc/softlevel
+          sudo rc-update --update
+          sudo rc-status -a
+      - name: Install stable toolchain
+        run: curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+      - name: Run ${{ matrix.test }} for ${{ matrix.manager }} using sudo
+        run: |
+          . "$HOME/.cargo/env"
+          sudo --preserve-env cargo test -p system-tests ${{ matrix.test }} -- --nocapture

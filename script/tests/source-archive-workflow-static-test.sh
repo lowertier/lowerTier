@@ -9,7 +9,7 @@ test ! -e "$repo_root/script/build-offline-source-archive.sh"
 test ! -e "$repo_root/script/tests/offline-source-archive-static-test.sh"
 test ! -e "$repo_root/script/tests/offline-source-archive-e2e-test.sh"
 
-grep -Fq 'name: EasyTier Source Archive' "$workflow"
+grep -Fq 'name: LowTier Source Archive' "$workflow"
 grep -Eq '^  workflow_dispatch:' "$workflow"
 grep -Eq "^      - 'v\*'" "$workflow"
 grep -Fq 'uses: actions/checkout@v5' "$workflow"

@@ -2,15 +2,15 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-docker_context=${COLIMA_DOCKER_CONTEXT:-colima-easytier-l2}
-image_name=${EASYTIER_L2_IMAGE:-easytier-l2-qemu-test:local}
-secure_mode=${EASYTIER_L2_SECURE_MODE:-1}
-ping_count=${EASYTIER_L2_PING_COUNT:-1000}
-duration=${EASYTIER_L2_IPERF_DURATION:-10}
-result_dir=${EASYTIER_L2_RESULT_DIR:-$(mktemp -d -t easytier-l2-benchmark.XXXXXX)}
-network_name=easytier-l2-benchmark-net
-node_a=easytier-l2-benchmark-a
-node_b=easytier-l2-benchmark-b
+docker_context=${COLIMA_DOCKER_CONTEXT:-colima-lowertier-l2}
+image_name=${LOWTIER_L2_IMAGE:-lowertier-l2-qemu-test:local}
+secure_mode=${LOWTIER_L2_SECURE_MODE:-1}
+ping_count=${LOWTIER_L2_PING_COUNT:-1000}
+duration=${LOWTIER_L2_IPERF_DURATION:-10}
+result_dir=${LOWTIER_L2_RESULT_DIR:-$(mktemp -d -t lowertier-l2-benchmark.XXXXXX)}
+network_name=lowertier-l2-benchmark-net
+node_a=lowertier-l2-benchmark-a
+node_b=lowertier-l2-benchmark-b
 docker_cmd=(docker --context "$docker_context")
 
 cleanup() {
@@ -27,7 +27,7 @@ wait_for_interface() {
         fi
         sleep 1
     done
-    "${docker_cmd[@]}" exec "$node" cat /tmp/easytier.log >&2 || true
+    "${docker_cmd[@]}" exec "$node" cat /tmp/lowertier.log >&2 || true
     return 1
 }
 
@@ -52,7 +52,7 @@ output=$1
 done_file=$2
 sample_count=$3
 node_name=$4
-pid=$(pidof easytier-core | cut -d " " -f 1)
+pid=$(pidof lowertier-core | cut -d " " -f 1)
 : >"$output"
 rm -f "$done_file"
 for sample in $(seq 1 "$sample_count"); do
@@ -64,7 +64,7 @@ for sample in $(seq 1 "$sample_count"); do
     sleep 1
 done
 touch "$done_file"
-' sh /tmp/easytier-resource-samples.tsv /tmp/easytier-resource-done \
+' sh /tmp/lowertier-resource-samples.tsv /tmp/lowertier-resource-done \
         "$sample_count" "$node"
 }
 
@@ -77,13 +77,13 @@ collect_resource_samples() {
     for node in "$node_a" "$node_b"; do
         for attempt in $(seq 1 $((duration + 20))); do
             if "${docker_cmd[@]}" exec "$node" \
-                test -f /tmp/easytier-resource-done; then
+                test -f /tmp/lowertier-resource-done; then
                 break
             fi
             sleep 1
         done
         "${docker_cmd[@]}" exec "$node" \
-            cat /tmp/easytier-resource-samples.tsv >>"$output"
+            cat /tmp/lowertier-resource-samples.tsv >>"$output"
     done
 }
 
@@ -92,7 +92,7 @@ start_core() {
     local overlay_ip=$2
     local peer_url=${3:-}
     local args=(
-        easytier-core
+        lowertier-core
         --network-name l2-benchmark
         --network-secret l2-benchmark-secret
         --port-mode tap
@@ -108,7 +108,7 @@ start_core() {
         args+=(--peers "$peer_url")
     fi
     "${docker_cmd[@]}" exec -d "$node" \
-        sh -c 'exec "$@" >/tmp/easytier.log 2>&1' sh "${args[@]}"
+        sh -c 'exec "$@" >/tmp/lowertier.log 2>&1' sh "${args[@]}"
 }
 
 trap cleanup EXIT INT TERM
@@ -151,7 +151,7 @@ python3 "$repo_root/script/traffic_signature_scan.py" scan \
     --input "$result_dir/steady-state-traffic.hex" \
     --output "$result_dir/steady-state-signature.json" \
     --strip-bytes 8 \
-    --forbid easytier \
+    --forbid lowertier \
     --forbid l2-benchmark \
     --forbid l2-benchmark-secret \
     --forbid ETL1 \

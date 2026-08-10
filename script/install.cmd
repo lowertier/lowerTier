@@ -71,7 +71,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [Alias("n")]
-    [string]$ServiceName = "EasyTierService",
+    [string]$ServiceName = "LowTierService",
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ServiceArgs
@@ -382,7 +382,7 @@ function Get-LocalVersion {
     }
     try {
         $versionOutput = & $CorePath --version 2>$null
-        if ($versionOutput -match "easytier-core\s+([0-9]+\.[0-9]+\.[0-9]+)") {
+        if ($versionOutput -match "lowertier-core\s+([0-9]+\.[0-9]+\.[0-9]+)") {
             return [System.Version]$matches[1]
         }
         else {
@@ -402,10 +402,10 @@ function Get-RemoteVersion {
         throw "无法从 GitHub 获取最新版本信息`n$response"
     }
 }
-function Get-EasyTier {
+function Get-LowTier {
     $Arch = Get-SystemArchitecture
 
-    $tempDirectory = Join-Path $ScriptRoot "easytier_update"
+    $tempDirectory = Join-Path $ScriptRoot "lowertier_update"
 
     try {
         if (-not (Test-Path $tempDirectory)) {
@@ -418,20 +418,20 @@ function Get-EasyTier {
 
     try {
         Write-Host "检查最新版本..." -ForegroundColor Green
-        $response = Invoke-RestMethodCompatible -Uri "https://api.github.com/repos/EasyTier/EasyTier/releases/latest"
+        $response = Invoke-RestMethodCompatible -Uri "https://api.github.com/repos/lowertier/lowerTier/releases/latest"
         $latestVersion = Get-RemoteVersion($response)
     }
     catch {
         throw "获取最新版本失败。请检查网络连接或API请求达到上限`n$_"
     }
 
-    $localVersion = Get-LocalVersion($EasyTierPath)
+    $localVersion = Get-LocalVersion($LowTierPath)
     if ($localVersion -ge $latestVersion) {
-        Write-Host "EasyTier 已是最新版本 $localVersion" -ForegroundColor Green
+        Write-Host "LowTier 已是最新版本 $localVersion" -ForegroundColor Green
         return
     }
 
-    $asset = $response.assets | Where-Object { $_.name -like "easytier-$Arch*.zip" } | Select-Object -First 1
+    $asset = $response.assets | Where-Object { $_.name -like "lowertier-$Arch*.zip" } | Select-Object -First 1
     if ($asset) {
         Write-Output "发现新版本 $latestVersion"
         $downloadUrl = $asset.browser_download_url
@@ -468,7 +468,7 @@ function Get-EasyTier {
     if ($activeServices) {
         try {
             Write-Host "发现正在运行的服务: $ServiceName" -ForegroundColor Yellow
-            Write-Host "停止 EasyTier 服务..." -ForegroundColor Yellow
+            Write-Host "停止 LowTier 服务..." -ForegroundColor Yellow
             $activeServices | Stop-Service -Force
         }
         catch {
@@ -484,7 +484,7 @@ function Get-EasyTier {
         throw "更新文件失败!`n$_"
     }
 
-    $localVersion = Get-LocalVersion($EasyTierPath)
+    $localVersion = Get-LocalVersion($LowTierPath)
     if ($localVersion -ge $latestVersion) {
         if ($activeServices) {
             try {
@@ -495,7 +495,7 @@ function Get-EasyTier {
                 throw "服务启动失败!`n$_"
             }
         }
-        Write-Host "EasyTier 已成功更新到版本 $latestVersion" -ForegroundColor Green
+        Write-Host "LowTier 已成功更新到版本 $latestVersion" -ForegroundColor Green
     }
     else {
         throw "更新文件失败! 请检查脚本是否过时或者文件/文件夹是否被其他程序占用"
@@ -504,7 +504,7 @@ function Get-EasyTier {
 }
 
 $HelpText = @"
-EasyTier 服务管理脚本
+LowTier 服务管理脚本
 
 【使用方式】
 直接双击运行或在命令行中执行:
@@ -517,10 +517,10 @@ EasyTier 服务管理脚本
         显示此帮助信息并退出。
 
     -U / -Update
-        更新 EasyTier 到最新版本
+        更新 LowTier 到最新版本
 
     -X / -Uninstall
-        卸载 EasyTier 服务
+        卸载 LowTier 服务
 
     -UGHP / -UseGitHubProxy
         使用 GitHub 镜像代理下载 (默认: $false)
@@ -541,7 +541,7 @@ EasyTier 服务管理脚本
         * CLI    使用命令行直接传参
 
     -N / -ServiceName <名称>
-        指定安装的服务名称 (默认: EasyTierService)
+        指定安装的服务名称 (默认: LowTierService)
 
     <其他参数...>
         当选择 CLI 模式时，用于传递自定义参数
@@ -571,7 +571,7 @@ EasyTier 服务管理脚本
         install.cmd -ConfigType File
 
     2. 使用远程服务器并设定服务名称: 
-        install.cmd -ConfigType Remote -ServiceName EasyTierService
+        install.cmd -ConfigType Remote -ServiceName LowTierService
 
     3. 使用命令行传参: 
         install.cmd -ConfigType CLI --ipv4 x.x.x.x --network-name xxx --network-secret yyy --peers tcp://peer_host:11010
@@ -592,7 +592,7 @@ $WatchDogTemplate = @"
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Date>$((Get-Date).ToString("s"))</Date>
-    <URI>\EasyTierWatchDog</URI>
+    <URI>\LowTierWatchDog</URI>
   </RegistrationInfo>
   <Triggers>
     <EventTrigger>
@@ -627,12 +627,12 @@ $WatchDogTemplate = @"
 </Task>
 "@
 
-$host.ui.rawui.WindowTitle = "安装/卸载/更新 EasyTier 服务"
+$host.ui.rawui.WindowTitle = "安装/卸载/更新 LowTier 服务"
 Clear-Host
 $ScriptRoot = (Get-Location).Path
-$RegistryPath = "HKLM:\SOFTWARE\EasyTierServiceManage"
+$RegistryPath = "HKLM:\SOFTWARE\LowTierServiceManage"
 $RegistryName = "Services"
-$EasyTierPath = Join-Path $ScriptRoot "easytier-core.exe"
+$LowTierPath = Join-Path $ScriptRoot "lowertier-core.exe"
 $OPTIONS = @()
 
 $ErrorActionPreference = "Stop"
@@ -671,16 +671,16 @@ try {
             }
         }
         Show-Pause -Text "按任意键退出..."
-        Unregister-ScheduledTask -TaskName "EasyTierWatchDog" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        Unregister-ScheduledTask -TaskName "LowTierWatchDog" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
         exit 0
     }
     if ($Update) {
-        Get-EasyTier
+        Get-LowTier
         Show-Pause -Text "按任意键退出..."
         exit 0
     }
-    if (-not (Test-Path $EasyTierPath)) {
-        Get-EasyTier
+    if (-not (Test-Path $LowTierPath)) {
+        Get-LowTier
     }
     if (-not $ConfigType) {
         $choices = @(
@@ -688,7 +688,7 @@ try {
             [System.Management.Automation.Host.ChoiceDescription]::new("&Remote", "服务器集中管理"),
             [System.Management.Automation.Host.ChoiceDescription]::new("&CLI", "命令行传参")
         )
-        $selected = $Host.UI.PromptForChoice("您准备如何配置EasyTier?", "请选择: ", $choices, 0)
+        $selected = $Host.UI.PromptForChoice("您准备如何配置LowTier?", "请选择: ", $choices, 0)
         $ConfigType = @("File", "Remote", "CLI")[$selected]
     }
     switch ($ConfigType) {
@@ -716,7 +716,7 @@ try {
             throw "未知配置类型: $ConfigType"
         }
     }
-    $BinaryPath = "`"$EasyTierPath`" $($OPTIONS -join ' ')" 
+    $BinaryPath = "`"$LowTierPath`" $($OPTIONS -join ' ')" 
     Write-Host "生成的配置参数如下: " -ForegroundColor Yellow
     Write-Host ($OPTIONS -join " ") -ForegroundColor DarkGray
     if (Show-YesNoPrompt -Message "确认安装配置？" -DefaultIndex 1) {
@@ -724,13 +724,13 @@ try {
             Stop-Service -Name $ServiceName -Force | Out-Null
             Remove-ServiceCompatible -Name $ServiceName
         }
-        New-Service -Name $ServiceName -DisplayName "EasyTier" `
-            -Description "EasyTier 核心服务" `
+        New-Service -Name $ServiceName -DisplayName "LowTier" `
+            -Description "LowTier 核心服务" `
             -StartupType Automatic `
             -BinaryPathName $BinaryPath | Out-Null
         Start-Service -Name $ServiceName | Out-Null
 
-        Register-ScheduledTask -TaskName "EasyTierWatchDog" -User "SYSTEM" -Xml $WatchDogTemplate.Replace("%#ServiceName#%", $ServiceName) -Force | Out-Null
+        Register-ScheduledTask -TaskName "LowTierWatchDog" -User "SYSTEM" -Xml $WatchDogTemplate.Replace("%#ServiceName#%", $ServiceName) -Force | Out-Null
         Save-ServiceName -Name $ServiceName
         Write-Host "安装完成。" -ForegroundColor Green
     }
@@ -742,7 +742,7 @@ try {
 catch {
     Write-Host "发生错误: $_" -ForegroundColor Red
     Show-Pause -Text "按任意键退出..."
-    Unregister-ScheduledTask -TaskName "EasyTierWatchDog" -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName "LowTierWatchDog" -Confirm:$false -ErrorAction SilentlyContinue
     exit 1
 }
 

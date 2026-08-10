@@ -2,9 +2,9 @@
 
 ## Test boundary
 
-These measurements ran on 2026-07-19 in the `colima-easytier-l2` QEMU
+These measurements ran on 2026-07-19 in the `colima-lowertier-l2` QEMU
 backend on an aarch64 VM with four vCPUs. Both container egress interfaces used
-Linux netem with 140 ms mean delay, 40 ms jitter, and 3% loss. The EasyTier
+Linux netem with 140 ms mean delay, 40 ms jitter, and 3% loss. The LowTier
 underlay was QUIC, the port mode was `l2-tun`, the offered UDP payload rate was
 5 Mbit/s, and Brutal was capped at 10 Mbit/s. Each measured direction ran for
 10 seconds after a two-second iperf omit period.
@@ -17,12 +17,12 @@ comparison. Raw bridge TCP remains a substrate diagnostic, not a 10GbE claim.
 
 Artifacts:
 
-- independent loss: `/tmp/easytier-etq4-final-independent-20260719`
-- 75% correlated burst loss: `/tmp/easytier-etq4-final-burst-20260719`
-- final-image lossy smoke: `/tmp/easytier-etq4-final-image-smoke-20260719`
-- alternate-connection run: `/tmp/easytier-etq4-alternate-path-clean-20260719`
+- independent loss: `/tmp/lowertier-etq4-final-independent-20260719`
+- 75% correlated burst loss: `/tmp/lowertier-etq4-final-burst-20260719`
+- final-image lossy smoke: `/tmp/lowertier-etq4-final-image-smoke-20260719`
+- alternate-connection run: `/tmp/lowertier-etq4-alternate-path-clean-20260719`
 
-Both `workload-errors.tsv` files contain only their header. The EasyTier logs
+Both `workload-errors.tsv` files contain only their header. The LowTier logs
 contain no panic, invalid ETQ4 record, peer receive error, or QUIC protocol
 error. A metrics snapshot whose reason is `connection_drop` is the expected
 harness shutdown after `SIGTERM`, not a workload disconnect.

@@ -1,4 +1,4 @@
-name: EasyTier Test
+name: LowTier Test
 
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
           # All of these options are optional, so you can remove them if you are happy with the defaults
           concurrent_skipping: 'never'
           skip_after_successful_duplicate: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", ".github/workflows/test.yml", ".github/actions/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "lowertier/**", ".github/workflows/test.yml", ".github/actions/**"]'
 
   check:
     name: Run linters & check
@@ -68,7 +68,7 @@ jobs:
 
       - name: Check features
         if: ${{ !cancelled() }}
-        run: cargo hack check --package easytier --each-feature --exclude-features macos-ne --verbose
+        run: cargo hack check --package lowertier --each-feature --exclude-features macos-ne --verbose
 
       - name: Check Cargo.lock is up to date
         if: ${{ !cancelled() }}
@@ -98,7 +98,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: Archive test
-        run: cargo nextest archive --archive-file tests.tar.zst --package easytier --features full
+        run: cargo nextest archive --archive-file tests.tar.zst --package lowertier --features full
 
       - uses: actions/upload-artifact@v5
         with:
@@ -115,7 +115,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "easytier"
+          - name: "lowertier"
             opts: "-E 'not test(tests::three_node)' --test-threads 1 --no-fail-fast"
 
           - name: "three_node"

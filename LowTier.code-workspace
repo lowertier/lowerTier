@@ -1,0 +1,54 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "core",
+			"path": "lowertier"
+		},
+		{
+			"name": "gui",
+			"path": "lowertier-gui"
+		},
+		{
+			"name": "web",
+			"path": "lowertier-web"
+		},
+		{
+			"name": "ffi",
+			"path": "lowertier-contrib/lowertier-ffi"
+		},
+		{
+			"name": "magisk",
+			"path": "lowertier-contrib/lowertier-magisk"
+		},
+		{
+			"name": "openharmony",
+			"path": "lowertier-contrib/lowertier-ohrs"
+		},
+		{
+			"name": "uptime",
+			"path": "lowertier-contrib/lowertier-uptime"
+		},
+		{
+			"name": "vpnservice",
+			"path": "tauri-plugin-vpnservice"
+		},
+		{
+			"name": "rpc-build",
+			"path": "lowertier-rpc-build"
+		}
+	],
+	"settings": {
+		"i18n-ally.sourceLanguage": "cn",
+		"i18n-ally.keystyle": "nested",
+		"i18n-ally.sortKeys": true,
+		// Disable the default formatter
+		"prettier.enable": false,
+		"editor.formatOnSave": true,
+		"editor.formatOnSaveMode": "modifications",
+		"editor.formatOnPaste": false,
+		"editor.formatOnType": true,
+	}
+}

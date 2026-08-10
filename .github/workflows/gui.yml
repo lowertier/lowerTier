@@ -1,4 +1,4 @@
-name: EasyTier GUI
+name: LowTier GUI
 
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
           concurrent_skipping: 'same_content_newer'
           skip_after_successful_duplicate: 'true'
           cancel_others: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-gui/**", ".github/workflows/gui.yml", ".github/actions/**", "easytier-web/frontend-lib/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "lowertier/**", "lowertier-gui/**", ".github/workflows/gui.yml", ".github/actions/**", "lowertier-web/frontend-lib/**"]'
   build-gui:
     strategy:
       fail-fast: true
@@ -74,7 +74,7 @@ jobs:
 
     runs-on: ${{ matrix.OS }}
     env:
-      NAME: easytier
+      NAME: lowertier
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
       GUI_TARGET: ${{ matrix.GUI_TARGET }}
@@ -114,14 +114,14 @@ jobs:
               aarch64*) ARCH_DIR=arm64 ;;
           esac
           if [[ -n "$ARCH_DIR" ]]; then
-              find "./easytier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./easytier-gui/src-tauri/ \;
+              find "./lowertier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./lowertier-gui/src-tauri/ \;
           fi
 
       - name: Build GUI
         if: ${{ matrix.GUI_TARGET != '' }}
         uses: tauri-apps/tauri-action@v0
         with:
-          projectPath: ./easytier-gui
+          projectPath: ./lowertier-gui
           args: --verbose --target ${{ matrix.GUI_TARGET }}
 
       - name: Collect artifact
@@ -151,7 +151,7 @@ jobs:
       - name: Archive artifact
         uses: actions/upload-artifact@v5
         with:
-          name: easytier-gui-${{ matrix.ARTIFACT_NAME }}
+          name: lowertier-gui-${{ matrix.ARTIFACT_NAME }}
           path: |
             ./artifacts/*
 

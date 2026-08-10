@@ -1,17 +1,17 @@
 # Userspace networking
 
-EasyTier can run without a kernel TUN or TAP interface.
+LowTier can run without a kernel TUN or TAP interface.
 
 This mode follows the Tailscale userspace networking model.
 Applications use a local SOCKS5 proxy or HTTP proxy.
-EasyTier sends each proxy connection through its existing encrypted overlay route.
+LowTier sends each proxy connection through its existing encrypted overlay route.
 
 ## Start the proxy
 
 The following command starts both proxy protocols on one local TCP port.
 
 ```bash
-easytier-core \
+lowertier-core \
   --tun=userspace-networking \
   --socks5-server=127.0.0.1:1055 \
   --outbound-http-proxy-listen=127.0.0.1:1055 \
@@ -25,7 +25,7 @@ Use an unprivileged local port above 1023.
 Use UDP, TCP, QUIC, or WebSocket underlay connections.
 Some other underlay modes can require extra operating system privileges.
 
-EasyTier detects SOCKS5 and HTTP from the first client byte.
+LowTier detects SOCKS5 and HTTP from the first client byte.
 One shared listener avoids a second socket and a second userspace network stack.
 Different listener addresses create separate sockets but still share one network stack.
 
@@ -64,7 +64,7 @@ It rejects a socket mark because that option can require operating system privil
 
 The SOCKS5 listener supports TCP connections and the existing SOCKS5 UDP association path.
 The HTTP listener supports `CONNECT` tunnels and normal HTTP proxy requests.
-Both proxy protocols use EasyTier peer selection and overlay routing.
+Both proxy protocols use LowTier peer selection and overlay routing.
 The userspace overlay target path currently supports IPv4 destinations.
 One SOCKS5 UDP association can use at most 256 active targets.
 
@@ -75,14 +75,14 @@ Use TAP mode when applications require a complete Ethernet interface.
 
 ## Security
 
-EasyTier applies its configured overlay encryption after the local proxy accepts a connection.
+LowTier applies its configured overlay encryption after the local proxy accepts a connection.
 The local proxy connection itself is plain TCP.
 The proxy listener has no local authentication.
 Bind the listener to `127.0.0.1` or `::1` unless a trusted firewall protects it.
 
 HTTP destinations remain visible to an HTTP proxy by protocol design.
 HTTPS applications normally use `CONNECT`, so application TLS protects the content end to end.
-EasyTier does not log proxy request payloads or complete request targets.
+LowTier does not log proxy request payloads or complete request targets.
 
 ## Compatibility
 
@@ -92,4 +92,4 @@ See the [Tailscale userspace networking guide](https://tailscale.com/docs/concep
 See the [Tailscale daemon reference](https://tailscale.com/docs/reference/tailscaled).
 See the [Tailscale router comparison](https://tailscale.com/kb/1177/kernel-vs-userspace-routers).
 
-See the [measured EasyTier results](performance/userspace-networking-results.md).
+See the [measured LowTier results](performance/userspace-networking-results.md).

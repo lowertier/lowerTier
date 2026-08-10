@@ -889,10 +889,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "boringtun-easytier"
+name = "boringtun-lowertier"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f09b4d1ada8affba260cb185bbdf6d5acff42f924dea1a17f938cf3e8fbe475"
 dependencies = [
  "aead",
  "atomic-shim",
@@ -2313,316 +2311,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "easytier"
-version = "2.6.4"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "arc-swap",
- "ariadne",
- "async-recursion",
- "async-ringbuf",
- "async-stream",
- "async-trait",
- "atomic-shim",
- "atomic_refcell",
- "auto_impl",
- "base64 0.22.1",
- "bitflags 2.13.1",
- "bon",
- "boringtun-easytier",
- "bytecodec",
- "byteorder",
- "bytes",
- "cfg_aliases",
- "chrono",
- "cidr",
- "clap",
- "clap_complete",
- "clap_complete_nushell",
- "console-subscriber",
- "criterion",
- "crossbeam",
- "ctor 0.8.0",
- "dashmap",
- "dbus",
- "defguard_wireguard_rs",
- "delegate",
- "derivative",
- "derive_builder",
- "derive_more 2.1.1",
- "encoding",
- "flume 0.12.0",
- "forwarded-header-value",
- "futures",
- "futures-util",
- "gethostname 0.5.0",
- "git-version",
- "globwalk",
- "guarden 0.2.0",
- "hickory-client",
- "hickory-proto",
- "hickory-resolver",
- "hickory-server",
- "hmac",
- "http",
- "http_req",
- "humansize",
- "humantime-serde",
- "idna 1.0.3",
- "igd-next",
- "indoc",
- "itertools 0.14.0",
- "kcp-sys",
- "machine-uid",
- "maplit",
- "mimalloc",
- "moka",
- "multimap",
- "natpmp",
- "netlink-packet-core 0.7.0",
- "netlink-packet-route 0.21.0",
- "netlink-packet-utils",
- "netlink-sys",
- "network-interface",
- "nix 0.29.0",
- "once_cell",
- "openssl",
- "ordered_hash_map",
- "parking_lot",
- "paste",
- "pbjson",
- "pbjson-build",
- "percent-encoding",
- "petgraph",
- "pin-project-lite",
- "pnet",
- "prefix-trie",
- "proc-macro2",
- "prost 0.14.3",
- "prost-build",
- "prost-reflect",
- "prost-reflect-build",
- "prost-wkt-types",
- "quanta",
- "quincy-tun",
- "quinn",
- "quinn-proto",
- "quote",
- "rand 0.8.5",
- "rayon",
- "rcgen",
- "reed-solomon-simd",
- "regex",
- "reqwest 0.12.12",
- "resolv-conf",
- "ring",
- "ringbuf",
- "rstest",
- "rust-i18n",
- "rustls",
- "serde",
- "serde_json",
- "serial_test",
- "service-manager",
- "sha2",
- "shellexpand",
- "smallvec",
- "smoltcp",
- "snow",
- "socket2 0.5.10",
- "strum 0.27.2",
- "stun_codec",
- "sys-locale",
- "tabled",
- "tempfile",
- "terminal_size",
- "thiserror 1.0.63",
- "thunk-rs",
- "tikv-jemalloc-ctl",
- "tikv-jemalloc-sys",
- "tikv-jemallocator",
- "time",
- "timedmap",
- "tokio",
- "tokio-rustls",
- "tokio-socks",
- "tokio-stream",
- "tokio-util",
- "tokio-websockets",
- "toml 0.8.19",
- "tracing",
- "tracing-subscriber",
- "tun-easytier",
- "unicode-width 0.1.11",
- "url",
- "uuid",
- "version-compare",
- "which 7.0.3",
- "wildmatch",
- "winapi",
- "windivert",
- "windows 0.62.2",
- "windows-service",
- "winreg 0.52.0",
- "x25519-dalek",
- "zerocopy 0.7.35",
- "zip",
- "zstd",
-]
-
-[[package]]
-name = "easytier-android-jni"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "easytier",
- "easytier-ffi",
- "jni 0.21.1",
- "log",
- "once_cell",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "easytier-ffi"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dashmap",
- "easytier",
- "log",
- "once_cell",
- "percent-encoding",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "easytier-gui"
-version = "2.6.4"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dashmap",
- "dunce",
- "easytier",
- "gethostname 1.1.0",
- "libc",
- "once_cell",
- "security-framework-sys",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-os",
- "tauri-plugin-positioner",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-vpnservice",
- "thunk-rs",
- "tokio",
- "url",
- "uuid",
- "winapi",
- "windows 0.52.0",
-]
-
-[[package]]
-name = "easytier-uptime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "axum-extra",
- "chrono",
- "clap",
- "dashmap",
- "easytier",
- "futures",
- "guarden 0.1.2",
- "jsonwebtoken",
- "mimalloc",
- "mockall",
- "once_cell",
- "parking_lot",
- "reqwest 0.12.12",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "serde_json",
- "serde_yaml",
- "sqlx",
- "tempfile",
- "thiserror 1.0.63",
- "tokio",
- "tokio-test",
- "tokio-util",
- "toml 0.8.19",
- "tower 0.5.2",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "validator",
-]
-
-[[package]]
-name = "easytier-web"
-version = "2.6.4"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.7.7",
- "axum-embed",
- "axum-login",
- "axum-messages",
- "base64 0.22.1",
- "chrono",
- "clap",
- "dashmap",
- "easytier",
- "image 0.24.9",
- "imageproc",
- "maxminddb",
- "mimalloc",
- "once_cell",
- "openidconnect",
- "password-auth",
- "rand 0.8.5",
- "reqwest 0.12.12",
- "rust-embed",
- "rust-i18n",
- "rusttype",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "serde_json",
- "sqlx",
- "subtle",
- "sys-locale",
- "thiserror 1.0.63",
- "thunk-rs",
- "tokio",
- "tokio-util",
- "tower-http",
- "tower-sessions",
- "tower-sessions-sqlx-store",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4036,7 +3724,6 @@ dependencies = [
 [[package]]
 name = "http_req"
 version = "0.13.1"
-source = "git+https://github.com/EasyTier/http_req.git#b10aa9fc0db3067cc3d2174683a87250b80a1ea9"
 dependencies = [
  "base64 0.22.1",
  "rand 0.8.5",
@@ -4818,7 +4505,6 @@ dependencies = [
 [[package]]
 name = "kcp-sys"
 version = "0.1.0"
-source = "git+https://github.com/EasyTier/kcp-sys?rev=d7427c22d764deb1860a7d37acc446ed5033464c#d7427c22d764deb1860a7d37acc446ed5033464c"
 dependencies = [
  "anyhow",
  "auto_impl",
@@ -5064,6 +4750,316 @@ dependencies = [
  "scoped-tls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lowertier"
+version = "2.6.4"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "arc-swap",
+ "ariadne",
+ "async-recursion",
+ "async-ringbuf",
+ "async-stream",
+ "async-trait",
+ "atomic-shim",
+ "atomic_refcell",
+ "auto_impl",
+ "base64 0.22.1",
+ "bitflags 2.13.1",
+ "bon",
+ "boringtun-lowertier",
+ "bytecodec",
+ "byteorder",
+ "bytes",
+ "cfg_aliases",
+ "chrono",
+ "cidr",
+ "clap",
+ "clap_complete",
+ "clap_complete_nushell",
+ "console-subscriber",
+ "criterion",
+ "crossbeam",
+ "ctor 0.8.0",
+ "dashmap",
+ "dbus",
+ "defguard_wireguard_rs",
+ "delegate",
+ "derivative",
+ "derive_builder",
+ "derive_more 2.1.1",
+ "encoding",
+ "flume 0.12.0",
+ "forwarded-header-value",
+ "futures",
+ "futures-util",
+ "gethostname 0.5.0",
+ "git-version",
+ "globwalk",
+ "guarden 0.2.0",
+ "hickory-client",
+ "hickory-proto",
+ "hickory-resolver",
+ "hickory-server",
+ "hmac",
+ "http",
+ "http_req",
+ "humansize",
+ "humantime-serde",
+ "idna 1.0.3",
+ "igd-next",
+ "indoc",
+ "itertools 0.14.0",
+ "kcp-sys",
+ "machine-uid",
+ "maplit",
+ "mimalloc",
+ "moka",
+ "multimap",
+ "natpmp",
+ "netlink-packet-core 0.7.0",
+ "netlink-packet-route 0.21.0",
+ "netlink-packet-utils",
+ "netlink-sys",
+ "network-interface",
+ "nix 0.29.0",
+ "once_cell",
+ "openssl",
+ "ordered_hash_map",
+ "parking_lot",
+ "paste",
+ "pbjson",
+ "pbjson-build",
+ "percent-encoding",
+ "petgraph",
+ "pin-project-lite",
+ "pnet",
+ "prefix-trie",
+ "proc-macro2",
+ "prost 0.14.3",
+ "prost-build",
+ "prost-reflect",
+ "prost-reflect-build",
+ "prost-wkt-types",
+ "quanta",
+ "quincy-tun",
+ "quinn",
+ "quinn-proto",
+ "quote",
+ "rand 0.8.5",
+ "rayon",
+ "rcgen",
+ "reed-solomon-simd",
+ "regex",
+ "reqwest 0.12.12",
+ "resolv-conf",
+ "ring",
+ "ringbuf",
+ "rstest",
+ "rust-i18n",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "service-manager",
+ "sha2",
+ "shellexpand",
+ "smallvec",
+ "smoltcp",
+ "snow",
+ "socket2 0.5.10",
+ "strum 0.27.2",
+ "stun_codec",
+ "sys-locale",
+ "tabled",
+ "tempfile",
+ "terminal_size",
+ "thiserror 1.0.63",
+ "thunk-rs",
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+ "time",
+ "timedmap",
+ "tokio",
+ "tokio-rustls",
+ "tokio-socks",
+ "tokio-stream",
+ "tokio-util",
+ "tokio-websockets",
+ "toml 0.8.19",
+ "tracing",
+ "tracing-subscriber",
+ "tun-lowertier",
+ "unicode-width 0.1.11",
+ "url",
+ "uuid",
+ "version-compare",
+ "which 7.0.3",
+ "wildmatch",
+ "winapi",
+ "windivert",
+ "windows 0.62.2",
+ "windows-service",
+ "winreg 0.52.0",
+ "x25519-dalek",
+ "zerocopy 0.7.35",
+ "zip",
+ "zstd",
+]
+
+[[package]]
+name = "lowertier-android-jni"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "jni 0.21.1",
+ "log",
+ "lowertier",
+ "lowertier-ffi",
+ "once_cell",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lowertier-ffi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "log",
+ "lowertier",
+ "once_cell",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "lowertier-gui"
+version = "2.6.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "dunce",
+ "gethostname 1.1.0",
+ "libc",
+ "lowertier",
+ "once_cell",
+ "security-framework-sys",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-os",
+ "tauri-plugin-positioner",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-vpnservice",
+ "thunk-rs",
+ "tokio",
+ "url",
+ "uuid",
+ "winapi",
+ "windows 0.52.0",
+]
+
+[[package]]
+name = "lowertier-uptime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "axum-extra",
+ "chrono",
+ "clap",
+ "dashmap",
+ "futures",
+ "guarden 0.1.2",
+ "jsonwebtoken",
+ "lowertier",
+ "mimalloc",
+ "mockall",
+ "once_cell",
+ "parking_lot",
+ "reqwest 0.12.12",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.63",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "toml 0.8.19",
+ "tower 0.5.2",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "validator",
+]
+
+[[package]]
+name = "lowertier-web"
+version = "2.6.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.7",
+ "axum-embed",
+ "axum-login",
+ "axum-messages",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "dashmap",
+ "image 0.24.9",
+ "imageproc",
+ "lowertier",
+ "maxminddb",
+ "mimalloc",
+ "once_cell",
+ "openidconnect",
+ "password-auth",
+ "rand 0.8.5",
+ "reqwest 0.12.12",
+ "rust-embed",
+ "rust-i18n",
+ "rusttype",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "subtle",
+ "sys-locale",
+ "thiserror 1.0.63",
+ "thunk-rs",
+ "tokio",
+ "tokio-util",
+ "tower-http",
+ "tower-sessions",
+ "tower-sessions-sqlx-store",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -8865,7 +8861,6 @@ dependencies = [
 [[package]]
 name = "service-manager"
 version = "0.8.0"
-source = "git+https://github.com/EasyTier/service-manager-rs.git?branch=main#5eb28f7a686858eea4f4933534ed989d3b71dc2a"
 dependencies = [
  "cfg-if",
  "dirs 4.0.0",
@@ -10125,7 +10120,6 @@ dependencies = [
 [[package]]
 name = "thunk-rs"
 version = "0.3.5"
-source = "git+https://github.com/easytier/thunk.git#cbbeec75a66b7b3cf0824ae890d9d06bcfb9d1f3"
 
 [[package]]
 name = "tiff"
@@ -10350,7 +10344,6 @@ dependencies = [
 [[package]]
 name = "tokio-websockets"
 version = "0.13.2"
-source = "git+https://github.com/EasyTier/tokio-websockets#dc9771c7c215882349c3cb328877550a3593df21"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -10829,9 +10822,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b3e06c9b9d80ed6b745c7159c40b311ad2916abb34a49e9be2653b90db0d8dd"
 
 [[package]]
-name = "tun-easytier"
+name = "tun-lowertier"
 version = "1.1.1"
-source = "git+https://github.com/EasyTier/rust-tun#12378839e7985283df0e4fb536b7137230356db5"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -11638,7 +11630,6 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "windivert"
 version = "0.6.0"
-source = "git+https://github.com/EasyTier/windivert-rust.git?rev=adcc56d1550f7b5377ec2b3429f413ee24a77375#adcc56d1550f7b5377ec2b3429f413ee24a77375"
 dependencies = [
  "etherparse",
  "thiserror 1.0.63",
@@ -11649,7 +11640,6 @@ dependencies = [
 [[package]]
 name = "windivert-sys"
 version = "0.10.0"
-source = "git+https://github.com/EasyTier/windivert-rust.git?rev=adcc56d1550f7b5377ec2b3429f413ee24a77375#adcc56d1550f7b5377ec2b3429f413ee24a77375"
 dependencies = [
  "cc",
  "thiserror 1.0.63",

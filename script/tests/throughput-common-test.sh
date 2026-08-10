@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$repo_root/script/throughput-common.sh"
 
-test_dir=$(mktemp -d -t easytier-throughput-common.XXXXXX)
+test_dir=$(mktemp -d -t lowertier-throughput-common.XXXXXX)
 trap 'rm -rf "$test_dir"' EXIT
 
 cat >"$test_dir/tcp.json" <<'JSON'

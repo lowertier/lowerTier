@@ -2,9 +2,9 @@
 
 Date: 2026-07-18
 
-Host: Apple Silicon macOS, native EasyTier client
+Host: Apple Silicon macOS, native LowTier client
 
-Peer: Colima `easytier-l2` profile, QEMU aarch64, Linux container
+Peer: Colima `lowertier-l2` profile, QEMU aarch64, Linux container
 
 Overlay: L2-TUN on both nodes, UDP transport, MTU 1360
 
@@ -24,25 +24,25 @@ non-Apple TUN output remains capped at one buffered packet so `writev` cannot me
 boundaries.
 
 This follows the kernel-facing parts of SagerNet sing-tun rather than importing its userspace
-network stack. EasyTier retains its current overlay, routing, packet buffers, and L2 fabric.
+network stack. LowTier retains its current overlay, routing, packet buffers, and L2 fabric.
 
 ## Reproduction
 
 Build:
 
 ```bash
-cargo build --locked --release -p easytier --bin easytier-core \
+cargo build --locked --release -p lowertier --bin lowertier-core \
   --no-default-features --features tun
 ```
 
 Run the native macOS/QEMU experiment:
 
 ```bash
-script/macos-tun-bench/e2e.sh target/release/easytier-core
+script/macos-tun-bench/e2e.sh target/release/lowertier-core
 ```
 
 The script requires passwordless `sudo` for the native client, the running QEMU-backed Colima
-profile `easytier-l2`, and the fixed Linux image `easytier-l2-qemu-test:local`. It writes the exact
+profile `lowertier-l2`, and the fixed Linux image `lowertier-l2-qemu-test:local`. It writes the exact
 ping and per-run iperf summaries to a new temporary result directory.
 
 ## Exact pre-change baseline
@@ -57,7 +57,7 @@ and server process were held fixed across variants.
 
 The QEMU boundary has visible scheduling noise, so the comparison uses medians and does not use a
 single best sample. Native iperf CPU medians were 2.08% in the forward direction and 17.99% in the
-reverse direction; these values cover iperf itself, not the EasyTier process.
+reverse direction; these values cover iperf itself, not the LowTier process.
 
 ## Post-change result
 
@@ -68,10 +68,10 @@ reverse direction; these values cover iperf itself, not the EasyTier process.
 
 The QEMU link, UDP overlay, and peer processing cap throughput before the native utun loop does.
 The throughput medians are therefore a tie within experimental noise. The useful result appears in
-the native EasyTier process CPU measured by 16 one-second `top` samples during otherwise identical
+the native LowTier process CPU measured by 16 one-second `top` samples during otherwise identical
 15-second transfers:
 
-| Direction | Baseline throughput | Batched throughput | Baseline EasyTier CPU | Batched EasyTier CPU | CPU change |
+| Direction | Baseline throughput | Batched throughput | Baseline LowTier CPU | Batched LowTier CPU | CPU change |
 |---|---:|---:|---:|---:|---:|
 | macOS to QEMU | 440.6 Mbit/s | 427.1 Mbit/s | 80.7% | 33.8% | -58.1% |
 | QEMU to macOS | 382.6 Mbit/s | 357.5 Mbit/s | 81.3% | 77.6% | -4.5% |
@@ -80,7 +80,7 @@ The forward direction exercises batched utun reads and shows the expected large 
 this two-node test, packets arriving from the peer are frequently delivered to the channel one at a
 time, so `sendmsg_x` has fewer opportunities to batch. Its result is correspondingly smaller.
 After replacing the peer-to-NIC batch `Vec` with the final zero-allocation iterator, the reproducible
-script measured 31.3% forward EasyTier CPU. That later run's QEMU throughput was only 360.1 Mbit/s,
+script measured 31.3% forward LowTier CPU. That later run's QEMU throughput was only 360.1 Mbit/s,
 so the table keeps the earlier, more closely throughput-matched A/B pair rather than overstating the
 additional improvement.
 

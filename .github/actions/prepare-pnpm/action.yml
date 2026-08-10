@@ -4,7 +4,7 @@ description: 'Setup Node.js, pnpm, and install dependencies'
 
 inputs:
   build-filter:
-    description: 'The filter argument for pnpm build (e.g. ./easytier-web/*)'
+    description: 'The filter argument for pnpm build (e.g. ./lowertier-web/*)'
     required: false
     default: ''
 

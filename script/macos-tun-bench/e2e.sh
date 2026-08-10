@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$repo_root/script/throughput-common.sh"
 
-binary=${1:-target/release/easytier-core}
+binary=${1:-target/release/lowertier-core}
 binary=$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")
 runs=${RUNS:-3}
 duration=${DURATION:-10}
@@ -13,13 +13,13 @@ profile_duration=${PROFILE_DURATION:-0}
 parallel_streams=${PARALLEL_STREAMS:-8}
 encryption_algorithm=${ENCRYPTION_ALGORITHM:-chacha20-poly1305}
 mtu=${MTU:-1360}
-colima_profile=${COLIMA_PROFILE:-easytier-l2}
-docker_context=${DOCKER_CONTEXT:-colima-easytier-l2}
-image=${EASYTIER_TEST_IMAGE:-easytier-l2-qemu-test:local}
-runtime_env=${EASYTIER_RUNTIME_ENV:-}
-container_name=easytier-macos-tun-bench
+colima_profile=${COLIMA_PROFILE:-lowertier-l2}
+docker_context=${DOCKER_CONTEXT:-colima-lowertier-l2}
+image=${LOWTIER_TEST_IMAGE:-lowertier-l2-qemu-test:local}
+runtime_env=${LOWTIER_RUNTIME_ENV:-}
+container_name=lowertier-macos-tun-bench
 host_udp_port=${HOST_UDP_PORT:-12010}
-result_dir=${RESULT_DIR:-$(mktemp -d -t easytier-macos-tun-bench.XXXXXX)}
+result_dir=${RESULT_DIR:-$(mktemp -d -t lowertier-macos-tun-bench.XXXXXX)}
 client_pid=
 client_core_pid=
 loaded_ping_pid=
@@ -96,7 +96,7 @@ docker --context "$docker_context" run -d \
     --device /dev/net/tun \
     -p "${host_udp_port}:11010/udp" \
     "$image" \
-    env $runtime_env /usr/local/bin/easytier-core \
+    env $runtime_env /usr/local/bin/lowertier-core \
     --network-name macos-tun-bench \
     --network-secret macos-tun-bench-secret \
     --encryption-algorithm "$encryption_algorithm" \
@@ -131,7 +131,7 @@ for _ in {1..30}; do
     fi
     sleep 1
 done
-client_core_pid=$(pgrep -n -x easytier-core)
+client_core_pid=$(pgrep -n -x lowertier-core)
 client_ifname=$(sed -n 's/.*tun device ready dev="\([^"]*\)".*/\1/p' "$result_dir/client.log" | tail -1)
 test -n "$client_ifname"
 ping -q -c 20 -i 0.1 -W 1000 10.91.0.2 | tee "$result_dir/ping.txt"
@@ -155,9 +155,9 @@ for direction in forward reverse; do
     done
 done
 
-cpu_results="$result_dir/easytier-cpu.tsv"
+cpu_results="$result_dir/lowertier-cpu.tsv"
 resources="$result_dir/resources.tsv"
-printf 'direction\tbits_per_second\tretransmits\taverage_easytier_cpu\tmax_easytier_cpu\tcpu_cores_per_gbit\n' \
+printf 'direction\tbits_per_second\tretransmits\taverage_lowertier_cpu\tmax_lowertier_cpu\tcpu_cores_per_gbit\n' \
     | tee "$cpu_results"
 printf 'direction\taverage_rss_kib\tmax_rss_kib\taverage_threads\tmax_threads\n' \
     | tee "$resources"

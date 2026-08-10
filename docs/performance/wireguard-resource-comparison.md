@@ -1,15 +1,15 @@
-# Native macOS EasyTier versus WireGuard
+# Native macOS LowTier versus WireGuard
 
 Date: 2026-07-18
 
 ## Result
 
-On this Apple Silicon host, native EasyTier L2-TUN is already substantially more CPU-efficient
-than the pinned Tailscale `wireguard-go` reference. EasyTier is 31.8% faster in the host-to-VM
+On this Apple Silicon host, native LowTier L2-TUN is already substantially more CPU-efficient
+than the pinned Tailscale `wireguard-go` reference. LowTier is 31.8% faster in the host-to-VM
 direction, effectively tied in the reverse direction, and uses fewer native CPU cores per Gbit in
 both directions. It pays for that with a larger sampled RSS and a higher unloaded latency floor.
 
-The comparison does not support replacing EasyTier's established ChaCha20-Poly1305 implementation
+The comparison does not support replacing LowTier's established ChaCha20-Poly1305 implementation
 or adding hand-written SIMD. Both implementations already reach architecture-specific ChaCha code.
 The next credible gain is structural: keep a received packet vector intact through UDP decode, peer
 processing, and the NIC queue, then shard independent flows onto persistent workers while preserving
@@ -26,7 +26,7 @@ native macOS client
   -> privileged benchmark container
 ```
 
-EasyTier used native macOS L2-TUN and a Linux EasyTier peer. WireGuard used the pinned Tailscale
+LowTier used native macOS L2-TUN and a Linux LowTier peer. WireGuard used the pinned Tailscale
 `wireguard-go` userspace implementation on macOS and kernel WireGuard in the same Linux VM profile.
 Both used:
 
@@ -38,12 +38,12 @@ Both used:
 - the same QEMU profile and host UDP forwarding boundary;
 - two complete passes, with the implementation order reversed on pass two.
 
-The WireGuard source revision was `2e01ba5b00f0`. The recorded EasyTier base revision was
+The WireGuard source revision was `2e01ba5b00f0`. The recorded LowTier base revision was
 `5e635e5dc761769ecf337504056ec0c463657ab8`, with the packet-batch work in the dirty feature
 worktree. Private WireGuard keys were ephemeral and were not written to the result directory.
 
 This is a dataplane-cost comparison, not a feature-equivalence claim. WireGuard transports L3
-packets with a compact direct-peer format. EasyTier transports an Ethernet-capable routed overlay
+packets with a compact direct-peer format. LowTier transports an Ethernet-capable routed overlay
 and performs L2-TUN frame preparation and peer selection.
 
 ## Throughput and native resource use
@@ -51,7 +51,7 @@ and performs L2-TUN frame preparation and peer selection.
 Throughput is the median of six independent 10-second samples. CPU/Gbit is the mean of the two
 separate 15-second probes. RSS and thread counts are the means of those probe windows.
 
-| Native macOS measurement | EasyTier | WireGuard | EasyTier relative result |
+| Native macOS measurement | LowTier | WireGuard | LowTier relative result |
 | --- | ---: | ---: | ---: |
 | Forward TCP | 496.0 Mbit/s | 376.3 Mbit/s | 31.8% faster |
 | Reverse TCP | 432.8 Mbit/s | 426.9 Mbit/s | 1.4% faster |
@@ -63,7 +63,7 @@ separate 15-second probes. RSS and thread counts are the means of those probe wi
 
 The two independent CPU probes were consistent:
 
-| Probe | EasyTier forward | WireGuard forward | EasyTier reverse | WireGuard reverse |
+| Probe | LowTier forward | WireGuard forward | LowTier reverse | WireGuard reverse |
 | --- | ---: | ---: | ---: | ---: |
 | Pass 1 cores/Gbit | 1.214 | 3.873 | 2.593 | 3.577 |
 | Pass 2 cores/Gbit | 1.076 | 3.708 | 2.552 | 3.538 |
@@ -73,24 +73,24 @@ The two independent CPU probes were consistent:
 QEMU and host port forwarding added visible run-to-run jitter. The unloaded minimum is a more useful
 floor than one pass's average, while the loaded average shows behavior during the CPU probe.
 
-| Latency measurement | EasyTier | WireGuard |
+| Latency measurement | LowTier | WireGuard |
 | --- | ---: | ---: |
 | Mean unloaded minimum | 1.936 ms | 0.984 ms |
 | Mean unloaded average | 4.829 ms | 2.423 ms |
 | Forward loaded average | 2.475 ms | 2.788 ms |
 | Reverse loaded average | 2.792 ms | 2.510 ms |
 
-EasyTier therefore has an approximately 0.95 ms worse idle RTT floor in this topology. Under load,
+LowTier therefore has an approximately 0.95 ms worse idle RTT floor in this topology. Under load,
 the forward direction is 0.31 ms better and the reverse direction is 0.28 ms worse. Throughput and
 CPU efficiency do not justify ignoring the idle-latency gap. A future direct host-to-host test should
-remove QEMU port forwarding before assigning all of that gap to EasyTier itself.
+remove QEMU port forwarding before assigning all of that gap to LowTier itself.
 
 ## Profile evidence
 
 The profile runs used symbolized release builds and separate traffic windows. The macOS `sample`
 leaf counts below are sampling observations, not syscall invocation counts or percentages.
 
-EasyTier's most visible active leaves were:
+LowTier's most visible active leaves were:
 
 | Direction | Important sampled leaves |
 | --- | --- |
@@ -109,7 +109,7 @@ read, and loops over writes with one file write per packet. This explains much o
 cost. It is also a warning about the comparison: Tailscale's shipping Network Extension integration
 is not identical to this standalone Darwin backend.
 
-EasyTier's macOS backend already uses `recvmsg_x` and `sendmsg_x` for utun and feeds the writer with
+LowTier's macOS backend already uses `recvmsg_x` and `sendmsg_x` for utun and feeds the writer with
 upstream-ready packets. This is a real current advantage over the pinned reference. At the UDP
 socket edge, receive vectors are enabled. Darwin UDP `sendmsg_x` remains opt-in because repeated
 A/B tests have not shown a retention-grade improvement.
@@ -127,7 +127,7 @@ parallel decryption, replay validation, and one TUN batch write.
 
 Tailscale's Linux batching wrapper keeps arrays of packet buffers and message descriptors, uses
 `sendmmsg` and `recvmmsg`, coalesces compatible packets with UDP GSO, splits UDP GRO results, reuses
-batch storage, and disables offload dynamically when the kernel rejects it. EasyTier's retained
+batch storage, and disables offload dynamically when the kernel rejects it. LowTier's retained
 Linux GSO/GRO work follows the same established mechanisms.
 
 ZeroTier computes a small flow identifier from L3 protocol and L4 ports, maps a flow to a stable
@@ -145,7 +145,7 @@ rewriting an iterator as an index loop.
 This was checked on the actual final LTO binary with:
 
 ```bash
-cargo rustc --locked --release -p easytier --bin easytier-core -- \
+cargo rustc --locked --release -p lowertier --bin lowertier-core -- \
   -C debuginfo=1 -C remark=loop-vectorize
 ```
 
@@ -156,7 +156,7 @@ unsupported control flow, or values escaping the loop. This matches the profile:
 path does not contain a flat arithmetic loop that the compiler can profitably widen.
 
 The established `ring` ChaCha implementation already dispatches to an AArch64 NEON path for
-sufficiently large inputs. The EasyTier profile reached `ring_core_0_17_14__chacha20_poly1305_*`;
+sufficiently large inputs. The LowTier profile reached `ring_core_0_17_14__chacha20_poly1305_*`;
 the WireGuard profile reached `golang.org/x/crypto/chacha20.xorKeyStreamVX`. Hand-written Rust SIMD
 around either library would duplicate mature cryptographic code and would violate the project's
 crypto rule.
@@ -221,12 +221,12 @@ small to remove the scalar boundaries and produced no retention-grade result.
 ```bash
 RUNS=3 DURATION=10 CPU_DURATION=15 PROFILE_DURATION=0 \
   PARALLEL_STREAMS=8 MTU=1360 HOST_UDP_PORT=12014 \
-  RESULT_DIR=/tmp/easytier-vs-wireguard-et \
-  script/macos-tun-bench/e2e.sh target/release/easytier-core
+  RESULT_DIR=/tmp/lowertier-vs-wireguard-et \
+  script/macos-tun-bench/e2e.sh target/release/lowertier-core
 
 RUNS=3 DURATION=10 CPU_DURATION=15 PROFILE_DURATION=0 \
   PARALLEL_STREAMS=8 MTU=1360 HOST_UDP_PORT=12020 \
-  RESULT_DIR=/tmp/easytier-vs-wireguard-wg \
+  RESULT_DIR=/tmp/lowertier-vs-wireguard-wg \
   script/wireguard-macos-bench/e2e.sh
 ```
 

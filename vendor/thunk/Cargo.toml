@@ -1,0 +1,7 @@
+[workspace]
+members = [
+	"thunk-cli",
+	"thunk-rs",
+	"sample"
+]
+resolver = "2"

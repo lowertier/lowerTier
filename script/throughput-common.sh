@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Shared, side-effect-light helpers for EasyTier throughput harnesses.
+# Shared, side-effect-light helpers for LowTier throughput harnesses.
 # The caller owns `set -euo pipefail` so this file can also be sourced by tests.
 
 perf_result_header() {

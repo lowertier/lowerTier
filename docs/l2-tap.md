@@ -1,6 +1,6 @@
 # Ethernet fabric
 
-EasyTier can carry complete Ethernet frames through its existing peer routing,
+LowTier can carry complete Ethernet frames through its existing peer routing,
 relay, compression, encryption, and underlay transport stack. This is useful
 when nodes need L2 behavior such as ARP, IPv6 neighbour discovery, broadcast,
 or a simple bridged network.
@@ -11,7 +11,7 @@ Extension, Android VPN APIs, and Windows Wintun are IP-only interfaces. Use
 through the Ethernet overlay without pretending the operating-system device is
 a TAP interface.
 
-EasyTier provides three network profile names through `port_mode`:
+LowTier provides three network profile names through `port_mode`:
 
 - `routed` selects the IP-only TUN path.
 - `ethernet` requires native TAP and provides complete Ethernet behavior.
@@ -23,7 +23,7 @@ The default remains `l3` for compatibility.
 
 The `ethernet` profile fails when native TAP is unavailable.
 
-EasyTier does not silently replace complete Ethernet behavior with L2-TUN.
+LowTier does not silently replace complete Ethernet behavior with L2-TUN.
 
 ```toml
 [flags]
@@ -47,7 +47,7 @@ port_mode = "compatible-ethernet"
 ```
 
 `compatible-ethernet` reserves the Ethernet header in the receive buffer and resolves normal
-unicast with the existing EasyTier IP route table. It still targets only one
+unicast with the existing LowTier IP route table. It still targets only one
 peer, but uses an Ethernet broadcast destination so a native TAP kernel accepts
 the routed packet. A locally administered source MAC is derived from the peer
 ID. The TUN edge answers ARP for its own overlay IPv4 address, which allows TAP
@@ -63,7 +63,7 @@ The equivalent CLI options are `--port-mode`, `--l2-fdb-capacity`,
 Use `--port-mode ethernet` for complete L2 behavior.
 
 Known unicast frames use the learned destination MAC and send once to that
-peer. The normal EasyTier route table can still deliver that logical peer over
+peer. The normal LowTier route table can still deliver that logical peer over
 multiple hops. Unknown unicast, broadcast, and multicast frames replicate only
 to routes whose peer advertises Ethernet input. The FDB never learns zero,
 broadcast, or multicast source MAC addresses. Entries age out and are removed
@@ -75,13 +75,13 @@ and data sockets. Restart the instance after any port-mode or underlay-policy
 change.
 
 The default direct transport is UDP. If raw UDP cannot establish an eligible
-path, EasyTier next tries QUIC and then TCP. An explicit `default_protocol`
+path, LowTier next tries QUIC and then TCP. An explicit `default_protocol`
 still takes first priority. All three transports use the same strict underlay
 interface and CIDR checks.
 
 Run `script/colima-l2/e2e.sh` for QEMU-backed TAP, L3, L2-TUN, and mixed-edge
 checks. A native macOS-to-Colima UDP test requires an UDP-capable Colima port
-forwarder, for example `colima -p easytier-l2 start --port-forwarder grpc`.
+forwarder, for example `colima -p lowertier-l2 start --port-forwarder grpc`.
 The default SSH forwarder carries TCP only.
 
 Avoid using unlimited flood traffic on a large mesh. L2 broadcast is necessary

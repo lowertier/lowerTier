@@ -1,12 +1,12 @@
 # Dataplane cryptography
 
-EasyTier peer traffic defaults to `chacha20-poly1305`, implemented by the audited `ring` AEAD
+LowTier peer traffic defaults to `chacha20-poly1305`, implemented by the audited `ring` AEAD
 implementation in lean builds and by OpenSSL when the `openssl-crypto` feature is selected. The
 primitive uses a 256-bit key, a 96-bit nonce, and a 128-bit authentication tag.
 
 This choice follows the established WireGuard dataplane primitive used by Tailscale. Tailscale
 delegates peer packet encryption to `wireguard-go`; its batched `magicsock` path carries already
-encrypted WireGuard packets. EasyTier does not claim wire-format compatibility with WireGuard and
+encrypted WireGuard packets. LowTier does not claim wire-format compatibility with WireGuard and
 does not introduce a new cipher.
 
 ## Configuration
@@ -28,16 +28,16 @@ The AEAD authenticates the encrypted payload and tag. The existing peer-manager 
 outside the AEAD because relay nodes must update routing fields. Changing that boundary requires a
 versioned packet protocol, not an ad-hoc AAD change.
 
-EasyTier secure mode adds existing Noise handshakes and session protections:
+LowTier secure mode adds existing Noise handshakes and session protections:
 
 - Noise XX with X25519, ChaChaPoly, and SHA-256 for direct peer authentication;
 - Noise IK with the same standard primitives on the relay path;
 - per-direction traffic keys, epoch rotation, sequence nonces, and replay windows.
 
-This is still EasyTier's protocol construction, not the complete WireGuard protocol. Deployments
+This is still LowTier's protocol construction, not the complete WireGuard protocol. Deployments
 requiring peer identity authentication and replay protection should enable secure mode. A future
 full WireGuard-compatible peer session would need a separately versioned handshake and packet
-format rather than reusing the EasyTier framing under a WireGuard name.
+format rather than reusing the LowTier framing under a WireGuard name.
 
 ## Verification
 

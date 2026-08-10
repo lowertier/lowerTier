@@ -4,11 +4,11 @@ The high-RTT loss-recovery matrix and ETQ4 counter reconciliation are recorded
 separately in [ETQ4 L2 loss-resilience results](l2-loss-resilience-results.md).
 
 Measured on 2026-07-18 on an Apple Silicon macOS host. The VZ run used the default Colima
-profile with 16 virtual CPUs and 128 GiB RAM. The native macOS run used an EasyTier process on
+profile with 16 virtual CPUs and 128 GiB RAM. The native macOS run used an LowTier process on
 the host and an aarch64 QEMU Colima peer reached through UDP port forwarding.
 
 These are software dataplane measurements, not simulated NIC line-rate claims. The raw VZ
-Docker bridge carried 121.95 Gbit/s with eight TCP streams, so it did not constrain the EasyTier
+Docker bridge carried 121.95 Gbit/s with eight TCP streams, so it did not constrain the LowTier
 result. The QEMU macOS-to-VM path does constrain the native test; CPU per delivered Gbit is the
 primary macOS metric.
 
@@ -29,20 +29,20 @@ primary macOS metric.
   next hop until route invalidation, path failure, or strict underlay denial. The shard is stamped
   into the existing reserved peer-header byte before encryption, so relays retain flow identity
   with no additional wire bytes. Eagerly splitting a mixed vector is experimental through
-  `EASYTIER_ENABLE_FLOW_SHARD_SPLIT=1` because the default keeps the faster intact vector.
+  `LOWTIER_ENABLE_FLOW_SHARD_SPLIT=1` because the default keeps the faster intact vector.
 - Linux UDP uses `sendmmsg`/`recvmmsg` and coupled UDP GSO/GRO. Darwin UDP receive uses
   `recvmsg_x`; Darwin socket `sendmsg_x` remains opt-in with
-  `EASYTIER_ENABLE_UDP_SEND_VECTOR=1` because native A/B testing found a forward-throughput
+  `LOWTIER_ENABLE_UDP_SEND_VECTOR=1` because native A/B testing found a forward-throughput
   regression. The separate utun `sendmsg_x` backend remains enabled.
 - Established Rayon parallel encryption is implemented for batches of at least 32 packets but is
-  opt-in (`EASYTIER_ENABLE_PARALLEL_CRYPTO=1`). Per-batch Rayon reduced throughput on both the
+  opt-in (`LOWTIER_ENABLE_PARALLEL_CRYPTO=1`). Per-batch Rayon reduced throughput on both the
   four-vCPU QEMU and 16-vCPU VZ profiles, so the measured default preserves in-order sequential
   ChaCha20-Poly1305 encryption.
 - Linux virtio TUN checksum/TSO/GRO support is implemented with `quincy-tun`, which ports the
   WireGuard-go offload model. It defaults on for x86_64, where quincy has AVX2/SSE4.1 checksum
   acceleration. It defaults off on aarch64, where forced scalar checksum handling reduced this
   QEMU workload to about 86 Mbit/s. ARM users can opt in with
-  `EASYTIER_ENABLE_LINUX_TUN_OFFLOAD=1`; every architecture falls back to portable TUN if the
+  `LOWTIER_ENABLE_LINUX_TUN_OFFLOAD=1`; every architecture falls back to portable TUN if the
   kernel rejects negotiation.
 - Fresh STUN observations are gathered for every punch attempt through the persistent data socket.
   Strict deny filtering is applied before STUN handling, candidate advertisement, triggered checks,
@@ -175,7 +175,7 @@ The encrypted VZ matrix used three five-second samples per direction. The raw br
 
 Encrypted UDP medians were 4.84-5.24 Gbit/s when offered 10 Gbit/s. Unloaded RTT averaged
 0.646 ms for L3, 0.682 ms for L2-TUN, and 0.793 ms for TAP. CPU use was 0.46-0.52 cores per
-delivered Gbit at each EasyTier endpoint. The similar cost in every mode confirms that encryption
+delivered Gbit at each LowTier endpoint. The similar cost in every mode confirms that encryption
 belongs in the shared peer/UDP optimization work rather than separate L2 and L3 implementations.
 
 ## Native macOS result
@@ -239,8 +239,8 @@ lost 10.7% forward and 11.2% reverse p1 TCP throughput. The no-copy `sendmmsg` c
 6.2% forward and 5.0% reverse.
 
 This is not evidence against `sendmmsg` or GSO. It is evidence against applying them after
-EasyTier has already serialized routing, encryption, queueing, and scheduling. Tailscale keeps
-vectors through those stages before reaching UDP. EasyTier must do the same.
+LowTier has already serialized routing, encryption, queueing, and scheduling. Tailscale keeps
+vectors through those stages before reaching UDP. LowTier must do the same.
 
 These results point to batching before the final UDP queue, not adding delay or another cache at
 the socket. Linux UDP GSO/GRO and multi-packet queue items are the next credible route to 10
@@ -254,7 +254,7 @@ interfaces applied `delay 140ms 40ms loss random 3%`, producing a randomized
 carried 12.14 Mbit/s with one TCP flow and 16.93 Mbit/s with four flows in this
 deliberately impaired environment.
 
-The legacy EasyTier QUIC checksum implementation was not resilient. Under the
+The legacy LowTier QUIC checksum implementation was not resilient. Under the
 same matrix it produced checksum mismatches, false stateless resets,
 `KEY_UPDATE_ERROR`, and `unsent packet acked`, with three peer reconnects in one
 run. Upgrading Quinn alone did not correct the defect.
@@ -275,13 +275,13 @@ send timeouts. Results from the five-second workloads were:
 Unloaded overlay RTT averaged 305.8 ms. Loaded RTT averaged 374.9 ms forward
 and 314.8 ms reverse, with maxima of 967.2 and 808.6 ms. The 100 Mbit/s forward
 UDP offer overloaded an approximately 2 Mbit/s overlay enough to reset iperf's
-inner TCP control flow, but the EasyTier peer and QUIC connection stayed up.
+inner TCP control flow, but the LowTier peer and QUIC connection stayed up.
 The harness now records such application-level failures in
 `workload-errors.tsv` rather than writing an incomplete throughput row.
 
 A second run offered 5 Mbit/s UDP, near the usable noisy-path capacity. It
 delivered 4.980 Mbit/s forward and 5.000 Mbit/s reverse, with iperf loss of
-1.09% and 0.16%. There were no workload errors or EasyTier peer removals.
+1.09% and 0.16%. There were no workload errors or LowTier peer removals.
 Loaded RTT averaged 318.9 ms forward and 299.8 ms reverse. This separates the
 transport result from the intentional 100 Mbit/s overload: normal offered load
 is carried nearly in full, while gross overload drops application traffic
@@ -292,15 +292,15 @@ delivered 0.990 Mbit/s forward and 1.004 Mbit/s reverse, with 0.70% and 0.32%
 inner iperf loss. All loaded pings completed and the logs again contained no
 peer removal, QUIC protocol violation, key-update failure, receive-loop error,
 or send timeout. One short reverse four-flow TCP workload lost its inner iperf
-control connection; the EasyTier QUIC peer remained connected and the following
+control connection; the LowTier QUIC peer remained connected and the following
 reverse UDP and latency workloads completed.
 
 ## Comparison boundary
 
 Tailscale's published 10GbE work used two bare-metal Linux systems with Mellanox 25GbE adapters,
-then added packet vectors, UDP GSO/GRO, and checksum work. EasyTier's VZ result is therefore not
+then added packet vectors, UDP GSO/GRO, and checksum work. LowTier's VZ result is therefore not
 an apples-to-apples product comparison. It is an actionable bottleneck test: the substrate is
-fast enough, all EasyTier port modes converge near 4 Gbit/s TCP, and the remaining work belongs
+fast enough, all LowTier port modes converge near 4 Gbit/s TCP, and the remaining work belongs
 in the shared queue/socket backend.
 
 References:
@@ -312,12 +312,12 @@ References:
 ## Reproduce
 
 ```bash
-QUICK=1 RESULT_DIR=/tmp/easytier-10gbe script/colima-throughput/e2e.sh
+QUICK=1 RESULT_DIR=/tmp/lowertier-10gbe script/colima-throughput/e2e.sh
 
-cargo build --locked --release -p easytier --bin easytier-core \
+cargo build --locked --release -p lowertier --bin lowertier-core \
   --no-default-features --features tun
-RUNS=1 DURATION=5 CPU_DURATION=5 RESULT_DIR=/tmp/easytier-macos \
-  script/macos-tun-bench/e2e.sh target/release/easytier-core
+RUNS=1 DURATION=5 CPU_DURATION=5 RESULT_DIR=/tmp/lowertier-macos \
+  script/macos-tun-bench/e2e.sh target/release/lowertier-core
 ```
 
 Both harnesses default `ENCRYPTION_ALGORITHM=chacha20-poly1305` and record it in

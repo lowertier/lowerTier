@@ -16,11 +16,11 @@ The latency and throughput targets did not pass in the QEMU environment.
 
 ## Test Environment
 
-The tests used the `easytier-l2` Colima QEMU profile.
+The tests used the `lowertier-l2` Colima QEMU profile.
 
 The virtual machine used four ARM64 virtual CPUs.
 
-EasyTier used UDP underlay transport and secure mode.
+LowTier used UDP underlay transport and secure mode.
 
 The two-node benchmark used 1000 ping samples and three 10-second throughput runs.
 
@@ -28,7 +28,7 @@ The WireGuard comparison used Linux kernel WireGuard in the same QEMU profile.
 
 WireGuard carried L3 traffic.
 
-EasyTier carried native TAP Ethernet traffic.
+LowTier carried native TAP Ethernet traffic.
 
 This comparison is not feature equivalent.
 
@@ -96,7 +96,7 @@ The scanner removed the eight-byte UDP transport header before the strict envelo
 | Fixed envelope positions | 0 |
 | Mean position entropy | 6.549 bits |
 | Minimum position entropy | 6.411 bits |
-| `easytier` hits | 0 |
+| `lowertier` hits | 0 |
 | Network name hits | 0 |
 | Network secret hits | 0 |
 | `ETL1` hits | 0 |
@@ -113,7 +113,7 @@ The UDP SYN and SACK setup packets remain recognizable.
 
 Noise message one still exposes its clear payload under the Noise XX pattern.
 
-QUIC no longer sends the fixed `easytier-quic/4` ALPN value.
+QUIC no longer sends the fixed `lowertier-quic/4` ALPN value.
 
 QUIC no longer sends the fixed `localhost` server name.
 
@@ -123,16 +123,16 @@ The tests do not claim active probing resistance.
 
 ## RTT
 
-The table reports the median result from three independent EasyTier runs.
+The table reports the median result from three independent LowTier runs.
 
 WireGuard used one 1000-sample latency run.
 
-| QEMU RTT overhead | Protected EasyTier TAP | Basic EasyTier TAP | Kernel WireGuard |
+| QEMU RTT overhead | Protected LowTier TAP | Basic LowTier TAP | Kernel WireGuard |
 | --- | ---: | ---: | ---: |
 | Median | 0.699 ms | 0.607 ms | 0.602 ms |
 | p99 | 1.309 ms | 1.311 ms | 1.379 ms |
 
-The protected envelope adds about 0.093 ms median RTT over the basic EasyTier path.
+The protected envelope adds about 0.093 ms median RTT over the basic LowTier path.
 
 Its p99 result is equal within QEMU variation.
 
@@ -148,19 +148,19 @@ A native host-to-host test is still required.
 
 | QEMU throughput | Median |
 | --- | ---: |
-| Protected EasyTier TAP | 3.21 Gbit/s |
-| Basic EasyTier TAP | 3.84 Gbit/s |
+| Protected LowTier TAP | 3.21 Gbit/s |
+| Basic LowTier TAP | 3.84 Gbit/s |
 | Kernel WireGuard | 5.76 Gbit/s |
 
-Protected EasyTier is 16.3 percent slower than the basic EasyTier path.
+Protected LowTier is 16.3 percent slower than the basic LowTier path.
 
 The result does not meet the five percent regression target.
 
-Protected EasyTier is 44.2 percent slower than kernel WireGuard in this QEMU test.
+Protected LowTier is 44.2 percent slower than kernel WireGuard in this QEMU test.
 
 The earlier native macOS L2-TUN test used userspace `wireguard-go`.
 
-That test measured EasyTier as 31.8 percent faster forward and 1.4 percent faster reverse.
+That test measured LowTier as 31.8 percent faster forward and 1.4 percent faster reverse.
 
 The protected TAP build has not repeated that native comparison.
 
@@ -183,13 +183,13 @@ Micro-tuning is not justified by the current evidence.
 ## Verification Commands
 
 ```text
-cargo test --locked -p easytier --no-default-features --features tun l2 -- --nocapture
-cargo test --locked -p easytier --no-default-features --features tun peer_conn_secure_mode -- --nocapture
-cargo test --locked -p easytier --no-default-features --features tun link_envelope::tests -- --nocapture
-cargo test --locked -p easytier --no-default-features --features tun,quic quic_transport_uses_tls13_and_survives_a_key_update -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun l2 -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun peer_conn_secure_mode -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun link_envelope::tests -- --nocapture
+cargo test --locked -p lowertier --no-default-features --features tun,quic quic_transport_uses_tls13_and_survives_a_key_update -- --nocapture
 bash script/tests/colima-l2-static-test.sh
 bash script/tests/colima-l2-benchmark-static-test.sh
-COLIMA_DOCKER_CONTEXT=colima-easytier-l2 SKIP_IMAGE_BUILD=1 bash script/colima-l2/e2e.sh
+COLIMA_DOCKER_CONTEXT=colima-lowertier-l2 SKIP_IMAGE_BUILD=1 bash script/colima-l2/e2e.sh
 ```
 
 Clippy completed with 13 existing warnings.

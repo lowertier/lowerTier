@@ -1,5 +1,5 @@
 {
-  "name": "easytier-monorepo",
+  "name": "lowertier-monorepo",
   "private": true,
   "pnpm": {
     "overrides": {

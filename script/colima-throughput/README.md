@@ -1,12 +1,12 @@
 # Colima 10GbE-class dataplane benchmark
 
-This harness offers EasyTier up to 12 Gbit/s inside the VZ-backed default Colima VM. It is a
+This harness offers LowTier up to 12 Gbit/s inside the VZ-backed default Colima VM. It is a
 software throughput and CPU-efficiency test, not a claim that Colima emulates a physical 10GbE
 NIC.
 
 The raw Docker bridge is measured first with one and eight TCP streams. Its eight-stream result
 must reach `RAW_GATE_BPS` (12 Gbit/s by default) for the run to be marked `valid`. When it does not,
-`substrate-status.txt` contains `substrate-limited`; EasyTier measurements are retained for
+`substrate-status.txt` contains `substrate-limited`; LowTier measurements are retained for
 diagnostics but cannot establish a 10GbE ceiling. Set `REQUIRE_RAW_GATE=1` to stop immediately.
 
 ## Prerequisites
@@ -43,7 +43,7 @@ Reliable QUIC DATAGRAM L2-TUN under randomized 100-180 ms one-way delay and 3%
 loss in each egress direction:
 
 ```bash
-DOCKER_CONTEXT=colima-easytier-l2 \
+DOCKER_CONTEXT=colima-lowertier-l2 \
 UNDERLAY_PROTOCOL=quic \
 MODES=l2-tun \
 NETEM_DELAY=140ms \
@@ -55,7 +55,7 @@ UDP_RATES=100M \
 DURATION=10 \
 OMIT=2 \
 QUIC_FEC_PROFILES="0 2 3" \
-EASYTIER_CORE_ARGS="--quic-congestion brutal --quic-brutal-send-bps 10000000" \
+LOWTIER_CORE_ARGS="--quic-congestion brutal --quic-brutal-send-bps 10000000" \
 script/colima-throughput/e2e.sh
 ```
 
@@ -74,7 +74,7 @@ script/colima-throughput/e2e.sh
 The delay and loss qdisc is applied to `eth0` on both containers. Each data
 direction therefore sees 3% loss, while round trips also include independently
 impaired acknowledgements. Leaving `NETEM_DELAY` empty disables emulation.
-The QUIC transport is protected by TLS 1.3 through rustls/ring; EasyTier's
+The QUIC transport is protected by TLS 1.3 through rustls/ring; LowTier's
 configured authenticated dataplane cipher remains enabled inside that tunnel.
 
 Important controls:
@@ -84,11 +84,11 @@ Important controls:
 | `DOCKER_CONTEXT` | `colima` | Docker endpoint for the VZ profile |
 | `RESULT_DIR` | temporary directory | Stable location for raw JSON and summaries |
 | `RAW_GATE_BPS` | `12000000000` | Minimum valid substrate throughput |
-| `MODES` | `l3 l2-tun tap` | EasyTier port modes |
+| `MODES` | `l3 l2-tun tap` | LowTier port modes |
 | `PARALLEL_STREAMS` | `8` | Aggregate TCP stream count |
 | `ENCRYPTION_ALGORITHM` | `chacha20-poly1305` | Explicit authenticated dataplane cipher |
-| `UNDERLAY_PROTOCOL` | `udp` | EasyTier underlay, `udp` or `quic` |
-| `EASYTIER_CORE_ARGS` | empty | Extra arguments passed to both EasyTier nodes |
+| `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp` or `quic` |
+| `LOWTIER_CORE_ARGS` | empty | Extra arguments passed to both LowTier nodes |
 | `NETEM_DELAY` | empty | Mean egress delay; empty disables netem |
 | `NETEM_JITTER` | `0ms` | Random delay range around the mean |
 | `NETEM_LOSS` | `0%` | Random egress packet loss |
@@ -106,7 +106,7 @@ Important controls:
 `throughput.tsv` contains only complete normalized iperf results. If an overload
 resets an inner iperf control flow, `workload-errors.tsv` records the workload
 and exact iperf error instead of emitting a malformed throughput row.
-`cpu-cores-per-gbit.tsv` reports each EasyTier endpoint's process CPU divided by
+`cpu-cores-per-gbit.tsv` reports each LowTier endpoint's process CPU divided by
 received payload throughput. Raw iperf JSON, unloaded and loaded ping samples,
 offload state, logs, and environment metadata remain alongside them.
 `quic-datagram-metrics.tsv` exports ETQ4 source, feedback, selective recovery,
@@ -118,5 +118,5 @@ available. These are relaxed atomic dataplane counters; string formatting only
 occurs in the five-second benchmark log task.
 
 Absolute results are not directly comparable with Tailscale's published bare-metal 25GbE test.
-The comparable engineering question is whether EasyTier preserves packets in batches, avoids
+The comparable engineering question is whether LowTier preserves packets in batches, avoids
 avoidable syscalls and queue handoffs, and reduces CPU cores consumed per Gbit/s.

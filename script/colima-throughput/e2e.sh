@@ -5,19 +5,19 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$repo_root/script/throughput-common.sh"
 
 docker_context=${DOCKER_CONTEXT:-colima}
-image=${EASYTIER_BENCH_IMAGE:-easytier-throughput:local}
-network=${EASYTIER_BENCH_NETWORK:-easytier-throughput-net}
-node_a=${EASYTIER_BENCH_NODE_A:-easytier-throughput-a}
-node_b=${EASYTIER_BENCH_NODE_B:-easytier-throughput-b}
-result_dir=${RESULT_DIR:-$(mktemp -d -t easytier-colima-throughput.XXXXXX)}
+image=${LOWTIER_BENCH_IMAGE:-lowertier-throughput:local}
+network=${LOWTIER_BENCH_NETWORK:-lowertier-throughput-net}
+node_a=${LOWTIER_BENCH_NODE_A:-lowertier-throughput-a}
+node_b=${LOWTIER_BENCH_NODE_B:-lowertier-throughput-b}
+result_dir=${RESULT_DIR:-$(mktemp -d -t lowertier-colima-throughput.XXXXXX)}
 duration=${DURATION:-10}
 omit=${OMIT:-2}
 runs=${RUNS:-1}
 parallel_streams=${PARALLEL_STREAMS:-8}
 encryption_algorithm=${ENCRYPTION_ALGORITHM:-chacha20-poly1305}
-runtime_env=${EASYTIER_RUNTIME_ENV:-}
+runtime_env=${LOWTIER_RUNTIME_ENV:-}
 underlay_protocol=${UNDERLAY_PROTOCOL:-udp}
-core_args=${EASYTIER_CORE_ARGS:-}
+core_args=${LOWTIER_CORE_ARGS:-}
 netem_delay=${NETEM_DELAY:-}
 netem_jitter=${NETEM_JITTER:-0ms}
 netem_loss=${NETEM_LOSS:-0%}
@@ -219,7 +219,7 @@ sample_cpu() {
     local output=$2
     local samples=$3
     "${docker_cmd[@]}" exec "$node" sh -lc \
-        "i=0; while [ \"\$i\" -lt $samples ]; do ps -C easytier-core -o %cpu= | awk '{s+=\$1} END {print s+0}'; i=\$((i+1)); sleep 1; done" \
+        "i=0; while [ \"\$i\" -lt $samples ]; do ps -C lowertier-core -o %cpu= | awk '{s+=\$1} END {print s+0}'; i=\$((i+1)); sleep 1; done" \
         >"$output"
 }
 
@@ -319,9 +319,9 @@ for mode in "${modes[@]}"; do
     start_containers
     apply_network_noise
     "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
-        "exec env $runtime_env easytier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 0.0.0.0:15991 $fec_args $core_args >/tmp/easytier.log 2>&1"
+        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 0.0.0.0:15991 $fec_args $core_args >/tmp/lowertier.log 2>&1"
     "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
-        "exec env $runtime_env easytier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 0.0.0.0:15992 $fec_args $core_args >/tmp/easytier.log 2>&1"
+        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 0.0.0.0:15992 $fec_args $core_args >/tmp/lowertier.log 2>&1"
     wait_for_ping "$subnet.2"
     "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \
         >"$result_dir/latency/${profile}-unloaded.txt"
@@ -346,12 +346,12 @@ for mode in "${modes[@]}"; do
             record_cpu_probe "$profile" "$direction" "$subnet.2" 5201
         fi
     done
-    "${docker_cmd[@]}" exec "$node_a" pkill -TERM easytier-core 2>/dev/null || true
-    "${docker_cmd[@]}" exec "$node_b" pkill -TERM easytier-core 2>/dev/null || true
+    "${docker_cmd[@]}" exec "$node_a" pkill -TERM lowertier-core 2>/dev/null || true
+    "${docker_cmd[@]}" exec "$node_b" pkill -TERM lowertier-core 2>/dev/null || true
     sleep 1
     for node in "$node_a" "$node_b"; do
         log_file="$result_dir/logs/${profile}-${node}.log"
-        "${docker_cmd[@]}" cp "$node:/tmp/easytier.log" "$log_file" 2>/dev/null || true
+        "${docker_cmd[@]}" cp "$node:/tmp/lowertier.log" "$log_file" 2>/dev/null || true
         extract_quic_metrics "$profile" "$node" "$log_file"
         extract_alternate_fec_metrics "$profile" "$node" "$log_file"
     done
