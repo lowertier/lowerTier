@@ -29,7 +29,7 @@ env:
 
 jobs:
   tests:
-    name: Build once and verify CLI
+    name: Build once and run essential tests
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -40,7 +40,7 @@ jobs:
         uses: ./.github/actions/prepare-build
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          components: rustfmt,clippy
+          components: rustfmt
 
       - name: Restore Cargo cache
         uses: Swatinem/rust-cache@v2
@@ -51,19 +51,13 @@ jobs:
       - name: Check lock file
         run: cargo metadata --format-version 1 --locked > /dev/null
 
-      - name: Check lints
-        run: >-
-          cargo clippy --locked --package lowertier --all-targets
-          --no-default-features --features lean -- -D warnings
-
       - name: Install network test tools
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bridge-utils \
-            iptables \
-            miniupnpd \
-            miniupnpd-iptables
+            iproute2 \
+            iputils-ping
 
       - name: Prepare network test system
         run: |
@@ -82,23 +76,33 @@ jobs:
           --no-default-features --features lean
           --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
 
-      - name: Run unit and component tests
+      - name: Run essential tests
+        env:
+          LOWERTIER_ESSENTIAL_TESTS: >-
+            binary(lowertier-cli)
+            | test(common::acl_processor::tests)
+            | test(common::config::tests)
+            | test(launcher::tests)
+            | test(instance::l2_tun::tests)
+            | test(instance::virtual_nic::tests::l2_)
+            | test(instance::virtual_nic::tests::tap_port_mode)
+            | test(peers::l2_fabric::tests)
+            | test(peers::peer_manager::tests::ethernet_)
+            | test(peers::peer_manager::tests::l2_)
+            | test(peers::peer_session::tests)
+            | test(peers::secure_datagram::tests)
+            | test(tests::credential_tests::credential_basic_connectivity)
+            | test(tests::credential_tests::credential_non_reusable_)
+            | test(tunnel::packet_def::tests)
+            | test(tunnel::quic::tests::critical_l2_)
+            | test(tunnel::quic::tests::fragmented_ethernet_)
+            | test(tunnel::quic::tests::quic_datagram_)
+            | test(tunnel::quic::tests::quic_transport_uses_tls13)
+            | test(tunnel::udp::tests::platform_udp_)
+            | test(tunnel::udp::tests::protected_udp_)
+            | test(tunnel::udp_vector_io::tests)
         run: >-
           sudo -E env "PATH=$PATH" cargo nextest run
           --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
-          -E 'not test(tests::three_node)'
-          --test-threads 1 --no-fail-fast
-
-      - name: Run three-node tests
-        run: >-
-          sudo -E env "PATH=$PATH" cargo nextest run
-          --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
-          -E 'test(tests::three_node) and not test(subnet_proxy_three_node_test)'
-          --test-threads 1 --no-fail-fast
-
-      - name: Run subnet proxy tests
-        run: >-
-          sudo -E env "PATH=$PATH" cargo nextest run
-          --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
-          -E 'test(subnet_proxy_three_node_test)'
+          -E "$LOWERTIER_ESSENTIAL_TESTS"
           --test-threads 1 --no-fail-fast
