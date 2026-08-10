@@ -33,6 +33,7 @@ use snow::{HandshakeState, params::NoiseParams};
 use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet};
 use super::{
     PacketRecvChan,
+    encrypt::Encryptor,
     flow::{FLOW_SHARD_COUNT, classify_packet_flow, stamp_critical_l2_control},
     link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
     peer_conn_ping::PeerConnPinger,
@@ -107,6 +108,138 @@ struct PeerSessionTunnelFilter {
     my_peer_id: Arc<AtomicCell<PeerId>>,
     peer_id: Arc<AtomicCell<Option<PeerId>>>,
     session: Arc<ArcSwapOption<PeerSession>>,
+}
+
+#[derive(Clone)]
+struct LegacyNetworkTunnelFilter {
+    enabled: bool,
+    transport_authenticated: bool,
+    opaque_relay: Arc<AtomicBool>,
+    my_peer_id: Arc<AtomicCell<PeerId>>,
+    peer_id: Arc<AtomicCell<Option<PeerId>>>,
+    encryptor: Arc<dyn Encryptor>,
+}
+
+impl LegacyNetworkTunnelFilter {
+    fn new(
+        my_peer_id: PeerId,
+        enabled: bool,
+        transport_authenticated: bool,
+        encryptor: Arc<dyn Encryptor>,
+    ) -> Self {
+        Self {
+            enabled,
+            transport_authenticated,
+            opaque_relay: Arc::new(AtomicBool::new(false)),
+            my_peer_id: Arc::new(AtomicCell::new(my_peer_id)),
+            peer_id: Arc::new(AtomicCell::new(None)),
+            encryptor,
+        }
+    }
+
+    fn set_my_peer_id(&self, my_peer_id: PeerId) {
+        self.my_peer_id.store(my_peer_id);
+    }
+
+    fn set_peer_id(&self, peer_id: PeerId) {
+        self.peer_id.store(Some(peer_id));
+    }
+
+    fn set_opaque_relay(&self, opaque_relay: bool) {
+        self.opaque_relay.store(opaque_relay, Ordering::Release);
+    }
+
+    fn protects(packet_type: u8) -> bool {
+        matches!(
+            packet_type,
+            value if value == PacketType::Data as u8
+                || value == PacketType::Ethernet as u8
+                || value == PacketType::KcpSrc as u8
+                || value == PacketType::KcpDst as u8
+                || value == PacketType::QuicSrc as u8
+                || value == PacketType::QuicDst as u8
+                || value == PacketType::AlternateFecSource as u8
+                || value == PacketType::AlternateFecParity as u8
+        )
+    }
+
+    fn direct_authenticated_packet(&self, from_peer_id: PeerId, to_peer_id: PeerId) -> bool {
+        self.transport_authenticated
+            && self.peer_id.load().is_some_and(|peer_id| {
+                from_peer_id == self.my_peer_id.load() && to_peer_id == peer_id
+            })
+    }
+
+    fn encrypt_packet_if_needed(&self, packet: &mut ZCPacket) -> Result<(), anyhow::Error> {
+        if !self.enabled || self.opaque_relay.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Some(header) = packet.peer_manager_header() else {
+            return Ok(());
+        };
+        if header.is_encrypted() || !Self::protects(header.packet_type) {
+            return Ok(());
+        }
+        if self.direct_authenticated_packet(header.from_peer_id.get(), header.to_peer_id.get()) {
+            return Ok(());
+        }
+        self.encryptor.encrypt(packet).map_err(Into::into)
+    }
+
+    fn decrypt_packet_if_needed(&self, packet: &mut ZCPacket) -> Result<bool, anyhow::Error> {
+        if !self.enabled || self.opaque_relay.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        let Some(header) = packet.peer_manager_header() else {
+            return Ok(true);
+        };
+        if !Self::protects(header.packet_type) {
+            return Ok(true);
+        }
+        let from_peer_id = header.from_peer_id.get();
+        let to_peer_id = header.to_peer_id.get();
+        if header.is_encrypted() {
+            if to_peer_id == self.my_peer_id.load() {
+                self.encryptor.decrypt(packet)?;
+            }
+            return Ok(true);
+        }
+        Ok(self.transport_authenticated
+            && self.peer_id.load() == Some(from_peer_id)
+            && to_peer_id == self.my_peer_id.load())
+    }
+}
+
+impl TunnelFilter for LegacyNetworkTunnelFilter {
+    type FilterOutput = ();
+
+    fn before_send(&self, mut data: crate::tunnel::SinkItem) -> Option<crate::tunnel::SinkItem> {
+        if let Err(error) = self.encrypt_packet_if_needed(&mut data) {
+            tracing::warn!(?error, "legacy network encryption failed");
+            return None;
+        }
+        Some(data)
+    }
+
+    fn after_received(&self, data: crate::tunnel::StreamItem) -> Option<crate::tunnel::StreamItem> {
+        let mut data = match data {
+            Ok(packet) => packet,
+            Err(error) => return Some(Err(error)),
+        };
+        match self.decrypt_packet_if_needed(&mut data) {
+            Ok(true) => Some(Ok(data)),
+            Ok(false) => {
+                tracing::warn!("dropped unencrypted data from an unauthenticated transport");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(?error, "legacy network decryption failed");
+                None
+            }
+        }
+    }
+
+    fn filter_output(&self) {}
 }
 
 impl PeerSessionTunnelFilter {
@@ -331,6 +464,7 @@ pub struct PeerConn {
 
     secure_mode_cfg: Option<SecureModeConfig>,
     session_filter: PeerSessionTunnelFilter,
+    legacy_filter: LegacyNetworkTunnelFilter,
     link_envelope_filter: LinkEnvelopeTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
 
@@ -391,6 +525,7 @@ impl PeerConn {
         peer_session_store: Arc<PeerSessionStore>,
     ) -> Self {
         let flags = global_ctx.get_flags();
+        let transport_authenticated = tunnel.is_transport_authenticated();
         let tunnel_info = tunnel.info();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
 
@@ -408,10 +543,21 @@ impl PeerConn {
             secure_mode_enabled,
             link_envelope_filter.active_flag(),
         );
+        let legacy_filter = LegacyNetworkTunnelFilter::new(
+            my_peer_id,
+            !secure_mode_enabled && flags.enable_encryption,
+            transport_authenticated,
+            super::encrypt::create_encryptor(
+                &flags.encryption_algorithm,
+                global_ctx.get_128_key(),
+                global_ctx.get_256_key(),
+            ),
+        );
 
         let peer_conn_tunnel_filter = StatsRecorderTunnelFilter::new();
         let throughput = peer_conn_tunnel_filter.filter_output();
-        let filter_chain = TunnelFilterChain::new(session_filter.clone(), peer_conn_tunnel_filter)
+        let filter_chain = TunnelFilterChain::new(session_filter.clone(), legacy_filter.clone())
+            .chain(peer_conn_tunnel_filter)
             .chain(link_envelope_filter.clone());
         let peer_conn_tunnel = TunnelWithFilter::new(tunnel, filter_chain);
         let mut mpsc_tunnel = MpscTunnel::new(peer_conn_tunnel, Some(Duration::from_secs(7)));
@@ -430,6 +576,7 @@ impl PeerConn {
 
             secure_mode_cfg,
             session_filter,
+            legacy_filter,
             link_envelope_filter,
             noise_handshake_result: None,
 
@@ -1364,6 +1511,12 @@ impl PeerConn {
             )));
         }
 
+        self.legacy_filter.set_peer_id(self.get_peer_id());
+        self.legacy_filter.set_opaque_relay(
+            self.get_network_identity().network_name
+                != self.global_ctx.get_network_identity().network_name,
+        );
+
         if self.get_peer_id() == self.my_peer_id {
             Err(Error::WaitRespError("peer id conflict".to_owned()))
         } else {
@@ -1401,6 +1554,8 @@ impl PeerConn {
             self.info = Some(rsp);
             self.is_client = Some(true);
         }
+
+        self.legacy_filter.set_peer_id(self.get_peer_id());
 
         if self.get_peer_id() == self.my_peer_id {
             Err(Error::WaitRespError(
@@ -1725,6 +1880,12 @@ impl PeerConn {
         }
     }
 
+    pub(crate) fn tunnel_type(&self) -> Option<&str> {
+        self.tunnel_info
+            .as_ref()
+            .map(|info| info.tunnel_type.as_str())
+    }
+
     #[cfg(test)]
     pub(crate) fn record_latency_for_test(&self, latency_us: u32) {
         self.latency_stats.record_latency(latency_us);
@@ -1784,6 +1945,7 @@ impl PeerConn {
         }
         self.my_peer_id = peer_id;
         self.session_filter.set_my_peer_id(peer_id);
+        self.legacy_filter.set_my_peer_id(peer_id);
     }
 
     pub fn get_my_peer_id(&self) -> PeerId {
@@ -2092,6 +2254,105 @@ pub mod tests {
         assert!(!packet.peer_manager_header().unwrap().is_encrypted());
         let packet = receiver.after_received(Ok(packet)).unwrap().unwrap();
         assert_eq!(packet.payload(), b"direct payload");
+    }
+
+    fn legacy_filter(
+        my_peer_id: PeerId,
+        peer_id: PeerId,
+        transport_authenticated: bool,
+    ) -> LegacyNetworkTunnelFilter {
+        let cipher = crate::peers::encrypt::create_encryptor("aes-gcm", [7_u8; 16], [9_u8; 32]);
+        let filter =
+            LegacyNetworkTunnelFilter::new(my_peer_id, true, transport_authenticated, cipher);
+        filter.set_peer_id(peer_id);
+        filter
+    }
+
+    #[test]
+    fn authenticated_quic_skips_inner_encryption_for_direct_data() {
+        let sender = legacy_filter(10, 20, true);
+        let mut packet = ZCPacket::new_with_payload(b"direct data");
+        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+
+        let packet = sender.before_send(packet).unwrap();
+
+        assert!(!packet.peer_manager_header().unwrap().is_encrypted());
+        assert_eq!(packet.payload(), b"direct data");
+    }
+
+    #[test]
+    fn fallback_transport_keeps_inner_encryption() {
+        let sender = legacy_filter(10, 20, false);
+        let receiver = legacy_filter(20, 10, false);
+        let mut packet = ZCPacket::new_with_payload(b"fallback data");
+        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+
+        let packet = sender.before_send(packet).unwrap();
+        assert!(packet.peer_manager_header().unwrap().is_encrypted());
+
+        let packet = receiver.after_received(Ok(packet)).unwrap().unwrap();
+        assert!(!packet.peer_manager_header().unwrap().is_encrypted());
+        assert_eq!(packet.payload(), b"fallback data");
+    }
+
+    #[test]
+    fn authenticated_quic_keeps_relay_data_encrypted_until_destination() {
+        let origin = legacy_filter(10, 20, true);
+        let relay_receive = legacy_filter(20, 10, true);
+        let relay_send = legacy_filter(20, 30, true);
+        let destination = legacy_filter(30, 20, true);
+        let mut packet = ZCPacket::new_with_payload(b"relay data");
+        packet.fill_peer_manager_hdr(10, 30, PacketType::Data as u8);
+
+        let packet = origin.before_send(packet).unwrap();
+        assert!(packet.peer_manager_header().unwrap().is_encrypted());
+
+        let packet = relay_receive.after_received(Ok(packet)).unwrap().unwrap();
+        assert!(packet.peer_manager_header().unwrap().is_encrypted());
+
+        let packet = relay_send.before_send(packet).unwrap();
+        assert!(packet.peer_manager_header().unwrap().is_encrypted());
+
+        let packet = destination.after_received(Ok(packet)).unwrap().unwrap();
+        assert!(!packet.peer_manager_header().unwrap().is_encrypted());
+        assert_eq!(packet.payload(), b"relay data");
+    }
+
+    #[test]
+    fn foreign_relay_preserves_opaque_legacy_data() {
+        let origin = legacy_filter(10, 20, false);
+        let relay = legacy_filter(20, 10, false);
+        relay.set_opaque_relay(true);
+        let mut packet = ZCPacket::new_with_payload(b"foreign relay data");
+        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+
+        let packet = origin.before_send(packet).unwrap();
+        assert!(packet.peer_manager_header().unwrap().is_encrypted());
+        let encrypted_payload = packet.payload().to_vec();
+
+        let packet = relay.after_received(Ok(packet)).unwrap().unwrap();
+        assert!(packet.peer_manager_header().unwrap().is_encrypted());
+        assert_eq!(packet.payload(), encrypted_payload);
+    }
+
+    #[test]
+    fn foreign_network_wrapper_stays_parseable_for_routing() {
+        let sender = legacy_filter(10, 20, false);
+        let inner = ZCPacket::new_with_payload(b"encrypted inner packet");
+        let network_name = "foreign".to_string();
+        let mut packet = ZCPacket::new_for_foreign_network(&network_name, 30, &inner);
+        packet.fill_peer_manager_hdr(10, 20, PacketType::ForeignNetworkPacket as u8);
+
+        let packet = sender.before_send(packet).unwrap();
+
+        assert!(!packet.peer_manager_header().unwrap().is_encrypted());
+        assert_eq!(
+            packet
+                .foreign_network_hdr()
+                .unwrap()
+                .get_network_name(packet.payload()),
+            "foreign"
+        );
     }
 
     #[tokio::test]

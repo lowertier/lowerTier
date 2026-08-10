@@ -2,14 +2,19 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::Ordering;
 use std::{
     net::IpAddr,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, LazyLock, atomic::AtomicBool},
 };
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::{
-    Packet as _, ip::IpNextHeaderProtocols, ipv4::Ipv4Packet, tcp::TcpPacket, udp::UdpPacket,
+    Packet as _,
+    ip::IpNextHeaderProtocols,
+    ipv4::Ipv4Packet,
+    tcp::{TcpFlags, TcpPacket},
+    udp::UdpPacket,
 };
 use quanta::Instant;
 
@@ -21,6 +26,8 @@ use crate::{
     tunnel::packet_def::ZCPacket,
 };
 use tokio_util::task::AbortOnDropHandle;
+
+static EMPTY_GROUPS: LazyLock<Arc<Vec<String>>> = LazyLock::new(|| Arc::new(Vec::new()));
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 struct OutboundAllowRecord {
@@ -58,12 +65,12 @@ impl OutboundAllowRecord {
 pub struct AclFilter {
     // Use ArcSwap for lock-free atomic replacement during hot reload
     acl_processor: ArcSwap<AclProcessor>,
-    acl_enabled: Arc<AtomicBool>,
+    acl_enabled: AtomicBool,
 
     // Track allowed outbound packets and automatically allow their corresponding inbound response
     // packets, even if they would normally be dropped by ACL rules
     outbound_allow_records: Arc<DashMap<OutboundAllowRecord, Instant>>,
-    clean_task: AbortOnDropHandle<()>,
+    clean_task: Mutex<Option<AbortOnDropHandle<()>>>,
 }
 
 impl Default for AclFilter {
@@ -75,19 +82,28 @@ impl Default for AclFilter {
 impl AclFilter {
     pub fn new() -> Self {
         let outbound_allow_records = Arc::new(DashMap::new());
-        let record_clone = outbound_allow_records.clone();
         Self {
-            acl_processor: ArcSwap::from(Arc::new(AclProcessor::new(Acl::default()))),
-            acl_enabled: Arc::new(AtomicBool::new(false)),
+            acl_processor: ArcSwap::from(Arc::new(AclProcessor::new_disabled())),
+            acl_enabled: AtomicBool::new(false),
             outbound_allow_records,
-            clean_task: AbortOnDropHandle::new(tokio::spawn(async move {
-                let max_life = std::time::Duration::from_secs(30);
-                loop {
-                    record_clone.retain(|_, v| v.elapsed() < max_life);
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                }
-            })),
+            clean_task: Mutex::new(None),
         }
+    }
+
+    fn start_allow_record_cleanup(&self) {
+        let mut clean_task = self.clean_task.lock();
+        if clean_task.is_some() {
+            return;
+        }
+
+        let records = self.outbound_allow_records.clone();
+        *clean_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+            let max_life = std::time::Duration::from_secs(30);
+            loop {
+                records.retain(|_, timestamp| timestamp.elapsed() < max_life);
+                tokio::time::sleep(max_life).await;
+            }
+        })));
     }
 
     /// Hot reload ACL rules by creating a new processor instance
@@ -98,6 +114,9 @@ impl AclFilter {
 
         let Some(acl_config) = acl_config else {
             self.acl_enabled.store(false, Ordering::Relaxed);
+            self.clean_task.lock().take();
+            self.acl_processor
+                .store(Arc::new(AclProcessor::new_disabled()));
             return;
         };
 
@@ -115,9 +134,16 @@ impl AclFilter {
 
         // Atomic replacement - this is completely lock-free!
         self.acl_processor.store(Arc::new(new_processor));
+        self.start_allow_record_cleanup();
         self.acl_enabled.store(true, Ordering::Relaxed);
 
         tracing::info!("ACL rules hot reloaded with preserved state (lock-free)");
+    }
+
+    #[cfg(test)]
+    fn background_task_count_for_test(&self) -> usize {
+        usize::from(self.clean_task.lock().is_some())
+            + self.acl_processor.load().background_task_count_for_test()
     }
 
     /// Get current processor for processing packets
@@ -143,7 +169,9 @@ impl AclFilter {
         &self,
         packet: &ZCPacket,
         route: &(dyn super::route_trait::Route + Send + Sync + 'static),
-    ) -> Option<PacketInfo> {
+        needs_src_groups: bool,
+        needs_dst_groups: bool,
+    ) -> Option<(PacketInfo, bool)> {
         let payload = packet.payload();
 
         let src_ip;
@@ -151,6 +179,7 @@ impl AclFilter {
         let src_port;
         let dst_port;
         let protocol;
+        let tcp_is_initial_syn;
 
         let ipv4_packet = Ipv4Packet::new(payload)?;
         if ipv4_packet.get_version() == 4 {
@@ -161,6 +190,8 @@ impl AclFilter {
             (src_port, dst_port) = match protocol {
                 IpNextHeaderProtocols::Tcp => {
                     let tcp_packet = TcpPacket::new(ipv4_packet.payload())?;
+                    let flags = tcp_packet.get_flags();
+                    tcp_is_initial_syn = flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK == 0;
                     (
                         Some(tcp_packet.get_source()),
                         Some(tcp_packet.get_destination()),
@@ -168,12 +199,16 @@ impl AclFilter {
                 }
                 IpNextHeaderProtocols::Udp => {
                     let udp_packet = UdpPacket::new(ipv4_packet.payload())?;
+                    tcp_is_initial_syn = false;
                     (
                         Some(udp_packet.get_source()),
                         Some(udp_packet.get_destination()),
                     )
                 }
-                _ => (None, None),
+                _ => {
+                    tcp_is_initial_syn = false;
+                    (None, None)
+                }
             };
         } else if ipv4_packet.get_version() == 6 {
             let ipv6_packet = Ipv6Packet::new(payload)?;
@@ -184,6 +219,8 @@ impl AclFilter {
             (src_port, dst_port) = match protocol {
                 IpNextHeaderProtocols::Tcp => {
                     let tcp_packet = TcpPacket::new(ipv6_packet.payload())?;
+                    let flags = tcp_packet.get_flags();
+                    tcp_is_initial_syn = flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK == 0;
                     (
                         Some(tcp_packet.get_source()),
                         Some(tcp_packet.get_destination()),
@@ -191,12 +228,16 @@ impl AclFilter {
                 }
                 IpNextHeaderProtocols::Udp => {
                     let udp_packet = UdpPacket::new(ipv6_packet.payload())?;
+                    tcp_is_initial_syn = false;
                     (
                         Some(udp_packet.get_source()),
                         Some(udp_packet.get_destination()),
                     )
                 }
-                _ => (None, None),
+                _ => {
+                    tcp_is_initial_syn = false;
+                    (None, None)
+                }
             };
         } else {
             return None;
@@ -210,25 +251,36 @@ impl AclFilter {
             _ => Protocol::Unspecified,
         };
 
-        let src_groups = packet
-            .get_src_peer_id()
-            .map(|peer_id| route.get_peer_groups(peer_id))
-            .unwrap_or_else(|| Arc::new(Vec::new()));
-        let dst_groups = packet
-            .get_dst_peer_id()
-            .map(|peer_id| route.get_peer_groups(peer_id))
-            .unwrap_or_else(|| Arc::new(Vec::new()));
+        let src_groups = if needs_src_groups {
+            packet
+                .get_src_peer_id()
+                .map(|peer_id| route.get_peer_groups(peer_id))
+                .unwrap_or_else(|| EMPTY_GROUPS.clone())
+        } else {
+            EMPTY_GROUPS.clone()
+        };
+        let dst_groups = if needs_dst_groups {
+            packet
+                .get_dst_peer_id()
+                .map(|peer_id| route.get_peer_groups(peer_id))
+                .unwrap_or_else(|| EMPTY_GROUPS.clone())
+        } else {
+            EMPTY_GROUPS.clone()
+        };
 
-        Some(PacketInfo {
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            protocol: acl_protocol,
-            packet_size: payload.len(),
-            src_groups,
-            dst_groups,
-        })
+        Some((
+            PacketInfo {
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                protocol: acl_protocol,
+                packet_size: payload.len(),
+                src_groups,
+                dst_groups,
+            },
+            tcp_is_initial_syn,
+        ))
     }
 
     /// Process ACL result and log if needed
@@ -314,6 +366,18 @@ impl AclFilter {
         }
     }
 
+    fn needs_response_record(protocol: Protocol) -> bool {
+        protocol != Protocol::Tcp
+    }
+
+    fn allow_untracked_tcp_reply(
+        chain_type: ChainType,
+        protocol: Protocol,
+        tcp_is_initial_syn: bool,
+    ) -> bool {
+        chain_type == ChainType::Inbound && protocol == Protocol::Tcp && !tcp_is_initial_syn
+    }
+
     /// Common ACL processing logic
     pub fn process_packet_with_acl(
         &self,
@@ -331,8 +395,13 @@ impl AclFilter {
             return true;
         }
 
-        // Extract packet information
-        let packet_info = match self.extract_packet_info(packet, route) {
+        let processor = self.acl_processor.load();
+        let (packet_info, tcp_is_initial_syn) = match self.extract_packet_info(
+            packet,
+            route,
+            processor.needs_src_groups(),
+            processor.needs_dst_groups(),
+        ) {
             Some(info) => info,
             None => {
                 tracing::warn!(
@@ -347,10 +416,6 @@ impl AclFilter {
 
         let chain_type = Self::classify_chain_type(is_in, &packet_info, my_ipv4, is_local_ipv6);
 
-        // Get current processor atomically
-        let processor = self.get_processor();
-
-        // Process through ACL rules
         let acl_result = processor.process_packet(&packet_info, chain_type);
 
         self.handle_acl_result(&acl_result, &packet_info, chain_type, &processor);
@@ -358,7 +423,9 @@ impl AclFilter {
         // Check if packet should be allowed
         match acl_result.action {
             Action::Allow | Action::Noop => {
-                if matches!(chain_type, ChainType::Outbound) {
+                if matches!(chain_type, ChainType::Outbound)
+                    && Self::needs_response_record(packet_info.protocol)
+                {
                     self.outbound_allow_records.insert(
                         OutboundAllowRecord::new_from_outbound_packet(&packet_info),
                         Instant::now(),
@@ -367,6 +434,14 @@ impl AclFilter {
                 true
             }
             Action::Drop => {
+                if Self::allow_untracked_tcp_reply(
+                    chain_type,
+                    packet_info.protocol,
+                    tcp_is_initial_syn,
+                ) {
+                    return true;
+                }
+
                 if is_in {
                     let record = OutboundAllowRecord::new_from_inbound_packet(&packet_info);
                     let entry = self.outbound_allow_records.entry(record);
@@ -484,5 +559,40 @@ mod tests {
         filter.reload_rules(None);
 
         assert_eq!(filter.outbound_allow_records.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_acl_has_no_background_tasks() {
+        let filter = AclFilter::new();
+        assert_eq!(filter.background_task_count_for_test(), 0);
+
+        filter.reload_rules(Some(&Acl::default()));
+        assert_eq!(filter.background_task_count_for_test(), 3);
+
+        filter.reload_rules(None);
+        assert_eq!(filter.background_task_count_for_test(), 0);
+    }
+
+    #[test]
+    fn response_tracking_matches_the_compiled_firewall_model() {
+        assert!(!AclFilter::needs_response_record(Protocol::Tcp));
+        assert!(AclFilter::needs_response_record(Protocol::Udp));
+        assert!(AclFilter::needs_response_record(Protocol::Icmp));
+
+        assert!(AclFilter::allow_untracked_tcp_reply(
+            ChainType::Inbound,
+            Protocol::Tcp,
+            false,
+        ));
+        assert!(!AclFilter::allow_untracked_tcp_reply(
+            ChainType::Inbound,
+            Protocol::Tcp,
+            true,
+        ));
+        assert!(!AclFilter::allow_untracked_tcp_reply(
+            ChainType::Forward,
+            Protocol::Tcp,
+            false,
+        ));
     }
 }

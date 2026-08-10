@@ -133,6 +133,16 @@ const FLOW_SHARD_MASK: u8 = 0x3f;
 const CRITICAL_L2_DUPLICATE: u8 = 0x40;
 
 impl PeerManagerHeader {
+    fn initialize(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8, len: u32) {
+        self.from_peer_id.set(from_peer_id);
+        self.to_peer_id.set(to_peer_id);
+        self.packet_type = packet_type;
+        self.flags = 0;
+        self.forward_counter = 1;
+        self.reserved = 0;
+        self.len.set(len);
+    }
+
     pub fn flow_shard(&self) -> Option<u16> {
         (self.reserved & FLOW_SHARD_PRESENT != 0)
             .then_some(u16::from(self.reserved & FLOW_SHARD_MASK))
@@ -560,10 +570,12 @@ impl ZCPacket {
             .copy_from_slice(foreign_zc_packet.tunnel_payload());
 
         let hdr = ret.mut_peer_manager_header().unwrap();
-        hdr.from_peer_id = 0.into();
-        hdr.to_peer_id = 0.into();
-        hdr.packet_type = PacketType::ForeignNetworkPacket as u8;
-        hdr.len.set(total_payload_len as u32);
+        hdr.initialize(
+            0,
+            0,
+            PacketType::ForeignNetworkPacket as u8,
+            total_payload_len as u32,
+        );
 
         ret
     }
@@ -673,12 +685,7 @@ impl ZCPacket {
     pub fn fill_peer_manager_hdr(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8) {
         let payload_len = self.payload_len();
         let hdr = self.mut_peer_manager_header().unwrap();
-        hdr.from_peer_id.set(from_peer_id);
-        hdr.to_peer_id.set(to_peer_id);
-        hdr.packet_type = packet_type;
-        hdr.flags = 0;
-        hdr.forward_counter = 1;
-        hdr.len.set(payload_len as u32);
+        hdr.initialize(from_peer_id, to_peer_id, packet_type, payload_len as u32);
     }
 
     pub fn tunnel_payload(&self) -> &[u8] {
@@ -880,6 +887,42 @@ mod tests {
         header.set_critical_l2_duplicate(false);
         assert!(!header.is_critical_l2_duplicate());
         assert_eq!(header.flow_shard(), Some(37));
+    }
+
+    #[test]
+    fn filling_peer_header_clears_stale_reserved_flags() {
+        let mut packet = ZCPacket::new_with_payload(b"payload");
+        let header = packet.mut_peer_manager_header().unwrap();
+        header.set_critical_l2_duplicate(true);
+        header.set_flow_shard(17);
+
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+
+        let header = packet.peer_manager_header().unwrap();
+        assert!(!header.is_critical_l2_duplicate());
+        assert_eq!(header.flow_shard(), None);
+    }
+
+    #[test]
+    fn peer_header_initialization_clears_all_reused_state() {
+        let mut header = PeerManagerHeader {
+            flags: u8::MAX,
+            forward_counter: 7,
+            ..Default::default()
+        };
+        header.set_critical_l2_duplicate(true);
+        header.set_flow_shard(17);
+
+        header.initialize(3, 4, PacketType::ForeignNetworkPacket as u8, 99);
+
+        assert_eq!(header.from_peer_id.get(), 3);
+        assert_eq!(header.to_peer_id.get(), 4);
+        assert_eq!(header.packet_type, PacketType::ForeignNetworkPacket as u8);
+        assert_eq!(header.flags, 0);
+        assert_eq!(header.forward_counter, 1);
+        assert!(!header.is_critical_l2_duplicate());
+        assert_eq!(header.flow_shard(), None);
+        assert_eq!(header.len.get(), 99);
     }
 
     #[test]

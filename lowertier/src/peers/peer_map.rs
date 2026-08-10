@@ -243,6 +243,12 @@ impl PeerMap {
             NextHopPolicy::LeastHop => flow_hash,
             NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
         };
+        if let Some(path) = self
+            .flow_paths
+            .lookup(dst_peer_id, policy_flow, |path| self.has_peer(path))
+        {
+            return Some(path);
+        }
         let candidate = self.get_gateway_peer_id(dst_peer_id, policy).await?;
         Some(
             self.flow_paths

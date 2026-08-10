@@ -56,7 +56,7 @@ pub struct Peer {
     default_conn_id: Arc<AtomicCell<PeerConnId>>,
     peer_identity_type: Arc<AtomicCell<Option<PeerIdentityType>>>,
     peer_public_key: Arc<RwLock<Option<Vec<u8>>>>,
-    default_conn_id_clear_task: AbortOnDropHandle<()>,
+    default_conn_refresh_task: AbortOnDropHandle<()>,
 
     #[cfg(feature = "quic")]
     alternate_fec_encoder: Option<Arc<Mutex<AlternateFecEncoder>>>,
@@ -183,13 +183,27 @@ impl Peer {
 
         let conns_copy = conns.clone();
         let default_conn_id_copy = default_conn_id.clone();
-        let default_conn_id_clear_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        let selection_ctx = global_ctx.clone();
+        let default_conn_refresh_task = AbortOnDropHandle::new(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let has_sampled_connection = conns_copy.iter().any(|entry| {
-                    !entry.value().is_closed() && entry.value().get_stats().latency_us > 0
+                let default_conn_id = default_conn_id_copy.load();
+                let preferred_protocol = selection_ctx.flags_arc();
+                let preferred_protocol = preferred_protocol.default_protocol.as_str();
+                let current = conns_copy.get(&default_conn_id);
+                let current_is_live = current
+                    .as_ref()
+                    .is_some_and(|entry| !entry.value().is_closed());
+                let current_is_preferred = current.as_ref().is_some_and(|entry| {
+                    !entry.value().is_closed()
+                        && entry.value().tunnel_type() == Some(preferred_protocol)
                 });
-                if conns_copy.len() > 1 && has_sampled_connection {
+                drop(current);
+                let has_preferred = conns_copy.iter().any(|entry| {
+                    !entry.value().is_closed()
+                        && entry.value().tunnel_type() == Some(preferred_protocol)
+                });
+                if !current_is_live || (has_preferred && !current_is_preferred) {
                     default_conn_id_copy.store(PeerConnId::default());
                 }
             }
@@ -296,7 +310,7 @@ impl Peer {
             default_conn_id,
             peer_identity_type,
             peer_public_key,
-            default_conn_id_clear_task,
+            default_conn_refresh_task,
 
             #[cfg(feature = "quic")]
             alternate_fec_encoder,
@@ -376,33 +390,48 @@ impl Peer {
             return Some(conn.clone());
         }
 
-        // A zero latency means ping sampling has not completed. It must not beat
-        // a real measurement merely because its numeric value is smaller.
-        let mut min_latency = u64::MAX;
-        for conn in self.conns.iter() {
-            if conn.value().is_closed() {
+        let flags = self.global_ctx.flags_arc();
+        let preferred_protocol = flags.default_protocol.as_str();
+        let mut preferred_sampled: Option<(u64, ArcPeerConn)> = None;
+        let mut preferred_unsampled: Option<ArcPeerConn> = None;
+        let mut fallback_sampled: Option<(u64, ArcPeerConn)> = None;
+        let mut fallback_unsampled: Option<ArcPeerConn> = None;
+        for entry in self.conns.iter() {
+            let conn = entry.value();
+            if conn.is_closed() {
                 continue;
             }
-            let latency = conn.value().get_stats().latency_us;
-            if latency > 0 && latency < min_latency {
-                min_latency = latency;
-                self.default_conn_id.store(conn.get_conn_id());
+            let latency = conn.get_stats().latency_us;
+            let is_preferred = conn.tunnel_type() == Some(preferred_protocol);
+            if is_preferred && latency > 0 {
+                if preferred_sampled
+                    .as_ref()
+                    .is_none_or(|(best_latency, _)| latency < *best_latency)
+                {
+                    preferred_sampled = Some((latency, conn.clone()));
+                }
+            } else if is_preferred {
+                preferred_unsampled.get_or_insert_with(|| conn.clone());
+            } else if latency > 0 {
+                if fallback_sampled
+                    .as_ref()
+                    .is_none_or(|(best_latency, _)| latency < *best_latency)
+                {
+                    fallback_sampled = Some((latency, conn.clone()));
+                }
+            } else {
+                fallback_unsampled.get_or_insert_with(|| conn.clone());
             }
         }
-
-        if let Some(conn) = self.conns.get(&self.default_conn_id.load()) {
-            return Some(conn.clone());
-        }
-
-        let fallback = self
-            .conns
-            .iter()
-            .find(|conn| !conn.value().is_closed())
-            .map(|conn| conn.clone());
-        if let Some(conn) = &fallback {
+        let selected = preferred_sampled
+            .map(|(_, conn)| conn)
+            .or(preferred_unsampled)
+            .or_else(|| fallback_sampled.map(|(_, conn)| conn))
+            .or(fallback_unsampled);
+        if let Some(conn) = &selected {
             self.default_conn_id.store(conn.get_conn_id());
         }
-        fallback
+        selected
     }
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
@@ -631,9 +660,9 @@ mod tests {
     }
 
     #[cfg(feature = "quic")]
-    fn quic_test_info(local: &str, remote: &str) -> TunnelInfo {
+    fn test_tunnel_info(protocol: &str, local: &str, remote: &str) -> TunnelInfo {
         TunnelInfo {
-            tunnel_type: "quic".into(),
+            tunnel_type: protocol.into(),
             local_addr: Some(url::Url::parse(local).unwrap().into()),
             remote_addr: Some(url::Url::parse(remote).unwrap().into()),
             resolved_remote_addr: Some(url::Url::parse(remote).unwrap().into()),
@@ -671,11 +700,13 @@ mod tests {
             );
             client.unwrap();
             server.unwrap();
-            conn_a.set_tunnel_info_for_test(quic_test_info(
+            conn_a.set_tunnel_info_for_test(test_tunnel_info(
+                "quic",
                 &format!("quic://{local_ip}:{}", 31000 + index),
                 &format!("quic://{remote_ip}:11010"),
             ));
-            conn_b.set_tunnel_info_for_test(quic_test_info(
+            conn_b.set_tunnel_info_for_test(test_tunnel_info(
+                "quic",
                 &format!("quic://{remote_ip}:11010"),
                 &format!("quic://{local_ip}:{}", 31000 + index),
             ));
@@ -742,6 +773,42 @@ mod tests {
         let selected_id = peer.select_conn().await.unwrap().get_conn_id();
         peer.conns.clear();
         assert_eq!(selected_id, sampled_id);
+    }
+
+    #[tokio::test]
+    async fn configured_protocol_wins_over_a_lower_latency_fallback() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags().clone();
+        flags.default_protocol = "quic".to_owned();
+        global_ctx.set_flags(flags);
+        let peer = Peer::new(new_peer_id(), packet_send, global_ctx.clone());
+
+        let mut udp = unstarted_peer_conn(global_ctx.clone());
+        udp.set_tunnel_info_for_test(test_tunnel_info(
+            "udp",
+            "udp://127.0.0.1:10001",
+            "udp://127.0.0.1:10002",
+        ));
+        udp.record_latency_for_test(500);
+        let udp = Arc::new(udp);
+
+        let mut quic = unstarted_peer_conn(global_ctx);
+        quic.set_tunnel_info_for_test(test_tunnel_info(
+            "quic",
+            "quic://127.0.0.1:10003",
+            "quic://127.0.0.1:10004",
+        ));
+        quic.record_latency_for_test(2_000);
+        let quic = Arc::new(quic);
+        let quic_id = quic.get_conn_id();
+
+        peer.conns.insert(udp.get_conn_id(), udp);
+        peer.conns.insert(quic_id, quic);
+
+        let selected_id = peer.select_conn().await.unwrap().get_conn_id();
+        peer.conns.clear();
+        assert_eq!(selected_id, quic_id);
     }
 
     #[tokio::test]

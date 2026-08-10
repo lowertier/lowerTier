@@ -42,6 +42,18 @@ pub trait PeerPacketFilter {
     async fn try_process_packet_from_peer(&self, _zc_packet: ZCPacket) -> Option<ZCPacket> {
         Some(_zc_packet)
     }
+
+    async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+        let mut remaining = PacketBatch::new();
+        for packet in batch {
+            if let Some(packet) = self.try_process_packet_from_peer(packet).await {
+                remaining
+                    .try_push(packet)
+                    .expect("a filtered batch cannot exceed its input batch");
+            }
+        }
+        remaining
+    }
 }
 
 #[async_trait::async_trait]
@@ -197,7 +209,16 @@ pub const PUBLIC_SERVER_HOSTNAME_PREFIX: &str = "PublicServer_";
 mod vector_channel_tests {
     use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
 
-    use super::{create_packet_recv_chan, recv_packet_batch_from_chan};
+    use super::{PeerPacketFilter, create_packet_recv_chan, recv_packet_batch_from_chan};
+
+    struct KeepOddPackets;
+
+    #[async_trait::async_trait]
+    impl PeerPacketFilter for KeepOddPackets {
+        async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
+            (packet.payload()[0] % 2 == 1).then_some(packet)
+        }
+    }
 
     #[tokio::test]
     async fn peer_channel_queues_a_vector_as_one_ordered_job() {
@@ -219,6 +240,26 @@ mod vector_channel_tests {
                 .map(|packet| packet.payload()[0])
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_peer_filter_batch_preserves_order_and_consumption() {
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..6 {
+            batch
+                .try_push(ZCPacket::new_with_payload(&[value]))
+                .unwrap();
+        }
+
+        let filtered = KeepOddPackets.try_process_batch_from_peer(batch).await;
+
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|packet| packet.payload()[0])
+                .collect::<Vec<_>>(),
+            vec![1, 3, 5]
         );
     }
 }

@@ -108,6 +108,10 @@ pub type SplitTunnel = (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>
 pub trait Tunnel: Send {
     fn split(&self) -> SplitTunnel;
     fn info(&self) -> Option<TunnelInfo>;
+
+    fn is_transport_authenticated(&self) -> bool {
+        false
+    }
 }
 
 #[auto_impl::auto_impl(Arc)]

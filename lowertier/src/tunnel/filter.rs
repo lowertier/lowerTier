@@ -199,6 +199,10 @@ where
         self.inner.info()
     }
 
+    fn is_transport_authenticated(&self) -> bool {
+        self.inner.is_transport_authenticated()
+    }
+
     fn split(&self) -> (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>) {
         let (stream, sink) = self.inner.split();
         let filter = self.filter.clone();

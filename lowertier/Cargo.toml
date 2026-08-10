@@ -19,10 +19,13 @@ build = "build/main.rs"
 name = "lowertier-core"
 path = "src/lowertier-core.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "lowertier-cli"
 path = "src/lowertier-cli.rs"
+test = false
+bench = false
 
 [lib]
 name = "lowertier"
@@ -38,6 +41,10 @@ harness = false
 
 [[bench]]
 name = "l2_fabric"
+harness = false
+
+[[bench]]
+name = "acl_filter"
 harness = false
 
 [dependencies]

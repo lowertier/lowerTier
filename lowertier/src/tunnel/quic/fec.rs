@@ -85,6 +85,10 @@ impl FecEncoderState {
         self.close_block().map(Some)
     }
 
+    pub fn has_service_work(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
     pub fn abort_block(&mut self) {
         self.sources.clear();
         self.started_at = None;
@@ -548,18 +552,22 @@ mod tests {
     fn full_block_flushes_immediately_and_partial_block_waits_forty_ms() {
         let now = std::time::Instant::now();
         let mut encoder = FecEncoderState::new(2, std::time::Duration::from_millis(2)).unwrap();
+        assert!(!encoder.has_service_work());
         for index in 0..15 {
             let output = encoder
                 .push(Bytes::from(vec![index as u8; 64]), now)
                 .unwrap();
             assert!(output.completed.is_none());
         }
+        assert!(encoder.has_service_work());
         let output = encoder.push(Bytes::from(vec![15; 64]), now).unwrap();
         let completed = output.completed.unwrap();
         assert_eq!(completed.source_count, 16);
         assert_eq!(completed.parity.len(), 2);
+        assert!(!encoder.has_service_work());
 
         encoder.push(Bytes::from_static(b"partial"), now).unwrap();
+        assert!(encoder.has_service_work());
         assert!(
             encoder
                 .flush_due(now + std::time::Duration::from_millis(1))
@@ -572,6 +580,7 @@ mod tests {
             .unwrap();
         assert_eq!(partial.source_count, 1);
         assert_eq!(partial.parity.len(), 2);
+        assert!(!encoder.has_service_work());
     }
 
     #[test]

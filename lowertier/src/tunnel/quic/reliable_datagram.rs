@@ -131,6 +131,7 @@ struct PendingFrame {
 pub(super) struct QueuedFrame {
     pub frame_id: u64,
     pub datagrams: Vec<Bytes>,
+    pub pending_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +204,7 @@ impl SendState {
         Ok(QueuedFrame {
             frame_id,
             datagrams,
+            pending_bytes: self.pending_bytes,
         })
     }
 
@@ -242,6 +244,10 @@ impl SendState {
 
     pub fn pending_bytes(&self) -> usize {
         self.pending_bytes
+    }
+
+    pub fn has_service_work(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     pub fn retries_due(&mut self, now: Instant, rto: Duration) -> RetrySweep {
@@ -376,6 +382,17 @@ impl ReceiveState {
                 frame_id: fragment.frame_id,
             });
         }
+        if fragment.fragment_count == 1 {
+            if fragment.fragment_index != 0 || fragment.payload.len() != fragment.total_len {
+                return Err(invalid("single-fragment frame geometry is inconsistent"));
+            }
+            let frame_id = fragment.frame_id;
+            self.record_delivered(frame_id, now);
+            return Ok(ReceiveEvent::Complete {
+                frame_id,
+                frame: fragment.payload,
+            });
+        }
 
         if !self.partial.contains_key(&fragment.frame_id) {
             if self.partial.len() >= self.limits.max_partial_frames
@@ -506,6 +523,10 @@ impl ReceiveState {
 
     pub fn take_expired_partial_frames(&mut self) -> usize {
         std::mem::take(&mut self.expired_partial_frames)
+    }
+
+    pub fn has_service_work(&self) -> bool {
+        self.completed_since_feedback != 0 || !self.partial.is_empty()
     }
 
     #[cfg(test)]
@@ -932,6 +953,35 @@ mod tests {
     }
 
     #[test]
+    fn receiver_completes_single_fragment_without_partial_storage() {
+        let limits = ReceiveLimits {
+            max_partial_frames: 0,
+            max_partial_bytes: 0,
+            ..ReceiveLimits::default()
+        };
+        let fragment = match decode_datagram(
+            encode_frame(8, Bytes::from_static(b"complete"), 1200)
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap()
+        {
+            DatagramMessage::Data(fragment) => fragment,
+            _ => unreachable!(),
+        };
+        let mut receiver = ReceiveState::new(limits);
+
+        assert_eq!(
+            receiver.ingest(fragment, Instant::now()).unwrap(),
+            ReceiveEvent::Complete {
+                frame_id: 8,
+                frame: Bytes::from_static(b"complete"),
+            }
+        );
+        assert_eq!(receiver.partial_frame_count(), 0);
+    }
+
+    #[test]
     fn receiver_expires_partial_frames_and_enforces_bounds() {
         let limits = ReceiveLimits {
             max_partial_frames: 1,
@@ -993,6 +1043,10 @@ mod tests {
         let queued = sender
             .queue(Bytes::from(vec![0x33; 1500]), 1200, now, rto)
             .unwrap();
+        assert_eq!(
+            queued.pending_bytes,
+            queued.datagrams.iter().map(Bytes::len).sum::<usize>()
+        );
         assert_eq!(sender.pending_frame_count(), 1);
         assert!(
             sender
@@ -1009,12 +1063,44 @@ mod tests {
 
         assert!(sender.acknowledge(queued.frame_id));
         assert_eq!(sender.pending_frame_count(), 0);
+        assert!(!sender.has_service_work());
         assert!(
             sender
                 .retries_due(now + Duration::from_secs(1), rto)
                 .retries
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn sender_and_receiver_report_only_pending_service_work() {
+        let now = Instant::now();
+        let mut sender = SendState::default();
+        let queued = sender
+            .queue(
+                Bytes::from_static(b"frame"),
+                1200,
+                now,
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        assert!(sender.has_service_work());
+        assert!(sender.acknowledge(queued.frame_id));
+        assert!(!sender.has_service_work());
+
+        let fragment = match decode_datagram(queued.datagrams[0].clone()).unwrap() {
+            DatagramMessage::Data(fragment) => fragment,
+            _ => unreachable!(),
+        };
+        let mut receiver = ReceiveState::default();
+        receiver.ingest(fragment, now).unwrap();
+        assert!(receiver.has_service_work());
+        assert!(
+            receiver
+                .take_ack_range_if_due(now, 1, Duration::from_secs(1))
+                .is_some()
+        );
+        assert!(!receiver.has_service_work());
     }
 
     #[test]

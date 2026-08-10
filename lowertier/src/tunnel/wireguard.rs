@@ -917,9 +917,9 @@ pub mod tests {
     #[tokio::test]
     async fn bind_same_port() {
         let (server_cfg, _client_cfg) = create_wg_config();
-        let mut listener = WgTunnelListener::new("wg://[::1]:31015".parse().unwrap(), server_cfg);
+        let mut listener = WgTunnelListener::new("wg://[::1]:33014".parse().unwrap(), server_cfg);
         let (server_cfg, _client_cfg) = create_wg_config();
-        let mut listener2 = WgTunnelListener::new("wg://[::1]:31015".parse().unwrap(), server_cfg);
+        let mut listener2 = WgTunnelListener::new("wg://[::1]:33014".parse().unwrap(), server_cfg);
         listener.listen().await.unwrap();
         listener2.listen().await.unwrap();
     }
@@ -927,24 +927,24 @@ pub mod tests {
     #[tokio::test]
     async fn ipv6_pingpong() {
         let (server_cfg, client_cfg) = create_wg_config();
-        let listener = WgTunnelListener::new("wg://[::1]:31015".parse().unwrap(), server_cfg);
-        let connector = WgTunnelConnector::new("wg://[::1]:31015".parse().unwrap(), client_cfg);
+        let listener = WgTunnelListener::new("wg://[::1]:33015".parse().unwrap(), server_cfg);
+        let connector = WgTunnelConnector::new("wg://[::1]:33015".parse().unwrap(), client_cfg);
         _tunnel_pingpong(listener, connector).await
     }
 
     #[tokio::test]
     async fn ipv6_domain_pingpong() {
         let (server_cfg, client_cfg) = create_wg_config();
-        let listener = WgTunnelListener::new("wg://[::1]:31016".parse().unwrap(), server_cfg);
+        let listener = WgTunnelListener::new("wg://[::1]:33016".parse().unwrap(), server_cfg);
         let mut connector =
-            WgTunnelConnector::new("wg://localhost:31016".parse().unwrap(), client_cfg);
+            WgTunnelConnector::new("wg://localhost:33016".parse().unwrap(), client_cfg);
         connector.set_ip_version(IpVersion::V6);
         _tunnel_pingpong(listener, connector).await;
 
         let (server_cfg, client_cfg) = create_wg_config();
-        let listener = WgTunnelListener::new("wg://127.0.0.1:31016".parse().unwrap(), server_cfg);
+        let listener = WgTunnelListener::new("wg://127.0.0.1:33016".parse().unwrap(), server_cfg);
         let mut connector =
-            WgTunnelConnector::new("wg://localhost:31016".parse().unwrap(), client_cfg);
+            WgTunnelConnector::new("wg://localhost:33016".parse().unwrap(), client_cfg);
         connector.set_ip_version(IpVersion::V4);
         _tunnel_pingpong(listener, connector).await;
     }

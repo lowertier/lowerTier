@@ -1983,6 +1983,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires privileged TUN access"]
     async fn tun_test() {
         let _dev = run_test_helper().await.unwrap();
 

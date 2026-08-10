@@ -1081,6 +1081,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(protected_tcp_ports)]
     async fn should_deny_proxy_for_process_wide_rpc_port() {
         protected_port::clear_protected_tcp_ports_for_test();
         protected_port::register_protected_tcp_port(15888);
@@ -1112,6 +1113,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(protected_tcp_ports)]
     async fn public_ipv6_lease_is_treated_as_local_ip() {
         protected_port::clear_protected_tcp_ports_for_test();
 

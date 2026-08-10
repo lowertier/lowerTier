@@ -38,6 +38,7 @@ mod tests {
     };
 
     #[test]
+    #[serial_test::serial(protected_tcp_ports)]
     fn protected_tcp_port_registry_is_ref_counted() {
         clear_protected_tcp_ports_for_test();
 
@@ -53,6 +54,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(protected_tcp_ports)]
     fn unregistering_unknown_port_is_a_noop() {
         clear_protected_tcp_ports_for_test();
         unregister_protected_tcp_port(15888);

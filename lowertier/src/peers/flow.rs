@@ -449,13 +449,8 @@ impl FlowPathCache {
     {
         let key = FlowPathKey { destination, flow };
         let now = Instant::now();
-        if let Some(mut pinned) = self.entries.get_mut(&key) {
-            if now.duration_since(pinned.last_used) <= self.ttl && eligible(pinned.path) {
-                pinned.last_used = now;
-                return pinned.path;
-            }
-            drop(pinned);
-            self.entries.remove(&key);
+        if let Some(path) = self.lookup_key(key, now, &eligible) {
+            return path;
         }
         if self.entries.len() >= self.capacity {
             self.prune(now);
@@ -468,6 +463,28 @@ impl FlowPathCache {
             },
         );
         candidate
+    }
+
+    pub(crate) fn lookup<F>(&self, destination: PeerId, flow: u64, eligible: F) -> Option<PeerId>
+    where
+        F: Fn(PeerId) -> bool,
+    {
+        self.lookup_key(FlowPathKey { destination, flow }, Instant::now(), &eligible)
+    }
+
+    fn lookup_key<F>(&self, key: FlowPathKey, now: Instant, eligible: &F) -> Option<PeerId>
+    where
+        F: Fn(PeerId) -> bool,
+    {
+        if let Some(mut pinned) = self.entries.get_mut(&key) {
+            if now.duration_since(pinned.last_used) <= self.ttl && eligible(pinned.path) {
+                pinned.last_used = now;
+                return Some(pinned.path);
+            }
+            drop(pinned);
+            self.entries.remove(&key);
+        }
+        None
     }
 
     pub(crate) fn invalidate_path(&self, path: PeerId) {
@@ -614,6 +631,16 @@ mod tests {
 
         cache.invalidate_path(11);
         assert_eq!(cache.select(7, flow, 12, |_| true), 12);
+    }
+
+    #[test]
+    fn path_lookup_returns_a_live_pin_without_a_new_candidate() {
+        let cache = FlowPathCache::new(8, Duration::from_secs(60));
+        let flow = 0x2345;
+
+        assert_eq!(cache.select(7, flow, 11, |_| true), 11);
+        assert_eq!(cache.lookup(7, flow, |path| path == 11), Some(11));
+        assert_eq!(cache.lookup(7, flow, |_| false), None);
     }
 
     #[test]

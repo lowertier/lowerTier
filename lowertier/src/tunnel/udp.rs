@@ -408,6 +408,7 @@ fn prepare_udp_data_packet(packet: ZCPacket, conn_id: u32) -> ZCPacket {
     } else {
         header.len.set(udp_payload_len as u16);
         header.msg_type = UdpPacketType::Data as u8;
+        header.padding = 0;
     }
     packet
 }
@@ -1324,6 +1325,16 @@ mod tests {
         assert!(packet.is_lossy());
     }
 
+    #[test]
+    fn plain_udp_data_clears_reused_padding() {
+        let mut packet = ZCPacket::new_with_payload(b"plain-data").convert_type(ZCPacketType::UDP);
+        packet.mut_udp_tunnel_header().unwrap().padding = 0xfe;
+
+        let packet = prepare_udp_data_packet(packet, 0x1234_5678);
+
+        assert_eq!(packet.udp_tunnel_header().unwrap().padding, 0);
+    }
+
     fn assert_sync_packet_handler(_: fn(&mut UdpConnection, ZCPacket) -> Result<(), TunnelError>) {}
 
     #[tokio::test]
@@ -1657,8 +1668,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_conn_counter() {
-        let mut listener = UdpTunnelListener::new("udp://0.0.0.0:5556".parse().unwrap());
-        let mut connector = UdpTunnelConnector::new("udp://127.0.0.1:5556".parse().unwrap());
+        let mut listener = UdpTunnelListener::new("udp://0.0.0.0:5558".parse().unwrap());
+        let mut connector = UdpTunnelConnector::new("udp://127.0.0.1:5558".parse().unwrap());
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             let _c1 = connector.connect().await.unwrap();

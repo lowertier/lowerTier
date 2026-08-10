@@ -9,9 +9,6 @@ repository = "https://github.com/lowertier/lowertier"
 keywords = ["tun", "network", "tunnel", "bindings"]
 rust-version = "1.75"
 
-[lib]
-crate-type = ["staticlib", "cdylib", "lib"]
-
 [dependencies]
 bytes = { version = "1" }
 cfg-if = "1"

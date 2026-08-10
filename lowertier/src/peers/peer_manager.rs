@@ -56,7 +56,7 @@ use crate::{
     },
     tunnel::{
         self, Tunnel, TunnelConnector,
-        batch::{PacketBatch, ordered_parallel_try_for_each, parallel_crypto_enabled},
+        batch::PacketBatch,
         packet_def::{CompressorAlgo, PacketType, ZCPacket},
     },
 };
@@ -234,46 +234,17 @@ fn push_ordered_peer_batch(
 
 async fn prepare_packet_batch(
     compress_algo: CompressorAlgo,
-    encryptor: Arc<dyn Encryptor + 'static>,
     mut batch: PacketBatch,
-    secure_mode_enabled: bool,
 ) -> Result<PacketBatch, Error> {
     let compressor = DefaultCompressor {};
     for packet in batch.iter_mut() {
         stamp_packet_flow(packet);
+        compressor
+            .compress(packet, compress_algo)
+            .await
+            .with_context(|| "compress failed")?;
     }
-    if secure_mode_enabled {
-        for packet in batch.iter_mut() {
-            compressor
-                .compress(packet, compress_algo)
-                .await
-                .with_context(|| "compress failed")?;
-        }
-        return Ok(batch);
-    }
-
-    if parallel_crypto_enabled(batch.len()) {
-        for packet in batch.iter_mut() {
-            compressor
-                .compress(packet, compress_algo)
-                .await
-                .with_context(|| "compress failed")?;
-        }
-        ordered_parallel_try_for_each(&mut batch, |packet| encryptor.encrypt(packet))
-            .with_context(|| "encrypt failed")?;
-        Ok(batch)
-    } else {
-        for packet in batch.iter_mut() {
-            compressor
-                .compress(packet, compress_algo)
-                .await
-                .with_context(|| "compress failed")?;
-            encryptor
-                .encrypt(packet)
-                .with_context(|| "encrypt failed")?;
-        }
-        Ok(batch)
-    }
+    Ok(batch)
 }
 
 pub struct PeerManager {
@@ -1167,8 +1138,9 @@ impl PeerManager {
         self.tasks.lock().await.spawn(async move {
             tracing::trace!("start_peer_recv");
             while let Ok(batch) = recv_packet_batch_from_chan(&mut recv).await {
+                let disable_relay_data = global_ctx.flags_arc().disable_relay_data;
+                let mut local_batch = PacketBatch::new();
                 for ret in batch {
-                    let disable_relay_data = global_ctx.flags_arc().disable_relay_data;
                     let Err(mut ret) = Self::try_handle_foreign_network_packet(
                         ret,
                         my_peer_id,
@@ -1244,13 +1216,7 @@ impl PeerManager {
                                 || packet_type == PacketType::KcpSrc as u8
                                 || packet_type == PacketType::KcpDst as u8
                             {
-                                let _ = Self::try_compress_and_encrypt(
-                                    compress_algo,
-                                    &encryptor,
-                                    &mut ret,
-                                    secure_mode_enabled,
-                                )
-                                .await;
+                                let _ = Self::try_compress(compress_algo, &mut ret).await;
                             }
 
                             compress_tx_bytes_after.add(ret.buf_len() as u64);
@@ -1299,7 +1265,7 @@ impl PeerManager {
                             let _ = relay_peer_map.handle_handshake_packet(ret).await;
                             continue;
                         }
-                        if !secure_mode_enabled {
+                        if !secure_mode_enabled && is_encrypted {
                             if let Err(e) = encryptor.decrypt(&mut ret) {
                                 tracing::error!(?e, "decrypt failed");
                                 continue;
@@ -1345,22 +1311,24 @@ impl PeerManager {
                             continue;
                         }
 
-                        let mut processed = false;
-                        let mut zc_packet = Some(ret);
-                        tracing::trace!(?zc_packet, "try_process_packet_from_peer");
-                        for pipeline in pipe_line.read().await.iter().rev() {
-                            zc_packet = pipeline
-                                .try_process_packet_from_peer(zc_packet.unwrap())
-                                .await;
-                            if zc_packet.is_none() {
-                                processed = true;
-                                break;
-                            }
-                        }
-                        if !processed {
-                            tracing::error!(?zc_packet, "unhandled packet");
-                        }
+                        local_batch
+                            .try_push(ret)
+                            .expect("the local batch cannot exceed the received batch");
                     }
+                }
+                if local_batch.is_empty() {
+                    continue;
+                }
+                tracing::trace!(packets = local_batch.len(), "process peer packet batch");
+                let pipelines = pipe_line.read().await;
+                for pipeline in pipelines.iter().rev() {
+                    local_batch = pipeline.try_process_batch_from_peer(local_batch).await;
+                    if local_batch.is_empty() {
+                        break;
+                    }
+                }
+                if !local_batch.is_empty() {
+                    tracing::error!(packets = local_batch.len(), "unhandled packet batch");
                 }
             }
             panic!("done_peer_recv");
@@ -1385,48 +1353,87 @@ impl PeerManager {
 
     async fn init_packet_process_pipeline(&self) {
         // for tun/tap ip/eth packet.
+        enum NicPacketAction {
+            Send(ZCPacket),
+            Continue(ZCPacket),
+            Drop,
+        }
+
         struct NicPacketProcessor {
             nic_channel: PacketRecvChan,
             l2_fabric: Arc<L2Fabric>,
             ethernet_input: bool,
         }
-        #[async_trait::async_trait]
-        impl PeerPacketFilter for NicPacketProcessor {
-            async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
+
+        impl NicPacketProcessor {
+            fn classify(&self, packet: ZCPacket) -> NicPacketAction {
                 let hdr = packet.peer_manager_header().unwrap();
                 let packet_type = hdr.packet_type;
                 let from_peer_id = hdr.from_peer_id.get();
                 let is_ethernet = packet_type == PacketType::Ethernet as u8;
-                if (packet_type == PacketType::Data as u8 || is_ethernet)
-                    && !hdr.is_not_send_to_tun()
+                if (packet_type != PacketType::Data as u8 && !is_ethernet)
+                    || hdr.is_not_send_to_tun()
                 {
-                    if is_ethernet && !self.ethernet_input {
-                        tracing::debug!(
-                            from_peer_id,
-                            "dropping ethernet packet because tap input is disabled"
-                        );
-                        return None;
-                    }
-                    if hdr.is_encrypted() || hdr.is_compressed() {
-                        tracing::warn!(
-                            from_peer_id = hdr.from_peer_id.get(),
-                            to_peer_id = hdr.to_peer_id.get(),
-                            encrypted = hdr.is_encrypted(),
-                            compressed = hdr.is_compressed(),
-                            "dropping packet before nic because it is not fully decoded"
-                        );
-                        return None;
-                    }
-                    if is_ethernet {
-                        self.l2_fabric.learn_source(packet.payload(), from_peer_id);
-                    }
-                    tracing::trace!(?packet, "send packet to nic channel");
-                    // TODO: use a function to get the body ref directly for zero copy
-                    let _ = self.nic_channel.send(packet).await;
-                    None
-                } else {
-                    Some(packet)
+                    return NicPacketAction::Continue(packet);
                 }
+                if is_ethernet && !self.ethernet_input {
+                    tracing::debug!(
+                        from_peer_id,
+                        "dropping ethernet packet because tap input is disabled"
+                    );
+                    return NicPacketAction::Drop;
+                }
+                if hdr.is_encrypted() || hdr.is_compressed() {
+                    tracing::warn!(
+                        from_peer_id,
+                        to_peer_id = hdr.to_peer_id.get(),
+                        encrypted = hdr.is_encrypted(),
+                        compressed = hdr.is_compressed(),
+                        "dropping packet before nic because it is not fully decoded"
+                    );
+                    return NicPacketAction::Drop;
+                }
+                if is_ethernet {
+                    self.l2_fabric.learn_source(packet.payload(), from_peer_id);
+                }
+                NicPacketAction::Send(packet)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl PeerPacketFilter for NicPacketProcessor {
+            async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
+                match self.classify(packet) {
+                    NicPacketAction::Send(packet) => {
+                        tracing::trace!(?packet, "send packet to nic channel");
+                        let _ = self.nic_channel.send(packet).await;
+                        None
+                    }
+                    NicPacketAction::Continue(packet) => Some(packet),
+                    NicPacketAction::Drop => None,
+                }
+            }
+
+            async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+                let mut to_nic = PacketBatch::new();
+                let mut remaining = PacketBatch::new();
+                for packet in batch {
+                    match self.classify(packet) {
+                        NicPacketAction::Send(packet) => to_nic
+                            .try_push(packet)
+                            .expect("a NIC batch cannot exceed its input batch"),
+                        NicPacketAction::Continue(packet) => remaining
+                            .try_push(packet)
+                            .expect("a filtered batch cannot exceed its input batch"),
+                        NicPacketAction::Drop => {}
+                    }
+                }
+                if !to_nic.is_empty() {
+                    tracing::trace!(packets = to_nic.len(), "send packet batch to nic channel");
+                    // The channel is bounded and preserves packet order.
+                    let _ = self.nic_channel.send_batch(to_nic).await;
+                }
+                remaining
             }
         }
         self.add_packet_process_pipeline(Box::new(NicPacketProcessor {
@@ -1699,13 +1706,7 @@ impl PeerManager {
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
 
-        Self::try_compress_and_encrypt(
-            self.data_compress_algo,
-            &self.encryptor,
-            &mut msg,
-            self.is_secure_mode_enabled,
-        )
-        .await?;
+        Self::try_compress(self.data_compress_algo, &mut msg).await?;
 
         self.self_tx_counters
             .compress_tx_bytes_after
@@ -1806,13 +1807,7 @@ impl PeerManager {
         self.self_tx_counters
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
-        Self::try_compress_and_encrypt(
-            self.data_compress_algo,
-            &self.encryptor,
-            &mut msg,
-            self.is_secure_mode_enabled,
-        )
-        .await?;
+        Self::try_compress(self.data_compress_algo, &mut msg).await?;
         self.self_tx_counters
             .compress_tx_bytes_after
             .add(msg.buf_len() as u64);
@@ -2007,13 +2002,7 @@ impl PeerManager {
             self.self_tx_counters
                 .compress_tx_bytes_before
                 .add(peer_batch.buffer_byte_len() as u64);
-            let peer_batch = prepare_packet_batch(
-                self.data_compress_algo,
-                self.encryptor.clone(),
-                peer_batch,
-                self.is_secure_mode_enabled,
-            )
-            .await?;
+            let peer_batch = prepare_packet_batch(self.data_compress_algo, peer_batch).await?;
             self.self_tx_counters
                 .compress_tx_bytes_after
                 .add(peer_batch.buffer_byte_len() as u64);
@@ -2471,11 +2460,9 @@ impl PeerManager {
         (dst_peers, is_exit_node)
     }
 
-    pub async fn try_compress_and_encrypt(
+    pub async fn try_compress(
         compress_algo: CompressorAlgo,
-        encryptor: &Arc<dyn Encryptor + 'static>,
         msg: &mut ZCPacket,
-        secure_mode_enabled: bool,
     ) -> Result<(), Error> {
         stamp_packet_flow(msg);
         let compressor = DefaultCompressor {};
@@ -2483,9 +2470,6 @@ impl PeerManager {
             .compress(msg, compress_algo)
             .await
             .with_context(|| "compress failed")?;
-        if !secure_mode_enabled {
-            encryptor.encrypt(msg).with_context(|| "encrypt failed")?;
-        }
         Ok(())
     }
 
@@ -2537,13 +2521,7 @@ impl PeerManager {
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
 
-        Self::try_compress_and_encrypt(
-            self.data_compress_algo,
-            &self.encryptor,
-            &mut msg,
-            self.is_secure_mode_enabled,
-        )
-        .await?;
+        Self::try_compress(self.data_compress_algo, &mut msg).await?;
 
         self.self_tx_counters
             .compress_tx_bytes_after
@@ -3026,8 +3004,7 @@ mod tests {
     use super::{PeerManager, check_tunnel_info_underlay, prepare_packet_batch};
 
     #[tokio::test]
-    async fn legacy_packet_batch_crypto_preserves_order_and_authenticates_every_packet() {
-        let cipher = crate::peers::encrypt::create_encryptor("chacha20-poly1305", [3; 16], [7; 32]);
+    async fn packet_batch_defers_encryption_until_transport_selection() {
         let mut batch = PacketBatch::new();
         for sequence in 0_u8..8 {
             let mut packet = ZCPacket::new_with_payload(&[sequence; 64]);
@@ -3035,18 +3012,12 @@ mod tests {
             batch.try_push(packet).unwrap();
         }
 
-        let batch = prepare_packet_batch(
-            crate::tunnel::packet_def::CompressorAlgo::None,
-            cipher.clone(),
-            batch,
-            false,
-        )
-        .await
-        .unwrap();
+        let batch = prepare_packet_batch(crate::tunnel::packet_def::CompressorAlgo::None, batch)
+            .await
+            .unwrap();
 
-        for (sequence, mut packet) in batch.into_iter().enumerate() {
-            assert!(packet.peer_manager_header().unwrap().is_encrypted());
-            cipher.decrypt(&mut packet).unwrap();
+        for (sequence, packet) in batch.into_iter().enumerate() {
+            assert!(!packet.peer_manager_header().unwrap().is_encrypted());
             assert_eq!(packet.payload(), &[sequence as u8; 64]);
         }
     }

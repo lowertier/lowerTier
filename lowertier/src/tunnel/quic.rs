@@ -40,7 +40,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncWriteExt as _, net::UdpSocket};
+use tokio::{io::AsyncWriteExt as _, net::UdpSocket, sync::Notify};
 
 use super::{
     common::TcpZCPacketToBytes,
@@ -69,6 +69,17 @@ const QUIC_DATAGRAM_MIN_QUEUE_BUDGET: usize = 64 * 1024;
 const QUIC_DATAGRAM_ACK_BATCH_FRAMES: usize = 16;
 const QUIC_DATAGRAM_ACK_MAX_DELAY: Duration = Duration::from_millis(2);
 const QUIC_DATAGRAM_RECOVERED_QUEUE_CAPACITY: usize = 4096;
+
+fn periodic_quic_metrics_configured(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some()
+}
+
+fn periodic_quic_metrics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        periodic_quic_metrics_configured(std::env::var_os("LOWTIER_QUIC_METRICS").as_deref())
+    })
+}
 
 fn extend_bounded_queue<T>(
     queue: &mut VecDeque<T>,
@@ -122,14 +133,62 @@ mod tls {
     use std::sync::Arc;
 
     use anyhow::Context as _;
+    use hmac::{Hmac, Mac};
     use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
     use rustls::{
-        DigitallySignedStruct, SignatureScheme,
+        CertificateError, DigitallySignedStruct, DistinguishedName, SignatureScheme,
         client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
+        server::danger::{ClientCertVerified, ClientCertVerifier},
     };
+    use sha2::Sha256;
 
-    use crate::tunnel::TunnelError;
+    use crate::{common::config::NetworkIdentity, tunnel::TunnelError};
+
+    const NETWORK_IDENTITY_LABEL: &[u8] = b"lowertier QUIC network identity v1";
+    const ED25519_PKCS8_PREFIX: [u8; 16] = [
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+
+    pub(super) struct NetworkTlsIdentity {
+        pub(super) certificate: CertificateDer<'static>,
+        pub(super) private_key: PrivateKeyDer<'static>,
+    }
+
+    pub(super) fn network_identity(
+        identity: &NetworkIdentity,
+    ) -> Result<Option<NetworkTlsIdentity>, TunnelError> {
+        let Some(secret) = identity.network_secret.as_deref() else {
+            return Ok(None);
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+            .context("initialize QUIC network identity derivation")?;
+        mac.update(NETWORK_IDENTITY_LABEL);
+        mac.update(identity.network_name.as_bytes());
+        let seed = mac.finalize().into_bytes();
+
+        let mut key_der = Vec::with_capacity(ED25519_PKCS8_PREFIX.len() + seed.len());
+        key_der.extend_from_slice(&ED25519_PKCS8_PREFIX);
+        key_der.extend_from_slice(seed.as_slice());
+        let key_pair = rcgen::KeyPair::from_der_and_sign_algo(&key_der, &rcgen::PKCS_ED25519)
+            .context("create QUIC network identity key")?;
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
+        params.alg = &rcgen::PKCS_ED25519;
+        params.key_pair = Some(key_pair);
+        let certificate = rcgen::Certificate::from_params(params)
+            .context("create QUIC network identity certificate")?;
+        let certificate_der = CertificateDer::from(
+            certificate
+                .serialize_der()
+                .context("serialize QUIC network identity certificate")?,
+        );
+        let private_key = PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der()).into();
+        Ok(Some(NetworkTlsIdentity {
+            certificate: certificate_der,
+            private_key,
+        }))
+    }
 
     /// QUIC supplies standard TLS 1.3 AEAD, header protection, and key updates.
     /// LowTier's authenticated Noise session remains the peer identity layer,
@@ -141,6 +200,149 @@ mod tls {
     impl NoiseAuthenticatedPeerVerifier {
         fn new() -> Arc<Self> {
             Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
+        }
+    }
+
+    #[derive(Debug)]
+    struct NetworkCertificateVerifier {
+        certificate: CertificateDer<'static>,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+        root_hints: Vec<DistinguishedName>,
+    }
+
+    impl NetworkCertificateVerifier {
+        fn new(certificate: CertificateDer<'static>) -> Arc<Self> {
+            Arc::new(Self {
+                certificate,
+                provider: Arc::new(rustls::crypto::ring::default_provider()),
+                root_hints: Vec::new(),
+            })
+        }
+
+        fn verify_certificate(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+        ) -> Result<(), rustls::Error> {
+            if intermediates.is_empty() && end_entity.as_ref() == self.certificate.as_ref() {
+                Ok(())
+            } else {
+                Err(rustls::Error::InvalidCertificate(
+                    CertificateError::ApplicationVerificationFailure,
+                ))
+            }
+        }
+
+        fn verify_tls12(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            signature: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                signature,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            signature: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                signature,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn schemes(&self) -> Vec<SignatureScheme> {
+            self.provider
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    impl ServerCertVerifier for NetworkCertificateVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            self.verify_certificate(end_entity, intermediates)?;
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            signature: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            self.verify_tls12(message, cert, signature)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            signature: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            self.verify_tls13(message, cert, signature)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.schemes()
+        }
+    }
+
+    impl ClientCertVerifier for NetworkCertificateVerifier {
+        fn client_auth_mandatory(&self) -> bool {
+            false
+        }
+
+        fn root_hint_subjects(&self) -> &[DistinguishedName] {
+            &self.root_hints
+        }
+
+        fn verify_client_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            _now: UnixTime,
+        ) -> Result<ClientCertVerified, rustls::Error> {
+            self.verify_certificate(end_entity, intermediates)?;
+            Ok(ClientCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            signature: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            self.verify_tls12(message, cert, signature)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            signature: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            self.verify_tls13(message, cert, signature)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.schemes()
         }
     }
 
@@ -211,6 +413,25 @@ mod tls {
             .map_err(Into::into)
     }
 
+    pub(super) fn network_server_crypto(
+        identity: &NetworkIdentity,
+    ) -> Result<QuicServerConfig, TunnelError> {
+        let Some(identity) = network_identity(identity)? else {
+            return server_crypto();
+        };
+        let verifier = NetworkCertificateVerifier::new(identity.certificate.clone());
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .context("configure network-authenticated QUIC TLS 1.3 server")?
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![identity.certificate], identity.private_key)
+            .context("configure QUIC network server identity")?;
+        QuicServerConfig::try_from(config)
+            .context("convert network rustls server config to Quinn")
+            .map_err(Into::into)
+    }
+
     pub(super) fn client_crypto() -> Result<QuicClientConfig, TunnelError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ClientConfig::builder_with_provider(provider)
@@ -221,6 +442,26 @@ mod tls {
             .with_no_client_auth();
         QuicClientConfig::try_from(config)
             .context("convert rustls client config to Quinn")
+            .map_err(Into::into)
+    }
+
+    pub(super) fn network_client_crypto(
+        identity: &NetworkIdentity,
+    ) -> Result<QuicClientConfig, TunnelError> {
+        let Some(identity) = network_identity(identity)? else {
+            return client_crypto();
+        };
+        let verifier = NetworkCertificateVerifier::new(identity.certificate.clone());
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .context("configure network-authenticated QUIC TLS 1.3 client")?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(vec![identity.certificate], identity.private_key)
+            .context("configure QUIC network client identity")?;
+        QuicClientConfig::try_from(config)
+            .context("convert network rustls client config to Quinn")
             .map_err(Into::into)
     }
 }
@@ -289,6 +530,42 @@ pub fn client_config(flags: &Flags) -> Result<ClientConfig, TunnelError> {
     let mut config = ClientConfig::new(Arc::new(tls::client_crypto()?));
     config.transport_config(transport_config(flags)?);
     Ok(config)
+}
+
+fn server_config_for_network(
+    flags: &Flags,
+    identity: &crate::common::config::NetworkIdentity,
+) -> Result<ServerConfig, TunnelError> {
+    let mut config = ServerConfig::with_crypto(Arc::new(tls::network_server_crypto(identity)?));
+    config.transport_config(transport_config(flags)?);
+    Ok(config)
+}
+
+fn client_config_for_network(
+    flags: &Flags,
+    identity: &crate::common::config::NetworkIdentity,
+) -> Result<ClientConfig, TunnelError> {
+    let mut config = ClientConfig::new(Arc::new(tls::network_client_crypto(identity)?));
+    config.transport_config(transport_config(flags)?);
+    Ok(config)
+}
+
+fn connection_has_network_identity(
+    connection: &Connection,
+    identity: &crate::common::config::NetworkIdentity,
+) -> bool {
+    let Ok(Some(expected)) = tls::network_identity(identity) else {
+        return false;
+    };
+    let Some(peer_identity) = connection.peer_identity() else {
+        return false;
+    };
+    let Ok(certificates) =
+        peer_identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+    else {
+        return false;
+    };
+    certificates.len() == 1 && certificates[0].as_ref() == expected.certificate.as_ref()
 }
 
 pub fn endpoint_config() -> EndpointConfig {
@@ -596,7 +873,10 @@ impl QuicEndpointManager {
         })?;
 
         let endpoint = endpoint.expect("server endpoint creation should not return None");
-        endpoint.set_server_config(Some(server_config(&global_ctx.get_flags())?));
+        endpoint.set_server_config(Some(server_config_for_network(
+            &global_ctx.get_flags(),
+            &global_ctx.get_network_identity(),
+        )?));
         pool.push(endpoint.clone());
 
         Ok(endpoint)
@@ -685,20 +965,21 @@ impl QuicEndpointManager {
         addr: SocketAddr,
         bind_addrs: &[SocketAddr],
         policy: Arc<UnderlayPolicy>,
-    ) -> Result<(Endpoint, Connection), TunnelError> {
+    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
         let ip_version = if addr.ip().is_ipv4() {
             IpVersion::V4
         } else {
             IpVersion::V6
         };
         let flags = global_ctx.get_flags();
+        let identity = global_ctx.get_network_identity();
         let socket_mark = flags.socket_mark;
         ensure_remote_allowed(&policy, addr)?;
         let bind_addrs = eligible_bind_addrs(&policy, bind_addrs, addr)?;
         let manager = Self::load(global_ctx);
         if bind_addrs.is_empty() {
             return manager
-                .connect_with_ip_version(addr, ip_version, socket_mark, &flags)
+                .connect_with_ip_version(addr, ip_version, socket_mark, &flags, &identity)
                 .await;
         }
 
@@ -710,6 +991,7 @@ impl QuicEndpointManager {
                 socket_mark,
                 policy.clone(),
                 &flags,
+                &identity,
             ));
         }
         wait_for_connect_futures(futures).await
@@ -722,7 +1004,8 @@ impl QuicEndpointManager {
         socket_mark: Option<u32>,
         policy: Arc<UnderlayPolicy>,
         flags: &Flags,
-    ) -> Result<(Endpoint, Connection), TunnelError> {
+        identity: &crate::common::config::NetworkIdentity,
+    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
         let pool = if source.is_ipv4() {
             &self.ipv4
         } else {
@@ -732,10 +1015,13 @@ impl QuicEndpointManager {
         let mut endpoint_stopping_retries = 0;
 
         loop {
-            let mut endpoint = self.client_endpoint_for_source(source, socket_mark, &policy)?;
-            endpoint.set_default_client_config(client_config(flags)?);
+            let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy)?;
             let server_name = addr.ip().to_string();
-            let connecting = match endpoint.connect(addr, &server_name) {
+            let connecting = match endpoint.connect_with(
+                client_config_for_network(flags, identity)?,
+                addr,
+                &server_name,
+            ) {
                 Ok(connecting) => connecting,
                 Err(ConnectError::EndpointStopping) => {
                     self.remove_endpoint(&endpoint);
@@ -753,12 +1039,30 @@ impl QuicEndpointManager {
                         .into());
                 }
             };
-            let connection = connecting
-                .await
-                .with_context(|| format!("failed to connect to {}", addr))?;
+            let connection = match connecting.await {
+                Ok(connection) => connection,
+                Err(authentication_error) if identity.network_secret.is_some() => {
+                    tracing::debug!(
+                        ?authentication_error,
+                        %addr,
+                        "network-authenticated QUIC failed; retrying with inner encryption"
+                    );
+                    endpoint
+                        .connect_with(client_config(flags)?, addr, &server_name)
+                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                        .await
+                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error)
+                        .context(format!("failed to connect to {}", addr))
+                        .into());
+                }
+            };
             ensure_local_allowed(&policy, endpoint.local_addr()?)?;
             ensure_remote_allowed(&policy, connection.remote_address())?;
-            return Ok((endpoint, connection));
+            let authenticated = connection_has_network_identity(&connection, identity);
+            return Ok((endpoint, connection, authenticated));
         }
     }
 
@@ -768,15 +1072,19 @@ impl QuicEndpointManager {
         ip_version: IpVersion,
         socket_mark: Option<u32>,
         flags: &Flags,
-    ) -> Result<(Endpoint, Connection), TunnelError> {
+        identity: &crate::common::config::NetworkIdentity,
+    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
         let max_endpoint_stopping_retries = self.client_pool(ip_version).len().saturating_add(1);
         let mut endpoint_stopping_retries = 0;
 
         loop {
-            let mut endpoint = self.client_endpoint(ip_version, socket_mark)?;
-            endpoint.set_default_client_config(client_config(flags)?);
+            let endpoint = self.client_endpoint(ip_version, socket_mark)?;
             let server_name = addr.ip().to_string();
-            let connecting = match endpoint.connect(addr, &server_name) {
+            let connecting = match endpoint.connect_with(
+                client_config_for_network(flags, identity)?,
+                addr,
+                &server_name,
+            ) {
                 Ok(connecting) => connecting,
                 Err(ConnectError::EndpointStopping) => {
                     let local_addr = endpoint.local_addr().ok();
@@ -801,11 +1109,29 @@ impl QuicEndpointManager {
                         .into());
                 }
             };
-            let connection = connecting
-                .await
-                .with_context(|| format!("failed to connect to {}", addr))?;
+            let connection = match connecting.await {
+                Ok(connection) => connection,
+                Err(authentication_error) if identity.network_secret.is_some() => {
+                    tracing::debug!(
+                        ?authentication_error,
+                        %addr,
+                        "network-authenticated QUIC failed; retrying with inner encryption"
+                    );
+                    endpoint
+                        .connect_with(client_config(flags)?, addr, &server_name)
+                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                        .await
+                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error)
+                        .context(format!("failed to connect to {}", addr))
+                        .into());
+                }
+            };
 
-            return Ok((endpoint, connection));
+            let authenticated = connection_has_network_identity(&connection, identity);
+            return Ok((endpoint, connection, authenticated));
         }
     }
 }
@@ -950,7 +1276,7 @@ fn send_frame_with_io(
                 }
                 Err(error) => return Err(error),
             };
-        metrics.observe_queue_bytes(send.lock().pending_bytes());
+        metrics.observe_queue_bytes(queued.pending_bytes);
         let encoded_bytes = queued.datagrams.iter().map(Bytes::len).sum();
         if !io.has_send_buffer_space(encoded_bytes) {
             send.lock().acknowledge(queued.frame_id);
@@ -1030,13 +1356,14 @@ fn send_frame_with_io(
                     ));
                 }
             }
-            if let Some(duplicate_datagram) = duplicate_datagram {
-                io.send_datagram(duplicate_datagram).map_err(|error| {
-                    TunnelError::Anyhow(
-                        anyhow::Error::new(error)
-                            .context("send duplicate critical L2 QUIC DATAGRAM failed"),
-                    )
-                })?;
+            if let Some(duplicate_datagram) = duplicate_datagram
+                && let Err(error) = io.send_datagram(duplicate_datagram)
+            {
+                send.lock().acknowledge(queued.frame_id);
+                return Err(TunnelError::Anyhow(
+                    anyhow::Error::new(error)
+                        .context("send duplicate critical L2 QUIC DATAGRAM failed"),
+                ));
             }
         }
         if duplicate {
@@ -1081,6 +1408,17 @@ struct ReliableDatagramState {
     recovered_packets: Mutex<VecDeque<ZCPacket>>,
     critical_l2_duplication: bool,
     metrics: QuicDatagramMetrics,
+    service_notify: Arc<Notify>,
+}
+
+fn reliable_datagram_service_has_work(
+    send: &SendState,
+    receive: &ReceiveState,
+    fec_send: Option<&FecEncoderState>,
+) -> bool {
+    send.has_service_work()
+        || receive.has_service_work()
+        || fec_send.is_some_and(FecEncoderState::has_service_work)
 }
 
 impl ReliableDatagramState {
@@ -1101,7 +1439,17 @@ impl ReliableDatagramState {
             recovered_packets: Mutex::new(VecDeque::new()),
             critical_l2_duplication: flags.quic_critical_l2_duplication,
             metrics: QuicDatagramMetrics::default(),
+            service_notify: Arc::new(Notify::new()),
         })
+    }
+
+    fn has_service_work(&self) -> bool {
+        if self.send.lock().has_service_work() || self.receive.lock().has_service_work() {
+            return true;
+        }
+        self.fec_send
+            .as_ref()
+            .is_some_and(|fec| fec.lock().has_service_work())
     }
 
     fn send_packet(&self, packet: ZCPacket) -> Result<(), TunnelError> {
@@ -1124,6 +1472,8 @@ impl ReliableDatagramState {
         )?;
         if outcome == DatagramSendOutcome::Dropped {
             tracing::trace!("dropping L2 QUIC DATAGRAM because the bounded send queue is full");
+        } else {
+            self.service_notify.notify_one();
         }
         Ok(())
     }
@@ -1189,7 +1539,7 @@ impl ReliableDatagramState {
         fragment: reliable_datagram::DataFragment,
         now: Instant,
     ) -> Result<Option<ZCPacket>, TunnelError> {
-        let (event, ack_range) = {
+        let (event, ack_range, service_work) = {
             let mut receive = self.receive.lock();
             let event = receive.ingest(fragment, now)?;
             let ack_range = match event {
@@ -1201,8 +1551,12 @@ impl ReliableDatagramState {
                 ReceiveEvent::Duplicate { .. } => receive.ack_range(),
                 ReceiveEvent::Pending => None,
             };
-            (event, ack_range)
+            let service_work = receive.has_service_work();
+            (event, ack_range, service_work)
         };
+        if service_work {
+            self.service_notify.notify_one();
+        }
         if let Some((largest_frame_id, received)) = ack_range {
             self.send_ack_range(largest_frame_id, received)?;
         }
@@ -1482,14 +1836,27 @@ impl ReliableDatagramState {
 
 impl Drop for ReliableDatagramState {
     fn drop(&mut self) {
+        self.service_notify.notify_one();
         self.log_metrics("connection_drop");
     }
 }
 
-async fn run_reliable_datagram_retransmissions(state: Weak<ReliableDatagramState>) {
+async fn run_reliable_datagram_retransmissions(
+    state: Weak<ReliableDatagramState>,
+    service_notify: Arc<Notify>,
+) {
     let mut interval = tokio::time::interval(QUIC_DATAGRAM_ACK_MAX_DELAY);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        let Some(active) = state.upgrade() else {
+            return;
+        };
+        let has_service_work = active.has_service_work();
+        drop(active);
+        if !has_service_work {
+            service_notify.notified().await;
+            continue;
+        }
         interval.tick().await;
         let Some(state) = state.upgrade() else {
             return;
@@ -1668,14 +2035,18 @@ fn build_quic_hybrid_tunnel(
     max_packet_size: usize,
     info: TunnelInfo,
     flags: &Flags,
+    transport_authenticated: bool,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let connection = Arc::new(ConnWrapper { conn: connection });
     let datagram = Arc::new(ReliableDatagramState::new(connection.conn.clone(), flags)?);
-    tokio::spawn(run_reliable_datagram_retransmissions(Arc::downgrade(
-        &datagram,
-    )));
-    tokio::spawn(run_reliable_datagram_metrics(Arc::downgrade(&datagram)));
-    Ok(Box::new(TunnelWrapper::new(
+    tokio::spawn(run_reliable_datagram_retransmissions(
+        Arc::downgrade(&datagram),
+        datagram.service_notify.clone(),
+    ));
+    if periodic_quic_metrics_enabled() {
+        tokio::spawn(run_reliable_datagram_metrics(Arc::downgrade(&datagram)));
+    }
+    Ok(Box::new(TunnelWrapper::new_with_transport_authentication(
         QuicHybridReader::new(
             reliable_recv,
             max_packet_size,
@@ -1684,6 +2055,7 @@ fn build_quic_hybrid_tunnel(
         ),
         QuicHybridWriter::new(reliable_send, connection, datagram),
         Some(info),
+        transport_authenticated,
     )))
 }
 
@@ -1712,6 +2084,8 @@ impl QuicTunnelListener {
             .await
             .ok_or_else(|| anyhow::anyhow!("accept failed, no incoming"))?;
         let conn = conn.await.with_context(|| "accept connection failed")?;
+        let transport_authenticated =
+            connection_has_network_identity(&conn, &self.global_ctx.get_network_identity());
         let remote_addr = conn.remote_address();
         let (mut w, mut r) = conn.accept_bi().await.with_context(|| "accept_bi failed")?;
         exchange_datagram_preface(&mut w, &mut r, false).await?;
@@ -1728,7 +2102,7 @@ impl QuicTunnelListener {
         };
 
         let flags = self.global_ctx.config.get_flags();
-        build_quic_hybrid_tunnel(conn, w, r, 2000, info, &flags)
+        build_quic_hybrid_tunnel(conn, w, r, 2000, info, &flags, transport_authenticated)
     }
 }
 
@@ -1803,7 +2177,7 @@ impl TunnelConnector for QuicTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
-        let (endpoint, connection) = QuicEndpointManager::connect(
+        let (endpoint, connection, transport_authenticated) = QuicEndpointManager::connect(
             &self.global_ctx,
             addr,
             &self.bind_addrs,
@@ -1832,7 +2206,15 @@ impl TunnelConnector for QuicTunnelConnector {
         };
 
         let flags = self.global_ctx.config.get_flags();
-        build_quic_hybrid_tunnel(connection, w, r, 4500, info, &flags)
+        build_quic_hybrid_tunnel(
+            connection,
+            w,
+            r,
+            4500,
+            info,
+            &flags,
+            transport_authenticated,
+        )
     }
 
     fn remote_url(&self) -> url::Url {
@@ -1868,6 +2250,47 @@ mod tests {
     use tokio::runtime::{Builder, Runtime};
 
     use super::*;
+
+    #[test]
+    fn reliable_datagram_service_sleeps_only_without_pending_work() {
+        let now = Instant::now();
+        let mut send = SendState::default();
+        let receive = ReceiveState::default();
+        let fec = FecEncoderState::new(2, FEC_FLUSH_DELAY).unwrap();
+        assert!(!reliable_datagram_service_has_work(
+            &send,
+            &receive,
+            Some(&fec)
+        ));
+
+        let queued = send
+            .queue(
+                Bytes::from_static(b"frame"),
+                1200,
+                now,
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        assert!(reliable_datagram_service_has_work(
+            &send,
+            &receive,
+            Some(&fec)
+        ));
+        assert!(send.acknowledge(queued.frame_id));
+        assert!(!reliable_datagram_service_has_work(
+            &send,
+            &receive,
+            Some(&fec)
+        ));
+    }
+
+    #[test]
+    fn periodic_quic_metrics_are_explicitly_enabled() {
+        assert!(!periodic_quic_metrics_configured(None));
+        assert!(periodic_quic_metrics_configured(Some(
+            std::ffi::OsStr::new("1")
+        )));
+    }
 
     #[test]
     fn recovered_queue_extension_is_hard_bounded() {
@@ -1994,9 +2417,9 @@ mod tests {
         RUNTIME.block_on(ipv6_pingpong_impl())
     }
     async fn ipv6_pingpong_impl() {
-        let listener = QuicTunnelListener::new("quic://[::1]:31015".parse().unwrap(), global_ctx());
+        let listener = QuicTunnelListener::new("quic://[::1]:32015".parse().unwrap(), global_ctx());
         let connector =
-            QuicTunnelConnector::new("quic://[::1]:31015".parse().unwrap(), global_ctx());
+            QuicTunnelConnector::new("quic://[::1]:32015".parse().unwrap(), global_ctx());
         _tunnel_pingpong(listener, connector).await
     }
 
@@ -2005,16 +2428,16 @@ mod tests {
         RUNTIME.block_on(ipv6_domain_pingpong_impl())
     }
     async fn ipv6_domain_pingpong_impl() {
-        let listener = QuicTunnelListener::new("quic://[::1]:31016".parse().unwrap(), global_ctx());
+        let listener = QuicTunnelListener::new("quic://[::1]:32016".parse().unwrap(), global_ctx());
         let mut connector =
-            QuicTunnelConnector::new("quic://localhost:31016".parse().unwrap(), global_ctx());
+            QuicTunnelConnector::new("quic://localhost:32016".parse().unwrap(), global_ctx());
         connector.set_ip_version(IpVersion::V6);
         _tunnel_pingpong(listener, connector).await;
 
         let listener =
-            QuicTunnelListener::new("quic://127.0.0.1:31016".parse().unwrap(), global_ctx());
+            QuicTunnelListener::new("quic://127.0.0.1:32016".parse().unwrap(), global_ctx());
         let mut connector =
-            QuicTunnelConnector::new("quic://localhost:31016".parse().unwrap(), global_ctx());
+            QuicTunnelConnector::new("quic://localhost:32016".parse().unwrap(), global_ctx());
         connector.set_ip_version(IpVersion::V4);
         _tunnel_pingpong(listener, connector).await;
     }
@@ -2074,6 +2497,7 @@ mod tests {
                     IpVersion::V4,
                     None,
                     &gen_default_flags(),
+                    &crate::common::config::NetworkIdentity::default(),
                 )
                 .await
                 .unwrap_err();
@@ -2191,6 +2615,202 @@ mod tests {
         });
     }
 
+    #[test]
+    fn quic_network_identity_is_deterministic_and_secret_bound() {
+        let first = crate::common::config::NetworkIdentity::new(
+            "test-network".to_owned(),
+            "first-secret".to_owned(),
+        );
+        let same = crate::common::config::NetworkIdentity::new(
+            "test-network".to_owned(),
+            "first-secret".to_owned(),
+        );
+        let different = crate::common::config::NetworkIdentity::new(
+            "test-network".to_owned(),
+            "different-secret".to_owned(),
+        );
+
+        let first = tls::network_identity(&first).unwrap().unwrap();
+        let same = tls::network_identity(&same).unwrap().unwrap();
+        let different = tls::network_identity(&different).unwrap().unwrap();
+
+        assert_eq!(first.certificate, same.certificate);
+        assert_eq!(
+            first.private_key.secret_der(),
+            same.private_key.secret_der()
+        );
+        assert_ne!(first.certificate, different.certificate);
+    }
+
+    #[test]
+    fn quic_network_identity_authenticates_both_endpoints() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let identity = crate::common::config::NetworkIdentity::new(
+                "test-network".to_owned(),
+                "test-secret".to_owned(),
+            );
+            let server_endpoint = Endpoint::server(
+                server_config_for_network(&flags, &identity).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server =
+                tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint
+                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
+            let client = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let server = server.await.unwrap();
+
+            assert!(connection_has_network_identity(&client, &identity));
+            assert!(connection_has_network_identity(&server, &identity));
+        });
+    }
+
+    #[test]
+    fn quic_network_identity_rejects_a_different_secret() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_identity = crate::common::config::NetworkIdentity::new(
+                "test-network".to_owned(),
+                "server-secret".to_owned(),
+            );
+            let client_identity = crate::common::config::NetworkIdentity::new(
+                "test-network".to_owned(),
+                "client-secret".to_owned(),
+            );
+            let server_endpoint = Endpoint::server(
+                server_config_for_network(&flags, &server_identity).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server = tokio::spawn(async move { server_endpoint.accept().await.unwrap().await });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(
+                client_config_for_network(&flags, &client_identity).unwrap(),
+            );
+            let client = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await;
+            let server = server.await.unwrap();
+
+            assert!(client.is_err());
+            assert!(server.is_err());
+        });
+    }
+
+    #[test]
+    fn direct_quic_tunnel_reports_network_authentication() {
+        RUNTIME.block_on(async {
+            let server_ctx = global_ctx();
+            let client_ctx = global_ctx();
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), server_ctx);
+            listener.listen().await.unwrap();
+            let listener_addr = listener.local_url();
+            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+
+            let mut connector = QuicTunnelConnector::new(listener_addr, client_ctx);
+            let client = connector.connect().await.unwrap();
+            let server = server.await.unwrap();
+
+            assert!(client.is_transport_authenticated());
+            assert!(server.is_transport_authenticated());
+        });
+    }
+
+    #[test]
+    fn direct_quic_connection_falls_back_to_protected_compatibility() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let accept_endpoint = server_endpoint.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let incoming = accept_endpoint.accept().await.unwrap();
+                    if let Ok(connection) = incoming.await {
+                        return connection;
+                    }
+                }
+            });
+
+            let context = global_ctx();
+            let (_endpoint, connection, authenticated) = QuicEndpointManager::connect(
+                &context,
+                server_addr,
+                &[],
+                Arc::new(UnderlayPolicy::default()),
+            )
+            .await
+            .unwrap();
+            let _server = server.await.unwrap();
+
+            assert!(!authenticated);
+            connection.close(0_u32.into(), b"test complete");
+        });
+    }
+
+    #[test]
+    fn different_network_secrets_fall_back_without_transport_authentication() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_identity = crate::common::config::NetworkIdentity::new(
+                "test-network".to_owned(),
+                "server-secret".to_owned(),
+            );
+            let server_endpoint = Endpoint::server(
+                server_config_for_network(&flags, &server_identity).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let accept_endpoint = server_endpoint.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let incoming = accept_endpoint.accept().await.unwrap();
+                    if let Ok(connection) = incoming.await {
+                        return connection;
+                    }
+                }
+            });
+
+            let context = global_ctx();
+            context
+                .config
+                .set_network_identity(crate::common::config::NetworkIdentity::new(
+                    "test-network".to_owned(),
+                    "client-secret".to_owned(),
+                ));
+            let (_endpoint, connection, authenticated) = QuicEndpointManager::connect(
+                &context,
+                server_addr,
+                &[],
+                Arc::new(UnderlayPolicy::default()),
+            )
+            .await
+            .unwrap();
+            let _server = server.await.unwrap();
+
+            assert!(!authenticated);
+            connection.close(0_u32.into(), b"test complete");
+        });
+    }
+
     struct ShrinkingDatagramIo {
         max_size: AtomicUsize,
         reject_first: AtomicBool,
@@ -2198,6 +2818,10 @@ mod tests {
     }
 
     struct FullDatagramIo {
+        sent: AtomicUsize,
+    }
+
+    struct FailSecondDatagramIo {
         sent: AtomicUsize,
     }
 
@@ -2227,6 +2851,19 @@ mod tests {
                 return Err(quinn::SendDatagramError::TooLarge);
             }
             self.sent.lock().push(datagram);
+            Ok(())
+        }
+    }
+
+    impl QuicDatagramIo for FailSecondDatagramIo {
+        fn max_datagram_size(&self) -> Option<usize> {
+            Some(1200)
+        }
+
+        fn send_datagram(&self, _datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
+            if self.sent.fetch_add(1, Ordering::Relaxed) == 1 {
+                return Err(quinn::SendDatagramError::TooLarge);
+            }
             Ok(())
         }
     }
@@ -2325,6 +2962,31 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0], sent[1]);
         assert_eq!(metrics.snapshot().critical_duplicates_sent, 1);
+    }
+
+    #[test]
+    fn failed_critical_duplicate_releases_pending_frame() {
+        let io = FailSecondDatagramIo {
+            sent: AtomicUsize::new(0),
+        };
+        let send = Mutex::new(SendState::default());
+        let metrics = QuicDatagramMetrics::default();
+        assert!(
+            send_frame_with_io(
+                &io,
+                &send,
+                &metrics,
+                None,
+                Bytes::from_static(b"critical-arp"),
+                true,
+                DatagramSendTiming {
+                    now: Instant::now(),
+                    rto: Duration::from_millis(100),
+                },
+            )
+            .is_err()
+        );
+        assert!(!send.lock().has_service_work());
     }
 
     #[test]

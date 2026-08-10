@@ -102,6 +102,7 @@ pub struct TunnelWrapper<R, W> {
     writer: Arc<Mutex<Option<W>>>,
     info: Option<TunnelInfo>,
     associate_data: Option<Box<dyn Any + Send + 'static>>,
+    transport_authenticated: bool,
 }
 
 impl<R, W> TunnelWrapper<R, W> {
@@ -120,6 +121,22 @@ impl<R, W> TunnelWrapper<R, W> {
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
             associate_data,
+            transport_authenticated: false,
+        }
+    }
+
+    pub fn new_with_transport_authentication(
+        reader: R,
+        writer: W,
+        info: Option<TunnelInfo>,
+        transport_authenticated: bool,
+    ) -> Self {
+        TunnelWrapper {
+            reader: Arc::new(Mutex::new(Some(reader))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            info,
+            associate_data: None,
+            transport_authenticated,
         }
     }
 }
@@ -137,6 +154,10 @@ where
 
     fn info(&self) -> Option<TunnelInfo> {
         self.info.clone()
+    }
+
+    fn is_transport_authenticated(&self) -> bool {
+        self.transport_authenticated
     }
 }
 
