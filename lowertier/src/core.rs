@@ -1583,7 +1583,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
                 "Web client started successfully...",
             );
 
-            log::info!("Project website: https://github.com/lowertier/lowerTier");
+            log::info!("Project website: https://github.com/lowertier/lowertier");
         })?;
 
         Some(wc)

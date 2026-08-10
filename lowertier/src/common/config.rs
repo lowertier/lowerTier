@@ -295,7 +295,7 @@ pub fn parse_mapped_listener_urls(
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Display, EnumString, VariantArray)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Display, EnumString, VariantArray)]
 #[strum(ascii_case_insensitive)]
 pub enum EncryptionAlgorithm {
     #[strum(serialize = "aes-gcm")]
@@ -303,6 +303,7 @@ pub enum EncryptionAlgorithm {
     #[strum(serialize = "aes-256-gcm")]
     Aes256Gcm,
     #[strum(serialize = "chacha20-poly1305", serialize = "chacha20")]
+    #[default]
     ChaCha20Poly1305,
 }
 
@@ -319,12 +320,6 @@ impl ValueEnum for EncryptionAlgorithm {
 
     fn to_possible_value(&self) -> Option<PossibleValue> {
         Some(PossibleValue::new(self.to_string()))
-    }
-}
-
-impl Default for EncryptionAlgorithm {
-    fn default() -> Self {
-        EncryptionAlgorithm::ChaCha20Poly1305
     }
 }
 
@@ -1967,6 +1962,7 @@ enabled = true
         assert!(identity.network_secret_digest.is_some());
     }
 
+    #[cfg(feature = "websocket")]
     #[test]
     fn test_parse_mapped_listener_urls_allows_ws_without_port() {
         let parsed = parse_mapped_listener_urls(&[

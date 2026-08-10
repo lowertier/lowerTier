@@ -1,10 +1,10 @@
-name: LowTier Docker
+name: lowertier container
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 'The run id of LowTier-Core Action in LowTier repo'
+        description: "The successful lowertier core run ID"
         type: number
         default: 10228239965
         required: true
@@ -63,7 +63,7 @@ jobs:
         with:
           github_token: ${{secrets.GITHUB_TOKEN}}
           run_id: ${{ inputs.run_id }}
-          repo: lowertier/lowerTier
+          repo: lowertier/lowertier
           path: docker_context
       - name: List files
         run: |
@@ -97,7 +97,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./docker_context
-          platforms: linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,linux/riscv64
+          platforms: linux/amd64,linux/arm64
           push: true
           file: .github/workflows/Dockerfile
           tags: ${{ steps.tags.outputs.tags }}

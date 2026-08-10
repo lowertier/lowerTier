@@ -1,6 +1,6 @@
-# LowTier
+# lowertier
 
-LowTier is an L2-first mesh VPN for command-line deployments.
+lowertier is an L2-first mesh VPN for command-line deployments.
 
 LowTier carries Ethernet frames between peers through the LowTier routing and transport engine.
 The project provides the `lowertier-core` and `lowertier-cli` binaries.
@@ -10,11 +10,11 @@ It does not cover a web interface or graphical client.
 
 ## What LowTier provides
 
-- Native TAP transport for complete Ethernet behavior on Linux and FreeBSD.
-- An Ethernet overlay with an IP-only TUN edge on macOS, Windows, Android, and iOS.
+- Native TAP transport for complete Ethernet behavior on Linux.
+- An Ethernet overlay with an IP-only TUN edge on macOS and Windows.
 - Routed TUN mode for lower packet overhead.
 - Unprivileged SOCKS5 and HTTP proxy mode without TUN or TAP.
-- UDP, QUIC, TCP, WebSocket, WireGuard, and FakeTCP underlay transports.
+- UDP, QUIC, and TCP underlay transports in published builds.
 - Peer discovery, NAT traversal, subnet routes, exit nodes, ACLs, and port forwarding.
 - ChaCha20-Poly1305 authenticated encryption by default.
 - An optional secure mode with Noise authentication and replay protection.
@@ -41,7 +41,7 @@ TAP, TUN, or local proxy
         |
 LowTier route and Ethernet fabric
         |
-Encrypted UDP, QUIC, TCP, WS, WSS, WG, or FakeTCP link
+Encrypted UDP, QUIC, or TCP link
         |
 Remote LowTier peer
 ```
@@ -58,14 +58,14 @@ Select the mode that matches the operating system and application.
 | Userspace networking | `--tun=userspace-networking` | None | No | Not required |
 
 Native Ethernet supports ARP, VLAN, QinQ, LLDP, broadcast, multicast, and unknown EtherTypes.
-Native Ethernet requires Linux or FreeBSD.
+Native Ethernet requires Linux.
 
 Compatible Ethernet supports mixed TAP and TUN peers.
 The local TUN interface receives only IPv4 and IPv6 packets.
 Use this mode on macOS and other systems without TAP support.
 
 Routed mode has the lowest interface overhead.
-LowTier selects native Ethernet by default on Linux and FreeBSD.
+LowTier selects native Ethernet by default on Linux.
 LowTier selects compatible Ethernet by default on other systems.
 Set `routed` only when the node must use the L3 packet path.
 
@@ -78,10 +78,18 @@ Install a stable Rust toolchain and the platform build tools.
 Then build only the command-line package.
 
 ```bash
-git clone https://github.com/lowertier/lowerTier.git
-cd lowerTier
-cargo build --release --locked -p lowertier --bins
+git clone https://github.com/lowertier/lowertier.git
+cd lowertier
+cargo build --release --locked -p lowertier --bins \
+  --no-default-features --features lean
 ```
+
+The `lean` feature keeps TAP/TUN, QUIC, and unprivileged proxy support.
+It removes WebSocket, WireGuard, KCP, FakeTCP, Magic DNS, Zstandard, and optional allocators.
+The release profile uses fat LTO, optimization level 3, one code generation unit, symbol stripping, and aborting panics.
+Development and test builds retain panic unwinding for diagnostics.
+
+Use `--features full` only when the deployment requires every optional transport and service.
 
 The build creates these files.
 
@@ -106,7 +114,7 @@ lowertier-cli --version
 
 ## Start a native L2 network
 
-The following example connects two Linux or FreeBSD nodes.
+The following example connects two Linux nodes.
 Both nodes must use the same network name and secret.
 
 Generate a strong secret once.
@@ -158,10 +166,10 @@ Use a protected configuration file for a production deployment.
 
 ## Start a mixed Linux and macOS network
 
-Use native Ethernet on Linux or FreeBSD.
+Use native Ethernet on Linux.
 Use compatible Ethernet on macOS.
 
-Linux or FreeBSD:
+Linux:
 
 ```bash
 sudo lowertier-core \
@@ -352,7 +360,8 @@ peer_public_key = "<base64-x25519-public-key>"
 | `uri` | Yes | Selects the peer address and transport or discovery method. |
 | `peer_public_key` | No | Pins the peer X25519 public key in secure mode. |
 
-Direct peer schemes are `udp`, `quic`, `tcp`, `ws`, `wss`, `wg`, `faketcp`, and `ring`.
+Published binaries support `udp`, `quic`, `tcp`, and `ring` peer schemes.
+Full source builds also support `ws`, `wss`, `wg`, and `faketcp`.
 Connector-only discovery schemes are `http`, `https`, `txt`, and `srv`.
 Unix builds also support `unix` sockets.
 
@@ -368,17 +377,18 @@ listeners = [
 ]
 ```
 
-The full CLI build supports these listener schemes.
+Published binaries support UDP, QUIC, and TCP listeners.
+Rows marked as full require a full source build.
 
 | Scheme | Network protocol | Default port from base `11010` |
 | --- | --- | ---: |
 | `udp` | UDP | 11010 |
 | `quic` | UDP | 11012 |
-| `wg` | UDP | 11011 |
+| `wg` (full) | UDP | 11011 |
 | `tcp` | TCP | 11010 |
-| `ws` | TCP | 11011 |
-| `wss` | TCP with TLS | 11012 |
-| `faketcp` | Raw or emulated TCP path | 11013 |
+| `ws` (full) | TCP | 11011 |
+| `wss` (full) | TCP with TLS | 11012 |
+| `faketcp` (full) | Raw or emulated TCP path | 11013 |
 
 `--listeners 11010` creates every compiled IP listener with its standard offset.
 `--no-listener` creates an outbound-only node.
@@ -402,7 +412,7 @@ allow = ["tcp", "udp", "icmp"]
 
 The CLI shorthand is `--proxy-networks 10.20.0.0/16->172.20.0.0/16`.
 
-### WireGuard portal
+### WireGuard portal in a full source build
 
 ```toml
 [vpn_portal_config]
@@ -571,7 +581,7 @@ The table includes every supported flag.
 | `quic_critical_l2_duplication` | `true` | Duplicate critical ARP, DHCP, and neighbor-discovery frames. | `--quic-critical-l2-duplication` |
 | `quic_datagram_alternate_path_parity` | `true` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
 
-`auto` selects native Ethernet on Linux and FreeBSD.
+`auto` selects native Ethernet on Linux.
 `auto` selects routed mode on other systems.
 
 `l2_fdb_capacity` accepts values from 1 through 1,048,576.

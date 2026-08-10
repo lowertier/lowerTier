@@ -111,7 +111,7 @@ onUnmounted(() => {
                         <Button ref="toggleButtonRef" type="button" aria-haspopup="true" icon="pi pi-list"
                             variant="text" size="large" severity="contrast" @click="toggleSidebar" />
                     </div>
-                    <a href="https://github.com/lowertier/lowerTier" class="flex ms-2 md:me-24">
+                    <a href="https://github.com/lowertier/lowertier" class="flex ms-2 md:me-24">
                         <img :src="Icon" class="h-9 me-3" alt="FlowBite Logo" />
                         <span
                             class="self-center text-xl font-semibold sm:text-2xl whitespace-nowrap dark:text-white">LowTier</span>

@@ -43,7 +43,7 @@ $ProgressPreference = 'SilentlyContinue'
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-$GITHUB_REPO        = 'lowertier/lowerTier'
+$GITHUB_REPO        = 'lowertier/lowertier'
 $GITHUB_API         = "https://api.github.com/repos/$GITHUB_REPO"
 $GITHUB_RELEASE_URL = "https://github.com/$GITHUB_REPO/releases"
 
@@ -228,7 +228,7 @@ Write-Host ''
 Write-Host "  [OK] LowTier $releaseVersion installation complete!" -ForegroundColor Green
 Write-Host ''
 Write-Host "  Install dir : $InstallDir" -ForegroundColor White
-Write-Host '  User guide  : https://github.com/lowertier/lowerTier' -ForegroundColor DarkGray
+Write-Host '  User guide  : https://github.com/lowertier/lowertier' -ForegroundColor DarkGray
 Write-Host ''
 Write-Host '  NOTE: If PATH was just updated, please restart your terminal.' -ForegroundColor DarkYellow
 Write-Host ''

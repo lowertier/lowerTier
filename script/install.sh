@@ -198,7 +198,7 @@ CHECK() {
 
 INSTALL() {
   # Get version number
-  RESPONSE=$(curl -s "https://api.github.com/repos/lowertier/lowerTier/releases/latest")
+  RESPONSE=$(curl -s "https://api.github.com/repos/lowertier/lowertier/releases/latest")
   LATEST_VERSION=$(echo "$RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
   LATEST_VERSION=$(echo -e "$LATEST_VERSION" | tr -d '[:space:]')
 
@@ -210,7 +210,7 @@ INSTALL() {
   # Download
   echo -e "\r\n${GREEN_COLOR}Downloading LowTier $LATEST_VERSION ...${RES}"
   rm -rf /tmp/lowertier_tmp_install.zip
-  BASE_URL="https://github.com/lowertier/lowerTier/releases/latest/download/lowertier-linux-${ARCH}-${LATEST_VERSION}.zip"
+  BASE_URL="https://github.com/lowertier/lowertier/releases/latest/download/lowertier-linux-${ARCH}-${LATEST_VERSION}.zip"
   DOWNLOAD_URL=$($NO_GH_PROXY && echo "$BASE_URL" || echo "${GH_PROXY}${BASE_URL}")
   echo -e "Download URL: ${GREEN_COLOR}${DOWNLOAD_URL}${RES}"
   curl -L ${DOWNLOAD_URL} -o /tmp/lowertier_tmp_install.zip $CURL_BAR
@@ -398,7 +398,7 @@ UPDATE() {
 
   # 1. Get the latest version info (while service is still running)
   echo -e "${GREEN_COLOR}Checking for the latest version...${RES}"
-  RESPONSE=$(curl -s "https://api.github.com/repos/lowertier/lowerTier/releases/latest")
+  RESPONSE=$(curl -s "https://api.github.com/repos/lowertier/lowertier/releases/latest")
   LATEST_VERSION=$(echo "$RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
   LATEST_VERSION=$(echo -e "$LATEST_VERSION" | tr -d '[:space:]')
 
@@ -413,7 +413,7 @@ UPDATE() {
   TEMP_UPDATE_DIR=$(mktemp -d /tmp/lowertier_update_XXXXXX)
   echo -e "${GREEN_COLOR}Downloading new version to temporary directory: $TEMP_UPDATE_DIR${RES}"
   
-  BASE_URL="https://github.com/lowertier/lowerTier/releases/latest/download/lowertier-linux-${ARCH}-${LATEST_VERSION}.zip"
+  BASE_URL="https://github.com/lowertier/lowertier/releases/latest/download/lowertier-linux-${ARCH}-${LATEST_VERSION}.zip"
   DOWNLOAD_URL=$($NO_GH_PROXY && echo "$BASE_URL" || echo "${GH_PROXY}${BASE_URL}")
   
   echo -e "Download URL: ${GREEN_COLOR}${DOWNLOAD_URL}${RES}"

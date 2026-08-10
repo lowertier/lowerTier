@@ -59,7 +59,7 @@ pub fn setup_panic_handler() {
 
         log::error!("{}", rust_i18n::t!("core_app.panic_backtrace_save"));
 
-        // write str to stderr & file
+        // Write the panic data to stderr and the log file.
         let mut write_err = |s: String| {
             let _ = stderr.write_all(s.as_bytes());
             if let Some(mut f) = file.as_ref() {
@@ -68,7 +68,7 @@ pub fn setup_panic_handler() {
         };
 
         let msg = formatdoc! {"
-            panic occurred, if this is a bug, please report this issue on github (https://github.com/lowertier/lowerTier/issues)
+            panic occurred, if this is a bug, please report this issue on github (https://github.com/lowertier/lowertier/issues)
                 lowertier version: {version}
                 os: {os}
                 arch: {arch}

@@ -22,7 +22,7 @@ authors = [
 description = "an implementation of the WireGuard® protocol designed for portability and speed. modified version for LowTier."
 documentation = "https://docs.rs/boringtun/0.5.2/boringtun/"
 license = "BSD-3-Clause"
-repository = "https://github.com/lowertier/lowerTier"
+repository = "https://github.com/lowertier/lowertier"
 
 [lib]
 crate-type = [

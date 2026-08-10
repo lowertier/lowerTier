@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["meh. <meh@schizofreni.co>", "@ssrlive", "sijie.sun <sunsijie@buaa.edu.cn>"]
 license = "WTFPL"
 description = "TUN device creation and handling."
-repository = "https://github.com/lowertier/lowerTier"
+repository = "https://github.com/lowertier/lowertier"
 keywords = ["tun", "network", "tunnel", "bindings"]
 rust-version = "1.75"
 

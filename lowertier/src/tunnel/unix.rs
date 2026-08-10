@@ -153,7 +153,7 @@ impl Drop for UnixSocketTunnelListener {
 
 #[cfg(test)]
 mod tests {
-    use crate::tunnel::common::tests::{_tunnel_bench, _tunnel_pingpong};
+    use crate::tunnel::common::tests::_tunnel_pingpong;
 
     use super::*;
 
@@ -164,16 +164,6 @@ mod tests {
         let connector =
             UnixSocketTunnelConnector::new("unix:///tmp/lowertier-test.sock".parse().unwrap());
         _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    async fn unix_socket_bench() {
-        let listener =
-            UnixSocketTunnelListener::new("unix:///tmp/lowertier-test-bench.sock".parse().unwrap());
-        let connector = UnixSocketTunnelConnector::new(
-            "unix:///tmp/lowertier-test-bench.sock".parse().unwrap(),
-        );
-        _tunnel_bench(listener, connector).await
     }
 
     #[tokio::test]

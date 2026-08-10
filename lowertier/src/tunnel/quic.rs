@@ -909,6 +909,12 @@ enum DatagramSendOutcome {
     Dropped,
 }
 
+#[derive(Clone, Copy)]
+struct DatagramSendTiming {
+    now: Instant,
+    rto: Duration,
+}
+
 fn send_frame_with_io(
     io: &impl QuicDatagramIo,
     send: &Mutex<SendState>,
@@ -916,8 +922,7 @@ fn send_frame_with_io(
     fec_send: Option<&Mutex<FecEncoderState>>,
     frame: Bytes,
     immediate_duplicate: bool,
-    now: Instant,
-    rto: Duration,
+    timing: DatagramSendTiming,
 ) -> Result<DatagramSendOutcome, TunnelError> {
     const MAX_REFRAGMENT_ATTEMPTS: usize = 3;
     const MTU_RACE_SAFETY_MARGIN: usize = 32;
@@ -933,17 +938,18 @@ fn send_frame_with_io(
         } else {
             max_datagram_size
         };
-        let queued = match send
-            .lock()
-            .queue(frame.clone(), source_datagram_size, now, rto)
-        {
-            Ok(queued) => queued,
-            Err(TunnelError::BufferFull) => {
-                metrics.record_queue_drop_pending();
-                return Ok(DatagramSendOutcome::Dropped);
-            }
-            Err(error) => return Err(error),
-        };
+        let queued =
+            match send
+                .lock()
+                .queue(frame.clone(), source_datagram_size, timing.now, timing.rto)
+            {
+                Ok(queued) => queued,
+                Err(TunnelError::BufferFull) => {
+                    metrics.record_queue_drop_pending();
+                    return Ok(DatagramSendOutcome::Dropped);
+                }
+                Err(error) => return Err(error),
+            };
         metrics.observe_queue_bytes(send.lock().pending_bytes());
         let encoded_bytes = queued.datagrams.iter().map(Bytes::len).sum();
         if !io.has_send_buffer_space(encoded_bytes) {
@@ -958,7 +964,7 @@ fn send_frame_with_io(
             let mut sources = Vec::with_capacity(raw_fragment_count);
             let mut completed = Vec::new();
             for datagram in queued.datagrams {
-                let output = match fec_send.push(datagram, now) {
+                let output = match fec_send.push(datagram, timing.now) {
                     Ok(output) => output,
                     Err(error) => {
                         fec_send.abort_block();
@@ -1111,8 +1117,10 @@ impl ReliableDatagramState {
             self.fec_send.as_ref(),
             encode_quic_datagram(packet),
             immediate_duplicate,
-            Instant::now(),
-            reliable_datagram_rto(&self.connection),
+            DatagramSendTiming {
+                now: Instant::now(),
+                rto: reliable_datagram_rto(&self.connection),
+            },
         )?;
         if outcome == DatagramSendOutcome::Dropped {
             tracing::trace!("dropping L2 QUIC DATAGRAM because the bounded send queue is full");
@@ -1853,10 +1861,7 @@ mod tests {
     use crate::common::{
         global_ctx::tests::get_mock_global_ctx_with_network, underlay_policy::UnderlayPolicy,
     };
-    use crate::tunnel::{
-        TunnelConnector,
-        common::tests::{_tunnel_bench, _tunnel_pingpong},
-    };
+    use crate::tunnel::{TunnelConnector, common::tests::_tunnel_pingpong};
     use futures::{SinkExt as _, StreamExt as _};
     use std::sync::LazyLock;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1982,17 +1987,6 @@ mod tests {
             );
             _tunnel_pingpong(listener, connector).await;
         });
-    }
-
-    #[test]
-    fn quic_bench() {
-        RUNTIME.block_on(quic_bench_impl())
-    }
-    async fn quic_bench_impl() {
-        let listener = QuicTunnelListener::new("quic://[::]:21012".parse().unwrap(), global_ctx());
-        let connector =
-            QuicTunnelConnector::new("quic://127.0.0.1:21012".parse().unwrap(), global_ctx());
-        _tunnel_bench(listener, connector).await
     }
 
     #[test]
@@ -2254,8 +2248,10 @@ mod tests {
             None,
             expected.clone(),
             false,
-            Instant::now(),
-            Duration::from_millis(100),
+            DatagramSendTiming {
+                now: Instant::now(),
+                rto: Duration::from_millis(100),
+            },
         )
         .unwrap();
 
@@ -2292,8 +2288,10 @@ mod tests {
                 None,
                 Bytes::from(vec![0x4a; 1500]),
                 false,
-                Instant::now(),
-                Duration::from_millis(100),
+                DatagramSendTiming {
+                    now: Instant::now(),
+                    rto: Duration::from_millis(100),
+                },
             ),
             Ok(DatagramSendOutcome::Dropped)
         ));
@@ -2316,8 +2314,10 @@ mod tests {
             None,
             Bytes::from_static(b"critical-arp"),
             true,
-            Instant::now(),
-            Duration::from_millis(100),
+            DatagramSendTiming {
+                now: Instant::now(),
+                rto: Duration::from_millis(100),
+            },
         )
         .unwrap();
 

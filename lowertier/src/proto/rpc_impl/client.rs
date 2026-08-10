@@ -16,11 +16,10 @@ use crate::common::{
     PeerId, shrink_dashmap,
     stats_manager::{LabelSet, LabelType, MetricName, StatsManager},
 };
-use crate::proto::common::{
-    CompressionAlgoPb, RpcCompressionInfo, RpcDescriptor, RpcPacket, RpcRequest, RpcResponse,
-};
+use crate::proto::common::{RpcCompressionInfo, RpcDescriptor, RpcPacket, RpcRequest, RpcResponse};
 use crate::proto::rpc_impl::packet::{
     BuildRpcPacketArgs, build_rpc_packet, compress_packet, decompress_packet,
+    supported_rpc_compression,
 };
 use crate::proto::rpc_types::controller::Controller;
 use crate::proto::rpc_types::descriptor::MethodDescriptor;
@@ -303,7 +302,7 @@ impl Client {
                     trace_id: ctrl.trace_id(),
                     compression_info: RpcCompressionInfo {
                         algo: c_algo.into(),
-                        accepted_algo: CompressionAlgoPb::Zstd.into(),
+                        accepted_algo: supported_rpc_compression().into(),
                     },
                 });
                 let timeout_dur = std::time::Duration::from_millis(ctrl.timeout_ms() as u64);

@@ -1,4 +1,4 @@
-name: LowTier Source Archive
+name: lowertier source archive
 
 "on":
   workflow_dispatch:

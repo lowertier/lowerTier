@@ -314,7 +314,7 @@ impl Headers {
     ///
     /// let mut iterator = headers.iter();
     /// ```
-    pub fn iter(&self) -> hash_map::Iter<Ascii<String>, String> {
+    pub fn iter(&self) -> hash_map::Iter<'_, Ascii<String>, String> {
         self.0.iter()
     }
 

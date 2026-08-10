@@ -132,7 +132,7 @@ onMounted(() => {
           </el-button>
 
           <!-- GitHub链接 -->
-          <el-button type="primary" link @click="() => openExternalLink('https://github.com/lowertier/lowerTier')">
+          <el-button type="primary" link @click="() => openExternalLink('https://github.com/lowertier/lowertier')">
             <el-icon>
               <Link />
             </el-icon>
@@ -157,12 +157,12 @@ onMounted(() => {
         <p>
           © 2024 LowTier Community |
           <el-button type="primary" link size="small"
-            @click="() => openExternalLink('https://github.com/lowertier/lowerTier')">
+            @click="() => openExternalLink('https://github.com/lowertier/lowertier')">
             开源项目
           </el-button>
           |
           <el-button type="primary" link size="small"
-            @click="() => openExternalLink('https://github.com/lowertier/lowerTier/blob/main/README.md')">
+            @click="() => openExternalLink('https://github.com/lowertier/lowertier/blob/main/README.md')">
             使用文档
           </el-button>
         </p>

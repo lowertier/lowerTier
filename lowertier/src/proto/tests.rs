@@ -137,8 +137,9 @@ impl Greeting for GreetingService {
     }
 }
 
-use crate::proto::common::{CompressionAlgoPb, RpcCompressionInfo};
+use crate::proto::common::RpcCompressionInfo;
 use crate::proto::rpc_impl::client::Client;
+use crate::proto::rpc_impl::packet::supported_rpc_compression;
 use crate::proto::rpc_impl::server::Server;
 
 struct TestContext {
@@ -230,7 +231,7 @@ async fn rpc_basic_test() {
     let first_peer_info = ctx.client.peer_info_table().iter().next().unwrap().clone();
     assert_eq!(
         first_peer_info.compression_info.accepted_algo(),
-        CompressionAlgoPb::Zstd,
+        supported_rpc_compression(),
     );
 
     println!("{:?}", ctx.client.peer_info_table());
@@ -256,8 +257,8 @@ async fn rpc_basic_test() {
     assert_eq!(
         first_peer_info.compression_info,
         RpcCompressionInfo {
-            algo: CompressionAlgoPb::Zstd.into(),
-            accepted_algo: CompressionAlgoPb::Zstd.into(),
+            algo: supported_rpc_compression().into(),
+            accepted_algo: supported_rpc_compression().into(),
         }
     );
 }

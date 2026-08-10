@@ -80,7 +80,7 @@ sudo apt install -y bridge-utils
 
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/lowertier/lowerTier.git
+   git clone https://github.com/lowertier/lowertier.git
    cd LowTier
    ```
 
@@ -220,8 +220,8 @@ cargo test --no-default-features --features=full --verbose
 
 ## 其他资源
 
-- [问题追踪](https://github.com/lowertier/lowerTier/issues)
-- [项目文档](https://github.com/lowertier/lowerTier/wiki)
+- [问题追踪](https://github.com/lowertier/lowertier/issues)
+- [项目文档](https://github.com/lowertier/lowertier/wiki)
 
 ## 需要帮助？
 

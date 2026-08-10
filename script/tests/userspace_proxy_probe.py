@@ -15,7 +15,7 @@ from typing import Callable
 
 
 READ_TIMEOUT_SECONDS = 15
-TRANSFER_CHUNK = b"lowerTier-userspace-path\n" * 2731
+TRANSFER_CHUNK = b"lowertier-userspace-path\n" * 2731
 RTT_TOKEN = b"ETRTT001"
 HTTP_MARKER = b"userspace-http-ok"
 
@@ -156,7 +156,7 @@ def verify_socks5_udp(proxy_port: int, target_ip: str, target_port: int) -> None
         if relay_host in {"0.0.0.0", "::"}:
             relay_host = "127.0.0.1"
 
-        payload = b"lowerTier-socks5-udp"
+        payload = b"lowertier-socks5-udp"
         datagram = b"\x00\x00\x00\x01" + socket.inet_aton(target_ip)
         datagram += struct.pack("!H", target_port) + payload
         family = socket.AF_INET6 if ":" in relay_host else socket.AF_INET
@@ -377,6 +377,7 @@ def print_ports() -> None:
     ports: list[int] = []
     families = [socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM]
     families += [socket.SOCK_DGRAM, socket.SOCK_STREAM]
+    families += [socket.SOCK_STREAM, socket.SOCK_STREAM]
     try:
         for socket_type in families:
             probe = socket.socket(socket.AF_INET, socket_type)

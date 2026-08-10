@@ -277,6 +277,6 @@ public class LowTierVpnService extends VpnService {
 
 ## 相关链接
 
-- [LowTier 主项目](https://github.com/lowertier/lowerTier)
+- [LowTier 主项目](https://github.com/lowertier/lowertier)
 - [Android NDK 文档](https://developer.android.com/ndk)
 - [Rust JNI 文档](https://docs.rs/jni/)

@@ -85,6 +85,10 @@ impl L2Fabric {
         self.entry_count.load(Ordering::Acquire)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn learn_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) {
         let Ok((_, source)) = ethernet_addresses(frame) else {
             return;

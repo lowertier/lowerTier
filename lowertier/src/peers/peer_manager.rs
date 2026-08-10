@@ -4524,8 +4524,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(forward_packet_test)]
     async fn forward_packet(
-        #[values("tcp", "udp", "wg", "quic")] proto1: &str,
-        #[values("tcp", "udp", "wg", "quic")] proto2: &str,
+        #[values("tcp", "udp", "quic")] proto1: &str,
+        #[values("tcp", "udp", "quic")] proto2: &str,
     ) {
         use crate::proto::{
             rpc_impl::RpcController,

@@ -138,7 +138,7 @@ impl PacketRecvChanReceiver {
     pub async fn recv_batch(&mut self) -> Option<PacketBatch> {
         if let Some(mut pending) = self.pending.take() {
             let mut batch = PacketBatch::new();
-            while let Some(packet) = pending.next() {
+            for packet in pending.by_ref() {
                 batch
                     .try_push(packet)
                     .expect("pending peer vector remains bounded");

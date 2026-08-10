@@ -45,21 +45,21 @@ fn allowed_interface_ips(
 
             match addr {
                 IpAddr::V4(addr)
-                    if !addr.is_loopback() && !addr.is_multicast() && !addr.is_unspecified() =>
+                    if !addr.is_loopback()
+                        && !addr.is_multicast()
+                        && !addr.is_unspecified()
+                        && !ipv4.contains(&addr) =>
                 {
-                    if !ipv4.contains(&addr) {
-                        ipv4.push(addr);
-                    }
+                    ipv4.push(addr);
                 }
                 IpAddr::V6(addr)
                     if !addr.is_loopback()
                         && !addr.is_multicast()
                         && !addr.is_unspecified()
-                        && !addr.is_unicast_link_local() =>
+                        && !addr.is_unicast_link_local()
+                        && !ipv6.contains(&addr) =>
                 {
-                    if !ipv6.contains(&addr) {
-                        ipv6.push(addr);
-                    }
+                    ipv6.push(addr);
                 }
                 _ => {}
             }

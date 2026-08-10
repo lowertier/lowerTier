@@ -486,7 +486,8 @@ async fn detect_public_ipv6_prefix_linux() -> Result<Option<DetectedPublicIpv6Pr
         return Ok(Some(prefix));
     }
 
-    // Fallback for DHCPv6 IA_NA / SLAAC — see https://github.com/lowertier/lowerTier/issues/2333
+    // Use this fallback for DHCPv6 IA_NA or SLAAC.
+    // See https://github.com/lowertier/lowertier/issues/2333.
     Ok(detect_public_ipv6_prefix_from_interfaces(&routes))
 }
 
@@ -949,8 +950,11 @@ fn cleanup_ndp_proxy_runtime(runtime: &mut NdpProxyRuntime, net_ns: &NetNS) {
 }
 
 #[cfg(not(target_os = "linux"))]
+struct NdpProxyRuntime;
+
+#[cfg(not(target_os = "linux"))]
 fn reconcile_ndp_proxy_runtime(
-    _runtime: &mut (),
+    _runtime: &mut NdpProxyRuntime,
     _global_ctx: &ArcGlobalCtx,
     _state: &PublicIpv6ProviderRuntimeState,
 ) -> bool {
@@ -958,7 +962,7 @@ fn reconcile_ndp_proxy_runtime(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn cleanup_ndp_proxy_runtime(_runtime: &mut (), _net_ns: &NetNS) {}
+fn cleanup_ndp_proxy_runtime(_runtime: &mut NdpProxyRuntime, _net_ns: &NetNS) {}
 
 #[cfg(target_os = "linux")]
 fn new_ndp_proxy_runtime() -> NdpProxyRuntime {
@@ -966,7 +970,9 @@ fn new_ndp_proxy_runtime() -> NdpProxyRuntime {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn new_ndp_proxy_runtime() {}
+fn new_ndp_proxy_runtime() -> NdpProxyRuntime {
+    NdpProxyRuntime
+}
 
 fn should_reconcile_immediately(event: &GlobalCtxEvent) -> bool {
     matches!(

@@ -18,6 +18,17 @@ use super::RpcTransactId;
 // space for encryption/compression metadata, but excludes the outer IP header.
 const RPC_PACKET_UDP_PAYLOAD_BUDGET: usize = 1300;
 
+pub const fn supported_rpc_compression() -> CompressionAlgoPb {
+    #[cfg(feature = "zstd")]
+    {
+        CompressionAlgoPb::Zstd
+    }
+    #[cfg(not(feature = "zstd"))]
+    {
+        CompressionAlgoPb::None
+    }
+}
+
 pub async fn compress_packet(
     accepted_compression_algo: CompressionAlgoPb,
     content: &[u8],

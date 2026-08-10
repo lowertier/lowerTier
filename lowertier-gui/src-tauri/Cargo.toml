@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 
 [dependencies]
-# wry 0.47 may crash on android, see https://github.com/lowertier/lowerTier/issues/527
+# Wry 0.47 can fail on Android. See https://github.com/lowertier/lowertier/issues/527.
 tauri = { version = "2.7.0", features = [
     "tray-icon",
     "image-png",

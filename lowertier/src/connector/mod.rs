@@ -258,9 +258,9 @@ pub async fn create_connector_by_url(
         TunnelScheme::Ip(scheme) => {
             let underlay_policy = global_ctx.get_underlay_policy();
             if underlay_policy.is_active()
-                && !url
+                && url
                     .host_str()
-                    .is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok())
+                    .is_none_or(|host| host.parse::<std::net::IpAddr>().is_err())
             {
                 return Err(TunnelError::UnderlayPolicyDenied(format!(
                     "strict underlay policy requires a literal IP peer address: {url}"

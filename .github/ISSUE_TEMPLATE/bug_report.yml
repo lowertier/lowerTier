@@ -11,8 +11,8 @@ body:
     attributes:
       value: |
         ## 在提交问题之前 / First of all
-        1. 请先搜索有关此问题的 [现有问题](https://github.com/lowertier/lowerTier/issues?q=is%3Aissue)。
-        1. Please search for [existing issues](https://github.com/lowertier/lowerTier/issues?q=is%3Aissue) about this problem first.
+        1. 请先搜索有关此问题的 [现有问题](https://github.com/lowertier/lowertier/issues?q=is%3Aissue)。
+        1. Please search for [existing issues](https://github.com/lowertier/lowertier/issues?q=is%3Aissue) about this problem first.
         2. 请确保所使用的 LowTier 版本都是最新的。
         2. Make sure that all LowTier versions are up-to-date.
         3. 请确保这是 LowTier 的问题，而不是你正在使用的其他内容引起的问题。

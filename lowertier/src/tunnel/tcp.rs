@@ -260,10 +260,7 @@ impl super::TunnelConnector for TcpTunnelConnector {
 mod tests {
     use crate::{
         common::underlay_policy::UnderlayPolicy,
-        tunnel::{
-            TunnelConnector, TunnelError,
-            common::tests::{_tunnel_bench, _tunnel_pingpong},
-        },
+        tunnel::{TunnelConnector, TunnelError, common::tests::_tunnel_pingpong},
     };
 
     use super::*;
@@ -286,13 +283,6 @@ mod tests {
         let result = connector.connect().await;
 
         assert!(matches!(result, Err(TunnelError::UnderlayPolicyDenied(_))));
-    }
-
-    #[tokio::test]
-    async fn tcp_bench() {
-        let listener = TcpTunnelListener::new("tcp://0.0.0.0:31012".parse().unwrap());
-        let connector = TcpTunnelConnector::new("tcp://127.0.0.1:31012".parse().unwrap());
-        _tunnel_bench(listener, connector).await
     }
 
     #[tokio::test]

@@ -265,6 +265,7 @@ impl RingSink {
             .map_err(|batch| batch.pop_singleton().expect("scalar ring job"))
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn try_send_batch(&mut self, batch: PacketBatch) -> Result<(), PacketBatch> {
         if batch.is_empty() {
             return Ok(());
@@ -299,6 +300,7 @@ impl RingSink {
             .map_err(|batch| batch.pop_singleton().expect("scalar ring job"))
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn force_send_batch(&mut self, batch: PacketBatch) -> Result<(), PacketBatch> {
         if batch.is_empty() {
             return Ok(());
@@ -559,7 +561,7 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use tokio::time::timeout;
 
-    use crate::tunnel::common::tests::{_tunnel_bench, _tunnel_pingpong};
+    use crate::tunnel::common::tests::_tunnel_pingpong;
 
     use super::*;
 
@@ -569,14 +571,6 @@ mod tests {
         let listener = RingTunnelListener::new(id.clone());
         let connector = RingTunnelConnector::new(id.clone());
         _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    async fn ring_bench() {
-        let id: url::Url = format!("ring://{}", Uuid::new_v4()).parse().unwrap();
-        let listener = RingTunnelListener::new(id.clone());
-        let connector = RingTunnelConnector::new(id);
-        _tunnel_bench(listener, connector).await
     }
 
     #[tokio::test]

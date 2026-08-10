@@ -72,7 +72,7 @@ sudo apt install -y bridge-utils
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/lowertier/lowerTier.git
+   git clone https://github.com/lowertier/lowertier.git
    cd LowTier
    ```
 
@@ -212,8 +212,8 @@ cargo test --no-default-features --features=full --verbose
 
 ## Additional Resources
 
-- [Issue Tracker](https://github.com/lowertier/lowerTier/issues)
-- [Project Documentation](https://github.com/lowertier/lowerTier/wiki)
+- [Issue Tracker](https://github.com/lowertier/lowertier/issues)
+- [Project Documentation](https://github.com/lowertier/lowertier/wiki)
 
 ## Questions or Need Help?
 

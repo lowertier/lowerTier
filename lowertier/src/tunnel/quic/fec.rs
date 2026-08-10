@@ -306,7 +306,7 @@ impl FecDecoderState {
             "FEC parity index is out of range"
         );
         ensure!(
-            shard.len() >= 2 && shard.len() % 2 == 0,
+            shard.len() >= 2 && shard.len().is_multiple_of(2),
             "invalid FEC parity size"
         );
         if self.completed.contains(&block_id) {

@@ -1,8 +1,8 @@
 [package]
 name = "lowertier"
 description = "A secure peer-to-peer Layer 2 VPN with routed and userspace modes."
-homepage = "https://github.com/lowertier/lowerTier"
-repository = "https://github.com/lowertier/lowerTier"
+homepage = "https://github.com/lowertier/lowertier"
+repository = "https://github.com/lowertier/lowertier"
 version = "2.6.4"
 edition.workspace = true
 rust-version.workspace = true
@@ -364,28 +364,15 @@ tokio-socks = "0.5.2"
 
 
 [features]
-default = [
-    "wireguard",
-    "websocket",
-    "smoltcp",
-    "tun",
-    "socks5",
-    "kcp",
-    "quic",
-    "faketcp",
-    "magic-dns",
-    "zstd",
-]
+default = ["lean"]
+lean = ["tun", "socks5", "quic"]
 full = [
+    "lean",
     "websocket",
     "wireguard",
     "aes-gcm",
-    "openssl-crypto", # need openssl-dev libs
-    "smoltcp",
-    "tun",
-    "socks5",
+    "openssl-crypto", # This feature requires OpenSSL development files.
     "kcp",
-    "quic",
     "faketcp",
     "magic-dns",
     "zstd",

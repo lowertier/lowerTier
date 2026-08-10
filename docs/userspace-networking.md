@@ -22,7 +22,8 @@ lowertier-core \
 
 Replace the example network values before use.
 Use an unprivileged local port above 1023.
-Use UDP, TCP, QUIC, or WebSocket underlay connections.
+Published binaries support UDP, TCP, and QUIC underlay connections.
+Full source builds can also support WebSocket connections.
 Some other underlay modes can require extra operating system privileges.
 
 LowTier detects SOCKS5 and HTTP from the first client byte.

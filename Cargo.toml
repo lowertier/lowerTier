@@ -2,15 +2,9 @@
 resolver = "2"
 members = [
     "lowertier",
-    "lowertier-gui/src-tauri",
-    "lowertier-web",
-    "lowertier-contrib/lowertier-ffi",
-    "lowertier-contrib/lowertier-uptime",
-    "lowertier-contrib/lowertier-android-jni",
 ]
-default-members = ["lowertier", "lowertier-web"]
+default-members = ["lowertier"]
 exclude = [
-    "lowertier-contrib/lowertier-ohrs", # it needs ohrs sdk
     "vendor/boringtun-lowertier",
     "vendor/http_req",
     "vendor/kcp-sys",
@@ -32,7 +26,12 @@ debug = 2
 
 [profile.release]
 panic = "abort"
-lto = true
+lto = "fat"
 codegen-units = 1
 opt-level = 3
-strip = true
+strip = "symbols"
+debug = 0
+debug-assertions = false
+overflow-checks = false
+incremental = false
+rpath = false

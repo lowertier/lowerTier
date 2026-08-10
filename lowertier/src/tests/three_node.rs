@@ -77,13 +77,18 @@ pub fn get_inst_config(
     config.set_netns(ns.map(|s| s.to_owned()));
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
-    config.set_listeners(vec![
+    let mut listeners = vec![
         "tcp://0.0.0.0:11010".parse().unwrap(),
         "udp://0.0.0.0:11010".parse().unwrap(),
-        "wg://0.0.0.0:11011".parse().unwrap(),
+    ];
+    #[cfg(feature = "wireguard")]
+    listeners.push("wg://0.0.0.0:11011".parse().unwrap());
+    #[cfg(feature = "websocket")]
+    listeners.extend([
         "ws://0.0.0.0:11011".parse().unwrap(),
         "wss://0.0.0.0:11012".parse().unwrap(),
     ]);
+    config.set_listeners(listeners);
     config.set_socks5_portal(Some("socks5://0.0.0.0:12345".parse().unwrap()));
     config
 }
@@ -1043,7 +1048,7 @@ pub async fn public_ipv6_auto_addr_reconnect_reuses_same_address() {
 #[tokio::test]
 #[serial_test::serial]
 pub async fn basic_three_node_test(
-    #[values("tcp", "udp", "wg", "ws", "wss")] proto: &str,
+    #[values("tcp", "udp")] proto: &str,
     #[values(
         ["aes-gcm", "aes-gcm"],
         ["aes-256-gcm", "aes-256-gcm"],

@@ -418,7 +418,7 @@ function Get-LowTier {
 
     try {
         Write-Host "检查最新版本..." -ForegroundColor Green
-        $response = Invoke-RestMethodCompatible -Uri "https://api.github.com/repos/lowertier/lowerTier/releases/latest"
+        $response = Invoke-RestMethodCompatible -Uri "https://api.github.com/repos/lowertier/lowertier/releases/latest"
         $latestVersion = Get-RemoteVersion($response)
     }
     catch {

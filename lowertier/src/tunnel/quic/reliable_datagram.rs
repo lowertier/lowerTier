@@ -633,7 +633,7 @@ pub(super) fn encode_fec_parity(
         || parity_index >= parity_count
         || shard.is_empty()
         || shard.len() > u16::MAX as usize
-        || shard.len() % 2 != 0
+        || !shard.len().is_multiple_of(2)
     {
         return Err(invalid("invalid FEC parity metadata"));
     }

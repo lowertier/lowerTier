@@ -133,13 +133,13 @@ Use userspace networking when the process cannot create a kernel interface.
 ## Reproduce
 
 ```bash
-export CARGO_TARGET_DIR=/tmp/lowerTier-target
+export CARGO_TARGET_DIR=/tmp/lowertier-target
 cargo build --release --locked \
   -p lowertier \
   --bin lowertier-core \
   --no-default-features \
   --features socks5,quic
 
-LOWTIER_CORE=/tmp/lowerTier-target/release/lowertier-core \
+LOWTIER_CORE=/tmp/lowertier-target/release/lowertier-core \
   bash script/tests/userspace-proxy-test.sh
 ```

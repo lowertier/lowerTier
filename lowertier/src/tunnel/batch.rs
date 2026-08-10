@@ -74,6 +74,7 @@ impl PacketBatch {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn pop_singleton(mut self) -> Result<ZCPacket, Self> {
         if self.packets.len() != 1 {
             return Err(self);

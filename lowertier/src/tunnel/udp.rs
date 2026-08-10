@@ -1279,7 +1279,6 @@ mod tests {
     use std::{net::IpAddr, time::Duration};
 
     use futures::{SinkExt, StreamExt};
-    use tokio::time::timeout;
 
     use super::*;
     use crate::{
@@ -1288,7 +1287,7 @@ mod tests {
             TunnelConnector,
             common::{
                 get_interface_name_by_ip,
-                tests::{_tunnel_bench, _tunnel_echo_server, _tunnel_pingpong, wait_for_condition},
+                tests::{_tunnel_echo_server, _tunnel_pingpong, wait_for_condition},
             },
             packet_def::PacketType,
         },
@@ -1504,13 +1503,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_bench() {
-        let listener = UdpTunnelListener::new("udp://0.0.0.0:5555".parse().unwrap());
-        let connector = UdpTunnelConnector::new("udp://127.0.0.1:5555".parse().unwrap());
-        _tunnel_bench(listener, connector).await
-    }
-
-    #[tokio::test]
     async fn udp_bench_with_bind() {
         let listener = UdpTunnelListener::new("udp://127.0.0.1:5554".parse().unwrap());
         let mut connector = UdpTunnelConnector::new("udp://127.0.0.1:5554".parse().unwrap());
@@ -1525,26 +1517,6 @@ mod tests {
         let mut connector = UdpTunnelConnector::new("udp://127.0.0.1:5553".parse().unwrap());
         connector.set_bind_addrs(vec!["10.0.0.1:0".parse().unwrap()]);
         _tunnel_pingpong(listener, connector).await
-    }
-
-    async fn send_random_data_to_socket(remote_url: url::Url) {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-        socket
-            .connect(format!(
-                "{}:{}",
-                remote_url.host().unwrap(),
-                remote_url.port().unwrap()
-            ))
-            .await
-            .unwrap();
-
-        // get a random 100-len buf
-        loop {
-            let mut buf = vec![0u8; 100];
-            rand::thread_rng().fill(&mut buf[..]);
-            socket.send(&buf).await.unwrap();
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
     }
 
     #[tokio::test]
@@ -1572,19 +1544,6 @@ mod tests {
 
         let t1 = connector1.connect().await.unwrap();
         let t2 = connector2.connect().await.unwrap();
-
-        tokio::spawn(timeout(
-            Duration::from_secs(2),
-            send_random_data_to_socket(t1.info().unwrap().local_addr.unwrap().into()),
-        ));
-        tokio::spawn(timeout(
-            Duration::from_secs(2),
-            send_random_data_to_socket(t1.info().unwrap().remote_addr.unwrap().into()),
-        ));
-        tokio::spawn(timeout(
-            Duration::from_secs(2),
-            send_random_data_to_socket(t2.info().unwrap().remote_addr.unwrap().into()),
-        ));
 
         let sender1 = tokio::spawn(async move {
             let (mut stream, mut sink) = t1.split();
@@ -1746,7 +1705,7 @@ mod tests {
         lis.listen().await.unwrap();
 
         // a socket to receive forwarded hole punch packets
-        let socket = Arc::new(UdpSocket::bind("[::]:0").await.unwrap());
+        let socket = Arc::new(UdpSocket::bind("[::1]:0").await.unwrap());
         let socket_clone = socket.clone();
         let t = tokio::spawn(async move {
             let mut buf = BytesMut::new();

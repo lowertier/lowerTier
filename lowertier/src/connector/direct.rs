@@ -1123,14 +1123,17 @@ mod tests {
 
     #[test]
     fn mapped_listener_port_uses_ip_scheme_defaults() {
-        assert_eq!(
-            mapped_listener_port(&"ws://example.com".parse().unwrap()),
-            Some(80)
-        );
-        assert_eq!(
-            mapped_listener_port(&"wss://example.com".parse().unwrap()),
-            Some(443)
-        );
+        #[cfg(feature = "websocket")]
+        {
+            assert_eq!(
+                mapped_listener_port(&"ws://example.com".parse().unwrap()),
+                Some(80)
+            );
+            assert_eq!(
+                mapped_listener_port(&"wss://example.com".parse().unwrap()),
+                Some(443)
+            );
+        }
         assert_eq!(
             mapped_listener_port(&"tcp://127.0.0.1".parse().unwrap()),
             Some(11010)
@@ -1143,13 +1146,16 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_mapped_listener_addrs_uses_default_ports() {
-        let wss_addrs = resolve_mapped_listener_addrs(&"wss://127.0.0.1".parse().unwrap())
-            .await
-            .unwrap();
-        assert_eq!(
-            wss_addrs,
-            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443)]
-        );
+        #[cfg(feature = "websocket")]
+        {
+            let wss_addrs = resolve_mapped_listener_addrs(&"wss://127.0.0.1".parse().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                wss_addrs,
+                vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443)]
+            );
+        }
 
         let tcp_addrs = resolve_mapped_listener_addrs(&"tcp://127.0.0.1".parse().unwrap())
             .await
@@ -1225,12 +1231,7 @@ mod tests {
             .await;
     }
 
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn direct_connector_basic_test(
-        #[values("tcp", "udp", "wg")] proto: &str,
-        #[values("true", "false")] ipv6: bool,
-    ) {
+    async fn run_direct_connector_basic_test(proto: &str, ipv6: bool) {
         TESTING.store(true, std::sync::atomic::Ordering::Relaxed);
 
         let p_a = create_mock_peer_manager().await;
@@ -1275,6 +1276,22 @@ mod tests {
         wait_route_appear_with_cost(p_a.clone(), p_c.my_peer_id(), Some(1))
             .await
             .unwrap();
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn direct_connector_basic_test(
+        #[values("tcp", "udp")] proto: &str,
+        #[values("true", "false")] ipv6: bool,
+    ) {
+        run_direct_connector_basic_test(proto, ipv6).await;
+    }
+
+    #[cfg(feature = "wireguard")]
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn direct_connector_wireguard_basic_test(#[values("true", "false")] ipv6: bool) {
+        run_direct_connector_basic_test("wg", ipv6).await;
     }
 
     #[tokio::test]
