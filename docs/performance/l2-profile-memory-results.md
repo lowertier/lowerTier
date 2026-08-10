@@ -40,7 +40,9 @@ The `port_mode` field now accepts these profile names:
 
 The existing `l3`, `tap`, and `l2-tun` names remain valid.
 
-The default remains `l3` to preserve existing deployments.
+Linux and FreeBSD use native Ethernet by default.
+Other systems use compatible Ethernet by default.
+Select `routed` to use the L3 path.
 
 ## Test Environment
 
