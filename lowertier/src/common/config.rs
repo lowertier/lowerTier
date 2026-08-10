@@ -828,6 +828,11 @@ impl TomlConfigLoader {
             .context("failed to parse flags")?;
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         config.flags_struct = Some(flags);
+        config.secure_mode = config
+            .secure_mode
+            .map(process_secure_mode_cfg)
+            .transpose()
+            .context("failed to configure secure mode")?;
         let has_network_identity = config.network_identity.is_some();
 
         let config = TomlConfigLoader {
@@ -1960,6 +1965,21 @@ enabled = true
         assert_eq!(identity.network_name, "default");
         assert_eq!(identity.network_secret.as_deref(), Some(""));
         assert!(identity.network_secret_digest.is_some());
+    }
+
+    #[test]
+    fn secure_mode_from_toml_generates_a_key_pair() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[secure_mode]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let secure_mode = config.get_secure_mode().unwrap();
+        assert!(secure_mode.local_private_key.is_some());
+        assert!(secure_mode.local_public_key.is_some());
     }
 
     #[cfg(feature = "websocket")]
