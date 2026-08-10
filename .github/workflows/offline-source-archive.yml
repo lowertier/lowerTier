@@ -1,0 +1,50 @@
+name: EasyTier Source Archive
+
+"on":
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Archive committed source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Choose archive name
+        id: archive
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REVISION: ${{ github.sha }}
+        run: |
+          safe_ref="${REF_NAME//\//-}"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            basename="easytier-${safe_ref}-source"
+          else
+            basename="easytier-${safe_ref}-${REVISION:0:12}-source"
+          fi
+          echo "basename=$basename" >> "$GITHUB_OUTPUT"
+
+      - name: Create source ZIP
+        env:
+          BASENAME: ${{ steps.archive.outputs.basename }}
+        run: |
+          mkdir -p dist
+          git archive --format=zip --prefix="${BASENAME}/" --output="dist/${BASENAME}.zip" "$GITHUB_SHA"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.archive.outputs.basename }}
+          path: dist/${{ steps.archive.outputs.basename }}.zip
+          if-no-files-found: error
+          retention-days: 30
