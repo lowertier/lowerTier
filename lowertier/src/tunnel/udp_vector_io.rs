@@ -478,7 +478,9 @@ fn try_recv_batch(
         messages[index].msg_hdr.msg_iovlen = 1;
         messages[index].msg_hdr.msg_control = controls[index].as_mut_ptr().cast();
         #[cfg(not(target_env = "musl"))]
-        messages[index].msg_hdr.msg_controllen = mem::size_of_val(&controls[index]);
+        {
+            messages[index].msg_hdr.msg_controllen = mem::size_of_val(&controls[index]);
+        }
         #[cfg(target_env = "musl")]
         {
             messages[index].msg_hdr.msg_controllen =
@@ -779,14 +781,18 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
     message.msg_namelen = destination.len();
     message.msg_iov = iovecs.as_mut_ptr();
     #[cfg(not(target_env = "musl"))]
-    message.msg_iovlen = buffers.len();
+    {
+        message.msg_iovlen = buffers.len();
+    }
     #[cfg(target_env = "musl")]
     {
         message.msg_iovlen = buffers.len() as libc::c_int;
     }
     message.msg_control = control.as_mut_ptr().cast();
     #[cfg(not(target_env = "musl"))]
-    message.msg_controllen = control_len;
+    {
+        message.msg_controllen = control_len;
+    }
     #[cfg(target_env = "musl")]
     {
         message.msg_controllen = control_len as libc::socklen_t;
@@ -803,7 +809,9 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
         (*cmsg).cmsg_level = SOL_UDP;
         (*cmsg).cmsg_type = UDP_SEGMENT;
         #[cfg(not(target_env = "musl"))]
-        (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint) as usize;
+        {
+            (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint) as usize;
+        }
         #[cfg(target_env = "musl")]
         {
             (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint);
