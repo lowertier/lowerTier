@@ -113,6 +113,10 @@ grep -Fq 'opt-level = 3' "$repo_root/Cargo.toml"
 grep -Fq 'panic = "abort"' "$repo_root/Cargo.toml"
 grep -Fq 'force-unwind-tables=no' "$core_workflow"
 grep -Fq -- '--remap-path-prefix=$GITHUB_WORKSPACE=.' "$repo_root/.github/actions/prepare-build/action.yml"
+if grep -Eq 'rustflags:.*crt-static.*force-unwind-tables' "$core_workflow"; then
+  echo "the Windows build disables required unwind tables" >&2
+  exit 1
+fi
 
 if grep -Eiq 'gui_run_id|mobile_run_id|magisk' "$release_workflow"; then
   echo "the release workflow contains a non-CLI artifact" >&2
