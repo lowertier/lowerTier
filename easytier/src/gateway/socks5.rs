@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc, Weak,
@@ -26,6 +27,7 @@ use crate::{
             },
             util::stream::tcp_connect_with_timeout,
         },
+        http_proxy::serve_http_proxy,
         ip_reassembler::IpReassembler,
         tokio_smoltcp::{BufferSize, Net, NetConfig, channel_device},
     },
@@ -38,7 +40,7 @@ use pnet::packet::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::{TcpListener, UdpSocket},
+    net::{TcpListener, TcpStream, UdpSocket},
     select,
     sync::{Mutex, Notify, mpsc},
     task::JoinSet,
@@ -370,6 +372,91 @@ struct Socks5AutoConnector {
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyProtocol {
+    Socks5,
+    Http,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProxyProtocols {
+    socks5: bool,
+    http: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProxyListenerSpec {
+    addr: SocketAddr,
+    protocols: ProxyProtocols,
+}
+
+fn classify_proxy_protocol(first_byte: u8, protocols: ProxyProtocols) -> Option<ProxyProtocol> {
+    if first_byte == 0x05 && protocols.socks5 {
+        Some(ProxyProtocol::Socks5)
+    } else if first_byte.is_ascii_alphabetic() && protocols.http {
+        Some(ProxyProtocol::Http)
+    } else {
+        None
+    }
+}
+
+async fn resolve_proxy_listener(
+    url: &url::Url,
+    expected_scheme: &str,
+) -> anyhow::Result<SocketAddr> {
+    if url.scheme() != expected_scheme {
+        anyhow::bail!(
+            "proxy listener uses scheme {:?}; expected {:?}",
+            url.scheme(),
+            expected_scheme
+        );
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("proxy listener port is missing: {url}"))?;
+    let host = url
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("proxy listener host is missing: {url}"))?;
+
+    match host {
+        url::Host::Ipv4(address) => Ok(SocketAddr::new(IpAddr::V4(address), port)),
+        url::Host::Ipv6(address) => Ok(SocketAddr::new(IpAddr::V6(address), port)),
+        url::Host::Domain("localhost") => {
+            Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+        }
+        url::Host::Domain(domain) => {
+            let addresses: Vec<_> = tokio::net::lookup_host((domain, port)).await?.collect();
+            addresses
+                .iter()
+                .copied()
+                .find(SocketAddr::is_ipv4)
+                .or_else(|| addresses.first().copied())
+                .ok_or_else(|| anyhow::anyhow!("proxy listener host has no address: {domain}"))
+        }
+    }
+}
+
+async fn plan_proxy_listeners(
+    socks5_url: Option<url::Url>,
+    http_url: Option<url::Url>,
+) -> anyhow::Result<Vec<ProxyListenerSpec>> {
+    let mut listeners = BTreeMap::<SocketAddr, ProxyProtocols>::new();
+
+    if let Some(url) = socks5_url {
+        let addr = resolve_proxy_listener(&url, "socks5").await?;
+        listeners.entry(addr).or_default().socks5 = true;
+    }
+    if let Some(url) = http_url {
+        let addr = resolve_proxy_listener(&url, "http").await?;
+        listeners.entry(addr).or_default().http = true;
+    }
+
+    Ok(listeners
+        .into_iter()
+        .map(|(addr, protocols)| ProxyListenerSpec { addr, protocols })
+        .collect())
+}
+
 #[async_trait::async_trait]
 impl AsyncTcpConnector for Socks5AutoConnector {
     type S = SocksTcpStream;
@@ -571,7 +658,7 @@ impl Socks5ServerNet {
         }
     }
 
-    async fn handle_tcp_stream_task(stream: tokio::net::TcpStream, connector: Socks5AutoConnector) {
+    async fn handle_socks5_stream_task(stream: TcpStream, connector: Socks5AutoConnector) {
         let mut config = Config::<AcceptAuthentication>::default();
         config.set_request_timeout(10);
         config.set_skip_auth(false);
@@ -589,11 +676,50 @@ impl Socks5ServerNet {
         };
     }
 
-    fn handle_tcp_stream(&self, stream: tokio::net::TcpStream, connector: Socks5AutoConnector) {
+    async fn dispatch_tcp_stream_task(
+        stream: TcpStream,
+        connector: Socks5AutoConnector,
+        protocols: ProxyProtocols,
+    ) {
+        let mut first_byte = [0_u8; 1];
+        let protocol = match timeout(Duration::from_secs(10), stream.peek(&mut first_byte)).await {
+            Ok(Ok(1..)) => classify_proxy_protocol(first_byte[0], protocols),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => {
+                tracing::debug!(?error, "proxy protocol detection failed");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!("proxy protocol detection timed out");
+                return;
+            }
+        };
+
+        match protocol {
+            Some(ProxyProtocol::Socks5) => {
+                Self::handle_socks5_stream_task(stream, connector).await;
+            }
+            Some(ProxyProtocol::Http) => {
+                if let Err(error) = serve_http_proxy(stream, connector).await {
+                    tracing::debug!(?error, "HTTP proxy connection closed with an error");
+                }
+            }
+            None => {
+                tracing::debug!(first_byte = first_byte[0], "unsupported proxy protocol");
+            }
+        }
+    }
+
+    fn handle_tcp_stream(
+        &self,
+        stream: TcpStream,
+        connector: Socks5AutoConnector,
+        protocols: ProxyProtocols,
+    ) {
         self.forward_tasks
             .lock()
             .unwrap()
-            .spawn(Self::handle_tcp_stream_task(stream, connector));
+            .spawn(Self::dispatch_tcp_stream_task(stream, connector, protocols));
     }
 }
 
@@ -630,7 +756,7 @@ pub struct Socks5Server {
     #[cfg(feature = "kcp")]
     kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
 
-    socks5_enabled: Arc<AtomicBool>,
+    userspace_proxy_enabled: Arc<AtomicBool>,
     #[cfg(feature = "ffi-dataplane")]
     data_plane_refs: Arc<AtomicUsize>,
     // Tracks whether the smoltcp `net` is ready for data-plane callers.
@@ -645,8 +771,8 @@ pub struct Socks5Server {
 impl PeerPacketFilter for Socks5Server {
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         let entry_count = self.entry_count.load(Ordering::Relaxed);
-        let socks5_enabled = self.socks5_enabled.load(Ordering::Relaxed);
-        if entry_count == 0 && !socks5_enabled && self.entries.is_empty() {
+        let userspace_proxy_enabled = self.userspace_proxy_enabled.load(Ordering::Relaxed);
+        if entry_count == 0 && !userspace_proxy_enabled && self.entries.is_empty() {
             if tracing::enabled!(tracing::Level::TRACE)
                 && let Some(hdr) = packet.peer_manager_header()
                 && matches!(
@@ -682,8 +808,8 @@ impl PeerPacketFilter for Socks5Server {
                         ?tcp_dst_port,
                         ?tcp_flags,
                         entry_count,
-                        socks5_enabled,
-                        "socks5 fast gate passed packet from peer"
+                        userspace_proxy_enabled,
+                        "userspace proxy fast gate passed packet from peer"
                     );
                 } else {
                     tracing::trace!(
@@ -691,8 +817,8 @@ impl PeerPacketFilter for Socks5Server {
                         from_peer_id = hdr.from_peer_id.get(),
                         to_peer_id = hdr.to_peer_id.get(),
                         entry_count,
-                        socks5_enabled,
-                        "socks5 fast gate passed non-ipv4 packet from peer"
+                        userspace_proxy_enabled,
+                        "userspace proxy fast gate passed non-ipv4 packet from peer"
                     );
                 }
             }
@@ -811,8 +937,8 @@ impl PeerPacketFilter for Socks5Server {
                 ipv4_src = %ipv4.get_source(),
                 ipv4_dst = %ipv4.get_destination(),
                 entry_count = self.entry_count.load(Ordering::Relaxed),
-                socks5_enabled = self.socks5_enabled.load(Ordering::Relaxed),
-                "socks5 no entry for packet from peer"
+                userspace_proxy_enabled = self.userspace_proxy_enabled.load(Ordering::Relaxed),
+                "userspace proxy has no entry for packet from peer"
             );
             return Some(packet);
         }
@@ -870,7 +996,7 @@ impl Socks5Server {
             #[cfg(feature = "kcp")]
             kcp_endpoint: Mutex::new(None),
 
-            socks5_enabled: Arc::new(AtomicBool::new(false)),
+            userspace_proxy_enabled: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "ffi-dataplane")]
             data_plane_refs: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "ffi-dataplane")]
@@ -891,7 +1017,7 @@ impl Socks5Server {
         let udp_client_map = self.udp_client_map.clone();
         let cancel_tokens = self.cancel_tokens.clone();
         let port_forward_list_change_notifier = self.port_forward_list_change_notifier.clone();
-        let socks5_enabled = self.socks5_enabled.clone();
+        let userspace_proxy_enabled = self.userspace_proxy_enabled.clone();
         #[cfg(feature = "ffi-dataplane")]
         let data_plane_refs = self.data_plane_refs.clone();
         #[cfg(feature = "ffi-dataplane")]
@@ -905,8 +1031,8 @@ impl Socks5Server {
                 let data_plane_active = false;
 
                 let active_port_forwards = cancel_tokens.len();
-                let is_socks5_enabled = socks5_enabled.load(Ordering::Relaxed);
-                if active_port_forwards == 0 && !is_socks5_enabled && !data_plane_active {
+                let is_userspace_proxy_enabled = userspace_proxy_enabled.load(Ordering::Relaxed);
+                if active_port_forwards == 0 && !is_userspace_proxy_enabled && !data_plane_active {
                     let had_net = {
                         let mut net_guard = net.lock().await;
                         net_guard.take().is_some()
@@ -914,11 +1040,11 @@ impl Socks5Server {
                     tracing::trace!(
                         had_net,
                         active_port_forwards,
-                        is_socks5_enabled,
+                        is_userspace_proxy_enabled,
                         data_plane_active,
                         entry_count = entry_count.load(Ordering::Relaxed),
                         entries_len = entries.len(),
-                        "socks5 net update waiting for consumers"
+                        "userspace proxy net update waiting for consumers"
                     );
                     #[cfg(feature = "ffi-dataplane")]
                     let _ = data_plane_net_ready.send_replace(false);
@@ -1005,57 +1131,67 @@ impl Socks5Server {
         {
             *self.kcp_endpoint.lock().await = kcp_endpoint.clone();
         }
-        if let Some(proxy_url) = self.global_ctx.config.get_socks5_portal() {
-            let bind_addr = format!(
-                "{}:{}",
-                proxy_url.host_str().unwrap(),
-                proxy_url.port().unwrap()
-            );
-
-            let listener = bind::<TcpListener>()
-                .addr(bind_addr.parse::<SocketAddr>().unwrap())
-                .net_ns(self.global_ctx.net_ns.clone())
-                .call()?;
-
-            let entries = self.entries.clone();
-            let entry_count = self.entry_count.clone();
-            let peer_manager = self.peer_manager.clone();
-            let net = self.net.clone();
-            self.tasks.lock().unwrap().spawn(async move {
-                loop {
-                    match listener.accept().await {
-                        Ok((socket, addr)) => {
-                            tracing::info!("accept a new connection, {:?}", socket);
-                            let connector = Socks5AutoConnector {
-                                smoltcp_net: net
-                                    .lock()
-                                    .await
-                                    .as_ref()
-                                    .map(|net| net.smoltcp_net.clone()),
-                                entries: entries.clone(),
-                                #[cfg(feature = "kcp")]
-                                kcp_endpoint: kcp_endpoint.clone(),
-                                peer_mgr: peer_manager.clone(),
-                                src_addr: addr,
-                                inner_connector: parking_lot::Mutex::new(None),
-                                entry_count: entry_count.clone(),
-                            };
-                            if let Some(net) = net.lock().await.as_ref() {
-                                net.handle_tcp_stream(socket, connector);
-                            } else {
-                                tokio::spawn(Socks5ServerNet::handle_tcp_stream_task(
-                                    socket, connector,
-                                ));
-                            }
-                        }
-                        Err(err) => tracing::error!("accept error = {:?}", err),
-                    }
+        let proxy_listeners = plan_proxy_listeners(
+            self.global_ctx.config.get_socks5_portal(),
+            self.global_ctx.config.get_outbound_http_proxy(),
+        )
+        .await?;
+        if !proxy_listeners.is_empty() {
+            for proxy_listener in proxy_listeners {
+                if !proxy_listener.addr.ip().is_loopback() {
+                    tracing::warn!(
+                        bind_addr = %proxy_listener.addr,
+                        "userspace proxy has no authentication and is not bound to loopback"
+                    );
                 }
-            });
+                let listener = bind::<TcpListener>()
+                    .addr(proxy_listener.addr)
+                    .net_ns(self.global_ctx.net_ns.clone())
+                    .call()?;
 
-            self.socks5_enabled.store(true, Ordering::Relaxed);
-            join_joinset_background(self.tasks.clone(), "socks5 server".to_string());
-        };
+                let entries = self.entries.clone();
+                let entry_count = self.entry_count.clone();
+                let peer_manager = self.peer_manager.clone();
+                let net = self.net.clone();
+                let protocols = proxy_listener.protocols;
+                #[cfg(feature = "kcp")]
+                let listener_kcp_endpoint = kcp_endpoint.clone();
+                self.tasks.lock().unwrap().spawn(async move {
+                    loop {
+                        match listener.accept().await {
+                            Ok((socket, addr)) => {
+                                tracing::info!("accept a new connection, {:?}", socket);
+                                let connector = Socks5AutoConnector {
+                                    smoltcp_net: net
+                                        .lock()
+                                        .await
+                                        .as_ref()
+                                        .map(|net| net.smoltcp_net.clone()),
+                                    entries: entries.clone(),
+                                    #[cfg(feature = "kcp")]
+                                    kcp_endpoint: listener_kcp_endpoint.clone(),
+                                    peer_mgr: peer_manager.clone(),
+                                    src_addr: addr,
+                                    inner_connector: parking_lot::Mutex::new(None),
+                                    entry_count: entry_count.clone(),
+                                };
+                                if let Some(net) = net.lock().await.as_ref() {
+                                    net.handle_tcp_stream(socket, connector, protocols);
+                                } else {
+                                    tokio::spawn(Socks5ServerNet::dispatch_tcp_stream_task(
+                                        socket, connector, protocols,
+                                    ));
+                                }
+                            }
+                            Err(err) => tracing::error!("accept error = {:?}", err),
+                        }
+                    }
+                });
+            }
+
+            self.userspace_proxy_enabled.store(true, Ordering::Relaxed);
+            join_joinset_background(self.tasks.clone(), "userspace proxy server".to_string());
+        }
 
         let cfgs = self.global_ctx.config.get_port_forwards();
         self.reload_port_forwards(&cfgs).await?;
@@ -1769,5 +1905,82 @@ mod tests {
         assert_eq!(old_entry_count_again, 1);
         assert_eq!(new_entry_count_again, 1);
         assert_eq!(entry_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn equal_proxy_addresses_share_one_listener() {
+        let listeners = plan_proxy_listeners(
+            Some("socks5://127.0.0.1:1055".parse().unwrap()),
+            Some("http://127.0.0.1:1055".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].addr, "127.0.0.1:1055".parse().unwrap());
+        assert!(listeners[0].protocols.socks5);
+        assert!(listeners[0].protocols.http);
+    }
+
+    #[tokio::test]
+    async fn different_proxy_addresses_create_two_listeners() {
+        let listeners = plan_proxy_listeners(
+            Some("socks5://127.0.0.1:1055".parse().unwrap()),
+            Some("http://127.0.0.1:1056".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(listeners.len(), 2);
+        let socks5 = listeners
+            .iter()
+            .find(|listener| listener.addr.port() == 1055)
+            .unwrap();
+        let http = listeners
+            .iter()
+            .find(|listener| listener.addr.port() == 1056)
+            .unwrap();
+        assert!(socks5.protocols.socks5);
+        assert!(!socks5.protocols.http);
+        assert!(!http.protocols.socks5);
+        assert!(http.protocols.http);
+    }
+
+    #[tokio::test]
+    async fn localhost_proxy_address_uses_ipv4_loopback() {
+        let listeners =
+            plan_proxy_listeners(Some("socks5://localhost:1055".parse().unwrap()), None)
+                .await
+                .unwrap();
+
+        assert_eq!(listeners[0].addr, "127.0.0.1:1055".parse().unwrap());
+    }
+
+    #[test]
+    fn shared_listener_classifies_enabled_protocols() {
+        let both = ProxyProtocols {
+            socks5: true,
+            http: true,
+        };
+        let http_only = ProxyProtocols {
+            socks5: false,
+            http: true,
+        };
+        let socks5_only = ProxyProtocols {
+            socks5: true,
+            http: false,
+        };
+
+        assert_eq!(
+            classify_proxy_protocol(0x05, both),
+            Some(ProxyProtocol::Socks5)
+        );
+        assert_eq!(
+            classify_proxy_protocol(b'C', both),
+            Some(ProxyProtocol::Http)
+        );
+        assert_eq!(classify_proxy_protocol(0x05, http_only), None);
+        assert_eq!(classify_proxy_protocol(b'G', socks5_only), None);
+        assert_eq!(classify_proxy_protocol(0xff, both), None);
     }
 }
