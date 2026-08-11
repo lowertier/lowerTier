@@ -354,12 +354,24 @@ impl TrafficMetricRecorder {
     }
 
     pub(crate) async fn record_rx(&self, peer_id: PeerId, packet_type: u8, bytes: u64) {
+        self.record_rx_batch(peer_id, packet_type, bytes, 1).await;
+    }
+
+    pub(crate) async fn record_rx_batch(
+        &self,
+        peer_id: PeerId,
+        packet_type: u8,
+        bytes: u64,
+        packets: u64,
+    ) {
         if peer_id == self.my_peer_id {
             return;
         }
         self.rx_metrics
             .select(traffic_kind(packet_type))
-            .record_with_resolver(peer_id, bytes, || self.resolve_instance_id(peer_id))
+            .record_batch_with_resolver(peer_id, bytes, packets, || {
+                self.resolve_instance_id(peer_id)
+            })
             .await;
     }
 

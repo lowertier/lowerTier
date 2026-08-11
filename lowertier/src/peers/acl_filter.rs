@@ -19,7 +19,10 @@ use pnet::packet::{
 use quanta::Instant;
 
 use crate::proto::acl::{AclStats, Protocol};
-use crate::tunnel::packet_def::PacketType;
+use crate::tunnel::{
+    batch::PacketBatch,
+    packet_def::{PacketType, ethernet_network_metadata},
+};
 use crate::{
     common::acl_processor::{AclProcessor, AclResult, AclStatKey, AclStatType, PacketInfo},
     proto::acl::{Acl, Action, ChainType},
@@ -28,6 +31,52 @@ use crate::{
 use tokio_util::task::AbortOnDropHandle;
 
 static EMPTY_GROUPS: LazyLock<Arc<Vec<String>>> = LazyLock::new(|| Arc::new(Vec::new()));
+
+fn packet_batch_contains_acl_data(batch: &PacketBatch) -> bool {
+    batch.iter().any(packet_has_acl_ip_payload)
+}
+
+fn packet_type(packet: &ZCPacket) -> Option<u8> {
+    packet
+        .parsed_metadata()
+        .map(|metadata| metadata.packet_type)
+        .or_else(|| {
+            packet
+                .peer_manager_header()
+                .map(|header| header.packet_type)
+        })
+}
+
+fn ethernet_ip_payload(packet: &ZCPacket) -> Option<&[u8]> {
+    let network = packet
+        .parsed_metadata()
+        .and_then(|metadata| metadata.ethernet_network)
+        .or_else(|| ethernet_network_metadata(packet.payload()))?;
+    if !matches!(network.ether_type, 0x0800 | 0x86dd) {
+        return None;
+    }
+    packet.payload().get(network.payload_offset..)
+}
+
+fn packet_has_acl_ip_payload(packet: &ZCPacket) -> bool {
+    match packet_type(packet) {
+        Some(packet_type) if packet_type == PacketType::Data as u8 => true,
+        Some(packet_type) if packet_type == PacketType::Ethernet as u8 => {
+            ethernet_ip_payload(packet).is_some()
+        }
+        _ => false,
+    }
+}
+
+fn packet_ip_payload(packet: &ZCPacket) -> Option<&[u8]> {
+    match packet_type(packet) {
+        Some(packet_type) if packet_type == PacketType::Data as u8 => Some(packet.payload()),
+        Some(packet_type) if packet_type == PacketType::Ethernet as u8 => {
+            ethernet_ip_payload(packet)
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 struct OutboundAllowRecord {
@@ -172,7 +221,7 @@ impl AclFilter {
         needs_src_groups: bool,
         needs_dst_groups: bool,
     ) -> Option<(PacketInfo, bool)> {
-        let payload = packet.payload();
+        let payload = packet_ip_payload(packet)?;
 
         let src_ip;
         let dst_ip;
@@ -391,11 +440,60 @@ impl AclFilter {
             return true;
         }
 
-        if packet.peer_manager_header().unwrap().packet_type != PacketType::Data as u8 {
+        if !packet_has_acl_ip_payload(packet) {
             return true;
         }
 
         let processor = self.acl_processor.load();
+        self.process_packet_with_processor(packet, is_in, my_ipv4, is_local_ipv6, route, &processor)
+    }
+
+    pub fn process_packet_batch_with_acl(
+        &self,
+        batch: PacketBatch,
+        is_in: bool,
+        my_ipv4: Option<Ipv4Addr>,
+        is_local_ipv6: impl Fn(Ipv6Addr) -> bool + Copy,
+        route: &(dyn super::route_trait::Route + Send + Sync + 'static),
+    ) -> PacketBatch {
+        if !self.acl_enabled.load(Ordering::Relaxed) {
+            return batch;
+        }
+
+        if !packet_batch_contains_acl_data(&batch) {
+            return batch;
+        }
+
+        let processor = self.acl_processor.load();
+        let mut allowed = PacketBatch::with_capacity(batch.len());
+        for packet in batch {
+            if !packet_has_acl_ip_payload(&packet)
+                || self.process_packet_with_processor(
+                    &packet,
+                    is_in,
+                    my_ipv4,
+                    is_local_ipv6,
+                    route,
+                    &processor,
+                )
+            {
+                allowed
+                    .try_push(packet)
+                    .expect("an ACL output batch cannot exceed its input batch");
+            }
+        }
+        allowed
+    }
+
+    fn process_packet_with_processor(
+        &self,
+        packet: &ZCPacket,
+        is_in: bool,
+        my_ipv4: Option<Ipv4Addr>,
+        is_local_ipv6: impl Fn(Ipv6Addr) -> bool,
+        route: &(dyn super::route_trait::Route + Send + Sync + 'static),
+        processor: &AclProcessor,
+    ) -> bool {
         let (packet_info, tcp_is_initial_syn) = match self.extract_packet_info(
             packet,
             route,
@@ -418,7 +516,7 @@ impl AclFilter {
 
         let acl_result = processor.process_packet(&packet_info, chain_type);
 
-        self.handle_acl_result(&acl_result, &packet_info, chain_type, &processor);
+        self.handle_acl_result(&acl_result, &packet_info, chain_type, processor);
 
         // Check if packet should be allowed
         match acl_result.action {
@@ -483,10 +581,15 @@ mod tests {
 
     use crate::{
         common::acl_processor::PacketInfo,
-        proto::acl::{Acl, ChainType, Protocol},
+        peers::route_trait::MockRoute,
+        proto::acl::{Acl, AclV1, Action, Chain, ChainType, Protocol},
+        tunnel::{
+            batch::PacketBatch,
+            packet_def::{PacketType, ZCPacket},
+        },
     };
 
-    use super::{AclFilter, OutboundAllowRecord};
+    use super::{AclFilter, OutboundAllowRecord, packet_batch_contains_acl_data};
 
     fn packet_info(dst_ip: IpAddr) -> PacketInfo {
         PacketInfo {
@@ -499,6 +602,71 @@ mod tests {
             src_groups: Arc::new(Vec::new()),
             dst_groups: Arc::new(Vec::new()),
         }
+    }
+
+    #[test]
+    fn acl_batch_scan_finds_ip_inside_ethernet_frames() {
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..8 {
+            let mut packet = ZCPacket::new_with_payload(&[value; 64]);
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+            batch.try_push(packet).unwrap();
+        }
+        assert!(!packet_batch_contains_acl_data(&batch));
+
+        let mut frame = vec![0_u8; 14 + 20];
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        frame[14] = 0x45;
+        let mut ethernet_ip = ZCPacket::new_with_payload(&frame);
+        ethernet_ip.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+        batch.try_push(ethernet_ip).unwrap();
+        assert!(packet_batch_contains_acl_data(&batch));
+
+        let mut data = ZCPacket::new_with_payload(b"data");
+        data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        batch.try_push(data).unwrap();
+        assert!(packet_batch_contains_acl_data(&batch));
+    }
+
+    #[tokio::test]
+    async fn acl_filters_inner_ip_and_keeps_non_ip_ethernet() {
+        let filter = AclFilter::new();
+        filter.reload_rules(Some(&Acl {
+            acl_v1: Some(AclV1 {
+                chains: vec![Chain {
+                    name: "drop_forward".to_string(),
+                    chain_type: ChainType::Forward as i32,
+                    enabled: true,
+                    default_action: Action::Drop as i32,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+        }));
+
+        let mut ipv4_frame = vec![0_u8; 14 + 20 + 8];
+        ipv4_frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        ipv4_frame[14] = 0x45;
+        ipv4_frame[16..18].copy_from_slice(&28_u16.to_be_bytes());
+        ipv4_frame[23] = 17;
+        ipv4_frame[26..30].copy_from_slice(&[10, 0, 0, 1]);
+        ipv4_frame[30..34].copy_from_slice(&[10, 0, 0, 2]);
+        let mut ip_packet = ZCPacket::new_with_payload(&ipv4_frame);
+        ip_packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+
+        let mut arp_frame = vec![0_u8; 14 + 28];
+        arp_frame[12..14].copy_from_slice(&0x0806_u16.to_be_bytes());
+        let mut arp_packet = ZCPacket::new_with_payload(&arp_frame);
+        arp_packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+
+        let mut batch = PacketBatch::new();
+        batch.try_push(ip_packet).unwrap();
+        batch.try_push(arp_packet).unwrap();
+        let allowed =
+            filter.process_packet_batch_with_acl(batch, true, None, |_| false, &MockRoute {});
+
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(&allowed[0].payload()[12..14], &0x0806_u16.to_be_bytes());
     }
 
     #[test]

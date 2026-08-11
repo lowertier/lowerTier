@@ -13,7 +13,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::TunnelInfo;
 use super::{
-    SinkItem, StreamItem, Tunnel, TunnelError, ZCPacketSink, ZCPacketStream,
+    PacketBatchSink, PacketBatchStream, SinkItem, SplitTunnel, StreamItem, Tunnel, TunnelError,
+    ZCPacketSink, ZCPacketStream,
+    batch::{ScalarToBatchSink, ScalarToBatchStream},
     buf::BufList,
     packet_def::{TCP_TUNNEL_HEADER_SIZE, TCPTunnelHeader, ZCPacketType},
 };
@@ -144,9 +146,68 @@ impl<R, W> TunnelWrapper<R, W> {
 impl<R, W> Tunnel for TunnelWrapper<R, W>
 where
     R: ZCPacketStream + Send + 'static,
-    W: ZCPacketSink + Send + 'static,
+    W: ZCPacketSink + Send + Unpin + 'static,
 {
-    fn split(&self) -> (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>) {
+    fn split(&self) -> SplitTunnel {
+        let reader = self.reader.lock().unwrap().take().unwrap();
+        let writer = self.writer.lock().unwrap().take().unwrap();
+        (
+            Box::pin(ScalarToBatchStream::new(reader)),
+            Box::pin(ScalarToBatchSink::new(writer)),
+        )
+    }
+
+    fn info(&self) -> Option<TunnelInfo> {
+        self.info.clone()
+    }
+
+    fn is_transport_authenticated(&self) -> bool {
+        self.transport_authenticated
+    }
+}
+
+/// Holds a transport that already reads and writes owned packet batches.
+pub struct BatchTunnelWrapper<R, W> {
+    reader: Arc<Mutex<Option<R>>>,
+    writer: Arc<Mutex<Option<W>>>,
+    info: Option<TunnelInfo>,
+    associate_data: Option<Box<dyn Any + Send + 'static>>,
+    transport_authenticated: bool,
+}
+
+impl<R, W> BatchTunnelWrapper<R, W> {
+    pub fn new(reader: R, writer: W, info: Option<TunnelInfo>) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(Some(reader))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            info,
+            associate_data: None,
+            transport_authenticated: false,
+        }
+    }
+
+    pub fn new_with_transport_authentication(
+        reader: R,
+        writer: W,
+        info: Option<TunnelInfo>,
+        transport_authenticated: bool,
+    ) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(Some(reader))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            info,
+            associate_data: None,
+            transport_authenticated,
+        }
+    }
+}
+
+impl<R, W> Tunnel for BatchTunnelWrapper<R, W>
+where
+    R: PacketBatchStream + Send + 'static,
+    W: PacketBatchSink + Send + 'static,
+{
+    fn split(&self) -> SplitTunnel {
         let reader = self.reader.lock().unwrap().take().unwrap();
         let writer = self.writer.lock().unwrap().take().unwrap();
         (Box::pin(reader), Box::pin(writer))
@@ -178,14 +239,41 @@ impl<R> FramedReader<R> {
         Self::new_with_associate_data(reader, max_packet_size, None)
     }
 
+    pub fn new_with_initial_capacity(
+        reader: R,
+        max_packet_size: usize,
+        initial_capacity: usize,
+    ) -> Self {
+        Self::new_with_associate_data_and_initial_capacity(
+            reader,
+            max_packet_size,
+            initial_capacity,
+            None,
+        )
+    }
+
     pub fn new_with_associate_data(
         reader: R,
         max_packet_size: usize,
         associate_data: Option<Box<dyn Any + Send + 'static>>,
     ) -> Self {
+        Self::new_with_associate_data_and_initial_capacity(
+            reader,
+            max_packet_size,
+            max_packet_size,
+            associate_data,
+        )
+    }
+
+    fn new_with_associate_data_and_initial_capacity(
+        reader: R,
+        max_packet_size: usize,
+        initial_capacity: usize,
+        associate_data: Option<Box<dyn Any + Send + 'static>>,
+    ) -> Self {
         FramedReader {
             reader,
-            buf: BytesMut::with_capacity(max_packet_size),
+            buf: BytesMut::with_capacity(initial_capacity.min(max_packet_size)),
             max_packet_size,
             associate_data,
             error: None,
@@ -702,7 +790,7 @@ pub mod tests {
 
     use crate::{
         common::netns::NetNS,
-        tunnel::{TunnelConnector, TunnelListener, packet_def::ZCPacket},
+        tunnel::{TunnelConnector, TunnelListener, batch::PacketBatch, packet_def::ZCPacket},
     };
 
     #[cfg(test)]
@@ -895,15 +983,19 @@ pub mod tests {
 
         let (mut recv, mut send) = tunnel.split();
 
-        send.send(ZCPacket::new_with_payload(buf.as_slice()))
-            .await
-            .unwrap();
+        send.send(PacketBatch::singleton(ZCPacket::new_with_payload(
+            buf.as_slice(),
+        )))
+        .await
+        .unwrap();
 
         let ret = tokio::time::timeout(tokio::time::Duration::from_secs(1), recv.next())
             .await
             .unwrap()
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .pop_singleton()
+            .expect("the ping response contains one packet");
         println!("echo back: {:?}", ret);
         assert_eq!(ret.payload(), Bytes::from(buf));
 
@@ -989,8 +1081,8 @@ pub mod tests {
             let (mut r, _s) = ret.split();
             let now = Instant::now();
             let mut count = 0;
-            while let Some(Ok(p)) = r.next().await {
-                count += p.payload_len();
+            while let Some(Ok(batch)) = r.next().await {
+                count += batch.byte_len();
                 let elapsed_sec = now.elapsed().as_secs();
                 if elapsed_sec > 0 {
                     bps_clone.store(
@@ -1018,7 +1110,7 @@ pub mod tests {
         while now.elapsed().as_secs() < 10 {
             // send.feed(item)
             let item = ZCPacket::new_with_payload(send_buf.as_ref());
-            send.feed(item).await.unwrap();
+            send.feed(PacketBatch::singleton(item)).await.unwrap();
         }
 
         send.close().await.unwrap();

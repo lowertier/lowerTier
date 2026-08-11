@@ -22,6 +22,7 @@ use crate::{
     },
     tunnel::{
         Tunnel, ZCPacketStream,
+        batch::BatchToScalarStream,
         mpsc::{MpscTunnel, MpscTunnelSender},
         ring::create_ring_tunnel_pair,
     },
@@ -96,7 +97,9 @@ impl Server {
     }
 
     pub fn get_transport_stream(&self) -> Pin<Box<dyn ZCPacketStream>> {
-        self.transport.lock().unwrap().get_stream()
+        Box::pin(BatchToScalarStream::new(
+            self.transport.lock().unwrap().get_stream(),
+        ))
     }
 
     pub fn run(&self) {
@@ -112,7 +115,7 @@ impl Server {
         let tunnel_info = mpsc.tunnel_info();
         tasks.lock().unwrap().spawn(async move {
             let mut mpsc = mpsc;
-            let mut rx = mpsc.get_stream();
+            let mut rx = BatchToScalarStream::new(mpsc.get_stream());
 
             while let Some(packet) = rx.next().await {
                 if let Err(err) = packet {

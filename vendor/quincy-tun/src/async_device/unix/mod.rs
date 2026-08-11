@@ -4,7 +4,10 @@ use crate::platform::GROTable;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 use crate::{
     builder::Layer,
-    platform::offload::{VIRTIO_NET_HDR_LEN, VirtioNetHdr, handle_gro, handle_gro_ethernet},
+    platform::offload::{
+        VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN, VirtioNetHdr,
+        gso_none_checksum, handle_gro, handle_gro_ethernet,
+    },
 };
 use std::io;
 use std::io::{IoSlice, IoSliceMut};
@@ -249,6 +252,52 @@ impl AsyncDevice {
         let tun = self.get_ref();
 
         if tun.vnet_hdr {
+            let direct_capacity = bufs[0].as_ref().len().saturating_sub(offset);
+            if direct_capacity != 0 && original_buffer.len() >= direct_capacity {
+                let mut header = [0_u8; VIRTIO_NET_HDR_LEN];
+                let len = {
+                    let direct = &mut bufs[0].as_mut()[offset..];
+                    let overflow = &mut original_buffer[direct_capacity..];
+                    let mut vectors = [
+                        IoSliceMut::new(&mut header),
+                        IoSliceMut::new(direct),
+                        IoSliceMut::new(overflow),
+                    ];
+                    self.recv_vectored(&mut vectors).await?
+                };
+                if len <= VIRTIO_NET_HDR_LEN {
+                    return Err(io::Error::other(format!(
+                        "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                    )));
+                }
+                let hdr = VirtioNetHdr::decode(&header)?;
+                let packet_len = len - VIRTIO_NET_HDR_LEN;
+                let direct_len = packet_len.min(direct_capacity);
+                if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+                    if packet_len > direct_capacity {
+                        return Err(io::Error::other(format!(
+                            "non-GSO packet length {packet_len} exceeds direct buffer length {direct_capacity}",
+                        )));
+                    }
+                    let packet = &mut bufs[0].as_mut()[offset..offset + packet_len];
+                    if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                        gso_none_checksum(packet, hdr.csum_start, hdr.csum_offset)?;
+                    }
+                    sizes[0] = packet_len;
+                    return Ok(1);
+                }
+
+                original_buffer[..direct_len]
+                    .copy_from_slice(&bufs[0].as_ref()[offset..offset + direct_len]);
+                return tun.handle_virtio_read(
+                    hdr,
+                    &mut original_buffer[..packet_len],
+                    bufs,
+                    sizes,
+                    offset,
+                );
+            }
+
             let len = self.recv(original_buffer).await?;
             if len <= VIRTIO_NET_HDR_LEN {
                 Err(io::Error::other(format!(
@@ -332,28 +381,37 @@ impl AsyncDevice {
         }
 
         let mut total = 0;
-        let mut err = Ok(());
-
-        for buf_idx in &gro_table.to_write {
-            let Some(buf) = bufs[*buf_idx].as_ref().get(offset..) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid offset",
-                ));
-            };
-            match self.send(buf).await {
-                Ok(n) => {
-                    total += n;
-                }
-                Err(e) => {
-                    if e.raw_os_error() == Some(libc::EBADFD) {
-                        return Err(e);
+        let mut error = None;
+        let mut next = 0;
+        while next < gro_table.to_write.len() {
+            self.writable().await?;
+            while next < gro_table.to_write.len() {
+                let buf_idx = gro_table.to_write[next];
+                let Some(buf) = bufs[buf_idx].as_ref().get(offset..) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid offset",
+                    ));
+                };
+                match self.try_send(buf) {
+                    Ok(n) => {
+                        total += n;
+                        next += 1;
                     }
-                    err = Err(e)
+                    Err(current) if current.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(current) => {
+                        if current.raw_os_error() == Some(libc::EBADFD) {
+                            return Err(current);
+                        }
+                        error = Some(current);
+                        next += 1;
+                    }
                 }
             }
         }
-        err?;
+        if let Some(error) = error {
+            return Err(error);
+        }
         Ok(total)
     }
 }

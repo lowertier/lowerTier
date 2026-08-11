@@ -21,6 +21,8 @@ pub mod route_trait;
 pub mod rpc_service;
 mod traffic_metrics;
 
+use std::sync::{Arc, OnceLock};
+
 pub(crate) mod flow;
 pub mod foreign_network_client;
 pub mod foreign_network_manager;
@@ -34,11 +36,28 @@ pub mod peer_task;
 #[cfg(test)]
 pub mod tests;
 
-use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
+use crate::tunnel::{
+    batch::{PacketBatch, PacketBatchIntoIter},
+    packet_def::ZCPacket,
+};
 
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait PeerPacketFilter {
+    fn is_direct_nic_terminal(&self) -> bool {
+        false
+    }
+
+    fn is_interested_in_packet_from_peer(&self, _packet: &ZCPacket) -> bool {
+        true
+    }
+
+    fn is_interested_in_batch_from_peer(&self, batch: &PacketBatch) -> bool {
+        batch
+            .iter()
+            .any(|packet| self.is_interested_in_packet_from_peer(packet))
+    }
+
     async fn try_process_packet_from_peer(&self, _zc_packet: ZCPacket) -> Option<ZCPacket> {
         Some(_zc_packet)
     }
@@ -61,6 +80,13 @@ pub trait PeerPacketFilter {
 pub trait NicPacketFilter {
     async fn try_process_packet_from_nic(&self, data: &mut ZCPacket) -> bool;
 
+    async fn try_process_batch_from_nic(&self, mut batch: PacketBatch) -> PacketBatch {
+        for packet in batch.iter_mut() {
+            let _ = self.try_process_packet_from_nic(packet).await;
+        }
+        batch
+    }
+
     fn id(&self) -> String {
         format!("{:p}", self)
     }
@@ -77,6 +103,7 @@ type BoxNicPacketFilter = Box<dyn NicPacketFilter + Send + Sync>;
 #[derive(Clone)]
 pub struct PacketRecvChan {
     sender: tokio::sync::mpsc::Sender<PacketBatch>,
+    direct_nic: Arc<OnceLock<Arc<peer_manager::DirectNicIngress>>>,
 }
 
 impl PacketRecvChan {
@@ -101,7 +128,19 @@ impl PacketRecvChan {
         if batch.is_empty() {
             return Ok(());
         }
+        let batch = if let Some(direct_nic) = self.direct_nic.get() {
+            match direct_nic.try_process(batch).await {
+                Ok(()) => return Ok(()),
+                Err(batch) => batch,
+            }
+        } else {
+            batch
+        };
         self.sender.send(batch).await
+    }
+
+    pub(crate) fn install_direct_nic(&self, ingress: Arc<peer_manager::DirectNicIngress>) {
+        let _ = self.direct_nic.set(ingress);
     }
 
     pub fn try_send(
@@ -131,7 +170,7 @@ impl PacketRecvChan {
 
 pub struct PacketRecvChanReceiver {
     receiver: tokio::sync::mpsc::Receiver<PacketBatch>,
-    pending: Option<smallvec::IntoIter<[ZCPacket; 4]>>,
+    pending: Option<PacketBatchIntoIter>,
 }
 
 impl PacketRecvChanReceiver {
@@ -177,8 +216,9 @@ impl PacketRecvChanReceiver {
 
 pub fn create_packet_recv_chan() -> (PacketRecvChan, PacketRecvChanReceiver) {
     let (sender, receiver) = tokio::sync::mpsc::channel(128);
+    let direct_nic = Arc::new(OnceLock::new());
     (
-        PacketRecvChan { sender },
+        PacketRecvChan { sender, direct_nic },
         PacketRecvChanReceiver {
             receiver,
             pending: None,
@@ -261,5 +301,12 @@ mod vector_channel_tests {
                 .collect::<Vec<_>>(),
             vec![1, 3, 5]
         );
+    }
+
+    #[test]
+    fn peer_filter_is_interested_by_default() {
+        let packet = ZCPacket::new_with_payload(b"data");
+
+        assert!(KeepOddPackets.is_interested_in_packet_from_peer(&packet));
     }
 }

@@ -6,7 +6,7 @@ use tokio::{task::JoinSet, time::timeout};
 
 use crate::{
     proto::rpc_types::error::Error,
-    tunnel::{Tunnel, packet_def::PacketType, ring::create_ring_tunnel_pair},
+    tunnel::{Tunnel, batch::PacketBatch, packet_def::PacketType, ring::create_ring_tunnel_pair},
 };
 
 use super::{client::Client, server::Server, service_registry::ServiceRegistry};
@@ -114,7 +114,7 @@ impl BidirectRpcManager {
                     }
                 };
 
-                if let Err(e) = inner_tx.send(packet).await {
+                if let Err(e) = inner_tx.send(PacketBatch::singleton(packet)).await {
                     tracing::error!(error = ?e, "send to peer failed");
                     e_clone.lock().unwrap().replace(Error::from(e));
                 }
@@ -141,7 +141,7 @@ impl BidirectRpcManager {
                     inner_rx.next().await
                 };
 
-                let o = match ret {
+                let batch = match ret {
                     Some(Ok(o)) => o,
                     Some(Err(e)) => {
                         tracing::error!(error = ?e, "recv from peer failed");
@@ -155,16 +155,16 @@ impl BidirectRpcManager {
                     }
                 };
 
-                let Some(peer_manager_header) = o.peer_manager_header() else {
-                    tracing::error!("peer manager header not found");
-                    continue;
-                };
-                if peer_manager_header.packet_type == PacketType::RpcReq as u8 {
-                    server_tx.send(o).await.unwrap();
-                    continue;
-                } else if peer_manager_header.packet_type == PacketType::RpcResp as u8 {
-                    client_tx.send(o).await.unwrap();
-                    continue;
+                for packet in batch {
+                    let Some(peer_manager_header) = packet.peer_manager_header() else {
+                        tracing::error!("peer manager header not found");
+                        continue;
+                    };
+                    if peer_manager_header.packet_type == PacketType::RpcReq as u8 {
+                        server_tx.send(packet).await.unwrap();
+                    } else if peer_manager_header.packet_type == PacketType::RpcResp as u8 {
+                        client_tx.send(packet).await.unwrap();
+                    }
                 }
             }
         });

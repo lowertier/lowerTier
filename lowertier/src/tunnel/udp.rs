@@ -1565,10 +1565,18 @@ mod tests {
             let (mut stream, mut sink) = t1.split();
 
             for i in 0..10 {
-                sink.send(ZCPacket::new_with_payload("hello1".as_bytes()))
+                sink.send(PacketBatch::singleton(ZCPacket::new_with_payload(
+                    "hello1".as_bytes(),
+                )))
+                .await
+                .unwrap();
+                let recv = stream
+                    .next()
                     .await
+                    .unwrap()
+                    .unwrap()
+                    .pop_singleton()
                     .unwrap();
-                let recv = stream.next().await.unwrap().unwrap();
                 println!("t1 recv: {:?}, {:?}", recv, i);
                 assert_eq!(recv.payload(), "hello1".as_bytes());
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1579,10 +1587,18 @@ mod tests {
             let (mut stream, mut sink) = t2.split();
 
             for i in 0..10 {
-                sink.send(ZCPacket::new_with_payload("hello2".as_bytes()))
+                sink.send(PacketBatch::singleton(ZCPacket::new_with_payload(
+                    "hello2".as_bytes(),
+                )))
+                .await
+                .unwrap();
+                let recv = stream
+                    .next()
                     .await
+                    .unwrap()
+                    .unwrap()
+                    .pop_singleton()
                     .unwrap();
-                let recv = stream.next().await.unwrap().unwrap();
                 println!("t2 recv: {:?}, {:?}", recv, i);
                 assert_eq!(recv.payload(), "hello2".as_bytes());
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

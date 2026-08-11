@@ -109,6 +109,32 @@ unsafe fn checksum_no_fold_sse41(mut b: &[u8], initial: u64) -> u64 {
     }
 }
 
+/// Accumulate network-order words with the AArch64 NEON unit.
+///
+/// # Safety
+/// AArch64 always provides NEON support.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn checksum_no_fold_neon(mut b: &[u8], initial: u64) -> u64 {
+    unsafe {
+        use std::arch::aarch64::*;
+
+        const CHUNK_SIZE: usize = 16;
+        let mut sums = vdupq_n_u64(0);
+
+        while b.len() >= CHUNK_SIZE {
+            let bytes = vld1q_u8(b.as_ptr());
+            let words = vreinterpretq_u32_u8(vrev32q_u8(bytes));
+            sums = vaddq_u64(sums, vmovl_u32(vget_low_u32(words)));
+            sums = vaddq_u64(sums, vmovl_high_u32(words));
+            b = &b[CHUNK_SIZE..];
+        }
+
+        let accumulator = initial + vgetq_lane_u64(sums, 0) + vgetq_lane_u64(sums, 1);
+        checksum_no_fold_scalar(b, accumulator)
+    }
+}
+
 /// RFC 1071 checksum accumulator over `b`, without folding to 16 bits.
 ///
 /// Treats the input as big-endian `u32` chunks and accumulates in `u64` to avoid
@@ -127,7 +153,21 @@ pub fn checksum_no_fold(b: &[u8], initial: u64) -> u64 {
         }
     }
 
-    checksum_no_fold_scalar(b, initial)
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: AArch64 includes the NEON instruction set.
+        return unsafe { checksum_no_fold_neon(b, initial) };
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        checksum_no_fold_scalar(b, initial)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        checksum_no_fold_scalar(b, initial)
+    }
 }
 
 /// Returns the final 16-bit RFC 1071 internet checksum.
@@ -157,12 +197,61 @@ pub fn pseudo_header_checksum_no_fold(
     checksum_no_fold(&trailer, sum)
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests {
-    use crate::platform::linux::checksum::{
-        checksum_no_fold_avx2, checksum_no_fold_scalar, checksum_no_fold_sse41,
-    };
+    use crate::platform::linux::checksum::checksum_no_fold_scalar;
 
+    fn deterministic_data(length: usize) -> Vec<u8> {
+        (0..length)
+            .map(|index| index.wrapping_mul(37).wrapping_add(11) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn scalar_checksum_handles_all_tail_lengths() {
+        let lengths = [0, 1, 2, 3, 4, 15, 16, 17, 63, 64, 65, 1500, 65535];
+        for length in lengths {
+            let data = deterministic_data(length);
+            let mut expected = data
+                .chunks(2)
+                .map(|word| match word {
+                    [high, low] => u16::from_be_bytes([*high, *low]) as u64,
+                    [high] => (*high as u64) << 8,
+                    _ => 0,
+                })
+                .sum::<u64>();
+            while expected > 0xffff {
+                expected = (expected >> 16) + (expected & 0xffff);
+            }
+            let mut actual = checksum_no_fold_scalar(&data, 0);
+            while actual > 0xffff {
+                actual = (actual >> 16) + (actual & 0xffff);
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_checksum_matches_scalar_for_packet_boundaries() {
+        use crate::platform::linux::checksum::checksum_no_fold_neon;
+
+        let lengths = [0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 1500, 9000, 65535];
+        let initial_values = [0_u64, 1, 12345, u32::MAX as u64];
+        for length in lengths {
+            let data = deterministic_data(length);
+            for initial in initial_values {
+                let expected = checksum_no_fold_scalar(&data, initial);
+                let actual = unsafe { checksum_no_fold_neon(&data, initial) };
+                assert_eq!(actual, expected, "length {length}, initial {initial}");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    use crate::platform::linux::checksum::{checksum_no_fold_avx2, checksum_no_fold_sse41};
+
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_checksum_avx2_vs_scalar_output() {
         // Only run this test on x86/x64 architectures if AVX2 feature is detected

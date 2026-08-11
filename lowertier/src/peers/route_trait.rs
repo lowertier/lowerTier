@@ -185,6 +185,7 @@ pub trait Route {
 
 pub type ArcRoute = Arc<Box<dyn Route + Send + Sync>>;
 
+#[derive(Clone)]
 pub struct MockRoute {}
 
 #[async_trait::async_trait]

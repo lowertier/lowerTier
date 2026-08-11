@@ -185,6 +185,12 @@ fn socket_recv_loop(
 
 #[async_trait::async_trait]
 impl PeerPacketFilter for IcmpProxy {
+    fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
+        packet
+            .peer_manager_header()
+            .is_some_and(|header| header.packet_type == PacketType::Data as u8)
+    }
+
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         if self.try_handle_peer_packet(&packet).await.is_some() {
             return None;

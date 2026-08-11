@@ -2,6 +2,8 @@ use anyhow::Context;
 use async_trait::async_trait;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use dashmap::DashMap;
+use futures::SinkExt;
+use parking_lot::RwLock as SyncRwLock;
 use pnet::packet::{ipv4::Ipv4Packet, ipv6::Ipv6Packet};
 use quanta::Instant;
 use smallvec::SmallVec;
@@ -33,7 +35,7 @@ use crate::{
     peers::{
         PeerPacketFilter,
         flow::{classify_packet_flow, split_packet_batch_by_flow_shard, stamp_packet_flow},
-        l2_fabric::{EthernetDestination, L2Fabric},
+        l2_fabric::{EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch},
         peer_conn::PeerConn,
         peer_rpc::PeerRpcManagerTransport,
         peer_session::PeerSessionStore,
@@ -55,7 +57,7 @@ use crate::{
         },
     },
     tunnel::{
-        self, Tunnel, TunnelConnector,
+        self, PacketBatchSink, Tunnel, TunnelConnector, TunnelError,
         batch::PacketBatch,
         packet_def::{CompressorAlgo, PacketType, ZCPacket},
     },
@@ -185,7 +187,119 @@ struct EthernetBatchInput {
 }
 
 type EthernetBatchInputs = SmallVec<[EthernetBatchInput; 4]>;
-type OrderedPeerBatches = SmallVec<[(PeerId, PacketBatch); 2]>;
+
+struct OrderedPeerBatch {
+    peer_id: PeerId,
+    packets: PacketBatch,
+    mark_recent: bool,
+}
+
+type OrderedPeerBatches = SmallVec<[OrderedPeerBatch; 2]>;
+
+fn is_peer_rpc_packet_type(packet_type: u8) -> bool {
+    packet_type == PacketType::TaRpc as u8
+        || packet_type == PacketType::RpcReq as u8
+        || packet_type == PacketType::RpcResp as u8
+}
+
+fn is_foreign_network_packet_type(packet_type: u8) -> bool {
+    packet_type == PacketType::ForeignNetworkPacket as u8
+}
+
+fn decoded_local_nic_batch_source(batch: &PacketBatch, my_peer_id: PeerId) -> Option<(PeerId, u8)> {
+    let first = batch.first()?;
+    let (source, packet_type) = first
+        .parsed_metadata()
+        .map(|metadata| (metadata.from_peer_id, metadata.packet_type))
+        .or_else(|| {
+            first
+                .peer_manager_header()
+                .map(|header| (header.from_peer_id.get(), header.packet_type))
+        })?;
+    if packet_type != PacketType::Data as u8 && packet_type != PacketType::Ethernet as u8 {
+        return None;
+    }
+    batch
+        .iter()
+        .all(|packet| {
+            if let Some(metadata) = packet.parsed_metadata() {
+                return metadata.packet_type == packet_type
+                    && metadata.from_peer_id == source
+                    && metadata.to_peer_id == my_peer_id
+                    && !metadata.encrypted
+                    && !metadata.compressed
+                    && (packet_type != PacketType::Ethernet as u8
+                        || (metadata.ethernet_destination.is_some()
+                            && metadata.ethernet_source.is_some()));
+            }
+            packet.peer_manager_header().is_some_and(|header| {
+                header.packet_type == packet_type
+                    && header.from_peer_id.get() == source
+                    && header.to_peer_id.get() == my_peer_id
+                    && !header.is_encrypted()
+                    && !header.is_compressed()
+                    && (packet_type != PacketType::Ethernet as u8 || packet.payload().len() >= 14)
+            })
+        })
+        .then_some((source, packet_type))
+}
+
+fn prepare_direct_nic_batch<F>(
+    batch: &PacketBatch,
+    ethernet_input: bool,
+    mut learn_ethernet_source: F,
+) -> bool
+where
+    F: FnMut(&[u8], PeerId),
+{
+    if batch.is_empty() {
+        return false;
+    }
+
+    for packet in batch {
+        if let Some(metadata) = packet.parsed_metadata() {
+            let is_ethernet = metadata.packet_type == PacketType::Ethernet as u8;
+            if (metadata.packet_type != PacketType::Data as u8 && !is_ethernet)
+                || metadata.not_send_to_tun
+                || (is_ethernet && !ethernet_input)
+                || metadata.encrypted
+                || metadata.compressed
+            {
+                return false;
+            }
+            if is_ethernet {
+                learn_ethernet_source(packet.payload(), metadata.from_peer_id);
+            }
+            continue;
+        }
+        let Some(header) = packet.peer_manager_header() else {
+            return false;
+        };
+        let is_ethernet = header.packet_type == PacketType::Ethernet as u8;
+        if (header.packet_type != PacketType::Data as u8 && !is_ethernet)
+            || header.is_not_send_to_tun()
+            || (is_ethernet && !ethernet_input)
+            || header.is_encrypted()
+            || header.is_compressed()
+        {
+            return false;
+        }
+        if is_ethernet {
+            learn_ethernet_source(packet.payload(), header.from_peer_id.get());
+        }
+    }
+
+    true
+}
+
+fn packet_batch_contains_peer_rpc(batch: &PacketBatch) -> bool {
+    batch.iter().any(|packet| {
+        packet
+            .peer_manager_header()
+            .is_some_and(|header| is_peer_rpc_packet_type(header.packet_type))
+    })
+}
+
 static BATCH_QUEUE_DISABLED: OnceLock<bool> = OnceLock::new();
 
 fn batch_queue_disabled() -> bool {
@@ -214,12 +328,15 @@ fn push_ordered_peer_batch(
     peer_batches: &mut OrderedPeerBatches,
     peer_id: PeerId,
     packet: ZCPacket,
+    mark_recent: bool,
 ) {
-    if let Some((_, peer_batch)) = peer_batches
+    if let Some(peer_batch) = peer_batches
         .iter_mut()
-        .find(|(group_peer_id, _)| *group_peer_id == peer_id)
+        .find(|batch| batch.peer_id == peer_id)
     {
+        peer_batch.mark_recent |= mark_recent;
         peer_batch
+            .packets
             .try_push(packet)
             .expect("a per-peer group cannot exceed its bounded ingress batch");
         return;
@@ -229,10 +346,14 @@ fn push_ordered_peer_batch(
     peer_batch
         .try_push(packet)
         .expect("a new per-peer group accepts its first packet");
-    peer_batches.push((peer_id, peer_batch));
+    peer_batches.push(OrderedPeerBatch {
+        peer_id,
+        packets: peer_batch,
+        mark_recent,
+    });
 }
 
-async fn prepare_packet_batch(
+fn prepare_packet_batch(
     compress_algo: CompressorAlgo,
     mut batch: PacketBatch,
 ) -> Result<PacketBatch, Error> {
@@ -241,10 +362,143 @@ async fn prepare_packet_batch(
         stamp_packet_flow(packet);
         compressor
             .compress(packet, compress_algo)
-            .await
             .with_context(|| "compress failed")?;
     }
     Ok(batch)
+}
+
+pub(crate) struct DirectNicEndpoint {
+    sink: Mutex<std::pin::Pin<Box<dyn PacketBatchSink>>>,
+}
+
+#[derive(Default)]
+struct DirectNicBatchWriter {
+    endpoint: SyncRwLock<Weak<DirectNicEndpoint>>,
+}
+
+impl DirectNicBatchWriter {
+    fn install(&self, sink: std::pin::Pin<Box<dyn PacketBatchSink>>) -> Arc<DirectNicEndpoint> {
+        let endpoint = Arc::new(DirectNicEndpoint {
+            sink: Mutex::new(sink),
+        });
+        *self.endpoint.write() = Arc::downgrade(&endpoint);
+        endpoint
+    }
+
+    fn current_endpoint(&self) -> Option<Arc<DirectNicEndpoint>> {
+        self.endpoint.read().upgrade()
+    }
+
+    async fn send_to(
+        endpoint: Arc<DirectNicEndpoint>,
+        batch: PacketBatch,
+    ) -> Result<(), TunnelError> {
+        let mut sink = endpoint.sink.lock().await;
+        sink.send(batch).await
+    }
+}
+
+pub(crate) struct DirectNicIngress {
+    my_peer_id: PeerId,
+    peers: Weak<PeerMap>,
+    global_ctx: ArcGlobalCtx,
+    route: ArcRoute,
+    l2_fabric: Arc<L2Fabric>,
+    traffic_metrics: Arc<TrafficMetricRecorder>,
+    peer_packet_process_pipeline: Arc<RwLock<Vec<BoxPeerPacketFilter>>>,
+    ethernet_input: bool,
+    nic: Arc<DirectNicBatchWriter>,
+    self_rx_bytes: CounterHandle,
+    self_rx_packets: CounterHandle,
+    compress_rx_bytes_before: CounterHandle,
+    compress_rx_bytes_after: CounterHandle,
+}
+
+impl DirectNicIngress {
+    pub(crate) async fn try_process(&self, mut batch: PacketBatch) -> Result<(), PacketBatch> {
+        let Some(peers) = self.peers.upgrade() else {
+            return Err(batch);
+        };
+        let Some(endpoint) = self.nic.current_endpoint() else {
+            return Err(batch);
+        };
+        for packet in batch.iter_mut() {
+            if packet.parsed_metadata().is_none() && packet.refresh_parsed_metadata().is_none() {
+                return Err(batch);
+            }
+        }
+        let Some((from_peer_id, packet_type)) =
+            decoded_local_nic_batch_source(&batch, self.my_peer_id)
+        else {
+            return Err(batch);
+        };
+        if !prepare_direct_nic_batch(&batch, self.ethernet_input, |_, _| {}) {
+            return Err(batch);
+        }
+        if packet_type == PacketType::Ethernet as u8
+            && !PeerManager::credential_ethernet_peer_is_allowed(&peers, packet_type, from_peer_id)
+                .await
+        {
+            tracing::warn!(
+                from_peer_id,
+                "drop ethernet batch from suppressed credential peer"
+            );
+            return Ok(());
+        }
+
+        let batch = self
+            .global_ctx
+            .get_acl_filter()
+            .process_packet_batch_with_acl(
+                batch,
+                true,
+                self.global_ctx.get_ipv4().map(|address| address.address()),
+                |destination| self.global_ctx.is_ip_local_ipv6(&destination),
+                self.route.as_ref(),
+            );
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = batch;
+        {
+            let pipelines = self.peer_packet_process_pipeline.read().await;
+            for pipeline in pipelines.iter().rev() {
+                if pipeline.is_direct_nic_terminal()
+                    || !pipeline.is_interested_in_batch_from_peer(&batch)
+                {
+                    continue;
+                }
+                batch = pipeline.try_process_batch_from_peer(batch).await;
+                if batch.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut source_batch = L2SourceBatch::default();
+        if !prepare_direct_nic_batch(&batch, self.ethernet_input, |frame, peer_id| {
+            source_batch.record(frame, peer_id);
+        }) {
+            return Err(batch);
+        }
+        self.l2_fabric
+            .learn_source_batch_at(source_batch, std::time::Instant::now());
+        let bytes = batch.buffer_byte_len() as u64;
+        let packets = batch.len() as u64;
+        self.self_rx_bytes.add(bytes);
+        self.self_rx_packets.add(packets);
+        self.compress_rx_bytes_before.add(bytes);
+        self.compress_rx_bytes_after.add(bytes);
+        self.traffic_metrics
+            .record_rx_batch(from_peer_id, packet_type, bytes, packets)
+            .await;
+
+        if let Err(error) = DirectNicBatchWriter::send_to(endpoint, batch).await {
+            tracing::error!(?error, "send direct packet batch to NIC failed");
+        }
+        Ok(())
+    }
 }
 
 pub struct PeerManager {
@@ -252,6 +506,8 @@ pub struct PeerManager {
 
     global_ctx: ArcGlobalCtx,
     nic_channel: PacketRecvChan,
+    packet_ingress: PacketRecvChan,
+    direct_nic_writer: Arc<DirectNicBatchWriter>,
 
     tasks: Mutex<JoinSet<()>>,
 
@@ -342,6 +598,7 @@ impl PeerManager {
         let my_peer_id = rand::random();
 
         let (packet_send, packet_recv) = create_packet_recv_chan();
+        let packet_ingress = packet_send.clone();
         let peers = Arc::new(PeerMap::new(
             packet_send.clone(),
             global_ctx.clone(),
@@ -519,6 +776,8 @@ impl PeerManager {
 
             global_ctx,
             nic_channel,
+            packet_ingress,
+            direct_nic_writer: Arc::new(DirectNicBatchWriter::default()),
 
             tasks: Mutex::new(JoinSet::new()),
 
@@ -935,7 +1194,7 @@ impl PeerManager {
         Ok(())
     }
 
-    async fn try_handle_foreign_network_packet(
+    async fn handle_foreign_network_packet(
         mut packet: ZCPacket,
         my_peer_id: PeerId,
         peer_map: &PeerMap,
@@ -943,10 +1202,6 @@ impl PeerManager {
         disable_relay_data: bool,
     ) -> Result<(), ZCPacket> {
         let pm_header = packet.peer_manager_header().unwrap();
-        if pm_header.packet_type != PacketType::ForeignNetworkPacket as u8 {
-            return Err(packet);
-        }
-
         let from_peer_id = pm_header.from_peer_id.get();
         let to_peer_id = pm_header.to_peer_id.get();
 
@@ -1139,189 +1394,289 @@ impl PeerManager {
             tracing::trace!("start_peer_recv");
             while let Ok(batch) = recv_packet_batch_from_chan(&mut recv).await {
                 let disable_relay_data = global_ctx.flags_arc().disable_relay_data;
-                let mut local_batch = PacketBatch::new();
-                for ret in batch {
-                    let Err(mut ret) = Self::try_handle_foreign_network_packet(
-                        ret,
-                        my_peer_id,
-                        &peers,
-                        &foreign_mgr,
-                        disable_relay_data,
-                    )
-                    .await
-                    else {
-                        continue;
-                    };
-
-                    let buf_len = ret.buf_len();
-                    let is_relay_data_packet = Self::is_relay_data_zc_packet(&ret);
-                    let Some(hdr) = ret.mut_peer_manager_header() else {
-                        tracing::warn!(?ret, "invalid packet, skip");
-                        continue;
-                    };
-
-                    tracing::trace!(?hdr, "peer recv a packet...");
-                    let from_peer_id = hdr.from_peer_id.get();
-                    let to_peer_id = hdr.to_peer_id.get();
-                    let packet_type = hdr.packet_type;
-                    let is_encrypted = hdr.is_encrypted();
-                    if !Self::credential_ethernet_peer_is_allowed(&peers, packet_type, from_peer_id)
+                let mut local_batch = if let Some((from_peer_id, packet_type)) =
+                    decoded_local_nic_batch_source(&batch, my_peer_id)
+                {
+                    if packet_type == PacketType::Ethernet as u8
+                        && !Self::credential_ethernet_peer_is_allowed(
+                            &peers,
+                            packet_type,
+                            from_peer_id,
+                        )
                         .await
                     {
                         tracing::warn!(
                             from_peer_id,
-                            "drop ethernet packet from suppressed credential peer"
+                            "drop ethernet batch from suppressed credential peer"
                         );
                         continue;
                     }
-                    if to_peer_id != my_peer_id {
-                        if disable_relay_data && is_relay_data_packet {
-                            tracing::debug!(
-                                ?from_peer_id,
-                                ?to_peer_id,
-                                packet_type,
-                                "drop forwarded relay data while relay data is disabled"
-                            );
-                            continue;
-                        }
 
-                        if hdr.forward_counter > 7 {
-                            tracing::warn!(?hdr, "forward counter exceed, drop packet");
-                            continue;
-                        }
-
-                        // Step 10b: credential nodes don't forward handshake packets
-                        if is_credential_node
-                            && (packet_type == PacketType::HandShake as u8
-                                || packet_type == PacketType::NoiseHandshakeMsg1 as u8
-                                || packet_type == PacketType::NoiseHandshakeMsg2 as u8
-                                || packet_type == PacketType::NoiseHandshakeMsg3 as u8)
-                        {
-                            tracing::debug!("credential node dropping forwarded handshake packet");
-                            continue;
-                        }
-
-                        if hdr.forward_counter > 2 && hdr.is_latency_first() {
-                            tracing::trace!(?hdr, "set_latency_first false because too many hop");
-                            hdr.set_latency_first(false);
-                        }
-
-                        hdr.forward_counter += 1;
-
-                        if from_peer_id == my_peer_id {
-                            compress_tx_bytes_before.add(buf_len as u64);
-
-                            if packet_type == PacketType::Data as u8
-                                || packet_type == PacketType::Ethernet as u8
-                                || packet_type == PacketType::KcpSrc as u8
-                                || packet_type == PacketType::KcpDst as u8
-                            {
-                                let _ = Self::try_compress(compress_algo, &mut ret).await;
-                            }
-
-                            compress_tx_bytes_after.add(ret.buf_len() as u64);
-                            self_tx_bytes.add(ret.buf_len() as u64);
-                            self_tx_packets.inc();
-                        } else {
-                            match traffic_kind(packet_type) {
-                                TrafficKind::Data => {
-                                    forward_data_tx_bytes.add(buf_len as u64);
-                                    forward_data_tx_packets.inc();
-                                }
-                                TrafficKind::Control => {
-                                    forward_control_tx_bytes.add(buf_len as u64);
-                                    forward_control_tx_packets.inc();
-                                }
-                            }
-                        }
-
-                        tracing::trace!(?to_peer_id, ?my_peer_id, "need forward");
-                        let tx_metrics = if from_peer_id == my_peer_id {
-                            Some(&traffic_metrics)
-                        } else {
-                            None
-                        };
-                        let ret = Self::send_msg_internal(
-                            &peers,
-                            &foreign_client,
-                            &relay_peer_map,
-                            tx_metrics,
-                            ret,
-                            to_peer_id,
-                        )
+                    let bytes = batch.buffer_byte_len() as u64;
+                    let packets = batch.len() as u64;
+                    self_rx_bytes.add(bytes);
+                    self_rx_packets.add(packets);
+                    compress_rx_bytes_before.add(bytes);
+                    compress_rx_bytes_after.add(bytes);
+                    traffic_metrics
+                        .record_rx_batch(from_peer_id, packet_type, bytes, packets)
                         .await;
-                        if ret.is_err() {
-                            tracing::error!(
-                                ?ret,
-                                ?to_peer_id,
-                                ?from_peer_id,
-                                "forward packet error"
-                            );
-                        }
-                    } else {
-                        if packet_type == PacketType::RelayHandshake as u8
-                            || packet_type == PacketType::RelayHandshakeAck as u8
+                    batch
+                } else {
+                    let mut local_batch = PacketBatch::new();
+                    let mut local_rx_bytes = 0_u64;
+                    let mut local_rx_packets = 0_u64;
+                    let mut compression_rx_before = 0_u64;
+                    let mut compression_rx_after = 0_u64;
+                    let mut rx_metric_batches: SmallVec<[(PeerId, u8, u64, u64); 4]> =
+                        SmallVec::new();
+                    for mut ret in batch {
+                        let Some(header) = ret.peer_manager_header() else {
+                            tracing::warn!(?ret, "invalid packet, skip");
+                            continue;
+                        };
+                        let initial_metadata = (
+                            header.from_peer_id.get(),
+                            header.to_peer_id.get(),
+                            header.packet_type,
+                            header.is_encrypted(),
+                        );
+                        let (from_peer_id, to_peer_id, packet_type, is_encrypted) =
+                            if is_foreign_network_packet_type(initial_metadata.2) {
+                                let Err(foreign_packet) = Self::handle_foreign_network_packet(
+                                    ret,
+                                    my_peer_id,
+                                    &peers,
+                                    &foreign_mgr,
+                                    disable_relay_data,
+                                )
+                                .await
+                                else {
+                                    continue;
+                                };
+                                ret = foreign_packet;
+                                let Some(header) = ret.peer_manager_header() else {
+                                    tracing::warn!(?ret, "invalid foreign network packet, skip");
+                                    continue;
+                                };
+                                (
+                                    header.from_peer_id.get(),
+                                    header.to_peer_id.get(),
+                                    header.packet_type,
+                                    header.is_encrypted(),
+                                )
+                            } else {
+                                initial_metadata
+                            };
+
+                        let buf_len = ret.buf_len();
+                        let is_relay_data_packet = if is_foreign_network_packet_type(packet_type) {
+                            Self::is_relay_data_zc_packet(&ret)
+                        } else {
+                            Self::is_relay_data_packet(packet_type)
+                        };
+
+                        tracing::trace!(
+                            from_peer_id,
+                            to_peer_id,
+                            packet_type,
+                            "peer recv a packet"
+                        );
+                        if !Self::credential_ethernet_peer_is_allowed(
+                            &peers,
+                            packet_type,
+                            from_peer_id,
+                        )
+                        .await
                         {
-                            let _ = relay_peer_map.handle_handshake_packet(ret).await;
+                            tracing::warn!(
+                                from_peer_id,
+                                "drop ethernet packet from suppressed credential peer"
+                            );
                             continue;
                         }
-                        if !secure_mode_enabled && is_encrypted {
-                            if let Err(e) = encryptor.decrypt(&mut ret) {
-                                tracing::error!(?e, "decrypt failed");
+                        if to_peer_id != my_peer_id {
+                            if disable_relay_data && is_relay_data_packet {
+                                tracing::debug!(
+                                    ?from_peer_id,
+                                    ?to_peer_id,
+                                    packet_type,
+                                    "drop forwarded relay data while relay data is disabled"
+                                );
                                 continue;
                             }
-                        } else if is_encrypted {
-                            match relay_peer_map.decrypt_if_needed(&mut ret).await {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    tracing::error!("secure session not found");
-                                    continue;
+
+                            let Some(header) = ret.mut_peer_manager_header() else {
+                                tracing::warn!(?ret, "invalid forwarded packet, skip");
+                                continue;
+                            };
+
+                            if header.forward_counter > 7 {
+                                tracing::warn!(?header, "forward counter exceed, drop packet");
+                                continue;
+                            }
+
+                            // Step 10b: credential nodes don't forward handshake packets
+                            if is_credential_node
+                                && (packet_type == PacketType::HandShake as u8
+                                    || packet_type == PacketType::NoiseHandshakeMsg1 as u8
+                                    || packet_type == PacketType::NoiseHandshakeMsg2 as u8
+                                    || packet_type == PacketType::NoiseHandshakeMsg3 as u8)
+                            {
+                                tracing::debug!(
+                                    "credential node dropping forwarded handshake packet"
+                                );
+                                continue;
+                            }
+
+                            if header.forward_counter > 2 && header.is_latency_first() {
+                                tracing::trace!(
+                                    ?header,
+                                    "set_latency_first false because too many hop"
+                                );
+                                header.set_latency_first(false);
+                            }
+
+                            header.forward_counter += 1;
+
+                            if from_peer_id == my_peer_id {
+                                compress_tx_bytes_before.add(buf_len as u64);
+
+                                if packet_type == PacketType::Data as u8
+                                    || packet_type == PacketType::Ethernet as u8
+                                    || packet_type == PacketType::KcpSrc as u8
+                                    || packet_type == PacketType::KcpDst as u8
+                                {
+                                    let _ = Self::try_compress(compress_algo, &mut ret);
                                 }
-                                Err(e) => {
-                                    tracing::error!(?e, "secure decrypt failed");
-                                    continue;
+
+                                compress_tx_bytes_after.add(ret.buf_len() as u64);
+                                self_tx_bytes.add(ret.buf_len() as u64);
+                                self_tx_packets.inc();
+                            } else {
+                                match traffic_kind(packet_type) {
+                                    TrafficKind::Data => {
+                                        forward_data_tx_bytes.add(buf_len as u64);
+                                        forward_data_tx_packets.inc();
+                                    }
+                                    TrafficKind::Control => {
+                                        forward_control_tx_bytes.add(buf_len as u64);
+                                        forward_control_tx_packets.inc();
+                                    }
                                 }
                             }
-                        }
 
-                        self_rx_bytes.add(buf_len as u64);
-                        self_rx_packets.inc();
-                        traffic_metrics
-                            .record_rx(from_peer_id, packet_type, buf_len as u64)
-                            .await;
-                        compress_rx_bytes_before.add(buf_len as u64);
-
-                        let compressor = DefaultCompressor {};
-                        if let Err(e) = compressor.decompress(&mut ret).await {
-                            tracing::error!(?e, "decompress failed");
-                            continue;
-                        }
-
-                        compress_rx_bytes_after.add(ret.buf_len() as u64);
-
-                        if packet_type != PacketType::Ethernet as u8
-                            && !acl_filter.process_packet_with_acl(
-                                &ret,
-                                true,
-                                global_ctx.get_ipv4().map(|x| x.address()),
-                                |dst| global_ctx.is_ip_local_ipv6(&dst),
-                                &route,
+                            tracing::trace!(?to_peer_id, ?my_peer_id, "need forward");
+                            let tx_metrics = if from_peer_id == my_peer_id {
+                                Some(&traffic_metrics)
+                            } else {
+                                None
+                            };
+                            let ret = Self::send_msg_internal(
+                                &peers,
+                                &foreign_client,
+                                &relay_peer_map,
+                                tx_metrics,
+                                ret,
+                                to_peer_id,
                             )
-                        {
-                            continue;
-                        }
+                            .await;
+                            if ret.is_err() {
+                                tracing::error!(
+                                    ?ret,
+                                    ?to_peer_id,
+                                    ?from_peer_id,
+                                    "forward packet error"
+                                );
+                            }
+                        } else {
+                            if packet_type == PacketType::RelayHandshake as u8
+                                || packet_type == PacketType::RelayHandshakeAck as u8
+                            {
+                                let _ = relay_peer_map.handle_handshake_packet(ret).await;
+                                continue;
+                            }
+                            if !secure_mode_enabled && is_encrypted {
+                                if let Err(e) = encryptor.decrypt(&mut ret) {
+                                    tracing::error!(?e, "decrypt failed");
+                                    continue;
+                                }
+                            } else if is_encrypted {
+                                match relay_peer_map.decrypt_if_needed(&mut ret).await {
+                                    Ok(true) => {}
+                                    Ok(false) => {
+                                        tracing::error!("secure session not found");
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(?e, "secure decrypt failed");
+                                        continue;
+                                    }
+                                }
+                            }
 
-                        local_batch
-                            .try_push(ret)
-                            .expect("the local batch cannot exceed the received batch");
+                            local_rx_bytes += buf_len as u64;
+                            local_rx_packets += 1;
+                            compression_rx_before += buf_len as u64;
+                            if let Some((_, _, bytes, packets)) =
+                                rx_metric_batches.iter_mut().find(|(peer_id, kind, _, _)| {
+                                    *peer_id == from_peer_id && *kind == packet_type
+                                })
+                            {
+                                *bytes += buf_len as u64;
+                                *packets += 1;
+                            } else {
+                                rx_metric_batches.push((
+                                    from_peer_id,
+                                    packet_type,
+                                    buf_len as u64,
+                                    1,
+                                ));
+                            }
+
+                            let compressor = DefaultCompressor {};
+                            if let Err(e) = compressor.decompress(&mut ret) {
+                                tracing::error!(?e, "decompress failed");
+                                continue;
+                            }
+
+                            compression_rx_after += ret.buf_len() as u64;
+
+                            local_batch
+                                .try_push(ret)
+                                .expect("the local batch cannot exceed the received batch");
+                        }
                     }
-                }
+
+                    self_rx_bytes.add(local_rx_bytes);
+                    self_rx_packets.add(local_rx_packets);
+                    compress_rx_bytes_before.add(compression_rx_before);
+                    compress_rx_bytes_after.add(compression_rx_after);
+                    for (peer_id, packet_type, bytes, packets) in rx_metric_batches {
+                        traffic_metrics
+                            .record_rx_batch(peer_id, packet_type, bytes, packets)
+                            .await;
+                    }
+
+                    local_batch
+                };
+
+                local_batch = acl_filter.process_packet_batch_with_acl(
+                    local_batch,
+                    true,
+                    global_ctx.get_ipv4().map(|address| address.address()),
+                    |destination| global_ctx.is_ip_local_ipv6(&destination),
+                    &route,
+                );
                 if local_batch.is_empty() {
                     continue;
                 }
                 tracing::trace!(packets = local_batch.len(), "process peer packet batch");
                 let pipelines = pipe_line.read().await;
                 for pipeline in pipelines.iter().rev() {
+                    if !pipeline.is_interested_in_batch_from_peer(&local_batch) {
+                        continue;
+                    }
                     local_batch = pipeline.try_process_batch_from_peer(local_batch).await;
                     if local_batch.is_empty() {
                         break;
@@ -1366,7 +1721,7 @@ impl PeerManager {
         }
 
         impl NicPacketProcessor {
-            fn classify(&self, packet: ZCPacket) -> NicPacketAction {
+            fn classify_at(&self, packet: ZCPacket, now: std::time::Instant) -> NicPacketAction {
                 let hdr = packet.peer_manager_header().unwrap();
                 let packet_type = hdr.packet_type;
                 let from_peer_id = hdr.from_peer_id.get();
@@ -1394,14 +1749,23 @@ impl PeerManager {
                     return NicPacketAction::Drop;
                 }
                 if is_ethernet {
-                    self.l2_fabric.learn_source(packet.payload(), from_peer_id);
+                    self.l2_fabric
+                        .learn_source_at(packet.payload(), from_peer_id, now);
                 }
                 NicPacketAction::Send(packet)
+            }
+
+            fn classify(&self, packet: ZCPacket) -> NicPacketAction {
+                self.classify_at(packet, std::time::Instant::now())
             }
         }
 
         #[async_trait::async_trait]
         impl PeerPacketFilter for NicPacketProcessor {
+            fn is_direct_nic_terminal(&self) -> bool {
+                true
+            }
+
             async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
                 match self.classify(packet) {
                     NicPacketAction::Send(packet) => {
@@ -1415,10 +1779,25 @@ impl PeerManager {
             }
 
             async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+                let batch_time = std::time::Instant::now();
+                let mut source_batch = L2SourceBatch::default();
+                if prepare_direct_nic_batch(&batch, self.ethernet_input, |frame, peer_id| {
+                    source_batch.record(frame, peer_id);
+                }) {
+                    self.l2_fabric
+                        .learn_source_batch_at(source_batch, batch_time);
+                    tracing::trace!(
+                        packets = batch.len(),
+                        "send owned packet batch to nic channel"
+                    );
+                    let _ = self.nic_channel.send_batch(batch).await;
+                    return PacketBatch::new();
+                }
+
                 let mut to_nic = PacketBatch::new();
                 let mut remaining = PacketBatch::new();
                 for packet in batch {
-                    match self.classify(packet) {
+                    match self.classify_at(packet, batch_time) {
                         NicPacketAction::Send(packet) => to_nic
                             .try_push(packet)
                             .expect("a NIC batch cannot exceed its input batch"),
@@ -1452,15 +1831,31 @@ impl PeerManager {
         impl PeerPacketFilter for PeerRpcPacketProcessor {
             async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
                 let hdr = packet.peer_manager_header().unwrap();
-                if hdr.packet_type == PacketType::TaRpc as u8
-                    || hdr.packet_type == PacketType::RpcReq as u8
-                    || hdr.packet_type == PacketType::RpcResp as u8
-                {
+                if is_peer_rpc_packet_type(hdr.packet_type) {
                     self.peer_rpc_tspt_sender.send(packet).unwrap();
                     None
                 } else {
                     Some(packet)
                 }
+            }
+
+            async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+                if !packet_batch_contains_peer_rpc(&batch) {
+                    return batch;
+                }
+
+                let mut remaining = PacketBatch::with_capacity(batch.len());
+                for packet in batch {
+                    let header = packet.peer_manager_header().unwrap();
+                    if is_peer_rpc_packet_type(header.packet_type) {
+                        self.peer_rpc_tspt_sender.send(packet).unwrap();
+                    } else {
+                        remaining
+                            .try_push(packet)
+                            .expect("a filtered batch cannot exceed its input batch");
+                    }
+                }
+                remaining
             }
         }
         self.add_packet_process_pipeline(Box::new(PeerRpcPacketProcessor {
@@ -1471,12 +1866,8 @@ impl PeerManager {
 
     pub async fn add_route<T>(&self, route: T)
     where
-        T: Route + PeerPacketFilter + Send + Sync + Clone + 'static,
+        T: Route + Send + Sync + Clone + 'static,
     {
-        // for route
-        self.add_packet_process_pipeline(Box::new(route.clone()))
-            .await;
-
         struct Interface {
             my_peer_id: PeerId,
             peers: Weak<PeerMap>,
@@ -1645,9 +2036,7 @@ impl PeerManager {
             .peer_manager_header()
             .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
         {
-            for pipeline in self.nic_packet_process_pipeline.read().await.iter().rev() {
-                let _ = pipeline.try_process_packet_from_nic(data).await;
-            }
+            // L3 proxy filters do not inspect transparent Ethernet frames.
             return true;
         }
 
@@ -1667,6 +2056,25 @@ impl PeerManager {
         }
 
         true
+    }
+
+    async fn run_nic_packet_process_pipeline_batch(&self, batch: PacketBatch) -> PacketBatch {
+        let mut batch = self
+            .global_ctx
+            .get_acl_filter()
+            .process_packet_batch_with_acl(batch, false, None, |_| false, &self.get_route());
+        if batch.is_empty() {
+            return batch;
+        }
+
+        let pipelines = self.nic_packet_process_pipeline.read().await;
+        for pipeline in pipelines.iter().rev() {
+            batch = pipeline.try_process_batch_from_nic(batch).await;
+            if batch.is_empty() {
+                break;
+            }
+        }
+        batch
     }
 
     pub async fn remove_nic_packet_process_pipeline(&self, id: String) -> Result<(), Error> {
@@ -1706,7 +2114,7 @@ impl PeerManager {
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
 
-        Self::try_compress(self.data_compress_algo, &mut msg).await?;
+        Self::try_compress(self.data_compress_algo, &mut msg)?;
 
         self.self_tx_counters
             .compress_tx_bytes_after
@@ -1807,7 +2215,7 @@ impl PeerManager {
         self.self_tx_counters
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
-        Self::try_compress(self.data_compress_algo, &mut msg).await?;
+        Self::try_compress(self.data_compress_algo, &mut msg)?;
         self.self_tx_counters
             .compress_tx_bytes_after
             .add(msg.buf_len() as u64);
@@ -1885,26 +2293,25 @@ impl PeerManager {
             }
             Err(batch) => batch,
         };
-        let inputs: EthernetBatchInputs = batch
-            .into_iter()
-            .map(|packet| EthernetBatchInput {
-                packet,
-                destination_peer_id,
-                is_exit_node,
-                suppress_local_delivery,
-            })
-            .collect();
+        let inputs = batch.into_iter().map(|packet| EthernetBatchInput {
+            packet,
+            destination_peer_id,
+            is_exit_node,
+            suppress_local_delivery,
+        });
         self.send_preclassified_ethernet_batch(inputs).await
     }
 
-    async fn send_preclassified_ethernet_batch(
-        &self,
-        inputs: EthernetBatchInputs,
-    ) -> Result<(), Error> {
+    async fn send_preclassified_ethernet_batch<I>(&self, inputs: I) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = EthernetBatchInput>,
+    {
         let mut per_peer_batches = OrderedPeerBatches::new();
         let mut errors = Vec::new();
         let mut flood_peers: Option<Vec<PeerId>> = None;
         let latency_first = self.global_ctx.latency_first();
+        let fdb_batch_time = std::time::Instant::now();
+        let mut destination_batch = L2DestinationBatch::default();
 
         for input in inputs {
             let EthernetBatchInput {
@@ -1915,38 +2322,27 @@ impl PeerManager {
             } = input;
             let msg = &mut packet;
             msg.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
-            {
-                let header = msg.mut_peer_manager_header().unwrap();
-                if let Some(peer_id) = destination_peer_id {
-                    header.to_peer_id.set(peer_id);
-                }
-                header.set_exit_node(is_exit_node);
-                if suppress_local_delivery {
-                    header.set_not_send_to_tun(true);
-                    header.set_no_proxy(true);
-                }
+            let header = msg.mut_peer_manager_header().unwrap();
+            if let Some(peer_id) = destination_peer_id {
+                header.to_peer_id.set(peer_id);
             }
-            if !self.run_nic_packet_process_pipeline(msg).await {
-                continue;
+            header.set_exit_node(is_exit_node);
+            if suppress_local_delivery {
+                header.set_not_send_to_tun(true);
+                header.set_no_proxy(true);
             }
 
             let overridden_dst = msg.peer_manager_header().unwrap().to_peer_id.get();
             if overridden_dst != 0 {
-                self.mark_recent_traffic(overridden_dst);
-                if let Err(error) = self.check_p2p_only_before_send(overridden_dst) {
-                    errors.push(error);
-                    continue;
-                }
                 msg.mut_peer_manager_header()
                     .unwrap()
                     .set_latency_first(latency_first);
-                push_ordered_peer_batch(&mut per_peer_batches, overridden_dst, packet);
+                push_ordered_peer_batch(&mut per_peer_batches, overridden_dst, packet, true);
                 continue;
             }
 
-            let (dst_peers, known_unicast) = match self
-                .l2_fabric
-                .destination(msg.payload())
+            let (dst_peers, known_unicast) = match destination_batch
+                .resolve_at(&self.l2_fabric, msg.payload(), fdb_batch_time)
                 .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?
             {
                 EthernetDestination::Known(peer_id) => (vec![peer_id], true),
@@ -1976,14 +2372,6 @@ impl PeerManager {
             let total_dst_peers = dst_peers.len();
             let mut msg = Some(packet);
             for (index, peer_id) in dst_peers.into_iter().enumerate() {
-                if known_unicast {
-                    self.mark_recent_traffic(peer_id);
-                }
-                if let Err(error) = self.check_p2p_only_before_send(peer_id) {
-                    errors.push(error);
-                    continue;
-                }
-
                 let mut per_peer_msg = if index + 1 == total_dst_peers {
                     msg.take().unwrap()
                 } else {
@@ -1994,15 +2382,47 @@ impl PeerManager {
                     .unwrap()
                     .to_peer_id
                     .set(peer_id);
-                push_ordered_peer_batch(&mut per_peer_batches, peer_id, per_peer_msg);
+                push_ordered_peer_batch(
+                    &mut per_peer_batches,
+                    peer_id,
+                    per_peer_msg,
+                    known_unicast,
+                );
             }
         }
 
-        for (peer_id, peer_batch) in per_peer_batches {
+        self.send_ordered_peer_batches(per_peer_batches, &mut errors)
+            .await?;
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("ethernet frame delivery failed: {errors:?}").into())
+        }
+    }
+
+    async fn send_ordered_peer_batches(
+        &self,
+        peer_batches: OrderedPeerBatches,
+        errors: &mut Vec<Error>,
+    ) -> Result<(), Error> {
+        for peer_batch in peer_batches {
+            let OrderedPeerBatch {
+                peer_id,
+                packets: peer_batch,
+                mark_recent,
+            } = peer_batch;
+            if mark_recent {
+                self.mark_recent_traffic(peer_id);
+            }
+            if let Err(error) = self.check_p2p_only_before_send(peer_id) {
+                errors.push(error);
+                continue;
+            }
             self.self_tx_counters
                 .compress_tx_bytes_before
                 .add(peer_batch.buffer_byte_len() as u64);
-            let peer_batch = prepare_packet_batch(self.data_compress_algo, peer_batch).await?;
+            let peer_batch = prepare_packet_batch(self.data_compress_algo, peer_batch)?;
             self.self_tx_counters
                 .compress_tx_bytes_after
                 .add(peer_batch.buffer_byte_len() as u64);
@@ -2060,12 +2480,7 @@ impl PeerManager {
                 }
             }
         }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("ethernet frame delivery failed: {errors:?}").into())
-        }
+        Ok(())
     }
 
     /// Carry an IP-only TUN edge through the Ethernet overlay. Unicast reuses the existing
@@ -2467,17 +2882,126 @@ impl PeerManager {
         (dst_peers, is_exit_node)
     }
 
-    pub async fn try_compress(
-        compress_algo: CompressorAlgo,
-        msg: &mut ZCPacket,
-    ) -> Result<(), Error> {
+    pub fn try_compress(compress_algo: CompressorAlgo, msg: &mut ZCPacket) -> Result<(), Error> {
         stamp_packet_flow(msg);
         let compressor = DefaultCompressor {};
         compressor
             .compress(msg, compress_algo)
-            .await
             .with_context(|| "compress failed")?;
         Ok(())
+    }
+
+    fn routed_packet_destination(&self, packet: &ZCPacket) -> Option<(IpAddr, bool)> {
+        let payload = packet.payload();
+        let version = payload.first().map(|byte| byte >> 4)?;
+        match version {
+            4 => {
+                let ipv4 = Ipv4Packet::new(payload)?;
+                if ipv4.get_version() != 4 {
+                    return None;
+                }
+                let source_is_local =
+                    self.global_ctx.get_ipv4().map(|ip| ip.address()) == Some(ipv4.get_source());
+                Some((IpAddr::V4(ipv4.get_destination()), source_is_local))
+            }
+            6 => {
+                let ipv6 = Ipv6Packet::new(payload)?;
+                if ipv6.get_version() != 6 {
+                    return None;
+                }
+                let source = ipv6.get_source();
+                let source_is_local = self.global_ctx.is_ip_local_ipv6(&source);
+                if source.is_unicast_link_local() && !source_is_local {
+                    return None;
+                }
+                Some((IpAddr::V6(ipv6.get_destination()), source_is_local))
+            }
+            _ => None,
+        }
+    }
+
+    pub async fn send_msg_by_ip_batch(&self, mut batch: PacketBatch) -> Result<(), Error> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        for packet in batch.iter_mut() {
+            packet.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Data as u8);
+        }
+        let batch = self.run_nic_packet_process_pipeline_batch(batch).await;
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let latency_first = self.global_ctx.latency_first();
+        let mut route_cache: SmallVec<[(IpAddr, Vec<PeerId>, bool); 4]> = SmallVec::new();
+        let mut peer_batches = OrderedPeerBatches::new();
+
+        for mut packet in batch {
+            let overridden_peer = packet.peer_manager_header().unwrap().to_peer_id.get();
+            packet
+                .mut_peer_manager_header()
+                .unwrap()
+                .set_latency_first(latency_first);
+            if overridden_peer != 0 {
+                push_ordered_peer_batch(&mut peer_batches, overridden_peer, packet, true);
+                continue;
+            }
+
+            let Some((ip_addr, not_send_to_self)) = self.routed_packet_destination(&packet) else {
+                tracing::trace!(?packet, "drop invalid routed IP packet");
+                continue;
+            };
+            let route_index = if let Some(index) = route_cache
+                .iter()
+                .position(|(cached_address, _, _)| *cached_address == ip_addr)
+            {
+                index
+            } else {
+                let (peers, is_exit_node) = self.get_msg_dst_peer(&ip_addr).await;
+                route_cache.push((ip_addr, peers, is_exit_node));
+                route_cache.len() - 1
+            };
+            let (_, destination_peers, is_exit_node) = &route_cache[route_index];
+            if destination_peers.is_empty() {
+                continue;
+            }
+
+            packet
+                .mut_peer_manager_header()
+                .unwrap()
+                .set_exit_node(*is_exit_node);
+            let mark_recent = Self::should_mark_recent_traffic_for_fanout(destination_peers.len());
+            let peer_count = destination_peers.len();
+            let mut packet = Some(packet);
+            for (index, peer_id) in destination_peers.iter().copied().enumerate() {
+                let mut peer_packet = if index + 1 == peer_count {
+                    packet.take().unwrap()
+                } else {
+                    packet.clone().unwrap()
+                };
+                let header = peer_packet.mut_peer_manager_header().unwrap();
+                header.to_peer_id.set(peer_id);
+                #[cfg(not(target_env = "ohos"))]
+                if not_send_to_self
+                    && peer_id == self.my_peer_id
+                    && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
+                {
+                    header.set_not_send_to_tun(true);
+                    header.set_no_proxy(true);
+                }
+                push_ordered_peer_batch(&mut peer_batches, peer_id, peer_packet, mark_recent);
+            }
+        }
+
+        let mut errors = Vec::new();
+        self.send_ordered_peer_batches(peer_batches, &mut errors)
+            .await?;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("routed packet batch delivery failed: {errors:?}").into())
+        }
     }
 
     pub async fn send_msg_by_ip(
@@ -2528,7 +3052,7 @@ impl PeerManager {
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
 
-        Self::try_compress(self.data_compress_algo, &mut msg).await?;
+        Self::try_compress(self.data_compress_algo, &mut msg)?;
 
         self.self_tx_counters
             .compress_tx_bytes_after
@@ -2771,6 +3295,35 @@ impl PeerManager {
         self.nic_channel.clone()
     }
 
+    pub(crate) fn install_direct_nic_sink(
+        &self,
+        sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
+    ) -> Arc<DirectNicEndpoint> {
+        let label_set = LabelSet::new()
+            .with_label_type(LabelType::NetworkName(self.global_ctx.get_network_name()));
+        let stats = self.global_ctx.stats_manager();
+        self.packet_ingress
+            .install_direct_nic(Arc::new(DirectNicIngress {
+                my_peer_id: self.my_peer_id,
+                peers: Arc::downgrade(&self.peers),
+                global_ctx: self.global_ctx.clone(),
+                route: self.get_route().into(),
+                l2_fabric: self.l2_fabric.clone(),
+                traffic_metrics: self.traffic_metrics.clone(),
+                peer_packet_process_pipeline: self.peer_packet_process_pipeline.clone(),
+                ethernet_input: self.global_ctx.get_feature_flags().ethernet_input,
+                nic: self.direct_nic_writer.clone(),
+                self_rx_bytes: stats.get_counter(MetricName::TrafficBytesSelfRx, label_set.clone()),
+                self_rx_packets: stats
+                    .get_counter(MetricName::TrafficPacketsSelfRx, label_set.clone()),
+                compress_rx_bytes_before: stats
+                    .get_counter(MetricName::CompressionBytesRxBefore, label_set.clone()),
+                compress_rx_bytes_after: stats
+                    .get_counter(MetricName::CompressionBytesRxAfter, label_set),
+            }));
+        self.direct_nic_writer.install(sink)
+    }
+
     pub fn get_foreign_network_manager(&self) -> Arc<ForeignNetworkManager> {
         self.foreign_network_manager.clone()
     }
@@ -2967,7 +3520,16 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use base64::Engine;
-    use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
+    use futures::{SinkExt as _, StreamExt as _};
+    use std::{
+        collections::HashMap,
+        fmt::Debug,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use quanta::Instant;
 
@@ -2984,11 +3546,11 @@ mod tests {
         },
         instance::listeners::create_listener_by_url,
         peers::{
-            PacketRecvChanReceiver, create_packet_recv_chan,
+            PacketRecvChanReceiver, PeerPacketFilter, create_packet_recv_chan,
             peer_conn::tests::set_secure_mode_cfg,
             peer_manager::RouteAlgoType,
             peer_rpc::tests::register_service,
-            route_trait::{NextHopPolicy, RouteCostCalculatorInterface},
+            route_trait::{MockRoute, NextHopPolicy, RouteCostCalculatorInterface},
             tests::{
                 connect_peer_manager, create_mock_peer_manager_with_name, wait_route_appear,
                 wait_route_appear_with_cost,
@@ -3008,7 +3570,137 @@ mod tests {
         },
     };
 
-    use super::{PeerManager, check_tunnel_info_underlay, prepare_packet_batch};
+    use super::{
+        DirectNicBatchWriter, PeerManager, check_tunnel_info_underlay,
+        decoded_local_nic_batch_source, is_foreign_network_packet_type,
+        packet_batch_contains_peer_rpc, prepare_direct_nic_batch, prepare_packet_batch,
+    };
+
+    #[test]
+    fn direct_nic_writer_exposes_the_installed_endpoint() {
+        let writer = DirectNicBatchWriter::default();
+        let (sink, _receiver) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let installed = writer.install(Box::pin(sink));
+        let observed = writer.current_endpoint().unwrap();
+
+        assert!(Arc::ptr_eq(&installed, &observed));
+    }
+
+    #[test]
+    fn direct_nic_writer_reports_endpoint_removal() {
+        let writer = DirectNicBatchWriter::default();
+        assert!(writer.current_endpoint().is_none());
+
+        let (sink, _receiver) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let installed = writer.install(Box::pin(sink));
+        assert!(writer.current_endpoint().is_some());
+
+        drop(installed);
+        assert!(writer.current_endpoint().is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_nic_ingress_does_not_retain_the_peer_map() {
+        let global_ctx = get_mock_global_ctx();
+        let (nic_sender, _legacy_nic) = create_packet_recv_chan();
+        let peer_manager = PeerManager::new(RouteAlgoType::Ospf, global_ctx, nic_sender);
+        let peers = Arc::downgrade(&peer_manager.peers);
+        let (sink, _receiver) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint = peer_manager.install_direct_nic_sink(Box::pin(sink));
+
+        drop(peer_manager);
+
+        assert!(peers.upgrade().is_none());
+    }
+
+    #[test]
+    fn route_registration_does_not_require_a_packet_filter() {
+        fn register(manager: &PeerManager, route: MockRoute) {
+            drop(manager.add_route(route));
+        }
+
+        let _ = register;
+    }
+
+    #[test]
+    fn peer_rpc_batch_scan_distinguishes_data_from_control() {
+        let mut data_batch = PacketBatch::new();
+        for value in 0_u8..8 {
+            let mut packet = ZCPacket::new_with_payload(&[value]);
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+            data_batch.try_push(packet).unwrap();
+        }
+        assert!(!packet_batch_contains_peer_rpc(&data_batch));
+
+        let mut control = ZCPacket::new_with_payload(b"request");
+        control.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+        data_batch.try_push(control).unwrap();
+        assert!(packet_batch_contains_peer_rpc(&data_batch));
+    }
+
+    #[test]
+    fn foreign_network_dispatch_ignores_normal_ethernet() {
+        assert!(!is_foreign_network_packet_type(PacketType::Ethernet as u8));
+        assert!(is_foreign_network_packet_type(
+            PacketType::ForeignNetworkPacket as u8
+        ));
+    }
+
+    #[test]
+    fn decoded_ethernet_batch_can_keep_its_owned_storage_for_nic() {
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..8 {
+            let mut packet = ZCPacket::new_with_payload(&[value; 64]);
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+            batch.try_push(packet).unwrap();
+        }
+
+        assert!(prepare_direct_nic_batch(&batch, true, |_, _| {}));
+
+        let mut control = ZCPacket::new_with_payload(b"control");
+        control.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
+        batch.try_push(control).unwrap();
+        assert!(!prepare_direct_nic_batch(&batch, true, |_, _| {}));
+    }
+
+    #[test]
+    fn decoded_local_ethernet_batch_has_one_source() {
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..8 {
+            let mut packet = ZCPacket::new_with_payload(&[value; 64]);
+            packet.fill_peer_manager_hdr(10, 20, PacketType::Ethernet as u8);
+            batch.try_push(packet).unwrap();
+        }
+        assert_eq!(
+            decoded_local_nic_batch_source(&batch, 20),
+            Some((10, PacketType::Ethernet as u8))
+        );
+
+        batch[7]
+            .mut_peer_manager_header()
+            .unwrap()
+            .to_peer_id
+            .set(21);
+        assert_eq!(decoded_local_nic_batch_source(&batch, 20), None);
+    }
+
+    #[test]
+    fn decoded_local_routed_batch_keeps_one_source_and_packet_type() {
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..8 {
+            let mut packet = ZCPacket::new_with_payload(&[value; 64]);
+            packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+            batch.try_push(packet).unwrap();
+        }
+
+        assert_eq!(
+            decoded_local_nic_batch_source(&batch, 20),
+            Some((10, PacketType::Data as u8))
+        );
+    }
 
     #[tokio::test]
     async fn packet_batch_defers_encryption_until_transport_selection() {
@@ -3019,9 +3711,8 @@ mod tests {
             batch.try_push(packet).unwrap();
         }
 
-        let batch = prepare_packet_batch(crate::tunnel::packet_def::CompressorAlgo::None, batch)
-            .await
-            .unwrap();
+        let batch =
+            prepare_packet_batch(crate::tunnel::packet_def::CompressorAlgo::None, batch).unwrap();
 
         for (sequence, packet) in batch.into_iter().enumerate() {
             assert!(!packet.peer_manager_header().unwrap().is_encrypted());
@@ -3054,6 +3745,286 @@ mod tests {
         ));
         peer_manager.run().await.unwrap();
         (peer_manager, packet_recv)
+    }
+
+    async fn create_routed_peer_manager_with_ipv4(ipv4: std::net::Ipv4Addr) -> Arc<PeerManager> {
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "routed".to_string();
+        global_ctx.set_flags(flags);
+
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let peer_manager = Arc::new(PeerManager::new(
+            RouteAlgoType::Ospf,
+            global_ctx,
+            packet_send,
+        ));
+        peer_manager.run().await.unwrap();
+        peer_manager
+    }
+
+    fn routed_ipv4_packet(
+        source: std::net::Ipv4Addr,
+        destination: std::net::Ipv4Addr,
+        marker: u8,
+    ) -> ZCPacket {
+        let mut bytes = vec![0_u8; 64];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&64_u16.to_be_bytes());
+        bytes[8] = 64;
+        bytes[9] = 17;
+        bytes[12..16].copy_from_slice(&source.octets());
+        bytes[16..20].copy_from_slice(&destination.octets());
+        bytes[20..22].copy_from_slice(&1000_u16.to_be_bytes());
+        bytes[22..24].copy_from_slice(&2000_u16.to_be_bytes());
+        bytes[24] = marker;
+        ZCPacket::new_with_payload(&bytes)
+    }
+
+    #[tokio::test]
+    async fn routed_l3_batch_reaches_direct_peer_as_one_owned_batch() {
+        let address_a = "10.144.144.2".parse().unwrap();
+        let address_b = "10.144.144.3".parse().unwrap();
+        let peer_mgr_a = create_routed_peer_manager_with_ipv4(address_a).await;
+        let peer_mgr_b = create_routed_peer_manager_with_ipv4(address_b).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        let peer_b_id = peer_mgr_b.my_peer_id();
+        wait_for_condition(
+            || {
+                let peer_mgr_a = peer_mgr_a.clone();
+                async move {
+                    peer_mgr_a
+                        .get_msg_dst_peer(&std::net::IpAddr::V4(address_b))
+                        .await
+                        .0
+                        .contains(&peer_b_id)
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let (sink, mut direct_nic) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint = peer_mgr_b.install_direct_nic_sink(Box::pin(sink));
+        let mut batch = PacketBatch::new();
+        for marker in 0_u8..8 {
+            batch
+                .try_push(routed_ipv4_packet(address_a, address_b, marker))
+                .unwrap();
+        }
+
+        peer_mgr_a.send_msg_by_ip_batch(batch).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), direct_nic.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(received.len(), 8);
+        assert_eq!(
+            received
+                .iter()
+                .map(|packet| packet.payload()[24])
+                .collect::<Vec<_>>(),
+            (0_u8..8).collect::<Vec<_>>()
+        );
+        assert!(direct_nic.try_next().is_err());
+    }
+
+    #[tokio::test]
+    async fn routed_l3_batch_groups_destinations_and_preserves_order() {
+        let address_a = "10.144.144.11".parse().unwrap();
+        let address_b = "10.144.144.12".parse().unwrap();
+        let address_c = "10.144.144.13".parse().unwrap();
+        let peer_mgr_a = create_routed_peer_manager_with_ipv4(address_a).await;
+        let peer_mgr_b = create_routed_peer_manager_with_ipv4(address_b).await;
+        let peer_mgr_c = create_routed_peer_manager_with_ipv4(address_c).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_c.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
+            .await
+            .unwrap();
+
+        let (sink_b, mut nic_b) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink_b = sink_b.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint_b = peer_mgr_b.install_direct_nic_sink(Box::pin(sink_b));
+        let (sink_c, mut nic_c) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink_c = sink_c.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint_c = peer_mgr_c.install_direct_nic_sink(Box::pin(sink_c));
+
+        let mut batch = PacketBatch::new();
+        for (destination, marker) in [
+            (address_b, 1_u8),
+            (address_c, 2),
+            (address_b, 3),
+            (address_c, 4),
+        ] {
+            batch
+                .try_push(routed_ipv4_packet(address_a, destination, marker))
+                .unwrap();
+        }
+        peer_mgr_a.send_msg_by_ip_batch(batch).await.unwrap();
+
+        let batch_b = tokio::time::timeout(Duration::from_secs(5), nic_b.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let batch_c = tokio::time::timeout(Duration::from_secs(5), nic_c.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            batch_b
+                .iter()
+                .map(|packet| packet.payload()[24])
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            batch_c
+                .iter()
+                .map(|packet| packet.payload()[24])
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_nic_ingress_bypasses_both_packet_channels() {
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "ethernet".to_string();
+        global_ctx.set_flags(flags);
+        let (nic_sender, mut legacy_nic) = create_packet_recv_chan();
+        let peer_manager = Arc::new(PeerManager::new(
+            RouteAlgoType::Ospf,
+            global_ctx,
+            nic_sender,
+        ));
+        let (sink, mut direct_nic) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint = peer_manager.install_direct_nic_sink(Box::pin(sink));
+        let mut batch = PacketBatch::new();
+        for marker in 0_u8..8 {
+            let mut frame = ethernet_frame([0xff; 6], [0x02, 0, 0, 0, 0, marker + 1]);
+            frame[14] = marker;
+            let mut packet = ZCPacket::new_with_payload(&frame);
+            packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Ethernet as u8);
+            batch.try_push(packet).unwrap();
+        }
+
+        peer_manager.packet_ingress.send_batch(batch).await.unwrap();
+        let received = direct_nic.next().await.unwrap();
+
+        assert_eq!(received.len(), 8);
+        assert!(
+            peer_manager
+                .packet_recv
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .is_err()
+        );
+        assert!(legacy_nic.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_nic_ingress_runs_registered_peer_filters() {
+        struct ConsumeBatch {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl PeerPacketFilter for ConsumeBatch {
+            async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                drop(batch);
+                PacketBatch::new()
+            }
+        }
+
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "ethernet".to_string();
+        global_ctx.set_flags(flags);
+        let (nic_sender, _legacy_nic) = create_packet_recv_chan();
+        let peer_manager = Arc::new(PeerManager::new(
+            RouteAlgoType::Ospf,
+            global_ctx,
+            nic_sender,
+        ));
+        let calls = Arc::new(AtomicUsize::new(0));
+        peer_manager
+            .add_packet_process_pipeline(Box::new(ConsumeBatch {
+                calls: calls.clone(),
+            }))
+            .await;
+        let (sink, mut direct_nic) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint = peer_manager.install_direct_nic_sink(Box::pin(sink));
+        let mut packet =
+            ZCPacket::new_with_payload(&ethernet_frame([0xff; 6], [0x02, 0, 0, 0, 0, 1]));
+        packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Ethernet as u8);
+
+        peer_manager
+            .packet_ingress
+            .send_batch(PacketBatch::singleton(packet))
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(direct_nic.try_next().is_err());
+    }
+
+    #[tokio::test]
+    async fn routed_direct_nic_ingress_rejects_ethernet() {
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "routed".to_string();
+        global_ctx.set_flags(flags);
+        let (nic_sender, _legacy_nic) = create_packet_recv_chan();
+        let peer_manager = Arc::new(PeerManager::new(
+            RouteAlgoType::Ospf,
+            global_ctx,
+            nic_sender,
+        ));
+        let (sink, mut direct_nic) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint = peer_manager.install_direct_nic_sink(Box::pin(sink));
+        let mut packet =
+            ZCPacket::new_with_payload(&ethernet_frame([0xff; 6], [0x02, 0, 0, 0, 0, 1]));
+        packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Ethernet as u8);
+
+        peer_manager
+            .packet_ingress
+            .send_batch(PacketBatch::singleton(packet))
+            .await
+            .unwrap();
+
+        assert!(direct_nic.try_next().is_err());
+        assert_eq!(
+            peer_manager
+                .packet_recv
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .unwrap()
+                .peer_manager_header()
+                .unwrap()
+                .packet_type,
+            PacketType::Ethernet as u8
+        );
     }
 
     fn ethernet_frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {

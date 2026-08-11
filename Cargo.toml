@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "lowertier",
+    "vendor/quinn",
     "vendor/quincy-tun",
 ]
 default-members = ["lowertier"]
@@ -19,6 +20,7 @@ exclude = [
 
 [patch.crates-io]
 quincy-tun = { path = "vendor/quincy-tun" }
+quinn = { path = "vendor/quinn" }
 
 [workspace.package]
 edition = "2024"

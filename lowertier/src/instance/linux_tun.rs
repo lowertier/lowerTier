@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     future::Future,
     io,
     pin::Pin,
@@ -12,22 +11,23 @@ use futures::{Sink, Stream, ready, stream::FuturesUnordered};
 use quincy_tun::{AsyncDevice, GROTable, VIRTIO_NET_HDR_LEN};
 
 use crate::tunnel::{
-    SinkItem, StreamItem, Tunnel, TunnelError,
-    batch::MAX_PACKET_BATCH_SIZE,
-    common::TunnelWrapper,
-    packet_def::{TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
+    BatchStreamItem, Tunnel, TunnelError,
+    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+    common::BatchTunnelWrapper,
+    packet_def::{ReusableBufferPool, TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
 };
 
 const MAX_TUN_PACKET_SIZE: usize = u16::MAX as usize;
+const REUSABLE_TUN_BATCH_COUNT: usize = 2;
 
 struct ReadState {
     device: Arc<AsyncDevice>,
     original: Vec<u8>,
     segments: Vec<BytesMut>,
     sizes: Vec<usize>,
-    ready: VecDeque<ZCPacket>,
     payload_offset: usize,
     segment_capacity: usize,
+    reusable_pool: ReusableBufferPool,
     failed: bool,
 }
 
@@ -40,26 +40,31 @@ impl ReadState {
                 0
             };
         let segment_capacity = payload_offset + mtu.max(1500) + 256 + TAIL_RESERVED_SIZE;
+        let reusable_pool = ReusableBufferPool::new(
+            segment_capacity,
+            MAX_PACKET_BATCH_SIZE * REUSABLE_TUN_BATCH_COUNT,
+        );
         Self {
             device,
             original: vec![0; VIRTIO_NET_HDR_LEN + MAX_TUN_PACKET_SIZE],
             segments: (0..MAX_PACKET_BATCH_SIZE)
-                .map(|_| zeroed_buffer(segment_capacity))
+                .map(|_| {
+                    reusable_pool
+                        .try_take()
+                        .expect("the reusable TAP pool contains the first read batch")
+                })
                 .collect(),
             sizes: vec![0; MAX_PACKET_BATCH_SIZE],
-            ready: VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE),
             payload_offset,
             segment_capacity,
+            reusable_pool,
             failed: false,
         }
     }
 
-    async fn next(mut self) -> Option<(StreamItem, Self)> {
+    async fn next(mut self) -> Option<(BatchStreamItem, Self)> {
         if self.failed {
             return None;
-        }
-        if let Some(packet) = self.ready.pop_front() {
-            return Some((Ok(packet), self));
         }
 
         let result = self
@@ -91,23 +96,25 @@ impl ReadState {
                     self,
                 ));
             }
-            let mut segment = std::mem::replace(
-                &mut self.segments[index],
-                zeroed_buffer(self.segment_capacity),
-            );
-            segment.truncate(packet_len);
-            self.ready
-                .push_back(ZCPacket::new_from_buf(segment, ZCPacketType::NIC));
         }
 
-        self.ready.pop_front().map(|packet| (Ok(packet), self))
-    }
-}
+        let mut batch = PacketBatch::with_capacity(count);
+        for index in 0..count {
+            let packet_len = self.payload_offset + self.sizes[index];
+            let replacement = self.reusable_pool.take_or_allocate();
+            let mut segment = std::mem::replace(&mut self.segments[index], replacement);
+            segment.truncate(packet_len);
+            batch
+                .try_push(ZCPacket::new_from_reusable_buf(
+                    segment,
+                    ZCPacketType::NIC,
+                    self.reusable_pool.clone(),
+                ))
+                .expect("the TAP read batch has a fixed bound");
+        }
 
-fn zeroed_buffer(length: usize) -> BytesMut {
-    let mut buffer = BytesMut::with_capacity(length);
-    buffer.resize(length, 0);
-    buffer
+        Some((Ok(batch), self))
+    }
 }
 
 fn packet_into_offload_buffer(packet: ZCPacket, l2_tun: bool) -> Result<BytesMut, TunnelError> {
@@ -132,11 +139,38 @@ fn packet_into_offload_buffer(packet: ZCPacket, l2_tun: bool) -> Result<BytesMut
 }
 
 type SendFuture =
-    Pin<Box<dyn Future<Output = (usize, io::Result<usize>, GROTable)> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = (usize, io::Result<usize>, Vec<BytesMut>, GROTable)> + Send>>;
 
 struct QueueSink {
-    pending: Vec<BytesMut>,
-    gro_table: GROTable,
+    pending: Option<Vec<BytesMut>>,
+    gro_table: Option<GROTable>,
+}
+
+impl QueueSink {
+    fn new() -> Self {
+        Self {
+            pending: Some(Vec::with_capacity(MAX_PACKET_BATCH_SIZE)),
+            gro_table: Some(GROTable::default()),
+        }
+    }
+
+    fn take_flush_resources(&mut self) -> (Vec<BytesMut>, GROTable) {
+        let buffers = self
+            .pending
+            .take()
+            .expect("a queue has one buffer vector when no flush is active");
+        let gro_table = self
+            .gro_table
+            .take()
+            .expect("a queue has one GRO table when no flush is active");
+        (buffers, gro_table)
+    }
+
+    fn restore_flush_resources(&mut self, mut buffers: Vec<BytesMut>, gro_table: GROTable) {
+        buffers.clear();
+        self.pending = Some(buffers);
+        self.gro_table = Some(gro_table);
+    }
 }
 
 struct LinuxTunSink {
@@ -148,13 +182,7 @@ struct LinuxTunSink {
 
 impl LinuxTunSink {
     fn new(devices: Vec<Arc<AsyncDevice>>, l2_tun: bool) -> Self {
-        let queues = devices
-            .iter()
-            .map(|_| QueueSink {
-                pending: Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
-                gro_table: GROTable::default(),
-            })
-            .collect();
+        let queues = devices.iter().map(|_| QueueSink::new()).collect();
         Self {
             devices,
             l2_tun,
@@ -168,17 +196,16 @@ impl LinuxTunSink {
             return;
         }
         for (index, queue) in self.queues.iter_mut().enumerate() {
-            if queue.pending.is_empty() {
+            if queue.pending.as_ref().is_none_or(Vec::is_empty) {
                 continue;
             }
             let device = self.devices[index].clone();
-            let mut buffers = std::mem::take(&mut queue.pending);
-            let mut gro_table = std::mem::take(&mut queue.gro_table);
+            let (mut buffers, mut gro_table) = queue.take_flush_resources();
             self.in_flight.push(Box::pin(async move {
                 let result = device
                     .send_multiple(&mut gro_table, &mut buffers, VIRTIO_NET_HDR_LEN)
                     .await;
-                (index, result, gro_table)
+                (index, result, buffers, gro_table)
             }));
         }
     }
@@ -191,15 +218,17 @@ fn packet_queue_index(packet: &ZCPacket, queue_count: usize) -> usize {
         .map_or(0, |shard| usize::from(shard) % queue_count)
 }
 
-impl Sink<SinkItem> for LinuxTunSink {
+impl Sink<PacketBatch> for LinuxTunSink {
     type Error = TunnelError;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if !self.in_flight.is_empty()
-            || self
-                .queues
-                .iter()
-                .any(|queue| queue.pending.len() >= MAX_PACKET_BATCH_SIZE)
+            || self.queues.iter().any(|queue| {
+                queue
+                    .pending
+                    .as_ref()
+                    .is_some_and(|packets| !packets.is_empty())
+            })
         {
             self.as_mut().poll_flush(cx)
         } else {
@@ -207,12 +236,17 @@ impl Sink<SinkItem> for LinuxTunSink {
         }
     }
 
-    fn start_send(mut self: Pin<&mut Self>, packet: SinkItem) -> Result<(), Self::Error> {
+    fn start_send(mut self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
         let l2_tun = self.l2_tun;
-        let queue_index = packet_queue_index(&packet, self.queues.len());
-        self.queues[queue_index]
-            .pending
-            .push(packet_into_offload_buffer(packet, l2_tun)?);
+        let queue_count = self.queues.len();
+        for packet in batch {
+            let queue_index = packet_queue_index(&packet, queue_count);
+            self.queues[queue_index]
+                .pending
+                .as_mut()
+                .expect("poll_ready restores the queue buffer vector")
+                .push(packet_into_offload_buffer(packet, l2_tun)?);
+        }
         Ok(())
     }
 
@@ -222,12 +256,12 @@ impl Sink<SinkItem> for LinuxTunSink {
             if self.in_flight.is_empty() {
                 return Poll::Ready(Ok(()));
             }
-            let Some((index, result, gro_table)) =
+            let Some((index, result, buffers, gro_table)) =
                 ready!(Pin::new(&mut self.in_flight).poll_next(cx))
             else {
                 return Poll::Ready(Ok(()));
             };
-            self.queues[index].gro_table = gro_table;
+            self.queues[index].restore_flush_resources(buffers, gro_table);
             result.map_err(TunnelError::IOError)?;
         }
     }
@@ -246,17 +280,27 @@ pub(crate) fn wrap_devices(devices: Vec<AsyncDevice>, l2_tun: bool, mtu: usize) 
             Box::pin(futures::stream::unfold(
                 ReadState::new(device.clone(), l2_tun, mtu),
                 |state| state.next(),
-            )) as Pin<Box<dyn Stream<Item = StreamItem> + Send>>
+            )) as Pin<Box<dyn Stream<Item = BatchStreamItem> + Send>>
         })
         .collect::<Vec<_>>();
     let stream = futures::stream::select_all(streams);
     let sink = LinuxTunSink::new(devices, l2_tun);
-    Box::new(TunnelWrapper::new(stream, sink, None))
+    Box::new(BatchTunnelWrapper::new(stream, sink, None))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tunnel::packet_def::{ZCPacket, ZCPacketType};
+    use crate::tunnel::{
+        PacketBatchSink,
+        packet_def::{ZCPacket, ZCPacketType},
+    };
+
+    #[test]
+    fn linux_tap_writer_accepts_owned_packet_batches() {
+        fn assert_batch_sink<T: PacketBatchSink>() {}
+
+        assert_batch_sink::<super::LinuxTunSink>();
+    }
 
     #[test]
     fn offload_egress_reuses_packet_headroom_for_virtio_metadata() {
@@ -286,5 +330,21 @@ mod tests {
             super::packet_queue_index(&first, 2),
             super::packet_queue_index(&second, 2)
         );
+    }
+
+    #[test]
+    fn queue_sink_reuses_flush_resources() {
+        let mut queue = super::QueueSink::new();
+
+        let (buffers, gro_table) = queue.take_flush_resources();
+        assert!(queue.pending.is_none());
+        assert!(queue.gro_table.is_none());
+
+        queue.restore_flush_resources(buffers, gro_table);
+        assert_eq!(
+            queue.pending.as_ref().unwrap().capacity(),
+            super::MAX_PACKET_BATCH_SIZE
+        );
+        assert!(queue.gro_table.is_some());
     }
 }

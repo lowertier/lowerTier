@@ -31,7 +31,7 @@ use crate::proto::rpc_types::error::Result;
 use crate::tunnel::mpsc::{MpscTunnel, MpscTunnelSender};
 use crate::tunnel::packet_def::ZCPacket;
 use crate::tunnel::ring::create_ring_tunnel_pair;
-use crate::tunnel::{Tunnel, TunnelError, ZCPacketStream};
+use crate::tunnel::{Tunnel, TunnelError, ZCPacketStream, batch::BatchToScalarStream};
 
 use super::packet::PacketMerger;
 use super::{RpcTransactId, Transport};
@@ -113,7 +113,9 @@ impl Client {
     }
 
     pub fn get_transport_stream(&self) -> Pin<Box<dyn ZCPacketStream>> {
-        self.transport.lock().unwrap().get_stream()
+        Box::pin(BatchToScalarStream::new(
+            self.transport.lock().unwrap().get_stream(),
+        ))
     }
 
     pub fn run(&self) {
@@ -135,7 +137,7 @@ impl Client {
             }
         });
 
-        let mut rx = self.mpsc.lock().unwrap().get_stream();
+        let mut rx = BatchToScalarStream::new(self.mpsc.lock().unwrap().get_stream());
         let inflight_requests = self.inflight_requests.clone();
         tasks.spawn(async move {
             while let Some(packet) = rx.next().await {

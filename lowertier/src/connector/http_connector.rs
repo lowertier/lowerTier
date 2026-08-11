@@ -1,6 +1,5 @@
 use std::{
     net::SocketAddr,
-    pin::Pin,
     sync::{Arc, RwLock},
 };
 
@@ -12,7 +11,7 @@ use url::Url;
 use crate::{
     VERSION,
     common::{error::Error, global_ctx::ArcGlobalCtx},
-    tunnel::{IpVersion, Tunnel, TunnelConnector, TunnelError, ZCPacketSink, ZCPacketStream},
+    tunnel::{IpVersion, SplitTunnel, Tunnel, TunnelConnector, TunnelError},
 };
 
 use crate::proto::common::TunnelInfo;
@@ -31,7 +30,7 @@ impl TunnelWithInfo {
 }
 
 impl Tunnel for TunnelWithInfo {
-    fn split(&self) -> (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>) {
+    fn split(&self) -> SplitTunnel {
         self.inner.split()
     }
 

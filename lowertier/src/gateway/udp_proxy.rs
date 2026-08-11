@@ -416,6 +416,12 @@ impl UdpProxy {
 
 #[async_trait::async_trait]
 impl PeerPacketFilter for UdpProxy {
+    fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
+        packet
+            .peer_manager_header()
+            .is_some_and(|header| header.packet_type == PacketType::Data as u8)
+    }
+
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         self.try_handle_packet(&packet)
             .await

@@ -1,6 +1,8 @@
 use bytes::Buf;
 use bytes::Bytes;
 use bytes::BytesMut;
+use crossbeam::queue::ArrayQueue;
+use std::sync::Arc;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
@@ -494,14 +496,164 @@ impl ZCPacketType {
     }
 }
 
-#[derive(Debug, Clone)]
+struct ReusableBufferPoolInner {
+    buffers: ArrayQueue<BytesMut>,
+    buffer_len: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReusableBufferPool {
+    inner: Arc<ReusableBufferPoolInner>,
+}
+
+impl std::fmt::Debug for ReusableBufferPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReusableBufferPool")
+            .field("available", &self.available())
+            .field("capacity", &self.inner.buffers.capacity())
+            .field("buffer_len", &self.inner.buffer_len)
+            .finish()
+    }
+}
+
+impl ReusableBufferPool {
+    pub(crate) fn new(buffer_len: usize, buffer_count: usize) -> Self {
+        assert!(buffer_len > 0);
+        assert!(buffer_count > 0);
+        let buffers = ArrayQueue::new(buffer_count);
+        for _ in 0..buffer_count {
+            buffers
+                .push(zeroed_packet_buffer(buffer_len))
+                .expect("a new reusable buffer pool has room");
+        }
+        Self {
+            inner: Arc::new(ReusableBufferPoolInner {
+                buffers,
+                buffer_len,
+            }),
+        }
+    }
+
+    pub(crate) fn try_take(&self) -> Option<BytesMut> {
+        self.inner.buffers.pop()
+    }
+
+    pub(crate) fn take_or_allocate(&self) -> BytesMut {
+        self.try_take()
+            .unwrap_or_else(|| zeroed_packet_buffer(self.inner.buffer_len))
+    }
+
+    fn recycle(&self, mut buffer: BytesMut) {
+        if buffer.capacity() < self.inner.buffer_len {
+            buffer = zeroed_packet_buffer(self.inner.buffer_len);
+        } else {
+            buffer.truncate(self.inner.buffer_len);
+            if buffer.len() < self.inner.buffer_len {
+                // The pool initializes each complete slab once. Truncation does
+                // not uninitialize its bytes. Restore only the logical length.
+                unsafe { buffer.set_len(self.inner.buffer_len) };
+            }
+        }
+        let _ = self.inner.buffers.push(buffer);
+    }
+
+    fn replace_detached(&self) {
+        self.recycle(zeroed_packet_buffer(self.inner.buffer_len));
+    }
+
+    pub(crate) fn available(&self) -> usize {
+        self.inner.buffers.len()
+    }
+}
+
+fn zeroed_packet_buffer(length: usize) -> BytesMut {
+    let mut buffer = BytesMut::with_capacity(length);
+    buffer.resize(length, 0);
+    buffer
+}
+
+struct ReusableBytesOwner {
+    buffer: Option<BytesMut>,
+    pool: ReusableBufferPool,
+}
+
+impl AsRef<[u8]> for ReusableBytesOwner {
+    fn as_ref(&self) -> &[u8] {
+        self.buffer.as_ref().expect("the reusable buffer exists")
+    }
+}
+
+impl Drop for ReusableBytesOwner {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            self.pool.recycle(buffer);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EthernetNetworkMetadata {
+    pub(crate) ether_type: u16,
+    pub(crate) payload_offset: usize,
+}
+
+pub(crate) fn ethernet_network_metadata(frame: &[u8]) -> Option<EthernetNetworkMetadata> {
+    let mut ether_type = u16::from_be_bytes(frame.get(12..14)?.try_into().ok()?);
+    let mut payload_offset = 14;
+    while matches!(ether_type, 0x8100 | 0x88a8 | 0x9100) {
+        let tag = frame.get(payload_offset..payload_offset + 4)?;
+        ether_type = u16::from_be_bytes(tag[2..4].try_into().ok()?);
+        payload_offset += 4;
+    }
+    Some(EthernetNetworkMetadata {
+        ether_type,
+        payload_offset,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ParsedPacketMetadata {
+    pub(crate) from_peer_id: u32,
+    pub(crate) to_peer_id: u32,
+    pub(crate) packet_type: u8,
+    pub(crate) encrypted: bool,
+    pub(crate) compressed: bool,
+    pub(crate) not_send_to_tun: bool,
+    pub(crate) flow_shard: Option<u16>,
+    pub(crate) ethernet_destination: Option<[u8; 6]>,
+    pub(crate) ethernet_source: Option<[u8; 6]>,
+    pub(crate) ethernet_network: Option<EthernetNetworkMetadata>,
+}
+
+#[derive(Debug)]
 pub struct ZCPacket {
     inner: BytesMut,
     packet_type: ZCPacketType,
     lossy_hint: Option<bool>,
+    parsed_metadata: Option<ParsedPacketMetadata>,
+    reusable_pool: Option<ReusableBufferPool>,
+}
+
+impl Clone for ZCPacket {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            packet_type: self.packet_type,
+            lossy_hint: self.lossy_hint,
+            parsed_metadata: self.parsed_metadata,
+            reusable_pool: None,
+        }
+    }
 }
 
 impl ZCPacket {
+    fn detach_reusable_buffer(&mut self) {
+        if let Some(pool) = self.reusable_pool.take() {
+            pool.replace_detached();
+        }
+    }
+
     fn bytes_from_offset(&self, offset: usize) -> Option<&[u8]> {
         self.inner.get(offset..)
     }
@@ -515,6 +667,8 @@ impl ZCPacket {
             inner: BytesMut::new(),
             packet_type: ZCPacketType::NIC,
             lossy_hint: None,
+            parsed_metadata: None,
+            reusable_pool: None,
         }
     }
 
@@ -523,6 +677,22 @@ impl ZCPacket {
             inner: buf,
             packet_type,
             lossy_hint: None,
+            parsed_metadata: None,
+            reusable_pool: None,
+        }
+    }
+
+    pub(crate) fn new_from_reusable_buf(
+        buf: BytesMut,
+        packet_type: ZCPacketType,
+        reusable_pool: ReusableBufferPool,
+    ) -> Self {
+        Self {
+            inner: buf,
+            packet_type,
+            lossy_hint: None,
+            parsed_metadata: None,
+            reusable_pool: Some(reusable_pool),
         }
     }
 
@@ -584,16 +754,67 @@ impl ZCPacket {
         self.packet_type
     }
 
+    pub(crate) fn refresh_parsed_metadata(&mut self) -> Option<ParsedPacketMetadata> {
+        let header = self.peer_manager_header()?;
+        let from_peer_id = header.from_peer_id.get();
+        let to_peer_id = header.to_peer_id.get();
+        let packet_type = header.packet_type;
+        let encrypted = header.is_encrypted();
+        let compressed = header.is_compressed();
+        let not_send_to_tun = header.is_not_send_to_tun();
+        let flow_shard = header.flow_shard();
+        let (ethernet_destination, ethernet_source, ethernet_network) =
+            if packet_type == PacketType::Ethernet as u8 {
+                let frame = self.payload();
+                match (frame.get(..6), frame.get(6..12), frame.get(12..14)) {
+                    (Some(destination), Some(source), Some(_)) => {
+                        let mut parsed_destination = [0_u8; 6];
+                        let mut parsed_source = [0_u8; 6];
+                        parsed_destination.copy_from_slice(destination);
+                        parsed_source.copy_from_slice(source);
+                        (
+                            Some(parsed_destination),
+                            Some(parsed_source),
+                            ethernet_network_metadata(frame),
+                        )
+                    }
+                    _ => (None, None, None),
+                }
+            } else {
+                (None, None, None)
+            };
+        let metadata = ParsedPacketMetadata {
+            from_peer_id,
+            to_peer_id,
+            packet_type,
+            encrypted,
+            compressed,
+            not_send_to_tun,
+            flow_shard,
+            ethernet_destination,
+            ethernet_source,
+            ethernet_network,
+        };
+        self.parsed_metadata = Some(metadata);
+        Some(metadata)
+    }
+
+    pub(crate) fn parsed_metadata(&self) -> Option<&ParsedPacketMetadata> {
+        self.parsed_metadata.as_ref()
+    }
+
     pub fn payload_offset(&self) -> usize {
         self.packet_type.get_packet_offsets().payload_offset
     }
 
     pub fn mut_payload(&mut self) -> &mut [u8] {
+        self.parsed_metadata = None;
         let offset = self.payload_offset();
         &mut self.inner[offset..]
     }
 
     pub fn mut_peer_manager_header(&mut self) -> Option<&mut PeerManagerHeader> {
+        self.parsed_metadata = None;
         let offset = self
             .packet_type
             .get_packet_offsets()
@@ -636,6 +857,7 @@ impl ZCPacket {
 
     pub fn payload_bytes(mut self) -> BytesMut {
         self.inner.advance(self.payload_offset());
+        self.detach_reusable_buffer();
         self.inner
     }
 
@@ -701,6 +923,7 @@ impl ZCPacket {
                 .get_packet_offsets()
                 .peer_manager_header_offset,
         );
+        self.detach_reusable_buffer();
         self.inner
     }
 
@@ -746,24 +969,37 @@ impl ZCPacket {
             buf.extend_from_slice(tunnel_payload);
             let mut packet = Self::new_from_buf(buf, target_packet_type);
             packet.lossy_hint = self.lossy_hint;
+            if let Some(pool) = self.reusable_pool.take() {
+                pool.recycle(self.inner);
+            }
             return packet;
         }
 
         self.inner.advance(new_offset);
         let mut packet = Self::new_from_buf(self.inner, target_packet_type);
         packet.lossy_hint = self.lossy_hint;
+        packet.reusable_pool = self.reusable_pool;
         packet
     }
 
     pub fn into_bytes(self) -> Bytes {
-        self.inner.freeze()
+        if let Some(pool) = self.reusable_pool {
+            Bytes::from_owner(ReusableBytesOwner {
+                buffer: Some(self.inner),
+                pool,
+            })
+        } else {
+            self.inner.freeze()
+        }
     }
 
-    pub fn inner(self) -> BytesMut {
+    pub fn inner(mut self) -> BytesMut {
+        self.detach_reusable_buffer();
         self.inner
     }
 
     pub fn mut_inner(&mut self) -> &mut BytesMut {
+        self.parsed_metadata = None;
         &mut self.inner
     }
 
@@ -808,14 +1044,11 @@ impl ZCPacket {
     pub fn foreign_network_packet(mut self) -> Self {
         let hdr = self.foreign_network_hdr().unwrap();
         let foreign_hdr_len = hdr.get_header_len();
-
-        Self::new_from_buf(
-            {
-                self.inner.advance(foreign_hdr_len + self.payload_offset());
-                self.inner
-            },
-            ZCPacketType::DummyTunnel,
-        )
+        self.inner.advance(foreign_hdr_len + self.payload_offset());
+        let mut packet = Self::new_from_buf(self.inner, ZCPacketType::DummyTunnel);
+        packet.lossy_hint = self.lossy_hint;
+        packet.reusable_pool = self.reusable_pool;
+        packet
     }
 
     pub fn get_src_peer_id(&self) -> Option<u32> {
@@ -830,6 +1063,64 @@ impl ZCPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusable_buffer_returns_after_transport_bytes_drop() {
+        let pool = ReusableBufferPool::new(256, 2);
+        let buffer = pool.try_take().unwrap();
+        assert_eq!(pool.available(), 1);
+        let packet = ZCPacket::new_from_reusable_buf(buffer, ZCPacketType::NIC, pool.clone());
+
+        let transport_bytes = packet.into_bytes();
+        assert_eq!(pool.available(), 1);
+        drop(transport_bytes);
+
+        assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    fn reusable_buffer_pool_allocates_without_waiting_when_empty() {
+        let pool = ReusableBufferPool::new(256, 1);
+        let pooled = pool.try_take().unwrap();
+
+        let replacement = pool.take_or_allocate();
+
+        assert_eq!(replacement.len(), 256);
+        assert_eq!(pool.available(), 0);
+        drop(pooled);
+    }
+
+    #[test]
+    fn reusable_buffer_recycle_keeps_initialized_slab_bytes() {
+        let pool = ReusableBufferPool::new(256, 1);
+        let mut buffer = pool.try_take().unwrap();
+        buffer.fill(0xa5);
+        buffer.truncate(32);
+
+        pool.recycle(buffer);
+        let buffer = pool.try_take().unwrap();
+
+        assert_eq!(buffer.len(), 256);
+        assert!(buffer[32..].iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn parsed_ethernet_metadata_stays_with_the_owned_packet() {
+        let mut frame = vec![0_u8; 64];
+        frame[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+        frame[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&frame);
+        packet.fill_peer_manager_hdr(7, 9, PacketType::Ethernet as u8);
+
+        let metadata = packet.refresh_parsed_metadata().unwrap();
+
+        assert_eq!(metadata.from_peer_id, 7);
+        assert_eq!(metadata.to_peer_id, 9);
+        assert_eq!(metadata.ethernet_destination, Some([0x02, 0, 0, 0, 0, 1]));
+        assert_eq!(metadata.ethernet_source, Some([0x02, 0, 0, 0, 0, 2]));
+        assert_eq!(packet.parsed_metadata(), Some(&metadata));
+    }
 
     #[test]
     fn test_zc_packet() {

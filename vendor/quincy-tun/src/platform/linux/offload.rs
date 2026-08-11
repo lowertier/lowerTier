@@ -857,7 +857,7 @@ fn two_buffers_mut<B>(bufs: &mut [B], first: usize, second: usize) -> (&mut B, &
 /// coalesceResult represents the result of attempting to coalesce two TCP
 /// packets.
 enum CoalesceResult {
-    InsufficientCap,
+    PacketTooLarge,
     PSHEnding,
     ItemInvalidCSum,
     PktInvalidCSum,
@@ -879,10 +879,8 @@ fn coalesce_udp_packets<B: ExpandBuffer>(
     // let pkt_head = &buf[bufs_offset..]; // the packet that will end up at the front
     let headers_len = item.iph_len as usize + UDP_H_LEN;
     let coalesced_len = buf[bufs_offset..].len() + pkt.len() - headers_len;
-    if bufs[item.bufs_index as usize].buf_capacity() < bufs_offset * 2 + coalesced_len {
-        // We don't want to allocate a new underlying array if capacity is
-        // too small.
-        return CoalesceResult::InsufficientCap;
+    if coalesced_len > u16::MAX as usize {
+        return CoalesceResult::PacketTooLarge;
     }
 
     if item.num_merged == 0
@@ -919,13 +917,11 @@ fn coalesce_tcp_packets<B: ExpandBuffer>(
     let headers_len = (item.iph_len + item.tcph_len) as usize;
     let coalesced_len =
         bufs[item.bufs_index as usize].as_ref()[bufs_offset..].len() + pkt.len() - headers_len;
+    if coalesced_len > u16::MAX as usize {
+        return CoalesceResult::PacketTooLarge;
+    }
 
     if mode == CanCoalesce::Prepend {
-        if bufs[pkt_bufs_index].buf_capacity() < 2 * bufs_offset + coalesced_len {
-            // We don't want to allocate a new underlying array if capacity is
-            // too small.
-            return CoalesceResult::InsufficientCap;
-        }
         if psh_set {
             return CoalesceResult::PSHEnding;
         }
@@ -953,11 +949,6 @@ fn coalesce_tcp_packets<B: ExpandBuffer>(
         );
         bufs.swap(item.bufs_index as usize, pkt_bufs_index);
     } else {
-        if bufs[item.bufs_index as usize].buf_capacity() < 2 * bufs_offset + coalesced_len {
-            // We don't want to allocate a new underlying array if capacity is
-            // too small.
-            return CoalesceResult::InsufficientCap;
-        }
         if item.num_merged == 0
             && !checksum_valid(
                 &bufs[item.bufs_index as usize].as_ref()[bufs_offset..],
@@ -2438,6 +2429,49 @@ mod tests {
         pkt[IPH_LEN + 16..IPH_LEN + 18].copy_from_slice(&tcp_checksum.to_be_bytes());
 
         pkt
+    }
+
+    fn exact_capacity_tcp_buffer(seq: u32, payload_len: usize) -> Vec<u8> {
+        let packet = make_ipv4_tcp_packet(seq, payload_len);
+        let mut buffer = Vec::with_capacity(VIRTIO_NET_HDR_LEN + packet.len());
+        buffer.resize(VIRTIO_NET_HDR_LEN, 0);
+        buffer.extend_from_slice(&packet);
+        buffer.shrink_to_fit();
+        buffer
+    }
+
+    #[test]
+    fn tcp_gro_grows_an_exact_size_quic_buffer() {
+        let mut buffers = vec![
+            exact_capacity_tcp_buffer(0, 1000),
+            exact_capacity_tcp_buffer(1000, 1000),
+        ];
+        let original_capacity = buffers[0].capacity();
+        let mut table = GROTable::new();
+
+        table
+            .apply_gro(&mut buffers, VIRTIO_NET_HDR_LEN, false)
+            .unwrap();
+
+        assert_eq!(table.to_write, [0]);
+        assert!(buffers[0].capacity() > original_capacity);
+        let header = VirtioNetHdr::decode(&buffers[0][..VIRTIO_NET_HDR_LEN]).unwrap();
+        assert_eq!(header.gso_size, 1000);
+    }
+
+    #[test]
+    fn tcp_gro_starts_a_new_packet_before_the_kernel_size_limit() {
+        let mut buffers = vec![
+            exact_capacity_tcp_buffer(0, 33_000),
+            exact_capacity_tcp_buffer(33_000, 33_000),
+        ];
+        let mut table = GROTable::new();
+
+        table
+            .apply_gro(&mut buffers, VIRTIO_NET_HDR_LEN, false)
+            .unwrap();
+
+        assert_eq!(table.to_write, [0, 1]);
     }
 
     #[test]

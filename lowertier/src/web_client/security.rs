@@ -9,7 +9,8 @@ use crate::{
     peers::secure_datagram::{SecureDatagramDirection, SecureDatagramSession},
     proto::common::TunnelInfo,
     tunnel::{
-        SplitTunnel, StreamItem, Tunnel, TunnelError, ZCPacketSink, ZCPacketStream,
+        PacketBatchSink, PacketBatchStream, SplitTunnel, StreamItem, Tunnel, TunnelError,
+        batch::PacketBatch,
         filter::{TunnelFilter, TunnelWithFilter},
         packet_def::{PacketType, ZCPacket, ZCPacketType},
     },
@@ -32,8 +33,8 @@ struct RawSplitTunnel {
 impl RawSplitTunnel {
     fn new(
         info: Option<TunnelInfo>,
-        stream: std::pin::Pin<Box<dyn ZCPacketStream>>,
-        sink: std::pin::Pin<Box<dyn ZCPacketSink>>,
+        stream: std::pin::Pin<Box<dyn PacketBatchStream>>,
+        sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
     ) -> Self {
         Self {
             info,
@@ -186,8 +187,8 @@ fn new_web_secure_session(root_key: [u8; 32], algorithm: &str) -> Arc<SecureData
 
 fn wrap_secure_tunnel(
     info: Option<TunnelInfo>,
-    stream: std::pin::Pin<Box<dyn ZCPacketStream>>,
-    sink: std::pin::Pin<Box<dyn ZCPacketSink>>,
+    stream: std::pin::Pin<Box<dyn PacketBatchStream>>,
+    sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
     session: Arc<SecureDatagramSession>,
     role: SecureTunnelRole,
 ) -> Box<dyn Tunnel> {
@@ -218,14 +219,16 @@ pub async fn upgrade_client_tunnel(
     let msg1_len = state
         .write_message(&[], &mut msg1)
         .map_err(|e| TunnelError::InternalError(format!("write noise msg1 failed: {e}")))?;
-    sink.send(pack_control_packet(&encode_noise_payload(
-        &msg1[..msg1_len],
+    sink.send(PacketBatch::singleton(pack_control_packet(
+        &encode_noise_payload(&msg1[..msg1_len]),
     )))
     .await?;
 
     let msg2_packet = match tokio::time::timeout(WEB_SECURE_HANDSHAKE_TIMEOUT, stream.next()).await
     {
-        Ok(Some(Ok(packet))) => packet,
+        Ok(Some(Ok(batch))) => batch.pop_singleton().map_err(|batch| {
+            TunnelError::InvalidPacket(format!("noise msg2 batch contains {} packets", batch.len()))
+        })?,
         Ok(Some(Err(error))) => return Err(error),
         Ok(None) => return Err(TunnelError::Shutdown),
         Err(error) => return Err(error.into()),
@@ -261,7 +264,12 @@ pub async fn accept_or_upgrade_server_tunnel(
     let mut sink = sink;
 
     let first_packet = match tokio::time::timeout(WEB_SECURE_ACCEPT_TIMEOUT, stream.next()).await {
-        Ok(Some(Ok(packet))) => packet,
+        Ok(Some(Ok(batch))) => batch.pop_singleton().map_err(|batch| {
+            TunnelError::InvalidPacket(format!(
+                "first web packet batch contains {} packets",
+                batch.len()
+            ))
+        })?,
         Ok(Some(Err(error))) => return Err(error),
         Ok(None) => return Err(TunnelError::Shutdown),
         Err(_) => {
@@ -273,7 +281,10 @@ pub async fn accept_or_upgrade_server_tunnel(
     };
     let first_payload = checked_payload(&first_packet, "first packet")?;
     let Some(msg1_cipher) = decode_noise_payload(first_payload) else {
-        let stream = Box::pin(futures::stream::once(async move { Ok(first_packet) }).chain(stream));
+        let stream = Box::pin(
+            futures::stream::once(async move { Ok(PacketBatch::singleton(first_packet)) })
+                .chain(stream),
+        );
         return Ok((
             Box::new(RawSplitTunnel::new(info, stream, sink)) as Box<dyn Tunnel>,
             false,
@@ -300,8 +311,8 @@ pub async fn accept_or_upgrade_server_tunnel(
     let msg2_len = state
         .write_message(&root_key, &mut msg2)
         .map_err(|e| TunnelError::InternalError(format!("write noise msg2 failed: {e}")))?;
-    sink.send(pack_control_packet(&encode_noise_payload(
-        &msg2[..msg2_len],
+    sink.send(PacketBatch::singleton(pack_control_packet(
+        &encode_noise_payload(&msg2[..msg2_len]),
     )))
     .await?;
 
@@ -365,10 +376,10 @@ mod tests {
             tokio::spawn(async move { accept_or_upgrade_server_tunnel(server_tunnel).await });
 
         let (_stream, mut sink) = client_tunnel.split();
-        sink.send(ZCPacket::new_from_buf(
+        sink.send(PacketBatch::singleton(ZCPacket::new_from_buf(
             BytesMut::from(&b"\x01"[..]),
             ZCPacketType::TCP,
-        ))
+        )))
         .await
         .unwrap();
 

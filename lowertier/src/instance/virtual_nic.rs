@@ -19,9 +19,13 @@ use crate::{
         log,
     },
     instance::proxy_cidrs_monitor::ProxyCidrsMonitor,
-    peers::{PacketRecvChanReceiver, peer_manager::PeerManager, recv_packet_batch_from_chan},
+    peers::{
+        PacketRecvChanReceiver,
+        peer_manager::{DirectNicEndpoint, PeerManager},
+        recv_packet_batch_from_chan,
+    },
     tunnel::{
-        StreamItem, Tunnel, TunnelError, ZCPacketSink, ZCPacketStream,
+        PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         common::{FramedWriter, TunnelWrapper, ZCPacketToBytes, reserve_buf},
         packet_def::{TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
@@ -67,8 +71,13 @@ fn linux_tun_offload_enabled() -> bool {
     linux_tun_offload_configured(
         std::env::var_os("LOWTIER_ENABLE_LINUX_TUN_OFFLOAD").is_some(),
         std::env::var_os("LOWTIER_DEBUG_DISABLE_TUN_OFFLOAD").is_some(),
-        cfg!(target_arch = "x86_64"),
+        linux_vector_checksum_available(),
     )
+}
+
+#[cfg(target_os = "linux")]
+const fn linux_vector_checksum_available() -> bool {
+    cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
 }
 
 #[cfg(target_os = "linux")]
@@ -81,9 +90,13 @@ fn linux_tun_offload_configured(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_virtual_nic_queue_count(native_ethernet: bool, parallelism: usize) -> usize {
+fn linux_virtual_nic_queue_count(
+    native_ethernet: bool,
+    parallelism: usize,
+    requested: Option<usize>,
+) -> usize {
     if native_ethernet {
-        parallelism.clamp(1, 2)
+        requested.unwrap_or(2).clamp(1, 2).min(parallelism.max(1))
     } else {
         1
     }
@@ -824,7 +837,11 @@ impl VirtualNic {
         let parallelism = std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(1);
-        let queue_count = linux_virtual_nic_queue_count(native_ethernet, parallelism);
+        let requested_queue_count = std::env::var("LOWTIER_TAP_QUEUES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+        let queue_count =
+            linux_virtual_nic_queue_count(native_ethernet, parallelism, requested_queue_count);
         let mut builder = quincy_tun::DeviceBuilder::new()
             .mtu(kernel_mtu)
             .packet_information(false)
@@ -1053,6 +1070,7 @@ pub struct NicCtx {
 
     nic: Arc<Mutex<VirtualNic>>,
     tasks: JoinSet<()>,
+    direct_nic_endpoint: Option<Arc<DirectNicEndpoint>>,
 
     #[cfg(target_os = "windows")]
     windows_udp_broadcast_relay: Option<AbortOnDropHandle<()>>,
@@ -1074,6 +1092,7 @@ impl NicCtx {
 
             nic: Arc::new(Mutex::new(VirtualNic::new(global_ctx))),
             tasks: JoinSet::new(),
+            direct_nic_endpoint: None,
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
@@ -1329,14 +1348,14 @@ impl NicCtx {
             return;
         }
 
-        for packet in batch {
-            Self::do_forward_nic_to_peers(packet, mgr).await;
+        if let Err(error) = mgr.send_msg_by_ip_batch(batch).await {
+            tracing::trace!(?error, "[USER_PACKET] send routed IP batch failed");
         }
     }
 
     fn do_forward_nic_to_peers_task(
         &mut self,
-        mut stream: Pin<Box<dyn ZCPacketStream>>,
+        mut stream: Pin<Box<dyn PacketBatchStream>>,
     ) -> Result<(), Error> {
         // read from nic and write to corresponding tunnel
         let Some(mgr) = self.peer_mgr.upgrade() else {
@@ -1349,7 +1368,11 @@ impl NicCtx {
             {
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok(packet) => Self::do_forward_nic_to_peers(packet, mgr.as_ref()).await,
+                        Ok(batch) => {
+                            for packet in batch {
+                                Self::do_forward_nic_to_peers(packet, mgr.as_ref()).await;
+                            }
+                        }
                         Err(error) => {
                             tracing::error!(?error, "read from nic failed");
                             break;
@@ -1360,12 +1383,10 @@ impl NicCtx {
                 tracing::error!("nic closed when recving from it");
                 return;
             }
-            let batch_size = nic_packet_batch_size();
             let record_batch_stats = std::env::var_os("LOWTIER_DEBUG_BATCH_STATS").is_some();
-            loop {
-                let batch = match read_ready_packet_batch(&mut stream, batch_size).await {
-                    Ok(Some(batch)) => batch,
-                    Ok(None) => break,
+            while let Some(result) = stream.next().await {
+                let batch = match result {
+                    Ok(batch) => batch,
                     Err(error) => {
                         tracing::error!(?error, "read from nic failed");
                         break;
@@ -1425,7 +1446,7 @@ impl NicCtx {
         }
     }
 
-    fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn ZCPacketSink>>) {
+    fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn PacketBatchSink>>) {
         let channel = self.peer_packet_receiver.clone();
         let close_notifier = self.close_notifier.clone();
         let l2_tun = VirtualNic::uses_l2_tun(&self.global_ctx.get_flags());
@@ -1434,7 +1455,14 @@ impl NicCtx {
             // unlock until coroutine finished
             let mut channel = channel.lock().await;
             while let Ok(batch) = recv_packet_batch_from_chan(&mut channel).await {
-                let mut fed_packet = false;
+                if !l2_tun {
+                    if let Err(error) = sink.send(batch).await {
+                        tracing::error!(?error, "send native Ethernet batch to NIC failed");
+                    }
+                    continue;
+                }
+
+                let mut deliverable = PacketBatch::new();
                 for packet in batch {
                     tracing::trace!(
                         "[USER_PACKET] forward packet from peers to nic. packet: {:?}",
@@ -1451,17 +1479,14 @@ impl NicCtx {
                             continue;
                         }
                     }
-                    if let Err(error) = sink.feed(packet).await {
-                        tracing::error!(?error, "do_forward_tunnel_to_nic sink feed error");
-                    } else {
-                        fed_packet = true;
-                    }
+                    deliverable
+                        .try_push(packet)
+                        .expect("the compatible Ethernet output cannot exceed its input");
                 }
-                if fed_packet {
-                    let ret = sink.flush().await;
-                    if ret.is_err() {
-                        tracing::error!(?ret, "do_forward_tunnel_to_nic sink flush error");
-                    }
+                if !deliverable.is_empty()
+                    && let Err(error) = sink.send(deliverable).await
+                {
+                    tracing::error!(?error, "send compatible Ethernet batch to NIC failed");
                 }
             }
             close_notifier.notify_one();
@@ -1830,7 +1855,15 @@ impl NicCtx {
         let (stream, sink) = tunnel.split();
 
         self.do_forward_nic_to_peers_task(stream)?;
-        self.do_forward_peers_to_nic(sink);
+        if !VirtualNic::uses_l2_tun(&self.global_ctx.get_flags()) {
+            let peer_mgr = self
+                .peer_mgr
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+            self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
+        } else {
+            self.do_forward_peers_to_nic(sink);
+        }
 
         // Assign IPv4 address if provided
         if let Some(ipv4_addr) = ipv4_addr {
@@ -1873,7 +1906,15 @@ impl NicCtx {
         let (stream, sink) = tunnel.split();
 
         self.do_forward_nic_to_peers_task(stream)?;
-        self.do_forward_peers_to_nic(sink);
+        if !VirtualNic::uses_l2_tun(&self.global_ctx.get_flags()) {
+            let peer_mgr = self
+                .peer_mgr
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+            self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
+        } else {
+            self.do_forward_peers_to_nic(sink);
+        }
 
         Ok(())
     }
@@ -1899,13 +1940,21 @@ mod tests {
         assert!(!super::linux_tun_offload_configured(true, true, true));
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn linux_tun_offload_uses_neon_by_default() {
+        assert!(super::linux_vector_checksum_available());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn native_tap_uses_two_queues_when_parallelism_is_available() {
-        assert_eq!(super::linux_virtual_nic_queue_count(false, 16), 1);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 1), 1);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 2), 2);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 16), 2);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 16, None), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 1, None), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 2, None), 2);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, None), 2);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, Some(1)), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, Some(8)), 2);
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ use crate::{
     peers::traffic_metrics::AggregateTrafficMetrics,
     tunnel::{
         TunnelError,
-        mpsc::MpscTunnelSender,
+        direct::DirectTunnelSender,
         packet_def::{PacketType, ZCPacket},
         stats::{Throughput, WindowLatency},
     },
@@ -115,7 +115,7 @@ impl PingIntervalController {
 pub struct PeerConnPinger {
     my_peer_id: PeerId,
     peer_id: PeerId,
-    sink: MpscTunnelSender,
+    sink: DirectTunnelSender,
     ctrl_sender: broadcast::Sender<ZCPacket>,
     latency_stats: Arc<WindowLatency>,
     loss_rate_stats: Arc<AtomicU32>,
@@ -138,7 +138,7 @@ impl PeerConnPinger {
     pub(crate) fn new(
         my_peer_id: PeerId,
         peer_id: PeerId,
-        sink: MpscTunnelSender,
+        sink: DirectTunnelSender,
         ctrl_sender: broadcast::Sender<ZCPacket>,
         latency_stats: Arc<WindowLatency>,
         loss_rate_stats: Arc<AtomicU32>,
@@ -167,7 +167,7 @@ impl PeerConnPinger {
     async fn do_pingpong_once(
         my_node_id: PeerId,
         peer_id: PeerId,
-        sink: &MpscTunnelSender,
+        sink: &DirectTunnelSender,
         control_metrics: &AggregateTrafficMetrics,
         receiver: &mut broadcast::Receiver<ZCPacket>,
         seq: u32,

@@ -1,13 +1,19 @@
 use std::{
+    collections::VecDeque,
+    mem,
     ops::{Deref, DerefMut},
-    slice,
+    pin::Pin,
+    ptr, slice,
     sync::OnceLock,
+    task::{Context, Poll},
 };
 
+use crossbeam::queue::ArrayQueue;
+use futures::{Sink, Stream, ready};
+use pin_project_lite::pin_project;
 use rayon::prelude::*;
-use smallvec::{IntoIter, SmallVec};
 
-use super::packet_def::ZCPacket;
+use super::{TunnelError, packet_def::ZCPacket};
 
 /// Maximum number of packets carried by one scheduling and I/O batch.
 ///
@@ -15,6 +21,7 @@ use super::packet_def::ZCPacket;
 /// reach this size; producers append only packets that are already available.
 pub const MAX_PACKET_BATCH_SIZE: usize = 64;
 pub const PARALLEL_CRYPTO_MIN_BATCH_SIZE: usize = 32;
+const RETAINED_PACKET_BATCH_CONTAINERS: usize = 32;
 
 static PARALLEL_CRYPTO_ENABLED: OnceLock<bool> = OnceLock::new();
 
@@ -46,32 +53,65 @@ where
     items.par_iter_mut().try_for_each(operation)
 }
 
-/// A bounded, owning packet vector.
+struct PacketBatchPool {
+    containers: ArrayQueue<Vec<ZCPacket>>,
+}
+
+impl PacketBatchPool {
+    fn new(capacity: usize) -> Self {
+        Self {
+            containers: ArrayQueue::new(capacity),
+        }
+    }
+
+    fn take(&self) -> Vec<ZCPacket> {
+        self.containers
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(MAX_PACKET_BATCH_SIZE))
+    }
+
+    fn recycle(&self, mut packets: Vec<ZCPacket>) {
+        packets.clear();
+        if packets.capacity() < MAX_PACKET_BATCH_SIZE {
+            return;
+        }
+        let _ = self.containers.push(packets);
+    }
+}
+
+static PACKET_BATCH_POOL: OnceLock<PacketBatchPool> = OnceLock::new();
+
+fn packet_batch_pool() -> &'static PacketBatchPool {
+    PACKET_BATCH_POOL.get_or_init(|| PacketBatchPool::new(RETAINED_PACKET_BATCH_CONTAINERS))
+}
+
+/// A bounded, owning packet vector from a bounded container pool.
 ///
 /// Packets keep their existing `BytesMut` storage when moved into and out of a
 /// batch. The type intentionally exposes no unbounded `push` operation.
 #[derive(Debug)]
 pub struct PacketBatch {
-    packets: SmallVec<[ZCPacket; 4]>,
+    packets: Vec<ZCPacket>,
 }
 
 impl PacketBatch {
     pub fn new() -> Self {
         Self {
-            packets: SmallVec::new(),
+            packets: packet_batch_pool().take(),
         }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            packets: SmallVec::with_capacity(capacity.min(MAX_PACKET_BATCH_SIZE)),
-        }
+        debug_assert!(capacity <= MAX_PACKET_BATCH_SIZE);
+        Self::new()
     }
 
     pub fn singleton(packet: ZCPacket) -> Self {
-        Self {
-            packets: smallvec::smallvec![packet],
-        }
+        let mut batch = Self::new();
+        batch
+            .try_push(packet)
+            .expect("a new packet batch accepts one packet");
+        batch
     }
 
     #[allow(clippy::result_large_err)]
@@ -117,6 +157,13 @@ impl PacketBatch {
     }
 }
 
+impl Drop for PacketBatch {
+    fn drop(&mut self) {
+        let packets = mem::take(&mut self.packets);
+        packet_batch_pool().recycle(packets);
+    }
+}
+
 impl Default for PacketBatch {
     fn default() -> Self {
         Self::new()
@@ -139,10 +186,60 @@ impl DerefMut for PacketBatch {
 
 impl IntoIterator for PacketBatch {
     type Item = ZCPacket;
-    type IntoIter = IntoIter<[ZCPacket; 4]>;
+    type IntoIter = PacketBatchIntoIter;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.packets.into_iter()
+    fn into_iter(mut self) -> Self::IntoIter {
+        let mut packets = mem::take(&mut self.packets);
+        let len = packets.len();
+        // The iterator moves each initialized packet with `ptr::read`.
+        // A zero length prevents `Vec` from dropping moved packets twice.
+        unsafe { packets.set_len(0) };
+        PacketBatchIntoIter {
+            packets: Some(packets),
+            next: 0,
+            len,
+        }
+    }
+}
+
+pub struct PacketBatchIntoIter {
+    packets: Option<Vec<ZCPacket>>,
+    next: usize,
+    len: usize,
+}
+
+impl Iterator for PacketBatchIntoIter {
+    type Item = ZCPacket;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == self.len {
+            return None;
+        }
+        let packets = self.packets.as_ref().expect("the batch storage exists");
+        // The index identifies one initialized and unread packet.
+        let packet = unsafe { ptr::read(packets.as_ptr().add(self.next)) };
+        self.next += 1;
+        Some(packet)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len - self.next;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for PacketBatchIntoIter {}
+
+impl Drop for PacketBatchIntoIter {
+    fn drop(&mut self) {
+        let Some(packets) = self.packets.take() else {
+            return;
+        };
+        for index in self.next..self.len {
+            // These packets remain initialized because iteration did not read them.
+            unsafe { ptr::drop_in_place(packets.as_ptr().add(index) as *mut ZCPacket) };
+        }
+        packet_batch_pool().recycle(packets);
     }
 }
 
@@ -152,6 +249,256 @@ impl<'a> IntoIterator for &'a PacketBatch {
 
     fn into_iter(self) -> Self::IntoIter {
         self.packets.iter()
+    }
+}
+
+pin_project! {
+    /// Converts a scalar transport reader into the batch-first tunnel interface.
+    ///
+    /// This adapter is for control and compatibility transports. Native data
+    /// transports must produce `PacketBatch` directly.
+    pub struct ScalarToBatchStream<S> {
+        #[pin]
+        inner: S,
+        pending_error: Option<TunnelError>,
+    }
+}
+
+impl<S> ScalarToBatchStream<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            pending_error: None,
+        }
+    }
+}
+
+impl<S> Stream for ScalarToBatchStream<S>
+where
+    S: Stream<Item = Result<ZCPacket, TunnelError>>,
+{
+    type Item = Result<PacketBatch, TunnelError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        if let Some(error) = this.pending_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
+
+        let first = match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(packet))) => packet,
+            Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => return Poll::Pending,
+        };
+
+        let mut batch = PacketBatch::new();
+        batch
+            .try_push(first)
+            .expect("a new packet batch accepts its first packet");
+        while batch.len() < MAX_PACKET_BATCH_SIZE {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(packet))) => batch
+                    .try_push(packet)
+                    .expect("the scalar adapter checks the batch bound"),
+                Poll::Ready(Some(Err(error))) => {
+                    *this.pending_error = Some(error);
+                    break;
+                }
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        Poll::Ready(Some(Ok(batch)))
+    }
+}
+
+pin_project! {
+    /// Exposes a batch stream to scalar control consumers.
+    pub struct BatchToScalarStream<S> {
+        #[pin]
+        inner: S,
+        pending: VecDeque<ZCPacket>,
+    }
+}
+
+impl<S> BatchToScalarStream<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            pending: VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE),
+        }
+    }
+}
+
+impl<S> Stream for BatchToScalarStream<S>
+where
+    S: Stream<Item = Result<PacketBatch, TunnelError>>,
+{
+    type Item = Result<ZCPacket, TunnelError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        if let Some(packet) = this.pending.pop_front() {
+            return Poll::Ready(Some(Ok(packet)));
+        }
+
+        loop {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(batch))) if batch.is_empty() => continue,
+                Poll::Ready(Some(Ok(batch))) => {
+                    this.pending.extend(batch);
+                    return Poll::Ready(this.pending.pop_front().map(Ok));
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Converts a scalar transport writer into the batch-first tunnel interface.
+///
+/// It preserves downstream readiness for every packet. It flushes only after
+/// the complete owned batch enters the scalar writer.
+pub struct ScalarToBatchSink<S> {
+    inner: S,
+    pending: Option<PacketBatchIntoIter>,
+    current: Option<ZCPacket>,
+}
+
+impl<S> ScalarToBatchSink<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            pending: None,
+            current: None,
+        }
+    }
+}
+
+impl<S> ScalarToBatchSink<S>
+where
+    S: Sink<ZCPacket, Error = TunnelError> + Unpin,
+{
+    fn poll_pending(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TunnelError>> {
+        loop {
+            if self.current.is_none() {
+                self.current = self.pending.as_mut().and_then(Iterator::next);
+                if self.current.is_none() {
+                    self.pending = None;
+                    return Poll::Ready(Ok(()));
+                }
+            }
+
+            ready!(Pin::new(&mut self.inner).poll_ready(cx))?;
+            let packet = self.current.take().expect("a ready scalar packet exists");
+            Pin::new(&mut self.inner).start_send(packet)?;
+        }
+    }
+}
+
+impl<S> Sink<PacketBatch> for ScalarToBatchSink<S>
+where
+    S: Sink<ZCPacket, Error = TunnelError> + Unpin,
+{
+    type Error = TunnelError;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.poll_pending(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+        if self.pending.is_some() || self.current.is_some() {
+            return Err(TunnelError::InternalError(
+                "batch sink received data without readiness".to_owned(),
+            ));
+        }
+        self.pending = Some(batch.into_iter());
+        Ok(())
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        ready!(self.as_mut().poll_pending(cx))?;
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        ready!(self.as_mut().poll_pending(cx))?;
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
+#[cfg(test)]
+mod batch_interface_tests {
+    use futures::{SinkExt, StreamExt, channel::mpsc, stream};
+
+    use super::{BatchToScalarStream, PacketBatch, ScalarToBatchSink, ScalarToBatchStream};
+    use crate::tunnel::{Tunnel, packet_def::ZCPacket, ring::create_ring_tunnel_pair};
+
+    fn packet(value: u8) -> ZCPacket {
+        ZCPacket::new_with_payload(&[value])
+    }
+
+    #[tokio::test]
+    async fn scalar_stream_returns_all_ready_packets_in_one_owned_batch() {
+        let source = stream::iter([Ok(packet(1)), Ok(packet(2)), Ok(packet(3))]);
+        let mut stream = ScalarToBatchStream::new(source);
+
+        let batch = stream.next().await.unwrap().unwrap();
+
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].payload(), &[1]);
+        assert_eq!(batch[1].payload(), &[2]);
+        assert_eq!(batch[2].payload(), &[3]);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_stream_scalar_adapter_preserves_packet_order() {
+        let mut batch = PacketBatch::new();
+        batch.try_push(packet(4)).unwrap();
+        batch.try_push(packet(5)).unwrap();
+        let source = stream::iter([Ok(batch)]);
+        let mut stream = BatchToScalarStream::new(source);
+
+        assert_eq!(stream.next().await.unwrap().unwrap().payload(), &[4]);
+        assert_eq!(stream.next().await.unwrap().unwrap().payload(), &[5]);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn scalar_sink_adapter_delivers_each_packet_from_one_batch() {
+        let (sink, mut receiver) = mpsc::unbounded();
+        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let mut sink = ScalarToBatchSink::new(sink);
+        let mut batch = PacketBatch::new();
+        batch.try_push(packet(6)).unwrap();
+        batch.try_push(packet(7)).unwrap();
+
+        sink.send(batch).await.unwrap();
+        sink.close().await.unwrap();
+
+        assert_eq!(receiver.next().await.unwrap().payload(), &[6]);
+        assert_eq!(receiver.next().await.unwrap().payload(), &[7]);
+        assert!(receiver.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn tunnel_split_transfers_one_owned_batch_without_scalar_calls() {
+        let (left, right) = create_ring_tunnel_pair();
+        let (_left_reader, mut left_writer) = left.split();
+        let (mut right_reader, _right_writer) = right.split();
+        let mut sent = PacketBatch::new();
+        sent.try_push(packet(8)).unwrap();
+        sent.try_push(packet(9)).unwrap();
+
+        left_writer.send(sent).await.unwrap();
+        let received = right_reader.next().await.unwrap().unwrap();
+
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].payload(), &[8]);
+        assert_eq!(received[1].payload(), &[9]);
     }
 }
 
@@ -169,8 +516,23 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        PARALLEL_CRYPTO_MIN_BATCH_SIZE, ordered_parallel_try_for_each, parallel_crypto_configured,
+        MAX_PACKET_BATCH_SIZE, PARALLEL_CRYPTO_MIN_BATCH_SIZE, PacketBatchPool,
+        ordered_parallel_try_for_each, parallel_crypto_configured,
     };
+
+    #[test]
+    fn batch_container_pool_reuses_one_fixed_vector() {
+        let pool = PacketBatchPool::new(1);
+        let first = pool.take();
+        let first_pointer = first.as_ptr();
+        assert_eq!(first.capacity(), MAX_PACKET_BATCH_SIZE);
+
+        pool.recycle(first);
+        let second = pool.take();
+
+        assert_eq!(second.as_ptr(), first_pointer);
+        assert_eq!(second.capacity(), MAX_PACKET_BATCH_SIZE);
+    }
 
     #[test]
     fn parallel_crypto_is_opt_in_for_large_vectors_and_can_be_disabled() {

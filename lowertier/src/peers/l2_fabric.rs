@@ -6,6 +6,7 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use pnet::packet::ethernet::EthernetPacket;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::common::PeerId;
@@ -28,6 +29,67 @@ pub enum L2FrameError {
 struct FdbEntry {
     peer_id: PeerId,
     last_seen: Instant,
+}
+
+#[derive(Default)]
+pub(crate) struct L2SourceBatch {
+    sources: SmallVec<[(MacAddress, PeerId); 4]>,
+}
+
+#[derive(Default)]
+pub(crate) struct L2DestinationBatch {
+    destinations: SmallVec<[(MacAddress, EthernetDestination); 4]>,
+}
+
+impl L2DestinationBatch {
+    pub(crate) fn resolve_at(
+        &mut self,
+        fabric: &L2Fabric,
+        frame: &[u8],
+        now: Instant,
+    ) -> Result<EthernetDestination, L2FrameError> {
+        let (destination, _) = ethernet_addresses(frame)?;
+        if let Some((_, decision)) = self
+            .destinations
+            .iter()
+            .find(|(recorded_destination, _)| *recorded_destination == destination)
+        {
+            return Ok(*decision);
+        }
+
+        let decision = fabric.destination_address_at(destination, now);
+        self.destinations.push((destination, decision));
+        Ok(decision)
+    }
+}
+
+impl L2SourceBatch {
+    pub(crate) fn record_source(&mut self, source: MacAddress, peer_id: PeerId) {
+        if !is_unicast(source) {
+            return;
+        }
+        if let Some((_, recorded_peer_id)) = self
+            .sources
+            .iter_mut()
+            .find(|(recorded_source, _)| *recorded_source == source)
+        {
+            *recorded_peer_id = peer_id;
+            return;
+        }
+        self.sources.push((source, peer_id));
+    }
+
+    pub(crate) fn record(&mut self, frame: &[u8], peer_id: PeerId) {
+        let Ok((_, source)) = ethernet_addresses(frame) else {
+            return;
+        };
+        self.record_source(source, peer_id);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.sources.len()
+    }
 }
 
 /// Concurrent Ethernet forwarding database used by the peer fast path.
@@ -89,7 +151,7 @@ impl L2Fabric {
         self.len() == 0
     }
 
-    fn learn_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) {
+    pub(crate) fn learn_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) {
         let Ok((_, source)) = ethernet_addresses(frame) else {
             return;
         };
@@ -97,6 +159,16 @@ impl L2Fabric {
             return;
         }
 
+        self.learn_address_at(source, peer_id, now);
+    }
+
+    pub(crate) fn learn_source_batch_at(&self, batch: L2SourceBatch, now: Instant) {
+        for (source, peer_id) in batch.sources {
+            self.learn_address_at(source, peer_id, now);
+        }
+    }
+
+    fn learn_address_at(&self, source: MacAddress, peer_id: PeerId, now: Instant) {
         match self.fdb.entry(source) {
             Entry::Occupied(mut occupied) => {
                 *occupied.get_mut() = FdbEntry {
@@ -115,21 +187,25 @@ impl L2Fabric {
         }
     }
 
-    fn destination_at(
+    pub(crate) fn destination_at(
         &self,
         frame: &[u8],
         now: Instant,
     ) -> Result<EthernetDestination, L2FrameError> {
         let (destination, _) = ethernet_addresses(frame)?;
+        Ok(self.destination_address_at(destination, now))
+    }
+
+    fn destination_address_at(&self, destination: MacAddress, now: Instant) -> EthernetDestination {
         if !is_unicast(destination) {
-            return Ok(EthernetDestination::Flood);
+            return EthernetDestination::Flood;
         }
 
         let Some(entry) = self.fdb.get(&destination) else {
-            return Ok(EthernetDestination::Flood);
+            return EthernetDestination::Flood;
         };
         if now.saturating_duration_since(entry.last_seen) <= self.age {
-            return Ok(EthernetDestination::Known(entry.peer_id));
+            return EthernetDestination::Known(entry.peer_id);
         }
         drop(entry);
 
@@ -142,7 +218,7 @@ impl L2Fabric {
         {
             self.entry_count.fetch_sub(1, Ordering::AcqRel);
         }
-        Ok(EthernetDestination::Flood)
+        EthernetDestination::Flood
     }
 
     fn try_reserve_entry(&self) -> bool {
@@ -210,7 +286,7 @@ fn is_unicast(address: MacAddress) -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{EthernetDestination, L2Fabric};
+    use super::{EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch};
 
     fn frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
         let mut bytes = vec![0_u8; 64];
@@ -233,6 +309,51 @@ mod tests {
             Ok(EthernetDestination::Known(7))
         );
         assert_eq!(fabric.len(), 1);
+    }
+
+    #[test]
+    fn batch_learning_writes_each_source_once_with_the_latest_peer() {
+        let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
+        let now = Instant::now();
+        let source = [0x02, 0, 0, 0, 0, 9];
+        let learned = frame([0xff; 6], source);
+        let mut sources = L2SourceBatch::default();
+
+        sources.record(&learned, 7);
+        sources.record(&learned, 8);
+        assert_eq!(sources.len(), 1);
+        fabric.learn_source_batch_at(sources, now);
+
+        assert_eq!(
+            fabric.destination_at(&frame(source, [0x02, 0, 0, 0, 0, 1]), now),
+            Ok(EthernetDestination::Known(8))
+        );
+    }
+
+    #[test]
+    fn batch_destination_uses_one_decision_for_repeated_mac_addresses() {
+        let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
+        let now = Instant::now();
+        let destination = [0x02, 0, 0, 0, 0, 9];
+        let learned = frame([0xff; 6], destination);
+        let outbound = frame(destination, [0x02, 0, 0, 0, 0, 1]);
+        fabric.learn_source_at(&learned, 7, now);
+
+        let mut batch = L2DestinationBatch::default();
+        assert_eq!(
+            batch.resolve_at(&fabric, &outbound, now),
+            Ok(EthernetDestination::Known(7))
+        );
+
+        fabric.learn_source_at(&learned, 8, now);
+        assert_eq!(
+            batch.resolve_at(&fabric, &outbound, now),
+            Ok(EthernetDestination::Known(7))
+        );
+        assert_eq!(
+            L2DestinationBatch::default().resolve_at(&fabric, &outbound, now),
+            Ok(EthernetDestination::Known(8))
+        );
     }
 
     #[test]

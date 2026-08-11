@@ -493,7 +493,9 @@ mod tests {
             let (_recv, mut send) = tunnel.split();
 
             let zc_packet = ZCPacket::new_with_payload(data.as_bytes());
-            send.send(zc_packet).await.unwrap();
+            send.send(crate::tunnel::batch::PacketBatch::singleton(zc_packet))
+                .await
+                .unwrap();
             Err(Error::Unknown)
         }
     }
@@ -521,7 +523,13 @@ mod tests {
             let tunnel = RingTunnelConnector::new(ring_id).connect().await.unwrap();
             let (mut recv, _send) = tunnel.split();
             assert_eq!(
-                recv.next().await.unwrap().unwrap().payload(),
+                recv.next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pop_singleton()
+                    .expect("the mock listener sends one packet")
+                    .payload(),
                 "abc".as_bytes()
             );
             tunnel

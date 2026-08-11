@@ -340,6 +340,17 @@ pub struct TcpProxy<C: NatDstConnector> {
 
 #[async_trait::async_trait]
 impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
+    fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
+        packet.peer_manager_header().is_some_and(|header| {
+            matches!(
+                header.packet_type,
+                x if x == PacketType::Data as u8
+                    || x == PacketType::DataWithKcpSrcModified as u8
+                    || x == PacketType::DataWithQuicSrcModified as u8
+            )
+        })
+    }
+
     async fn try_process_packet_from_peer(&self, mut packet: ZCPacket) -> Option<ZCPacket> {
         if self.try_handle_peer_packet(&mut packet).await.is_some() {
             if self.is_smoltcp_enabled() {

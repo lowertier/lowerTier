@@ -1,8 +1,9 @@
 use arc_swap::ArcSwapOption;
 use crossbeam::atomic::AtomicCell;
-use futures::{FutureExt, StreamExt, TryFutureExt};
+use futures::{StreamExt, TryFutureExt};
 use std::{
     any::Any,
+    collections::VecDeque,
     fmt::Debug,
     pin::Pin,
     sync::{
@@ -15,7 +16,6 @@ use tokio::sync::Mutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use guarden::guard;
 use hmac::Mac;
 use prost::Message;
 use tokio::{
@@ -34,7 +34,7 @@ use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet};
 use super::{
     PacketRecvChan,
     encrypt::Encryptor,
-    flow::{FLOW_SHARD_COUNT, classify_packet_flow, stamp_critical_l2_control},
+    flow::{FLOW_SHARD_COUNT, classify_packet_flow},
     link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
     peer_conn_ping::PeerConnPinger,
     peer_session::{PeerSession, PeerSessionAction},
@@ -57,11 +57,14 @@ use crate::{
         },
     },
     tunnel::{
-        Tunnel, TunnelError, ZCPacketStream,
-        batch::{PacketBatch, ordered_parallel_try_for_each, parallel_crypto_enabled},
+        PacketBatchStream, Tunnel, TunnelError,
+        batch::{
+            MAX_PACKET_BATCH_SIZE, PacketBatch, ordered_parallel_try_for_each,
+            parallel_crypto_enabled,
+        },
+        direct::{DirectTunnel, DirectTunnelSender},
         filter::{StatsRecorderTunnelFilter, TunnelFilter, TunnelFilterChain, TunnelWithFilter},
-        mpsc::{MpscTunnel, MpscTunnelSender},
-        packet_def::{PacketType, ZCPacket},
+        packet_def::{PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
         stats::{Throughput, WindowLatency},
     },
     use_global_var,
@@ -71,6 +74,27 @@ pub type PeerConnId = uuid::Uuid;
 
 const MAGIC: u32 = 0xd1e1a5e1;
 const VERSION: u32 = 1;
+const MAX_PENDING_HANDSHAKE_PACKETS: usize = MAX_PACKET_BATCH_SIZE;
+const MAX_PENDING_HANDSHAKE_BYTES: usize =
+    MAX_PENDING_HANDSHAKE_PACKETS * (4096 + PEER_MANAGER_HEADER_SIZE);
+
+fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
+    !batch.is_empty()
+        && batch.iter().all(|packet| {
+            if let Some(metadata) = packet.parsed_metadata() {
+                return metadata.packet_type != PacketType::Ping as u8
+                    && metadata.packet_type != PacketType::Pong as u8
+                    && metadata.packet_type != PacketType::AlternateFecSource as u8
+                    && metadata.packet_type != PacketType::AlternateFecParity as u8;
+            }
+            packet.peer_manager_header().is_some_and(|header| {
+                header.packet_type != PacketType::Ping as u8
+                    && header.packet_type != PacketType::Pong as u8
+                    && header.packet_type != PacketType::AlternateFecSource as u8
+                    && header.packet_type != PacketType::AlternateFecParity as u8
+            })
+        })
+}
 
 /// The proof of client secret.
 #[derive(Debug)]
@@ -293,11 +317,13 @@ impl PeerSessionTunnelFilter {
             || hdr.packet_type == PacketType::Pong as u8
     }
 
-    fn encrypt_packet_if_needed(&self, data: &mut ZCPacket) -> Result<(), anyhow::Error> {
-        if !self.enabled {
-            return Ok(());
-        }
-
+    fn encrypt_packet_with_session(
+        &self,
+        data: &mut ZCPacket,
+        my_peer_id: PeerId,
+        peer_id: PeerId,
+        session: &PeerSession,
+    ) -> Result<(), anyhow::Error> {
         let Some(hdr) = data.peer_manager_header() else {
             return Ok(());
         };
@@ -306,39 +332,46 @@ impl PeerSessionTunnelFilter {
         }
         let from_peer_id = hdr.from_peer_id.get();
         let to_peer_id = hdr.to_peer_id.get();
-
-        let Some(peer_id) = self.peer_id.load() else {
-            return Ok(());
-        };
-        let my_peer_id = self.my_peer_id.load();
         if my_peer_id != from_peer_id || to_peer_id != peer_id {
             return Ok(());
         }
-        if self.link_protection_active.load(Ordering::Acquire) {
-            return Ok(());
-        }
-
-        let session_guard = self.session.load();
-        let Some(session) = session_guard.as_deref() else {
-            return Ok(());
-        };
         session.encrypt_payload(my_peer_id, peer_id, data)
     }
 
-    fn encrypt_batch_sequential(&self, batch: &mut PacketBatch) -> Result<(), anyhow::Error> {
-        if !self.enabled {
-            return Ok(());
+    fn encryption_context(&self) -> Option<(PeerId, PeerId, Arc<PeerSession>)> {
+        if !self.enabled || self.link_protection_active.load(Ordering::Acquire) {
+            return None;
         }
-        batch
-            .iter_mut()
-            .try_for_each(|packet| self.encrypt_packet_if_needed(packet))
+        Some((
+            self.my_peer_id.load(),
+            self.peer_id.load()?,
+            self.session.load_full()?,
+        ))
+    }
+
+    fn encrypt_packet_if_needed(&self, data: &mut ZCPacket) -> Result<(), anyhow::Error> {
+        let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
+            return Ok(());
+        };
+        self.encrypt_packet_with_session(data, my_peer_id, peer_id, &session)
+    }
+
+    fn encrypt_batch_sequential(&self, batch: &mut PacketBatch) -> Result<(), anyhow::Error> {
+        let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
+            return Ok(());
+        };
+        batch.iter_mut().try_for_each(|packet| {
+            self.encrypt_packet_with_session(packet, my_peer_id, peer_id, &session)
+        })
     }
 
     fn encrypt_batch_parallel(&self, batch: &mut PacketBatch) -> Result<(), anyhow::Error> {
-        if !self.enabled {
+        let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
             return Ok(());
-        }
-        ordered_parallel_try_for_each(batch, |packet| self.encrypt_packet_if_needed(packet))
+        };
+        ordered_parallel_try_for_each(batch, |packet| {
+            self.encrypt_packet_with_session(packet, my_peer_id, peer_id, &session)
+        })
     }
 }
 
@@ -469,9 +502,10 @@ pub struct PeerConn {
     noise_handshake_result: Option<NoiseHandshakeResult>,
 
     tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
-    sink: MpscTunnelSender,
+    sink: DirectTunnelSender,
     send_lanes: Arc<[Mutex<()>; FLOW_SHARD_COUNT as usize]>,
-    recv: Mutex<Option<Pin<Box<dyn ZCPacketStream>>>>,
+    recv: Mutex<Option<Pin<Box<dyn PacketBatchStream>>>>,
+    pending_recv: parking_lot::Mutex<VecDeque<ZCPacket>>,
     tunnel_info: Option<TunnelInfo>,
 
     tasks: JoinSet<Result<(), TunnelError>>,
@@ -560,9 +594,9 @@ impl PeerConn {
             .chain(peer_conn_tunnel_filter)
             .chain(link_envelope_filter.clone());
         let peer_conn_tunnel = TunnelWithFilter::new(tunnel, filter_chain);
-        let mut mpsc_tunnel = MpscTunnel::new(peer_conn_tunnel, Some(Duration::from_secs(7)));
+        let mut direct_tunnel = DirectTunnel::new(peer_conn_tunnel, Some(Duration::from_secs(7)));
 
-        let (recv, sink) = (mpsc_tunnel.get_stream(), mpsc_tunnel.get_sink());
+        let (recv, sink) = (direct_tunnel.get_stream(), direct_tunnel.get_sink());
 
         let conn_id = PeerConnId::new_v4();
         let my_encrypt_algo = flags.encryption_algorithm;
@@ -581,12 +615,12 @@ impl PeerConn {
             noise_handshake_result: None,
 
             tunnel: Arc::new(Mutex::new(
-                Box::new(guard!([mut mpsc_tunnel] mpsc_tunnel.close()))
-                    as Box<dyn Any + Send + 'static>,
+                Box::new(direct_tunnel) as Box<dyn Any + Send + 'static>
             )),
             sink,
             send_lanes: Arc::new(std::array::from_fn(|_| Mutex::new(()))),
             recv: Mutex::new(Some(recv)),
+            pending_recv: parking_lot::Mutex::new(VecDeque::new()),
             tunnel_info,
 
             tasks: JoinSet::new(),
@@ -674,23 +708,9 @@ impl PeerConn {
 
     async fn wait_handshake(&self, need_retry: &mut bool) -> Result<HandshakeRequest, Error> {
         *need_retry = false;
-
-        let mut locked = self.recv.lock().await;
-        let recv = locked.as_mut().unwrap();
-        let rsp = match recv.next().await {
-            Some(Ok(rsp)) => rsp,
-            Some(Err(e)) => {
-                return Err(Error::WaitRespError(format!(
-                    "conn recv error during wait handshake response, err: {:?}",
-                    e
-                )));
-            }
-            None => {
-                return Err(Error::WaitRespError(
-                    "conn closed during wait handshake response".to_owned(),
-                ));
-            }
-        };
+        let rsp = self
+            .recv_next_peer_manager_packet(Some(PacketType::HandShake))
+            .await?;
 
         *need_retry = true;
         let rsp_len = rsp.buf_len() as u64;
@@ -824,12 +844,15 @@ impl PeerConn {
         let recv = locked.as_mut().unwrap();
 
         loop {
+            if let Some(packet) = self.take_pending_packet(expected_pkt_type)? {
+                return Ok(packet);
+            }
             let Some(ret) = recv.next().await else {
                 return Err(Error::WaitRespError(
                     "conn closed during wait handshake response".to_owned(),
                 ));
             };
-            let pkt = match ret {
+            let batch = match ret {
                 Ok(v) => v,
                 Err(e) => {
                     return Err(Error::WaitRespError(format!(
@@ -839,16 +862,55 @@ impl PeerConn {
                 }
             };
 
-            let Some(peer_mgr_hdr) = pkt.peer_manager_header() else {
-                continue;
-            };
-
-            if expected_pkt_type.is_none()
-                || peer_mgr_hdr.packet_type == *expected_pkt_type.as_ref().unwrap() as u8
-            {
-                return Ok(pkt);
-            }
+            let mut pending = self.pending_recv.lock();
+            Self::append_pending_handshake_batch(&mut pending, batch)?;
         }
+    }
+
+    fn take_pending_packet(
+        &self,
+        expected_pkt_type: Option<PacketType>,
+    ) -> Result<Option<ZCPacket>, Error> {
+        let mut pending = self.pending_recv.lock();
+        Self::take_pending_handshake_packet(&mut pending, expected_pkt_type)
+    }
+
+    fn take_pending_handshake_packet(
+        pending: &mut VecDeque<ZCPacket>,
+        expected_pkt_type: Option<PacketType>,
+    ) -> Result<Option<ZCPacket>, Error> {
+        let Some(expected_pkt_type) = expected_pkt_type else {
+            return Ok(pending.pop_front());
+        };
+        let position = pending.iter().position(|packet| {
+            packet
+                .peer_manager_header()
+                .is_some_and(|header| header.packet_type == expected_pkt_type as u8)
+        });
+        if let Some(position) = position {
+            return Ok(pending.remove(position));
+        }
+        Ok(None)
+    }
+
+    fn append_pending_handshake_batch(
+        pending: &mut VecDeque<ZCPacket>,
+        batch: PacketBatch,
+    ) -> Result<(), Error> {
+        let packet_count = pending.len().saturating_add(batch.len());
+        let byte_count = pending
+            .iter()
+            .map(ZCPacket::buf_len)
+            .sum::<usize>()
+            .saturating_add(batch.buffer_byte_len());
+        if packet_count > MAX_PENDING_HANDSHAKE_PACKETS || byte_count > MAX_PENDING_HANDSHAKE_BYTES
+        {
+            return Err(Error::WaitRespError(
+                "pending handshake packet limit exceeded".to_owned(),
+            ));
+        }
+        pending.extend(batch);
+        Ok(())
     }
 
     fn decode_b64_32(input: &str) -> Result<Vec<u8>, Error> {
@@ -1254,16 +1316,9 @@ impl PeerConn {
         &mut self,
         read_timeout: Duration,
     ) -> Result<ZCPacket, Error> {
-        timeout(read_timeout, async {
-            let mut locked = self.recv.lock().await;
-            let recv = locked.as_mut().unwrap();
-            Ok(recv
-                .next()
-                .await
-                .ok_or(Error::WaitRespError("read next message failed".to_owned()))??)
-        })
-        .await
-        .map_err(|e| Error::WaitRespError(format!("read next message timeout: {e:?}")))?
+        timeout(read_timeout, self.recv_next_peer_manager_packet(None))
+            .await
+            .map_err(|e| Error::WaitRespError(format!("read next message timeout: {e:?}")))?
     }
 
     async fn do_noise_handshake_as_server<Fn>(
@@ -1586,7 +1641,26 @@ impl PeerConn {
     }
 
     pub async fn start_recv_loop(&mut self, packet_recv_chan: PacketRecvChan) {
-        let mut stream = self.recv.lock().await.take().unwrap();
+        let stream = self.recv.lock().await.take().unwrap();
+        let mut pending = std::mem::take(&mut *self.pending_recv.lock());
+        let mut pending_batches = Vec::new();
+        while !pending.is_empty() {
+            let mut batch = PacketBatch::new();
+            while batch.len() < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+                let Some(packet) = pending.pop_front() else {
+                    break;
+                };
+                batch
+                    .try_push(packet)
+                    .expect("the pending receive batch checks its bound");
+            }
+            pending_batches.push(Ok(batch));
+        }
+        let mut stream: Pin<Box<dyn PacketBatchStream>> = if pending_batches.is_empty() {
+            stream
+        } else {
+            Box::pin(futures::stream::iter(pending_batches).chain(stream))
+        };
         let sink = self.sink.clone();
         let sender = packet_recv_chan.clone();
         let close_event_notifier = self.close_event_notifier.clone();
@@ -1630,41 +1704,36 @@ impl PeerConn {
             async move {
                 tracing::info!("start recving peer conn packet");
                 let mut task_ret = Ok(());
-                'receive: while let Some(first) = stream.next().await {
-                    let mut incoming = PacketBatch::new();
-                    match first {
-                        Ok(packet) => incoming
-                            .try_push(packet)
-                            .expect("fresh peer receive vector has room"),
+                'receive: while let Some(result) = stream.next().await {
+                    let mut incoming = match result {
+                        Ok(batch) => batch,
                         Err(error) => {
                             tracing::error!(?error, "peer conn recv error");
                             task_ret = Err(error);
                             break;
                         }
+                    };
+
+                    for packet in incoming.iter_mut() {
+                        let _ = packet.refresh_parsed_metadata();
                     }
 
-                    // Drain only packets that the transport already made ready. This
-                    // keeps the upstream UDP/ring vector in one scheduling job without
-                    // adding a batching timer to the latency path.
-                    while incoming.len() < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
-                        match stream.next().now_or_never() {
-                            Some(Some(Ok(packet))) => incoming
-                                .try_push(packet)
-                                .expect("peer receive vector is bounded"),
-                            Some(Some(Err(error))) => {
-                                tracing::error!(?error, "peer conn recv error");
-                                task_ret = Err(error);
-                                break 'receive;
-                            }
-                            Some(None) | None => break,
+                    let received_bytes = incoming.buffer_byte_len() as u64;
+                    if packet_batch_is_direct_peer_data(&incoming) {
+                        if sender.send_batch(incoming).await.is_err() {
+                            break;
                         }
+                        if received_bytes != 0
+                            && let Some(limiter) = recv_limiter.as_ref()
+                        {
+                            limiter.consume(received_bytes).await;
+                        }
+                        continue;
                     }
 
                     let mut data = PacketBatch::with_capacity(incoming.len());
-                    let mut received_bytes = 0_u64;
                     for mut zc_packet in incoming {
                         let buf_len = zc_packet.buf_len() as u64;
-                        received_bytes += buf_len;
                         let Some(peer_mgr_hdr) = zc_packet.mut_peer_manager_header() else {
                             tracing::error!(
                                 "unexpected packet: {:?}, cannot decode peer manager hdr",
@@ -1780,17 +1849,13 @@ impl PeerConn {
         });
     }
 
-    pub async fn send_msg(&self, mut msg: ZCPacket) -> Result<(), Error> {
-        stamp_critical_l2_control(&mut msg);
+    pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
         let shard = usize::from(classify_packet_flow(&msg).shard);
         let _lane = self.send_lanes[shard].lock().await;
         Ok(self.sink.send(msg).await?)
     }
 
-    pub async fn send_msg_batch(&self, mut batch: PacketBatch) -> Result<(), Error> {
-        for packet in batch.iter_mut() {
-            stamp_critical_l2_control(packet);
-        }
+    pub async fn send_msg_batch(&self, batch: PacketBatch) -> Result<(), Error> {
         // Tokio's FIFO mutex is the ordering lane. An uncontended singleton
         // takes its inline fast path immediately; a concurrent job waits until
         // every earlier vector has entered the transport queue.
@@ -2038,6 +2103,62 @@ pub mod tests {
     use crate::tunnel::filter::tests::DropSendTunnelFilter;
     use crate::tunnel::ring::create_ring_tunnel_pair;
     use tokio_util::task::AbortOnDropHandle;
+
+    #[test]
+    fn normal_data_batch_keeps_transport_owned_storage() {
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..8 {
+            let mut packet = ZCPacket::new_with_payload(&[value; 64]);
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+            batch.try_push(packet).unwrap();
+        }
+        assert!(packet_batch_is_direct_peer_data(&batch));
+
+        let mut ping = ZCPacket::new_with_payload(b"ping");
+        ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
+        batch.try_push(ping).unwrap();
+        assert!(!packet_batch_is_direct_peer_data(&batch));
+    }
+
+    #[test]
+    fn handshake_preserves_a_bounded_nonmatching_pending_batch() {
+        let mut pending = VecDeque::new();
+        let mut packet = ZCPacket::new_with_payload(b"early data");
+        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+        pending.push_back(packet);
+
+        let result =
+            PeerConn::take_pending_handshake_packet(&mut pending, Some(PacketType::HandShake));
+
+        assert!(result.unwrap().is_none());
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn handshake_rejects_a_pending_packet_count_overflow() {
+        let mut pending = VecDeque::new();
+        for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+            pending.push_back(ZCPacket::new_with_payload(b"early data"));
+        }
+        let batch = PacketBatch::singleton(ZCPacket::new_with_payload(b"overflow"));
+
+        let result = PeerConn::append_pending_handshake_batch(&mut pending, batch);
+
+        assert!(matches!(result, Err(Error::WaitRespError(_))));
+        assert_eq!(pending.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+    }
+
+    #[test]
+    fn handshake_rejects_a_pending_byte_overflow() {
+        let mut pending = VecDeque::new();
+        let packet = ZCPacket::new_with_payload(&vec![0_u8; MAX_PENDING_HANDSHAKE_BYTES]);
+        let batch = PacketBatch::singleton(packet);
+
+        let result = PeerConn::append_pending_handshake_batch(&mut pending, batch);
+
+        assert!(matches!(result, Err(Error::WaitRespError(_))));
+        assert!(pending.is_empty());
+    }
 
     #[test]
     fn alternate_parity_requires_two_distinct_quic_ip_surfaces() {

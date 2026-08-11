@@ -462,14 +462,14 @@ impl Peer {
         Ok(())
     }
 
-    pub async fn send_msg_batch(&self, mut batch: PacketBatch) -> Result<(), Error> {
-        for packet in batch.iter_mut() {
-            stamp_critical_l2_control(packet);
-        }
-        let batch = match batch.pop_singleton() {
+    pub async fn send_msg_batch(&self, batch: PacketBatch) -> Result<(), Error> {
+        let mut batch = match batch.pop_singleton() {
             Ok(packet) => return self.send_msg(packet).await,
             Err(batch) => batch,
         };
+        for packet in batch.iter_mut() {
+            stamp_critical_l2_control(packet);
+        }
         let Some(conn) = self.select_conn().await else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };

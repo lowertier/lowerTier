@@ -19,6 +19,7 @@ use self::packet_def::ZCPacket;
 pub mod batch;
 pub mod buf;
 pub mod common;
+pub mod direct;
 pub mod filter;
 pub mod mpsc;
 pub mod packet_def;
@@ -97,12 +98,23 @@ pub type StreamItem = Result<StreamT, TunnelError>;
 pub type SinkItem = packet_def::ZCPacket;
 pub type SinkError = TunnelError;
 
+pub type BatchStreamItem = Result<batch::PacketBatch, TunnelError>;
+pub type BatchSinkItem = batch::PacketBatch;
+
 pub trait ZCPacketStream: Stream<Item = StreamItem> + Send {}
 impl<T> ZCPacketStream for T where T: Stream<Item = StreamItem> + Send {}
 pub trait ZCPacketSink: Sink<SinkItem, Error = SinkError> + Send {}
 impl<T> ZCPacketSink for T where T: Sink<SinkItem, Error = SinkError> + Send {}
 
-pub type SplitTunnel = (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>);
+pub trait PacketBatchStream: Stream<Item = BatchStreamItem> + Send {}
+impl<T> PacketBatchStream for T where T: Stream<Item = BatchStreamItem> + Send {}
+pub trait PacketBatchSink: Sink<BatchSinkItem, Error = SinkError> + Send {}
+impl<T> PacketBatchSink for T where T: Sink<BatchSinkItem, Error = SinkError> + Send {}
+
+pub type SplitTunnel = (
+    Pin<Box<dyn PacketBatchStream>>,
+    Pin<Box<dyn PacketBatchSink>>,
+);
 
 #[auto_impl::auto_impl(Box, Arc)]
 pub trait Tunnel: Send {

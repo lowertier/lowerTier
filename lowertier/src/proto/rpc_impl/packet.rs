@@ -37,7 +37,7 @@ pub async fn compress_packet(
     let algo = accepted_compression_algo
         .try_into()
         .unwrap_or(CompressorAlgo::None);
-    let compressed = compressor.compress_raw(content, algo).await?;
+    let compressed = compressor.compress_raw(content, algo)?;
     if compressed.len() >= content.len() {
         Ok((content.to_vec(), CompressionAlgoPb::None))
     } else {
@@ -51,7 +51,7 @@ pub async fn decompress_packet(
 ) -> Result<Vec<u8>, Error> {
     let compressor = DefaultCompressor::new();
     let algo = compression_algo.try_into()?;
-    let decompressed = compressor.decompress_raw(content, algo).await?;
+    let decompressed = compressor.decompress_raw(content, algo)?;
     Ok(decompressed)
 }
 

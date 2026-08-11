@@ -6,7 +6,7 @@ use tokio::task::JoinSet;
 use crate::{
     common::{PeerId, error::Error, stats_manager::StatsManager},
     proto::rpc_impl::{self, bidirect::BidirectRpcManager},
-    tunnel::packet_def::ZCPacket,
+    tunnel::{batch::PacketBatch, packet_def::ZCPacket},
 };
 
 const RPC_PACKET_CONTENT_MTU: usize = 1300;
@@ -64,10 +64,12 @@ impl PeerRpcManager {
         let (mut rx, mut tx) = ret.split();
         let tspt = self.tspt.clone();
         self.tasks.lock().unwrap().spawn(async move {
-            while let Some(Ok(packet)) = rx.next().await {
-                let dst_peer_id = packet.peer_manager_header().unwrap().to_peer_id.into();
-                if let Err(e) = tspt.send(packet, dst_peer_id).await {
-                    tracing::error!("send to rpc tspt error: {:?}", e);
+            while let Some(Ok(batch)) = rx.next().await {
+                for packet in batch {
+                    let dst_peer_id = packet.peer_manager_header().unwrap().to_peer_id.into();
+                    if let Err(e) = tspt.send(packet, dst_peer_id).await {
+                        tracing::error!("send to rpc tspt error: {:?}", e);
+                    }
                 }
             }
         });
@@ -75,7 +77,7 @@ impl PeerRpcManager {
         let tspt = self.tspt.clone();
         self.tasks.lock().unwrap().spawn(async move {
             while let Ok(packet) = tspt.recv().await {
-                if let Err(e) = tx.send(packet).await {
+                if let Err(e) = tx.send(PacketBatch::singleton(packet)).await {
                     tracing::error!("send to rpc tspt error: {:?}", e);
                 }
             }
@@ -119,7 +121,9 @@ pub mod tests {
             tests::{GreetingClientFactory, GreetingServer, GreetingService, SayHelloRequest},
         },
         tunnel::{
-            Tunnel, ZCPacketSink, ZCPacketStream, packet_def::ZCPacket,
+            PacketBatchSink, Tunnel, ZCPacketStream,
+            batch::{BatchToScalarStream, PacketBatch},
+            packet_def::ZCPacket,
             ring::create_ring_tunnel_pair,
         },
     };
@@ -150,7 +154,7 @@ pub mod tests {
     #[tokio::test]
     async fn peer_rpc_basic_test() {
         struct MockTransport {
-            sink: Arc<Mutex<Pin<Box<dyn ZCPacketSink>>>>,
+            sink: Arc<Mutex<Pin<Box<dyn PacketBatchSink>>>>,
             stream: Arc<Mutex<Pin<Box<dyn ZCPacketStream>>>>,
             my_peer_id: PeerId,
         }
@@ -162,13 +166,18 @@ pub mod tests {
             }
             async fn send(&self, msg: ZCPacket, _dst_peer_id: PeerId) -> Result<(), Error> {
                 println!("rpc mgr send: {:?}", msg);
-                self.sink.lock().await.send(msg).await.unwrap();
+                self.sink
+                    .lock()
+                    .await
+                    .send(PacketBatch::singleton(msg))
+                    .await
+                    .unwrap();
                 Ok(())
             }
             async fn recv(&self) -> Result<ZCPacket, Error> {
                 let ret = self.stream.lock().await.next().await.unwrap();
                 println!("rpc mgr recv: {:?}", ret);
-                return ret.map_err(|e| e.into());
+                ret.map_err(Error::from)
             }
         }
 
@@ -178,7 +187,7 @@ pub mod tests {
 
         let server_rpc_mgr = PeerRpcManager::new(MockTransport {
             sink: Arc::new(Mutex::new(ctsr)),
-            stream: Arc::new(Mutex::new(cts)),
+            stream: Arc::new(Mutex::new(Box::pin(BatchToScalarStream::new(cts)))),
             my_peer_id: new_peer_id(),
         });
         server_rpc_mgr.run();
@@ -186,7 +195,7 @@ pub mod tests {
 
         let client_rpc_mgr = PeerRpcManager::new(MockTransport {
             sink: Arc::new(Mutex::new(stsr)),
-            stream: Arc::new(Mutex::new(sts)),
+            stream: Arc::new(Mutex::new(Box::pin(BatchToScalarStream::new(sts)))),
             my_peer_id: new_peer_id(),
         });
         client_rpc_mgr.run();

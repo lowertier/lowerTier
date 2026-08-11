@@ -32,7 +32,10 @@ use crate::{
         ip_reassembler::IpReassembler,
         tokio_smoltcp::{BufferSize, Net, NetConfig, channel_device},
     },
-    tunnel::packet_def::{PacketType, ZCPacket},
+    tunnel::{
+        batch::PacketBatch,
+        packet_def::{PacketType, ZCPacket},
+    },
 };
 use anyhow::Context;
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -877,6 +880,17 @@ pub struct Socks5Server {
 
 #[async_trait::async_trait]
 impl PeerPacketFilter for Socks5Server {
+    fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
+        packet.peer_manager_header().is_some_and(|header| {
+            matches!(
+                header.packet_type,
+                x if x == PacketType::Data as u8
+                    || x == PacketType::DataWithKcpSrcModified as u8
+                    || x == PacketType::DataWithQuicSrcModified as u8
+            )
+        })
+    }
+
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         let entry_count = self.entry_count.load(Ordering::Relaxed);
         let userspace_proxy_enabled = self.userspace_proxy_enabled.load(Ordering::Relaxed);
@@ -1077,9 +1091,31 @@ impl PeerPacketFilter for Socks5Server {
 
         None
     }
+
+    async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+        if self.packet_path_is_idle() && !tracing::enabled!(tracing::Level::TRACE) {
+            return batch;
+        }
+
+        let mut remaining = PacketBatch::with_capacity(batch.len());
+        for packet in batch {
+            if let Some(packet) = self.try_process_packet_from_peer(packet).await {
+                remaining
+                    .try_push(packet)
+                    .expect("a filtered batch cannot exceed its input batch");
+            }
+        }
+        remaining
+    }
 }
 
 impl Socks5Server {
+    fn packet_path_is_idle(&self) -> bool {
+        self.entry_count.load(Ordering::Relaxed) == 0
+            && !self.userspace_proxy_enabled.load(Ordering::Relaxed)
+            && self.entries.is_empty()
+    }
+
     pub fn new(
         global_ctx: Arc<GlobalCtx>,
         peer_manager: Arc<PeerManager>,
@@ -1708,6 +1744,14 @@ mod tests {
 
     use super::*;
     use crate::peers::tests::create_mock_peer_manager;
+
+    #[tokio::test]
+    async fn new_socks_server_has_an_idle_packet_path() {
+        let peer_manager = create_mock_peer_manager().await;
+        let server = Socks5Server::new(peer_manager.get_global_ctx(), peer_manager, None);
+
+        assert!(server.packet_path_is_idle());
+    }
 
     fn build_tcp_packet(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
         let mut buf = vec![0u8; 40];

@@ -4,7 +4,7 @@
 //! inner Noise session remains responsible for authenticated peer identity.
 
 use super::{
-    FromUrl, IpVersion, SinkError, SinkItem, StreamItem, Tunnel, TunnelConnector, TunnelError,
+    BatchStreamItem, FromUrl, IpVersion, SinkError, Tunnel, TunnelConnector, TunnelError,
     TunnelListener,
 };
 use crate::common::{
@@ -18,8 +18,8 @@ use crate::tunnel::common::{
 };
 use crate::tunnel::{
     TunnelInfo,
-    batch::MAX_PACKET_BATCH_SIZE,
-    common::{FramedReader, FramedWriter, TunnelWrapper},
+    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+    common::{BatchTunnelWrapper, FramedReader, FramedWriter},
 };
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
@@ -31,6 +31,7 @@ use quinn::{
     ClientConfig, ConnectError, Connection, ConnectionError, Endpoint, EndpointConfig, RecvStream,
     SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
 };
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
 use std::{
@@ -56,7 +57,32 @@ use self::adaptive::{AdaptiveConfig, AdaptiveFactory};
 
 const QUIC_INITIAL_MTU: u16 = 1452;
 const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize;
-const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 4500;
+const QUIC_RELIABLE_INITIAL_BUFFER_SIZE: usize = 4500;
+const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = u16::MAX as usize + PEER_MANAGER_HEADER_SIZE;
+const QUIC_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
+
+const fn quic_socket_buffer_bytes() -> usize {
+    QUIC_SOCKET_BUFFER_BYTES
+}
+
+fn configure_quic_socket_buffers(socket: &UdpSocket) {
+    let socket = socket2::SockRef::from(socket);
+    let target = quic_socket_buffer_bytes();
+    if let Err(error) = socket.set_recv_buffer_size(target) {
+        tracing::warn!(
+            ?error,
+            target,
+            "failed to increase the QUIC UDP receive buffer"
+        );
+    }
+    if let Err(error) = socket.set_send_buffer_size(target) {
+        tracing::warn!(
+            ?error,
+            target,
+            "failed to increase the QUIC UDP send buffer"
+        );
+    }
+}
 
 async fn activate_reliable_lane(
     send: &mut SendStream,
@@ -717,6 +743,7 @@ impl QuicEndpointManager {
             .only_v6(addr.is_ipv6() && !dual_stack)
             .maybe_socket_mark(socket_mark)
             .call()?;
+        configure_quic_socket_buffers(&socket);
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
         ))?;
@@ -1113,6 +1140,63 @@ impl Drop for ConnWrapper {
     }
 }
 
+static QUIC_STATS_INTERVAL: OnceLock<Option<Duration>> = OnceLock::new();
+
+fn quic_stats_interval_from(value: Option<&str>) -> Option<Duration> {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Duration::from_millis)
+}
+
+fn quic_stats_interval() -> Option<Duration> {
+    *QUIC_STATS_INTERVAL.get_or_init(|| {
+        let value = std::env::var("LOWTIER_QUIC_STATS_INTERVAL_MS").ok();
+        quic_stats_interval_from(value.as_deref())
+    })
+}
+
+fn observe_quic_path(connection: &Arc<ConnWrapper>) {
+    let Some(period) = quic_stats_interval() else {
+        return;
+    };
+    let connection = Arc::downgrade(connection);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(connection) = connection.upgrade() else {
+                break;
+            };
+            let stats = connection.conn.stats();
+            tracing::info!(
+                target: "CORE::TUNNEL::QUIC_PATH",
+                connection = connection.conn.stable_id(),
+                remote = %connection.conn.remote_address(),
+                tx_datagrams = stats.udp_tx.datagrams,
+                tx_bytes = stats.udp_tx.bytes,
+                tx_ios = stats.udp_tx.ios,
+                rx_datagrams = stats.udp_rx.datagrams,
+                rx_bytes = stats.udp_rx.bytes,
+                rx_ios = stats.udp_rx.ios,
+                tx_frames = stats.frame_tx.datagram,
+                rx_frames = stats.frame_rx.datagram,
+                rtt_us = stats.path.rtt.as_micros(),
+                cwnd = stats.path.cwnd,
+                congestion_events = stats.path.congestion_events,
+                lost_packets = stats.path.lost_packets,
+                lost_bytes = stats.path.lost_bytes,
+                sent_packets = stats.path.sent_packets,
+                mtu = stats.path.current_mtu,
+                send_buffer_space = connection.conn.datagram_send_buffer_space(),
+                "QUIC path statistics"
+            );
+        }
+    });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QuicDelivery {
     PlainDatagram,
@@ -1162,64 +1246,19 @@ fn decode_received_quic_datagram(bytes: Bytes) -> Option<ZCPacket> {
     }
 }
 
-fn send_plain_datagram_with_io(
-    io: &impl QuicDatagramIo,
-    packet: ZCPacket,
-) -> Result<DatagramSendOutcome, TunnelError> {
-    let datagram = encode_quic_datagram(packet);
-    let maximum = io.max_datagram_size().ok_or_else(|| {
-        TunnelError::InvalidProtocol("peer does not support QUIC DATAGRAM".to_owned())
-    })?;
-    if datagram.len() > maximum {
-        return Ok(DatagramSendOutcome::Dropped);
-    }
-    if !io.has_send_buffer_space(datagram.len()) {
-        return Ok(DatagramSendOutcome::Backpressured(datagram));
-    }
-    match io.send_datagram(datagram) {
-        Ok(()) => Ok(DatagramSendOutcome::Sent),
-        Err(quinn::SendDatagramError::TooLarge) => Ok(DatagramSendOutcome::Dropped),
-        Err(error) => Err(TunnelError::Anyhow(
-            anyhow::Error::new(error).context("send plain QUIC DATAGRAM failed"),
-        )),
-    }
-}
+type DatagramStream = Pin<Box<dyn Stream<Item = Result<Bytes, ConnectionError>> + Send + 'static>>;
 
-trait QuicDatagramIo {
-    fn max_datagram_size(&self) -> Option<usize>;
-    fn send_datagram(&self, datagram: Bytes) -> Result<(), quinn::SendDatagramError>;
-
-    fn has_send_buffer_space(&self, _bytes: usize) -> bool {
-        true
-    }
-}
-
-impl QuicDatagramIo for Connection {
-    fn max_datagram_size(&self) -> Option<usize> {
-        Connection::max_datagram_size(self)
-    }
-
-    fn send_datagram(&self, datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-        Connection::send_datagram(self, datagram)
-    }
-
-    fn has_send_buffer_space(&self, bytes: usize) -> bool {
-        self.datagram_send_buffer_space() >= bytes
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum DatagramSendOutcome {
-    Sent,
-    Backpressured(Bytes),
-    Dropped,
-}
-
-type DatagramRead = Pin<Box<dyn Future<Output = Result<Bytes, ConnectionError>> + Send + 'static>>;
-
-fn next_datagram_read(connection: &Connection) -> DatagramRead {
-    let connection = connection.clone();
-    Box::pin(async move { connection.read_datagram().await })
+fn datagram_stream(connection: Arc<ConnWrapper>) -> DatagramStream {
+    Box::pin(futures::stream::unfold(
+        Some(connection),
+        |connection| async move {
+            let connection = connection?;
+            match connection.conn.read_datagram().await {
+                Ok(bytes) => Some((Ok(bytes), Some(connection))),
+                Err(error) => Some((Err(error), None)),
+            }
+        },
+    ))
 }
 
 /// Combines reliable QUIC control frames with the unordered DATAGRAM data
@@ -1227,55 +1266,104 @@ fn next_datagram_read(connection: &Connection) -> DatagramRead {
 /// control traffic and vice versa.
 struct QuicHybridReader {
     reliable: FramedReader<RecvStream>,
+    datagrams: DatagramStream,
     connection: Arc<ConnWrapper>,
-    datagram_read: Option<DatagramRead>,
+    ready_datagrams: Vec<Bytes>,
+    pending_error: Option<TunnelError>,
     poll_datagram_first: bool,
 }
 
 impl QuicHybridReader {
     fn new(reliable: RecvStream, max_packet_size: usize, connection: Arc<ConnWrapper>) -> Self {
-        let datagram_read = Some(next_datagram_read(&connection.conn));
         Self {
-            reliable: FramedReader::new(reliable, max_packet_size),
+            reliable: FramedReader::new_with_initial_capacity(
+                reliable,
+                max_packet_size,
+                QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
+            ),
+            datagrams: datagram_stream(connection.clone()),
             connection,
-            datagram_read,
+            ready_datagrams: Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
+            pending_error: None,
             poll_datagram_first: true,
         }
     }
 
-    fn poll_datagram(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<StreamItem>> {
-        let Some(read) = self.datagram_read.as_mut() else {
-            return Poll::Pending;
-        };
-        match read.as_mut().poll(cx) {
+    fn take_ready_datagram_batch(&mut self) -> Option<PacketBatch> {
+        let mut batch = PacketBatch::with_capacity(self.ready_datagrams.len());
+        for bytes in self.ready_datagrams.drain(..) {
+            if let Some(packet) = decode_received_quic_datagram(bytes) {
+                batch
+                    .try_push(packet)
+                    .expect("the QUIC receive batch has a fixed bound");
+            }
+        }
+        (!batch.is_empty()).then_some(batch)
+    }
+
+    fn poll_datagram(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<BatchStreamItem>> {
+        if let Some(batch) = self.take_ready_datagram_batch() {
+            return Poll::Ready(Some(Ok(batch)));
+        }
+
+        match self.datagrams.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(bytes)) => {
-                self.datagram_read = Some(next_datagram_read(&self.connection.conn));
-                if let Some(packet) = decode_received_quic_datagram(bytes) {
-                    Poll::Ready(Some(Ok(packet)))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+            Poll::Ready(Some(Ok(bytes))) => {
+                self.ready_datagrams.push(bytes);
+                let _ = self
+                    .connection
+                    .conn
+                    .try_read_datagrams(&mut self.ready_datagrams, MAX_PACKET_BATCH_SIZE);
+                match self.take_ready_datagram_batch() {
+                    Some(batch) => Poll::Ready(Some(Ok(batch))),
+                    None => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
                 }
             }
-            Poll::Ready(Err(error)) => {
-                self.datagram_read = None;
-                Poll::Ready(Some(Err(TunnelError::Anyhow(
-                    anyhow::Error::new(error).context("read QUIC DATAGRAM failed"),
-                ))))
-            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(TunnelError::Anyhow(
+                anyhow::Error::new(error).context("read QUIC DATAGRAM failed"),
+            )))),
+            Poll::Ready(None) => Poll::Pending,
         }
     }
 
-    fn poll_reliable(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<StreamItem>> {
-        Pin::new(&mut self.reliable).poll_next(cx)
+    fn poll_reliable(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<BatchStreamItem>> {
+        let first = match Pin::new(&mut self.reliable).poll_next(cx) {
+            Poll::Ready(Some(Ok(packet))) => packet,
+            Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => return Poll::Pending,
+        };
+        let mut batch = PacketBatch::new();
+        batch
+            .try_push(first)
+            .expect("a new reliable QUIC batch accepts one packet");
+        while batch.len() < MAX_PACKET_BATCH_SIZE {
+            match Pin::new(&mut self.reliable).poll_next(cx) {
+                Poll::Ready(Some(Ok(packet))) => batch
+                    .try_push(packet)
+                    .expect("the reliable QUIC batch checks its bound"),
+                Poll::Ready(Some(Err(error))) => {
+                    self.pending_error = Some(error);
+                    break;
+                }
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        Poll::Ready(Some(Ok(batch)))
     }
 }
 
 impl Stream for QuicHybridReader {
-    type Item = StreamItem;
+    type Item = BatchStreamItem;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(error) = self.pending_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
+
         let datagram_first = self.poll_datagram_first;
         self.poll_datagram_first = !datagram_first;
 
@@ -1295,65 +1383,38 @@ impl Stream for QuicHybridReader {
 
 struct QuicHybridWriter {
     connection: Arc<ConnWrapper>,
-    pending_datagram: Option<DatagramSend>,
-    reliable_tx: Option<mpsc::Sender<ZCPacket>>,
-    pending_reliable: Option<ZCPacket>,
+    pending_datagrams: Option<VecDeque<Bytes>>,
+    pending_datagram_send: Option<DatagramBatchSend>,
+    reliable_tx: Option<mpsc::Sender<PacketBatch>>,
+    pending_reliable: Option<PacketBatch>,
     reliable_reserve: Option<ReliableReserve>,
     reliable_task: Option<JoinHandle<Result<(), TunnelError>>>,
 }
 
 type ReliableReserve = Pin<
     Box<
-        dyn Future<Output = Result<mpsc::OwnedPermit<ZCPacket>, mpsc::error::SendError<()>>> + Send,
+        dyn Future<Output = Result<mpsc::OwnedPermit<PacketBatch>, mpsc::error::SendError<()>>>
+            + Send,
     >,
 >;
-type DatagramSend = Pin<Box<dyn Future<Output = Result<(), SinkError>> + Send>>;
+type DatagramBatchSend =
+    Pin<Box<dyn Future<Output = (Result<(), quinn::SendDatagramError>, VecDeque<Bytes>)> + Send>>;
 
 const RELIABLE_LANE_QUEUE_PACKETS: usize = 64;
 
-async fn send_datagram_with_recheck<F, Fut>(
-    recheck_interval: Duration,
-    mut send: F,
-) -> Result<(), quinn::SendDatagramError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<(), quinn::SendDatagramError>>,
-{
-    loop {
-        if let Ok(result) = tokio::time::timeout(recheck_interval, send()).await {
-            return result;
-        }
-    }
-}
-
-fn wait_for_datagram_send(connection: &Connection, datagram: Bytes) -> DatagramSend {
-    let connection = connection.clone();
-    Box::pin(async move {
-        let recheck_interval = connection.rtt();
-        let result = send_datagram_with_recheck(recheck_interval, || {
-            let connection = connection.clone();
-            let datagram = datagram.clone();
-            async move { connection.send_datagram_wait(datagram).await }
-        })
-        .await;
-        match result {
-            Ok(()) | Err(quinn::SendDatagramError::TooLarge) => Ok(()),
-            Err(error) => Err(TunnelError::Anyhow(
-                anyhow::Error::new(error).context("send plain QUIC DATAGRAM failed"),
-            )),
-        }
-    })
-}
-
 async fn run_reliable_writer(
     send: SendStream,
-    mut receiver: mpsc::Receiver<ZCPacket>,
+    mut receiver: mpsc::Receiver<PacketBatch>,
 ) -> Result<(), TunnelError> {
     let mut writer = FramedWriter::<_, TcpZCPacketToBytes>::new(send);
-    while let Some(packet) = receiver.recv().await {
-        writer.feed(packet).await?;
-        while let Ok(packet) = receiver.try_recv() {
+    while let Some(batch) = receiver.recv().await {
+        for packet in batch {
             writer.feed(packet).await?;
+        }
+        while let Ok(batch) = receiver.try_recv() {
+            for packet in batch {
+                writer.feed(packet).await?;
+            }
         }
         tokio::time::timeout(Duration::from_secs(7), writer.flush())
             .await
@@ -1368,7 +1429,8 @@ impl QuicHybridWriter {
         let reliable_task = tokio::spawn(run_reliable_writer(reliable, reliable_rx));
         Self {
             connection,
-            pending_datagram: None,
+            pending_datagrams: Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE)),
+            pending_datagram_send: None,
             reliable_tx: Some(reliable_tx),
             pending_reliable: None,
             reliable_reserve: None,
@@ -1376,20 +1438,62 @@ impl QuicHybridWriter {
         }
     }
 
+    fn begin_datagram_flush(&mut self) {
+        if self.pending_datagram_send.is_some()
+            || self
+                .pending_datagrams
+                .as_ref()
+                .is_none_or(VecDeque::is_empty)
+        {
+            return;
+        }
+        let datagrams = self
+            .pending_datagrams
+            .take()
+            .expect("the pending QUIC batch is available before a flush");
+        let connection = self.connection.conn.clone();
+        self.pending_datagram_send = Some(Box::pin(async move {
+            connection.send_datagrams_wait(datagrams).await
+        }));
+    }
+
     fn poll_datagram_queue(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
-        let Some(send) = self.pending_datagram.as_mut() else {
+        let Some(send) = self.pending_datagram_send.as_mut() else {
             return Poll::Ready(Ok(()));
         };
         match send.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                self.pending_datagram = None;
-                Poll::Ready(result)
+            Poll::Ready((result, mut datagrams)) => {
+                datagrams.clear();
+                self.pending_datagrams = Some(datagrams);
+                self.pending_datagram_send = None;
+                match result {
+                    Ok(()) | Err(quinn::SendDatagramError::TooLarge) => Poll::Ready(Ok(())),
+                    Err(error) => Poll::Ready(Err(TunnelError::Anyhow(
+                        anyhow::Error::new(error).context("send QUIC DATAGRAM batch failed"),
+                    ))),
+                }
             }
         }
     }
 
-    fn poll_queues(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+    fn poll_ready_queues(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+        if self
+            .pending_datagrams
+            .as_ref()
+            .is_some_and(|datagrams| !datagrams.is_empty())
+        {
+            self.begin_datagram_flush();
+        }
+        match self.poll_datagram_queue(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => self.poll_reliable_queue(cx),
+        }
+    }
+
+    fn poll_flush_queues(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+        self.begin_datagram_flush();
         match self.poll_datagram_queue(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
@@ -1432,65 +1536,71 @@ impl Drop for QuicHybridWriter {
     }
 }
 
-impl Sink<SinkItem> for QuicHybridWriter {
+impl Sink<PacketBatch> for QuicHybridWriter {
     type Error = SinkError;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
-        self.get_mut().poll_queues(cx)
+        self.get_mut().poll_ready_queues(cx)
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: SinkItem) -> Result<(), Self::Error> {
-        match select_quic_delivery(&item, self.connection.conn.max_datagram_size()) {
-            QuicDelivery::PlainDatagram => {
-                match send_plain_datagram_with_io(&self.connection.conn, item)? {
-                    DatagramSendOutcome::Sent => Ok(()),
-                    DatagramSendOutcome::Backpressured(datagram) => {
-                        let writer = self.as_mut().get_mut();
-                        if writer.pending_datagram.is_some() {
-                            return Err(TunnelError::InternalError(
-                                "QUIC DATAGRAM started without sink readiness".to_owned(),
-                            ));
-                        }
-                        writer.pending_datagram =
-                            Some(wait_for_datagram_send(&writer.connection.conn, datagram));
-                        Ok(())
-                    }
-                    DatagramSendOutcome::Dropped => {
-                        tracing::trace!("dropping plain QUIC DATAGRAM after a path MTU change");
-                        Ok(())
-                    }
-                }
+    fn start_send(mut self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+        let writer = self.as_mut().get_mut();
+        let maximum = writer.connection.conn.max_datagram_size();
+        let mut reliable = PacketBatch::with_capacity(batch.len());
+        if writer.pending_reliable.is_some() {
+            return Err(TunnelError::InternalError(
+                "QUIC batch started without sink readiness".to_owned(),
+            ));
+        }
+        let datagrams = writer.pending_datagrams.as_mut().ok_or_else(|| {
+            TunnelError::InternalError(
+                "QUIC DATAGRAM batch started while a flush is active".to_owned(),
+            )
+        })?;
+        if !datagrams.is_empty() {
+            return Err(TunnelError::InternalError(
+                "QUIC batch started without sink readiness".to_owned(),
+            ));
+        }
+
+        for packet in batch {
+            match select_quic_delivery(&packet, maximum) {
+                QuicDelivery::PlainDatagram => datagrams.push_back(encode_quic_datagram(packet)),
+                QuicDelivery::ReliableStream => reliable
+                    .try_push(packet)
+                    .expect("the reliable subset cannot exceed its input batch"),
             }
-            QuicDelivery::ReliableStream => {
-                let writer = self.as_mut().get_mut();
-                let Some(sender) = writer.reliable_tx.as_ref() else {
-                    return Err(TunnelError::InternalError(
-                        "reliable QUIC lane is closed".to_owned(),
-                    ));
-                };
-                match sender.try_send(item) {
-                    Ok(()) => Ok(()),
-                    Err(mpsc::error::TrySendError::Full(packet)) => {
-                        writer.pending_reliable = Some(packet);
-                        Ok(())
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => Err(TunnelError::InternalError(
-                        "reliable QUIC lane stopped".to_owned(),
-                    )),
-                }
+        }
+
+        if reliable.is_empty() {
+            return Ok(());
+        }
+        let Some(sender) = writer.reliable_tx.as_ref() else {
+            return Err(TunnelError::InternalError(
+                "reliable QUIC lane is closed".to_owned(),
+            ));
+        };
+        match sender.try_send(reliable) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(batch)) => {
+                writer.pending_reliable = Some(batch);
+                Ok(())
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TunnelError::InternalError(
+                "reliable QUIC lane stopped".to_owned(),
+            )),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
-        self.get_mut().poll_queues(cx)
+        self.get_mut().poll_flush_queues(cx)
     }
 
     fn poll_close(
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        match self.as_mut().get_mut().poll_queues(cx) {
+        match self.as_mut().get_mut().poll_flush_queues(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
@@ -1525,12 +1635,15 @@ fn build_quic_hybrid_tunnel(
     transport_authenticated: bool,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let connection = Arc::new(ConnWrapper { conn: connection });
-    Ok(Box::new(TunnelWrapper::new_with_transport_authentication(
-        QuicHybridReader::new(reliable_recv, max_packet_size, connection.clone()),
-        QuicHybridWriter::new(reliable_send, connection),
-        Some(info),
-        transport_authenticated,
-    )))
+    observe_quic_path(&connection);
+    Ok(Box::new(
+        BatchTunnelWrapper::new_with_transport_authentication(
+            QuicHybridReader::new(reliable_recv, max_packet_size, connection.clone()),
+            QuicHybridWriter::new(reliable_send, connection),
+            Some(info),
+            transport_authenticated,
+        ),
+    ))
 }
 
 pub struct QuicTunnelListener {
@@ -1731,14 +1844,19 @@ mod tests {
         packet_def::{PacketType, ZCPacket},
     };
     use futures::{SinkExt, StreamExt};
-    use parking_lot::Mutex;
-    use std::sync::{
-        LazyLock,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::LazyLock;
     use tokio::runtime::{Builder, Runtime};
 
     use super::*;
+
+    #[test]
+    fn quic_data_plane_implements_owned_batch_interfaces() {
+        fn assert_reader<T: crate::tunnel::PacketBatchStream>() {}
+        fn assert_writer<T: crate::tunnel::PacketBatchSink>() {}
+
+        assert_reader::<QuicHybridReader>();
+        assert_writer::<QuicHybridWriter>();
+    }
 
     // Shared runtime for all tests to avoid endpoint invalidation across runtimes
     static RUNTIME: LazyLock<Runtime> =
@@ -1766,6 +1884,22 @@ mod tests {
         flags.quic_congestion = "adaptive".to_owned();
 
         transport_config(&flags).unwrap();
+    }
+
+    #[test]
+    fn quic_socket_buffer_matches_the_high_rate_datagram_path() {
+        assert_eq!(quic_socket_buffer_bytes(), 7 * 1024 * 1024);
+    }
+
+    #[test]
+    fn quic_path_observer_uses_an_explicit_positive_interval() {
+        assert_eq!(quic_stats_interval_from(None), None);
+        assert_eq!(quic_stats_interval_from(Some("0")), None);
+        assert_eq!(quic_stats_interval_from(Some("invalid")), None);
+        assert_eq!(
+            quic_stats_interval_from(Some("250")),
+            Some(Duration::from_millis(250))
+        );
     }
 
     fn stopped_client_endpoint() -> (Endpoint, SocketAddr) {
@@ -1857,16 +1991,20 @@ mod tests {
                 .unwrap()
                 .set_critical_l2_control(true);
 
-            let mut oversized = ZCPacket::new_with_payload(&[0x5a; 4096]);
+            let mut oversized = ZCPacket::new_with_payload(&[0x5a; 9000]);
             oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 
             for expected in [normal, critical, oversized] {
-                send.send(expected.clone()).await.unwrap();
+                send.send(PacketBatch::singleton(expected.clone()))
+                    .await
+                    .unwrap();
                 send.flush().await.unwrap();
                 let received = tokio::time::timeout(Duration::from_secs(2), recv.next())
                     .await
                     .unwrap()
                     .unwrap()
+                    .unwrap()
+                    .pop_singleton()
                     .unwrap();
                 assert_eq!(received.payload(), expected.payload());
                 assert_eq!(
@@ -2096,85 +2234,10 @@ mod tests {
     }
 
     #[test]
-    fn plain_datagram_send_has_no_envelope_or_retained_state() {
-        let io = CaptureDatagramIo {
-            max_size: 1200,
-            sent: Mutex::new(Vec::new()),
-        };
-        let mut packet = ZCPacket::new_with_payload(b"plain-frame");
-        packet.fill_peer_manager_hdr(7, 9, crate::tunnel::packet_def::PacketType::Data as u8);
-        let expected = packet.tunnel_payload().to_vec();
-
-        assert_eq!(
-            send_plain_datagram_with_io(&io, packet).unwrap(),
-            DatagramSendOutcome::Sent
-        );
-
-        let sent = io.sent.lock();
-        assert_eq!(sent.as_slice(), &[Bytes::from(expected)]);
-    }
-
-    #[test]
-    fn full_queue_defers_plain_datagram_without_copying() {
-        let mut packet = ZCPacket::new_with_payload(b"deferred-frame");
-        packet.fill_peer_manager_hdr(7, 9, crate::tunnel::packet_def::PacketType::Data as u8);
-        let expected = packet.tunnel_payload().to_vec();
-
-        match send_plain_datagram_with_io(&FullDatagramIo, packet).unwrap() {
-            DatagramSendOutcome::Backpressured(datagram) => {
-                assert_eq!(datagram.as_ref(), expected);
-            }
-            outcome => panic!("expected backpressure, got {outcome:?}"),
-        }
-    }
-
-    #[test]
     fn datagram_queue_owns_at_most_one_packet_batch() {
         assert_eq!(
             QUIC_DATAGRAM_SEND_BUFFER_BYTES,
             crate::tunnel::batch::MAX_PACKET_BATCH_SIZE * 1452
-        );
-    }
-
-    #[test]
-    fn stalled_datagram_send_rechecks_after_one_interval() {
-        RUNTIME.block_on(async {
-            let attempts = Arc::new(AtomicUsize::new(0));
-            let send_attempts = attempts.clone();
-            send_datagram_with_recheck(Duration::from_millis(1), move || {
-                let attempt = send_attempts.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    if attempt == 0 {
-                        futures::future::pending::<()>().await;
-                    }
-                    Ok::<(), quinn::SendDatagramError>(())
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(attempts.load(Ordering::Relaxed), 2);
-        });
-    }
-
-    #[test]
-    fn path_mtu_shrink_drops_one_lossy_datagram() {
-        let mut packet = ZCPacket::new_with_payload(b"data");
-        packet.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Data as u8);
-
-        assert_eq!(
-            send_plain_datagram_with_io(&ShrinkingDatagramIo, packet).unwrap(),
-            DatagramSendOutcome::Dropped
-        );
-    }
-
-    #[test]
-    fn path_mtu_shrink_before_send_drops_one_lossy_datagram() {
-        let mut packet = ZCPacket::new_with_payload(b"data");
-        packet.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Data as u8);
-
-        assert_eq!(
-            send_plain_datagram_with_io(&ReducedMtuDatagramIo, packet).unwrap(),
-            DatagramSendOutcome::Dropped
         );
     }
 
@@ -2233,6 +2296,58 @@ mod tests {
     }
 
     #[test]
+    fn quic_connection_drains_ready_datagrams_as_one_bounded_batch() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server =
+                tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let client = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let server = server.await.unwrap();
+
+            for sequence in 0_u8..8 {
+                client
+                    .send_datagram(Bytes::from(vec![sequence; 32]))
+                    .unwrap();
+            }
+
+            let first = tokio::time::timeout(Duration::from_secs(2), server.read_datagram())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first[0], 0);
+
+            let mut ready = Vec::with_capacity(7);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while ready.len() != 7 {
+                    server.try_read_datagrams(&mut ready, 7).unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(ready.len(), 7);
+            assert_eq!(
+                ready.iter().map(|datagram| datagram[0]).collect::<Vec<_>>(),
+                (1..8).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
     fn quic_writer_waits_for_full_datagram_queue_capacity() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
@@ -2271,15 +2386,93 @@ mod tests {
             let mut packet = ZCPacket::new_with_payload(&payload);
             packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 
-            Pin::new(&mut writer).start_send(packet).unwrap();
+            Pin::new(&mut writer)
+                .start_send(PacketBatch::singleton(packet))
+                .unwrap();
             tokio::time::timeout(
                 Duration::from_secs(2),
-                futures::future::poll_fn(|cx| Pin::new(&mut writer).poll_ready(cx)),
+                futures::future::poll_fn(|cx| Pin::new(&mut writer).poll_flush(cx)),
             )
             .await
             .unwrap()
             .unwrap();
-            drop(server);
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let datagram = server.read_datagram().await.unwrap();
+                    if datagram
+                        .get(PEER_MANAGER_HEADER_SIZE)
+                        .is_some_and(|byte| *byte == 0x5a)
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn quic_writer_keeps_one_owned_datagram_batch_until_flush() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server_task =
+                tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let client = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let server = server_task.await.unwrap();
+            let (client_send, _client_recv) = client.open_bi().await.unwrap();
+
+            let connection = Arc::new(ConnWrapper {
+                conn: client.clone(),
+            });
+            let mut writer = QuicHybridWriter::new(client_send, connection);
+            let mut batch = PacketBatch::with_capacity(8);
+            for sequence in 0..8_u8 {
+                let mut packet = ZCPacket::new_with_payload(&[sequence; 64]);
+                packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+                batch.try_push(packet).unwrap();
+            }
+            Pin::new(&mut writer).start_send(batch).unwrap();
+
+            assert_eq!(writer.pending_datagrams.as_ref().unwrap().len(), 8);
+            assert!(writer.pending_datagram_send.is_none());
+
+            futures::future::poll_fn(|cx| Pin::new(&mut writer).poll_flush(cx))
+                .await
+                .unwrap();
+            assert!(writer.pending_datagrams.as_ref().unwrap().is_empty());
+            assert!(writer.pending_datagram_send.is_none());
+
+            let mut received = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while received.len() != 8 {
+                    received.push(server.read_datagram().await.unwrap());
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                received
+                    .iter()
+                    .map(|datagram| datagram[PEER_MANAGER_HEADER_SIZE])
+                    .collect::<Vec<_>>(),
+                (0..8_u8).collect::<Vec<_>>()
+            );
         });
     }
 
@@ -2516,61 +2709,5 @@ mod tests {
             assert!(result.is_err());
             server.abort();
         });
-    }
-
-    struct CaptureDatagramIo {
-        max_size: usize,
-        sent: Mutex<Vec<Bytes>>,
-    }
-
-    struct ShrinkingDatagramIo;
-
-    struct ReducedMtuDatagramIo;
-
-    struct FullDatagramIo;
-
-    impl QuicDatagramIo for FullDatagramIo {
-        fn max_datagram_size(&self) -> Option<usize> {
-            Some(1500)
-        }
-
-        fn send_datagram(&self, _datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            panic!("a full queue must not use the eviction send operation");
-        }
-
-        fn has_send_buffer_space(&self, _bytes: usize) -> bool {
-            false
-        }
-    }
-
-    impl QuicDatagramIo for ShrinkingDatagramIo {
-        fn max_datagram_size(&self) -> Option<usize> {
-            Some(1500)
-        }
-
-        fn send_datagram(&self, _datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            Err(quinn::SendDatagramError::TooLarge)
-        }
-    }
-
-    impl QuicDatagramIo for ReducedMtuDatagramIo {
-        fn max_datagram_size(&self) -> Option<usize> {
-            Some(1)
-        }
-
-        fn send_datagram(&self, _datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            panic!("an oversized datagram must not reach the send operation");
-        }
-    }
-
-    impl QuicDatagramIo for CaptureDatagramIo {
-        fn max_datagram_size(&self) -> Option<usize> {
-            Some(self.max_size)
-        }
-
-        fn send_datagram(&self, datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            self.sent.lock().push(datagram);
-            Ok(())
-        }
     }
 }

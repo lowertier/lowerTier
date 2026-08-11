@@ -24,7 +24,7 @@ use crate::tunnel::{FromUrl, IpVersion, SinkError, SinkItem};
 
 use super::{
     StreamItem, Tunnel, TunnelConnector, TunnelError, TunnelInfo, TunnelListener,
-    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, PacketBatchIntoIter},
     build_url_from_socket_addr,
     common::TunnelWrapper,
 };
@@ -81,7 +81,7 @@ impl Debug for RingTunnel {
 pub struct RingStream {
     id: Uuid,
     ring_cons_impl: AsyncHeapCons<RingItem>,
-    pending: Option<smallvec::IntoIter<[SinkItem; 4]>>,
+    pending: Option<PacketBatchIntoIter>,
 }
 
 impl RingStream {

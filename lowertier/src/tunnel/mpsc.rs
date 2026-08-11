@@ -8,7 +8,8 @@ use tokio::time::timeout;
 use crate::proto::common::TunnelInfo;
 
 use super::{
-    Tunnel, TunnelError, ZCPacketSink, ZCPacketStream, batch::PacketBatch, packet_def::ZCPacket,
+    PacketBatchSink, PacketBatchStream, Tunnel, TunnelError, batch::PacketBatch,
+    packet_def::ZCPacket,
 };
 
 use tokio::sync::{
@@ -137,7 +138,7 @@ pub struct MpscTunnel<T> {
     packet_permits: Arc<Semaphore>,
 
     tunnel: T,
-    stream: Option<Pin<Box<dyn ZCPacketStream>>>,
+    stream: Option<Pin<Box<dyn PacketBatchStream>>>,
 
     task: AbortOnDropHandle<()>,
 }
@@ -171,7 +172,7 @@ impl<T: Tunnel> MpscTunnel<T> {
 
     async fn forward_one_round(
         rx: &mut Receiver<QueuedPackets>,
-        sink: &mut Pin<Box<dyn ZCPacketSink>>,
+        sink: &mut Pin<Box<dyn PacketBatchSink>>,
         send_timeout_ms: Option<Duration>,
     ) -> Result<(), TunnelError> {
         let item = rx.recv().await.with_context(|| "recv error")?;
@@ -184,7 +185,7 @@ impl<T: Tunnel> MpscTunnel<T> {
 
     async fn forward_one_round_no_timeout(
         rx: &mut Receiver<QueuedPackets>,
-        sink: &mut Pin<Box<dyn ZCPacketSink>>,
+        sink: &mut Pin<Box<dyn PacketBatchSink>>,
         initial_item: QueuedPackets,
     ) -> Result<(), TunnelError> {
         let mut permits = Vec::new();
@@ -193,7 +194,7 @@ impl<T: Tunnel> MpscTunnel<T> {
                 packet,
                 _packet_permit,
             } => {
-                sink.feed(packet).await?;
+                sink.feed(PacketBatch::singleton(packet)).await?;
                 permits.push(_packet_permit);
                 true
             }
@@ -201,9 +202,7 @@ impl<T: Tunnel> MpscTunnel<T> {
                 batch,
                 _packet_permits,
             } => {
-                for packet in batch {
-                    sink.feed(packet).await?;
-                }
+                sink.feed(batch).await?;
                 permits.push(_packet_permits);
                 false
             }
@@ -219,7 +218,7 @@ impl<T: Tunnel> MpscTunnel<T> {
                     packet,
                     _packet_permit,
                 } => {
-                    if let Err(e) = sink.feed(packet).await {
+                    if let Err(e) = sink.feed(PacketBatch::singleton(packet)).await {
                         tracing::error!(?e, "feed error");
                         return Err(e);
                     }
@@ -229,11 +228,9 @@ impl<T: Tunnel> MpscTunnel<T> {
                     batch,
                     _packet_permits,
                 } => {
-                    for packet in batch {
-                        if let Err(e) = sink.feed(packet).await {
-                            tracing::error!(?e, "feed error");
-                            return Err(e);
-                        }
+                    if let Err(e) = sink.feed(batch).await {
+                        tracing::error!(?e, "feed error");
+                        return Err(e);
                     }
                     permits.push(_packet_permits);
                     break;
@@ -248,7 +245,7 @@ impl<T: Tunnel> MpscTunnel<T> {
 
     async fn forward_one_round_with_timeout(
         rx: &mut Receiver<QueuedPackets>,
-        sink: &mut Pin<Box<dyn ZCPacketSink>>,
+        sink: &mut Pin<Box<dyn PacketBatchSink>>,
         initial_item: QueuedPackets,
         timeout_ms: Duration,
     ) -> Result<(), TunnelError> {
@@ -269,7 +266,7 @@ impl<T: Tunnel> MpscTunnel<T> {
         }
     }
 
-    pub fn get_stream(&mut self) -> Pin<Box<dyn ZCPacketStream>> {
+    pub fn get_stream(&mut self) -> Pin<Box<dyn PacketBatchStream>> {
         self.stream.take().unwrap()
     }
 
@@ -318,16 +315,18 @@ mod tests {
             let mut a_counter = 0;
             let mut b_counter = 0;
 
-            while let Some(Ok(msg)) = stream.next().await {
+            while let Some(Ok(batch)) = stream.next().await {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 if now.elapsed().as_secs() > 5 {
                     break;
                 }
 
-                if msg.payload() == "hello".as_bytes() {
-                    a_counter += 1;
-                } else if msg.payload() == "hello2".as_bytes() {
-                    b_counter += 1;
+                for msg in batch {
+                    if msg.payload() == "hello".as_bytes() {
+                        a_counter += 1;
+                    } else if msg.payload() == "hello2".as_bytes() {
+                        b_counter += 1;
+                    }
                 }
             }
 
@@ -423,10 +422,14 @@ mod tests {
 
         mpsc_tunnel.get_sink().send_batch(batch).await.unwrap();
 
-        let mut received = Vec::new();
-        for _ in 0..4 {
-            received.push(receiver.next().await.unwrap().unwrap().payload()[0]);
-        }
+        let received = receiver
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|packet| packet.payload()[0])
+            .collect::<Vec<_>>();
         assert_eq!(received, vec![1, 2, 3, 4]);
     }
 

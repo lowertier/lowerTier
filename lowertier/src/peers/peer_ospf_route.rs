@@ -62,7 +62,6 @@ use crate::{
 };
 
 use super::{
-    PeerPacketFilter,
     graph_algo::dijkstra_with_first_hop,
     peer_rpc::PeerRpcManager,
     public_ipv6::{
@@ -4229,8 +4228,6 @@ impl Route for PeerRoute {
         }
     }
 }
-
-impl PeerPacketFilter for Arc<PeerRoute> {}
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,7 @@ use auto_impl::auto_impl;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 
 use crate::proto::common::TunnelInfo;
+use crate::tunnel::batch::PacketBatch;
 
 use self::stats::Throughput;
 
@@ -25,6 +26,41 @@ pub trait TunnelFilter: Send + Sync {
             Ok(v) => Some(Ok(v)),
             Err(e) => Some(Err(e)),
         }
+    }
+
+    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+        let mut filtered = PacketBatch::with_capacity(data.len());
+        for packet in data {
+            if let Some(packet) = self.before_send(packet) {
+                filtered
+                    .try_push(packet)
+                    .expect("a filtered tunnel batch cannot exceed its input");
+            }
+        }
+        (!filtered.is_empty()).then_some(filtered)
+    }
+
+    fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
+        let batch = match data {
+            Ok(batch) => batch,
+            Err(error) => {
+                return self
+                    .after_received(Err(error))
+                    .map(|result| result.map(PacketBatch::singleton));
+            }
+        };
+        let mut filtered = PacketBatch::with_capacity(batch.len());
+        for packet in batch {
+            if let Some(result) = self.after_received(Ok(packet)) {
+                match result {
+                    Ok(packet) => filtered
+                        .try_push(packet)
+                        .expect("a filtered tunnel batch cannot exceed its input"),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+        }
+        (!filtered.is_empty()).then_some(Ok(filtered))
     }
 
     fn filter_output(&self) -> Self::FilterOutput;
@@ -48,6 +84,14 @@ where
     fn after_received(&self, data: StreamItem) -> Option<StreamItem> {
         let data = self.b.after_received(data)?;
         self.a.after_received(data)
+    }
+    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+        let data = self.a.before_send_batch(data)?;
+        self.b.before_send_batch(data)
+    }
+    fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
+        let data = self.b.after_received_batch(data)?;
+        self.a.after_received_batch(data)
     }
     fn filter_output(&self) -> Self::FilterOutput {
         (self.a.filter_output(), self.b.filter_output())
@@ -98,16 +142,19 @@ where
         }
     }
 
-    fn wrap_sink<S: ZCPacketSink + Unpin + 'static>(filter: Arc<F>, sink: S) -> impl ZCPacketSink {
+    fn wrap_sink<S: PacketBatchSink + Unpin + 'static>(
+        filter: Arc<F>,
+        sink: S,
+    ) -> impl PacketBatchSink {
         struct SinkWrapper<F, S> {
             sink: S,
             filter: Arc<F>,
         }
 
-        impl<F, S> Sink<ZCPacket> for SinkWrapper<F, S>
+        impl<F, S> Sink<PacketBatch> for SinkWrapper<F, S>
         where
             F: TunnelFilter + 'static,
-            S: ZCPacketSink + 'static + Unpin,
+            S: PacketBatchSink + 'static + Unpin,
         {
             type Error = SinkError;
 
@@ -120,9 +167,9 @@ where
 
             fn start_send(
                 self: std::pin::Pin<&mut Self>,
-                item: ZCPacket,
+                item: PacketBatch,
             ) -> Result<(), Self::Error> {
-                let Some(item) = self.filter.before_send(item) else {
+                let Some(item) = self.filter.before_send_batch(item) else {
                     return Ok(());
                 };
                 self.get_mut().sink.start_send_unpin(item)
@@ -146,10 +193,10 @@ where
         SinkWrapper { sink, filter }
     }
 
-    fn wrap_stream<S: ZCPacketStream + Unpin + 'static>(
+    fn wrap_stream<S: PacketBatchStream + Unpin + 'static>(
         filter: Arc<F>,
         stream: S,
-    ) -> impl ZCPacketStream {
+    ) -> impl PacketBatchStream {
         struct StreamWrapper<F, S> {
             stream: S,
             filter: Arc<F>,
@@ -158,9 +205,9 @@ where
         impl<F, S> Stream for StreamWrapper<F, S>
         where
             F: TunnelFilter + 'static,
-            S: ZCPacketStream + 'static + Unpin,
+            S: PacketBatchStream + 'static + Unpin,
         {
-            type Item = StreamItem;
+            type Item = BatchStreamItem;
 
             fn poll_next(
                 self: std::pin::Pin<&mut Self>,
@@ -170,7 +217,7 @@ where
                 loop {
                     match self_mut.stream.poll_next_unpin(cx) {
                         Poll::Ready(Some(ret)) => {
-                            let Some(ret) = self_mut.filter.after_received(ret) else {
+                            let Some(ret) = self_mut.filter.after_received_batch(ret) else {
                                 continue;
                             };
                             return Poll::Ready(Some(ret));
@@ -203,7 +250,7 @@ where
         self.inner.is_transport_authenticated()
     }
 
-    fn split(&self) -> (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>) {
+    fn split(&self) -> SplitTunnel {
         let (stream, sink) = self.inner.split();
         let filter = self.filter.clone();
         (
@@ -359,9 +406,11 @@ pub mod tests {
         let tunnel = TunnelWithFilter::new(s, filter.clone());
 
         let (_r, mut s) = tunnel.split();
-        s.send(ZCPacket::new_with_payload("ab".as_bytes()))
-            .await
-            .unwrap();
+        s.send(PacketBatch::singleton(ZCPacket::new_with_payload(
+            "ab".as_bytes(),
+        )))
+        .await
+        .unwrap();
 
         let out = filter.filter_output();
 
