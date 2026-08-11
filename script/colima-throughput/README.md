@@ -39,13 +39,12 @@ Reuse an already-built image:
 BUILD_IMAGE=0 RUNS=3 DURATION=15 script/colima-throughput/e2e.sh
 ```
 
-Reliable QUIC DATAGRAM L2-TUN under randomized 100-180 ms one-way delay and 3%
-loss in each egress direction:
+QUIC DATAGRAM L2-TUN under randomized 100-180 ms one-way delay and 3% loss:
 
 ```bash
 DOCKER_CONTEXT=colima-lowertier-l2 \
 UNDERLAY_PROTOCOL=quic \
-MODES=l2-tun \
+MODES=compatible-ethernet \
 NETEM_DELAY=140ms \
 NETEM_JITTER=40ms \
 NETEM_LOSS=3% \
@@ -54,20 +53,17 @@ PARALLEL_STREAMS=4 \
 UDP_RATES=100M \
 DURATION=10 \
 OMIT=2 \
-QUIC_FEC_PROFILES="0 2 3" \
 LOWTIER_CORE_ARGS="--quic-congestion brutal --quic-brutal-send-bps 10000000" \
 script/colima-throughput/e2e.sh
 ```
 
-This is the recommended known-capacity lossy L2 profile: Brutal at a measured
-send ceiling, immediate critical L2 duplication, and 16+2 FEC. BBR remains the
-safe choice when the path capacity is unknown. The matrix above labels results
-`l2-tun-fec0`, `l2-tun-fec2`, and `l2-tun-fec3`.
+Use Brutal only when you know the path capacity. Use BBR when the path capacity
+is not known. Inner TCP handles normal Ethernet frame loss.
 
 For burst loss, repeat the same run with correlated netem loss:
 
 ```bash
-NETEM_LOSS=3% NETEM_LOSS_CORRELATION=75% QUIC_FEC_PROFILES="0 2 3" \
+NETEM_LOSS=3% NETEM_LOSS_CORRELATION=75% \
 script/colima-throughput/e2e.sh
 ```
 
@@ -84,7 +80,7 @@ Important controls:
 | `DOCKER_CONTEXT` | `colima` | Docker endpoint for the VZ profile |
 | `RESULT_DIR` | temporary directory | Stable location for raw JSON and summaries |
 | `RAW_GATE_BPS` | `12000000000` | Minimum valid substrate throughput |
-| `MODES` | `l3 l2-tun tap` | LowTier port modes |
+| `MODES` | `routed compatible-ethernet ethernet` | LowTier port modes |
 | `PARALLEL_STREAMS` | `8` | Aggregate TCP stream count |
 | `ENCRYPTION_ALGORITHM` | `chacha20-poly1305` | Explicit authenticated dataplane cipher |
 | `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp` or `quic` |
@@ -94,11 +90,10 @@ Important controls:
 | `NETEM_LOSS` | `0%` | Random egress packet loss |
 | `NETEM_LOSS_CORRELATION` | `0%` | Correlation for burst-loss experiments |
 | `NETEM_LIMIT` | `250000` | Netem queue capacity in packets |
-| `QUIC_FEC_PROFILES` | `2` | Space-separated ETQ4 parity profiles: `0`, `2`, or `3` |
 | `UDP_RATES` | `2500M 5000M 7500M 10000M 12000M` | UDP offered-rate sweep |
 | `RUNS` | `1` | Repetitions per workload |
 | `DURATION` | `10` | Measured seconds per iperf run |
-| `RUN_TCP` | `1` | Run overlay TCP workloads; set to `0` for a focused UDP/FEC matrix |
+| `RUN_TCP` | `1` | Run overlay TCP workloads. Set `0` to omit these workloads. |
 | `RUN_UDP` | `1` | Run overlay UDP workloads |
 | `RUN_CPU_PROBE` | `1` | Run the separate loaded TCP CPU/latency probe |
 | `IPERF_BUSY_RETRIES` | `3` | Restart and retry when the delayed iperf server is still closing its prior test |
@@ -109,14 +104,6 @@ and exact iperf error instead of emitting a malformed throughput row.
 `cpu-cores-per-gbit.tsv` reports each LowTier endpoint's process CPU divided by
 received payload throughput. Raw iperf JSON, unloaded and loaded ping samples,
 offload state, logs, and environment metadata remain alongside them.
-`quic-datagram-metrics.tsv` exports ETQ4 source, feedback, selective recovery,
-duplication, FEC, RTT, congestion window, QUIC loss, MTU, and queue counters.
-When a peer has two eligible QUIC surfaces, `alternate-fec-metrics.tsv` exports
-the EAP1 wrapped-source count and bytes, parity blocks, parity records and
-bytes, send failures, and blocks skipped because no distinct allowed path was
-available. These are relaxed atomic dataplane counters; string formatting only
-occurs in the five-second benchmark log task.
-
 Absolute results are not directly comparable with Tailscale's published bare-metal 25GbE test.
 The comparable engineering question is whether LowTier preserves packets in batches, avoids
 avoidable syscalls and queue handoffs, and reduces CPU cores consumed per Gbit/s.

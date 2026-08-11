@@ -69,7 +69,6 @@ pub fn gen_default_flags() -> Flags {
         disable_sym_hole_punching: false,
         tld_dns_zone: DEFAULT_ET_DNS_ZONE.to_string(),
 
-        quic_listen_port: u32::MAX,
         need_p2p: false,
         instance_recv_bps_limit: u64::MAX,
         disable_upnp: false,
@@ -83,9 +82,8 @@ pub fn gen_default_flags() -> Flags {
         quic_brutal_loss_compensation: true,
         quic_initial_receive_window: 1_250_000,
         quic_receive_window: (1_u64 << 62) - 1,
-        quic_datagram_fec_parity: 2,
-        quic_critical_l2_duplication: true,
-        quic_datagram_alternate_path_parity: true,
+        quic_datagram_fec_parity: 0,
+        quic_datagram_alternate_path_parity: false,
         port_mode: if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             PortMode::Tap
         } else {
@@ -103,7 +101,7 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
 
     flags.port_mode.parse::<PortMode>().map_err(|_| {
         anyhow::anyhow!(
-            "unsupported port_mode {:?}; expected \"routed\", \"ethernet\", \"compatible-ethernet\", \"l3\", \"tap\", \"l2-tun\", or \"auto\"",
+            "unsupported port_mode {:?}; expected \"routed\", \"ethernet\", \"compatible-ethernet\", or \"auto\"",
             flags.port_mode
         )
     })?;
@@ -185,11 +183,11 @@ pub fn parse_proxy_listener_url(value: &str, scheme: &str) -> anyhow::Result<url
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, VariantArray)]
 #[strum(ascii_case_insensitive)]
 pub enum PortMode {
-    #[strum(to_string = "l3", serialize = "routed")]
+    #[strum(serialize = "routed")]
     L3,
-    #[strum(to_string = "tap", serialize = "ethernet")]
+    #[strum(serialize = "ethernet")]
     Tap,
-    #[strum(to_string = "l2-tun", serialize = "compatible-ethernet")]
+    #[strum(serialize = "compatible-ethernet")]
     L2Tun,
     #[strum(serialize = "auto")]
     Auto,
@@ -302,7 +300,7 @@ pub enum EncryptionAlgorithm {
     AesGcm,
     #[strum(serialize = "aes-256-gcm")]
     Aes256Gcm,
-    #[strum(serialize = "chacha20-poly1305", serialize = "chacha20")]
+    #[strum(serialize = "chacha20-poly1305")]
     #[default]
     ChaCha20Poly1305,
 }
@@ -1496,12 +1494,11 @@ pub mod tests {
     }
 
     #[test]
-    fn encryption_accepts_chacha20_poly1305_and_legacy_alias() {
+    fn encryption_accepts_only_the_standard_chacha_name() {
         let standard: EncryptionAlgorithm = "chacha20-poly1305".parse().unwrap();
-        let legacy: EncryptionAlgorithm = "chacha20".parse().unwrap();
 
-        assert_eq!(standard, legacy);
         assert_eq!(standard.to_string(), "chacha20-poly1305");
+        assert!("chacha20".parse::<EncryptionAlgorithm>().is_err());
     }
 
     #[test]
@@ -1654,9 +1651,9 @@ socket_mark = 66
     fn underlay_and_quic_flags_have_safe_defaults() {
         let flags = gen_default_flags();
         let expected_port_mode = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            "tap"
+            "ethernet"
         } else {
-            "l2-tun"
+            "compatible-ethernet"
         };
 
         assert_eq!(flags.default_protocol, "udp");
@@ -1671,25 +1668,24 @@ socket_mark = 66
         assert!(flags.quic_brutal_loss_compensation);
         assert_eq!(flags.quic_initial_receive_window, 1_250_000);
         assert_eq!(flags.quic_receive_window, (1_u64 << 62) - 1);
-        assert_eq!(flags.quic_datagram_fec_parity, 2);
-        assert!(flags.quic_critical_l2_duplication);
-        assert!(flags.quic_datagram_alternate_path_parity);
+        assert_eq!(flags.quic_datagram_fec_parity, 0);
+        assert!(!flags.quic_datagram_alternate_path_parity);
     }
 
     #[test]
     fn l2_tun_uses_ethernet_overlay_without_native_ethernet_device() {
-        let mode = "l2-tun".parse::<PortMode>().unwrap();
+        let mode = "compatible-ethernet".parse::<PortMode>().unwrap();
 
         assert!(mode.uses_ethernet_overlay());
         assert!(!mode.uses_native_ethernet());
 
         let mut flags = gen_default_flags();
-        flags.port_mode = "l2-tun".into();
+        flags.port_mode = "compatible-ethernet".into();
         validate_flags(&flags).unwrap();
     }
 
     #[test]
-    fn port_mode_accepts_network_profile_aliases() {
+    fn port_mode_accepts_only_canonical_profile_names() {
         assert_eq!("routed".parse::<PortMode>().unwrap(), PortMode::L3);
         assert_eq!("ethernet".parse::<PortMode>().unwrap(), PortMode::Tap);
         assert_eq!(
@@ -1697,9 +1693,12 @@ socket_mark = 66
             PortMode::L2Tun
         );
 
-        assert_eq!(PortMode::L3.to_string(), "l3");
-        assert_eq!(PortMode::Tap.to_string(), "tap");
-        assert_eq!(PortMode::L2Tun.to_string(), "l2-tun");
+        assert_eq!(PortMode::L3.to_string(), "routed");
+        assert_eq!(PortMode::Tap.to_string(), "ethernet");
+        assert_eq!(PortMode::L2Tun.to_string(), "compatible-ethernet");
+        for removed in ["l3", "tap", "l2-tun"] {
+            assert!(removed.parse::<PortMode>().is_err());
+        }
     }
 
     #[test]
@@ -1707,7 +1706,7 @@ socket_mark = 66
         let cfg = TomlConfigLoader::new_from_str(
             r#"
 [flags]
-port_mode = "tap"
+port_mode = "ethernet"
 l2_fdb_capacity = 32768
 l2_fdb_age_seconds = 600
 l2_flood_bps = 134217728
@@ -1719,14 +1718,13 @@ quic_brutal_loss_compensation = false
 quic_initial_receive_window = 8388608
 quic_receive_window = 33554432
 quic_datagram_fec_parity = 3
-quic_critical_l2_duplication = false
 quic_datagram_alternate_path_parity = false
 "#,
         )
         .unwrap();
         let flags = cfg.get_flags();
 
-        assert_eq!(flags.port_mode, "tap");
+        assert_eq!(flags.port_mode, "ethernet");
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);
@@ -1741,7 +1739,6 @@ quic_datagram_alternate_path_parity = false
         assert_eq!(flags.quic_initial_receive_window, 8_388_608);
         assert_eq!(flags.quic_receive_window, 33_554_432);
         assert_eq!(flags.quic_datagram_fec_parity, 3);
-        assert!(!flags.quic_critical_l2_duplication);
         assert!(!flags.quic_datagram_alternate_path_parity);
 
         let dumped = cfg.dump();
@@ -1772,7 +1769,7 @@ quic_congestion = "turbo"
     }
 
     #[test]
-    fn rejects_unsupported_etq4_fec_profile() {
+    fn rejects_unsupported_alternate_fec_profile() {
         let mut flags = gen_default_flags();
         flags.quic_datagram_fec_parity = 1;
         let error = validate_flags(&flags).unwrap_err();

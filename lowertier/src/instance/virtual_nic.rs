@@ -80,6 +80,15 @@ fn linux_tun_offload_configured(
     !explicitly_disabled && (explicitly_enabled || vector_checksum_available)
 }
 
+#[cfg(target_os = "linux")]
+fn linux_virtual_nic_queue_count(native_ethernet: bool, parallelism: usize) -> usize {
+    if native_ethernet {
+        parallelism.clamp(1, 2)
+    } else {
+        1
+    }
+}
+
 fn record_nic_batch_size(batch_size: usize) {
     let previous_packets = NIC_PACKET_COUNT.fetch_add(batch_size as u64, Ordering::Relaxed);
     let batch_count = NIC_BATCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -811,25 +820,39 @@ impl VirtualNic {
         let kernel_mtu = u16::try_from(effective_mtu)
             .map_err(|_| anyhow::anyhow!("TUN MTU {effective_mtu} exceeds Linux u16 limits"))?;
 
+        let native_ethernet = Self::uses_native_ethernet_frames(&flags);
+        let parallelism = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let queue_count = linux_virtual_nic_queue_count(native_ethernet, parallelism);
         let mut builder = quincy_tun::DeviceBuilder::new()
             .mtu(kernel_mtu)
             .packet_information(false)
-            .offload(true);
+            .offload(true)
+            .layer(if native_ethernet {
+                quincy_tun::Layer::L2
+            } else {
+                quincy_tun::Layer::L3
+            })
+            .queues(queue_count);
         if !flags.dev_name.is_empty() {
             builder = builder.name(flags.dev_name.clone());
         }
-        let device = {
+        let devices = {
             let _guard = self.global_ctx.net_ns.guard();
-            builder.build_async()?
+            builder.build_async_queues()?
         };
-        if !device.tcp_gso() {
+        if devices.iter().any(|device| !device.tcp_gso()) {
             return Err(anyhow::anyhow!(
                 "Linux TUN virtio offload was requested but the kernel rejected TSO/GRO"
             )
             .into());
         }
 
-        let ifname = device.name()?;
+        let ifname = devices
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Linux virtual NIC has no queues"))?
+            .name()?;
         self.ifcfg.wait_interface_show(ifname.as_str()).await?;
         {
             let _guard = self.global_ctx.net_ns.guard();
@@ -837,16 +860,14 @@ impl VirtualNic {
         }
         let l2_tun = Self::uses_l2_tun(&flags);
         let tunnel =
-            crate::instance::linux_tun::wrap_device(device, l2_tun, effective_mtu as usize);
+            crate::instance::linux_tun::wrap_devices(devices, l2_tun, effective_mtu as usize);
         self.ifname = Some(ifname);
         Ok(tunnel)
     }
 
     pub async fn create_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
         #[cfg(target_os = "linux")]
-        if !Self::uses_native_ethernet_frames(&self.global_ctx.get_flags())
-            && linux_tun_offload_enabled()
-        {
+        if linux_tun_offload_enabled() {
             match self.create_linux_offload_dev().await {
                 Ok(tunnel) => return Ok(tunnel),
                 Err(error) => {
@@ -1187,7 +1208,10 @@ impl NicCtx {
             .payload()
             .get(crate::instance::l2_tun::ETHERNET_HEADER_LEN..)
         else {
-            tracing::warn!(?ret, "[USER_PACKET] l2-tun packet is too short");
+            tracing::warn!(
+                ?ret,
+                "[USER_PACKET] compatible Ethernet packet is too short"
+            );
             return;
         };
         let Some(version) = ip_packet.first().map(|byte| byte >> 4) else {
@@ -1196,7 +1220,10 @@ impl NicCtx {
         let (destination, local_source) = match version {
             4 => {
                 let Some(ipv4) = Ipv4Packet::new(ip_packet) else {
-                    tracing::warn!(?ret, "[USER_PACKET] invalid l2-tun IPv4 packet");
+                    tracing::warn!(
+                        ?ret,
+                        "[USER_PACKET] invalid compatible Ethernet IPv4 packet"
+                    );
                     return;
                 };
                 let source = ipv4.get_source();
@@ -1207,7 +1234,10 @@ impl NicCtx {
             }
             6 => {
                 let Some(ipv6) = Ipv6Packet::new(ip_packet) else {
-                    tracing::warn!(?ret, "[USER_PACKET] invalid l2-tun IPv6 packet");
+                    tracing::warn!(
+                        ?ret,
+                        "[USER_PACKET] invalid compatible Ethernet IPv6 packet"
+                    );
                     return;
                 };
                 let source = ipv6.get_source();
@@ -1217,13 +1247,19 @@ impl NicCtx {
                 )
             }
             _ => {
-                tracing::warn!(version, "[USER_PACKET] unsupported l2-tun IP version");
+                tracing::warn!(
+                    version,
+                    "[USER_PACKET] unsupported compatible Ethernet IP version"
+                );
                 return;
             }
         };
 
         if let Err(error) = mgr.send_msg_by_l2_tun(ret, destination, local_source).await {
-            tracing::trace!(?error, "[USER_PACKET] send l2-tun frame failed");
+            tracing::trace!(
+                ?error,
+                "[USER_PACKET] send compatible Ethernet frame failed"
+            );
         }
     }
 
@@ -1283,7 +1319,10 @@ impl NicCtx {
                 Ok(packet) => Self::do_forward_nic_to_peers(packet, mgr).await,
                 Err(batch) => {
                     if let Err(error) = mgr.send_msg_by_l2_tun_batch(batch).await {
-                        tracing::trace!(?error, "[USER_PACKET] send l2-tun batch failed");
+                        tracing::trace!(
+                            ?error,
+                            "[USER_PACKET] send compatible Ethernet batch failed"
+                        );
                     }
                 }
             }
@@ -1377,7 +1416,7 @@ impl NicCtx {
                     tracing::debug!(
                         ?error,
                         from_peer_id,
-                        "failed to send l2-tun proxy ARP reply"
+                        "failed to send compatible Ethernet proxy ARP reply"
                     );
                 }
                 false
@@ -1403,7 +1442,9 @@ impl NicCtx {
                     );
                     if l2_tun {
                         let Some(mgr) = peer_mgr.as_deref() else {
-                            tracing::debug!("peer manager unavailable for l2-tun ingress");
+                            tracing::debug!(
+                                "peer manager unavailable for compatible Ethernet ingress"
+                            );
                             continue;
                         };
                         if !Self::l2_tun_packet_is_deliverable(&packet, mgr).await {
@@ -1858,6 +1899,15 @@ mod tests {
         assert!(!super::linux_tun_offload_configured(true, true, true));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_tap_uses_two_queues_when_parallelism_is_available() {
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 16), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 1), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 2), 2);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 16), 2);
+    }
+
     #[tokio::test]
     async fn peer_packet_vector_reaches_the_nic_boundary_intact() {
         let (sender, mut receiver) = crate::peers::create_packet_recv_chan();
@@ -1933,7 +1983,7 @@ mod tests {
     #[test]
     fn tap_port_mode_selects_ethernet_frames() {
         let mut flags = gen_default_flags();
-        flags.port_mode = "tap".to_string();
+        flags.port_mode = "ethernet".to_string();
 
         assert!(VirtualNic::uses_ethernet_frames(&flags));
     }
@@ -1941,7 +1991,7 @@ mod tests {
     #[test]
     fn l3_port_mode_keeps_ip_packet_forwarding() {
         let mut flags = gen_default_flags();
-        flags.port_mode = "l3".to_string();
+        flags.port_mode = "routed".to_string();
 
         assert!(!VirtualNic::uses_ethernet_frames(&flags));
     }
@@ -1949,7 +1999,7 @@ mod tests {
     #[test]
     fn l2_tun_uses_ethernet_overlay_on_a_layer_three_device() {
         let mut flags = gen_default_flags();
-        flags.port_mode = "l2-tun".to_string();
+        flags.port_mode = "compatible-ethernet".to_string();
 
         assert!(VirtualNic::uses_ethernet_frames(&flags));
         assert!(!VirtualNic::uses_native_ethernet_frames(&flags));

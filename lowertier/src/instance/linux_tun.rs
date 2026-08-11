@@ -8,7 +8,7 @@ use std::{
 };
 
 use bytes::{Buf, BytesMut};
-use futures::{Sink, ready};
+use futures::{Sink, Stream, ready, stream::FuturesUnordered};
 use quincy_tun::{AsyncDevice, GROTable, VIRTIO_NET_HDR_LEN};
 
 use crate::tunnel::{
@@ -131,48 +131,76 @@ fn packet_into_offload_buffer(packet: ZCPacket, l2_tun: bool) -> Result<BytesMut
     Ok(inner)
 }
 
-type SendFuture = Pin<Box<dyn Future<Output = (io::Result<usize>, GROTable)> + Send + 'static>>;
+type SendFuture =
+    Pin<Box<dyn Future<Output = (usize, io::Result<usize>, GROTable)> + Send + 'static>>;
 
-struct LinuxTunSink {
-    device: Arc<AsyncDevice>,
-    l2_tun: bool,
+struct QueueSink {
     pending: Vec<BytesMut>,
     gro_table: GROTable,
-    in_flight: Option<SendFuture>,
+}
+
+struct LinuxTunSink {
+    devices: Vec<Arc<AsyncDevice>>,
+    l2_tun: bool,
+    queues: Vec<QueueSink>,
+    in_flight: FuturesUnordered<SendFuture>,
 }
 
 impl LinuxTunSink {
-    fn new(device: Arc<AsyncDevice>, l2_tun: bool) -> Self {
+    fn new(devices: Vec<Arc<AsyncDevice>>, l2_tun: bool) -> Self {
+        let queues = devices
+            .iter()
+            .map(|_| QueueSink {
+                pending: Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
+                gro_table: GROTable::default(),
+            })
+            .collect();
         Self {
-            device,
+            devices,
             l2_tun,
-            pending: Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
-            gro_table: GROTable::default(),
-            in_flight: None,
+            queues,
+            in_flight: FuturesUnordered::new(),
         }
     }
 
     fn begin_flush(&mut self) {
-        if self.in_flight.is_some() || self.pending.is_empty() {
+        if !self.in_flight.is_empty() {
             return;
         }
-        let device = self.device.clone();
-        let mut buffers = std::mem::take(&mut self.pending);
-        let mut gro_table = std::mem::take(&mut self.gro_table);
-        self.in_flight = Some(Box::pin(async move {
-            let result = device
-                .send_multiple(&mut gro_table, &mut buffers, VIRTIO_NET_HDR_LEN)
-                .await;
-            (result, gro_table)
-        }));
+        for (index, queue) in self.queues.iter_mut().enumerate() {
+            if queue.pending.is_empty() {
+                continue;
+            }
+            let device = self.devices[index].clone();
+            let mut buffers = std::mem::take(&mut queue.pending);
+            let mut gro_table = std::mem::take(&mut queue.gro_table);
+            self.in_flight.push(Box::pin(async move {
+                let result = device
+                    .send_multiple(&mut gro_table, &mut buffers, VIRTIO_NET_HDR_LEN)
+                    .await;
+                (index, result, gro_table)
+            }));
+        }
     }
+}
+
+fn packet_queue_index(packet: &ZCPacket, queue_count: usize) -> usize {
+    packet
+        .peer_manager_header()
+        .and_then(|header| header.flow_shard())
+        .map_or(0, |shard| usize::from(shard) % queue_count)
 }
 
 impl Sink<SinkItem> for LinuxTunSink {
     type Error = TunnelError;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.in_flight.is_some() || self.pending.len() >= MAX_PACKET_BATCH_SIZE {
+        if !self.in_flight.is_empty()
+            || self
+                .queues
+                .iter()
+                .any(|queue| queue.pending.len() >= MAX_PACKET_BATCH_SIZE)
+        {
             self.as_mut().poll_flush(cx)
         } else {
             Poll::Ready(Ok(()))
@@ -181,7 +209,9 @@ impl Sink<SinkItem> for LinuxTunSink {
 
     fn start_send(mut self: Pin<&mut Self>, packet: SinkItem) -> Result<(), Self::Error> {
         let l2_tun = self.l2_tun;
-        self.pending
+        let queue_index = packet_queue_index(&packet, self.queues.len());
+        self.queues[queue_index]
+            .pending
             .push(packet_into_offload_buffer(packet, l2_tun)?);
         Ok(())
     }
@@ -189,12 +219,15 @@ impl Sink<SinkItem> for LinuxTunSink {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         loop {
             self.begin_flush();
-            let Some(future) = self.in_flight.as_mut() else {
+            if self.in_flight.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let Some((index, result, gro_table)) =
+                ready!(Pin::new(&mut self.in_flight).poll_next(cx))
+            else {
                 return Poll::Ready(Ok(()));
             };
-            let (result, gro_table) = ready!(future.as_mut().poll(cx));
-            self.gro_table = gro_table;
-            self.in_flight = None;
+            self.queues[index].gro_table = gro_table;
             result.map_err(TunnelError::IOError)?;
         }
     }
@@ -204,12 +237,20 @@ impl Sink<SinkItem> for LinuxTunSink {
     }
 }
 
-pub(crate) fn wrap_device(device: AsyncDevice, l2_tun: bool, mtu: usize) -> Box<dyn Tunnel> {
-    let device = Arc::new(device);
-    let stream = futures::stream::unfold(ReadState::new(device.clone(), l2_tun, mtu), |state| {
-        state.next()
-    });
-    let sink = LinuxTunSink::new(device, l2_tun);
+pub(crate) fn wrap_devices(devices: Vec<AsyncDevice>, l2_tun: bool, mtu: usize) -> Box<dyn Tunnel> {
+    assert!(!devices.is_empty(), "Linux virtual NIC needs one queue");
+    let devices = devices.into_iter().map(Arc::new).collect::<Vec<_>>();
+    let streams = devices
+        .iter()
+        .map(|device| {
+            Box::pin(futures::stream::unfold(
+                ReadState::new(device.clone(), l2_tun, mtu),
+                |state| state.next(),
+            )) as Pin<Box<dyn Stream<Item = StreamItem> + Send>>
+        })
+        .collect::<Vec<_>>();
+    let stream = futures::stream::select_all(streams);
+    let sink = LinuxTunSink::new(devices, l2_tun);
     Box::new(TunnelWrapper::new(stream, sink, None))
 }
 
@@ -229,5 +270,21 @@ mod tests {
             vec![0; quincy_tun::VIRTIO_NET_HDR_LEN]
         );
         assert_eq!(&buffer[quincy_tun::VIRTIO_NET_HDR_LEN..], &[0x45, 0, 0, 20]);
+    }
+
+    #[test]
+    fn queue_selection_preserves_flow_affinity() {
+        let mut first = ZCPacket::new_with_payload(b"first");
+        first.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Ethernet as u8);
+        first.mut_peer_manager_header().unwrap().set_flow_shard(5);
+        let mut second = ZCPacket::new_with_payload(b"second");
+        second.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Ethernet as u8);
+        second.mut_peer_manager_header().unwrap().set_flow_shard(5);
+
+        assert_eq!(super::packet_queue_index(&first, 2), 1);
+        assert_eq!(
+            super::packet_queue_index(&first, 2),
+            super::packet_queue_index(&second, 2)
+        );
     }
 }

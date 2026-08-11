@@ -24,8 +24,8 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
-use futures::{Future, Sink, Stream};
-use parking_lot::{Mutex, RwLock};
+use futures::{Future, Sink, SinkExt, Stream};
+use parking_lot::RwLock;
 use quinn::{
     ClientConfig, ConnectError, Connection, ConnectionError, Endpoint, EndpointConfig, RecvStream,
     SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
@@ -33,97 +33,45 @@ use quinn::{
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
 use std::{
-    collections::VecDeque,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::Arc,
     task::{Context as TaskContext, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
-use tokio::{io::AsyncWriteExt as _, net::UdpSocket, sync::Notify};
+use tokio::{io::AsyncWriteExt as _, net::UdpSocket, sync::mpsc, task::JoinHandle};
 
 use super::{
     common::TcpZCPacketToBytes,
     packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket, ZCPacketType},
 };
-use datagram_metrics::QuicDatagramMetrics;
-use fec::{EncodedFecBlock, FEC_FLUSH_DELAY, FecDecoderState, FecEncoderState};
-use reliable_datagram::{
-    DatagramMessage, ReceiveEvent, ReceiveState, SendState, decode_datagram, encode_ack_range,
-    encode_fragment_nack,
-};
 
 pub(crate) mod adaptive;
 pub(crate) mod brutal;
-mod datagram_metrics;
-pub(crate) mod fec;
 pub(crate) mod quic_config;
-mod reliable_datagram;
 pub(crate) mod wire_profile;
 
 use self::adaptive::{AdaptiveConfig, AdaptiveFactory};
 
-const QUIC_DATAGRAM_PREFACE: &[u8; 4] = b"ETQ4";
 const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const QUIC_DATAGRAM_MIN_QUEUE_BUDGET: usize = 64 * 1024;
-const QUIC_DATAGRAM_ACK_BATCH_FRAMES: usize = 16;
-const QUIC_DATAGRAM_ACK_MAX_DELAY: Duration = Duration::from_millis(2);
-const QUIC_DATAGRAM_RECOVERED_QUEUE_CAPACITY: usize = 4096;
+const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 4500;
 
-fn periodic_quic_metrics_configured(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some()
-}
-
-fn periodic_quic_metrics_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        periodic_quic_metrics_configured(std::env::var_os("LOWTIER_QUIC_METRICS").as_deref())
-    })
-}
-
-fn extend_bounded_queue<T>(
-    queue: &mut VecDeque<T>,
-    values: impl IntoIterator<Item = T>,
-    capacity: usize,
-) -> usize {
-    let mut dropped = 0;
-    for value in values {
-        if queue.len() < capacity {
-            queue.push_back(value);
-        } else {
-            dropped += 1;
-        }
-    }
-    dropped
-}
-
-async fn exchange_datagram_preface(
+async fn activate_reliable_lane(
     send: &mut SendStream,
     recv: &mut RecvStream,
     client: bool,
 ) -> Result<(), TunnelError> {
-    let mut peer = [0_u8; QUIC_DATAGRAM_PREFACE.len()];
     if client {
-        send.write_all(QUIC_DATAGRAM_PREFACE)
+        send.write_all(&[0])
             .await
-            .context("write QUIC DATAGRAM preface")?;
-        send.flush().await.context("flush QUIC DATAGRAM preface")?;
-        recv.read_exact(&mut peer)
-            .await
-            .context("read QUIC DATAGRAM preface")?;
+            .context("activate reliable QUIC lane")?;
+        send.flush().await.context("flush reliable QUIC lane")?;
     } else {
-        recv.read_exact(&mut peer)
+        let mut activation = [0_u8; 1];
+        recv.read_exact(&mut activation)
             .await
-            .context("read QUIC DATAGRAM preface")?;
-        send.write_all(QUIC_DATAGRAM_PREFACE)
-            .await
-            .context("write QUIC DATAGRAM preface")?;
-        send.flush().await.context("flush QUIC DATAGRAM preface")?;
-    }
-    if &peer != QUIC_DATAGRAM_PREFACE {
-        return Err(TunnelError::InvalidPacket(format!(
-            "unsupported QUIC packet transport preface: {peer:?}"
-        )));
+            .context("receive reliable QUIC lane activation")?;
     }
     Ok(())
 }
@@ -477,7 +425,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .max_concurrent_bidi_streams(u8::MAX.into())
         .max_concurrent_uni_streams(0u8.into())
         .keep_alive_interval(Some(Duration::from_secs(5)))
-        .initial_mtu(1200)
+        .initial_mtu(1452)
         .min_mtu(1200)
         .enable_segmentation_offload(true)
         .datagram_receive_buffer_size(Some(16 * 1024 * 1024))
@@ -750,6 +698,13 @@ pub struct QuicEndpointManager {
 
 static QUIC_ENDPOINT_MANAGER: OnceLock<QuicEndpointManager> = OnceLock::new();
 
+#[derive(Clone, Copy)]
+struct QuicConnectSecurity<'a> {
+    flags: &'a Flags,
+    identity: &'a crate::common::config::NetworkIdentity,
+    allow_noise_protected_transport: bool,
+}
+
 impl QuicEndpointManager {
     fn try_create(
         addr: SocketAddr,
@@ -973,13 +928,22 @@ impl QuicEndpointManager {
         };
         let flags = global_ctx.get_flags();
         let identity = global_ctx.get_network_identity();
+        let allow_noise_protected_transport = global_ctx
+            .config
+            .get_secure_mode()
+            .is_some_and(|config| config.enabled);
+        let security = QuicConnectSecurity {
+            flags: &flags,
+            identity: &identity,
+            allow_noise_protected_transport,
+        };
         let socket_mark = flags.socket_mark;
         ensure_remote_allowed(&policy, addr)?;
         let bind_addrs = eligible_bind_addrs(&policy, bind_addrs, addr)?;
         let manager = Self::load(global_ctx);
         if bind_addrs.is_empty() {
             return manager
-                .connect_with_ip_version(addr, ip_version, socket_mark, &flags, &identity)
+                .connect_with_ip_version(addr, ip_version, socket_mark, security)
                 .await;
         }
 
@@ -990,8 +954,7 @@ impl QuicEndpointManager {
                 source,
                 socket_mark,
                 policy.clone(),
-                &flags,
-                &identity,
+                security,
             ));
         }
         wait_for_connect_futures(futures).await
@@ -1003,8 +966,7 @@ impl QuicEndpointManager {
         source: SocketAddr,
         socket_mark: Option<u32>,
         policy: Arc<UnderlayPolicy>,
-        flags: &Flags,
-        identity: &crate::common::config::NetworkIdentity,
+        security: QuicConnectSecurity<'_>,
     ) -> Result<(Endpoint, Connection, bool), TunnelError> {
         let pool = if source.is_ipv4() {
             &self.ipv4
@@ -1018,7 +980,7 @@ impl QuicEndpointManager {
             let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy)?;
             let server_name = addr.ip().to_string();
             let connecting = match endpoint.connect_with(
-                client_config_for_network(flags, identity)?,
+                client_config_for_network(security.flags, security.identity)?,
                 addr,
                 &server_name,
             ) {
@@ -1041,27 +1003,29 @@ impl QuicEndpointManager {
             };
             let connection = match connecting.await {
                 Ok(connection) => connection,
-                Err(authentication_error) if identity.network_secret.is_some() => {
+                Err(authentication_error) if security.allow_noise_protected_transport => {
                     tracing::debug!(
                         ?authentication_error,
                         %addr,
-                        "network-authenticated QUIC failed; retrying with inner encryption"
+                        "network identity unavailable; using Noise-protected QUIC"
                     );
                     endpoint
-                        .connect_with(client_config(flags)?, addr, &server_name)
-                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                        .connect_with(client_config(security.flags)?, addr, &server_name)
+                        .with_context(|| format!("failed to start Noise-protected QUIC to {addr}"))?
                         .await
-                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                        .with_context(|| {
+                            format!("failed to connect Noise-protected QUIC to {addr}")
+                        })?
                 }
                 Err(error) => {
                     return Err(anyhow::Error::new(error)
-                        .context(format!("failed to connect to {}", addr))
+                        .context(format!("failed to authenticate QUIC connection to {addr}"))
                         .into());
                 }
             };
             ensure_local_allowed(&policy, endpoint.local_addr()?)?;
             ensure_remote_allowed(&policy, connection.remote_address())?;
-            let authenticated = connection_has_network_identity(&connection, identity);
+            let authenticated = connection_has_network_identity(&connection, security.identity);
             return Ok((endpoint, connection, authenticated));
         }
     }
@@ -1071,8 +1035,7 @@ impl QuicEndpointManager {
         addr: SocketAddr,
         ip_version: IpVersion,
         socket_mark: Option<u32>,
-        flags: &Flags,
-        identity: &crate::common::config::NetworkIdentity,
+        security: QuicConnectSecurity<'_>,
     ) -> Result<(Endpoint, Connection, bool), TunnelError> {
         let max_endpoint_stopping_retries = self.client_pool(ip_version).len().saturating_add(1);
         let mut endpoint_stopping_retries = 0;
@@ -1081,7 +1044,7 @@ impl QuicEndpointManager {
             let endpoint = self.client_endpoint(ip_version, socket_mark)?;
             let server_name = addr.ip().to_string();
             let connecting = match endpoint.connect_with(
-                client_config_for_network(flags, identity)?,
+                client_config_for_network(security.flags, security.identity)?,
                 addr,
                 &server_name,
             ) {
@@ -1111,26 +1074,28 @@ impl QuicEndpointManager {
             };
             let connection = match connecting.await {
                 Ok(connection) => connection,
-                Err(authentication_error) if identity.network_secret.is_some() => {
+                Err(authentication_error) if security.allow_noise_protected_transport => {
                     tracing::debug!(
                         ?authentication_error,
                         %addr,
-                        "network-authenticated QUIC failed; retrying with inner encryption"
+                        "network identity unavailable; using Noise-protected QUIC"
                     );
                     endpoint
-                        .connect_with(client_config(flags)?, addr, &server_name)
-                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                        .connect_with(client_config(security.flags)?, addr, &server_name)
+                        .with_context(|| format!("failed to start Noise-protected QUIC to {addr}"))?
                         .await
-                        .with_context(|| format!("failed to retry connection to {}", addr))?
+                        .with_context(|| {
+                            format!("failed to connect Noise-protected QUIC to {addr}")
+                        })?
                 }
                 Err(error) => {
                     return Err(anyhow::Error::new(error)
-                        .context(format!("failed to connect to {}", addr))
+                        .context(format!("failed to authenticate QUIC connection to {addr}"))
                         .into());
                 }
             };
 
-            let authenticated = connection_has_network_identity(&connection, identity);
+            let authenticated = connection_has_network_identity(&connection, security.identity);
             return Ok((endpoint, connection, authenticated));
         }
     }
@@ -1149,16 +1114,20 @@ impl Drop for ConnWrapper {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QuicDelivery {
-    Datagram,
+    PlainDatagram,
     ReliableStream,
 }
 
 fn select_quic_delivery(packet: &ZCPacket, max_datagram_size: Option<usize>) -> QuicDelivery {
-    if packet.is_lossy() && max_datagram_size.is_some() {
-        QuicDelivery::Datagram
-    } else {
-        QuicDelivery::ReliableStream
+    let critical_l2 = packet
+        .peer_manager_header()
+        .is_some_and(|header| header.is_critical_l2_control());
+    let fits_datagram =
+        max_datagram_size.is_some_and(|maximum| packet.tunnel_payload().len() <= maximum);
+    if packet.is_lossy() && !critical_l2 && fits_datagram {
+        return QuicDelivery::PlainDatagram;
     }
+    QuicDelivery::ReliableStream
 }
 
 fn encode_quic_datagram(packet: ZCPacket) -> Bytes {
@@ -1182,18 +1151,40 @@ fn decode_quic_datagram(bytes: Bytes) -> Result<ZCPacket, TunnelError> {
     Ok(ZCPacket::new_from_buf(bytes, ZCPacketType::DummyTunnel))
 }
 
-fn reliable_datagram_rto(connection: &Connection) -> Duration {
-    connection
-        .rtt()
-        .saturating_mul(2)
-        .clamp(Duration::from_millis(100), Duration::from_secs(1))
+fn decode_received_quic_datagram(bytes: Bytes) -> Option<ZCPacket> {
+    match decode_quic_datagram(bytes) {
+        Ok(packet) => Some(packet),
+        Err(error) => {
+            tracing::debug!(?error, "dropping malformed QUIC DATAGRAM");
+            None
+        }
+    }
 }
 
-fn reliable_datagram_nack_grace(connection: &Connection) -> Duration {
-    connection
-        .rtt()
-        .div_f32(4.0)
-        .clamp(Duration::from_millis(10), Duration::from_millis(50))
+fn send_plain_datagram_with_io(
+    io: &impl QuicDatagramIo,
+    packet: ZCPacket,
+) -> Result<DatagramSendOutcome, TunnelError> {
+    let datagram = encode_quic_datagram(packet);
+    let maximum = io.max_datagram_size().ok_or_else(|| {
+        TunnelError::InvalidProtocol("peer does not support QUIC DATAGRAM".to_owned())
+    })?;
+    if datagram.len() > maximum {
+        return Err(TunnelError::InvalidPacket(format!(
+            "QUIC DATAGRAM is too large: {} > {maximum}",
+            datagram.len()
+        )));
+    }
+    if !io.has_send_buffer_space(datagram.len()) {
+        return Ok(DatagramSendOutcome::Dropped);
+    }
+    match io.send_datagram(datagram) {
+        Ok(()) => Ok(DatagramSendOutcome::Sent),
+        Err(quinn::SendDatagramError::TooLarge) => Ok(DatagramSendOutcome::Dropped),
+        Err(error) => Err(TunnelError::Anyhow(
+            anyhow::Error::new(error).context("send plain QUIC DATAGRAM failed"),
+        )),
+    }
 }
 
 trait QuicDatagramIo {
@@ -1235,651 +1226,6 @@ enum DatagramSendOutcome {
     Dropped,
 }
 
-#[derive(Clone, Copy)]
-struct DatagramSendTiming {
-    now: Instant,
-    rto: Duration,
-}
-
-fn send_frame_with_io(
-    io: &impl QuicDatagramIo,
-    send: &Mutex<SendState>,
-    metrics: &QuicDatagramMetrics,
-    fec_send: Option<&Mutex<FecEncoderState>>,
-    frame: Bytes,
-    immediate_duplicate: bool,
-    timing: DatagramSendTiming,
-) -> Result<DatagramSendOutcome, TunnelError> {
-    const MAX_REFRAGMENT_ATTEMPTS: usize = 3;
-    const MTU_RACE_SAFETY_MARGIN: usize = 32;
-
-    let mut max_datagram_size = io.max_datagram_size().ok_or_else(|| {
-        TunnelError::InvalidProtocol("peer does not support QUIC DATAGRAM".to_owned())
-    })?;
-    metrics.observe_path_mtu(max_datagram_size);
-    'refragment: for attempt in 0..MAX_REFRAGMENT_ATTEMPTS {
-        let source_datagram_size = if fec_send.is_some() {
-            FecEncoderState::max_source_datagram_size(max_datagram_size)
-                .map_err(|error| TunnelError::InternalError(error.to_string()))?
-        } else {
-            max_datagram_size
-        };
-        let queued =
-            match send
-                .lock()
-                .queue(frame.clone(), source_datagram_size, timing.now, timing.rto)
-            {
-                Ok(queued) => queued,
-                Err(TunnelError::BufferFull) => {
-                    metrics.record_queue_drop_pending();
-                    return Ok(DatagramSendOutcome::Dropped);
-                }
-                Err(error) => return Err(error),
-            };
-        metrics.observe_queue_bytes(queued.pending_bytes);
-        let encoded_bytes = queued.datagrams.iter().map(Bytes::len).sum();
-        if !io.has_send_buffer_space(encoded_bytes) {
-            send.lock().acknowledge(queued.frame_id);
-            metrics.record_queue_drop_quinn();
-            return Ok(DatagramSendOutcome::Dropped);
-        }
-
-        let raw_fragment_count = queued.datagrams.len();
-        let (source_datagrams, completed_blocks) = if let Some(fec_send) = fec_send {
-            let mut fec_send = fec_send.lock();
-            let mut sources = Vec::with_capacity(raw_fragment_count);
-            let mut completed = Vec::new();
-            for datagram in queued.datagrams {
-                let output = match fec_send.push(datagram, timing.now) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        fec_send.abort_block();
-                        send.lock().acknowledge(queued.frame_id);
-                        return Err(TunnelError::InternalError(error.to_string()));
-                    }
-                };
-                sources.push(output.source);
-                if let Some(block) = output.completed {
-                    completed.push(block);
-                }
-            }
-            (sources, completed)
-        } else {
-            (queued.datagrams, Vec::new())
-        };
-        let parity_bytes = completed_blocks
-            .iter()
-            .flat_map(|block| &block.parity)
-            .map(Bytes::len)
-            .sum::<usize>();
-        let source_bytes = source_datagrams.iter().map(Bytes::len).sum::<usize>();
-        let total_bytes = source_bytes.saturating_add(parity_bytes);
-        if !io.has_send_buffer_space(total_bytes) {
-            if let Some(fec_send) = fec_send {
-                fec_send.lock().abort_block();
-            }
-            send.lock().acknowledge(queued.frame_id);
-            metrics.record_queue_drop_quinn();
-            return Ok(DatagramSendOutcome::Dropped);
-        }
-        let duplicate = immediate_duplicate
-            && io.has_send_buffer_space(total_bytes.saturating_add(source_bytes));
-        if immediate_duplicate && !duplicate {
-            metrics.record_critical_duplicate_suppressed();
-        }
-        let fragmented = raw_fragment_count > 1;
-        for datagram in source_datagrams {
-            let datagram_len = datagram.len();
-            let duplicate_datagram = duplicate.then(|| datagram.clone());
-            match io.send_datagram(datagram) {
-                Ok(()) => metrics.record_source_fragment(datagram_len, fragmented),
-                Err(quinn::SendDatagramError::TooLarge)
-                    if attempt + 1 < MAX_REFRAGMENT_ATTEMPTS =>
-                {
-                    if let Some(fec_send) = fec_send {
-                        fec_send.lock().abort_block();
-                    }
-                    send.lock().acknowledge(queued.frame_id);
-                    let refreshed = io.max_datagram_size().unwrap_or(max_datagram_size);
-                    max_datagram_size = if refreshed < max_datagram_size {
-                        refreshed
-                    } else {
-                        max_datagram_size.saturating_sub(MTU_RACE_SAFETY_MARGIN)
-                    };
-                    metrics.observe_path_mtu(max_datagram_size);
-                    continue 'refragment;
-                }
-                Err(error) => {
-                    send.lock().acknowledge(queued.frame_id);
-                    return Err(TunnelError::Anyhow(
-                        anyhow::Error::new(error).context("send reliable QUIC DATAGRAM failed"),
-                    ));
-                }
-            }
-            if let Some(duplicate_datagram) = duplicate_datagram
-                && let Err(error) = io.send_datagram(duplicate_datagram)
-            {
-                send.lock().acknowledge(queued.frame_id);
-                return Err(TunnelError::Anyhow(
-                    anyhow::Error::new(error)
-                        .context("send duplicate critical L2 QUIC DATAGRAM failed"),
-                ));
-            }
-        }
-        if duplicate {
-            metrics.record_critical_duplicate_sent();
-        }
-        for block in completed_blocks {
-            let mut parity_sent = true;
-            for parity in &block.parity {
-                if let Err(error) = io.send_datagram(parity.clone()) {
-                    parity_sent = false;
-                    metrics.record_fec_unrecoverable();
-                    if !matches!(error, quinn::SendDatagramError::TooLarge) {
-                        send.lock().acknowledge(queued.frame_id);
-                        return Err(TunnelError::Anyhow(
-                            anyhow::Error::new(error)
-                                .context("send ETD4 FEC parity DATAGRAM failed"),
-                        ));
-                    }
-                    break;
-                }
-            }
-            if parity_sent {
-                metrics.record_fec_block(
-                    block.source_count,
-                    block.parity.len(),
-                    block.source_bytes,
-                    block.parity_bytes,
-                );
-            }
-        }
-        return Ok(DatagramSendOutcome::Sent);
-    }
-    unreachable!("refragmentation loop returns or propagates on every final attempt")
-}
-
-struct ReliableDatagramState {
-    connection: Connection,
-    send: Mutex<SendState>,
-    receive: Mutex<ReceiveState>,
-    fec_send: Option<Mutex<FecEncoderState>>,
-    fec_receive: Mutex<FecDecoderState>,
-    recovered_packets: Mutex<VecDeque<ZCPacket>>,
-    critical_l2_duplication: bool,
-    metrics: QuicDatagramMetrics,
-    service_notify: Arc<Notify>,
-}
-
-fn reliable_datagram_service_has_work(
-    send: &SendState,
-    receive: &ReceiveState,
-    fec_send: Option<&FecEncoderState>,
-) -> bool {
-    send.has_service_work()
-        || receive.has_service_work()
-        || fec_send.is_some_and(FecEncoderState::has_service_work)
-}
-
-impl ReliableDatagramState {
-    fn new(connection: Connection, flags: &Flags) -> Result<Self, TunnelError> {
-        let fec_send = match flags.quic_datagram_fec_parity {
-            0 => None,
-            parity_count => Some(Mutex::new(
-                FecEncoderState::new(parity_count as usize, FEC_FLUSH_DELAY)
-                    .map_err(|error| TunnelError::InternalError(error.to_string()))?,
-            )),
-        };
-        Ok(Self {
-            connection,
-            send: Mutex::new(SendState::default()),
-            receive: Mutex::new(ReceiveState::default()),
-            fec_send,
-            fec_receive: Mutex::new(FecDecoderState::default()),
-            recovered_packets: Mutex::new(VecDeque::new()),
-            critical_l2_duplication: flags.quic_critical_l2_duplication,
-            metrics: QuicDatagramMetrics::default(),
-            service_notify: Arc::new(Notify::new()),
-        })
-    }
-
-    fn has_service_work(&self) -> bool {
-        if self.send.lock().has_service_work() || self.receive.lock().has_service_work() {
-            return true;
-        }
-        self.fec_send
-            .as_ref()
-            .is_some_and(|fec| fec.lock().has_service_work())
-    }
-
-    fn send_packet(&self, packet: ZCPacket) -> Result<(), TunnelError> {
-        let immediate_duplicate = self.critical_l2_duplication
-            && packet
-                .peer_manager_header()
-                .is_some_and(|header| header.is_critical_l2_duplicate());
-        self.metrics.record_source_frame();
-        let outcome = send_frame_with_io(
-            &self.connection,
-            &self.send,
-            &self.metrics,
-            self.fec_send.as_ref(),
-            encode_quic_datagram(packet),
-            immediate_duplicate,
-            DatagramSendTiming {
-                now: Instant::now(),
-                rto: reliable_datagram_rto(&self.connection),
-            },
-        )?;
-        if outcome == DatagramSendOutcome::Dropped {
-            tracing::trace!("dropping L2 QUIC DATAGRAM because the bounded send queue is full");
-        } else {
-            self.service_notify.notify_one();
-        }
-        Ok(())
-    }
-
-    fn send_ack_range(&self, largest_frame_id: u64, received: u128) -> Result<(), TunnelError> {
-        self.connection
-            .send_datagram(encode_ack_range(largest_frame_id, received))
-            .map_err(|error| {
-                TunnelError::Anyhow(
-                    anyhow::Error::new(error)
-                        .context("send reliable QUIC DATAGRAM ACK range failed"),
-                )
-            })?;
-        self.metrics.record_ack_range_sent();
-        Ok(())
-    }
-
-    fn send_fragment_nack(&self, frame_id: u64, missing_fragments: u64) -> Result<(), TunnelError> {
-        self.connection
-            .send_datagram(encode_fragment_nack(frame_id, missing_fragments))
-            .map_err(|error| {
-                TunnelError::Anyhow(
-                    anyhow::Error::new(error)
-                        .context("send reliable QUIC DATAGRAM fragment NACK failed"),
-                )
-            })?;
-        self.metrics.record_nack_sent();
-        Ok(())
-    }
-
-    fn send_fec_block(&self, block: EncodedFecBlock) -> Result<(), TunnelError> {
-        if !self.connection.has_send_buffer_space(block.parity_bytes) {
-            self.metrics.record_queue_drop_quinn();
-            self.metrics.record_fec_unrecoverable();
-            return Ok(());
-        }
-        for parity in &block.parity {
-            if let Err(error) = self.connection.send_datagram(parity.clone()) {
-                self.metrics.record_fec_unrecoverable();
-                if matches!(error, quinn::SendDatagramError::TooLarge) {
-                    tracing::trace!(
-                        block_id = block.block_id,
-                        "dropping ETD4 FEC parity after a path MTU change"
-                    );
-                    return Ok(());
-                }
-                return Err(TunnelError::Anyhow(
-                    anyhow::Error::new(error).context("send partial ETD4 FEC block failed"),
-                ));
-            }
-        }
-        self.metrics.record_fec_block(
-            block.source_count,
-            block.parity.len(),
-            block.source_bytes,
-            block.parity_bytes,
-        );
-        Ok(())
-    }
-
-    fn receive_data_fragment(
-        &self,
-        fragment: reliable_datagram::DataFragment,
-        now: Instant,
-    ) -> Result<Option<ZCPacket>, TunnelError> {
-        let (event, ack_range, service_work) = {
-            let mut receive = self.receive.lock();
-            let event = receive.ingest(fragment, now)?;
-            let ack_range = match event {
-                ReceiveEvent::Complete { .. } => receive.take_ack_range_if_due(
-                    now,
-                    QUIC_DATAGRAM_ACK_BATCH_FRAMES,
-                    QUIC_DATAGRAM_ACK_MAX_DELAY,
-                ),
-                ReceiveEvent::Duplicate { .. } => receive.ack_range(),
-                ReceiveEvent::Pending => None,
-            };
-            let service_work = receive.has_service_work();
-            (event, ack_range, service_work)
-        };
-        if service_work {
-            self.service_notify.notify_one();
-        }
-        if let Some((largest_frame_id, received)) = ack_range {
-            self.send_ack_range(largest_frame_id, received)?;
-        }
-        match event {
-            ReceiveEvent::Pending | ReceiveEvent::Duplicate { .. } => Ok(None),
-            ReceiveEvent::Complete { frame, .. } => decode_quic_datagram(frame).map(Some),
-        }
-    }
-
-    fn receive_inner_data(
-        &self,
-        datagram: Bytes,
-        now: Instant,
-    ) -> Result<Option<ZCPacket>, TunnelError> {
-        let DatagramMessage::Data(fragment) = decode_datagram(datagram)? else {
-            return Err(TunnelError::InvalidPacket(
-                "ETD4 FEC source does not contain a data fragment".to_owned(),
-            ));
-        };
-        self.receive_data_fragment(fragment, now)
-    }
-
-    fn deliver_fec_records(
-        &self,
-        original: Option<Bytes>,
-        recovered: Vec<Bytes>,
-        expired_blocks: usize,
-        now: Instant,
-    ) -> Result<Option<ZCPacket>, TunnelError> {
-        for _ in 0..expired_blocks {
-            self.metrics.record_fec_unrecoverable();
-        }
-        if !recovered.is_empty() {
-            self.metrics.record_fec_recovered(recovered.len());
-        }
-        let mut packets = Vec::with_capacity(usize::from(original.is_some()) + recovered.len());
-        if let Some(original) = original
-            && let Some(packet) = self.receive_inner_data(original, now)?
-        {
-            packets.push(packet);
-        }
-        for datagram in recovered {
-            if let Some(packet) = self.receive_inner_data(datagram, now)? {
-                packets.push(packet);
-            }
-        }
-        let mut packets = packets.into_iter();
-        let first = packets.next();
-        let dropped = extend_bounded_queue(
-            &mut self.recovered_packets.lock(),
-            packets,
-            QUIC_DATAGRAM_RECOVERED_QUEUE_CAPACITY,
-        );
-        for _ in 0..dropped {
-            self.metrics.record_queue_drop_pending();
-        }
-        Ok(first)
-    }
-
-    fn take_recovered_packet(&self) -> Option<ZCPacket> {
-        self.recovered_packets.lock().pop_front()
-    }
-
-    fn log_metrics(&self, reason: &'static str) {
-        let path = self.connection.stats().path;
-        let queue_bytes = QUIC_DATAGRAM_SEND_BUFFER_BYTES
-            .saturating_sub(self.connection.datagram_send_buffer_space());
-        tracing::info!(
-            target: "CORE::QUIC_DATAGRAM_METRICS",
-            event = "ETQ4_METRICS",
-            reason,
-            atomic_header = QuicDatagramMetrics::tsv_header(),
-            atomic_row = %self.metrics.tsv_row(),
-            rtt_us = u64::try_from(path.rtt.as_micros()).unwrap_or(u64::MAX),
-            cwnd_bytes = path.cwnd,
-            lost_packets = path.lost_packets,
-            lost_bytes = path.lost_bytes,
-            sent_packets = path.sent_packets,
-            current_mtu = path.current_mtu,
-            datagram_queue_bytes = queue_bytes,
-            "ETQ4_METRICS_TSV\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            reason,
-            self.metrics.tsv_row(),
-            u64::try_from(path.rtt.as_micros()).unwrap_or(u64::MAX),
-            path.cwnd,
-            path.lost_packets,
-            path.lost_bytes,
-            path.sent_packets,
-            path.current_mtu,
-            queue_bytes,
-        );
-    }
-
-    fn receive_datagram(&self, bytes: Bytes) -> Result<Option<ZCPacket>, TunnelError> {
-        match decode_datagram(bytes)? {
-            DatagramMessage::AckRange {
-                largest_frame_id,
-                received,
-            } => {
-                self.send
-                    .lock()
-                    .acknowledge_range(largest_frame_id, received);
-                self.metrics.record_ack_range_received();
-                Ok(None)
-            }
-            DatagramMessage::FragmentNack {
-                frame_id,
-                missing_fragments,
-            } => {
-                self.metrics.record_nack_received();
-                let Some(fragments) = self
-                    .send
-                    .lock()
-                    .selective_fragments(frame_id, missing_fragments)
-                else {
-                    return Ok(None);
-                };
-                let encoded_bytes = fragments.iter().map(Bytes::len).sum();
-                if !self.connection.has_send_buffer_space(encoded_bytes) {
-                    self.metrics.record_queue_drop_quinn();
-                    return Ok(None);
-                }
-                self.metrics.record_selective_retransmit(fragments.len());
-                for fragment in fragments {
-                    self.connection.send_datagram(fragment).map_err(|error| {
-                        TunnelError::Anyhow(
-                            anyhow::Error::new(error)
-                                .context("selective QUIC DATAGRAM retransmission failed"),
-                        )
-                    })?;
-                }
-                Ok(None)
-            }
-            DatagramMessage::FecSource {
-                block_id,
-                source_index,
-                datagram,
-            } => {
-                let now = Instant::now();
-                let output = self
-                    .fec_receive
-                    .lock()
-                    .ingest_source(block_id, source_index, datagram.clone(), now)
-                    .map_err(|error| TunnelError::InvalidPacket(error.to_string()))?;
-                self.deliver_fec_records(
-                    Some(datagram),
-                    output.datagrams,
-                    output.expired_blocks,
-                    now,
-                )
-            }
-            DatagramMessage::FecParity {
-                block_id,
-                source_count,
-                parity_count,
-                parity_index,
-                shard,
-            } => {
-                let now = Instant::now();
-                let output = self
-                    .fec_receive
-                    .lock()
-                    .ingest_parity(
-                        block_id,
-                        source_count,
-                        parity_count,
-                        parity_index,
-                        shard,
-                        now,
-                    )
-                    .map_err(|error| TunnelError::InvalidPacket(error.to_string()))?;
-                self.deliver_fec_records(None, output.datagrams, output.expired_blocks, now)
-            }
-            DatagramMessage::Data(fragment) => self.receive_data_fragment(fragment, Instant::now()),
-        }
-    }
-
-    fn service_due(&self) -> bool {
-        let now = Instant::now();
-        let (ack_range, nacks, expired_partial_frames) = {
-            let mut receive = self.receive.lock();
-            let ack_range = receive.take_ack_range_if_due(
-                now,
-                QUIC_DATAGRAM_ACK_BATCH_FRAMES,
-                QUIC_DATAGRAM_ACK_MAX_DELAY,
-            );
-            let nacks = receive.nacks_due(now, reliable_datagram_nack_grace(&self.connection));
-            let expired_partial_frames = receive.take_expired_partial_frames();
-            (ack_range, nacks, expired_partial_frames)
-        };
-        for _ in 0..expired_partial_frames {
-            self.metrics.record_partial_frame_expired();
-        }
-        if let Some((largest_frame_id, received)) = ack_range
-            && let Err(error) = self.send_ack_range(largest_frame_id, received)
-        {
-            tracing::warn!(?error, "QUIC DATAGRAM ACK-range service failed");
-            if self.connection.close_reason().is_some() {
-                return false;
-            }
-        }
-        for (frame_id, missing_fragments) in nacks {
-            if let Err(error) = self.send_fragment_nack(frame_id, missing_fragments) {
-                tracing::warn!(
-                    ?error,
-                    frame_id,
-                    "QUIC DATAGRAM fragment-NACK service failed"
-                );
-                if self.connection.close_reason().is_some() {
-                    return false;
-                }
-            }
-        }
-
-        if let Some(fec_send) = &self.fec_send {
-            match fec_send.lock().flush_due(now) {
-                Ok(Some(block)) => {
-                    if let Err(error) = self.send_fec_block(block) {
-                        tracing::warn!(?error, "partial ETD4 FEC flush failed");
-                        if self.connection.close_reason().is_some() {
-                            return false;
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.metrics.record_fec_unrecoverable();
-                    tracing::warn!(?error, "partial ETD4 FEC encoding failed");
-                }
-            }
-        }
-
-        let sweep = self
-            .send
-            .lock()
-            .retries_due(now, reliable_datagram_rto(&self.connection));
-        if !sweep.exhausted.is_empty() {
-            for _ in &sweep.exhausted {
-                self.metrics.record_recovery_exhausted();
-            }
-            tracing::trace!(
-                frames = sweep.exhausted.len(),
-                first_frame_id = sweep.exhausted.first().copied(),
-                "reliable QUIC DATAGRAM retry limit reached"
-            );
-        }
-        for retry in sweep.retries {
-            let encoded_bytes = retry.datagrams.iter().map(Bytes::len).sum();
-            if !self.connection.has_send_buffer_space(encoded_bytes) {
-                tracing::trace!(
-                    frame_id = retry.frame_id,
-                    "skipping L2 QUIC DATAGRAM retry because the bounded send queue is full"
-                );
-                // The queue is already carrying newer traffic. Retaining this
-                // stale frame for another RTO cannot produce another retry,
-                // and only consumes pending-memory budget until expiry.
-                self.send.lock().acknowledge(retry.frame_id);
-                continue;
-            }
-            for datagram in retry.datagrams {
-                if let Err(error) = self.connection.send_datagram(datagram) {
-                    tracing::warn!(
-                        frame_id = retry.frame_id,
-                        ?error,
-                        "reliable QUIC DATAGRAM retransmission failed"
-                    );
-                    if matches!(error, quinn::SendDatagramError::ConnectionLost(_)) {
-                        return false;
-                    }
-                    break;
-                }
-            }
-        }
-        true
-    }
-}
-
-impl Drop for ReliableDatagramState {
-    fn drop(&mut self) {
-        self.service_notify.notify_one();
-        self.log_metrics("connection_drop");
-    }
-}
-
-async fn run_reliable_datagram_retransmissions(
-    state: Weak<ReliableDatagramState>,
-    service_notify: Arc<Notify>,
-) {
-    let mut interval = tokio::time::interval(QUIC_DATAGRAM_ACK_MAX_DELAY);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        let Some(active) = state.upgrade() else {
-            return;
-        };
-        let has_service_work = active.has_service_work();
-        drop(active);
-        if !has_service_work {
-            service_notify.notified().await;
-            continue;
-        }
-        interval.tick().await;
-        let Some(state) = state.upgrade() else {
-            return;
-        };
-        if !state.service_due() {
-            return;
-        }
-    }
-}
-
-async fn run_reliable_datagram_metrics(state: Weak<ReliableDatagramState>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval.tick().await;
-    loop {
-        interval.tick().await;
-        let Some(state) = state.upgrade() else {
-            return;
-        };
-        state.log_metrics("periodic");
-    }
-}
-
 type DatagramRead = Pin<Box<dyn Future<Output = Result<Bytes, ConnectionError>> + Send + 'static>>;
 
 fn next_datagram_read(connection: &Connection) -> DatagramRead {
@@ -1893,61 +1239,43 @@ fn next_datagram_read(connection: &Connection) -> DatagramRead {
 struct QuicHybridReader {
     reliable: FramedReader<RecvStream>,
     connection: Arc<ConnWrapper>,
-    datagram: Arc<ReliableDatagramState>,
     datagram_read: Option<DatagramRead>,
     poll_datagram_first: bool,
 }
 
 impl QuicHybridReader {
-    fn new(
-        reliable: RecvStream,
-        max_packet_size: usize,
-        connection: Arc<ConnWrapper>,
-        datagram: Arc<ReliableDatagramState>,
-    ) -> Self {
+    fn new(reliable: RecvStream, max_packet_size: usize, connection: Arc<ConnWrapper>) -> Self {
         let datagram_read = Some(next_datagram_read(&connection.conn));
         Self {
             reliable: FramedReader::new(reliable, max_packet_size),
             connection,
-            datagram,
             datagram_read,
             poll_datagram_first: true,
         }
     }
 
     fn poll_datagram(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<StreamItem>> {
-        // Consume a bounded number of internal ACKs/fragments per poll. This
-        // preserves control-stream fairness even when the DATAGRAM queue is hot.
-        for _ in 0..64 {
-            if let Some(packet) = self.datagram.take_recovered_packet() {
-                return Poll::Ready(Some(Ok(packet)));
+        let Some(read) = self.datagram_read.as_mut() else {
+            return Poll::Pending;
+        };
+        match read.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(bytes)) => {
+                self.datagram_read = Some(next_datagram_read(&self.connection.conn));
+                if let Some(packet) = decode_received_quic_datagram(bytes) {
+                    Poll::Ready(Some(Ok(packet)))
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
             }
-            let Some(read) = self.datagram_read.as_mut() else {
-                return Poll::Pending;
-            };
-            match read.as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(bytes)) => {
-                    self.datagram_read = Some(next_datagram_read(&self.connection.conn));
-                    match self.datagram.receive_datagram(bytes) {
-                        Ok(Some(packet)) => return Poll::Ready(Some(Ok(packet))),
-                        Ok(None) => continue,
-                        Err(error) => {
-                            tracing::warn!(?error, "dropping invalid reliable QUIC DATAGRAM");
-                            continue;
-                        }
-                    }
-                }
-                Poll::Ready(Err(error)) => {
-                    self.datagram_read = None;
-                    return Poll::Ready(Some(Err(TunnelError::Anyhow(
-                        anyhow::Error::new(error).context("read QUIC DATAGRAM failed"),
-                    ))));
-                }
+            Poll::Ready(Err(error)) => {
+                self.datagram_read = None;
+                Poll::Ready(Some(Err(TunnelError::Anyhow(
+                    anyhow::Error::new(error).context("read QUIC DATAGRAM failed"),
+                ))))
             }
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
     }
 
     fn poll_reliable(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<StreamItem>> {
@@ -1977,21 +1305,82 @@ impl Stream for QuicHybridReader {
 }
 
 struct QuicHybridWriter {
-    reliable: FramedWriter<SendStream, TcpZCPacketToBytes>,
     connection: Arc<ConnWrapper>,
-    datagram: Arc<ReliableDatagramState>,
+    reliable_tx: Option<mpsc::Sender<ZCPacket>>,
+    pending_reliable: Option<ZCPacket>,
+    reliable_reserve: Option<ReliableReserve>,
+    reliable_task: Option<JoinHandle<Result<(), TunnelError>>>,
+}
+
+type ReliableReserve = Pin<
+    Box<
+        dyn Future<Output = Result<mpsc::OwnedPermit<ZCPacket>, mpsc::error::SendError<()>>> + Send,
+    >,
+>;
+
+const RELIABLE_LANE_QUEUE_PACKETS: usize = 64;
+
+async fn run_reliable_writer(
+    send: SendStream,
+    mut receiver: mpsc::Receiver<ZCPacket>,
+) -> Result<(), TunnelError> {
+    let mut writer = FramedWriter::<_, TcpZCPacketToBytes>::new(send);
+    while let Some(packet) = receiver.recv().await {
+        writer.feed(packet).await?;
+        while let Ok(packet) = receiver.try_recv() {
+            writer.feed(packet).await?;
+        }
+        tokio::time::timeout(Duration::from_secs(7), writer.flush())
+            .await
+            .context("reliable QUIC lane timed out")??;
+    }
+    writer.close().await
 }
 
 impl QuicHybridWriter {
-    fn new(
-        reliable: SendStream,
-        connection: Arc<ConnWrapper>,
-        datagram: Arc<ReliableDatagramState>,
-    ) -> Self {
+    fn new(reliable: SendStream, connection: Arc<ConnWrapper>) -> Self {
+        let (reliable_tx, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_PACKETS);
+        let reliable_task = tokio::spawn(run_reliable_writer(reliable, reliable_rx));
         Self {
-            reliable: FramedWriter::new(reliable),
             connection,
-            datagram,
+            reliable_tx: Some(reliable_tx),
+            pending_reliable: None,
+            reliable_reserve: None,
+            reliable_task: Some(reliable_task),
+        }
+    }
+
+    fn poll_reliable_queue(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+        if self.pending_reliable.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        if self.reliable_reserve.is_none() {
+            let sender = self.reliable_tx.as_ref().ok_or_else(|| {
+                TunnelError::InternalError("reliable QUIC lane is closed".to_owned())
+            })?;
+            self.reliable_reserve = Some(Box::pin(sender.clone().reserve_owned()));
+        }
+
+        let reserve = self.reliable_reserve.as_mut().unwrap();
+        match reserve.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(permit)) => {
+                let packet = self.pending_reliable.take().unwrap();
+                permit.send(packet);
+                self.reliable_reserve = None;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(TunnelError::InternalError(
+                "reliable QUIC lane stopped".to_owned(),
+            ))),
+        }
+    }
+}
+
+impl Drop for QuicHybridWriter {
+    fn drop(&mut self) {
+        if let Some(task) = self.reliable_task.take() {
+            task.abort();
         }
     }
 }
@@ -1999,32 +1388,71 @@ impl QuicHybridWriter {
 impl Sink<SinkItem> for QuicHybridWriter {
     type Error = SinkError;
 
-    fn poll_ready(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.reliable).poll_ready(cx)
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
+        self.get_mut().poll_reliable_queue(cx)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: SinkItem) -> Result<(), Self::Error> {
         match select_quic_delivery(&item, self.connection.conn.max_datagram_size()) {
-            QuicDelivery::Datagram => self.datagram.send_packet(item),
-            QuicDelivery::ReliableStream => Pin::new(&mut self.reliable).start_send(item),
+            QuicDelivery::PlainDatagram => {
+                if send_plain_datagram_with_io(&self.connection.conn, item)?
+                    == DatagramSendOutcome::Dropped
+                {
+                    tracing::trace!("dropping plain QUIC DATAGRAM because the send queue is full");
+                }
+                Ok(())
+            }
+            QuicDelivery::ReliableStream => {
+                let writer = self.as_mut().get_mut();
+                let Some(sender) = writer.reliable_tx.as_ref() else {
+                    return Err(TunnelError::InternalError(
+                        "reliable QUIC lane is closed".to_owned(),
+                    ));
+                };
+                match sender.try_send(item) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(packet)) => {
+                        writer.pending_reliable = Some(packet);
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => Err(TunnelError::InternalError(
+                        "reliable QUIC lane stopped".to_owned(),
+                    )),
+                }
+            }
         }
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.reliable).poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
+        self.get_mut().poll_reliable_queue(cx)
     }
 
     fn poll_close(
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.reliable).poll_close(cx)
+        match self.as_mut().get_mut().poll_reliable_queue(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
+
+        let writer = self.as_mut().get_mut();
+        writer.reliable_tx.take();
+        let Some(task) = writer.reliable_task.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match Pin::new(task).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(result)) => {
+                writer.reliable_task = None;
+                Poll::Ready(result)
+            }
+            Poll::Ready(Err(error)) => {
+                writer.reliable_task = None;
+                Poll::Ready(Err(TunnelError::Anyhow(anyhow::Error::new(error))))
+            }
+        }
     }
 }
 
@@ -2034,26 +1462,13 @@ fn build_quic_hybrid_tunnel(
     reliable_recv: RecvStream,
     max_packet_size: usize,
     info: TunnelInfo,
-    flags: &Flags,
+    _flags: &Flags,
     transport_authenticated: bool,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let connection = Arc::new(ConnWrapper { conn: connection });
-    let datagram = Arc::new(ReliableDatagramState::new(connection.conn.clone(), flags)?);
-    tokio::spawn(run_reliable_datagram_retransmissions(
-        Arc::downgrade(&datagram),
-        datagram.service_notify.clone(),
-    ));
-    if periodic_quic_metrics_enabled() {
-        tokio::spawn(run_reliable_datagram_metrics(Arc::downgrade(&datagram)));
-    }
     Ok(Box::new(TunnelWrapper::new_with_transport_authentication(
-        QuicHybridReader::new(
-            reliable_recv,
-            max_packet_size,
-            connection.clone(),
-            datagram.clone(),
-        ),
-        QuicHybridWriter::new(reliable_send, connection, datagram),
+        QuicHybridReader::new(reliable_recv, max_packet_size, connection.clone()),
+        QuicHybridWriter::new(reliable_send, connection),
         Some(info),
         transport_authenticated,
     )))
@@ -2088,7 +1503,7 @@ impl QuicTunnelListener {
             connection_has_network_identity(&conn, &self.global_ctx.get_network_identity());
         let remote_addr = conn.remote_address();
         let (mut w, mut r) = conn.accept_bi().await.with_context(|| "accept_bi failed")?;
-        exchange_datagram_preface(&mut w, &mut r, false).await?;
+        activate_reliable_lane(&mut w, &mut r, false).await?;
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -2102,7 +1517,15 @@ impl QuicTunnelListener {
         };
 
         let flags = self.global_ctx.config.get_flags();
-        build_quic_hybrid_tunnel(conn, w, r, 2000, info, &flags, transport_authenticated)
+        build_quic_hybrid_tunnel(
+            conn,
+            w,
+            r,
+            QUIC_RELIABLE_MAX_PACKET_SIZE,
+            info,
+            &flags,
+            transport_authenticated,
+        )
     }
 }
 
@@ -2191,7 +1614,7 @@ impl TunnelConnector for QuicTunnelConnector {
             .open_bi()
             .await
             .with_context(|| "open_bi failed")?;
-        exchange_datagram_preface(&mut w, &mut r, true).await?;
+        activate_reliable_lane(&mut w, &mut r, true).await?;
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -2210,7 +1633,7 @@ impl TunnelConnector for QuicTunnelConnector {
             connection,
             w,
             r,
-            4500,
+            QUIC_RELIABLE_MAX_PACKET_SIZE,
             info,
             &flags,
             transport_authenticated,
@@ -2243,63 +1666,17 @@ mod tests {
     use crate::common::{
         global_ctx::tests::get_mock_global_ctx_with_network, underlay_policy::UnderlayPolicy,
     };
-    use crate::tunnel::{TunnelConnector, common::tests::_tunnel_pingpong};
-    use futures::{SinkExt as _, StreamExt as _};
+    use crate::tunnel::{
+        TunnelConnector,
+        common::tests::_tunnel_pingpong,
+        packet_def::{PacketType, ZCPacket},
+    };
+    use futures::{SinkExt, StreamExt};
+    use parking_lot::Mutex;
     use std::sync::LazyLock;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::runtime::{Builder, Runtime};
 
     use super::*;
-
-    #[test]
-    fn reliable_datagram_service_sleeps_only_without_pending_work() {
-        let now = Instant::now();
-        let mut send = SendState::default();
-        let receive = ReceiveState::default();
-        let fec = FecEncoderState::new(2, FEC_FLUSH_DELAY).unwrap();
-        assert!(!reliable_datagram_service_has_work(
-            &send,
-            &receive,
-            Some(&fec)
-        ));
-
-        let queued = send
-            .queue(
-                Bytes::from_static(b"frame"),
-                1200,
-                now,
-                Duration::from_millis(100),
-            )
-            .unwrap();
-        assert!(reliable_datagram_service_has_work(
-            &send,
-            &receive,
-            Some(&fec)
-        ));
-        assert!(send.acknowledge(queued.frame_id));
-        assert!(!reliable_datagram_service_has_work(
-            &send,
-            &receive,
-            Some(&fec)
-        ));
-    }
-
-    #[test]
-    fn periodic_quic_metrics_are_explicitly_enabled() {
-        assert!(!periodic_quic_metrics_configured(None));
-        assert!(periodic_quic_metrics_configured(Some(
-            std::ffi::OsStr::new("1")
-        )));
-    }
-
-    #[test]
-    fn recovered_queue_extension_is_hard_bounded() {
-        let mut queue = VecDeque::from([1_u8, 2]);
-        let dropped = extend_bounded_queue(&mut queue, [3_u8, 4, 5], 4);
-
-        assert_eq!(queue, VecDeque::from([1, 2, 3, 4]));
-        assert_eq!(dropped, 1);
-    }
 
     // Shared runtime for all tests to avoid endpoint invalidation across runtimes
     static RUNTIME: LazyLock<Runtime> =
@@ -2380,6 +1757,72 @@ mod tests {
         let connector =
             QuicTunnelConnector::new("quic://127.0.0.1:21011".parse().unwrap(), global_ctx());
         _tunnel_pingpong(listener, connector).await
+    }
+
+    #[test]
+    fn quic_hybrid_lanes_cross_a_live_connection() {
+        RUNTIME.block_on(async {
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+            listener.listen().await.unwrap();
+            let remote = listener.local_url();
+            let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let tunnel = listener.accept().await.unwrap();
+                let (mut recv, mut send) = tunnel.split();
+                for _ in 0..3 {
+                    let packet = recv.next().await.unwrap().unwrap();
+                    send.send(packet).await.unwrap();
+                    send.flush().await.unwrap();
+                }
+                received_rx.await.unwrap();
+                send.close().await.unwrap();
+            });
+
+            let tunnel = QuicTunnelConnector::new(remote, global_ctx())
+                .connect()
+                .await
+                .unwrap();
+            let (mut recv, mut send) = tunnel.split();
+
+            let mut normal = ZCPacket::new_with_payload(b"normal datagram");
+            normal.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+
+            let mut critical = ZCPacket::new_with_payload(&[0_u8; 42]);
+            critical.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+            critical
+                .mut_peer_manager_header()
+                .unwrap()
+                .set_critical_l2_control(true);
+
+            let mut oversized = ZCPacket::new_with_payload(&[0x5a; 4096]);
+            oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+
+            for expected in [normal, critical, oversized] {
+                send.send(expected.clone()).await.unwrap();
+                send.flush().await.unwrap();
+                let received = tokio::time::timeout(Duration::from_secs(2), recv.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(received.payload(), expected.payload());
+                assert_eq!(
+                    received
+                        .peer_manager_header()
+                        .unwrap()
+                        .is_critical_l2_control(),
+                    expected
+                        .peer_manager_header()
+                        .unwrap()
+                        .is_critical_l2_control()
+                );
+            }
+
+            received_tx.send(()).unwrap();
+            send.close().await.unwrap();
+            server.await.unwrap();
+        });
     }
 
     #[test]
@@ -2490,14 +1933,19 @@ mod tests {
             mgr.both.push(stopped_endpoint_b);
             assert!(mgr.contains_local_addr(stopped_addr_a));
             assert!(mgr.contains_local_addr(stopped_addr_b));
+            let flags = gen_default_flags();
+            let identity = crate::common::config::NetworkIdentity::default();
 
             let err = mgr
                 .connect_with_ip_version(
                     "127.0.0.1:0".parse().unwrap(),
                     IpVersion::V4,
                     None,
-                    &gen_default_flags(),
-                    &crate::common::config::NetworkIdentity::default(),
+                    QuicConnectSecurity {
+                        flags: &flags,
+                        identity: &identity,
+                        allow_noise_protected_transport: false,
+                    },
                 )
                 .await
                 .unwrap_err();
@@ -2528,20 +1976,39 @@ mod tests {
     }
 
     #[test]
-    fn quic_datagram_carries_l2_and_l3_data_without_stream_fallback() {
+    fn normal_data_uses_plain_datagrams_and_critical_l2_uses_the_stream() {
         let mut data = ZCPacket::new_with_payload(b"data");
         data.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Data as u8);
         assert_eq!(
             select_quic_delivery(&data, Some(data.tunnel_payload().len())),
-            QuicDelivery::Datagram
+            QuicDelivery::PlainDatagram
         );
 
-        let mut ethernet = ZCPacket::new_with_payload(&[0x5a; 1500]);
+        let mut ethernet = ZCPacket::new_with_payload(&[0x5a; 1000]);
         ethernet.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Ethernet as u8);
         assert_eq!(
             select_quic_delivery(&ethernet, Some(1200)),
-            QuicDelivery::Datagram,
-            "large Ethernet frames must be fragmented, not sent through the ordered stream"
+            QuicDelivery::PlainDatagram
+        );
+
+        ethernet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_critical_l2_control(true);
+        assert_eq!(
+            select_quic_delivery(&ethernet, Some(1200)),
+            QuicDelivery::ReliableStream
+        );
+
+        let mut oversized = ZCPacket::new_with_payload(&[0x5a; 1500]);
+        oversized.fill_peer_manager_hdr(
+            1,
+            2,
+            crate::tunnel::packet_def::PacketType::Ethernet as u8,
+        );
+        assert_eq!(
+            select_quic_delivery(&oversized, Some(1200)),
+            QuicDelivery::ReliableStream
         );
 
         let mut control = ZCPacket::new_with_payload(b"rpc");
@@ -2564,6 +2031,41 @@ mod tests {
         let decoded = decode_quic_datagram(encoded).unwrap();
         assert_eq!(decoded.tunnel_payload(), expected);
         assert!(decoded.is_lossy());
+    }
+
+    #[test]
+    fn plain_datagram_send_has_no_envelope_or_retained_state() {
+        let io = CaptureDatagramIo {
+            max_size: 1200,
+            sent: Mutex::new(Vec::new()),
+        };
+        let mut packet = ZCPacket::new_with_payload(b"plain-frame");
+        packet.fill_peer_manager_hdr(7, 9, crate::tunnel::packet_def::PacketType::Data as u8);
+        let expected = packet.tunnel_payload().to_vec();
+
+        assert_eq!(
+            send_plain_datagram_with_io(&io, packet).unwrap(),
+            DatagramSendOutcome::Sent
+        );
+
+        let sent = io.sent.lock();
+        assert_eq!(sent.as_slice(), &[Bytes::from(expected)]);
+    }
+
+    #[test]
+    fn path_mtu_shrink_drops_one_lossy_datagram() {
+        let mut packet = ZCPacket::new_with_payload(b"data");
+        packet.fill_peer_manager_hdr(1, 2, crate::tunnel::packet_def::PacketType::Data as u8);
+
+        assert_eq!(
+            send_plain_datagram_with_io(&ShrinkingDatagramIo, packet).unwrap(),
+            DatagramSendOutcome::Dropped
+        );
+    }
+
+    #[test]
+    fn malformed_plain_datagram_is_dropped() {
+        assert!(decode_received_quic_datagram(Bytes::from_static(b"short")).is_none());
     }
 
     #[test]
@@ -2730,7 +2232,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_quic_connection_falls_back_to_protected_compatibility() {
+    fn direct_quic_connection_rejects_an_unauthenticated_server() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_endpoint = Endpoint::server(
@@ -2750,6 +2252,47 @@ mod tests {
             });
 
             let context = global_ctx();
+            let result = QuicEndpointManager::connect(
+                &context,
+                server_addr,
+                &[],
+                Arc::new(UnderlayPolicy::default()),
+            )
+            .await;
+
+            assert!(result.is_err());
+            server.abort();
+        });
+    }
+
+    #[test]
+    fn secure_mode_allows_noise_protected_quic() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let accept_endpoint = server_endpoint.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let incoming = accept_endpoint.accept().await.unwrap();
+                    if let Ok(connection) = incoming.await {
+                        return connection;
+                    }
+                }
+            });
+
+            let context = global_ctx();
+            context
+                .config
+                .set_secure_mode(Some(crate::proto::common::SecureModeConfig {
+                    enabled: true,
+                    local_private_key: None,
+                    local_public_key: None,
+                }));
             let (_endpoint, connection, authenticated) = QuicEndpointManager::connect(
                 &context,
                 server_addr,
@@ -2766,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn different_network_secrets_fall_back_without_transport_authentication() {
+    fn different_network_secrets_are_rejected() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_identity = crate::common::config::NetworkIdentity::new(
@@ -2796,243 +2339,44 @@ mod tests {
                     "test-network".to_owned(),
                     "client-secret".to_owned(),
                 ));
-            let (_endpoint, connection, authenticated) = QuicEndpointManager::connect(
+            let result = QuicEndpointManager::connect(
                 &context,
                 server_addr,
                 &[],
                 Arc::new(UnderlayPolicy::default()),
             )
-            .await
-            .unwrap();
-            let _server = server.await.unwrap();
+            .await;
 
-            assert!(!authenticated);
-            connection.close(0_u32.into(), b"test complete");
+            assert!(result.is_err());
+            server.abort();
         });
     }
 
-    struct ShrinkingDatagramIo {
-        max_size: AtomicUsize,
-        reject_first: AtomicBool,
+    struct CaptureDatagramIo {
+        max_size: usize,
         sent: Mutex<Vec<Bytes>>,
     }
 
-    struct FullDatagramIo {
-        sent: AtomicUsize,
-    }
-
-    struct FailSecondDatagramIo {
-        sent: AtomicUsize,
-    }
-
-    impl QuicDatagramIo for FullDatagramIo {
-        fn max_datagram_size(&self) -> Option<usize> {
-            Some(1200)
-        }
-
-        fn send_datagram(&self, _datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            self.sent.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn has_send_buffer_space(&self, _bytes: usize) -> bool {
-            false
-        }
-    }
+    struct ShrinkingDatagramIo;
 
     impl QuicDatagramIo for ShrinkingDatagramIo {
         fn max_datagram_size(&self) -> Option<usize> {
-            Some(self.max_size.load(Ordering::Relaxed))
-        }
-
-        fn send_datagram(&self, datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            if self.reject_first.swap(false, Ordering::Relaxed) {
-                self.max_size.store(600, Ordering::Relaxed);
-                return Err(quinn::SendDatagramError::TooLarge);
-            }
-            self.sent.lock().push(datagram);
-            Ok(())
-        }
-    }
-
-    impl QuicDatagramIo for FailSecondDatagramIo {
-        fn max_datagram_size(&self) -> Option<usize> {
-            Some(1200)
+            Some(1500)
         }
 
         fn send_datagram(&self, _datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
-            if self.sent.fetch_add(1, Ordering::Relaxed) == 1 {
-                return Err(quinn::SendDatagramError::TooLarge);
-            }
+            Err(quinn::SendDatagramError::TooLarge)
+        }
+    }
+
+    impl QuicDatagramIo for CaptureDatagramIo {
+        fn max_datagram_size(&self) -> Option<usize> {
+            Some(self.max_size)
+        }
+
+        fn send_datagram(&self, datagram: Bytes) -> Result<(), quinn::SendDatagramError> {
+            self.sent.lock().push(datagram);
             Ok(())
         }
-    }
-
-    #[test]
-    fn reliable_datagram_refragments_after_path_mtu_shrinks() {
-        let io = ShrinkingDatagramIo {
-            max_size: AtomicUsize::new(1200),
-            reject_first: AtomicBool::new(true),
-            sent: Mutex::new(Vec::new()),
-        };
-        let send = Mutex::new(SendState::default());
-        let metrics = QuicDatagramMetrics::default();
-        let expected = Bytes::from(vec![0x7d; 4096]);
-        send_frame_with_io(
-            &io,
-            &send,
-            &metrics,
-            None,
-            expected.clone(),
-            false,
-            DatagramSendTiming {
-                now: Instant::now(),
-                rto: Duration::from_millis(100),
-            },
-        )
-        .unwrap();
-
-        let sent = io.sent.lock().clone();
-        assert!(sent.len() > 1);
-        assert!(sent.iter().all(|datagram| datagram.len() <= 600));
-        let mut receiver = ReceiveState::default();
-        let mut completed = None;
-        for datagram in sent {
-            let DatagramMessage::Data(fragment) = decode_datagram(datagram).unwrap() else {
-                unreachable!()
-            };
-            if let ReceiveEvent::Complete { frame, .. } =
-                receiver.ingest(fragment, Instant::now()).unwrap()
-            {
-                completed = Some(frame);
-            }
-        }
-        assert_eq!(completed, Some(expected));
-    }
-
-    #[test]
-    fn reliable_datagram_applies_backpressure_before_quinn_evicts_old_frames() {
-        let io = FullDatagramIo {
-            sent: AtomicUsize::new(0),
-        };
-        let send = Mutex::new(SendState::default());
-        let metrics = QuicDatagramMetrics::default();
-        assert!(matches!(
-            send_frame_with_io(
-                &io,
-                &send,
-                &metrics,
-                None,
-                Bytes::from(vec![0x4a; 1500]),
-                false,
-                DatagramSendTiming {
-                    now: Instant::now(),
-                    rto: Duration::from_millis(100),
-                },
-            ),
-            Ok(DatagramSendOutcome::Dropped)
-        ));
-        assert_eq!(io.sent.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn critical_l2_frame_is_duplicated_immediately_with_the_same_frame_id() {
-        let io = ShrinkingDatagramIo {
-            max_size: AtomicUsize::new(1200),
-            reject_first: AtomicBool::new(false),
-            sent: Mutex::new(Vec::new()),
-        };
-        let send = Mutex::new(SendState::default());
-        let metrics = QuicDatagramMetrics::default();
-        send_frame_with_io(
-            &io,
-            &send,
-            &metrics,
-            None,
-            Bytes::from_static(b"critical-arp"),
-            true,
-            DatagramSendTiming {
-                now: Instant::now(),
-                rto: Duration::from_millis(100),
-            },
-        )
-        .unwrap();
-
-        let sent = io.sent.lock();
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[0], sent[1]);
-        assert_eq!(metrics.snapshot().critical_duplicates_sent, 1);
-    }
-
-    #[test]
-    fn failed_critical_duplicate_releases_pending_frame() {
-        let io = FailSecondDatagramIo {
-            sent: AtomicUsize::new(0),
-        };
-        let send = Mutex::new(SendState::default());
-        let metrics = QuicDatagramMetrics::default();
-        assert!(
-            send_frame_with_io(
-                &io,
-                &send,
-                &metrics,
-                None,
-                Bytes::from_static(b"critical-arp"),
-                true,
-                DatagramSendTiming {
-                    now: Instant::now(),
-                    rto: Duration::from_millis(100),
-                },
-            )
-            .is_err()
-        );
-        assert!(!send.lock().has_service_work());
-    }
-
-    #[test]
-    fn fragmented_ethernet_crosses_a_live_bbr_datagram_connection() {
-        RUNTIME.block_on(async {
-            let mut listener =
-                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
-            listener.listen().await.unwrap();
-            let remote = listener.local_url();
-            let (verified_tx, verified_rx) = tokio::sync::oneshot::channel();
-
-            let server = tokio::spawn(async move {
-                let tunnel = listener.accept().await.unwrap();
-                let (mut recv, mut send) = tunnel.split();
-                let packet = recv.next().await.unwrap().unwrap();
-                assert!(packet.is_lossy());
-                assert_eq!(
-                    packet.peer_manager_header().unwrap().packet_type,
-                    crate::tunnel::packet_def::PacketType::Ethernet as u8
-                );
-                send.send(packet).await.unwrap();
-                send.flush().await.unwrap();
-                let _ = verified_rx.await;
-            });
-
-            let mut connector = QuicTunnelConnector::new(remote, global_ctx());
-            let tunnel = connector.connect().await.unwrap();
-            let (mut recv, mut send) = tunnel.split();
-            let payload = (0..4096).map(|i| (i % 251) as u8).collect::<Vec<_>>();
-            let mut packet = ZCPacket::new_with_payload(&payload);
-            packet.fill_peer_manager_hdr(
-                11,
-                12,
-                crate::tunnel::packet_def::PacketType::Ethernet as u8,
-            );
-            send.send(packet).await.unwrap();
-            send.flush().await.unwrap();
-
-            let echoed = tokio::time::timeout(Duration::from_secs(2), recv.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            assert_eq!(echoed.payload(), payload);
-            let _ = verified_tx.send(());
-            server.await.unwrap();
-        });
     }
 }

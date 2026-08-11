@@ -950,7 +950,7 @@ pub mod tests {
         flags.disable_relay_quic = true;
         flags.need_p2p = true;
         flags.disable_p2p = true;
-        flags.port_mode = "tap".to_string();
+        flags.port_mode = "ethernet".to_string();
         global_ctx.set_flags(flags);
 
         let feature_flags = global_ctx.get_feature_flags();
@@ -967,12 +967,12 @@ pub mod tests {
         assert!(!feature_flags.ipv6_public_addr_provider);
 
         let mut flags = global_ctx.get_flags();
-        flags.port_mode = "l3".to_string();
+        flags.port_mode = "routed".to_string();
         global_ctx.set_flags(flags);
         assert!(!global_ctx.get_feature_flags().ethernet_input);
 
         let mut flags = global_ctx.get_flags();
-        flags.port_mode = "l2-tun".to_string();
+        flags.port_mode = "compatible-ethernet".to_string();
         global_ctx.set_flags(flags);
         assert!(global_ctx.get_feature_flags().ethernet_input);
     }

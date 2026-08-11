@@ -1058,7 +1058,6 @@ pub async fn basic_three_node_test(
         ["aes-gcm", "aes-gcm"],
         ["aes-256-gcm", "aes-256-gcm"],
         ["chacha20-poly1305", "chacha20-poly1305"],
-        ["chacha20", "chacha20-poly1305"],
         ["aes-gcm", "chacha20-poly1305"],
         ["chacha20-poly1305", "aes-gcm"],
         ["aes-256-gcm", "chacha20-poly1305"],

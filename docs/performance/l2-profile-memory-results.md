@@ -38,8 +38,6 @@ The `port_mode` field now accepts these profile names:
 - `ethernet` selects native TAP and complete Ethernet behavior.
 - `compatible-ethernet` selects an IP-only edge on the Ethernet overlay.
 
-The existing `l3`, `tap`, and `l2-tun` names remain valid.
-
 Linux and FreeBSD use native Ethernet by default.
 Other systems use compatible Ethernet by default.
 Select `routed` to use the L3 path.

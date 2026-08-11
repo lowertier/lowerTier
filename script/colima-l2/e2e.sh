@@ -259,20 +259,20 @@ run_suite() {
         wait_for_interface "${node}"
     done
 
-    if [[ "${mode}" == "tap" ]]; then
+    if [[ "${mode}" == "ethernet" ]]; then
         "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tap'
     fi
 
     assert_stable_ping "${nodes[0]}" "${subnet}.3"
     assert_stable_ping "${nodes[2]}" "${subnet}.1"
 
-    if [[ "${mode}" == "tap" ]]; then
+    if [[ "${mode}" == "ethernet" ]]; then
         "${docker_cmd[@]}" exec -d "${nodes[2]}" iperf3 -s -1 -p 5201
         "${docker_cmd[@]}" exec "${nodes[0]}" iperf3 -c "${subnet}.3" -p 5201 -t 3
         run_tap_frame_matrix
     fi
 
-    if [[ "${mode}" == "l2-tun" ]]; then
+    if [[ "${mode}" == "compatible-ethernet" ]]; then
         "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tun'
         "${docker_cmd[@]}" exec -d "${nodes[2]}" iperf3 -s -1 -p 5202
         "${docker_cmd[@]}" exec "${nodes[0]}" iperf3 -c "${subnet}.3" -p 5202 -t 3
@@ -283,8 +283,8 @@ run_mixed_suite() {
     cleanup
     "${docker_cmd[@]}" network create "${network_name}" >/dev/null
 
-    start_node "${nodes[0]}" l2-tun 10.80.0.1
-    start_node "${nodes[1]}" tap 10.80.0.2 "udp://${nodes[0]}:11010"
+    start_node "${nodes[0]}" compatible-ethernet 10.80.0.1
+    start_node "${nodes[1]}" ethernet 10.80.0.2 "udp://${nodes[0]}:11010"
 
     wait_for_interface "${nodes[0]}"
     wait_for_interface "${nodes[1]}"
@@ -304,13 +304,13 @@ if [[ "${SKIP_IMAGE_BUILD:-0}" != "1" ]]; then
 fi
 
 case "${LOWTIER_L2_TEST_SCOPE:-all}" in
-    tap)
-        run_suite tap 10.77.0
+    ethernet)
+        run_suite ethernet 10.77.0
         ;;
     all)
-        run_suite tap 10.77.0
-        run_suite l3 10.78.0
-        run_suite l2-tun 10.79.0
+        run_suite ethernet 10.77.0
+        run_suite routed 10.78.0
+        run_suite compatible-ethernet 10.79.0
         run_mixed_suite
         ;;
     *)

@@ -270,9 +270,8 @@ l2_fdb_capacity = 16384
 l2_fdb_age_seconds = 300
 l2_flood_bps = 67108864
 quic_congestion = "bbr"
-quic_datagram_fec_parity = 2
-quic_critical_l2_duplication = true
-quic_datagram_alternate_path_parity = true
+quic_datagram_fec_parity = 0
+quic_datagram_alternate_path_parity = false
 ```
 
 Validate the file before startup.
@@ -555,7 +554,6 @@ The table includes every supported flag.
 | `disable_sym_hole_punching` | `false` | Disable symmetric-NAT UDP punching. | `--disable-sym-hole-punching` |
 | `tld_dns_zone` | `et.net.` | Set the Magic DNS suffix. | `--tld-dns-zone` |
 | `p2p_only` | `false` | Send data only through established direct links. | `--p2p-only` |
-| `quic_listen_port` | deprecated | Keep only for old configuration compatibility. | Use `--listeners quic://...` |
 | `disable_tcp_hole_punching` | `false` | Disable TCP NAT hole punching. | `--disable-tcp-hole-punching` |
 | `disable_relay_quic` | `false` | Reject relayed QUIC packets from the local network. | `--disable-relay-quic` |
 | `enable_relay_foreign_network_quic` | `false` | Relay QUIC packets for foreign networks. | `--enable-relay-foreign-network-quic` |
@@ -577,9 +575,8 @@ The table includes every supported flag.
 | `l2_fdb_capacity` | `16384` | Limit learned source MAC entries. | `--l2-fdb-capacity` |
 | `l2_fdb_age_seconds` | `300` | Expire idle MAC entries after this interval. | `--l2-fdb-age-seconds` |
 | `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
-| `quic_datagram_fec_parity` | `2` | Select `0` off, `2` for 16+2, or `3` for 16+3 ETQ4 FEC. | `--quic-datagram-fec-parity` |
-| `quic_critical_l2_duplication` | `true` | Duplicate critical ARP, DHCP, and neighbor-discovery frames. | `--quic-critical-l2-duplication` |
-| `quic_datagram_alternate_path_parity` | `true` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
+| `quic_datagram_fec_parity` | `0` | Select `0` off, `2` for 16+2, or `3` for 16+3 alternate-path FEC. | `--quic-datagram-fec-parity` |
+| `quic_datagram_alternate_path_parity` | `false` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
 
 `auto` selects native Ethernet on Linux.
 `auto` selects routed mode on other systems.
@@ -827,17 +824,21 @@ quic_brutal_send_bps = 50000000
 quic_brutal_loss_compensation = true
 quic_initial_receive_window = 8388608
 quic_receive_window = 33554432
-quic_datagram_fec_parity = 2
-quic_critical_l2_duplication = true
-quic_datagram_alternate_path_parity = true
+quic_datagram_fec_parity = 0
+quic_datagram_alternate_path_parity = false
 ```
 
 Set the Brutal rate at or below measured available capacity.
 An excessive value increases queueing, loss, and wasted traffic.
 
-ETQ4 parity `2` uses a 16+2 profile.
+Alternate-path parity `2` uses a 16+2 profile.
 Parity `3` uses the higher-overhead 16+3 profile.
 Parity `0` disables FEC.
+
+Normal Ethernet frames use plain QUIC DATAGRAM records.
+LowTier does not retransmit these records.
+Inner TCP handles lost TCP-bearing Ethernet frames.
+ARP, DHCP, and IPv6 neighbor-discovery frames use the reliable QUIC stream.
 
 Alternate-path parity requires two authenticated QUIC paths with distinct IP surfaces.
 The primary frame stays on its selected path.
@@ -942,16 +943,6 @@ lowertier-cli COMMAND --help
 ```
 
 Generated help reflects the features compiled into the current binary.
-
-## Compatibility names
-
-LowTier accepts both descriptive and legacy mode names.
-
-| Descriptive name | Legacy name |
-| --- | --- |
-| `routed` | `l3` |
-| `ethernet` | `tap` |
-| `compatible-ethernet` | `l2-tun` |
 
 ## License
 

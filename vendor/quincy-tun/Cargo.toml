@@ -1,0 +1,76 @@
+[package]
+name = "quincy-tun"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["quincy-rs", "tun-rs contributors"]
+license = "Apache-2.0"
+readme = "README.md"
+description = "Cross-platform async TUN library for Quincy"
+homepage = "https://github.com/quincy-rs/quincy-tun"
+repository = "https://github.com/quincy-rs/quincy-tun"
+keywords = ["tun", "tunnel", "vpn"]
+categories = ["asynchronous", "network-programming"]
+documentation = "https://docs.rs/quincy-tun"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+bytes = { version = "1" }
+log = "0.4"
+blocking = "1.6"
+tokio = { version = "1.49", features = ["net", "macros", "io-util", "rt"] }
+
+ipnet = "2"
+byteorder = "1.5.0"
+getifaddrs = "0.6.0"
+libc = { version = "0.2", features = ["extra_traits"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "android", target_os = "freebsd"))'.dependencies]
+nix = { version = "0.31", features = ["ioctl", "net"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+netconfig-rs = "0.1.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+encoding_rs = "0.8.35"
+scopeguard = "1.2.0"
+winreg = "0.56"
+widestring = "1.0.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Com",
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Devices_Properties",
+    "Win32_System_SystemInformation",
+] }
+libloading = "0.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+route_manager = "0.2.9"
+
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-linux-android",
+    "aarch64-apple-ios",
+    "x86_64-apple-ios",
+    "x86_64-unknown-freebsd",
+]

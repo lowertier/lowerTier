@@ -81,7 +81,7 @@ capture_interface_counters() {
 
 mkdir -p "$result_dir"
 mkdir -p "$result_dir/iperf" "$result_dir/loaded-latency" "$result_dir/profiles" "$result_dir/resources"
-perf_write_metadata "$result_dir" "native-macos-l2-tun"
+perf_write_metadata "$result_dir" "native-macos-compatible-ethernet"
 printf 'colima_profile=%s\ndocker_context=%s\nparallel_streams=%s\nencryption_algorithm=%s\nmtu=%s\nruntime_env=%s\nprofile_duration=%s\n' \
     "$colima_profile" "$docker_context" "$parallel_streams" "$encryption_algorithm" "$mtu" "$runtime_env" "$profile_duration" \
     >>"$result_dir/environment.txt"
@@ -101,7 +101,7 @@ docker --context "$docker_context" run -d \
     --network-secret macos-tun-bench-secret \
     --encryption-algorithm "$encryption_algorithm" \
     --mtu "$mtu" \
-    --port-mode l2-tun \
+    --port-mode compatible-ethernet \
     --ipv4 10.91.0.2/24 \
     --listeners udp://0.0.0.0:11010 \
     --default-protocol udp \
@@ -115,7 +115,7 @@ docker --context "$docker_context" run -d \
         --network-secret macos-tun-bench-secret \
         --encryption-algorithm "$encryption_algorithm" \
         --mtu "$mtu" \
-        --port-mode l2-tun \
+        --port-mode compatible-ethernet \
         --ipv4 10.91.0.1/24 \
         --no-listener \
         --peers "udp://127.0.0.1:${host_udp_port}" \
@@ -150,7 +150,7 @@ for direction in forward reverse; do
         iperf_json="$result_dir/iperf/${direction}-r${run}.json"
         iperf3 -c 10.91.0.2 --connect-timeout 3000 -t "$duration" -O 2 \
             -P "$parallel_streams" $reverse_flag -J >"$iperf_json"
-        printf 'l2-tun\t%s\n' "$(perf_parse_iperf_json "$direction" "$run" "$iperf_json")" \
+        printf 'compatible-ethernet\t%s\n' "$(perf_parse_iperf_json "$direction" "$run" "$iperf_json")" \
             | tee -a "$results"
     done
 done

@@ -111,7 +111,7 @@ core_clap:
     en: "disable encryption for peers communication, default is false, must be same with peers"
     zh-CN: "禁用对等节点通信的加密，默认为false，必须与对等节点相同"
   encryption_algorithm:
-    en: "authenticated encryption algorithm for peer traffic. Default: chacha20-poly1305. Also supported: aes-gcm, aes-256-gcm; chacha20 is a legacy alias"
+    en: "authenticated encryption algorithm for peer traffic. Default: chacha20-poly1305. Also supported: aes-gcm and aes-256-gcm"
     zh-CN: "对等流量使用的认证加密算法。默认：chacha20-poly1305。还支持：aes-gcm、aes-256-gcm；chacha20 是兼容旧配置的别名"
   multi_thread:
     en: "use multi-thread runtime, default is single-thread"
@@ -251,11 +251,8 @@ core_clap:
     en: "QUIC connection receive window in bytes"
     zh-CN: "QUIC 连接接收窗口，单位为字节"
   quic_datagram_fec_parity:
-    en: "ETQ4 SIMD FEC parity symbols: 0 disables, 2 selects 16+2, 3 selects 16+3"
-    zh-CN: "ETQ4 SIMD FEC 校验符号数：0 表示关闭，2 表示 16+2，3 表示 16+3"
-  quic_critical_l2_duplication:
-    en: "immediately duplicate critical ARP, DHCP, and IPv6 neighbor discovery frames"
-    zh-CN: "立即复制关键的 ARP、DHCP 和 IPv6 邻居发现帧"
+    en: "Alternate-path SIMD FEC symbols: 0 disables, 2 selects 16+2, 3 selects 16+3"
+    zh-CN: "备用路径 SIMD FEC 校验符号数：0 表示关闭，2 表示 16+2，3 表示 16+3"
   quic_datagram_alternate_path_parity:
     en: "send authenticated L2 FEC parity on a second QUIC path with a distinct local or remote IP surface"
     zh-CN: "在具有不同本地或远端 IP 表面的第二条 QUIC 路径上发送经过认证的 L2 FEC 校验包"

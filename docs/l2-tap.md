@@ -17,8 +17,6 @@ LowTier provides three network profile names through `port_mode`:
 - `ethernet` requires native TAP and provides complete Ethernet behavior.
 - `compatible-ethernet` selects an IP-only TUN edge with an Ethernet overlay.
 
-The existing `l3`, `tap`, and `l2-tun` names remain valid aliases.
-
 Linux and FreeBSD use native Ethernet by default.
 Other systems use compatible Ethernet by default.
 Select `routed` to use the L3 path.

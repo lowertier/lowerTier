@@ -1,109 +1,29 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, ensure};
 use bytes::{Bytes, BytesMut};
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 
-use crate::tunnel::{
-    packet_def::{
-        COMPRESSOR_TAIL_SIZE, PEER_MANAGER_HEADER_SIZE, PacketType, StandardAeadTail, ZCPacket,
-        ZCPacketType,
-    },
-    quic::fec::{encode_block, recover_block_indexed},
+use crate::tunnel::packet_def::{
+    COMPRESSOR_TAIL_SIZE, PEER_MANAGER_HEADER_SIZE, PacketType, StandardAeadTail, ZCPacket,
+    ZCPacketType,
 };
 
-const MAGIC: &[u8; 4] = b"EAP1";
 const SOURCE_KIND: u8 = 1;
 const PARITY_KIND: u8 = 2;
-const SOURCE_HEADER_LEN: usize = 14;
-const PARITY_HEADER_LEN: usize = 18;
+const SOURCE_HEADER_LEN: usize = 10;
+const PARITY_HEADER_LEN: usize = 14;
 const SOURCE_TARGET: usize = 16;
+const MAX_SOURCE_BYTES: usize = u16::MAX as usize;
 const MAX_BLOCKS: usize = 4096;
 const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_COMPLETED_BLOCKS: usize = 65_536;
 const BLOCK_TTL: Duration = Duration::from_secs(5);
 const COMPLETED_TTL: Duration = Duration::from_secs(10);
-const RELAXED: Ordering = Ordering::Relaxed;
-
-#[derive(Default)]
-pub(crate) struct AlternateFecMetrics {
-    source_records: AtomicU64,
-    source_bytes: AtomicU64,
-    parity_blocks_sent: AtomicU64,
-    parity_records_sent: AtomicU64,
-    parity_bytes_sent: AtomicU64,
-    parity_send_failures: AtomicU64,
-    parity_blocks_skipped_no_path: AtomicU64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct AlternateFecMetricsSnapshot {
-    pub source_records: u64,
-    pub source_bytes: u64,
-    pub parity_blocks_sent: u64,
-    pub parity_records_sent: u64,
-    pub parity_bytes_sent: u64,
-    pub parity_send_failures: u64,
-    pub parity_blocks_skipped_no_path: u64,
-}
-
-impl AlternateFecMetrics {
-    pub const fn tsv_header() -> &'static str {
-        "source_records\tsource_bytes\tparity_blocks_sent\tparity_records_sent\tparity_bytes_sent\tparity_send_failures\tparity_blocks_skipped_no_path"
-    }
-
-    pub fn record_source(&self, bytes: usize) {
-        self.record_sources(1, bytes);
-    }
-
-    pub fn record_sources(&self, records: usize, bytes: usize) {
-        self.source_records.fetch_add(records as u64, RELAXED);
-        self.source_bytes.fetch_add(bytes as u64, RELAXED);
-    }
-
-    pub fn record_parity_sent(&self, records: usize, bytes: usize) {
-        self.parity_blocks_sent.fetch_add(1, RELAXED);
-        self.parity_records_sent.fetch_add(records as u64, RELAXED);
-        self.parity_bytes_sent.fetch_add(bytes as u64, RELAXED);
-    }
-
-    pub fn record_parity_send_failure(&self) {
-        self.parity_send_failures.fetch_add(1, RELAXED);
-    }
-
-    pub fn record_parity_skipped_no_path(&self) {
-        self.parity_blocks_skipped_no_path.fetch_add(1, RELAXED);
-    }
-
-    pub fn snapshot(&self) -> AlternateFecMetricsSnapshot {
-        AlternateFecMetricsSnapshot {
-            source_records: self.source_records.load(RELAXED),
-            source_bytes: self.source_bytes.load(RELAXED),
-            parity_blocks_sent: self.parity_blocks_sent.load(RELAXED),
-            parity_records_sent: self.parity_records_sent.load(RELAXED),
-            parity_bytes_sent: self.parity_bytes_sent.load(RELAXED),
-            parity_send_failures: self.parity_send_failures.load(RELAXED),
-            parity_blocks_skipped_no_path: self.parity_blocks_skipped_no_path.load(RELAXED),
-        }
-    }
-
-    pub fn tsv_row(&self) -> String {
-        let snapshot = self.snapshot();
-        format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            snapshot.source_records,
-            snapshot.source_bytes,
-            snapshot.parity_blocks_sent,
-            snapshot.parity_records_sent,
-            snapshot.parity_bytes_sent,
-            snapshot.parity_send_failures,
-            snapshot.parity_blocks_skipped_no_path,
-        )
-    }
-}
+pub(crate) const FEC_FLUSH_DELAY: Duration = Duration::from_millis(40);
 
 #[derive(Debug)]
 pub(crate) struct CompletedAlternateFecBlock {
@@ -180,6 +100,10 @@ impl AlternateFecEncoder {
         self.flush().map(Some)
     }
 
+    pub fn next_flush_at(&self) -> Option<Instant> {
+        self.started_at.map(|started| started + self.flush_delay)
+    }
+
     fn flush(&mut self) -> anyhow::Result<CompletedAlternateFecBlock> {
         let source_count = self.sources.len();
         let parity = encode_block(&self.sources, self.parity_count)?
@@ -223,7 +147,6 @@ fn encode_source(block_id: u64, source_index: usize, source: Bytes) -> anyhow::R
         "alternate FEC source index is invalid"
     );
     let mut record = Vec::with_capacity(SOURCE_HEADER_LEN + source.len());
-    record.extend_from_slice(MAGIC);
     record.push(SOURCE_KIND);
     record.extend_from_slice(&block_id.to_be_bytes());
     record.push(source_index as u8);
@@ -250,7 +173,6 @@ fn encode_parity(
         "alternate FEC parity is too large"
     );
     let mut record = Vec::with_capacity(PARITY_HEADER_LEN + shard.len());
-    record.extend_from_slice(MAGIC);
     record.push(PARITY_KIND);
     record.extend_from_slice(&block_id.to_be_bytes());
     record.push(source_count as u8);
@@ -266,12 +188,11 @@ fn decode_record(record: Bytes) -> anyhow::Result<AlternateFecRecord> {
         record.len() >= SOURCE_HEADER_LEN,
         "alternate FEC record is too short"
     );
-    ensure!(&record[..4] == MAGIC, "alternate FEC magic mismatch");
-    let block_id = u64::from_be_bytes(record[5..13].try_into().unwrap());
+    let block_id = u64::from_be_bytes(record[1..9].try_into().unwrap());
     ensure!(block_id != 0, "alternate FEC block ID is zero");
-    match record[4] {
+    match record[0] {
         SOURCE_KIND => {
-            let source_index = usize::from(record[13]);
+            let source_index = usize::from(record[9]);
             ensure!(
                 source_index < SOURCE_TARGET,
                 "invalid alternate FEC source index"
@@ -291,10 +212,10 @@ fn decode_record(record: Bytes) -> anyhow::Result<AlternateFecRecord> {
                 record.len() >= PARITY_HEADER_LEN,
                 "alternate FEC parity is too short"
             );
-            let source_count = usize::from(record[13]);
-            let parity_count = usize::from(record[14]);
-            let parity_index = usize::from(record[15]);
-            let shard_len = usize::from(u16::from_be_bytes(record[16..18].try_into().unwrap()));
+            let source_count = usize::from(record[9]);
+            let parity_count = usize::from(record[10]);
+            let parity_index = usize::from(record[11]);
+            let shard_len = usize::from(u16::from_be_bytes(record[12..14].try_into().unwrap()));
             ensure!(
                 (1..=SOURCE_TARGET).contains(&source_count),
                 "invalid source count"
@@ -315,6 +236,101 @@ fn decode_record(record: Bytes) -> anyhow::Result<AlternateFecRecord> {
         }
         _ => anyhow::bail!("unknown alternate FEC record kind"),
     }
+}
+
+fn shard_bytes(sources: &[Bytes]) -> anyhow::Result<usize> {
+    let longest = sources.iter().map(Bytes::len).max().unwrap_or(0);
+    ensure!(!sources.is_empty(), "FEC block has no source symbols");
+    ensure!(
+        longest <= MAX_SOURCE_BYTES,
+        "FEC source symbol is too large"
+    );
+    Ok((longest + 2).next_multiple_of(2))
+}
+
+fn padded_source(source: &Bytes, shard_bytes: usize) -> anyhow::Result<Vec<u8>> {
+    ensure!(
+        source.len() <= MAX_SOURCE_BYTES && source.len() + 2 <= shard_bytes,
+        "FEC source symbol does not fit the announced shard size"
+    );
+    let mut shard = vec![0_u8; shard_bytes];
+    shard[..2].copy_from_slice(&(source.len() as u16).to_be_bytes());
+    shard[2..2 + source.len()].copy_from_slice(source);
+    Ok(shard)
+}
+
+fn encode_block(sources: &[Bytes], parity_count: usize) -> anyhow::Result<Vec<Bytes>> {
+    ensure!(
+        (1..=SOURCE_TARGET).contains(&sources.len()),
+        "invalid FEC source count"
+    );
+    ensure!((1..=3).contains(&parity_count), "invalid FEC parity count");
+    let shard_bytes = shard_bytes(sources)?;
+    let mut encoder = ReedSolomonEncoder::new(sources.len(), parity_count, shard_bytes)
+        .context("create SIMD Reed-Solomon encoder")?;
+    for source in sources {
+        encoder
+            .add_original_shard(padded_source(source, shard_bytes)?)
+            .context("add systematic FEC source shard")?;
+    }
+    Ok(encoder
+        .encode()
+        .context("encode SIMD Reed-Solomon parity")?
+        .recovery_iter()
+        .map(Bytes::copy_from_slice)
+        .collect())
+}
+
+fn recover_block_indexed(
+    sources: &[Option<Bytes>],
+    parity: &[(usize, Bytes)],
+    parity_count: usize,
+) -> anyhow::Result<Vec<(usize, Bytes)>> {
+    ensure!(
+        (1..=SOURCE_TARGET).contains(&sources.len()),
+        "invalid FEC source count"
+    );
+    ensure!((1..=3).contains(&parity_count), "invalid FEC parity count");
+    let shard_bytes = parity
+        .first()
+        .map(|(_, shard)| shard.len())
+        .context("FEC recovery has no parity symbols")?;
+    ensure!(
+        shard_bytes >= 2 && shard_bytes.is_multiple_of(2),
+        "invalid FEC shard size"
+    );
+    ensure!(
+        parity.iter().all(|(_, shard)| shard.len() == shard_bytes),
+        "FEC parity shard sizes differ"
+    );
+
+    let mut decoder = ReedSolomonDecoder::new(sources.len(), parity_count, shard_bytes)
+        .context("create SIMD Reed-Solomon decoder")?;
+    for (index, source) in sources.iter().enumerate() {
+        if let Some(source) = source {
+            decoder
+                .add_original_shard(index, padded_source(source, shard_bytes)?)
+                .context("add received systematic FEC source")?;
+        }
+    }
+    for (index, shard) in parity {
+        ensure!(*index < parity_count, "FEC parity index is out of range");
+        decoder
+            .add_recovery_shard(*index, shard)
+            .context("add received FEC parity")?;
+    }
+
+    let result = decoder.decode().context("recover missing FEC sources")?;
+    let mut recovered = Vec::new();
+    for (index, shard) in result.restored_original_iter() {
+        let encoded_len = usize::from(u16::from_be_bytes([shard[0], shard[1]]));
+        ensure!(
+            encoded_len > 0 && encoded_len + 2 <= shard.len(),
+            "recovered FEC source has an invalid encoded length"
+        );
+        recovered.push((index, Bytes::copy_from_slice(&shard[2..2 + encoded_len])));
+    }
+    Ok(recovered)
 }
 
 struct ReceiveBlock {
@@ -541,29 +557,42 @@ impl AlternateFecDecoder {
     }
 }
 
-pub(crate) fn wrap_source_packet(
-    original: ZCPacket,
-    source_record: Bytes,
-) -> anyhow::Result<ZCPacket> {
-    let header = original
+#[derive(Clone, Copy)]
+pub(crate) struct AlternateFecSourceMetadata {
+    from_peer_id: u32,
+    to_peer_id: u32,
+    flow_shard: Option<u16>,
+    critical: bool,
+}
+
+pub(crate) fn source_metadata(packet: &ZCPacket) -> anyhow::Result<AlternateFecSourceMetadata> {
+    let header = packet
         .peer_manager_header()
         .context("alternate FEC source has no peer header")?;
-    let from_peer_id = header.from_peer_id.get();
-    let to_peer_id = header.to_peer_id.get();
-    let flow_shard = header.flow_shard();
-    let critical = header.is_critical_l2_duplicate();
+    Ok(AlternateFecSourceMetadata {
+        from_peer_id: header.from_peer_id.get(),
+        to_peer_id: header.to_peer_id.get(),
+        flow_shard: header.flow_shard(),
+        critical: header.is_critical_l2_control(),
+    })
+}
+
+pub(crate) fn wrap_source_packet(
+    metadata: AlternateFecSourceMetadata,
+    source_record: Bytes,
+) -> ZCPacket {
     let mut wrapped = ZCPacket::new_with_payload(&source_record);
     wrapped.fill_peer_manager_hdr(
-        from_peer_id,
-        to_peer_id,
+        metadata.from_peer_id,
+        metadata.to_peer_id,
         PacketType::AlternateFecSource as u8,
     );
     let wrapped_header = wrapped.mut_peer_manager_header().unwrap();
-    if let Some(flow_shard) = flow_shard {
+    if let Some(flow_shard) = metadata.flow_shard {
         wrapped_header.set_flow_shard(flow_shard);
     }
-    wrapped_header.set_critical_l2_duplicate(critical);
-    Ok(wrapped)
+    wrapped_header.set_critical_l2_control(metadata.critical);
+    wrapped
 }
 
 pub(crate) fn parity_packets(
@@ -603,7 +632,7 @@ pub(crate) fn decode_alternate_fec_packet(
         "packet is not an alternate FEC record"
     );
     decoder
-        .ingest(Bytes::copy_from_slice(packet.payload()), now)?
+        .ingest(packet.payload_bytes().freeze(), now)?
         .datagrams
         .into_iter()
         .map(|datagram| {
@@ -611,10 +640,10 @@ pub(crate) fn decode_alternate_fec_packet(
                 datagram.len() >= PEER_MANAGER_HEADER_SIZE,
                 "recovered alternate FEC packet is too short"
             );
-            let packet = ZCPacket::new_from_buf(
-                BytesMut::from(datagram.as_ref()),
-                ZCPacketType::DummyTunnel,
-            );
+            let buffer = datagram
+                .try_into_mut()
+                .unwrap_or_else(|shared| BytesMut::from(shared.as_ref()));
+            let packet = ZCPacket::new_from_buf(buffer, ZCPacketType::DummyTunnel);
             let header = packet
                 .peer_manager_header()
                 .context("recovered alternate FEC packet has no peer header")?;
@@ -655,8 +684,8 @@ mod tests {
     use bytes::Bytes;
 
     use super::{
-        AlternateFecDecoder, AlternateFecEncoder, AlternateFecMetrics, decode_alternate_fec_packet,
-        parity_packets, wrap_source_packet,
+        AlternateFecDecoder, AlternateFecEncoder, SOURCE_HEADER_LEN, SOURCE_KIND,
+        decode_alternate_fec_packet, parity_packets, source_metadata, wrap_source_packet,
     };
     use crate::tunnel::packet_def::{PacketType, StandardAeadTail, ZCPacket};
 
@@ -664,21 +693,6 @@ mod tests {
         (0..count)
             .map(|index| Bytes::from(vec![index as u8; 96 + index * 11]))
             .collect()
-    }
-
-    #[test]
-    fn alternate_fec_metrics_have_a_stable_benchmark_export() {
-        let metrics = AlternateFecMetrics::default();
-        metrics.record_source(1200);
-        metrics.record_parity_sent(2, 2428);
-        metrics.record_parity_send_failure();
-        metrics.record_parity_skipped_no_path();
-
-        assert_eq!(
-            AlternateFecMetrics::tsv_header(),
-            "source_records\tsource_bytes\tparity_blocks_sent\tparity_records_sent\tparity_bytes_sent\tparity_send_failures\tparity_blocks_skipped_no_path"
-        );
-        assert_eq!(metrics.tsv_row(), "1\t1200\t1\t2\t2428\t1\t1");
     }
 
     #[test]
@@ -767,6 +781,24 @@ mod tests {
     }
 
     #[test]
+    fn encoder_exposes_a_deadline_only_for_pending_data() {
+        let now = Instant::now();
+        let delay = Duration::from_millis(40);
+        let mut encoder = AlternateFecEncoder::new(2, delay).unwrap();
+
+        assert_eq!(encoder.next_flush_at(), None);
+        let first = encoder.push(Bytes::from_static(b"first"), now).unwrap();
+        assert_eq!(first.source.len(), SOURCE_HEADER_LEN + 5);
+        assert_eq!(first.source[0], SOURCE_KIND);
+        assert_eq!(encoder.next_flush_at(), Some(now + delay));
+
+        for _ in 1..16 {
+            encoder.push(Bytes::from_static(b"next"), now).unwrap();
+        }
+        assert_eq!(encoder.next_flush_at(), None);
+    }
+
+    #[test]
     fn packet_wrapper_round_trip_preserves_header_payload_and_markers() {
         let now = Instant::now();
         let mut original = ZCPacket::new_with_payload(b"ethernet-frame");
@@ -778,21 +810,21 @@ mod tests {
         original
             .mut_peer_manager_header()
             .unwrap()
-            .set_critical_l2_duplicate(true);
+            .set_critical_l2_control(true);
         let expected = original.tunnel_payload().to_vec();
 
         let mut encoder = AlternateFecEncoder::new(2, Duration::from_millis(40)).unwrap();
         let encoded = encoder
             .push(Bytes::copy_from_slice(original.tunnel_payload()), now)
             .unwrap();
-        let wrapped = wrap_source_packet(original, encoded.source).unwrap();
+        let wrapped = wrap_source_packet(source_metadata(&original).unwrap(), encoded.source);
         let wrapped_header = wrapped.peer_manager_header().unwrap();
         assert_eq!(
             wrapped_header.packet_type,
             PacketType::AlternateFecSource as u8
         );
         assert_eq!(wrapped_header.flow_shard(), Some(17));
-        assert!(wrapped_header.is_critical_l2_duplicate());
+        assert!(wrapped_header.is_critical_l2_control());
 
         let mut decoder = AlternateFecDecoder::default();
         let recovered = decode_alternate_fec_packet(wrapped, &mut decoder, now).unwrap();
@@ -818,7 +850,7 @@ mod tests {
         let encoded = encoder
             .push(Bytes::copy_from_slice(original.tunnel_payload()), now)
             .unwrap();
-        let wrapped = wrap_source_packet(original, encoded.source).unwrap();
+        let wrapped = wrap_source_packet(source_metadata(&original).unwrap(), encoded.source);
 
         let recovered =
             decode_alternate_fec_packet(wrapped, &mut AlternateFecDecoder::default(), now).unwrap();
@@ -854,7 +886,7 @@ mod tests {
             .push(Bytes::copy_from_slice(original.tunnel_payload()), now)
             .unwrap()
             .source;
-        let mut wrapped = wrap_source_packet(original, source).unwrap();
+        let mut wrapped = wrap_source_packet(source_metadata(&original).unwrap(), source);
         wrapped
             .mut_peer_manager_header()
             .unwrap()

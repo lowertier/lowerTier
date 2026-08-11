@@ -1010,9 +1010,6 @@ impl NetworkConfig {
         if let Some(quic_datagram_fec_parity) = self.quic_datagram_fec_parity {
             flags.quic_datagram_fec_parity = quic_datagram_fec_parity;
         }
-        if let Some(quic_critical_l2_duplication) = self.quic_critical_l2_duplication {
-            flags.quic_critical_l2_duplication = quic_critical_l2_duplication;
-        }
         if let Some(quic_datagram_alternate_path_parity) = self.quic_datagram_alternate_path_parity
         {
             flags.quic_datagram_alternate_path_parity = quic_datagram_alternate_path_parity;
@@ -1280,9 +1277,6 @@ impl NetworkConfig {
         result.quic_datagram_fec_parity = (flags.quic_datagram_fec_parity
             != default_flags.quic_datagram_fec_parity)
             .then_some(flags.quic_datagram_fec_parity);
-        result.quic_critical_l2_duplication = (flags.quic_critical_l2_duplication
-            != default_flags.quic_critical_l2_duplication)
-            .then_some(flags.quic_critical_l2_duplication);
         result.quic_datagram_alternate_path_parity = (flags.quic_datagram_alternate_path_parity
             != default_flags.quic_datagram_alternate_path_parity)
             .then_some(flags.quic_datagram_alternate_path_parity);
@@ -1362,9 +1356,8 @@ mod tests {
         flags.quic_initial_receive_window = 8 * 1024 * 1024;
         flags.quic_receive_window = 32 * 1024 * 1024;
         flags.quic_datagram_fec_parity = 3;
-        flags.quic_critical_l2_duplication = false;
         flags.quic_datagram_alternate_path_parity = false;
-        flags.port_mode = "tap".into();
+        flags.port_mode = "ethernet".into();
         flags.l2_fdb_capacity = 32_768;
         flags.l2_fdb_age_seconds = 600;
         flags.l2_flood_bps = 128 * 1024 * 1024;
@@ -1378,15 +1371,11 @@ mod tests {
         assert_eq!(network_config.quic_congestion.as_deref(), Some("brutal"));
         assert_eq!(network_config.quic_brutal_send_bps, Some(100_000_000));
         assert_eq!(network_config.quic_datagram_fec_parity, Some(3));
-        assert_eq!(network_config.quic_critical_l2_duplication, Some(false));
-        assert_eq!(
-            network_config.quic_datagram_alternate_path_parity,
-            Some(false)
-        );
+        assert_eq!(network_config.quic_datagram_alternate_path_parity, None);
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         assert_eq!(network_config.port_mode, None);
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        assert_eq!(network_config.port_mode.as_deref(), Some("tap"));
+        assert_eq!(network_config.port_mode.as_deref(), Some("ethernet"));
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
         assert_eq!(network_config.l2_fdb_age_seconds, Some(600));
         assert_eq!(network_config.l2_flood_bps, Some(128 * 1024 * 1024));
@@ -1421,10 +1410,6 @@ mod tests {
         assert_eq!(
             regenerated_flags.quic_datagram_fec_parity,
             flags.quic_datagram_fec_parity
-        );
-        assert_eq!(
-            regenerated_flags.quic_critical_l2_duplication,
-            flags.quic_critical_l2_duplication
         );
         assert_eq!(
             regenerated_flags.quic_datagram_alternate_path_parity,

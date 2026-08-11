@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "lowertier",
+    "vendor/quincy-tun",
 ]
 default-members = ["lowertier"]
 exclude = [
@@ -15,6 +16,9 @@ exclude = [
     "vendor/windivert-rust/windivert",
     "vendor/windivert-rust/windivert-sys",
 ]
+
+[patch.crates-io]
+quincy-tun = { path = "vendor/quincy-tun" }
 
 [workspace.package]
 edition = "2024"

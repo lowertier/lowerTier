@@ -1,8 +1,5 @@
 # 10GbE-class dataplane results
 
-The high-RTT loss-recovery matrix and ETQ4 counter reconciliation are recorded
-separately in [ETQ4 L2 loss-resilience results](l2-loss-resilience-results.md).
-
 Measured on 2026-07-18 on an Apple Silicon macOS host. The VZ run used the default Colima
 profile with 16 virtual CPUs and 128 GiB RAM. The native macOS run used an LowTier process on
 the host and an aarch64 QEMU Colima peer reached through UDP port forwarding.
@@ -47,9 +44,9 @@ primary macOS metric.
 - Fresh STUN observations are gathered for every punch attempt through the persistent data socket.
   Strict deny filtering is applied before STUN handling, candidate advertisement, triggered checks,
   or path-cache reuse, so a denied interface, address, or subnet cannot carry discovery traffic.
-- QUIC uses the established Quinn BBR controller and a negotiated `ETQ2` hybrid transport. Lossy
-  data uses QUIC DATAGRAM when it fits; control, RPC, and oversized data fall back to the reliable
-  stream. `ETQ2` intentionally breaks compatibility with the old QUIC framing.
+- QUIC uses the established Quinn BBR controller. Normal data uses raw QUIC DATAGRAM records when
+  it fits. Critical control and oversized records use the reliable stream. The direct data path has
+  no private reliability envelope, packet identifier, acknowledgment, retransmission, or FEC.
 - L3, L2-TUN, and TAP use the same measured forwarding and UDP transport path.
 - Lean builds always include audited ChaCha20-Poly1305 authenticated encryption. XOR is no longer
   an encryption option.

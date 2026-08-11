@@ -1,0 +1,318 @@
+use crate::platform::DeviceImpl;
+use crate::platform::windows::{InterruptEvent, ffi};
+use std::future::Future;
+use std::io;
+use std::ops::Deref;
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+/// An async TUN device wrapper around a `DeviceImpl`.
+///
+/// This type does not provide a split method; wrap the device in an `Arc` if
+/// shared ownership is needed.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn _main() -> std::io::Result<()> {
+/// use quincy_tun::{AsyncDevice, DeviceBuilder};
+///     // Create a TUN device with basic configuration
+///     let dev = DeviceBuilder::new()
+///         .name("tun0")
+///         .mtu(1500)
+///         .ipv4("10.0.0.1", "255.255.255.0", None)
+///         .build_async()?;
+///
+///     // Send a simple packet (Replace with real IP message)
+///     let packet = b"[IP Packet: 10.0.0.1 -> 10.0.0.2] Hello, Async TUN!";
+///     dev.send(packet).await?;
+///
+///     // Receive a packet
+///     let mut buf = [0u8; 1500];
+///     let n = dev.recv(&mut buf).await?;
+///     println!("Received {} bytes: {:?}", n, &buf[..n]);
+///
+/// # Ok(()) }
+/// ```
+pub struct AsyncDevice {
+    inner: Arc<DeviceImpl>,
+    recv_task_lock: Arc<Mutex<Option<RecvTask>>>,
+    send_task_lock: Arc<Mutex<Option<SendTask>>>,
+}
+
+type RecvTask = blocking::Task<io::Result<(Vec<u8>, usize)>>;
+type SendTask = blocking::Task<io::Result<usize>>;
+
+impl Deref for AsyncDevice {
+    type Target = DeviceImpl;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Drop for AsyncDevice {
+    fn drop(&mut self) {
+        _ = self.inner.shutdown();
+    }
+}
+
+impl AsyncDevice {
+    /// Creates a new `AsyncDevice` wrapping a `DeviceImpl`.
+    pub(crate) fn new_dev(device: DeviceImpl) -> io::Result<AsyncDevice> {
+        let inner = Arc::new(device);
+
+        Ok(AsyncDevice {
+            inner,
+            recv_task_lock: Arc::new(Mutex::new(None)),
+            send_task_lock: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Attempts to receive a single packet from the device.
+    ///
+    /// # Caveats
+    ///
+    /// Two different tasks should not call this method concurrently. Otherwise, conflicting tasks
+    /// will just keep waking each other in turn, thus wasting CPU time.
+    ///
+    /// # Return value
+    ///
+    /// The function returns:
+    ///
+    /// * `Poll::Pending` if the device is not ready to read
+    /// * `Poll::Ready(Ok(()))` reads data `buf` if the device is ready
+    /// * `Poll::Ready(Err(e))` if an error is encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function may encounter any standard I/O error except `WouldBlock`.
+    pub fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        let mut guard = self.recv_task_lock.lock().unwrap();
+
+        let mut task = if let Some(task) = guard.take() {
+            task
+        } else {
+            match self.try_recv(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                rs => return Poll::Ready(rs),
+            }
+            let device = self.inner.clone();
+            let size = buf.len();
+            blocking::unblock(move || {
+                let mut in_buf = vec![0; size];
+                let n = device.recv(&mut in_buf)?;
+                Ok((in_buf, n))
+            })
+        };
+        match Pin::new(&mut task).poll(cx) {
+            Poll::Ready(rs) => {
+                drop(guard);
+                match rs {
+                    Ok((packet, n)) => {
+                        if n > buf.len() {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "receive buffer too small",
+                            )));
+                        }
+                        buf[..n].copy_from_slice(&packet[..n]);
+                        Poll::Ready(Ok(n))
+                    }
+                    Err(e) => Poll::Ready(Err(e)),
+                }
+            }
+            Poll::Pending => {
+                guard.replace(task);
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Attempts to send a packet to the device.
+    ///
+    /// # Caveats
+    ///
+    /// Two different tasks should not call this method concurrently. Otherwise, conflicting tasks
+    /// will just keep waking each other in turn, thus wasting CPU time.
+    ///
+    /// # Return value
+    ///
+    /// The function returns:
+    ///
+    /// * `Poll::Pending` if the device is not available to write
+    /// * `Poll::Ready(Ok(n))` `n` is the number of bytes sent
+    /// * `Poll::Ready(Err(e))` if an error is encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function may encounter any standard I/O error except `WouldBlock`.
+    pub fn poll_send(&self, cx: &mut Context<'_>, src: &[u8]) -> Poll<io::Result<usize>> {
+        let mut guard = self.send_task_lock.lock().unwrap();
+
+        let mut task = if let Some(task) = guard.take() {
+            task
+        } else {
+            match self.try_send(src) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                rs => return Poll::Ready(rs),
+            }
+            let device = self.inner.clone();
+            let buf = src.to_vec();
+            blocking::unblock(move || device.send(&buf))
+        };
+
+        match Pin::new(&mut task).poll(cx) {
+            Poll::Ready(rs) => {
+                drop(guard);
+                Poll::Ready(rs)
+            }
+            Poll::Pending => {
+                guard.replace(task);
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Waits for the device to become readable.
+    ///
+    /// This function is usually paired with `try_recv()`.
+    ///
+    /// The function may complete without the device being readable. This is a
+    /// false-positive and attempting a `try_recv()` will return with
+    /// `io::ErrorKind::WouldBlock`.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. Once a readiness event occurs, the method
+    /// will continue to return immediately until the readiness event is
+    /// consumed by an attempt to read that fails with `WouldBlock` or
+    /// `Poll::Pending`.
+    pub async fn readable(&self) -> io::Result<()> {
+        let mut canceller = Canceller::new_cancelable()?;
+        let device = self.inner.clone();
+        let (cancel_guard, exit_guard) = canceller.guard(device);
+        blocking::unblock(move || {
+            exit_guard.call(|device, cancel_event_handle| {
+                device.wait_readable_interruptible(cancel_event_handle, None)
+            })
+        })
+        .await?;
+        std::mem::forget(cancel_guard);
+        Ok(())
+    }
+
+    /// Recv a packet from the device
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.try_recv(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                rs => return rs,
+            }
+            self.readable().await?;
+        }
+    }
+
+    /// Attempts to read a packet without blocking.
+    #[inline]
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.try_recv(buf)
+    }
+
+    /// Send a packet to the device
+    ///
+    /// # Cancel safety
+    /// This method is not cancellation safe.
+    /// After cancellation, it is uncertain whether the data has been written or not.
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        match self.inner.try_send(buf) {
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            rs => return rs,
+        }
+        let buf = buf.to_vec();
+        let device = self.inner.clone();
+        let mut canceller = Canceller::new_cancelable()?;
+        let (cancel_guard, exit_guard) = canceller.guard(device);
+        let result = blocking::unblock(move || {
+            exit_guard.call(|device, cancel_event_handle| {
+                device.write_interruptible(&buf, cancel_event_handle)
+            })
+        })
+        .await;
+        std::mem::forget(cancel_guard);
+        result
+    }
+
+    /// Attempts to write a packet without blocking.
+    #[inline]
+    pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.try_send(buf)
+    }
+}
+
+struct ExitSignalGuard {
+    device: Option<Arc<DeviceImpl>>,
+    cancel_event_handle: Arc<InterruptEvent>,
+    exit_event: Arc<OwnedHandle>,
+}
+
+impl Drop for ExitSignalGuard {
+    fn drop(&mut self) {
+        drop(self.device.take());
+        _ = ffi::set_event(self.exit_event.as_raw_handle());
+    }
+}
+
+impl ExitSignalGuard {
+    pub fn call<R>(
+        &self,
+        mut op: impl FnMut(&DeviceImpl, &InterruptEvent) -> io::Result<R>,
+    ) -> io::Result<R> {
+        if let Some(device) = &self.device {
+            op(device, &self.cancel_event_handle)
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+struct Canceller {
+    exit_event_handle: Arc<OwnedHandle>,
+    cancel_event_handle: Arc<InterruptEvent>,
+}
+
+impl Canceller {
+    fn new_cancelable() -> io::Result<Self> {
+        Ok(Self {
+            exit_event_handle: Arc::new(ffi::create_event()?),
+            cancel_event_handle: Arc::new(InterruptEvent::new()?),
+        })
+    }
+
+    fn guard(&mut self, device_impl: Arc<DeviceImpl>) -> (CancelWaitGuard<'_>, ExitSignalGuard) {
+        (
+            CancelWaitGuard {
+                exit_event_handle: &self.exit_event_handle,
+                cancel_event_handle: &self.cancel_event_handle,
+            },
+            ExitSignalGuard {
+                device: Some(device_impl),
+                exit_event: self.exit_event_handle.clone(),
+                cancel_event_handle: self.cancel_event_handle.clone(),
+            },
+        )
+    }
+}
+
+struct CancelWaitGuard<'a> {
+    exit_event_handle: &'a Arc<OwnedHandle>,
+    cancel_event_handle: &'a Arc<InterruptEvent>,
+}
+
+impl Drop for CancelWaitGuard<'_> {
+    fn drop(&mut self) {
+        _ = self.cancel_event_handle.trigger();
+        _ = ffi::wait_for_single_object(self.exit_event_handle.as_raw_handle(), 10);
+    }
+}

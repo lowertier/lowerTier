@@ -318,7 +318,7 @@ pub(crate) fn stamp_critical_l2_control(packet: &mut ZCPacket) -> bool {
         .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
         && is_critical_l2_control(packet.payload());
     if critical && let Some(header) = packet.mut_peer_manager_header() {
-        header.set_critical_l2_duplicate(true);
+        header.set_critical_l2_control(true);
     }
     critical
 }
@@ -704,7 +704,7 @@ mod tests {
             packet
                 .peer_manager_header()
                 .unwrap()
-                .is_critical_l2_duplicate()
+                .is_critical_l2_control()
         );
     }
 }

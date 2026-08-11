@@ -25,7 +25,7 @@ For an encrypted LowTier raw-UDP data packet, the fixed inner overhead is:
 
 WireGuard transport data uses a 16-byte transport header and a 16-byte tag, or
 32 bytes before outer IP/UDP. LowTier therefore pays 20 more fixed bytes for
-normal L3 packets. `l2-tun` adds a 14-byte Ethernet header, making its fixed
+normal L3 packets. Compatible Ethernet adds a 14-byte Ethernet header, making its fixed
 inner overhead 66 bytes. Outer IPv4 plus UDP adds 28 bytes in both cases; IPv6
 plus UDP adds 48 bytes.
 
@@ -177,7 +177,7 @@ consumed on receive. No stage may add a batch-fill timer.
 ## Measurements from the L2-TUN milestone
 
 The Colima QEMU UDP suite measured 2.74 Gbit/s for three-node native TAP and
-2.59 Gbit/s for three-node `l2-tun` in one run. This is about a 5.5% difference,
+2.59 Gbit/s for three-node compatible Ethernet in one run. This is about a 5.5% difference,
 but it includes VM scheduling, TCP behavior inside `iperf3`, and run-to-run
 variance, so it does not isolate the 14-byte shim.
 

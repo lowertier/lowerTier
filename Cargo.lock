@@ -4328,8 +4328,6 @@ dependencies = [
 [[package]]
 name = "quincy-tun"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acfb32d756918d88d8704ab0978c3e1558b5156cc8e477fc2360784f724220dd"
 dependencies = [
  "blocking",
  "byteorder",

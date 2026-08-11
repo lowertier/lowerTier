@@ -130,7 +130,7 @@ pub struct PeerManagerHeader {
 pub const PEER_MANAGER_HEADER_SIZE: usize = std::mem::size_of::<PeerManagerHeader>();
 const FLOW_SHARD_PRESENT: u8 = 0x80;
 const FLOW_SHARD_MASK: u8 = 0x3f;
-const CRITICAL_L2_DUPLICATE: u8 = 0x40;
+const CRITICAL_L2_CONTROL: u8 = 0x40;
 
 impl PeerManagerHeader {
     fn initialize(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8, len: u32) {
@@ -150,18 +150,18 @@ impl PeerManagerHeader {
 
     pub fn set_flow_shard(&mut self, shard: u16) {
         assert!(shard <= u16::from(FLOW_SHARD_MASK));
-        self.reserved = (self.reserved & CRITICAL_L2_DUPLICATE) | FLOW_SHARD_PRESENT | shard as u8;
+        self.reserved = (self.reserved & CRITICAL_L2_CONTROL) | FLOW_SHARD_PRESENT | shard as u8;
     }
 
-    pub fn is_critical_l2_duplicate(&self) -> bool {
-        self.reserved & CRITICAL_L2_DUPLICATE != 0
+    pub fn is_critical_l2_control(&self) -> bool {
+        self.reserved & CRITICAL_L2_CONTROL != 0
     }
 
-    pub fn set_critical_l2_duplicate(&mut self, duplicate: bool) {
-        if duplicate {
-            self.reserved |= CRITICAL_L2_DUPLICATE;
+    pub fn set_critical_l2_control(&mut self, critical: bool) {
+        if critical {
+            self.reserved |= CRITICAL_L2_CONTROL;
         } else {
-            self.reserved &= !CRITICAL_L2_DUPLICATE;
+            self.reserved &= !CRITICAL_L2_CONTROL;
         }
     }
 
@@ -879,13 +879,13 @@ mod tests {
     #[test]
     fn critical_l2_marker_and_flow_shard_share_the_reserved_byte() {
         let mut header = PeerManagerHeader::default();
-        header.set_critical_l2_duplicate(true);
+        header.set_critical_l2_control(true);
         header.set_flow_shard(37);
-        assert!(header.is_critical_l2_duplicate());
+        assert!(header.is_critical_l2_control());
         assert_eq!(header.flow_shard(), Some(37));
 
-        header.set_critical_l2_duplicate(false);
-        assert!(!header.is_critical_l2_duplicate());
+        header.set_critical_l2_control(false);
+        assert!(!header.is_critical_l2_control());
         assert_eq!(header.flow_shard(), Some(37));
     }
 
@@ -893,13 +893,13 @@ mod tests {
     fn filling_peer_header_clears_stale_reserved_flags() {
         let mut packet = ZCPacket::new_with_payload(b"payload");
         let header = packet.mut_peer_manager_header().unwrap();
-        header.set_critical_l2_duplicate(true);
+        header.set_critical_l2_control(true);
         header.set_flow_shard(17);
 
         packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
 
         let header = packet.peer_manager_header().unwrap();
-        assert!(!header.is_critical_l2_duplicate());
+        assert!(!header.is_critical_l2_control());
         assert_eq!(header.flow_shard(), None);
     }
 
@@ -910,7 +910,7 @@ mod tests {
             forward_counter: 7,
             ..Default::default()
         };
-        header.set_critical_l2_duplicate(true);
+        header.set_critical_l2_control(true);
         header.set_flow_shard(17);
 
         header.initialize(3, 4, PacketType::ForeignNetworkPacket as u8, 99);
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(header.packet_type, PacketType::ForeignNetworkPacket as u8);
         assert_eq!(header.flags, 0);
         assert_eq!(header.forward_counter, 1);
-        assert!(!header.is_critical_l2_duplicate());
+        assert!(!header.is_critical_l2_control());
         assert_eq!(header.flow_shard(), None);
         assert_eq!(header.len.get(), 99);
     }

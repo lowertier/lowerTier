@@ -2079,7 +2079,7 @@ impl PeerManager {
     ) -> Result<(), Error> {
         let (destination_peers, is_exit_node) = self.get_msg_dst_peer(&ip_addr).await;
         if destination_peers.is_empty() {
-            tracing::info!(%ip_addr, "no peer id for l2-tun IP packet");
+            tracing::info!(%ip_addr, "no peer ID for compatible Ethernet packet");
             return Ok(());
         }
 
@@ -2116,15 +2116,16 @@ impl PeerManager {
                 .payload()
                 .get(crate::instance::l2_tun::ETHERNET_HEADER_LEN..)
             else {
-                return Err(anyhow::anyhow!("l2-tun packet is too short").into());
+                return Err(anyhow::anyhow!("compatible Ethernet packet is too short").into());
             };
             let Some(version) = ip_packet.first().map(|byte| byte >> 4) else {
                 continue;
             };
             let (ip_addr, not_send_to_self) = match version {
                 4 => {
-                    let ipv4 = Ipv4Packet::new(ip_packet)
-                        .ok_or_else(|| anyhow::anyhow!("invalid l2-tun IPv4 packet"))?;
+                    let ipv4 = Ipv4Packet::new(ip_packet).ok_or_else(|| {
+                        anyhow::anyhow!("invalid compatible Ethernet IPv4 packet")
+                    })?;
                     let source = ipv4.get_source();
                     (
                         IpAddr::V4(ipv4.get_destination()),
@@ -2132,15 +2133,21 @@ impl PeerManager {
                     )
                 }
                 6 => {
-                    let ipv6 = Ipv6Packet::new(ip_packet)
-                        .ok_or_else(|| anyhow::anyhow!("invalid l2-tun IPv6 packet"))?;
+                    let ipv6 = Ipv6Packet::new(ip_packet).ok_or_else(|| {
+                        anyhow::anyhow!("invalid compatible Ethernet IPv6 packet")
+                    })?;
                     let source = ipv6.get_source();
                     (
                         IpAddr::V6(ipv6.get_destination()),
                         self.global_ctx.is_ip_local_ipv6(&source),
                     )
                 }
-                _ => return Err(anyhow::anyhow!("unsupported l2-tun IP version {version}").into()),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "unsupported compatible Ethernet IP version {version}"
+                    )
+                    .into());
+                }
             };
 
             let route = if let Some((_, route)) = route_cache
@@ -3035,7 +3042,7 @@ mod tests {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(ipv4.map(|address| cidr::Ipv4Inet::new(address, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
-        flags.port_mode = "tap".to_string();
+        flags.port_mode = "ethernet".to_string();
         flags.l2_flood_bps = l2_flood_bps;
         global_ctx.set_flags(flags);
 

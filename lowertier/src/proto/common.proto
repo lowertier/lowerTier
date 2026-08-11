@@ -45,7 +45,7 @@ message FlagsInConfig {
   bool disable_relay_quic = 35;
 
   // quic listen port
-  uint32 quic_listen_port = 33 [deprecated = true];
+  reserved 33;
 
   // a global relay limit, only work for foreign network
   uint64 foreign_relay_bps_limit = 26;
@@ -106,10 +106,10 @@ message FlagsInConfig {
   // Zero disables the limit.
   uint64 l2_flood_bps = 54;
 
-  // ETQ4 systematic SIMD FEC. Zero disables FEC; two is the recommended
-  // 16+2 lossy-path profile and three enables the 16+3 benchmark profile.
+  // Alternate-path SIMD FEC. Zero disables FEC. Two selects 16+2.
+  // Three selects 16+3.
   uint32 quic_datagram_fec_parity = 55;
-  bool quic_critical_l2_duplication = 56;
+  reserved 56;
   // When two authenticated QUIC connections use distinct local or remote IP
   // surfaces, carry an additional peer-layer parity block on the alternate.
   bool quic_datagram_alternate_path_parity = 57;

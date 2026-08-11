@@ -95,7 +95,7 @@ start_core() {
         lowertier-core
         --network-name l2-benchmark
         --network-secret l2-benchmark-secret
-        --port-mode tap
+        --port-mode ethernet
         --dev-name et0
         --ipv4 "$overlay_ip/24"
         --listeners udp://0.0.0.0:11010

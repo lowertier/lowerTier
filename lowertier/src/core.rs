@@ -659,15 +659,6 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_QUIC_CRITICAL_L2_DUPLICATION",
-        help = t!("core_clap.quic_critical_l2_duplication").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    quic_critical_l2_duplication: Option<bool>,
-
-    #[arg(
-        long,
         env = "ET_QUIC_DATAGRAM_ALTERNATE_PATH_PARITY",
         help = t!("core_clap.quic_datagram_alternate_path_parity").to_string(),
         num_args = 0..=1,
@@ -1324,9 +1315,6 @@ impl NetworkOptions {
         f.quic_datagram_fec_parity = self
             .quic_datagram_fec_parity
             .unwrap_or(f.quic_datagram_fec_parity);
-        f.quic_critical_l2_duplication = self
-            .quic_critical_l2_duplication
-            .unwrap_or(f.quic_critical_l2_duplication);
         f.quic_datagram_alternate_path_parity = self
             .quic_datagram_alternate_path_parity
             .unwrap_or(f.quic_datagram_alternate_path_parity);
@@ -1993,10 +1981,9 @@ enabled = true
             "33554432",
             "--quic-datagram-fec-parity",
             "3",
-            "--quic-critical-l2-duplication=false",
             "--quic-datagram-alternate-path-parity=false",
             "--port-mode",
-            "tap",
+            "ethernet",
             "--l2-fdb-capacity",
             "32768",
             "--l2-fdb-age-seconds",
@@ -2021,9 +2008,8 @@ enabled = true
         assert_eq!(flags.quic_initial_receive_window, 8_388_608);
         assert_eq!(flags.quic_receive_window, 33_554_432);
         assert_eq!(flags.quic_datagram_fec_parity, 3);
-        assert!(!flags.quic_critical_l2_duplication);
         assert!(!flags.quic_datagram_alternate_path_parity);
-        assert_eq!(flags.port_mode, "tap");
+        assert_eq!(flags.port_mode, "ethernet");
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);

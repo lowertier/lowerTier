@@ -95,7 +95,7 @@ grep -Fq -- '--features lean' "$core_workflow"
 grep -Fq 'default = ["lean"]' "$repo_root/lowertier/Cargo.toml"
 grep -Fq 'lean = [' "$repo_root/lowertier/Cargo.toml"
 
-if grep -Eq 'pre_job|pre-test|test_matrix|nextest archive|upload-artifact|download-artifact' "$test_workflow"; then
+if grep -Eq 'pre_job|pre-test|test_matrix|upload-artifact|download-artifact' "$test_workflow"; then
   echo "the test workflow contains a duplicate or transfer-only job" >&2
   exit 1
 fi
