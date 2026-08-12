@@ -70,23 +70,38 @@ impl PeerCenterBase {
         Ok(())
     }
 
-    async fn select_center_peer(peer_mgr: &dyn PeerCenterPeerManagerTrait) -> Option<PeerId> {
-        let peers = peer_mgr.list_routes().await;
+    fn select_center_peer_from_routes(
+        my_peer_id: PeerId,
+        peers: &[crate::proto::api::instance::Route],
+        prefer_speed_capable: bool,
+    ) -> Option<PeerId> {
         if peers.is_empty() {
             return None;
         }
-        // find peer with alphabetical smallest id.
-        let mut min_peer = peer_mgr.my_peer_id();
-        for peer in peers
+
+        let eligible_peers = peers
             .iter()
-            .filter(|r| r.feature_flag.map(|r| !r.is_public_server).unwrap_or(true))
-        {
-            let peer_id = peer.peer_id;
-            if peer_id < min_peer {
-                min_peer = peer_id;
-            }
-        }
-        Some(min_peer)
+            .filter(|route| {
+                route
+                    .feature_flag
+                    .map(|flags| !flags.is_public_server)
+                    .unwrap_or(true)
+            })
+            .filter(|route| {
+                !prefer_speed_capable || route.feature_flag.is_some_and(|flags| flags.speed_routing)
+            })
+            .map(|route| route.peer_id);
+
+        std::iter::once(my_peer_id).chain(eligible_peers).min()
+    }
+
+    async fn select_center_peer(peer_mgr: &dyn PeerCenterPeerManagerTrait) -> Option<PeerId> {
+        let peers = peer_mgr.list_routes().await;
+        Self::select_center_peer_from_routes(
+            peer_mgr.my_peer_id(),
+            &peers,
+            peer_mgr.get_global_ctx().speed_probes_enabled(),
+        )
     }
 
     async fn init_periodic_job<
@@ -502,10 +517,39 @@ mod tests {
     use crate::{
         peers::tests::{connect_peer_manager, create_mock_peer_manager, wait_route_appear},
         proto::peer_rpc::DirectConnectedPeerInfo,
+        proto::{api::instance::Route, common::PeerFeatureFlag},
         tunnel::common::tests::wait_for_condition,
     };
 
     use super::*;
+
+    #[test]
+    fn speed_measurement_prefers_a_speed_capable_center() {
+        let routes = vec![
+            Route {
+                peer_id: 1,
+                feature_flag: Some(PeerFeatureFlag::default()),
+                ..Default::default()
+            },
+            Route {
+                peer_id: 20,
+                feature_flag: Some(PeerFeatureFlag {
+                    speed_routing: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            PeerCenterBase::select_center_peer_from_routes(30, &routes, true),
+            Some(20)
+        );
+        assert_eq!(
+            PeerCenterBase::select_center_peer_from_routes(30, &routes, false),
+            Some(1)
+        );
+    }
 
     #[tokio::test]
     async fn directed_delivery_expires_after_server_and_local_residence() {
