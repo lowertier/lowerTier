@@ -27,6 +27,13 @@ pub enum NextHopPolicy {
     MaxGoodput,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RouteQuality {
+    pub delivery_bps: u64,
+    pub latency_ms: u64,
+    pub hops: usize,
+}
+
 pub type ForeignNetworkRouteInfoMap =
     DashMap<ForeignNetworkRouteInfoKey, ForeignNetworkRouteInfoEntry>;
 

@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{
@@ -69,7 +70,7 @@ use super::{
     },
     route_trait::{
         DefaultRouteCostCalculator, ForeignNetworkRouteInfoMap, NextHopPolicy, RouteCostCalculator,
-        RouteCostCalculatorInterface,
+        RouteCostCalculatorInterface, RouteQuality,
     },
 };
 
@@ -1359,10 +1360,142 @@ impl SyncedRouteInfo {
 }
 
 type PeerGraph = Graph<PeerId, usize, Directed>;
+type SpeedGraph = Graph<PeerId, SpeedEdge, Directed>;
 type PeerIdToNodexIdxMap = DashMap<PeerId, NodeIndex>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpeedEdge {
+    delivery_bps: u64,
+    latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpeedPath {
+    next_hop_peer_id: PeerId,
+    quality: RouteQuality,
+}
+
+fn widest_capacities(graph: &SpeedGraph, start: NodeIndex) -> HashMap<NodeIndex, u64> {
+    let mut capacities = HashMap::new();
+    let mut pending = BinaryHeap::new();
+    capacities.insert(start, u64::MAX);
+    pending.push((u64::MAX, Reverse(start.index())));
+
+    while let Some((capacity, Reverse(node_index))) = pending.pop() {
+        let node = NodeIndex::new(node_index);
+        if capacities.get(&node).copied() != Some(capacity) {
+            continue;
+        }
+        for edge in graph.edges(node) {
+            let target = edge.target();
+            let next_capacity = capacity.min(edge.weight().delivery_bps);
+            if next_capacity == 0
+                || capacities
+                    .get(&target)
+                    .is_some_and(|current| *current >= next_capacity)
+            {
+                continue;
+            }
+            capacities.insert(target, next_capacity);
+            pending.push((next_capacity, Reverse(target.index())));
+        }
+    }
+
+    capacities
+}
+
+fn lowest_cost_paths_at_capacity(
+    graph: &SpeedGraph,
+    start: NodeIndex,
+    minimum_delivery_bps: u64,
+) -> HashMap<NodeIndex, (u64, usize, PeerId)> {
+    let start_peer_id = graph[start];
+    let mut paths = HashMap::new();
+    let mut pending = BinaryHeap::new();
+    paths.insert(start, (0, 0, start_peer_id));
+    pending.push(Reverse((0_u64, 0_usize, start_peer_id, start.index())));
+
+    while let Some(Reverse((latency_ms, hops, first_hop_peer_id, node_index))) = pending.pop() {
+        let node = NodeIndex::new(node_index);
+        if paths.get(&node).copied() != Some((latency_ms, hops, first_hop_peer_id)) {
+            continue;
+        }
+        for edge in graph.edges(node) {
+            if edge.weight().delivery_bps < minimum_delivery_bps {
+                continue;
+            }
+            let target = edge.target();
+            let next_path = (
+                latency_ms.saturating_add(edge.weight().latency_ms),
+                hops.saturating_add(1),
+                if node == start {
+                    graph[target]
+                } else {
+                    first_hop_peer_id
+                },
+            );
+            if paths
+                .get(&target)
+                .is_some_and(|current| *current <= next_path)
+            {
+                continue;
+            }
+            paths.insert(target, next_path);
+            pending.push(Reverse((
+                next_path.0,
+                next_path.1,
+                next_path.2,
+                target.index(),
+            )));
+        }
+    }
+
+    paths
+}
+
+fn widest_path_with_first_hop(
+    graph: &SpeedGraph,
+    start: NodeIndex,
+) -> HashMap<NodeIndex, SpeedPath> {
+    if graph.node_weight(start).is_none() {
+        return HashMap::new();
+    }
+
+    let capacities = widest_capacities(graph, start);
+    let mut nodes_by_capacity: BTreeMap<u64, Vec<NodeIndex>> = BTreeMap::new();
+    for (node, capacity) in capacities {
+        if node != start && capacity > 0 {
+            nodes_by_capacity.entry(capacity).or_default().push(node);
+        }
+    }
+
+    let mut routes = HashMap::new();
+    for (delivery_bps, nodes) in nodes_by_capacity {
+        let paths = lowest_cost_paths_at_capacity(graph, start, delivery_bps);
+        for node in nodes {
+            let Some((latency_ms, hops, next_hop_peer_id)) = paths.get(&node).copied() else {
+                continue;
+            };
+            routes.insert(
+                node,
+                SpeedPath {
+                    next_hop_peer_id,
+                    quality: RouteQuality {
+                        delivery_bps,
+                        latency_ms,
+                        hops,
+                    },
+                },
+            );
+        }
+    }
+    routes
+}
+
 #[derive(Debug, Clone, Copy)]
 struct NextHopInfo {
     next_hop_peer_id: PeerId,
+    path_delivery_bps: u64,
     path_latency: i32,
     path_len: usize, // path includes src and dst.
     version: Version,
@@ -1592,6 +1725,7 @@ impl RouteTable {
         for (dst, (next_hop, path_len)) in next_hops.iter() {
             let info = NextHopInfo {
                 next_hop_peer_id: *graph.node_weight(*next_hop).unwrap(),
+                path_delivery_bps: 0,
                 path_latency: (*costs.get(dst).unwrap() % AVOID_RELAY_COST) as i32,
                 path_len: { *path_len },
                 version,
@@ -1602,6 +1736,73 @@ impl RouteTable {
                 .and_modify(|x| {
                     if x.version < version {
                         *x = info;
+                    }
+                })
+                .or_insert(info);
+        }
+
+        self.next_hop_map_version.set_if_larger(version);
+    }
+
+    fn gen_next_hop_map_with_max_goodput<T: RouteCostCalculatorInterface>(
+        &self,
+        graph: &PeerGraph,
+        start_node: &NodeIndex,
+        version: Version,
+        cost_calc: &T,
+    ) {
+        if graph.node_weight(*start_node).is_none() {
+            tracing::warn!(
+                ?start_node,
+                version,
+                "invalid start node for maximum-goodput route rebuild"
+            );
+            return;
+        }
+
+        let mut speed_graph = SpeedGraph::with_capacity(graph.node_count(), graph.edge_count());
+        for (node, peer_id) in graph.node_references() {
+            let speed_node = speed_graph.add_node(*peer_id);
+            debug_assert_eq!(speed_node, node);
+        }
+        for edge in graph.edge_references() {
+            if edge.source() != *start_node && *edge.weight() >= AVOID_RELAY_COST {
+                continue;
+            }
+            let src_peer_id = graph[edge.source()];
+            let dst_peer_id = graph[edge.target()];
+            let Some(delivery_bps) = cost_calc.calculate_delivery_bps(src_peer_id, dst_peer_id)
+            else {
+                continue;
+            };
+            if delivery_bps == 0 {
+                continue;
+            }
+            let latency_ms = cost_calc.calculate_cost(src_peer_id, dst_peer_id).max(0) as u64;
+            speed_graph.add_edge(
+                edge.source(),
+                edge.target(),
+                SpeedEdge {
+                    delivery_bps,
+                    latency_ms,
+                },
+            );
+        }
+
+        for (dst, route) in widest_path_with_first_hop(&speed_graph, *start_node) {
+            let info = NextHopInfo {
+                next_hop_peer_id: route.next_hop_peer_id,
+                path_delivery_bps: route.quality.delivery_bps,
+                path_latency: route.quality.latency_ms.min(i32::MAX as u64) as i32,
+                path_len: route.quality.hops,
+                version,
+            };
+            let dst_peer_id = speed_graph[dst];
+            self.next_hop_map
+                .entry(dst_peer_id)
+                .and_modify(|current| {
+                    if current.version < version {
+                        *current = info;
                     }
                 })
                 .or_insert(info);
@@ -1650,10 +1851,16 @@ impl RouteTable {
             return;
         }
 
-        if matches!(policy, NextHopPolicy::LeastHop) {
-            self.gen_next_hop_map_with_least_hop(&graph, &start_node, version);
-        } else {
-            self.gen_next_hop_map_with_least_cost(&graph, &start_node, version);
+        match policy {
+            NextHopPolicy::LeastHop => {
+                self.gen_next_hop_map_with_least_hop(&graph, &start_node, version)
+            }
+            NextHopPolicy::LeastCost => {
+                self.gen_next_hop_map_with_least_cost(&graph, &start_node, version)
+            }
+            NextHopPolicy::MaxGoodput => {
+                self.gen_next_hop_map_with_max_goodput(&graph, &start_node, version, cost_calc)
+            }
         };
 
         let mut new_cidr_prefix_trie = PrefixMap::new();
@@ -2161,6 +2368,7 @@ struct PeerRouteServiceImpl {
     cost_calculator: std::sync::RwLock<Option<RouteCostCalculator>>,
     route_table: RouteTable,
     route_table_with_cost: RouteTable,
+    route_table_with_speed: RouteTable,
     foreign_network_owner_map: DashMap<NetworkIdentity, Vec<PeerId>>,
     foreign_network_my_peer_id_map: DashMap<(String, PeerId), PeerId>,
     synced_route_info: SyncedRouteInfo,
@@ -2186,6 +2394,7 @@ impl Debug for PeerRouteServiceImpl {
             .field("sessions", &self.sessions)
             .field("route_table", &self.route_table)
             .field("route_table_with_cost", &self.route_table_with_cost)
+            .field("route_table_with_speed", &self.route_table_with_speed)
             .field("synced_route_info", &self.synced_route_info)
             .field("foreign_network_owner_map", &self.foreign_network_owner_map)
             .field(
@@ -2214,6 +2423,7 @@ impl PeerRouteServiceImpl {
 
             route_table: RouteTable::new(),
             route_table_with_cost: RouteTable::new(),
+            route_table_with_speed: RouteTable::new(),
             foreign_network_owner_map: DashMap::new(),
             foreign_network_my_peer_id_map: DashMap::new(),
 
@@ -2248,6 +2458,25 @@ impl PeerRouteServiceImpl {
     fn get_my_secret_digest(&self) -> Option<Vec<u8>> {
         let ni = self.global_ctx.get_network_identity();
         ni.network_secret_digest.map(|d| d.to_vec())
+    }
+
+    fn get_next_hop_with_policy(
+        &self,
+        dst_peer_id: PeerId,
+        policy: NextHopPolicy,
+    ) -> Option<NextHopInfo> {
+        match policy {
+            NextHopPolicy::MaxGoodput => self
+                .route_table_with_speed
+                .get_next_hop(dst_peer_id)
+                .or_else(|| self.route_table_with_cost.get_next_hop(dst_peer_id))
+                .or_else(|| self.route_table.get_next_hop(dst_peer_id)),
+            NextHopPolicy::LeastCost => self
+                .route_table_with_cost
+                .get_next_hop(dst_peer_id)
+                .or_else(|| self.route_table.get_next_hop(dst_peer_id)),
+            NextHopPolicy::LeastHop => self.route_table.get_next_hop(dst_peer_id),
+        }
     }
 
     #[cfg(test)]
@@ -2475,6 +2704,13 @@ impl PeerRouteServiceImpl {
             self.my_peer_id,
             &self.synced_route_info,
             NextHopPolicy::LeastCost,
+            calc_locked.as_ref().unwrap(),
+        );
+
+        self.route_table_with_speed.build_from_synced_info(
+            self.my_peer_id,
+            &self.synced_route_info,
+            NextHopPolicy::MaxGoodput,
             calc_locked.as_ref().unwrap(),
         );
 
@@ -2981,6 +3217,7 @@ impl PeerRouteServiceImpl {
         self.refresh_credential_trusts_and_disconnect().await;
         self.route_table.clean_expired_route_info();
         self.route_table_with_cost.clean_expired_route_info();
+        self.route_table_with_speed.clean_expired_route_info();
     }
 
     fn build_sync_route_raw_req(
@@ -3993,20 +4230,15 @@ impl Route for PeerRoute {
         dst_peer_id: PeerId,
         policy: NextHopPolicy,
     ) -> Option<PeerId> {
-        let route_table = if matches!(policy, NextHopPolicy::LeastCost | NextHopPolicy::MaxGoodput)
-        {
-            &self.service_impl.route_table_with_cost
-        } else {
-            &self.service_impl.route_table
-        };
-        route_table
-            .get_next_hop(dst_peer_id)
+        self.service_impl
+            .get_next_hop_with_policy(dst_peer_id, policy)
             .map(|x| x.next_hop_peer_id)
     }
 
     async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route> {
         let route_table = &self.service_impl.route_table;
         let route_table_with_cost = &self.service_impl.route_table_with_cost;
+        let route_table_with_speed = &self.service_impl.route_table_with_speed;
         let mut routes = Vec::new();
         for item in route_table.peer_infos.iter() {
             if *item.key() == self.my_peer_id {
@@ -4016,6 +4248,10 @@ impl Route for PeerRoute {
                 continue;
             };
             let next_hop_peer_latency_first = route_table_with_cost.get_next_hop(*item.key());
+            let next_hop_peer_speed = route_table_with_speed.get_next_hop(*item.key());
+            let selected_speed_route = next_hop_peer_speed
+                .or(next_hop_peer_latency_first)
+                .or(Some(next_hop_peer));
             let mut route: crate::proto::api::instance::Route = item.value().clone().into();
             route.next_hop_peer_id = next_hop_peer.next_hop_peer_id;
             route.cost = next_hop_peer.path_len as i32;
@@ -4025,6 +4261,11 @@ impl Route for PeerRoute {
                 next_hop_peer_latency_first.map(|x| x.next_hop_peer_id);
             route.cost_latency_first = next_hop_peer_latency_first.map(|x| x.path_len as i32);
             route.path_latency_latency_first = next_hop_peer_latency_first.map(|x| x.path_latency);
+
+            route.next_hop_peer_id_speed_first = selected_speed_route.map(|x| x.next_hop_peer_id);
+            route.path_delivery_bps_speed_first = next_hop_peer_speed.map(|x| x.path_delivery_bps);
+            route.path_latency_speed_first = selected_speed_route.map(|x| x.path_latency);
+            route.path_len_speed_first = selected_speed_route.map(|x| x.path_len as i32);
 
             route.feature_flag = item.feature_flag;
 
@@ -4254,7 +4495,8 @@ mod tests {
     };
 
     use super::{
-        NextHopInfo, PeerRoute, REMOVE_DEAD_PEER_INFO_AFTER, RouteConnInfo, SyncRouteSession,
+        NextHopInfo, PeerRoute, REMOVE_DEAD_PEER_INFO_AFTER, RouteConnInfo, SpeedEdge, SpeedGraph,
+        SyncRouteSession, widest_path_with_first_hop,
     };
     use crate::proto::common::TimestampExt;
     use crate::{
@@ -4287,6 +4529,189 @@ mod tests {
     };
     use base64::Engine as _;
     use base64::prelude::BASE64_STANDARD;
+
+    #[test]
+    fn widest_path_keeps_forward_and_reverse_choices_independent() {
+        let mut graph = SpeedGraph::new();
+        let a = graph.add_node(1);
+        let b = graph.add_node(2);
+        let c = graph.add_node(3);
+        graph.add_edge(
+            a,
+            c,
+            SpeedEdge {
+                delivery_bps: 5_000_000,
+                latency_ms: 100,
+            },
+        );
+        graph.add_edge(
+            a,
+            b,
+            SpeedEdge {
+                delivery_bps: 20_000_000,
+                latency_ms: 40,
+            },
+        );
+        graph.add_edge(
+            b,
+            c,
+            SpeedEdge {
+                delivery_bps: 25_000_000,
+                latency_ms: 40,
+            },
+        );
+        graph.add_edge(
+            c,
+            a,
+            SpeedEdge {
+                delivery_bps: 30_000_000,
+                latency_ms: 70,
+            },
+        );
+        graph.add_edge(
+            c,
+            b,
+            SpeedEdge {
+                delivery_bps: 10_000_000,
+                latency_ms: 30,
+            },
+        );
+        graph.add_edge(
+            b,
+            a,
+            SpeedEdge {
+                delivery_bps: 10_000_000,
+                latency_ms: 30,
+            },
+        );
+
+        let from_a = widest_path_with_first_hop(&graph, a);
+        let from_c = widest_path_with_first_hop(&graph, c);
+
+        assert_eq!(from_a[&c].next_hop_peer_id, 2);
+        assert_eq!(from_a[&c].quality.delivery_bps, 20_000_000);
+        assert_eq!(from_c[&a].next_hop_peer_id, 1);
+        assert_eq!(from_c[&a].quality.delivery_bps, 30_000_000);
+    }
+
+    #[test]
+    fn widest_path_uses_latency_hops_and_peer_id_tie_breakers() {
+        let mut graph = SpeedGraph::new();
+        let a = graph.add_node(1);
+        let b = graph.add_node(2);
+        let c = graph.add_node(3);
+        let d = graph.add_node(4);
+        let e = graph.add_node(5);
+        for (source, target, latency_ms) in
+            [(a, b, 20), (b, e, 20), (a, c, 10), (c, d, 10), (d, e, 10)]
+        {
+            graph.add_edge(
+                source,
+                target,
+                SpeedEdge {
+                    delivery_bps: 10_000_000,
+                    latency_ms,
+                },
+            );
+        }
+        let routes = widest_path_with_first_hop(&graph, a);
+        assert_eq!(routes[&e].next_hop_peer_id, 3);
+
+        graph.update_edge(
+            a,
+            c,
+            SpeedEdge {
+                delivery_bps: 10_000_000,
+                latency_ms: 20,
+            },
+        );
+        graph.update_edge(
+            c,
+            d,
+            SpeedEdge {
+                delivery_bps: 10_000_000,
+                latency_ms: 20,
+            },
+        );
+        let routes = widest_path_with_first_hop(&graph, a);
+        assert_eq!(routes[&e].next_hop_peer_id, 2);
+
+        let f = graph.add_node(6);
+        graph.add_edge(
+            a,
+            f,
+            SpeedEdge {
+                delivery_bps: 10_000_000,
+                latency_ms: 20,
+            },
+        );
+        graph.add_edge(
+            f,
+            e,
+            SpeedEdge {
+                delivery_bps: 10_000_000,
+                latency_ms: 20,
+            },
+        );
+        let routes = widest_path_with_first_hop(&graph, a);
+        assert_eq!(routes[&e].next_hop_peer_id, 2);
+    }
+
+    #[test]
+    fn widest_path_recalculates_latency_after_a_later_bottleneck() {
+        let mut graph = SpeedGraph::new();
+        let a = graph.add_node(1);
+        let b = graph.add_node(2);
+        let c = graph.add_node(3);
+        let d = graph.add_node(4);
+        let e = graph.add_node(5);
+        graph.add_edge(
+            a,
+            b,
+            SpeedEdge {
+                delivery_bps: 100,
+                latency_ms: 1_000,
+            },
+        );
+        graph.add_edge(
+            b,
+            d,
+            SpeedEdge {
+                delivery_bps: 100,
+                latency_ms: 1_000,
+            },
+        );
+        graph.add_edge(
+            a,
+            c,
+            SpeedEdge {
+                delivery_bps: 50,
+                latency_ms: 1,
+            },
+        );
+        graph.add_edge(
+            c,
+            d,
+            SpeedEdge {
+                delivery_bps: 50,
+                latency_ms: 1,
+            },
+        );
+        graph.add_edge(
+            d,
+            e,
+            SpeedEdge {
+                delivery_bps: 10,
+                latency_ms: 1,
+            },
+        );
+
+        let routes = widest_path_with_first_hop(&graph, a);
+
+        assert_eq!(routes[&e].quality.delivery_bps, 10);
+        assert_eq!(routes[&e].quality.latency_ms, 3);
+        assert_eq!(routes[&e].next_hop_peer_id, 3);
+    }
 
     struct AuthOnlyInterface {
         my_peer_id: PeerId,
@@ -5122,6 +5547,7 @@ mod tests {
             replacement_peer_id,
             NextHopInfo {
                 next_hop_peer_id: replacement_peer_id,
+                path_delivery_bps: 0,
                 path_latency: 0,
                 path_len: 1,
                 version: 1,
@@ -5564,6 +5990,7 @@ mod tests {
             stale_peer_id,
             NextHopInfo {
                 next_hop_peer_id: stale_peer_id,
+                path_delivery_bps: 0,
                 path_latency: 0,
                 path_len: 1,
                 version: 1,
@@ -6537,6 +6964,7 @@ mod tests {
             p_b_peer_id: PeerId,
             p_c_peer_id: PeerId,
             p_d_peer_id: PeerId,
+            include_delivery: bool,
         }
 
         impl RouteCostCalculatorInterface for TestCostCalculator {
@@ -6563,6 +6991,18 @@ mod tests {
 
                 1
             }
+
+            fn calculate_delivery_bps(&self, src: PeerId, dst: PeerId) -> Option<u64> {
+                if !self.include_delivery {
+                    return None;
+                }
+                if (src == self.p_d_peer_id && dst == self.p_b_peer_id)
+                    || (src == self.p_b_peer_id && dst == self.p_a_peer_id)
+                {
+                    return Some(100_000_000);
+                }
+                Some(10_000_000)
+            }
         }
 
         r_d.set_route_cost_fn(Box::new(TestCostCalculator {
@@ -6570,6 +7010,7 @@ mod tests {
             p_b_peer_id: p_b.my_peer_id(),
             p_c_peer_id: p_c.my_peer_id(),
             p_d_peer_id: p_d.my_peer_id(),
+            include_delivery: false,
         }))
         .await;
 
@@ -6593,6 +7034,35 @@ mod tests {
             Duration::from_secs(5),
         )
         .await;
+
+        assert_eq!(
+            r_d.get_next_hop_with_policy(p_a.my_peer_id(), NextHopPolicy::MaxGoodput)
+                .await,
+            Some(p_c.my_peer_id())
+        );
+
+        r_d.set_route_cost_fn(Box::new(TestCostCalculator {
+            p_a_peer_id: p_a.my_peer_id(),
+            p_b_peer_id: p_b.my_peer_id(),
+            p_c_peer_id: p_c.my_peer_id(),
+            p_d_peer_id: p_d.my_peer_id(),
+            include_delivery: true,
+        }))
+        .await;
+
+        assert_eq!(
+            r_d.get_next_hop_with_policy(p_a.my_peer_id(), NextHopPolicy::MaxGoodput)
+                .await,
+            Some(p_b.my_peer_id())
+        );
+        let route = r_d
+            .list_routes()
+            .await
+            .into_iter()
+            .find(|route| route.peer_id == p_a.my_peer_id())
+            .unwrap();
+        assert_eq!(route.next_hop_peer_id_speed_first, Some(p_b.my_peer_id()));
+        assert_eq!(route.path_delivery_bps_speed_first, Some(100_000_000));
     }
 
     #[rstest::rstest]
