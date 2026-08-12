@@ -20,8 +20,9 @@ use super::alternate_fec::{
 };
 use super::{
     PacketRecvChan,
-    flow::stamp_critical_l2_control,
+    flow::{FlowPathCache, classify_packet_flow, stamp_critical_l2_control},
     peer_conn::{PeerConn, PeerConnId},
+    route_trait::NextHopPolicy,
 };
 #[cfg(feature = "quic")]
 use crate::tunnel::packet_def::PacketType;
@@ -53,6 +54,7 @@ pub struct Peer {
     shutdown_notifier: Arc<tokio::sync::Notify>,
 
     default_conn_id: Arc<AtomicCell<PeerConnId>>,
+    connection_flow_paths: Arc<FlowPathCache<PeerConnId>>,
     peer_identity_type: Arc<AtomicCell<Option<PeerIdentityType>>>,
     peer_public_key: Arc<RwLock<Option<Vec<u8>>>>,
     default_conn_refresh_task: AbortOnDropHandle<()>,
@@ -149,10 +151,15 @@ impl Peer {
         let peer_identity_type_copy = peer_identity_type.clone();
         let peer_public_key = Arc::new(RwLock::new(None));
         let peer_public_key_copy = peer_public_key.clone();
+        let connection_flow_paths = Arc::new(FlowPathCache::new(
+            65_536,
+            std::time::Duration::from_secs(120),
+        ));
 
         let conns_copy = conns.clone();
         let shutdown_notifier_copy = shutdown_notifier.clone();
         let global_ctx_copy = global_ctx.clone();
+        let connection_flow_paths_copy = connection_flow_paths.clone();
         let close_event_listener = AbortOnDropHandle::new(tokio::spawn(
             async move {
                 loop {
@@ -169,6 +176,7 @@ impl Peer {
                             );
 
                             if let Some((_, conn)) = conns_copy.remove(&ret) {
+                                connection_flow_paths_copy.invalidate_path(ret);
                                 global_ctx_copy.issue_event(GlobalCtxEvent::PeerConnRemoved(
                                     conn.get_conn_info(),
                                 ));
@@ -302,6 +310,7 @@ impl Peer {
 
             shutdown_notifier,
             default_conn_id,
+            connection_flow_paths,
             peer_identity_type,
             peer_public_key,
             default_conn_refresh_task,
@@ -375,61 +384,130 @@ impl Peer {
         Ok(())
     }
 
-    async fn select_conn(&self) -> Option<ArcPeerConn> {
-        let default_conn_id = self.default_conn_id.load();
-        if let Some(conn) = self.conns.get(&default_conn_id)
-            && !conn.is_closed()
+    fn best_connection(&self, policy: NextHopPolicy) -> Option<ArcPeerConn> {
+        let now = std::time::Instant::now();
+        let flags = self.global_ctx.flags_arc();
+        let preferred_protocol = flags.default_protocol.as_str();
+        let current_conn_id = self.default_conn_id.load();
+        match policy {
+            NextHopPolicy::MaxGoodput => self
+                .conns
+                .iter()
+                .filter(|entry| !entry.value().is_closed())
+                .min_by_key(|entry| {
+                    let conn = entry.value();
+                    let speed = conn
+                        .fresh_speed_sample(now)
+                        .filter(|sample| sample.delivery_bps > 0);
+                    let latency_us = conn.get_stats().latency_us;
+                    (
+                        speed.is_none(),
+                        std::cmp::Reverse(
+                            speed.map(|sample| sample.delivery_bps).unwrap_or_default(),
+                        ),
+                        latency_us == 0,
+                        latency_us,
+                        conn.tunnel_type() != Some(preferred_protocol),
+                        conn.get_conn_id() != current_conn_id,
+                        conn.get_conn_id(),
+                    )
+                })
+                .map(|entry| entry.value().clone()),
+            NextHopPolicy::LeastCost => self
+                .conns
+                .iter()
+                .filter(|entry| !entry.value().is_closed())
+                .min_by_key(|entry| {
+                    let conn = entry.value();
+                    let latency_us = conn.get_stats().latency_us;
+                    (
+                        latency_us == 0,
+                        latency_us,
+                        conn.tunnel_type() != Some(preferred_protocol),
+                        conn.get_conn_id() != current_conn_id,
+                        conn.get_conn_id(),
+                    )
+                })
+                .map(|entry| entry.value().clone()),
+            NextHopPolicy::LeastHop => self
+                .conns
+                .iter()
+                .filter(|entry| !entry.value().is_closed())
+                .min_by_key(|entry| {
+                    let conn = entry.value();
+                    let latency_us = conn.get_stats().latency_us;
+                    (
+                        conn.tunnel_type() != Some(preferred_protocol),
+                        latency_us == 0,
+                        latency_us,
+                        conn.get_conn_id() != current_conn_id,
+                        conn.get_conn_id(),
+                    )
+                })
+                .map(|entry| entry.value().clone()),
+        }
+    }
+
+    async fn select_conn(&self, policy: NextHopPolicy, flow_hash: u64) -> Option<ArcPeerConn> {
+        let policy_flow = match policy {
+            NextHopPolicy::LeastHop => flow_hash,
+            NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
+            NextHopPolicy::MaxGoodput => flow_hash ^ (1_u64 << 62),
+        };
+        if let Some(conn_id) =
+            self.connection_flow_paths
+                .lookup(self.peer_node_id, policy_flow, |conn_id| {
+                    self.conns
+                        .get(&conn_id)
+                        .is_some_and(|conn| !conn.is_closed())
+                })
+            && let Some(conn) = self.conns.get(&conn_id)
         {
+            self.default_conn_id.store(conn_id);
             return Some(conn.clone());
         }
 
-        let flags = self.global_ctx.flags_arc();
-        let preferred_protocol = flags.default_protocol.as_str();
-        let mut preferred_sampled: Option<(u64, ArcPeerConn)> = None;
-        let mut preferred_unsampled: Option<ArcPeerConn> = None;
-        let mut fallback_sampled: Option<(u64, ArcPeerConn)> = None;
-        let mut fallback_unsampled: Option<ArcPeerConn> = None;
-        for entry in self.conns.iter() {
-            let conn = entry.value();
-            if conn.is_closed() {
-                continue;
-            }
-            let latency = conn.get_stats().latency_us;
-            let is_preferred = conn.tunnel_type() == Some(preferred_protocol);
-            if is_preferred && latency > 0 {
-                if preferred_sampled
-                    .as_ref()
-                    .is_none_or(|(best_latency, _)| latency < *best_latency)
-                {
-                    preferred_sampled = Some((latency, conn.clone()));
-                }
-            } else if is_preferred {
-                preferred_unsampled.get_or_insert_with(|| conn.clone());
-            } else if latency > 0 {
-                if fallback_sampled
-                    .as_ref()
-                    .is_none_or(|(best_latency, _)| latency < *best_latency)
-                {
-                    fallback_sampled = Some((latency, conn.clone()));
-                }
-            } else {
-                fallback_unsampled.get_or_insert_with(|| conn.clone());
-            }
+        let candidate = self.best_connection(policy)?;
+        let candidate_id = candidate.get_conn_id();
+        let selected_id = self.connection_flow_paths.select(
+            self.peer_node_id,
+            policy_flow,
+            candidate_id,
+            |conn_id| {
+                self.conns
+                    .get(&conn_id)
+                    .is_some_and(|conn| !conn.is_closed())
+            },
+        );
+        let selected = self
+            .conns
+            .get(&selected_id)
+            .map(|conn| conn.clone())
+            .unwrap_or(candidate);
+        self.default_conn_id.store(selected.get_conn_id());
+        Some(selected)
+    }
+
+    fn packet_connection_policy(packet: &ZCPacket) -> NextHopPolicy {
+        let Some(header) = packet.peer_manager_header() else {
+            return NextHopPolicy::LeastHop;
+        };
+        if header.is_critical_l2_control() {
+            NextHopPolicy::LeastCost
+        } else if header.is_speed_first() {
+            NextHopPolicy::MaxGoodput
+        } else if header.is_latency_first() {
+            NextHopPolicy::LeastCost
+        } else {
+            NextHopPolicy::LeastHop
         }
-        let selected = preferred_sampled
-            .map(|(_, conn)| conn)
-            .or(preferred_unsampled)
-            .or_else(|| fallback_sampled.map(|(_, conn)| conn))
-            .or(fallback_unsampled);
-        if let Some(conn) = &selected {
-            self.default_conn_id.store(conn.get_conn_id());
-        }
-        selected
     }
 
     pub async fn send_msg(&self, mut msg: ZCPacket) -> Result<(), Error> {
         stamp_critical_l2_control(&mut msg);
-        let Some(conn) = self.select_conn().await else {
+        let policy = Self::packet_connection_policy(&msg);
+        let flow_hash = classify_packet_flow(&msg).hash;
+        let Some(conn) = self.select_conn(policy, flow_hash).await else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
         #[cfg(feature = "quic")]
@@ -470,7 +548,10 @@ impl Peer {
         for packet in batch.iter_mut() {
             stamp_critical_l2_control(packet);
         }
-        let Some(conn) = self.select_conn().await else {
+        let first = batch.first().expect("a non-singleton batch is not empty");
+        let policy = Self::packet_connection_policy(first);
+        let flow_hash = classify_packet_flow(first).hash;
+        let Some(conn) = self.select_conn(policy, flow_hash).await else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
         #[cfg(feature = "quic")]
@@ -610,7 +691,7 @@ impl Drop for Peer {
 mod tests {
     use base64::prelude::{BASE64_STANDARD, Engine as _};
     use rand::rngs::OsRng;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tokio::time::timeout;
 
     use crate::{
@@ -619,7 +700,10 @@ mod tests {
             global_ctx::{GlobalCtx, tests::get_mock_global_ctx},
             new_peer_id,
         },
-        peers::{create_packet_recv_chan, peer_conn::PeerConn, peer_session::PeerSessionStore},
+        peers::{
+            create_packet_recv_chan, peer_conn::PeerConn, peer_session::PeerSessionStore,
+            route_trait::NextHopPolicy, speed_probe::SpeedSample,
+        },
         proto::common::SecureModeConfig,
         tunnel::ring::create_ring_tunnel_pair,
     };
@@ -791,9 +875,106 @@ mod tests {
         peer.conns.insert(unsampled.get_conn_id(), unsampled);
         peer.conns.insert(sampled_id, sampled);
 
-        let selected_id = peer.select_conn().await.unwrap().get_conn_id();
+        let selected_id = peer
+            .select_conn(NextHopPolicy::LeastHop, 0)
+            .await
+            .unwrap()
+            .get_conn_id();
         peer.conns.clear();
         assert_eq!(selected_id, sampled_id);
+    }
+
+    #[tokio::test]
+    async fn speed_connection_selection_pins_each_active_flow() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let global_ctx = get_mock_global_ctx();
+        let peer = Peer::new(new_peer_id(), packet_send, global_ctx.clone());
+        let first = Arc::new(unstarted_peer_conn(global_ctx.clone()));
+        let second = Arc::new(unstarted_peer_conn(global_ctx));
+        let now = std::time::Instant::now();
+        first.record_speed_sample_for_test(SpeedSample {
+            delivery_bps: 100_000_000,
+            loss_ppm: 0,
+            generation: 1,
+            measured_at: now,
+            ttl: Duration::from_secs(30),
+        });
+        second.record_speed_sample_for_test(SpeedSample {
+            delivery_bps: 50_000_000,
+            loss_ppm: 0,
+            generation: 1,
+            measured_at: now,
+            ttl: Duration::from_secs(30),
+        });
+        let first_id = first.get_conn_id();
+        let second_id = second.get_conn_id();
+        peer.conns.insert(first_id, first.clone());
+        peer.conns.insert(second_id, second.clone());
+
+        let first_flow = peer
+            .select_conn(NextHopPolicy::MaxGoodput, 10)
+            .await
+            .unwrap();
+        second.record_speed_sample_for_test(SpeedSample {
+            delivery_bps: 200_000_000,
+            loss_ppm: 0,
+            generation: 2,
+            measured_at: now,
+            ttl: Duration::from_secs(30),
+        });
+        let pinned_flow = peer
+            .select_conn(NextHopPolicy::MaxGoodput, 10)
+            .await
+            .unwrap();
+        let new_flow = peer
+            .select_conn(NextHopPolicy::MaxGoodput, 11)
+            .await
+            .unwrap();
+        peer.conns.clear();
+
+        assert_eq!(first_flow.get_conn_id(), first_id);
+        assert_eq!(pinned_flow.get_conn_id(), first_id);
+        assert_eq!(new_flow.get_conn_id(), second_id);
+    }
+
+    #[tokio::test]
+    async fn speed_connection_fallback_prefers_latency_before_protocol() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags().clone();
+        flags.default_protocol = "quic".to_owned();
+        global_ctx.set_flags(flags);
+        let peer = Peer::new(new_peer_id(), packet_send, global_ctx.clone());
+
+        let mut udp = unstarted_peer_conn(global_ctx.clone());
+        udp.set_tunnel_info_for_test(test_tunnel_info(
+            "udp",
+            "udp://127.0.0.1:10001",
+            "udp://127.0.0.1:10002",
+        ));
+        udp.record_latency_for_test(500);
+        let udp = Arc::new(udp);
+        let udp_id = udp.get_conn_id();
+
+        let mut quic = unstarted_peer_conn(global_ctx);
+        quic.set_tunnel_info_for_test(test_tunnel_info(
+            "quic",
+            "quic://127.0.0.1:10003",
+            "quic://127.0.0.1:10004",
+        ));
+        quic.record_latency_for_test(2_000);
+        let quic = Arc::new(quic);
+
+        peer.conns.insert(udp_id, udp);
+        peer.conns.insert(quic.get_conn_id(), quic);
+
+        let selected_id = peer
+            .select_conn(NextHopPolicy::MaxGoodput, 20)
+            .await
+            .unwrap()
+            .get_conn_id();
+        peer.conns.clear();
+        assert_eq!(selected_id, udp_id);
     }
 
     #[tokio::test]
@@ -827,7 +1008,11 @@ mod tests {
         peer.conns.insert(udp.get_conn_id(), udp);
         peer.conns.insert(quic_id, quic);
 
-        let selected_id = peer.select_conn().await.unwrap().get_conn_id();
+        let selected_id = peer
+            .select_conn(NextHopPolicy::LeastHop, 0)
+            .await
+            .unwrap()
+            .get_conn_id();
         peer.conns.clear();
         assert_eq!(selected_id, quic_id);
     }
@@ -848,7 +1033,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 
         let retained_id = peer.default_conn_id.load();
-        let selected_id = peer.select_conn().await.unwrap().get_conn_id();
+        let selected_id = peer
+            .select_conn(NextHopPolicy::LeastHop, 0)
+            .await
+            .unwrap()
+            .get_conn_id();
         peer.conns.clear();
         assert_eq!(retained_id, current_id);
         assert_eq!(selected_id, current_id);

@@ -2133,6 +2133,11 @@ impl PeerConn {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_speed_sample_for_test(&self, sample: SpeedSample) {
+        self.store_speed_sample(sample);
+    }
+
     pub(crate) async fn run_speed_probe(
         &self,
         generation: u64,

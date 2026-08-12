@@ -21,9 +21,9 @@ use crate::{
     },
     proto::{
         peer_rpc::{
-            DirectConnectedPeerInfo, GetGlobalPeerMapRequest, GetGlobalPeerMapResponse,
-            GlobalPeerMap, PeerCenterRpc, PeerCenterRpcClientFactory, PeerCenterRpcServer,
-            PeerInfoForGlobalMap, ReportPeersRequest, ReportPeersResponse,
+            GetGlobalPeerMapRequest, GetGlobalPeerMapResponse, GlobalPeerMap, PeerCenterRpc,
+            PeerCenterRpcClientFactory, PeerCenterRpcServer, PeerInfoForGlobalMap,
+            ReportPeersRequest, ReportPeersResponse,
         },
         rpc_types::{self, controller::BaseController},
     },
@@ -501,6 +501,7 @@ impl PeerCenterPeerManagerTrait for PeerMapWithPeerRpcManager {
 mod tests {
     use crate::{
         peers::tests::{connect_peer_manager, create_mock_peer_manager, wait_route_appear},
+        proto::peer_rpc::DirectConnectedPeerInfo,
         tunnel::common::tests::wait_for_condition,
     };
 

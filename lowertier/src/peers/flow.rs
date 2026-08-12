@@ -416,18 +416,21 @@ struct FlowPathKey {
 }
 
 #[derive(Clone, Copy)]
-struct PinnedPath {
-    path: PeerId,
+struct PinnedPath<P> {
+    path: P,
     last_used: Instant,
 }
 
-pub(crate) struct FlowPathCache {
-    entries: DashMap<FlowPathKey, PinnedPath>,
+pub(crate) struct FlowPathCache<P = PeerId> {
+    entries: DashMap<FlowPathKey, PinnedPath<P>>,
     capacity: usize,
     ttl: Duration,
 }
 
-impl FlowPathCache {
+impl<P> FlowPathCache<P>
+where
+    P: Copy + Eq + Send + Sync,
+{
     pub(crate) fn new(capacity: usize, ttl: Duration) -> Self {
         assert!(capacity > 0);
         Self {
@@ -437,15 +440,9 @@ impl FlowPathCache {
         }
     }
 
-    pub(crate) fn select<F>(
-        &self,
-        destination: PeerId,
-        flow: u64,
-        candidate: PeerId,
-        eligible: F,
-    ) -> PeerId
+    pub(crate) fn select<F>(&self, destination: PeerId, flow: u64, candidate: P, eligible: F) -> P
     where
-        F: Fn(PeerId) -> bool,
+        F: Fn(P) -> bool,
     {
         let key = FlowPathKey { destination, flow };
         let now = Instant::now();
@@ -465,16 +462,16 @@ impl FlowPathCache {
         candidate
     }
 
-    pub(crate) fn lookup<F>(&self, destination: PeerId, flow: u64, eligible: F) -> Option<PeerId>
+    pub(crate) fn lookup<F>(&self, destination: PeerId, flow: u64, eligible: F) -> Option<P>
     where
-        F: Fn(PeerId) -> bool,
+        F: Fn(P) -> bool,
     {
         self.lookup_key(FlowPathKey { destination, flow }, Instant::now(), &eligible)
     }
 
-    fn lookup_key<F>(&self, key: FlowPathKey, now: Instant, eligible: &F) -> Option<PeerId>
+    fn lookup_key<F>(&self, key: FlowPathKey, now: Instant, eligible: &F) -> Option<P>
     where
-        F: Fn(PeerId) -> bool,
+        F: Fn(P) -> bool,
     {
         if let Some(mut pinned) = self.entries.get_mut(&key) {
             if now.duration_since(pinned.last_used) <= self.ttl && eligible(pinned.path) {
@@ -487,7 +484,7 @@ impl FlowPathCache {
         None
     }
 
-    pub(crate) fn invalidate_path(&self, path: PeerId) {
+    pub(crate) fn invalidate_path(&self, path: P) {
         self.entries.retain(|_, pinned| pinned.path != path);
         self.entries.shrink_to_fit();
     }
@@ -641,6 +638,19 @@ mod tests {
         assert_eq!(cache.select(7, flow, 11, |_| true), 11);
         assert_eq!(cache.lookup(7, flow, |path| path == 11), Some(11));
         assert_eq!(cache.lookup(7, flow, |_| false), None);
+    }
+
+    #[test]
+    fn path_cache_can_pin_connection_identifiers() {
+        let cache: FlowPathCache<uuid::Uuid> = FlowPathCache::new(8, Duration::from_secs(60));
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+
+        assert_eq!(cache.select(7, 0x3456, first, |_| true), first);
+        assert_eq!(cache.select(7, 0x3456, second, |_| true), first);
+
+        cache.invalidate_path(first);
+        assert_eq!(cache.select(7, 0x3456, second, |_| true), second);
     }
 
     #[test]
