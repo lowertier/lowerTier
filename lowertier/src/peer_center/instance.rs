@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -294,14 +293,14 @@ impl PeerCenterInstance {
     async fn init_report_peers_job(&self) {
         struct Ctx {
             peer_mgr: Arc<dyn PeerCenterPeerManagerTrait>,
-            last_report_peers: Mutex<BTreeSet<PeerId>>,
+            last_report: Mutex<PeerInfoForGlobalMap>,
 
             last_center_peer: AtomicCell<PeerId>,
             last_report_time: AtomicCell<Instant>,
         }
         let ctx = Arc::new(Ctx {
             peer_mgr: self.peer_mgr.clone(),
-            last_report_peers: Mutex::new(BTreeSet::new()),
+            last_report: Mutex::new(PeerInfoForGlobalMap::default()),
             last_center_peer: AtomicCell::new(PeerId::default()),
             last_report_time: AtomicCell::new(Instant::now()),
         });
@@ -310,7 +309,6 @@ impl PeerCenterInstance {
             .init_periodic_job(ctx, |client, ctx| async move {
                 let my_node_id = ctx.my_peer_id;
                 let peers = ctx.job_ctx.peer_mgr.list_peers().await;
-                let peer_list = peers.direct_peers.keys().copied().collect();
                 let job_ctx = &ctx.job_ctx;
 
                 // only report when:
@@ -319,7 +317,7 @@ impl PeerCenterInstance {
                 // 3. peers changed
                 if ctx.center_peer.load() == ctx.job_ctx.last_center_peer.load()
                     && job_ctx.last_report_time.load().elapsed().as_secs() < 60
-                    && *job_ctx.last_report_peers.lock().await == peer_list
+                    && *job_ctx.last_report.lock().await == peers
                 {
                     return Ok(5000);
                 }
@@ -329,14 +327,14 @@ impl PeerCenterInstance {
                         BaseController::default(),
                         ReportPeersRequest {
                             my_peer_id: my_node_id,
-                            peer_infos: Some(peers),
+                            peer_infos: Some(peers.clone()),
                         },
                     )
                     .await;
 
                 if ret.is_ok() {
                     ctx.job_ctx.last_center_peer.store(ctx.center_peer.load());
-                    *ctx.job_ctx.last_report_peers.lock().await = peer_list;
+                    *ctx.job_ctx.last_report.lock().await = peers;
                     ctx.job_ctx.last_report_time.store(Instant::now());
                 } else {
                     tracing::error!("report peers to center server got error result: {:?}", ret);
@@ -372,6 +370,27 @@ impl PeerCenterInstance {
                     .and_then(|src_peer_info| src_peer_info.direct_peers.get(&dst))
                     .map(|info| info.latency_ms)
             }
+
+            fn directed_delivery_bps(&self, src: PeerId, dst: PeerId) -> Option<u64> {
+                let info = self
+                    .global_peer_map_clone
+                    .map
+                    .get(&src)?
+                    .direct_peers
+                    .get(&dst)?;
+                if info.tx_delivery_bps == 0 || info.speed_sample_ttl_ms == 0 {
+                    return None;
+                }
+                let local_residence_ms = u64::try_from(
+                    self.global_peer_map_update_time
+                        .load()
+                        .elapsed()
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX);
+                let total_age_ms = info.speed_sample_age_ms.saturating_add(local_residence_ms);
+                (total_age_ms < info.speed_sample_ttl_ms).then_some(info.tx_delivery_bps)
+            }
         }
 
         impl RouteCostCalculatorInterface for RouteCostCalculatorImpl {
@@ -380,6 +399,10 @@ impl PeerCenterInstance {
                     return cost;
                 }
                 self.directed_cost(dst, src).unwrap_or(500)
+            }
+
+            fn calculate_delivery_bps(&self, src: PeerId, dst: PeerId) -> Option<u64> {
+                self.directed_delivery_bps(src, dst)
             }
 
             fn begin_update(&mut self) {
@@ -446,21 +469,11 @@ impl PeerCenterPeerManagerTrait for PeerMapWithPeerRpcManager {
         let mut ret = PeerInfoForGlobalMap::default();
         for peer in peers {
             if let Some(conns) = self.peer_map.list_peer_conns(peer).await {
-                let Some(min_lat) = conns
-                    .iter()
-                    .map(|conn| conn.stats.as_ref().unwrap().latency_us)
-                    .min()
-                else {
+                let Some(info) = super::direct_peer_info_from_connections(&conns) else {
                     continue;
                 };
 
-                ret.direct_peers.insert(
-                    peer,
-                    DirectConnectedPeerInfo {
-                        latency_ms: std::cmp::max(1, (min_lat as u32 / 1000) as i32),
-                        ..Default::default()
-                    },
-                );
+                ret.direct_peers.insert(peer, info);
             }
         }
 
@@ -492,6 +505,37 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn directed_delivery_expires_after_server_and_local_residence() {
+        let peer_mgr = create_mock_peer_manager().await;
+        let peer_center = PeerCenterInstance::new(peer_mgr);
+        peer_center.global_peer_map.write().unwrap().map.insert(
+            1,
+            PeerInfoForGlobalMap {
+                direct_peers: [(
+                    2,
+                    DirectConnectedPeerInfo {
+                        latency_ms: 10,
+                        tx_delivery_bps: 10_000_000,
+                        speed_sample_age_ms: 2_990,
+                        speed_sample_ttl_ms: 3_000,
+                        speed_probe_generation: 1,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            },
+        );
+        peer_center
+            .global_peer_map_update_time
+            .store(Instant::now() - Duration::from_millis(20));
+        let mut calculator = peer_center.get_cost_calculator();
+        calculator.begin_update();
+
+        assert_eq!(calculator.calculate_delivery_bps(1, 2), None);
+        assert_eq!(calculator.calculate_delivery_bps(2, 1), None);
+    }
 
     #[tokio::test]
     async fn test_peer_center_instance() {

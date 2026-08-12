@@ -80,13 +80,25 @@ impl PeerCenterServer {
 
     fn calc_global_digest_data(data: &PeerCenterServerData) -> Digest {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        data.global_peer_map
+        let entries = data
+            .global_peer_map
             .iter()
-            .map(|v| v.key().clone())
+            .map(|entry| {
+                let pair = entry.key().clone();
+                let info = entry.value().info;
+                (
+                    pair,
+                    info.latency_ms,
+                    info.tx_delivery_bps,
+                    info.tx_loss_ppm,
+                    info.speed_sample_age_ms,
+                    info.speed_sample_ttl_ms,
+                    info.speed_probe_generation,
+                )
+            })
             .collect::<BinaryHeap<_>>()
-            .into_sorted_vec()
-            .into_iter()
-            .for_each(|v| v.hash(&mut hasher));
+            .into_sorted_vec();
+        entries.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -144,6 +156,10 @@ impl PeerCenterRpc for PeerCenterServer {
         let mut global_peer_map = GlobalPeerMap::default();
         for item in data.global_peer_map.iter() {
             let (pair, entry) = item.pair();
+            let residence_ms =
+                u64::try_from(entry.update_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let mut info = entry.info;
+            info.speed_sample_age_ms = info.speed_sample_age_ms.saturating_add(residence_ms);
             global_peer_map
                 .map
                 .entry(pair.src)
@@ -151,7 +167,7 @@ impl PeerCenterRpc for PeerCenterServer {
                     direct_peers: Default::default(),
                 })
                 .direct_peers
-                .insert(pair.dst, entry.info);
+                .insert(pair.dst, info);
         }
 
         Ok(GetGlobalPeerMapResponse {
@@ -243,5 +259,114 @@ mod tests {
             .await
             .unwrap();
         assert!(resp_b.global_peer_map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_preserves_directed_speed_and_adds_residence_age() {
+        let server = PeerCenterServer::new();
+        let forward = DirectConnectedPeerInfo {
+            latency_ms: 70,
+            tx_delivery_bps: 20_000_000,
+            tx_loss_ppm: 1_000,
+            speed_sample_age_ms: 11,
+            speed_sample_ttl_ms: 90_000,
+            speed_probe_generation: 7,
+        };
+        let reverse = DirectConnectedPeerInfo {
+            latency_ms: 160,
+            tx_delivery_bps: 5_000_000,
+            tx_loss_ppm: 2_000,
+            speed_sample_age_ms: 13,
+            speed_sample_ttl_ms: 90_000,
+            speed_probe_generation: 8,
+        };
+
+        for (source, destination, info) in [(1, 2, forward), (2, 1, reverse)] {
+            let mut peers = PeerInfoForGlobalMap::default();
+            peers.direct_peers.insert(destination, info);
+            server
+                .report_peers(
+                    BaseController::default(),
+                    ReportPeersRequest {
+                        my_peer_id: source,
+                        peer_infos: Some(peers),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let response = server
+            .get_global_peer_map(
+                BaseController::default(),
+                GetGlobalPeerMapRequest { digest: 0 },
+            )
+            .await
+            .unwrap();
+        let actual_forward = &response.global_peer_map[&1].direct_peers[&2];
+        let actual_reverse = &response.global_peer_map[&2].direct_peers[&1];
+        assert_eq!(actual_forward.tx_delivery_bps, 20_000_000);
+        assert_eq!(actual_reverse.tx_delivery_bps, 5_000_000);
+        assert!(actual_forward.speed_sample_age_ms >= 21);
+        assert!(actual_reverse.speed_sample_age_ms >= 23);
+    }
+
+    #[tokio::test]
+    async fn delivery_change_updates_digest_without_a_topology_change() {
+        let server = PeerCenterServer::new();
+        let mut peers = PeerInfoForGlobalMap::default();
+        peers.direct_peers.insert(
+            2,
+            DirectConnectedPeerInfo {
+                tx_delivery_bps: 5_000_000,
+                speed_sample_ttl_ms: 90_000,
+                ..Default::default()
+            },
+        );
+        server
+            .report_peers(
+                BaseController::default(),
+                ReportPeersRequest {
+                    my_peer_id: 1,
+                    peer_infos: Some(peers.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        let first = server
+            .get_global_peer_map(
+                BaseController::default(),
+                GetGlobalPeerMapRequest { digest: 0 },
+            )
+            .await
+            .unwrap();
+
+        peers.direct_peers.get_mut(&2).unwrap().tx_delivery_bps = 20_000_000;
+        server
+            .report_peers(
+                BaseController::default(),
+                ReportPeersRequest {
+                    my_peer_id: 1,
+                    peer_infos: Some(peers),
+                },
+            )
+            .await
+            .unwrap();
+        let second = server
+            .get_global_peer_map(
+                BaseController::default(),
+                GetGlobalPeerMapRequest {
+                    digest: first.digest.unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            second.global_peer_map[&1].direct_peers[&2].tx_delivery_bps,
+            20_000_000
+        );
+        assert_ne!(first.digest, second.digest);
     }
 }

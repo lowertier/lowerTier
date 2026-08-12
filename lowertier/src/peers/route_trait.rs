@@ -60,6 +60,10 @@ pub trait RouteCostCalculatorInterface: Send + Sync {
         1
     }
 
+    fn calculate_delivery_bps(&self, _src: PeerId, _dst: PeerId) -> Option<u64> {
+        None
+    }
+
     fn need_update(&self) -> bool {
         false
     }

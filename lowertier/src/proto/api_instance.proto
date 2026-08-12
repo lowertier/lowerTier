@@ -49,6 +49,7 @@ message PeerConnInfo {
   optional uint32 tx_loss_ppm = 16;
   optional uint64 speed_sample_age_ms = 17;
   optional uint64 speed_probe_generation = 18;
+  optional uint64 speed_sample_ttl_ms = 19;
 }
 
 message PeerInfo {

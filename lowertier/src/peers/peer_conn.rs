@@ -2343,6 +2343,8 @@ impl PeerConn {
             speed_sample_age_ms: speed_sample
                 .map(|sample| u64::try_from(sample.age(now).as_millis()).unwrap_or(u64::MAX)),
             speed_probe_generation: speed_sample.map(|sample| sample.generation),
+            speed_sample_ttl_ms: speed_sample
+                .map(|sample| u64::try_from(sample.ttl.as_millis()).unwrap_or(u64::MAX)),
         }
     }
 
