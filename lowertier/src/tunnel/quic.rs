@@ -1388,6 +1388,28 @@ type DatagramBatchSend =
 
 const RELIABLE_LANE_QUEUE_BATCHES: usize = 1;
 
+fn poll_reliable_reservation(
+    reservation: &mut Option<ReliableReserve>,
+    cx: &mut TaskContext<'_>,
+) -> Poll<Result<mpsc::OwnedPermit<PacketBatch>, SinkError>> {
+    let reserve = reservation
+        .as_mut()
+        .expect("the reliable reservation exists before polling");
+    match reserve.as_mut().poll(cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Ok(permit)) => {
+            *reservation = None;
+            Poll::Ready(Ok(permit))
+        }
+        Poll::Ready(Err(_)) => {
+            *reservation = None;
+            Poll::Ready(Err(TunnelError::InternalError(
+                "reliable QUIC lane stopped".to_owned(),
+            )))
+        }
+    }
+}
+
 async fn run_reliable_writer(
     send: SendStream,
     mut receiver: mpsc::Receiver<PacketBatch>,
@@ -1498,18 +1520,14 @@ impl QuicHybridWriter {
             self.reliable_reserve = Some(Box::pin(sender.clone().reserve_owned()));
         }
 
-        let reserve = self.reliable_reserve.as_mut().unwrap();
-        match reserve.as_mut().poll(cx) {
+        match poll_reliable_reservation(&mut self.reliable_reserve, cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(permit)) => {
                 let packet = self.pending_reliable.take().unwrap();
                 permit.send(packet);
-                self.reliable_reserve = None;
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(TunnelError::InternalError(
-                "reliable QUIC lane stopped".to_owned(),
-            ))),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
     }
 }
@@ -1886,6 +1904,19 @@ mod tests {
             quic_stats_interval_from(Some("250")),
             Some(Duration::from_millis(250))
         );
+    }
+
+    #[tokio::test]
+    async fn failed_reliable_reservation_is_removed_before_another_poll() {
+        let (sender, receiver) = mpsc::channel::<PacketBatch>(1);
+        drop(receiver);
+        let mut reservation: Option<ReliableReserve> = Some(Box::pin(sender.reserve_owned()));
+
+        let result =
+            futures::future::poll_fn(|cx| poll_reliable_reservation(&mut reservation, cx)).await;
+
+        assert!(result.is_err());
+        assert!(reservation.is_none());
     }
 
     fn stopped_client_endpoint() -> (Endpoint, SocketAddr) {
