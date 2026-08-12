@@ -76,6 +76,7 @@ lowertier-panic.log
 /**/CODEX.md
 /.github/copilot-instructions.md
 /docs/superpowers/
+/.worktrees/
 
 # web
 node_modules
