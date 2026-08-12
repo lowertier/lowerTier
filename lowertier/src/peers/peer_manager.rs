@@ -413,9 +413,7 @@ where
             }
             continue;
         }
-        let Some(header) = packet.peer_manager_header() else {
-            return None;
-        };
+        let header = packet.peer_manager_header()?;
         if header.packet_type != packet_type
             || header.from_peer_id.get() != source
             || header.to_peer_id.get() != my_peer_id

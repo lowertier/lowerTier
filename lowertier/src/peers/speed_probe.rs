@@ -286,9 +286,7 @@ impl ProbeReceiver {
     }
 
     pub(crate) fn poll(&mut self, now: Instant) -> Option<ProbeAck> {
-        let Some(active) = self.active.as_ref() else {
-            return None;
-        };
+        let active = self.active.as_ref()?;
         if active.marker_arrival.is_some_and(|marker| {
             now.checked_duration_since(marker)
                 .is_some_and(|age| age >= PROBE_MARKER_TIMEOUT)
