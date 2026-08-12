@@ -136,10 +136,10 @@ fn console_layers(default_level: Option<LevelFilter>) -> anyhow::Result<Vec<BoxL
         tracing_subscriber::reload::Layer::new(parse_env_filter(default_level)?);
 
     let (stdout, stderr) = cfg_select! {
-        test => {{
+        test => {
             let w = tracing_subscriber::fmt::TestWriter::new;
             (w, w)
-        }}
+        }
         _ => (std::io::stdout, std::io::stderr),
     };
 

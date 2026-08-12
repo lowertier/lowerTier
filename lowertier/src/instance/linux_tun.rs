@@ -268,10 +268,7 @@ impl QueueSink {
             .spare
             .take()
             .or_else(|| Some(Vec::with_capacity(MAX_PACKET_BATCH_SIZE)));
-        self.gro_table = self
-            .gro_spare
-            .take()
-            .or_else(|| Some(GROTable::default()));
+        self.gro_table = self.gro_spare.take().or_else(|| Some(GROTable::default()));
         (buffers, gro_table)
     }
 
@@ -328,10 +325,7 @@ impl LinuxTunSink {
         }
     }
 
-    fn poll_complete_in_flight(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), TunnelError>> {
+    fn poll_complete_in_flight(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TunnelError>> {
         while !self.in_flight.is_empty() {
             match Pin::new(&mut self.in_flight).poll_next(cx) {
                 Poll::Ready(Some((index, result, buffers, gro_table))) => {

@@ -58,8 +58,8 @@ use crate::{
     tunnel::{
         BatchStreamItem, PacketBatchStream, Tunnel, TunnelError,
         batch::{
-            MAX_PACKET_BATCH_SIZE, PacketBatch, ordered_parallel_try_for_each,
-            parallel_crypto_enabled, RECEIVE_PREFETCH_BATCHES,
+            MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES,
+            ordered_parallel_try_for_each, parallel_crypto_enabled,
             wait_for_delivery_with_bounded_prefetch,
         },
         direct::{DirectTunnel, DirectTunnelSender},
@@ -1858,9 +1858,7 @@ impl PeerConn {
                         }
                         next_result = if let Some(first) = prefetched.pop_front() {
                             if !prefetched.is_empty() {
-                                stream = Box::pin(
-                                    futures::stream::iter(prefetched).chain(stream),
-                                );
+                                stream = Box::pin(futures::stream::iter(prefetched).chain(stream));
                             }
                             Some(first)
                         } else if stream_ended {
@@ -2231,11 +2229,11 @@ pub mod tests {
             release.send(()).unwrap();
         });
 
-        let (delivery, prefetched) = crate::tunnel::batch::wait_for_delivery_with_one_prefetch(
-            &mut stream,
-            async { wait.await.map_err(|_| ()) },
-        )
-        .await;
+        let (delivery, prefetched) =
+            crate::tunnel::batch::wait_for_delivery_with_one_prefetch(&mut stream, async {
+                wait.await.map_err(|_| ())
+            })
+            .await;
 
         assert!(delivery.is_ok());
         assert_eq!(prefetched, Some(Some(1)));
@@ -2251,20 +2249,16 @@ pub mod tests {
             release.send(()).unwrap();
         });
 
-        let (delivery, prefetched, stream_ended) =
-            wait_for_delivery_with_bounded_prefetch(
-                &mut stream,
-                async { wait.await.map_err(|_| ()) },
-                RECEIVE_PREFETCH_BATCHES,
-            )
-            .await;
+        let (delivery, prefetched, stream_ended) = wait_for_delivery_with_bounded_prefetch(
+            &mut stream,
+            async { wait.await.map_err(|_| ()) },
+            RECEIVE_PREFETCH_BATCHES,
+        )
+        .await;
 
         assert!(delivery.is_ok());
         assert!(!stream_ended);
-        assert_eq!(
-            prefetched.into_iter().collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
+        assert_eq!(prefetched.into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(stream.next().await, Some(4));
     }
     use crate::peers::create_packet_recv_chan;

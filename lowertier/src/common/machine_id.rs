@@ -96,27 +96,35 @@ fn default_machine_id_state_dir() -> anyhow::Result<PathBuf> {
             env::var_os("HOME"),
         )),
         all(target_os = "macos", not(feature = "macos-ne")) => {
-            let home = non_empty_os_string(env::var_os("HOME"))
-                .ok_or_else(|| anyhow::anyhow!("HOME is not set, cannot resolve machine id state directory"))?;
+            let home = non_empty_os_string(env::var_os("HOME")).ok_or_else(|| {
+                anyhow::anyhow!("HOME is not set, cannot resolve machine id state directory")
+            })?;
             Ok(PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
                 .join("com.lowertier"))
-        },
+        }
         target_os = "windows" => {
-            let local_app_data = non_empty_os_string(env::var_os("LOCALAPPDATA")).ok_or_else(|| {
-                anyhow::anyhow!("LOCALAPPDATA is not set, cannot resolve machine id state directory")
-            })?;
+            let local_app_data =
+                non_empty_os_string(env::var_os("LOCALAPPDATA")).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LOCALAPPDATA is not set, cannot resolve machine id state directory"
+                    )
+                })?;
             Ok(PathBuf::from(local_app_data).join("lowertier"))
-        },
+        }
         target_os = "freebsd" => {
-            let home = non_empty_os_string(env::var_os("HOME"))
-                .ok_or_else(|| anyhow::anyhow!("HOME is not set, cannot resolve machine id state directory"))?;
-            Ok(PathBuf::from(home).join(".local").join("share").join("lowertier"))
-        },
+            let home = non_empty_os_string(env::var_os("HOME")).ok_or_else(|| {
+                anyhow::anyhow!("HOME is not set, cannot resolve machine id state directory")
+            })?;
+            Ok(PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("lowertier"))
+        }
         target_os = "android" => {
             anyhow::bail!("machine id state directory must be provided explicitly on Android");
-        },
+        }
         _ => anyhow::bail!("machine id state directory is unsupported on this platform"),
     }
 }
