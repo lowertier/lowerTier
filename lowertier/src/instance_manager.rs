@@ -566,6 +566,10 @@ fn handle_event(
                     GlobalCtxEvent::CredentialChanged => {
                         event!(info, "[{}] credential changed", instance_id);
                     }
+
+                    GlobalCtxEvent::MulticastGroupsUpdated => {
+                        event!(debug, "[{}] multicast membership changed", instance_id);
+                    }
                 }
             } else {
                 events = events.resubscribe();

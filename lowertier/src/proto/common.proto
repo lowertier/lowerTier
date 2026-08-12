@@ -120,6 +120,8 @@ message FlagsInConfig {
   uint64 speed_probe_interval_seconds = 59;
   // Maximum node-wide probe traffic in bits per second.
   uint64 speed_probe_budget_bps = 60;
+  // Permit complete Ethernet frames from this authenticated admin node.
+  bool enable_bridge = 61;
 }
 
 message RpcDescriptor {
@@ -273,6 +275,9 @@ message PeerFeatureFlag {
   bool ipv6_public_addr_provider = 11;
   bool ethernet_input = 12;
   bool speed_routing = 13;
+  bool hybrid_l3 = 14;
+  bool bridge_input = 15;
+  bool multicast_membership = 16;
 }
 
 enum SocketType {

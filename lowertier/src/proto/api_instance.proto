@@ -93,6 +93,7 @@ message Route {
   optional uint64 path_delivery_bps_speed_first = 19;
   optional int32 path_latency_speed_first = 20;
   optional int32 path_len_speed_first = 21;
+  repeated bytes multicast_groups = 22;
 }
 
 message PeerRoutePair {

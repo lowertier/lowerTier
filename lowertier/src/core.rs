@@ -638,6 +638,15 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_ENABLE_BRIDGE",
+        help = t!("core_clap.enable_bridge").to_string(),
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    enable_bridge: Option<bool>,
+
+    #[arg(
+        long,
         env = "ET_QUIC_CONGESTION",
         help = t!("core_clap.quic_congestion").to_string()
     )]
@@ -1331,6 +1340,7 @@ impl NetworkOptions {
         f.l2_fdb_capacity = self.l2_fdb_capacity.unwrap_or(f.l2_fdb_capacity);
         f.l2_fdb_age_seconds = self.l2_fdb_age_seconds.unwrap_or(f.l2_fdb_age_seconds);
         f.l2_flood_bps = self.l2_flood_bps.unwrap_or(f.l2_flood_bps);
+        f.enable_bridge = self.enable_bridge.unwrap_or(f.enable_bridge);
         if let Some(controller) = &self.quic_congestion {
             f.quic_congestion = controller.clone();
         }
@@ -2020,6 +2030,7 @@ enabled = true
             "600",
             "--l2-flood-bps",
             "134217728",
+            "--enable-bridge",
         ])
         .unwrap();
         let cfg = TomlConfigLoader::default();
@@ -2043,6 +2054,7 @@ enabled = true
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);
+        assert!(flags.enable_bridge);
     }
 
     #[test]

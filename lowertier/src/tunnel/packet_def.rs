@@ -920,6 +920,31 @@ impl ZCPacket {
         self.inner.len() - self.payload_offset()
     }
 
+    pub fn remove_payload_prefix(&mut self, prefix_len: usize) -> Result<(), &'static str> {
+        let payload_len = self.payload_len();
+        if prefix_len > payload_len {
+            return Err("payload prefix exceeds the packet length");
+        }
+        self.inner.advance(prefix_len);
+        self.parsed_metadata = None;
+        Ok(())
+    }
+
+    pub fn prepend_payload(&mut self, prefix: &[u8]) -> Result<(), &'static str> {
+        let payload_offset = self.payload_offset();
+        let old_len = self.inner.len();
+        let new_inner_len = old_len
+            .checked_add(prefix.len())
+            .ok_or("payload length overflow")?;
+        self.inner.reserve(prefix.len());
+        self.inner.resize(new_inner_len, 0);
+        self.inner
+            .copy_within(payload_offset..old_len, payload_offset + prefix.len());
+        self.inner[payload_offset..payload_offset + prefix.len()].copy_from_slice(prefix);
+        self.parsed_metadata = None;
+        Ok(())
+    }
+
     pub fn buf_len(&self) -> usize {
         self.inner.len()
     }
@@ -1272,5 +1297,41 @@ mod tests {
         let packet = packet.convert_type(ZCPacketType::UDP);
 
         assert!(packet.is_lossy());
+    }
+
+    #[test]
+    fn removes_payload_prefix_without_moving_the_ip_packet() {
+        let mut packet = ZCPacket::new_with_payload(b"ethernet-headerpayload");
+        let original_pointer = packet.inner.as_ptr();
+
+        packet.remove_payload_prefix(15).unwrap();
+
+        assert_eq!(packet.payload(), b"payload");
+        assert_eq!(packet.inner.as_ptr(), original_pointer.wrapping_add(15));
+    }
+
+    #[test]
+    fn prepends_payload_without_allocation_when_tail_space_exists() {
+        let mut packet = ZCPacket::new_with_payload(b"payload");
+        packet.inner.reserve(15);
+        let original_capacity = packet.inner.capacity();
+
+        packet.prepend_payload(b"ethernet-header").unwrap();
+        assert_eq!(packet.payload(), b"ethernet-headerpayload");
+        assert_eq!(packet.inner.capacity(), original_capacity);
+    }
+
+    #[test]
+    fn removed_payload_prefix_keeps_the_peer_header_writable() {
+        let mut packet = ZCPacket::new_with_payload(b"ethernet-headerpayload");
+
+        packet.remove_payload_prefix(15).unwrap();
+        packet.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
+
+        assert_eq!(packet.payload(), b"payload");
+        let header = packet.peer_manager_header().unwrap();
+        assert_eq!(header.from_peer_id.get(), 7);
+        assert_eq!(header.to_peer_id.get(), 9);
+        assert_eq!(header.len.get(), 7);
     }
 }

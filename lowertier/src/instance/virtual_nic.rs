@@ -35,7 +35,8 @@ use crate::{
 use byteorder::WriteBytesExt as _;
 use bytes::{Buf, BufMut, BytesMut};
 use cidr::{Ipv4Inet, Ipv6Inet};
-use futures::{FutureExt, SinkExt, Stream, StreamExt, lock::BiLock, ready};
+use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, lock::BiLock, ready};
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use pin_project_lite::pin_project;
 use pnet::packet::{ipv4::Ipv4Packet, ipv6::Ipv6Packet};
 use tokio::{
@@ -48,6 +49,86 @@ use tokio_util::bytes::Bytes;
 use tokio_util::task::AbortOnDropHandle;
 use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
 use zerocopy::{NativeEndian, NetworkEndian};
+
+fn parse_interface_mac(value: &str) -> Option<[u8; 6]> {
+    let mut mac = [0_u8; 6];
+    let mut parts = value.split(':');
+    for byte in &mut mac {
+        *byte = u8::from_str_radix(parts.next()?, 16).ok()?;
+    }
+    parts.next().is_none().then_some(mac)
+}
+
+fn interface_mac(ifname: &str) -> Result<[u8; 6], Error> {
+    NetworkInterface::show()
+        .map_err(|error| anyhow::anyhow!("cannot list network interfaces: {error}"))?
+        .into_iter()
+        .find(|interface| interface.name == ifname)
+        .and_then(|interface| interface.mac_addr)
+        .and_then(|address| parse_interface_mac(&address))
+        .ok_or_else(|| anyhow::anyhow!("cannot find the MAC address for {ifname}").into())
+}
+
+fn restore_compact_ip_for_tap(
+    packet: &mut ZCPacket,
+    local_mac: [u8; 6],
+) -> Result<(), &'static str> {
+    let Some(header) = packet.peer_manager_header() else {
+        return Err("packet has no peer header");
+    };
+    if header.packet_type != crate::tunnel::packet_def::PacketType::Data as u8 {
+        return Ok(());
+    }
+    let source_mac = crate::instance::l2_tun::encode_peer_mac(header.from_peer_id.get());
+    let ether_type = match packet.payload().first().map(|byte| byte >> 4) {
+        Some(4) => 0x0800_u16,
+        Some(6) => 0x86dd_u16,
+        _ => return Err("compact packet is not IPv4 or IPv6"),
+    };
+    let mut ethernet_header = [0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN];
+    ethernet_header[..6].copy_from_slice(&local_mac);
+    ethernet_header[6..12].copy_from_slice(&source_mac);
+    ethernet_header[12..14].copy_from_slice(&ether_type.to_be_bytes());
+    packet.prepend_payload(&ethernet_header)
+}
+
+struct HybridTapSink {
+    inner: Pin<Box<dyn PacketBatchSink>>,
+    local_mac: [u8; 6],
+}
+
+impl Sink<PacketBatch> for HybridTapSink {
+    type Error = TunnelError;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_ready(context)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, mut batch: PacketBatch) -> Result<(), Self::Error> {
+        for packet in batch.iter_mut() {
+            restore_compact_ip_for_tap(packet, self.local_mac)
+                .map_err(|error| TunnelError::InvalidPacket(error.to_string()))?;
+        }
+        self.inner.as_mut().start_send(batch)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_flush(context)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_close(context)
+    }
+}
 
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
@@ -421,6 +502,10 @@ impl VirtualNic {
 
     fn uses_l2_tun(flags: &Flags) -> bool {
         matches!(flags.port_mode.parse::<PortMode>(), Ok(PortMode::L2Tun))
+    }
+
+    fn uses_hybrid_mode(flags: &Flags) -> bool {
+        matches!(flags.port_mode.parse::<PortMode>(), Ok(PortMode::Auto))
     }
 
     fn wrap_tun_device(
@@ -1303,7 +1388,17 @@ impl NicCtx {
     async fn do_forward_nic_to_peers(ret: ZCPacket, mgr: &PeerManager) {
         let flags = mgr.get_global_ctx().get_flags();
         if VirtualNic::uses_native_ethernet_frames(&flags) {
-            let send_ret = mgr.send_msg_by_ethernet(ret).await;
+            if VirtualNic::uses_hybrid_mode(&flags) {
+                Self::learn_hybrid_multicast_membership(ret.payload(), mgr);
+                if Self::handle_hybrid_control_frame(&ret, mgr).await {
+                    return;
+                }
+            }
+            let send_ret = if VirtualNic::uses_hybrid_mode(&flags) {
+                mgr.send_msg_by_hybrid_ethernet(ret).await
+            } else {
+                mgr.send_msg_by_ethernet(ret).await
+            };
             if send_ret.is_err() {
                 tracing::trace!(?send_ret, "[USER_PACKET] send ethernet frame failed");
             }
@@ -1311,6 +1406,20 @@ impl NicCtx {
         }
         if VirtualNic::uses_l2_tun(&flags) {
             Self::do_forward_l2_tun_to_peers(ret, mgr).await;
+            return;
+        }
+
+        if VirtualNic::uses_hybrid_mode(&flags) {
+            let Some((destination, local_source)) = mgr.routed_packet_destination(&ret) else {
+                tracing::warn!(?ret, "[USER_PACKET] invalid automatic IP packet");
+                return;
+            };
+            if let Err(error) = mgr
+                .send_msg_by_hybrid_ip(ret, destination, local_source)
+                .await
+            {
+                tracing::trace!(?error, "[USER_PACKET] send automatic IP packet failed");
+            }
             return;
         }
 
@@ -1337,6 +1446,21 @@ impl NicCtx {
         }
         let flags = mgr.get_global_ctx().get_flags();
         if VirtualNic::uses_native_ethernet_frames(&flags) {
+            if VirtualNic::uses_hybrid_mode(&flags) {
+                let mut data = PacketBatch::new();
+                for packet in batch {
+                    Self::learn_hybrid_multicast_membership(packet.payload(), mgr);
+                    if Self::handle_hybrid_control_frame(&packet, mgr).await {
+                        continue;
+                    }
+                    data.try_push(packet)
+                        .expect("a filtered NIC batch cannot exceed its input");
+                }
+                if let Err(error) = mgr.send_msg_by_hybrid_ethernet_batch(data).await {
+                    tracing::trace!(?error, "[USER_PACKET] send automatic Ethernet batch failed");
+                }
+                return;
+            }
             match batch.pop_singleton() {
                 Ok(packet) => {
                     if let Err(error) = mgr.send_msg_by_ethernet(packet).await {
@@ -1366,8 +1490,87 @@ impl NicCtx {
             return;
         }
 
-        if let Err(error) = mgr.send_msg_by_ip_batch(batch).await {
+        let result = if VirtualNic::uses_hybrid_mode(&flags) {
+            mgr.send_msg_by_hybrid_ip_batch(batch).await
+        } else {
+            mgr.send_msg_by_ip_batch(batch).await
+        };
+        if let Err(error) = result {
             tracing::trace!(?error, "[USER_PACKET] send routed IP batch failed");
+        }
+    }
+
+    async fn handle_hybrid_control_frame(packet: &ZCPacket, mgr: &PeerManager) -> bool {
+        let frame = packet.payload();
+        let Some(ether_type) = frame.get(12..14) else {
+            return false;
+        };
+        let reply = match ether_type {
+            [0x08, 0x06] => {
+                let Some(target) = frame
+                    .get(38..42)
+                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                    .map(Ipv4Addr::from)
+                else {
+                    return false;
+                };
+                let Some(peer_id) = mgr.get_route().get_peer_id_by_ipv4(&target).await else {
+                    return false;
+                };
+                crate::instance::l2_tun::arp_reply_for_known_ipv4(frame, peer_id, target)
+                    .map(|reply| reply.to_vec())
+            }
+            [0x86, 0xdd] => {
+                let Some(target) = frame
+                    .get(62..78)
+                    .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+                    .map(Ipv6Addr::from)
+                else {
+                    return false;
+                };
+                let Some(peer_id) = mgr.get_route().get_peer_id_by_ipv6(&target).await else {
+                    return false;
+                };
+                crate::instance::l2_tun::ndp_reply_for_known_ipv6(frame, peer_id, target)
+                    .map(|reply| reply.to_vec())
+            }
+            _ => None,
+        };
+        let Some(reply) = reply else {
+            return false;
+        };
+        let mut reply = ZCPacket::new_with_payload(&reply);
+        reply.fill_peer_manager_hdr(
+            mgr.my_peer_id(),
+            mgr.my_peer_id(),
+            crate::tunnel::packet_def::PacketType::Ethernet as u8,
+        );
+        if let Err(error) = mgr.inject_packet_to_nic(reply).await {
+            tracing::debug!(?error, "local hybrid neighbor reply failed");
+        }
+        true
+    }
+
+    fn learn_hybrid_multicast_membership(frame: &[u8], mgr: &PeerManager) {
+        const MAX_GROUPS: usize = 256;
+        let updates = crate::instance::l2_tun::multicast_membership_updates(frame);
+        if updates.is_empty() {
+            return;
+        }
+        let global_ctx = mgr.get_global_ctx_ref();
+        let mut groups = global_ctx.get_multicast_groups();
+        let mut changed = false;
+        for (group, joined) in updates {
+            if joined {
+                if groups.len() < MAX_GROUPS || groups.contains(&group) {
+                    changed |= groups.insert(group);
+                }
+            } else {
+                changed |= groups.remove(&group);
+            }
+        }
+        if changed {
+            global_ctx.set_multicast_groups(groups);
         }
     }
 
@@ -1883,18 +2086,39 @@ impl NicCtx {
             }
         };
 
+        let flags = self.global_ctx.get_flags();
+        let hybrid_tap_mac = if VirtualNic::uses_hybrid_mode(&flags)
+            && VirtualNic::uses_native_ethernet_frames(&flags)
+        {
+            let ifname = self
+                .ifname()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("virtual NIC has no interface name"))?;
+            let _guard = self.global_ctx.net_ns.guard();
+            Some(interface_mac(&ifname)?)
+        } else {
+            None
+        };
         let (stream, sink) = tunnel.split();
 
-        self.do_forward_nic_to_peers_task(stream)?;
-        if !VirtualNic::uses_l2_tun(&self.global_ctx.get_flags()) {
+        if !VirtualNic::uses_l2_tun(&flags) {
             let peer_mgr = self
                 .peer_mgr
                 .upgrade()
                 .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+            let sink: Pin<Box<dyn PacketBatchSink>> = if let Some(local_mac) = hybrid_tap_mac {
+                Box::pin(HybridTapSink {
+                    inner: sink,
+                    local_mac,
+                })
+            } else {
+                sink
+            };
             self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
         } else {
             self.do_forward_peers_to_nic(sink);
         }
+        self.do_forward_nic_to_peers_task(stream)?;
 
         // Assign IPv4 address if provided
         if let Some(ipv4_addr) = ipv4_addr {
@@ -1957,10 +2181,54 @@ mod tests {
         config::gen_default_flags, error::Error, global_ctx::tests::get_mock_global_ctx,
     };
     use crate::instance::l2_tun::{ETHERNET_HEADER_LEN, prepare_ip_frame};
-    use crate::tunnel::{TunnelError, common::ZCPacketToBytes, packet_def::ZCPacket};
+    use crate::tunnel::{
+        TunnelError,
+        common::ZCPacketToBytes,
+        packet_def::{PacketType, ZCPacket},
+    };
     use futures::{StreamExt as _, stream};
 
-    use super::{TunZCPacketToBytes, VirtualNic, read_ready_packet_batch};
+    use super::{
+        TunZCPacketToBytes, VirtualNic, parse_interface_mac, read_ready_packet_batch,
+        restore_compact_ip_for_tap,
+    };
+
+    #[test]
+    fn parses_interface_mac_address() {
+        assert_eq!(
+            parse_interface_mac("02:45:01:23:45:67"),
+            Some([0x02, 0x45, 0x01, 0x23, 0x45, 0x67])
+        );
+        assert_eq!(parse_interface_mac("missing"), None);
+    }
+
+    #[test]
+    fn restores_compact_ip_for_a_tap_edge() {
+        let local_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+        let mut packet = ZCPacket::new_with_payload(&[0x45; 20]);
+        packet.fill_peer_manager_hdr(9, 7, PacketType::Data as u8);
+
+        restore_compact_ip_for_tap(&mut packet, local_mac).unwrap();
+
+        assert_eq!(&packet.payload()[..6], &local_mac);
+        assert_eq!(
+            &packet.payload()[6..12],
+            &crate::instance::l2_tun::encode_peer_mac(9)
+        );
+        assert_eq!(&packet.payload()[12..14], &0x0800_u16.to_be_bytes());
+        assert_eq!(&packet.payload()[14..], &[0x45; 20]);
+    }
+
+    #[test]
+    fn keeps_complete_ethernet_for_a_tap_edge() {
+        let frame = [0x5a; 42];
+        let mut packet = ZCPacket::new_with_payload(&frame);
+        packet.fill_peer_manager_hdr(9, 7, PacketType::Ethernet as u8);
+
+        restore_compact_ip_for_tap(&mut packet, [0x02; 6]).unwrap();
+
+        assert_eq!(packet.payload(), frame);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

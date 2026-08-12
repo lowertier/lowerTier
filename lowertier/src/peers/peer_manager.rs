@@ -590,6 +590,20 @@ impl DirectNicIngress {
             );
             return Ok(());
         }
+        if packet_type == PacketType::Ethernet as u8 {
+            let local_features = self.global_ctx.get_feature_flags();
+            let remote_features = peers
+                .get_route_peer_info(from_peer_id)
+                .await
+                .and_then(|route| route.feature_flag);
+            if !PeerManager::complete_ethernet_is_compatible(
+                &local_features,
+                remote_features.as_ref(),
+            ) {
+                tracing::debug!(from_peer_id, "drop complete Ethernet from a hybrid peer");
+                return Ok(());
+            }
+        }
 
         let batch = self
             .global_ctx
@@ -708,6 +722,13 @@ impl Debug for PeerManager {
 }
 
 impl PeerManager {
+    fn complete_ethernet_is_compatible(
+        local: &crate::proto::common::PeerFeatureFlag,
+        remote: Option<&crate::proto::common::PeerFeatureFlag>,
+    ) -> bool {
+        !local.hybrid_l3 || local.bridge_input || remote.is_none_or(|features| !features.hybrid_l3)
+    }
+
     // Keep lazy-p2p demand alive across the 5s task rescan interval and a full on-demand
     // connect attempt, without retaining extra per-task state in the hot path.
     const RECENT_HAVE_TRAFFIC_TTL: Duration = Duration::from_secs(30);
@@ -2969,6 +2990,31 @@ impl PeerManager {
             .collect()
     }
 
+    fn select_ip_multicast_peers<'a>(
+        routes: impl IntoIterator<Item = &'a instance::Route>,
+        my_peer_id: PeerId,
+        address: IpAddr,
+    ) -> Vec<PeerId> {
+        routes
+            .into_iter()
+            .filter_map(|route| {
+                if route.peer_id == my_peer_id {
+                    return None;
+                }
+                let selected = route.feature_flag.as_ref().map_or(true, |features| {
+                    if features.multicast_membership {
+                        Self::route_subscribes_to_multicast(route, address)
+                    } else {
+                        !features.ethernet_input
+                    }
+                });
+                selected.then_some(route.peer_id)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     fn select_ethernet_peers<'a>(
         routes: impl IntoIterator<Item = &'a instance::Route>,
         my_peer_id: PeerId,
@@ -2977,10 +3023,11 @@ impl PeerManager {
             .into_iter()
             .filter_map(|route| {
                 (route.peer_id != my_peer_id
-                    && route
-                        .feature_flag
-                        .as_ref()
-                        .is_some_and(|features| features.ethernet_input))
+                    && route.feature_flag.as_ref().is_some_and(|features| {
+                        features.ethernet_input
+                            && (!features.hybrid_l3
+                                || (features.bridge_input && !features.is_credential_peer))
+                    }))
                 .then_some(route.peer_id)
             })
             .collect::<BTreeSet<_>>()
@@ -2991,7 +3038,13 @@ impl PeerManager {
     pub async fn get_msg_dst_peer_ipv4(&self, ipv4_addr: &Ipv4Addr) -> (Vec<PeerId>, bool) {
         let mut is_exit_node = false;
         let mut dst_peers = vec![];
-        if self.is_all_peers_broadcast_ipv4(ipv4_addr) {
+        if ipv4_addr.is_multicast() {
+            dst_peers.extend(Self::select_ip_multicast_peers(
+                &self.peers.list_route_infos().await,
+                self.my_peer_id,
+                IpAddr::V4(*ipv4_addr),
+            ));
+        } else if self.is_all_peers_broadcast_ipv4(ipv4_addr) {
             dst_peers.extend(Self::select_ipv4_broadcast_peers(
                 &self.peers.list_route_infos().await,
                 self.my_peer_id,
@@ -3031,7 +3084,13 @@ impl PeerManager {
     pub async fn get_msg_dst_peer_ipv6(&self, ipv6_addr: &Ipv6Addr) -> (Vec<PeerId>, bool) {
         let mut is_exit_node = false;
         let mut dst_peers = vec![];
-        if self.is_all_peers_broadcast_ipv6(ipv6_addr) {
+        if ipv6_addr.is_multicast() {
+            dst_peers.extend(Self::select_ip_multicast_peers(
+                &self.peers.list_route_infos().await,
+                self.my_peer_id,
+                IpAddr::V6(*ipv6_addr),
+            ));
+        } else if self.is_all_peers_broadcast_ipv6(ipv6_addr) {
             dst_peers.extend(self.peers.list_routes().await.iter().map(|x| *x.key()));
         } else if let Some(peer_id) = self.peers.get_peer_id_by_ipv6(ipv6_addr).await {
             dst_peers.push(peer_id);
@@ -3065,7 +3124,7 @@ impl PeerManager {
         Ok(())
     }
 
-    fn routed_packet_destination(&self, packet: &ZCPacket) -> Option<(IpAddr, bool)> {
+    pub(crate) fn routed_packet_destination(&self, packet: &ZCPacket) -> Option<(IpAddr, bool)> {
         let payload = packet.payload();
         let version = payload.first().map(|byte| byte >> 4)?;
         match version {
@@ -3176,6 +3235,280 @@ impl PeerManager {
         }
     }
 
+    fn route_accepts_compact_ip(route: &instance::Route) -> bool {
+        route
+            .feature_flag
+            .as_ref()
+            .is_none_or(|features| features.hybrid_l3 || !features.ethernet_input)
+    }
+
+    fn route_subscribes_to_multicast(route: &instance::Route, address: IpAddr) -> bool {
+        route.feature_flag.as_ref().is_some_and(|features| {
+            features.hybrid_l3
+                && features.multicast_membership
+                && route.multicast_groups.iter().any(|group| match address {
+                    IpAddr::V4(address) => group.as_slice() == address.octets(),
+                    IpAddr::V6(address) => group.as_slice() == address.octets(),
+                })
+        })
+    }
+
+    async fn send_compact_ip_to_peers(
+        &self,
+        mut msg: ZCPacket,
+        ip_addr: IpAddr,
+        not_send_to_self: bool,
+        dst_peers: Vec<PeerId>,
+        is_exit_node: bool,
+    ) -> Result<(), Error> {
+        if dst_peers.is_empty() {
+            return Ok(());
+        }
+        msg.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Data as u8);
+        if !self.run_nic_packet_process_pipeline(&mut msg).await {
+            return Ok(());
+        }
+        apply_local_route_policy(
+            &mut msg,
+            self.global_ctx.speed_first(),
+            self.global_ctx.latency_first(),
+        );
+        let overridden_peer = msg.peer_manager_header().unwrap().to_peer_id.get();
+        let dst_peers = if overridden_peer == 0 {
+            dst_peers
+        } else {
+            vec![overridden_peer]
+        };
+        self.finish_send_ip(msg, ip_addr, not_send_to_self, dst_peers, is_exit_node)
+            .await
+    }
+
+    pub async fn send_msg_by_hybrid_ethernet(&self, mut msg: ZCPacket) -> Result<(), Error> {
+        const ETHERNET_HEADER_LEN: usize = crate::instance::l2_tun::ETHERNET_HEADER_LEN;
+        let frame = msg.payload();
+        let Some(ether_type) = frame.get(12..14) else {
+            return Err(Error::InvalidEthernetFrame(
+                "frame is shorter than the Ethernet header".to_string(),
+            ));
+        };
+        let (ip_addr, not_send_to_self) = match ether_type {
+            [0x08, 0x00] => {
+                let packet = Ipv4Packet::new(&frame[ETHERNET_HEADER_LEN..]).ok_or_else(|| {
+                    Error::InvalidEthernetFrame("invalid Ethernet IPv4 payload".to_string())
+                })?;
+                (
+                    IpAddr::V4(packet.get_destination()),
+                    self.global_ctx.get_ipv4().map(|address| address.address())
+                        == Some(packet.get_source()),
+                )
+            }
+            [0x86, 0xdd] => {
+                let packet = Ipv6Packet::new(&frame[ETHERNET_HEADER_LEN..]).ok_or_else(|| {
+                    Error::InvalidEthernetFrame("invalid Ethernet IPv6 payload".to_string())
+                })?;
+                (
+                    IpAddr::V6(packet.get_destination()),
+                    self.global_ctx.is_ip_local_ipv6(&packet.get_source()),
+                )
+            }
+            _ => return self.send_msg_by_ethernet(msg).await,
+        };
+
+        let routes = self.peers.list_route_infos().await;
+        let is_multicast = ip_addr.is_multicast();
+        let is_broadcast = match ip_addr {
+            IpAddr::V4(address) => self.is_all_peers_broadcast_ipv4(&address),
+            IpAddr::V6(address) => self.is_all_peers_broadcast_ipv6(&address),
+        };
+        let (candidate_peers, is_exit_node) = if is_broadcast && !is_multicast {
+            (
+                routes.iter().map(|route| route.peer_id).collect::<Vec<_>>(),
+                false,
+            )
+        } else {
+            self.get_msg_dst_peer(&ip_addr).await
+        };
+
+        let compact_peers = candidate_peers
+            .iter()
+            .copied()
+            .filter(|peer_id| {
+                if *peer_id == self.my_peer_id {
+                    return true;
+                }
+                routes
+                    .iter()
+                    .find(|route| route.peer_id == *peer_id)
+                    .is_some_and(|route| {
+                        Self::route_accepts_compact_ip(route)
+                            && (!is_multicast
+                                || Self::route_subscribes_to_multicast(route, ip_addr)
+                                || route.feature_flag.as_ref().is_none_or(|features| {
+                                    !features.multicast_membership && !features.ethernet_input
+                                }))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let full_frame_needed = if is_broadcast || candidate_peers.is_empty() {
+            !Self::select_ethernet_peers(&routes, self.my_peer_id).is_empty()
+        } else {
+            candidate_peers.iter().any(|peer_id| {
+                routes
+                    .iter()
+                    .find(|route| route.peer_id == *peer_id)
+                    .is_some_and(|route| !Self::route_accepts_compact_ip(route))
+            })
+        };
+
+        if compact_peers.is_empty() {
+            if full_frame_needed {
+                if candidate_peers.len() == 1 && !is_broadcast {
+                    return self.send_ethernet_to_peer(msg, candidate_peers[0]).await;
+                }
+                return self.send_msg_by_ethernet(msg).await;
+            }
+            return Ok(());
+        }
+
+        let full_frame = full_frame_needed.then(|| msg.clone());
+        msg.remove_payload_prefix(ETHERNET_HEADER_LEN)
+            .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
+        let compact_result = self
+            .send_compact_ip_to_peers(msg, ip_addr, not_send_to_self, compact_peers, is_exit_node)
+            .await;
+        let full_result = if let Some(full_frame) = full_frame {
+            self.send_msg_by_ethernet(full_frame).await
+        } else {
+            Ok(())
+        };
+        compact_result.and(full_result)
+    }
+
+    pub async fn send_msg_by_hybrid_ethernet_batch(&self, batch: PacketBatch) -> Result<(), Error> {
+        let routes = self.peers.list_route_infos().await;
+        if !Self::select_ethernet_peers(&routes, self.my_peer_id).is_empty() {
+            for packet in batch {
+                self.send_msg_by_hybrid_ethernet(packet).await?;
+            }
+            return Ok(());
+        }
+
+        let mut compact = PacketBatch::new();
+        for mut packet in batch {
+            if !matches!(
+                packet.payload().get(12..14),
+                Some([0x08, 0x00] | [0x86, 0xdd])
+            ) {
+                continue;
+            }
+            packet
+                .remove_payload_prefix(crate::instance::l2_tun::ETHERNET_HEADER_LEN)
+                .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
+            compact
+                .try_push(packet)
+                .expect("a filtered batch cannot exceed its input");
+        }
+        self.send_msg_by_ip_batch(compact).await
+    }
+
+    pub async fn send_msg_by_hybrid_ip(
+        &self,
+        msg: ZCPacket,
+        ip_addr: IpAddr,
+        not_send_to_self: bool,
+    ) -> Result<(), Error> {
+        let routes = self.peers.list_route_infos().await;
+        let (candidate_peers, is_exit_node) = self.get_msg_dst_peer(&ip_addr).await;
+        let compact_peers = candidate_peers
+            .iter()
+            .copied()
+            .filter(|peer_id| {
+                *peer_id == self.my_peer_id
+                    || routes
+                        .iter()
+                        .find(|route| route.peer_id == *peer_id)
+                        .is_some_and(Self::route_accepts_compact_ip)
+            })
+            .collect::<Vec<_>>();
+        let full_peers = Self::select_ethernet_peers(&routes, self.my_peer_id);
+        let full_frame_needed = candidate_peers.iter().any(|peer_id| {
+            routes
+                .iter()
+                .find(|route| route.peer_id == *peer_id)
+                .is_some_and(|route| !Self::route_accepts_compact_ip(route))
+        }) || ((ip_addr.is_multicast() || candidate_peers.is_empty())
+            && !full_peers.is_empty());
+
+        if compact_peers.is_empty() && !full_frame_needed {
+            return Ok(());
+        }
+        let direct_legacy_peer = (candidate_peers.len() == 1 && !ip_addr.is_multicast())
+            .then_some(candidate_peers[0])
+            .filter(|peer_id| {
+                routes
+                    .iter()
+                    .find(|route| route.peer_id == *peer_id)
+                    .is_some_and(|route| !Self::route_accepts_compact_ip(route))
+            });
+
+        if compact_peers.is_empty() {
+            let mut frame = msg;
+            frame
+                .prepend_payload(&[0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN])
+                .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
+            crate::instance::l2_tun::prepare_ip_frame(
+                frame.mut_payload(),
+                self.my_peer_id,
+                direct_legacy_peer,
+            )
+            .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
+            return if let Some(peer_id) = direct_legacy_peer {
+                self.send_ethernet_to_peer(frame, peer_id).await
+            } else {
+                self.send_msg_by_ethernet(frame).await
+            };
+        }
+
+        let mut full_frame = full_frame_needed.then(|| msg.clone());
+        let compact_result = self
+            .send_compact_ip_to_peers(msg, ip_addr, not_send_to_self, compact_peers, is_exit_node)
+            .await;
+        let full_result = if let Some(mut frame) = full_frame.take() {
+            frame
+                .prepend_payload(&[0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN])
+                .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
+            crate::instance::l2_tun::prepare_ip_frame(
+                frame.mut_payload(),
+                self.my_peer_id,
+                direct_legacy_peer,
+            )
+            .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
+            if let Some(peer_id) = direct_legacy_peer {
+                self.send_ethernet_to_peer(frame, peer_id).await
+            } else {
+                self.send_msg_by_ethernet(frame).await
+            }
+        } else {
+            Ok(())
+        };
+        compact_result.and(full_result)
+    }
+
+    pub async fn send_msg_by_hybrid_ip_batch(&self, batch: PacketBatch) -> Result<(), Error> {
+        let routes = self.peers.list_route_infos().await;
+        if Self::select_ethernet_peers(&routes, self.my_peer_id).is_empty() {
+            return self.send_msg_by_ip_batch(batch).await;
+        }
+        for packet in batch {
+            let Some((ip_addr, not_send_to_self)) = self.routed_packet_destination(&packet) else {
+                continue;
+            };
+            self.send_msg_by_hybrid_ip(packet, ip_addr, not_send_to_self)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn send_msg_by_ip(
         &self,
         mut msg: ZCPacket,
@@ -3225,6 +3558,18 @@ impl PeerManager {
             return Ok(());
         }
 
+        self.finish_send_ip(msg, ip_addr, not_send_to_self, dst_peers, is_exit_node)
+            .await
+    }
+
+    async fn finish_send_ip(
+        &self,
+        mut msg: ZCPacket,
+        ip_addr: IpAddr,
+        not_send_to_self: bool,
+        dst_peers: Vec<PeerId>,
+        is_exit_node: bool,
+    ) -> Result<(), Error> {
         self.self_tx_counters
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
@@ -3591,6 +3936,14 @@ impl PeerManager {
                     .get_counter(MetricName::CompressionBytesRxAfter, label_set),
             }));
         self.direct_nic_writer.install(sink)
+    }
+
+    pub(crate) async fn inject_packet_to_nic(&self, packet: ZCPacket) -> Result<(), TunnelError> {
+        let endpoint = self
+            .direct_nic_writer
+            .current_endpoint()
+            .ok_or(TunnelError::Shutdown)?;
+        DirectNicBatchWriter::send_to(endpoint, PacketBatch::singleton(packet)).await
     }
 
     pub fn get_foreign_network_manager(&self) -> Arc<ForeignNetworkManager> {
@@ -4139,6 +4492,25 @@ mod tests {
         peer_manager
     }
 
+    async fn create_hybrid_peer_manager_with_ipv4(
+        ipv4: std::net::Ipv4Addr,
+    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "auto".to_string();
+        global_ctx.set_flags(flags);
+
+        let (packet_send, packet_recv) = create_packet_recv_chan();
+        let peer_manager = Arc::new(PeerManager::new(
+            RouteAlgoType::Ospf,
+            global_ctx,
+            packet_send,
+        ));
+        peer_manager.run().await.unwrap();
+        (peer_manager, packet_recv)
+    }
+
     fn routed_ipv4_packet(
         source: std::net::Ipv4Addr,
         destination: std::net::Ipv4Addr,
@@ -4585,6 +4957,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hybrid_tap_batch_carries_only_compact_ip() {
+        let (peer_mgr_a, _nic_a) =
+            create_hybrid_peer_manager_with_ipv4("10.144.144.1".parse().unwrap()).await;
+        let (peer_mgr_b, mut nic_b) =
+            create_hybrid_peer_manager_with_ipv4("10.144.144.2".parse().unwrap()).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+
+        let destination = peer_mgr_b.get_global_ctx().get_ipv4().unwrap().address();
+        let mut batch = PacketBatch::new();
+        for marker in [1_u8, 2] {
+            let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
+            frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+            let ip = &mut frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..];
+            ip[0] = 0x45;
+            ip[8] = marker;
+            ip[16..20].copy_from_slice(&destination.octets());
+            batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
+        }
+
+        peer_mgr_a
+            .send_msg_by_hybrid_ethernet_batch(batch)
+            .await
+            .unwrap();
+
+        for marker in [1_u8, 2] {
+            let packet = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                packet.peer_manager_header().unwrap().packet_type,
+                PacketType::Data as u8
+            );
+            assert_eq!(packet.payload().len(), 20);
+            assert_eq!(packet.payload()[8], marker);
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_multicast_targets_only_announced_members() {
+        let (peer_mgr_a, _nic_a) =
+            create_hybrid_peer_manager_with_ipv4("10.144.144.1".parse().unwrap()).await;
+        let (peer_mgr_b, _nic_b) =
+            create_hybrid_peer_manager_with_ipv4("10.144.144.2".parse().unwrap()).await;
+        let (peer_mgr_c, _nic_c) =
+            create_hybrid_peer_manager_with_ipv4("10.144.144.3".parse().unwrap()).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_c.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
+            .await
+            .unwrap();
+
+        let group_v4: std::net::Ipv4Addr = "239.1.2.3".parse().unwrap();
+        let group = std::net::IpAddr::V4(group_v4);
+        peer_mgr_b
+            .get_global_ctx()
+            .set_multicast_groups([group].into_iter().collect());
+        wait_for_condition(
+            || async {
+                peer_mgr_a
+                    .peers
+                    .get_route_peer_info(peer_mgr_b.my_peer_id())
+                    .await
+                    .is_some_and(|route| {
+                        route
+                            .multicast_groups
+                            .iter()
+                            .any(|value| value.as_slice() == group_v4.octets())
+                    })
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let (destinations, _) = peer_mgr_a.get_msg_dst_peer(&group).await;
+
+        assert_eq!(destinations, vec![peer_mgr_b.my_peer_id()]);
+    }
+
+    #[tokio::test]
+    async fn hybrid_sender_preserves_legacy_ethernet_unicast() {
+        let (peer_mgr_a, _nic_a) =
+            create_hybrid_peer_manager_with_ipv4("10.144.144.1".parse().unwrap()).await;
+        let (peer_mgr_b, mut nic_b) =
+            create_tap_peer_manager_with_ipv4(0, Some("10.144.144.2".parse().unwrap())).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+
+        let destination = peer_mgr_b.get_global_ctx().get_ipv4().unwrap().address();
+        let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        let ip = &mut frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..];
+        ip[0] = 0x45;
+        ip[16..20].copy_from_slice(&destination.octets());
+
+        peer_mgr_a
+            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.peer_manager_header().unwrap().packet_type,
+            PacketType::Ethernet as u8
+        );
+        assert_eq!(received.payload(), frame);
+    }
+
+    #[tokio::test]
     async fn l2_tun_batch_uses_shared_per_peer_ordering() {
         let (peer_mgr_a, _nic_a) =
             create_tap_peer_manager_with_ipv4(0, Some("10.144.144.1".parse().unwrap())).await;
@@ -4805,11 +5297,20 @@ mod tests {
         }
     }
 
-    fn ethernet_route(peer_id: PeerId, ethernet_input: bool) -> crate::proto::api::instance::Route {
+    fn ethernet_route(
+        peer_id: PeerId,
+        ethernet_input: bool,
+        hybrid_l3: bool,
+        bridge_input: bool,
+        is_credential_peer: bool,
+    ) -> crate::proto::api::instance::Route {
         crate::proto::api::instance::Route {
             peer_id,
             feature_flag: Some(crate::proto::common::PeerFeatureFlag {
                 ethernet_input,
+                hybrid_l3,
+                bridge_input,
+                is_credential_peer,
                 ..Default::default()
             }),
             ..Default::default()
@@ -4819,14 +5320,80 @@ mod tests {
     #[test]
     fn ethernet_peer_selection_requires_capability_and_deduplicates() {
         let routes = vec![
-            ethernet_route(1, true),
-            ethernet_route(2, false),
-            ethernet_route(3, true),
-            ethernet_route(1, true),
-            ethernet_route(4, true),
+            ethernet_route(1, true, false, false, false),
+            ethernet_route(2, false, false, false, false),
+            ethernet_route(3, true, false, false, false),
+            ethernet_route(1, true, false, false, false),
+            ethernet_route(4, true, false, false, false),
         ];
 
         assert_eq!(PeerManager::select_ethernet_peers(&routes, 3), vec![1, 4]);
+    }
+
+    #[test]
+    fn complete_ethernet_requires_legacy_or_authorized_bridge_input() {
+        let routes = vec![
+            ethernet_route(1, true, false, false, false),
+            ethernet_route(2, true, true, false, false),
+            ethernet_route(3, true, true, true, false),
+            ethernet_route(4, true, true, true, true),
+        ];
+
+        assert_eq!(PeerManager::select_ethernet_peers(&routes, 9), vec![1, 3]);
+    }
+
+    #[test]
+    fn hybrid_receiver_accepts_complete_ethernet_only_for_bridge_or_legacy() {
+        let hybrid = crate::proto::common::PeerFeatureFlag {
+            hybrid_l3: true,
+            ..Default::default()
+        };
+        let bridge = crate::proto::common::PeerFeatureFlag {
+            hybrid_l3: true,
+            bridge_input: true,
+            ..Default::default()
+        };
+        let legacy = crate::proto::common::PeerFeatureFlag {
+            ethernet_input: true,
+            ..Default::default()
+        };
+
+        assert!(!PeerManager::complete_ethernet_is_compatible(
+            &hybrid,
+            Some(&hybrid)
+        ));
+        assert!(PeerManager::complete_ethernet_is_compatible(
+            &bridge,
+            Some(&hybrid)
+        ));
+        assert!(PeerManager::complete_ethernet_is_compatible(
+            &hybrid,
+            Some(&legacy)
+        ));
+        assert!(PeerManager::complete_ethernet_is_compatible(&hybrid, None));
+    }
+
+    #[test]
+    fn multicast_selection_requires_announced_membership() {
+        let address: std::net::IpAddr = "239.1.2.3".parse().unwrap();
+        let mut subscribed = ethernet_route(1, true, true, false, false);
+        subscribed
+            .feature_flag
+            .as_mut()
+            .unwrap()
+            .multicast_membership = true;
+        subscribed.multicast_groups = vec![match address {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(_) => unreachable!(),
+        }];
+        let mut other = ethernet_route(2, true, true, false, false);
+        other.feature_flag.as_mut().unwrap().multicast_membership = true;
+
+        assert!(PeerManager::route_subscribes_to_multicast(
+            &subscribed,
+            address
+        ));
+        assert!(!PeerManager::route_subscribes_to_multicast(&other, address));
     }
 
     #[test]

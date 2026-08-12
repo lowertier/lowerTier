@@ -192,6 +192,22 @@ fn is_foreign_network_info_newer(
 }
 
 impl RoutePeerInfo {
+    fn normalize_multicast_groups(&mut self) {
+        const MAX_MULTICAST_GROUPS: usize = 256;
+        self.multicast_groups
+            .retain(|group| match group.as_slice() {
+                [a, b, c, d] => Ipv4Addr::from([*a, *b, *c, *d]).is_multicast(),
+                bytes if bytes.len() == 16 => <[u8; 16]>::try_from(bytes)
+                    .ok()
+                    .map(Ipv6Addr::from)
+                    .is_some_and(|address| address.is_multicast()),
+                _ => false,
+            });
+        self.multicast_groups.sort_unstable();
+        self.multicast_groups.dedup();
+        self.multicast_groups.truncate(MAX_MULTICAST_GROUPS);
+    }
+
     #[allow(deprecated)]
     pub fn new() -> Self {
         Self {
@@ -219,6 +235,7 @@ impl RoutePeerInfo {
             trusted_credential_pubkeys: Vec::new(),
             ipv6_public_addr_prefix: None,
             ipv6_public_addr_lease: None,
+            multicast_groups: Vec::new(),
         }
     }
 
@@ -297,6 +314,15 @@ impl RoutePeerInfo {
             } else {
                 Vec::new()
             },
+
+            multicast_groups: global_ctx
+                .get_multicast_groups()
+                .into_iter()
+                .map(|address| match address {
+                    IpAddr::V4(address) => address.octets().to_vec(),
+                    IpAddr::V6(address) => address.octets().to_vec(),
+                })
+                .collect(),
 
             ..Default::default()
         }
@@ -378,6 +404,7 @@ impl From<RoutePeerInfo> for crate::proto::api::instance::Route {
             path_delivery_bps_speed_first: None,
             path_latency_speed_first: None,
             path_len_speed_first: None,
+            multicast_groups: val.multicast_groups,
         }
     }
 }
@@ -882,6 +909,7 @@ impl SyncedRouteInfo {
         let mut need_inc_version = false;
         for (idx, route_info) in peer_infos.iter().enumerate() {
             let mut route_info = route_info.clone();
+            route_info.normalize_multicast_groups();
             let raw_route_info = &raw_peer_infos[idx];
             self.check_duplicate_peer_id(
                 my_peer_id,
@@ -4551,6 +4579,47 @@ mod tests {
     };
     use base64::Engine as _;
     use base64::prelude::BASE64_STANDARD;
+
+    #[test]
+    fn multicast_group_normalization_filters_and_bounds_input() {
+        let mut route = RoutePeerInfo::new();
+        route.multicast_groups = vec![
+            vec![239, 1, 2, 3],
+            vec![239, 1, 2, 3],
+            vec![10, 1, 2, 3],
+            "ff02::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+                .to_vec(),
+            vec![0; 15],
+        ];
+        for group in 0..300_u16 {
+            route
+                .multicast_groups
+                .push(vec![239, 2, (group >> 8) as u8, group as u8]);
+        }
+
+        route.normalize_multicast_groups();
+
+        assert_eq!(route.multicast_groups.len(), 256);
+        assert!(
+            route
+                .multicast_groups
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert!(route.multicast_groups.iter().all(|group| {
+            match group.as_slice() {
+                [a, b, c, d] => std::net::Ipv4Addr::from([*a, *b, *c, *d]).is_multicast(),
+                bytes if bytes.len() == 16 => <[u8; 16]>::try_from(bytes)
+                    .ok()
+                    .map(std::net::Ipv6Addr::from)
+                    .is_some_and(|address| address.is_multicast()),
+                _ => false,
+            }
+        }));
+    }
 
     #[test]
     fn widest_path_keeps_forward_and_reverse_choices_independent() {

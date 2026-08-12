@@ -84,6 +84,7 @@ pub enum GlobalCtxEvent {
     },
 
     CredentialChanged,
+    MulticastGroupsUpdated,
 }
 
 pub type EventBus = tokio::sync::broadcast::Sender<GlobalCtxEvent>;
@@ -210,6 +211,7 @@ pub struct GlobalCtx {
     cached_ipv6: AtomicCell<Option<cidr::Ipv6Inet>>,
     public_ipv6_lease: AtomicCell<Option<cidr::Ipv6Inet>>,
     public_ipv6_routes: Mutex<BTreeSet<std::net::Ipv6Addr>>,
+    multicast_groups: Mutex<BTreeSet<std::net::IpAddr>>,
     cached_proxy_cidrs: AtomicCell<Option<Vec<ProxyNetworkConfig>>>,
 
     ip_collector: Mutex<Option<Arc<IPCollector>>>,
@@ -280,11 +282,15 @@ impl GlobalCtx {
         feature_flags.no_relay_quic = flags.disable_relay_quic;
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
-        feature_flags.ethernet_input = flags
+        let port_mode = flags
             .port_mode
             .parse::<crate::common::config::PortMode>()
-            .expect("port mode was validated")
-            .uses_ethernet_overlay();
+            .expect("port mode was validated");
+        feature_flags.ethernet_input = port_mode.uses_ethernet_overlay();
+        feature_flags.hybrid_l3 = port_mode == crate::common::config::PortMode::Auto;
+        feature_flags.bridge_input =
+            feature_flags.hybrid_l3 && port_mode.uses_native_ethernet() && flags.enable_bridge;
+        feature_flags.multicast_membership = feature_flags.hybrid_l3;
         Self::apply_required_feature_flags(flags, feature_flags)
     }
 
@@ -337,6 +343,7 @@ impl GlobalCtx {
             cached_ipv6: AtomicCell::new(None),
             public_ipv6_lease: AtomicCell::new(None),
             public_ipv6_routes: Mutex::new(BTreeSet::new()),
+            multicast_groups: Mutex::new(BTreeSet::new()),
             cached_proxy_cidrs: AtomicCell::new(None),
 
             ip_collector: Mutex::new(Some(Arc::new(IPCollector::new(
@@ -403,6 +410,27 @@ impl GlobalCtx {
 
     pub fn get_tun_device_name(&self) -> Option<String> {
         self.tun_device_name.lock().unwrap().clone()
+    }
+
+    pub fn get_multicast_groups(&self) -> BTreeSet<std::net::IpAddr> {
+        self.multicast_groups.lock().unwrap().clone()
+    }
+
+    pub fn set_multicast_groups(&self, groups: BTreeSet<std::net::IpAddr>) -> bool {
+        const MAX_MULTICAST_GROUPS: usize = 256;
+        let groups = groups
+            .into_iter()
+            .filter(std::net::IpAddr::is_multicast)
+            .take(MAX_MULTICAST_GROUPS)
+            .collect();
+        let mut current = self.multicast_groups.lock().unwrap();
+        if *current == groups {
+            return false;
+        }
+        *current = groups;
+        drop(current);
+        self.issue_event(GlobalCtxEvent::MulticastGroupsUpdated);
+        true
     }
 
     pub fn check_network_in_whitelist(&self, network_name: &str) -> Result<(), anyhow::Error> {
@@ -970,6 +998,8 @@ pub mod tests {
         assert!(feature_flags.need_p2p);
         assert!(feature_flags.disable_p2p);
         assert!(feature_flags.ethernet_input);
+        assert!(!feature_flags.hybrid_l3);
+        assert!(!feature_flags.bridge_input);
         assert!(feature_flags.support_conn_list_sync);
         assert!(feature_flags.avoid_relay_data);
         assert!(feature_flags.is_public_server);
@@ -984,6 +1014,18 @@ pub mod tests {
         flags.port_mode = "compatible-ethernet".to_string();
         global_ctx.set_flags(flags);
         assert!(global_ctx.get_feature_flags().ethernet_input);
+
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "auto".to_string();
+        flags.enable_bridge = true;
+        global_ctx.set_flags(flags);
+        let feature_flags = global_ctx.get_feature_flags();
+        assert!(feature_flags.hybrid_l3);
+        assert!(feature_flags.multicast_membership);
+        assert_eq!(
+            feature_flags.bridge_input,
+            cfg!(any(target_os = "linux", target_os = "freebsd"))
+        );
     }
 
     #[tokio::test]

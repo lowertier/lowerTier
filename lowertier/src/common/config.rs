@@ -87,15 +87,11 @@ pub fn gen_default_flags() -> Flags {
         speed_first: false,
         speed_probe_interval_seconds: 30,
         speed_probe_budget_bps: 0,
-        port_mode: if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            PortMode::Tap
-        } else {
-            PortMode::L2Tun
-        }
-        .to_string(),
+        port_mode: PortMode::Auto.to_string(),
         l2_fdb_capacity: 16_384,
         l2_fdb_age_seconds: 300,
         l2_flood_bps: 64 * 1024 * 1024,
+        enable_bridge: false,
     }
 }
 
@@ -1659,14 +1655,10 @@ socket_mark = 66
     #[test]
     fn underlay_and_quic_flags_have_safe_defaults() {
         let flags = gen_default_flags();
-        let expected_port_mode = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            "ethernet"
-        } else {
-            "compatible-ethernet"
-        };
 
         assert_eq!(flags.default_protocol, "udp");
-        assert_eq!(flags.port_mode, expected_port_mode);
+        assert_eq!(flags.port_mode, "auto");
+        assert!(!flags.enable_bridge);
         assert_eq!(flags.l2_fdb_capacity, 16_384);
         assert_eq!(flags.l2_fdb_age_seconds, 300);
         assert_eq!(flags.l2_flood_bps, 64 * 1024 * 1024);

@@ -181,7 +181,7 @@ sample_cpu() {
     local output=$2
     local samples=$3
     "${docker_cmd[@]}" exec "$node" sh -lc \
-        "i=0; while [ \"\$i\" -lt $samples ]; do ps -C lowertier-core -o %cpu= | awk '{s+=\$1} END {print s+0}'; i=\$((i+1)); sleep 1; done" \
+        "i=0; while [ \"\$i\" -lt $samples ]; do ps -C lowertier-core -o %cpu=,rss= | awk '{cpu+=\$1; rss+=\$2} END {print cpu+0, rss+0}'; i=\$((i+1)); sleep 1; done" \
         >"$output"
 }
 
@@ -197,7 +197,7 @@ record_cpu_probe() {
     local iperf_args=(-c "$destination" -p "$port" -t "$cpu_duration" -O "$omit" -P "$parallel_streams" -J)
     local samples=$((cpu_duration + 1))
     local ping_count=$((cpu_duration * 20))
-    local pid_a pid_b ping_pid received cpu_avg cpu_max cores
+    local pid_a pid_b ping_pid received cpu_avg cpu_max cores rss_avg rss_max
 
     # A heavily delayed UDP test can leave iperf's single-test server occupied
     # after the client has returned. Start a fresh server so the CPU probe is
@@ -224,10 +224,15 @@ record_cpu_probe() {
         local cpu_file="$result_dir/cpu/${mode}-${direction}-${node}.txt"
         cpu_avg=$(awk 'NF {sum += $1; count++} END {if (count) printf "%.6f", sum/count; else print "0.000000"}' "$cpu_file")
         cpu_max=$(awk 'NF && $1 > max {max=$1} END {printf "%.6f", max+0}' "$cpu_file")
+        rss_avg=$(awk 'NF {sum += $2; count++} END {if (count) printf "%.0f", sum/count; else print "0"}' "$cpu_file")
+        rss_max=$(awk 'NF && $2 > max {max=$2} END {printf "%.0f", max+0}' "$cpu_file")
         cores=$(perf_cpu_cores_per_gbit "$cpu_avg" "$received")
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$mode" "$direction" "$node" "$received" "$cpu_avg" "$cpu_max" "$cores" \
             >>"$result_dir/cpu-cores-per-gbit.tsv"
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "$mode" "$direction" "$node" "$rss_avg" "$rss_max" \
+            >>"$result_dir/memory.tsv"
     done
 }
 
@@ -236,6 +241,7 @@ printf 'mode\tdirection\trun\tprotocol\tstreams\toffered_bps\terror\n' \
     >"$result_dir/workload-errors.tsv"
 printf 'mode\tdirection\tnode\treceived_bps\taverage_cpu_percent\tmax_cpu_percent\tcpu_cores_per_gbit\n' \
     >"$result_dir/cpu-cores-per-gbit.tsv"
+printf 'mode\tdirection\tnode\taverage_rss_kib\tpeak_rss_kib\n' >"$result_dir/memory.tsv"
 start_containers
 apply_network_noise
 "${docker_cmd[@]}" exec "$node_a" ethtool -k eth0 >"$result_dir/raw/${node_a}-offloads.txt" || true
@@ -262,6 +268,7 @@ for mode in "${modes[@]}"; do
         routed) subnet=10.201.1 ;;
         compatible-ethernet) subnet=10.201.2 ;;
         ethernet) subnet=10.201.3 ;;
+        auto) subnet=10.201.4 ;;
         *) echo "unsupported mode: $mode" >&2; exit 64 ;;
     esac
 

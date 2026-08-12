@@ -244,6 +244,9 @@ core_clap:
   l2_flood_bps:
     en: "TAP unknown-unicast, broadcast, and multicast byte limit per second; zero is unlimited"
     zh-CN: "TAP 未知单播、广播和组播的每秒字节限制；零表示不限制"
+  enable_bridge:
+    en: "authorize this node to receive complete Ethernet frames in automatic mode"
+    zh-CN: "授权此节点在自动模式下接收完整以太网帧"
   quic_congestion:
     en: "QUIC congestion controller: adaptive, bbr, or brutal"
     zh-CN: "QUIC 拥塞控制器：adaptive、bbr 或 brutal"

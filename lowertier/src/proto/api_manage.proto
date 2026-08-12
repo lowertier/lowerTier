@@ -122,6 +122,8 @@ message NetworkConfig {
   optional bool speed_first = 85;
   optional uint64 speed_probe_interval_seconds = 86;
   optional uint64 speed_probe_budget_bps = 87;
+  // Authorize complete Ethernet input in automatic mode.
+  optional bool enable_bridge = 88;
 }
 
 message NetworkPeerConfig {

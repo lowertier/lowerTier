@@ -1001,6 +1001,9 @@ impl NetworkConfig {
         if let Some(l2_flood_bps) = self.l2_flood_bps {
             flags.l2_flood_bps = l2_flood_bps;
         }
+        if let Some(enable_bridge) = self.enable_bridge {
+            flags.enable_bridge = enable_bridge;
+        }
         if let Some(quic_congestion) = &self.quic_congestion {
             flags.quic_congestion = quic_congestion.clone();
         }
@@ -1276,6 +1279,8 @@ impl NetworkConfig {
             .then_some(flags.l2_fdb_age_seconds);
         result.l2_flood_bps =
             (flags.l2_flood_bps != default_flags.l2_flood_bps).then_some(flags.l2_flood_bps);
+        result.enable_bridge =
+            (flags.enable_bridge != default_flags.enable_bridge).then_some(flags.enable_bridge);
         result.quic_congestion = (flags.quic_congestion != default_flags.quic_congestion)
             .then_some(flags.quic_congestion.clone());
         result.quic_brutal_send_bps = (flags.quic_brutal_send_bps
@@ -1377,6 +1382,7 @@ mod tests {
         flags.l2_fdb_capacity = 32_768;
         flags.l2_fdb_age_seconds = 600;
         flags.l2_flood_bps = 128 * 1024 * 1024;
+        flags.enable_bridge = true;
         config.set_flags(flags.clone());
 
         let network_config = super::NetworkConfig::new_from_config(&config)?;
@@ -1388,13 +1394,11 @@ mod tests {
         assert_eq!(network_config.quic_brutal_send_bps, Some(100_000_000));
         assert_eq!(network_config.quic_datagram_fec_parity, Some(3));
         assert_eq!(network_config.quic_datagram_alternate_path_parity, None);
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        assert_eq!(network_config.port_mode, None);
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         assert_eq!(network_config.port_mode.as_deref(), Some("ethernet"));
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
         assert_eq!(network_config.l2_fdb_age_seconds, Some(600));
         assert_eq!(network_config.l2_flood_bps, Some(128 * 1024 * 1024));
+        assert_eq!(network_config.enable_bridge, Some(true));
 
         let regenerated = network_config.gen_config()?;
         let regenerated_flags = regenerated.get_flags();
@@ -1438,6 +1442,7 @@ mod tests {
             flags.l2_fdb_age_seconds
         );
         assert_eq!(regenerated_flags.l2_flood_bps, flags.l2_flood_bps);
+        assert_eq!(regenerated_flags.enable_bridge, flags.enable_bridge);
         Ok(())
     }
 
