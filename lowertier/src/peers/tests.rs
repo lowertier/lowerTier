@@ -1625,3 +1625,278 @@ async fn unknown_credential_rejected_while_valid_credential_survives() {
     assert!(routes.iter().any(|r| r.peer_id == valid_id));
     assert!(!routes.iter().any(|r| r.peer_id == unknown_id));
 }
+
+mod speed_first {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use crate::{
+        common::PeerId,
+        peers::{
+            peer_manager::PeerManager,
+            route_trait::{NextHopPolicy, Route, RouteCostCalculatorInterface},
+            speed_probe::SpeedSample,
+        },
+        tunnel::packet_def::{PacketType, ZCPacket},
+    };
+
+    use super::{
+        connect_peer_manager, create_mock_peer_manager, wait_for_condition, wait_route_appear,
+    };
+
+    #[derive(Clone, Default)]
+    struct DirectedMeasurements {
+        latency_ms: HashMap<(PeerId, PeerId), i32>,
+        delivery_bps: HashMap<(PeerId, PeerId), u64>,
+    }
+
+    impl RouteCostCalculatorInterface for DirectedMeasurements {
+        fn calculate_cost(&self, src: PeerId, dst: PeerId) -> i32 {
+            self.latency_ms.get(&(src, dst)).copied().unwrap_or(1)
+        }
+
+        fn calculate_delivery_bps(&self, src: PeerId, dst: PeerId) -> Option<u64> {
+            self.delivery_bps.get(&(src, dst)).copied()
+        }
+    }
+
+    async fn fully_connected_peers() -> [Arc<PeerManager>; 3] {
+        let a = create_mock_peer_manager().await;
+        let b = create_mock_peer_manager().await;
+        let c = create_mock_peer_manager().await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        connect_peer_manager(b.clone(), c.clone()).await;
+        connect_peer_manager(a.clone(), c.clone()).await;
+        wait_route_appear(a.clone(), b.clone()).await.unwrap();
+        wait_route_appear(b.clone(), c.clone()).await.unwrap();
+        wait_route_appear(a.clone(), c.clone()).await.unwrap();
+        [a, b, c]
+    }
+
+    fn asymmetric_measurements(a: PeerId, b: PeerId, c: PeerId) -> DirectedMeasurements {
+        DirectedMeasurements {
+            latency_ms: HashMap::from([
+                ((a, c), 100),
+                ((a, b), 40),
+                ((b, c), 40),
+                ((c, a), 70),
+                ((c, b), 30),
+                ((b, a), 30),
+            ]),
+            delivery_bps: HashMap::from([
+                ((a, c), 5_000_000),
+                ((a, b), 20_000_000),
+                ((b, c), 25_000_000),
+                ((c, a), 30_000_000),
+                ((c, b), 10_000_000),
+                ((b, a), 10_000_000),
+            ]),
+        }
+    }
+
+    #[tokio::test]
+    async fn asymmetric_routes_and_active_flows_use_independent_paths() {
+        let [a, b, c] = fully_connected_peers().await;
+        let a_id = a.my_peer_id();
+        let b_id = b.my_peer_id();
+        let c_id = c.my_peer_id();
+        let measurements = asymmetric_measurements(a_id, b_id, c_id);
+        a.get_route()
+            .set_route_cost_fn(Box::new(measurements.clone()))
+            .await;
+        c.get_route()
+            .set_route_cost_fn(Box::new(measurements))
+            .await;
+
+        assert_eq!(
+            a.get_route()
+                .get_next_hop_with_policy(c_id, NextHopPolicy::MaxGoodput)
+                .await,
+            Some(b_id)
+        );
+        assert_eq!(
+            c.get_route()
+                .get_next_hop_with_policy(a_id, NextHopPolicy::MaxGoodput)
+                .await,
+            Some(a_id)
+        );
+        let route = a
+            .list_routes()
+            .await
+            .into_iter()
+            .find(|route| route.peer_id == c_id)
+            .unwrap();
+        assert_eq!(route.path_delivery_bps_speed_first, Some(20_000_000));
+
+        let pinned_flow = 10;
+        assert_eq!(
+            a.get_peer_map()
+                .get_gateway_peer_id_for_flow(c_id, NextHopPolicy::MaxGoodput, pinned_flow)
+                .await,
+            Some(b_id)
+        );
+
+        let mut changed = asymmetric_measurements(a_id, b_id, c_id);
+        changed.delivery_bps.insert((a_id, c_id), 50_000_000);
+        a.get_route().set_route_cost_fn(Box::new(changed)).await;
+
+        assert_eq!(
+            a.get_peer_map()
+                .get_gateway_peer_id_for_flow(c_id, NextHopPolicy::MaxGoodput, pinned_flow)
+                .await,
+            Some(b_id)
+        );
+        assert_eq!(
+            a.get_peer_map()
+                .get_gateway_peer_id_for_flow(c_id, NextHopPolicy::MaxGoodput, 11)
+                .await,
+            Some(c_id)
+        );
+
+        a.get_peer_map().close_peer(b_id).await.unwrap();
+        assert_eq!(
+            a.get_peer_map()
+                .get_gateway_peer_id_for_flow(c_id, NextHopPolicy::MaxGoodput, pinned_flow)
+                .await,
+            Some(c_id)
+        );
+    }
+
+    fn speed_packet(from: PeerId, to: PeerId, flow_shard: u16) -> ZCPacket {
+        let mut packet = ZCPacket::new_with_payload(b"speed-flow");
+        packet.fill_peer_manager_hdr(from, to, PacketType::Data as u8);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_speed_first(true)
+            .set_flow_shard(flow_shard);
+        packet
+    }
+
+    #[tokio::test]
+    async fn direct_connection_speed_selection_pins_and_fails_over() {
+        let a = create_mock_peer_manager().await;
+        let b = create_mock_peer_manager().await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        wait_for_condition(
+            || {
+                let a = a.clone();
+                let b = b.clone();
+                async move {
+                    a.get_peer_map()
+                        .list_peer_conns(b.my_peer_id())
+                        .await
+                        .is_some_and(|connections| connections.len() == 2)
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let peer = a.get_peer_map().get_peer_by_id(b.my_peer_id()).unwrap();
+        let mut connections = peer.speed_probe_connections();
+        connections.sort_by_key(|connection| connection.get_conn_id());
+        let first = connections[0].clone();
+        let second = connections[1].clone();
+        let first_id = first.get_conn_id();
+        let second_id = second.get_conn_id();
+        let now = std::time::Instant::now();
+        first.record_speed_sample_for_test(SpeedSample {
+            delivery_bps: 100_000_000,
+            loss_ppm: 0,
+            generation: 1,
+            measured_at: now,
+            ttl: Duration::from_secs(30),
+        });
+        second.record_speed_sample_for_test(SpeedSample {
+            delivery_bps: 50_000_000,
+            loss_ppm: 0,
+            generation: 1,
+            measured_at: now,
+            ttl: Duration::from_secs(30),
+        });
+
+        a.get_peer_map()
+            .send_msg_directly(
+                speed_packet(a.my_peer_id(), b.my_peer_id(), 10),
+                b.my_peer_id(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(peer.get_default_conn_id(), first_id);
+
+        second.record_speed_sample_for_test(SpeedSample {
+            delivery_bps: 200_000_000,
+            loss_ppm: 0,
+            generation: 2,
+            measured_at: now,
+            ttl: Duration::from_secs(30),
+        });
+        a.get_peer_map()
+            .send_msg_directly(
+                speed_packet(a.my_peer_id(), b.my_peer_id(), 10),
+                b.my_peer_id(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(peer.get_default_conn_id(), first_id);
+        a.get_peer_map()
+            .send_msg_directly(
+                speed_packet(a.my_peer_id(), b.my_peer_id(), 11),
+                b.my_peer_id(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(peer.get_default_conn_id(), second_id);
+
+        a.get_peer_map()
+            .close_peer_conn(b.my_peer_id(), &first_id)
+            .await
+            .unwrap();
+        let first_id_text = first_id.to_string();
+        wait_for_condition(
+            || {
+                let a = a.clone();
+                let b = b.clone();
+                let first_id_text = first_id_text.clone();
+                async move {
+                    a.get_peer_map()
+                        .list_peer_conns(b.my_peer_id())
+                        .await
+                        .is_some_and(|connections| {
+                            connections
+                                .iter()
+                                .all(|connection| connection.conn_id != first_id_text)
+                        })
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        a.get_peer_map()
+            .send_msg_directly(
+                speed_packet(a.my_peer_id(), b.my_peer_id(), 10),
+                b.my_peer_id(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(peer.get_default_conn_id(), second_id);
+    }
+
+    #[test]
+    fn old_relay_reads_the_speed_packet_as_latency_first() {
+        let packet = speed_packet(1, 2, 10);
+        let header = packet.peer_manager_header().unwrap();
+
+        assert!(header.is_speed_first());
+        assert!(header.is_latency_first());
+        assert_eq!(
+            if header.is_latency_first() {
+                NextHopPolicy::LeastCost
+            } else {
+                NextHopPolicy::LeastHop
+            },
+            NextHopPolicy::LeastCost
+        );
+    }
+}

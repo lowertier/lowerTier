@@ -4735,6 +4735,82 @@ mod tests {
         assert_eq!(routes[&e].next_hop_peer_id, 3);
     }
 
+    #[test]
+    fn widest_path_handles_representative_graph_matrix() {
+        for node_count in [8_usize, 32, 128] {
+            let mut graph = SpeedGraph::new();
+            let nodes: Vec<_> = (0..node_count)
+                .map(|index| graph.add_node((index + 1) as PeerId))
+                .collect();
+            for index in 0..node_count - 1 {
+                graph.add_edge(
+                    nodes[index],
+                    nodes[index + 1],
+                    SpeedEdge {
+                        delivery_bps: 100_000_000 - index as u64 * 1_000,
+                        latency_ms: 2,
+                    },
+                );
+                graph.add_edge(
+                    nodes[index + 1],
+                    nodes[index],
+                    SpeedEdge {
+                        delivery_bps: 50_000_000 + index as u64 * 1_000,
+                        latency_ms: 3,
+                    },
+                );
+            }
+
+            let forward = widest_path_with_first_hop(&graph, nodes[0]);
+            let reverse = widest_path_with_first_hop(&graph, nodes[node_count - 1]);
+
+            assert_eq!(graph.edge_count(), 2 * (node_count - 1));
+            assert_eq!(forward.len(), node_count - 1);
+            assert_eq!(reverse.len(), node_count - 1);
+            assert!(
+                forward
+                    .values()
+                    .all(|path| path.next_hop_peer_id == graph[nodes[1]])
+            );
+            assert!(
+                reverse
+                    .values()
+                    .all(|path| { path.next_hop_peer_id == graph[nodes[node_count - 2]] })
+            );
+        }
+
+        for node_count in [8_usize, 24, 48] {
+            let mut graph = SpeedGraph::new();
+            let nodes: Vec<_> = (0..node_count)
+                .map(|index| graph.add_node((index + 1) as PeerId))
+                .collect();
+            for source in 0..node_count {
+                for target in 0..node_count {
+                    if source == target {
+                        continue;
+                    }
+                    graph.add_edge(
+                        nodes[source],
+                        nodes[target],
+                        SpeedEdge {
+                            delivery_bps: 100_000_000,
+                            latency_ms: 1,
+                        },
+                    );
+                }
+            }
+
+            let routes = widest_path_with_first_hop(&graph, nodes[0]);
+
+            assert_eq!(graph.edge_count(), node_count * (node_count - 1));
+            assert_eq!(routes.len(), node_count - 1);
+            for target in nodes.iter().skip(1) {
+                assert_eq!(routes[target].next_hop_peer_id, graph[*target]);
+                assert_eq!(routes[target].quality.hops, 1);
+            }
+        }
+    }
+
     struct AuthOnlyInterface {
         my_peer_id: PeerId,
         identity_type: DashMap<PeerId, PeerIdentityType>,
