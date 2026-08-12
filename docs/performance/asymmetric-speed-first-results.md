@@ -57,9 +57,18 @@ The live route was asymmetric after fresh directed samples arrived.
 | Mac to `.40`, ping loss | 15% |
 | Mac to `.40`, ping average | 114.0 ms |
 
-The last Mac route sample selected a 34.85 Mbit/s relay path with 85 ms path latency.
-The last `.40` route sample selected a 45.08 Mbit/s direct path with 211 ms path latency.
+One Mac route sample selected a 34.85 Mbit/s relay path with 85 ms path latency.
+One `.40` route sample selected a 45.08 Mbit/s direct path with 211 ms path latency.
 These decisions show that each direction can select a different path.
+
+The final four samples used 30-second intervals.
+The Mac route changed from direct to relay and then back to direct.
+The selected relay sample measured 22.03 Mbit/s.
+The router independently used latency fallback through `btower` after its speed sample expired.
+Existing flows remained on their pinned path during route updates.
+
+The final four-stream test received 20.08 Mbit/s from the Mac to `.40`.
+The reverse test received 30.24 Mbit/s.
 
 ## Stability
 
