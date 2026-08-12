@@ -390,6 +390,23 @@ impl PeerMap {
         }
     }
 
+    pub(crate) fn list_speed_probe_connections(
+        &self,
+    ) -> Vec<(PeerId, crate::peers::peer::ArcPeerConn)> {
+        let mut connections = Vec::new();
+        for entry in self.peer_map.iter() {
+            let peer_id = *entry.key();
+            connections.extend(
+                entry
+                    .value()
+                    .speed_probe_connections()
+                    .into_iter()
+                    .map(|connection| (peer_id, connection)),
+            );
+        }
+        connections
+    }
+
     pub async fn get_peer_default_conn_id(&self, peer_id: PeerId) -> Option<PeerConnId> {
         self.get_peer_by_id(peer_id)
             .map(|p| p.get_default_conn_id())

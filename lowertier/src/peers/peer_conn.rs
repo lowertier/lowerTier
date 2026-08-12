@@ -37,6 +37,9 @@ use super::{
     link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
     peer_conn_ping::PeerConnPinger,
     peer_session::{PeerSession, PeerSessionAction},
+    speed_probe::{
+        ProbeAck, ProbeReceiver, ProbeReservation, SpeedSample, build_probe_train_with_overhead,
+    },
     traffic_metrics::AggregateTrafficMetrics,
 };
 use crate::{
@@ -80,6 +83,11 @@ const VERSION: u32 = 1;
 const MAX_PENDING_HANDSHAKE_PACKETS: usize = MAX_PACKET_BATCH_SIZE;
 const MAX_PENDING_HANDSHAKE_BYTES: usize =
     MAX_PENDING_HANDSHAKE_PACKETS * (4096 + PEER_MANAGER_HEADER_SIZE);
+pub(crate) const SPEED_ROUTING_FEATURE: &str = "speed-routing-v1";
+
+fn handshake_features() -> Vec<String> {
+    vec![SPEED_ROUTING_FEATURE.to_string()]
+}
 
 fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
     !batch.is_empty()
@@ -87,16 +95,34 @@ fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
             if let Some(metadata) = packet.parsed_metadata() {
                 return metadata.packet_type != PacketType::Ping as u8
                     && metadata.packet_type != PacketType::Pong as u8
+                    && metadata.packet_type != PacketType::SpeedProbe as u8
+                    && metadata.packet_type != PacketType::SpeedProbeAck as u8
                     && metadata.packet_type != PacketType::AlternateFecSource as u8
                     && metadata.packet_type != PacketType::AlternateFecParity as u8;
             }
             packet.peer_manager_header().is_some_and(|header| {
                 header.packet_type != PacketType::Ping as u8
                     && header.packet_type != PacketType::Pong as u8
+                    && header.packet_type != PacketType::SpeedProbe as u8
+                    && header.packet_type != PacketType::SpeedProbeAck as u8
                     && header.packet_type != PacketType::AlternateFecSource as u8
                     && header.packet_type != PacketType::AlternateFecParity as u8
             })
         })
+}
+
+fn speed_probe_ack_packet(my_peer_id: PeerId, peer_id: PeerId, ack: ProbeAck) -> ZCPacket {
+    let mut packet = ZCPacket::new_with_payload(&ack.encode());
+    packet.fill_peer_manager_hdr(my_peer_id, peer_id, PacketType::SpeedProbeAck as u8);
+    packet
+}
+
+struct ActiveSpeedProbeGuard<'a>(&'a AtomicBool);
+
+impl Drop for ActiveSpeedProbeGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// The proof of client secret.
@@ -642,6 +668,10 @@ pub struct PeerConn {
     latency_stats: Arc<WindowLatency>,
     throughput: Arc<Throughput>,
     loss_rate_stats: Arc<AtomicU32>,
+    speed_sample: Arc<parking_lot::RwLock<Option<SpeedSample>>>,
+    speed_probe_receiver: Arc<parking_lot::Mutex<ProbeReceiver>>,
+    speed_ack_sender: broadcast::Sender<ProbeAck>,
+    speed_probe_active: AtomicBool,
 
     peer_session_store: Arc<PeerSessionStore>,
     my_encrypt_algo: String,
@@ -681,6 +711,7 @@ impl PeerConn {
         let transport_authenticated = tunnel.is_transport_authenticated();
         let tunnel_info = tunnel.info();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
+        let (speed_ack_sender, _speed_ack_receiver) = broadcast::channel(8);
 
         let secure_mode_cfg = global_ctx.config.get_secure_mode();
         let secure_mode_enabled = secure_mode_cfg
@@ -755,6 +786,10 @@ impl PeerConn {
             latency_stats: Arc::new(WindowLatency::new(15)),
             throughput,
             loss_rate_stats: Arc::new(AtomicU32::new(0)),
+            speed_sample: Arc::new(parking_lot::RwLock::new(None)),
+            speed_probe_receiver: Arc::new(parking_lot::Mutex::new(ProbeReceiver::default())),
+            speed_ack_sender,
+            speed_probe_active: AtomicBool::new(false),
 
             peer_session_store,
             my_encrypt_algo,
@@ -891,7 +926,7 @@ impl PeerConn {
             magic: MAGIC,
             my_peer_id: self.my_peer_id,
             version: VERSION,
-            features: Vec::new(),
+            features: handshake_features(),
             network_name: network.network_name.clone(),
             ..Default::default()
         };
@@ -1624,7 +1659,7 @@ impl PeerConn {
             version: VERSION,
             network_name: noise.remote_network_name.clone(),
 
-            features: Vec::new(),
+            features: handshake_features(),
             network_secret_digest: noise.secret_digest.clone(),
         }
     }
@@ -1783,6 +1818,10 @@ impl PeerConn {
         let sender = packet_recv_chan.clone();
         let close_event_notifier = self.close_event_notifier.clone();
         let ctrl_sender = self.ctrl_resp_sender.clone();
+        let speed_ack_sender = self.speed_ack_sender.clone();
+        let speed_probe_receiver = self.speed_probe_receiver.clone();
+        let probe_my_peer_id = self.my_peer_id;
+        let probe_peer_id = self.get_peer_id();
         let conn_info_for_instrument = self.get_conn_info();
         let control_metrics = self.control_metrics(&conn_info_for_instrument.network_name);
         #[cfg(feature = "quic")]
@@ -1817,6 +1856,39 @@ impl PeerConn {
         } else {
             None
         };
+
+        let poll_receiver = speed_probe_receiver.clone();
+        let poll_sink = sink.clone();
+        let poll_close_notifier = self.close_event_notifier.clone();
+        let poll_metrics = control_metrics.clone();
+        self.tasks.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut close_waiter = poll_close_notifier.get_waiter().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let ack = poll_receiver.lock().poll(std::time::Instant::now());
+                        if let Some(ack) = ack {
+                            let packet = speed_probe_ack_packet(probe_my_peer_id, probe_peer_id, ack);
+                            let packet_len = packet.buf_len() as u64;
+                            if poll_sink.send(packet).await.is_err() {
+                                break;
+                            }
+                            poll_metrics.record_tx(packet_len);
+                        }
+                    }
+                    _ = async {
+                        if let Some(waiter) = close_waiter.as_mut() {
+                            let _ = waiter.recv().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => break,
+                }
+            }
+            Ok(())
+        });
 
         self.tasks.spawn(
             async move {
@@ -1921,7 +1993,48 @@ impl PeerConn {
                             continue;
                         }
 
-                        if peer_mgr_hdr.packet_type == PacketType::Ping as u8 {
+                        if peer_mgr_hdr.packet_type == PacketType::SpeedProbe as u8 {
+                            control_metrics.record_rx(buf_len);
+                            let probe_result = {
+                                speed_probe_receiver.lock().receive_wire(
+                                    zc_packet.payload(),
+                                    zc_packet.tunnel_payload().len(),
+                                    std::time::Instant::now(),
+                                )
+                            };
+                            match probe_result {
+                                Ok(Some(ack)) => {
+                                    let packet = speed_probe_ack_packet(
+                                        probe_my_peer_id,
+                                        probe_peer_id,
+                                        ack,
+                                    );
+                                    let packet_len = packet.buf_len() as u64;
+                                    if let Err(error) = sink.send(packet).await {
+                                        tracing::warn!(
+                                            ?error,
+                                            "speed probe acknowledgement failed"
+                                        );
+                                    } else {
+                                        control_metrics.record_tx(packet_len);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::warn!(?error, "invalid speed probe packet");
+                                }
+                            }
+                        } else if peer_mgr_hdr.packet_type == PacketType::SpeedProbeAck as u8 {
+                            control_metrics.record_rx(buf_len);
+                            match ProbeAck::decode(zc_packet.payload()) {
+                                Ok(ack) => {
+                                    let _ = speed_ack_sender.send(ack);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(?error, "invalid speed probe acknowledgement");
+                                }
+                            }
+                        } else if peer_mgr_hdr.packet_type == PacketType::Ping as u8 {
                             control_metrics.record_rx(buf_len);
                             peer_mgr_hdr.packet_type = PacketType::Pong as u8;
                             if let Err(e) = sink.send(zc_packet).await {
@@ -1992,6 +2105,110 @@ impl PeerConn {
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
         Ok(self.sink.send(msg).await?)
+    }
+
+    pub(crate) fn supports_speed_routing(&self) -> bool {
+        self.info.as_ref().is_some_and(|info| {
+            info.features
+                .iter()
+                .any(|feature| feature == SPEED_ROUTING_FEATURE)
+        })
+    }
+
+    pub(crate) fn fresh_speed_sample(&self, now: std::time::Instant) -> Option<SpeedSample> {
+        self.speed_sample
+            .read()
+            .filter(|sample| sample.is_fresh(now))
+            .as_ref()
+            .copied()
+    }
+
+    fn store_speed_sample(&self, sample: SpeedSample) {
+        let mut current = self.speed_sample.write();
+        if current
+            .as_ref()
+            .is_none_or(|existing| sample.generation > existing.generation)
+        {
+            *current = Some(sample);
+        }
+    }
+
+    pub(crate) async fn run_speed_probe(
+        &self,
+        generation: u64,
+        reserved_bytes: u64,
+        wire_packet_size: usize,
+        interval: Duration,
+    ) -> u64 {
+        if self.is_closed()
+            || !self.supports_speed_routing()
+            || self
+                .speed_probe_active
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            return reserved_bytes;
+        }
+        let _active_guard = ActiveSpeedProbeGuard(&self.speed_probe_active);
+        let Ok(train) = build_probe_train_with_overhead(
+            generation,
+            reserved_bytes,
+            wire_packet_size,
+            PEER_MANAGER_HEADER_SIZE,
+        ) else {
+            return reserved_bytes;
+        };
+        if train.is_empty() {
+            return reserved_bytes;
+        }
+
+        let mut acknowledgements = self.speed_ack_sender.subscribe();
+        let started_at = std::time::Instant::now();
+        let send_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut reservation = ProbeReservation::new(reserved_bytes, started_at);
+        let network_name = self.get_conn_info().network_name;
+        for payload in train {
+            let mut packet = ZCPacket::new_with_payload(&payload);
+            packet.fill_peer_manager_hdr(
+                self.my_peer_id,
+                self.get_peer_id(),
+                PacketType::SpeedProbe as u8,
+            );
+            packet
+                .mut_peer_manager_header()
+                .unwrap()
+                .set_latency_first(true);
+            let packet_len = packet.tunnel_payload().len() as u64;
+            let metric_len = packet.buf_len() as u64;
+            let send = tokio::time::timeout_at(send_deadline, self.sink.send(packet)).await;
+            if !matches!(send, Ok(Ok(())))
+                || !reservation.record_sent(packet_len, std::time::Instant::now())
+            {
+                break;
+            }
+            self.record_control_tx(&network_name, metric_len);
+        }
+
+        if reservation.sent_bytes() >= (wire_packet_size as u64).saturating_mul(2) {
+            let acknowledgement = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match acknowledgements.recv().await {
+                        Ok(ack) if ack.generation == generation => return Some(ack),
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(ack) = acknowledgement {
+                let ttl = interval.checked_mul(3).unwrap_or(Duration::MAX);
+                self.store_speed_sample(SpeedSample::from_ack(ack, std::time::Instant::now(), ttl));
+            }
+        }
+
+        reservation.unused_bytes()
     }
 
     pub async fn send_msg_batch(&self, batch: PacketBatch) -> Result<(), Error> {
@@ -2088,6 +2305,8 @@ impl PeerConn {
 
     pub fn get_conn_info(&self) -> PeerConnInfo {
         let info = self.info.as_ref().unwrap();
+        let now = std::time::Instant::now();
+        let speed_sample = self.fresh_speed_sample(now);
         PeerConnInfo {
             conn_id: self.conn_id.to_string(),
             my_peer_id: self.my_peer_id,
@@ -2119,10 +2338,11 @@ impl PeerConn {
                 .as_ref()
                 .map(|x| x.peer_identity_type as i32)
                 .unwrap_or(PeerIdentityType::Admin as i32),
-            tx_delivery_bps: None,
-            tx_loss_ppm: None,
-            speed_sample_age_ms: None,
-            speed_probe_generation: None,
+            tx_delivery_bps: speed_sample.map(|sample| sample.delivery_bps),
+            tx_loss_ppm: speed_sample.map(|sample| sample.loss_ppm),
+            speed_sample_age_ms: speed_sample
+                .map(|sample| u64::try_from(sample.age(now).as_millis()).unwrap_or(u64::MAX)),
+            speed_probe_generation: speed_sample.map(|sample| sample.generation),
         }
     }
 
@@ -2225,6 +2445,129 @@ pub mod tests {
     use crate::common::global_ctx::tests::get_mock_global_ctx;
     use crate::common::new_peer_id;
     use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
+
+    #[tokio::test]
+    async fn handshake_advertises_speed_routing_support() {
+        let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+        let client_id = new_peer_id();
+        let server_id = new_peer_id();
+        let sessions = Arc::new(PeerSessionStore::new());
+        let mut client = PeerConn::new(
+            client_id,
+            get_mock_global_ctx(),
+            client_tunnel,
+            sessions.clone(),
+        );
+        let mut server = PeerConn::new(server_id, get_mock_global_ctx(), server_tunnel, sessions);
+
+        let (client_result, server_result) = tokio::join!(
+            client.do_handshake_as_client(),
+            server.do_handshake_as_server()
+        );
+        client_result.unwrap();
+        server_result.unwrap();
+
+        assert!(client.supports_speed_routing());
+        assert!(server.supports_speed_routing());
+    }
+
+    #[tokio::test]
+    async fn unsupported_peer_does_not_receive_a_speed_probe() {
+        let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
+        let mut conn = PeerConn::new(
+            new_peer_id(),
+            get_mock_global_ctx(),
+            local_tunnel,
+            Arc::new(PeerSessionStore::new()),
+        );
+        conn.info = Some(HandshakeRequest {
+            my_peer_id: new_peer_id(),
+            features: Vec::new(),
+            ..Default::default()
+        });
+
+        let unused = conn
+            .run_speed_probe(1, 4_000, 100, Duration::from_secs(30))
+            .await;
+
+        assert_eq!(unused, 4_000);
+        assert!(conn.fresh_speed_sample(std::time::Instant::now()).is_none());
+    }
+
+    #[tokio::test]
+    async fn speed_sample_retains_the_newest_generation_until_expiry() {
+        let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
+        let conn = PeerConn::new(
+            new_peer_id(),
+            get_mock_global_ctx(),
+            local_tunnel,
+            Arc::new(PeerSessionStore::new()),
+        );
+        let measured_at = std::time::Instant::now();
+        conn.store_speed_sample(SpeedSample {
+            delivery_bps: 10_000,
+            loss_ppm: 100,
+            generation: 8,
+            measured_at,
+            ttl: Duration::from_secs(3),
+        });
+        conn.store_speed_sample(SpeedSample {
+            delivery_bps: 20_000,
+            loss_ppm: 0,
+            generation: 7,
+            measured_at,
+            ttl: Duration::from_secs(3),
+        });
+
+        assert_eq!(
+            conn.fresh_speed_sample(measured_at + Duration::from_secs(2))
+                .unwrap()
+                .delivery_bps,
+            10_000
+        );
+        assert!(
+            conn.fresh_speed_sample(measured_at + Duration::from_secs(3))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn ring_connection_completes_one_speed_probe_generation() {
+        let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+        let client_id = new_peer_id();
+        let server_id = new_peer_id();
+        let sessions = Arc::new(PeerSessionStore::new());
+        let mut client = PeerConn::new(
+            client_id,
+            get_mock_global_ctx(),
+            client_tunnel,
+            sessions.clone(),
+        );
+        let mut server = PeerConn::new(server_id, get_mock_global_ctx(), server_tunnel, sessions);
+        let (client_result, server_result) = tokio::join!(
+            client.do_handshake_as_client(),
+            server.do_handshake_as_server()
+        );
+        client_result.unwrap();
+        server_result.unwrap();
+        client.start_recv_loop(create_packet_recv_chan().0).await;
+        server.start_recv_loop(create_packet_recv_chan().0).await;
+
+        let unused = client
+            .run_speed_probe(77, 4_000, 100, Duration::from_secs(30))
+            .await;
+        let sample = client
+            .fresh_speed_sample(std::time::Instant::now())
+            .unwrap();
+
+        assert!(unused < 4_000);
+        assert_eq!(sample.generation, 77);
+        assert!(sample.delivery_bps > 0);
+        let info = client.get_conn_info();
+        assert_eq!(info.speed_probe_generation, Some(77));
+        assert_eq!(info.tx_delivery_bps, Some(sample.delivery_bps));
+        assert_eq!(info.tx_loss_ppm, Some(0));
+    }
 
     #[tokio::test]
     async fn direct_delivery_prefetches_exactly_one_batch() {
@@ -2849,7 +3192,7 @@ pub mod tests {
             magic: MAGIC,
             my_peer_id: s_peer_id,
             version: VERSION,
-            features: Vec::new(),
+            features: handshake_features(),
             network_name: network.network_name.clone(),
             ..Default::default()
         };

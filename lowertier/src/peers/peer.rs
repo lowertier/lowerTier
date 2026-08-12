@@ -37,7 +37,7 @@ use crate::{
 };
 use tokio_util::task::AbortOnDropHandle;
 
-type ArcPeerConn = Arc<PeerConn>;
+pub(crate) type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
 
 pub struct Peer {
@@ -552,6 +552,14 @@ impl Peer {
             }
         }
         ret
+    }
+
+    pub(crate) fn speed_probe_connections(&self) -> Vec<ArcPeerConn> {
+        self.conns
+            .iter()
+            .filter(|entry| !entry.value().is_closed() && entry.value().supports_speed_routing())
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     pub fn has_live_conns(&self) -> bool {

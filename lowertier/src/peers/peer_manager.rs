@@ -44,6 +44,7 @@ use crate::{
         peer_session::PeerSessionStore,
         recv_packet_batch_from_chan,
         route_trait::{ForeignNetworkRouteInfoMap, MockRoute, NextHopPolicy, RouteInterface},
+        speed_probe::{ProbeBudget, split_cycle_budget},
         traffic_metrics::{
             InstanceLabelKind, LogicalTrafficMetrics, TrafficKind, TrafficMetricRecorder,
             is_relay_data_packet_type, route_peer_info_instance_id, traffic_kind,
@@ -62,7 +63,7 @@ use crate::{
     tunnel::{
         self, PacketBatchSink, Tunnel, TunnelConnector, TunnelError,
         batch::PacketBatch,
-        packet_def::{CompressorAlgo, PacketType, ZCPacket},
+        packet_def::{CompressorAlgo, PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
     },
 };
 
@@ -128,6 +129,26 @@ fn apply_local_route_policy(packet: &mut ZCPacket, speed_first: bool, latency_fi
     if !use_speed {
         header.set_latency_first(latency_first || speed_first);
     }
+}
+
+fn ordered_probe_indexes(candidates: &[(PeerId, PeerConnId, bool)], rotation: usize) -> Vec<usize> {
+    let mut indexes = (0..candidates.len()).collect::<Vec<_>>();
+    indexes.sort_by_key(|index| {
+        let (peer_id, conn_id, recent) = candidates[*index];
+        (!recent, peer_id, conn_id)
+    });
+    let recent_count = indexes
+        .iter()
+        .take_while(|index| candidates[**index].2)
+        .count();
+    if recent_count > 1 {
+        indexes[..recent_count].rotate_left(rotation % recent_count);
+    }
+    let idle_count = indexes.len().saturating_sub(recent_count);
+    if idle_count > 1 {
+        indexes[recent_count..].rotate_left(rotation % idle_count);
+    }
+    indexes
 }
 
 use super::{
@@ -666,6 +687,7 @@ pub struct PeerManager {
 
     reserved_my_peer_id_map: DashMap<String, PeerId>,
     recent_have_traffic: Arc<DashMap<PeerId, Instant>>,
+    recent_data_traffic: Arc<DashMap<PeerId, Instant>>,
     p2p_demand_notify: Arc<ExternalTaskSignal>,
 
     allow_loopback_tunnel: AtomicBool,
@@ -936,6 +958,7 @@ impl PeerManager {
 
             reserved_my_peer_id_map: DashMap::new(),
             recent_have_traffic: Arc::new(DashMap::new()),
+            recent_data_traffic: Arc::new(DashMap::new()),
             p2p_demand_notify: Arc::new(ExternalTaskSignal::new()),
 
             allow_loopback_tunnel: AtomicBool::new(true),
@@ -958,12 +981,14 @@ impl PeerManager {
             return;
         }
 
+        let now = Instant::now();
+        self.recent_data_traffic.insert(dst_peer_id, now);
+
         let flags = self.global_ctx.flags_arc();
         if flags.disable_p2p || !flags.lazy_p2p || self.has_directly_connected_conn(dst_peer_id) {
             return;
         }
 
-        let now = Instant::now();
         if let Some(mut last_seen) = self.recent_have_traffic.get_mut(&dst_peer_id) {
             let should_notify =
                 now.saturating_duration_since(*last_seen) > Self::RECENT_HAVE_TRAFFIC_TTL;
@@ -3389,6 +3414,99 @@ impl PeerManager {
         self.foreign_network_client.run().await;
     }
 
+    async fn run_speed_probe_routine(&self) {
+        let global_ctx = self.global_ctx.clone();
+        let peers = self.peers.clone();
+        let recent_data_traffic = self.recent_data_traffic.clone();
+        self.tasks.lock().await.spawn(async move {
+            let mut active_config = None;
+            let mut budget = None;
+            let mut generation = 0_u64;
+            let mut rotation = 0_usize;
+            loop {
+                let flags = global_ctx.flags_arc();
+                if flags.speed_probe_budget_bps == 0 || flags.speed_probe_interval_seconds == 0 {
+                    active_config = None;
+                    budget = None;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+
+                let interval = Duration::from_secs(flags.speed_probe_interval_seconds);
+                let config = (
+                    flags.speed_probe_budget_bps,
+                    flags.speed_probe_interval_seconds,
+                );
+                if active_config != Some(config) {
+                    match ProbeBudget::new(
+                        flags.speed_probe_budget_bps,
+                        interval,
+                        std::time::Instant::now(),
+                    ) {
+                        Ok(new_budget) => {
+                            budget = Some(new_budget);
+                            active_config = Some(config);
+                        }
+                        Err(error) => {
+                            tracing::warn!(?error, "invalid speed probe budget");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    }
+                }
+
+                let now = Instant::now();
+                recent_data_traffic.retain(|_, last_seen| {
+                    now.saturating_duration_since(*last_seen) <= Self::RECENT_HAVE_TRAFFIC_TTL
+                });
+                let connections = peers.list_speed_probe_connections();
+                let packet_size = (flags.mtu as usize)
+                    .max(PEER_MANAGER_HEADER_SIZE + crate::peers::speed_probe::PROBE_HEADER_SIZE);
+                let snapshot = budget
+                    .as_mut()
+                    .unwrap()
+                    .take_cycle_snapshot(std::time::Instant::now());
+                let allocation = split_cycle_budget(snapshot, connections.len(), packet_size);
+                budget
+                    .as_mut()
+                    .unwrap()
+                    .return_unused(allocation.unused_bytes);
+
+                let keys = connections
+                    .iter()
+                    .map(|(peer_id, connection)| {
+                        (
+                            *peer_id,
+                            connection.get_conn_id(),
+                            recent_data_traffic.contains_key(peer_id),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let order = ordered_probe_indexes(&keys, rotation);
+                rotation = rotation.wrapping_add(1);
+                generation = generation.saturating_add(1);
+
+                let mut probes = JoinSet::new();
+                for (index, share) in order.into_iter().zip(allocation.shares) {
+                    let connection = connections[index].1.clone();
+                    probes.spawn(async move {
+                        connection
+                            .run_speed_probe(generation, share, packet_size, interval)
+                            .await
+                    });
+                }
+                while let Some(result) = probes.join_next().await {
+                    match result {
+                        Ok(unused) => budget.as_mut().unwrap().return_unused(unused),
+                        Err(error) => tracing::warn!(?error, "speed probe task failed"),
+                    }
+                }
+
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
     pub async fn run(&self) -> Result<(), Error> {
         match &self.route_algo_inst {
             RouteAlgoInst::Ospf(route) => self.add_route(route.clone()).await,
@@ -3405,6 +3523,7 @@ impl PeerManager {
         self.run_peer_session_gc_routine().await;
         self.run_credential_gc_routine().await;
         self.run_traffic_metrics_gc_routine().await;
+        self.run_speed_probe_routine().await;
 
         self.run_foriegn_network().await;
 
@@ -3724,10 +3843,34 @@ mod tests {
 
     use super::{
         DirectNicBatchWriter, PeerManager, apply_local_route_policy, check_tunnel_info_underlay,
-        decoded_local_nic_batch_source, is_foreign_network_packet_type,
+        decoded_local_nic_batch_source, is_foreign_network_packet_type, ordered_probe_indexes,
         packet_batch_contains_peer_rpc, packet_supports_speed_first, prepare_direct_nic_batch,
         prepare_packet_batch,
     };
+
+    #[test]
+    fn probe_order_keeps_recent_peers_first_and_rotates_every_group() {
+        let candidates = vec![
+            (30, uuid::Uuid::from_u128(3), false),
+            (10, uuid::Uuid::from_u128(1), true),
+            (40, uuid::Uuid::from_u128(4), false),
+            (20, uuid::Uuid::from_u128(2), true),
+            (50, uuid::Uuid::from_u128(5), false),
+        ];
+
+        let first = ordered_probe_indexes(&candidates, 0);
+        let second = ordered_probe_indexes(&candidates, 1);
+        let third = ordered_probe_indexes(&candidates, 2);
+
+        for order in [&first, &second, &third] {
+            assert!(candidates[order[0]].2);
+            assert!(candidates[order[1]].2);
+            assert!(!candidates[order[2]].2);
+        }
+        assert_ne!(first[..2], second[..2]);
+        assert_ne!(first[2..], second[2..]);
+        assert_ne!(second[2..], third[2..]);
+    }
 
     #[test]
     fn speed_first_allowlist_contains_only_data_packets() {

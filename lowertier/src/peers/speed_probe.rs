@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-const PROBE_DATA_HEADER_SIZE: usize = 32;
+pub(crate) const PROBE_HEADER_SIZE: usize = 32;
 const PROBE_ACK_SIZE: usize = 40;
 const MAX_PROBE_PACKETS: u32 = 65_536;
 const PROBE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -47,7 +47,7 @@ impl ProbeData {
     }
 
     pub(crate) fn decode(encoded: &[u8]) -> Result<Self, ProbeError> {
-        if encoded.len() < PROBE_DATA_HEADER_SIZE {
+        if encoded.len() < PROBE_HEADER_SIZE {
             return Err(ProbeError::PayloadTooShort);
         }
         let data = Self {
@@ -61,10 +61,7 @@ impl ProbeData {
                 _ => return Err(ProbeError::InvalidMetadata),
             },
         };
-        if encoded[25..PROBE_DATA_HEADER_SIZE]
-            .iter()
-            .any(|byte| *byte != 0)
-        {
+        if encoded[25..PROBE_HEADER_SIZE].iter().any(|byte| *byte != 0) {
             return Err(ProbeError::InvalidMetadata);
         }
         data.validate(encoded.len())?;
@@ -72,7 +69,7 @@ impl ProbeData {
     }
 
     fn validate(self, encoded_size: usize) -> Result<(), ProbeError> {
-        if encoded_size < PROBE_DATA_HEADER_SIZE {
+        if encoded_size < PROBE_HEADER_SIZE {
             return Err(ProbeError::PayloadTooShort);
         }
         if !(2..=MAX_PROBE_PACKETS).contains(&self.expected_packets)
@@ -83,7 +80,7 @@ impl ProbeData {
             return Err(ProbeError::InvalidMetadata);
         }
         let minimum_bytes = u64::from(self.expected_packets)
-            .checked_mul(PROBE_DATA_HEADER_SIZE as u64)
+            .checked_mul(PROBE_HEADER_SIZE as u64)
             .ok_or(ProbeError::ArithmeticOverflow)?;
         if self.expected_bytes < minimum_bytes || encoded_size as u64 > self.expected_bytes {
             return Err(ProbeError::InvalidMetadata);
@@ -240,6 +237,15 @@ impl ProbeReceiver {
         encoded: &[u8],
         now: Instant,
     ) -> Result<Option<ProbeAck>, ProbeError> {
+        self.receive_wire(encoded, encoded.len(), now)
+    }
+
+    pub(crate) fn receive_wire(
+        &mut self,
+        encoded: &[u8],
+        wire_size: usize,
+        now: Instant,
+    ) -> Result<Option<ProbeAck>, ProbeError> {
         let data = ProbeData::decode(encoded)?;
         match self.active.as_ref() {
             Some(active) if data.generation < active.metadata.generation => return Ok(None),
@@ -256,12 +262,16 @@ impl ProbeReceiver {
         if active.received[sequence] {
             return Ok(None);
         }
+        let received_bytes = active
+            .received_bytes
+            .checked_add(wire_size as u64)
+            .ok_or(ProbeError::ArithmeticOverflow)?;
+        if received_bytes > active.metadata.expected_bytes {
+            return Err(ProbeError::InvalidMetadata);
+        }
         active.received[sequence] = true;
         active.received_packets += 1;
-        active.received_bytes = active
-            .received_bytes
-            .checked_add(encoded.len() as u64)
-            .ok_or(ProbeError::ArithmeticOverflow)?;
+        active.received_bytes = received_bytes;
         if active.received_packets == 1 {
             active.first_arrival = now;
         }
@@ -315,10 +325,22 @@ pub(crate) fn build_probe_train(
     reserved_bytes: u64,
     packet_size: usize,
 ) -> Result<Vec<Vec<u8>>, ProbeError> {
-    if packet_size < PROBE_DATA_HEADER_SIZE {
+    build_probe_train_with_overhead(generation, reserved_bytes, packet_size, 0)
+}
+
+pub(crate) fn build_probe_train_with_overhead(
+    generation: u64,
+    reserved_bytes: u64,
+    wire_packet_size: usize,
+    per_packet_overhead: usize,
+) -> Result<Vec<Vec<u8>>, ProbeError> {
+    let encoded_size = wire_packet_size
+        .checked_sub(per_packet_overhead)
+        .ok_or(ProbeError::PayloadTooShort)?;
+    if encoded_size < PROBE_HEADER_SIZE {
         return Err(ProbeError::PayloadTooShort);
     }
-    let packet_size_u64 = packet_size as u64;
+    let packet_size_u64 = wire_packet_size as u64;
     let packet_count = (reserved_bytes / packet_size_u64).min(u64::from(MAX_PROBE_PACKETS));
     if packet_count < 2 {
         return Ok(Vec::new());
@@ -338,7 +360,7 @@ pub(crate) fn build_probe_train(
                 expected_bytes,
                 final_marker: sequence + 1 == expected_packets,
             }
-            .encode_with_size(packet_size)?,
+            .encode_with_size(encoded_size)?,
         );
     }
     Ok(train)
