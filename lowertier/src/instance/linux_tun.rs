@@ -489,14 +489,24 @@ mod tests {
         let mut queue = super::QueueSink::new();
 
         let (buffers, gro_table) = queue.take_flush_resources();
-        assert!(queue.pending.is_none());
-        assert!(queue.gro_table.is_none());
+        // Double-buffer: the spare pending vector is installed immediately so a
+        // second batch can queue while the first write is in flight.
+        assert!(queue.pending.is_some());
+        assert!(queue.pending_is_empty());
+        assert!(queue.spare.is_none());
+        assert!(queue.gro_table.is_some());
+        assert!(queue.gro_spare.is_none());
 
         queue.restore_flush_resources(buffers, gro_table);
         assert_eq!(
             queue.pending.as_ref().unwrap().capacity(),
             super::MAX_PACKET_BATCH_SIZE
         );
+        assert_eq!(
+            queue.spare.as_ref().unwrap().capacity(),
+            super::MAX_PACKET_BATCH_SIZE
+        );
         assert!(queue.gro_table.is_some());
+        assert!(queue.gro_spare.is_some());
     }
 }
