@@ -19,13 +19,13 @@ use crate::tunnel::common::{
 use crate::tunnel::{
     TunnelInfo,
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-    common::{BatchTunnelWrapper, FramedReader, FramedWriter},
+    common::{BatchTunnelWrapper, FramedReader, ZCPacketToBytes},
 };
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
-use futures::{Future, Sink, SinkExt, Stream};
+use futures::{Future, FutureExt, Sink, Stream, StreamExt};
 use parking_lot::RwLock;
 use quinn::{
     ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
@@ -919,8 +919,21 @@ impl QuicEndpointManager {
         }
 
         let endpoint = Self::try_create(source, false, socket_mark)?;
-        pool.push(endpoint.clone());
-        Ok(endpoint)
+        Ok(self.retain_source_endpoint(endpoint))
+    }
+
+    fn retain_source_endpoint(&self, endpoint: Endpoint) -> Endpoint {
+        let pool = if endpoint
+            .local_addr()
+            .is_ok_and(|local_addr| local_addr.is_ipv4())
+        {
+            &self.ipv4
+        } else {
+            &self.ipv6
+        };
+        pool.enable();
+        let connection_owner = endpoint.clone();
+        pool.try_push(endpoint).unwrap_or(connection_owner)
     }
 
     fn remove_endpoint(&self, endpoint: &Endpoint) -> usize {
@@ -1250,28 +1263,22 @@ fn decode_received_quic_datagram(bytes: Bytes) -> Option<ZCPacket> {
 /// lane. Poll preference alternates so a saturated data lane cannot starve
 /// control traffic and vice versa.
 struct QuicHybridReader {
-    reliable: FramedReader<RecvStream>,
+    reliable: mpsc::Receiver<BatchStreamItem>,
     connection: Arc<ConnWrapper>,
     datagrams: Pin<Box<quinn::ReadDatagrams>>,
-    pending_error: Option<TunnelError>,
     poll_datagram_first: bool,
 }
 
 impl QuicHybridReader {
-    fn new(reliable: RecvStream, max_packet_size: usize, connection: Arc<ConnWrapper>) -> Self {
+    fn new(reliable: mpsc::Receiver<BatchStreamItem>, connection: Arc<ConnWrapper>) -> Self {
         let datagrams = Box::pin(connection.conn.read_datagrams(
             Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
             MAX_PACKET_BATCH_SIZE,
         ));
         Self {
-            reliable: FramedReader::new_with_initial_capacity(
-                reliable,
-                max_packet_size,
-                QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
-            ),
+            reliable,
             connection,
             datagrams,
-            pending_error: None,
             poll_datagram_first: true,
         }
     }
@@ -1316,29 +1323,7 @@ impl QuicHybridReader {
     }
 
     fn poll_reliable(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<BatchStreamItem>> {
-        let first = match Pin::new(&mut self.reliable).poll_next(cx) {
-            Poll::Ready(Some(Ok(packet))) => packet,
-            Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Pending => return Poll::Pending,
-        };
-        let mut batch = PacketBatch::new();
-        batch
-            .try_push(first)
-            .expect("a new reliable QUIC batch accepts one packet");
-        while batch.len() < MAX_PACKET_BATCH_SIZE {
-            match Pin::new(&mut self.reliable).poll_next(cx) {
-                Poll::Ready(Some(Ok(packet))) => batch
-                    .try_push(packet)
-                    .expect("the reliable QUIC batch checks its bound"),
-                Poll::Ready(Some(Err(error))) => {
-                    self.pending_error = Some(error);
-                    break;
-                }
-                Poll::Ready(None) | Poll::Pending => break,
-            }
-        }
-        Poll::Ready(Some(Ok(batch)))
+        self.reliable.poll_recv(cx)
     }
 }
 
@@ -1346,10 +1331,6 @@ impl Stream for QuicHybridReader {
     type Item = BatchStreamItem;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(error) = self.pending_error.take() {
-            return Poll::Ready(Some(Err(error)));
-        }
-
         let datagram_first = self.poll_datagram_first;
         self.poll_datagram_first = !datagram_first;
 
@@ -1388,6 +1369,12 @@ type DatagramBatchSend =
 
 const RELIABLE_LANE_QUEUE_BATCHES: usize = 1;
 
+#[derive(Clone, Copy, Debug)]
+enum ReliableLaneRole {
+    Initiator,
+    Acceptor,
+}
+
 fn poll_reliable_reservation(
     reservation: &mut Option<ReliableReserve>,
     cx: &mut TaskContext<'_>,
@@ -1411,30 +1398,148 @@ fn poll_reliable_reservation(
 }
 
 async fn run_reliable_writer(
-    send: SendStream,
-    mut receiver: mpsc::Receiver<PacketBatch>,
+    mut send: SendStream,
+    receiver: &mut mpsc::Receiver<PacketBatch>,
+    pending: &mut Option<Vec<Bytes>>,
 ) -> Result<(), TunnelError> {
-    let mut writer = FramedWriter::<_, TcpZCPacketToBytes>::new(send);
-    while let Some(batch) = receiver.recv().await {
-        for packet in batch {
-            writer.feed(packet).await?;
-        }
-        while let Ok(batch) = receiver.try_recv() {
+    loop {
+        if pending.is_none() {
+            let Some(batch) = receiver.recv().await else {
+                send.finish().context("finish reliable QUIC lane")?;
+                return Ok(());
+            };
+            let converter = TcpZCPacketToBytes;
+            let mut frames = Vec::with_capacity(batch.len());
             for packet in batch {
-                writer.feed(packet).await?;
+                frames.push(converter.zcpacket_into_bytes(packet)?);
+            }
+            *pending = Some(frames);
+        }
+
+        tokio::time::timeout(Duration::from_secs(7), async {
+            for frame in pending.as_ref().unwrap() {
+                send.write_all(frame).await?;
+            }
+            send.flush().await
+        })
+        .await
+        .context("reliable QUIC lane timed out")??;
+        pending.take();
+    }
+}
+
+async fn run_reliable_reader(
+    recv: RecvStream,
+    max_packet_size: usize,
+    sender: &mpsc::Sender<BatchStreamItem>,
+) -> Result<(), TunnelError> {
+    let mut reader = FramedReader::new_with_initial_capacity(
+        recv,
+        max_packet_size,
+        QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
+    );
+    loop {
+        let Some(first) = reader.next().await else {
+            return Ok(());
+        };
+        let first = first?;
+        let mut batch = PacketBatch::new();
+        batch
+            .try_push(first)
+            .expect("a new reliable QUIC batch accepts one packet");
+        let mut reached_end = false;
+        while batch.len() < MAX_PACKET_BATCH_SIZE {
+            match reader.next().now_or_never() {
+                Some(Some(Ok(packet))) => batch
+                    .try_push(packet)
+                    .expect("the reliable QUIC batch checks its bound"),
+                Some(Some(Err(error))) => return Err(error),
+                Some(None) => {
+                    reached_end = true;
+                    break;
+                }
+                None => break,
             }
         }
-        tokio::time::timeout(Duration::from_secs(7), writer.flush())
+        sender
+            .send(Ok(batch))
             .await
-            .context("reliable QUIC lane timed out")??;
+            .map_err(|_| TunnelError::InternalError("QUIC tunnel reader stopped".to_owned()))?;
+        if reached_end {
+            return Ok(());
+        }
     }
-    writer.close().await
+}
+
+async fn open_replacement_reliable_lane(
+    connection: &Connection,
+    role: ReliableLaneRole,
+) -> Result<(SendStream, RecvStream), TunnelError> {
+    let (mut send, mut recv) = match role {
+        ReliableLaneRole::Initiator => connection
+            .open_bi()
+            .await
+            .with_context(|| "open replacement reliable QUIC lane")?,
+        ReliableLaneRole::Acceptor => connection
+            .accept_bi()
+            .await
+            .with_context(|| "accept replacement reliable QUIC lane")?,
+    };
+    activate_reliable_lane(
+        &mut send,
+        &mut recv,
+        matches!(role, ReliableLaneRole::Initiator),
+    )
+    .await?;
+    Ok((send, recv))
+}
+
+async fn run_reliable_lane(
+    connection: Connection,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    role: ReliableLaneRole,
+    max_packet_size: usize,
+    mut outgoing: mpsc::Receiver<PacketBatch>,
+    incoming: mpsc::Sender<BatchStreamItem>,
+) -> Result<(), TunnelError> {
+    let mut pending = None;
+    loop {
+        let writer = run_reliable_writer(send, &mut outgoing, &mut pending);
+        let reader = run_reliable_reader(recv, max_packet_size, &incoming);
+        tokio::pin!(writer, reader);
+
+        let lane_error = tokio::select! {
+            result = &mut writer => match result {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            },
+            result = &mut reader => match result {
+                Ok(()) => return Ok(()),
+                Err(_error) if incoming.is_closed() => return Ok(()),
+                Err(error) => error,
+            },
+            error = connection.closed() => {
+                return Err(anyhow::Error::new(error)
+                    .context("QUIC connection closed during reliable lane operation")
+                    .into());
+            }
+        };
+
+        tracing::warn!(?lane_error, ?role, "recovering reliable QUIC lane");
+        if connection.close_reason().is_some() {
+            return Err(lane_error);
+        }
+        (send, recv) = open_replacement_reliable_lane(&connection, role).await?;
+    }
 }
 
 impl QuicHybridWriter {
-    fn new(reliable: SendStream, connection: Arc<ConnWrapper>) -> Self {
-        let (reliable_tx, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
-        let reliable_task = tokio::spawn(run_reliable_writer(reliable, reliable_rx));
+    fn new(
+        reliable_tx: mpsc::Sender<PacketBatch>,
+        reliable_task: JoinHandle<Result<(), TunnelError>>,
+        connection: Arc<ConnWrapper>,
+    ) -> Self {
         Self {
             connection,
             pending_datagrams: Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE)),
@@ -1633,6 +1738,7 @@ fn build_quic_hybrid_tunnel(
     connection: Connection,
     reliable_send: SendStream,
     reliable_recv: RecvStream,
+    reliable_role: ReliableLaneRole,
     max_packet_size: usize,
     info: TunnelInfo,
     _flags: &Flags,
@@ -1640,10 +1746,21 @@ fn build_quic_hybrid_tunnel(
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let connection = Arc::new(ConnWrapper { conn: connection });
     observe_quic_path(&connection);
+    let (reliable_tx, reliable_outgoing) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
+    let (reliable_incoming, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
+    let reliable_task = tokio::spawn(run_reliable_lane(
+        connection.conn.clone(),
+        reliable_send,
+        reliable_recv,
+        reliable_role,
+        max_packet_size,
+        reliable_outgoing,
+        reliable_incoming,
+    ));
     Ok(Box::new(
         BatchTunnelWrapper::new_with_transport_authentication(
-            QuicHybridReader::new(reliable_recv, max_packet_size, connection.clone()),
-            QuicHybridWriter::new(reliable_send, connection),
+            QuicHybridReader::new(reliable_rx, connection.clone()),
+            QuicHybridWriter::new(reliable_tx, reliable_task, connection),
             Some(info),
             transport_authenticated,
         ),
@@ -1697,6 +1814,7 @@ impl QuicTunnelListener {
             conn,
             w,
             r,
+            ReliableLaneRole::Acceptor,
             QUIC_RELIABLE_MAX_PACKET_SIZE,
             info,
             &flags,
@@ -1809,6 +1927,7 @@ impl TunnelConnector for QuicTunnelConnector {
             connection,
             w,
             r,
+            ReliableLaneRole::Initiator,
             QUIC_RELIABLE_MAX_PACKET_SIZE,
             info,
             &flags,
@@ -1880,6 +1999,15 @@ mod tests {
         flags.quic_receive_window = 32 * 1024 * 1024;
         global_ctx.set_flags(flags);
         global_ctx
+    }
+
+    fn hybrid_writer_without_reliable_io(connection: Arc<ConnWrapper>) -> QuicHybridWriter {
+        let (sender, mut receiver) = mpsc::channel::<PacketBatch>(RELIABLE_LANE_QUEUE_BATCHES);
+        let task = tokio::spawn(async move {
+            while receiver.recv().await.is_some() {}
+            Ok(())
+        });
+        QuicHybridWriter::new(sender, task, connection)
     }
 
     #[test]
@@ -1962,6 +2090,22 @@ mod tests {
     }
 
     #[test]
+    fn source_bound_client_endpoints_remain_bounded() {
+        RUNTIME.block_on(async {
+            let mgr = QuicEndpointManager::new(1);
+
+            for _ in 0..3 {
+                let endpoint =
+                    QuicEndpointManager::try_create("127.0.0.1:0".parse().unwrap(), false, None)
+                        .unwrap();
+                let _connection_owner = mgr.retain_source_endpoint(endpoint);
+            }
+
+            assert_eq!(mgr.ipv4.len(), 1);
+        });
+    }
+
+    #[test]
     fn quic_pingpong() {
         RUNTIME.block_on(quic_pingpong_impl())
     }
@@ -2039,6 +2183,104 @@ mod tests {
             received_tx.send(()).unwrap();
             send.close().await.unwrap();
             server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn reliable_lane_recovers_without_reconnecting() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let (recovered_tx, recovered_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                let stable_id = connection.stable_id();
+                let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+                activate_reliable_lane(&mut send, &mut recv, false)
+                    .await
+                    .unwrap();
+                send.reset(0_u32.into()).unwrap();
+                recv.stop(0_u32.into()).unwrap();
+
+                let (mut send, mut recv) =
+                    tokio::time::timeout(Duration::from_secs(2), connection.accept_bi())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(connection.stable_id(), stable_id);
+                activate_reliable_lane(&mut send, &mut recv, false)
+                    .await
+                    .unwrap();
+                recovered_tx.send(()).unwrap();
+
+                let mut reader = FramedReader::new_with_initial_capacity(
+                    recv,
+                    QUIC_RELIABLE_MAX_PACKET_SIZE,
+                    QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
+                );
+                for _ in 0..2 {
+                    let packet = tokio::time::timeout(Duration::from_secs(2), reader.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    if packet.payload() == b"after recovery" {
+                        return packet;
+                    }
+                }
+                panic!("replacement reliable lane did not deliver the expected packet");
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let stable_id = connection.stable_id();
+            let (mut send_stream, mut recv_stream) = connection.open_bi().await.unwrap();
+            activate_reliable_lane(&mut send_stream, &mut recv_stream, true)
+                .await
+                .unwrap();
+            let tunnel = build_quic_hybrid_tunnel(
+                connection.clone(),
+                send_stream,
+                recv_stream,
+                ReliableLaneRole::Initiator,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+                TunnelInfo::default(),
+                &flags,
+                false,
+            )
+            .unwrap();
+            let (_recv, mut send) = tunnel.split();
+
+            let mut trigger = ZCPacket::new_with_payload(b"trigger recovery");
+            trigger.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+            let _ = send.send(PacketBatch::singleton(trigger)).await;
+            let _ = send.flush().await;
+
+            tokio::time::timeout(Duration::from_secs(2), recovered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let mut expected = ZCPacket::new_with_payload(b"after recovery");
+            expected.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+            send.send(PacketBatch::singleton(expected.clone()))
+                .await
+                .unwrap();
+            send.flush().await.unwrap();
+
+            let received = server.await.unwrap();
+            assert_eq!(received.payload(), expected.payload());
+            assert_eq!(connection.stable_id(), stable_id);
         });
     }
 
@@ -2384,8 +2626,6 @@ mod tests {
                 .await
                 .unwrap();
             let server = server_task.await.unwrap();
-            let (client_send, _client_recv) = client.open_bi().await.unwrap();
-
             let maximum = client.max_datagram_size().unwrap();
             let filler = Bytes::from(vec![0; maximum]);
             while client.datagram_send_buffer_space() >= filler.len() {
@@ -2396,7 +2636,7 @@ mod tests {
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
             });
-            let mut writer = QuicHybridWriter::new(client_send, connection);
+            let mut writer = hybrid_writer_without_reliable_io(connection);
             let payload = vec![0x5a; maximum - PEER_MANAGER_HEADER_SIZE];
             let mut packet = ZCPacket::new_with_payload(&payload);
             packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
@@ -2450,12 +2690,10 @@ mod tests {
                 .await
                 .unwrap();
             let server = server_task.await.unwrap();
-            let (client_send, _client_recv) = client.open_bi().await.unwrap();
-
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
             });
-            let mut writer = QuicHybridWriter::new(client_send, connection);
+            let mut writer = hybrid_writer_without_reliable_io(connection);
             let mut batch = PacketBatch::with_capacity(8);
             for sequence in 0..8_u8 {
                 let mut packet = ZCPacket::new_with_payload(&[sequence; 64]);
