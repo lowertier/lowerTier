@@ -364,6 +364,29 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_SPEED_FIRST",
+        help = t!("core_clap.speed_first").to_string(),
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    speed_first: Option<bool>,
+
+    #[arg(
+        long,
+        env = "ET_SPEED_PROBE_INTERVAL_SECONDS",
+        help = t!("core_clap.speed_probe_interval_seconds").to_string()
+    )]
+    speed_probe_interval_seconds: Option<u64>,
+
+    #[arg(
+        long,
+        env = "ET_SPEED_PROBE_BUDGET_BPS",
+        help = t!("core_clap.speed_probe_budget_bps").to_string()
+    )]
+    speed_probe_budget_bps: Option<u64>,
+
+    #[arg(
+        long,
         env = "ET_EXIT_NODES",
         value_delimiter = ',',
         help = t!("core_clap.exit_nodes").to_string(),
@@ -1234,6 +1257,13 @@ impl NetworkOptions {
             f.enable_ipv6 = !v;
         }
         f.latency_first = self.latency_first.unwrap_or(f.latency_first);
+        f.speed_first = self.speed_first.unwrap_or(f.speed_first);
+        f.speed_probe_interval_seconds = self
+            .speed_probe_interval_seconds
+            .unwrap_or(f.speed_probe_interval_seconds);
+        f.speed_probe_budget_bps = self
+            .speed_probe_budget_bps
+            .unwrap_or(f.speed_probe_budget_bps);
         if let Some(tun) = self.tun.as_deref()
             && tun != "userspace-networking"
             && self.dev_name.as_deref().is_some_and(|name| name != tun)
@@ -2013,6 +2043,27 @@ enabled = true
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);
+    }
+
+    #[test]
+    fn cli_round_trips_speed_first_options() {
+        let cli = Cli::try_parse_from([
+            "lowertier-core",
+            "--speed-first",
+            "--speed-probe-interval-seconds",
+            "15",
+            "--speed-probe-budget-bps",
+            "8000000",
+        ])
+        .unwrap();
+        let cfg = TomlConfigLoader::default();
+
+        cli.network_options.merge_into(&cfg).unwrap();
+        let flags = cfg.get_flags();
+
+        assert!(flags.speed_first);
+        assert_eq!(flags.speed_probe_interval_seconds, 15);
+        assert_eq!(flags.speed_probe_budget_bps, 8_000_000);
     }
 
     #[test]

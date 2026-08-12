@@ -171,9 +171,13 @@ mod tests {
         let server_clone = server.clone();
 
         let mut peers = PeerInfoForGlobalMap::default();
-        peers
-            .direct_peers
-            .insert(100, DirectConnectedPeerInfo { latency_ms: 3 });
+        peers.direct_peers.insert(
+            100,
+            DirectConnectedPeerInfo {
+                latency_ms: 3,
+                ..Default::default()
+            },
+        );
 
         server
             .report_peers(
@@ -203,9 +207,13 @@ mod tests {
         let server_b = PeerCenterServer::new();
 
         let mut peers = PeerInfoForGlobalMap::default();
-        peers
-            .direct_peers
-            .insert(101, DirectConnectedPeerInfo { latency_ms: 5 });
+        peers.direct_peers.insert(
+            101,
+            DirectConnectedPeerInfo {
+                latency_ms: 5,
+                ..Default::default()
+            },
+        );
 
         server_a
             .report_peers(

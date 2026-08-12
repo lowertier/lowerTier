@@ -134,6 +134,15 @@ core_clap:
   latency_first:
     en: "latency first mode, will try to relay traffic with lowest latency path, default is using shortest path"
     zh-CN: "延迟优先模式，将尝试使用最低延迟路径转发流量，默认使用最短路径"
+  speed_first:
+    en: "prefer the freshest route with the highest measured delivery rate"
+    zh-CN: "优先使用具有最高最新实测传输速率的路由"
+  speed_probe_interval_seconds:
+    en: "seconds between directional speed probe cycles"
+    zh-CN: "定向速度探测周期的秒数"
+  speed_probe_budget_bps:
+    en: "maximum node-wide speed probe traffic in bits per second"
+    zh-CN: "节点范围速度探测流量的最大比特率"
   exit_nodes:
     en: "exit nodes to forward all traffic to, a virtual ipv4 address, priority is determined by the order of the list"
     zh-CN: "转发所有流量的出口节点，虚拟IPv4地址，优先级由列表顺序决定"

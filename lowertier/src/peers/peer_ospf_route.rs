@@ -372,6 +372,10 @@ impl From<RoutePeerInfo> for crate::proto::api::instance::Route {
             ipv6_addr: val.ipv6_addr,
             public_ipv6_addr: val.ipv6_public_addr_lease,
             ipv6_public_addr_prefix: val.ipv6_public_addr_prefix,
+            next_hop_peer_id_speed_first: None,
+            path_delivery_bps_speed_first: None,
+            path_latency_speed_first: None,
+            path_len_speed_first: None,
         }
     }
 }

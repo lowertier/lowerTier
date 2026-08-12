@@ -458,6 +458,7 @@ impl PeerCenterPeerManagerTrait for PeerMapWithPeerRpcManager {
                     peer,
                     DirectConnectedPeerInfo {
                         latency_ms: std::cmp::max(1, (min_lat as u32 / 1000) as i32),
+                        ..Default::default()
                     },
                 );
             }

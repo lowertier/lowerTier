@@ -45,6 +45,10 @@ message PeerConnInfo {
   bytes noise_remote_static_pubkey = 12;
   peer_rpc.SecureAuthLevel secure_auth_level = 13;
   peer_rpc.PeerIdentityType peer_identity_type = 14;
+  optional uint64 tx_delivery_bps = 15;
+  optional uint32 tx_loss_ppm = 16;
+  optional uint64 speed_sample_age_ms = 17;
+  optional uint64 speed_probe_generation = 18;
 }
 
 message PeerInfo {
@@ -83,6 +87,11 @@ message Route {
   common.Ipv6Inet ipv6_addr = 15;
   common.Ipv6Inet public_ipv6_addr = 16;
   common.Ipv6Inet ipv6_public_addr_prefix = 17;
+
+  optional uint32 next_hop_peer_id_speed_first = 18;
+  optional uint64 path_delivery_bps_speed_first = 19;
+  optional int32 path_latency_speed_first = 20;
+  optional int32 path_len_speed_first = 21;
 }
 
 message PeerRoutePair {

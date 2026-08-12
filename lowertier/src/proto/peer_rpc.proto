@@ -285,7 +285,14 @@ service TcpHolePunchRpc {
   rpc ExchangeMappedAddr(TcpHolePunchRequest) returns (TcpHolePunchResponse);
 }
 
-message DirectConnectedPeerInfo { int32 latency_ms = 1; }
+message DirectConnectedPeerInfo {
+  int32 latency_ms = 1;
+  uint64 tx_delivery_bps = 2;
+  uint32 tx_loss_ppm = 3;
+  uint64 speed_sample_age_ms = 4;
+  uint64 speed_sample_ttl_ms = 5;
+  uint64 speed_probe_generation = 6;
+}
 
 message PeerInfoForGlobalMap {
   map<uint32, DirectConnectedPeerInfo> direct_peers = 1;

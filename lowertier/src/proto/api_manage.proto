@@ -119,6 +119,9 @@ message NetworkConfig {
   optional bool quic_datagram_alternate_path_parity = 82;
   optional string socks5_server = 83;
   optional string outbound_http_proxy_listen = 84;
+  optional bool speed_first = 85;
+  optional uint64 speed_probe_interval_seconds = 86;
+  optional uint64 speed_probe_budget_bps = 87;
 }
 
 message NetworkPeerConfig {

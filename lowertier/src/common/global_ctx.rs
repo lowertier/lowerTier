@@ -261,13 +261,14 @@ impl std::fmt::Debug for GlobalCtx {
 pub type ArcGlobalCtx = std::sync::Arc<GlobalCtx>;
 
 impl GlobalCtx {
-    fn apply_disable_relay_data_flag(
+    fn apply_required_feature_flags(
         flags: &Flags,
         mut feature_flags: PeerFeatureFlag,
     ) -> PeerFeatureFlag {
         if flags.disable_relay_data {
             feature_flags.avoid_relay_data = true;
         }
+        feature_flags.speed_routing = true;
         feature_flags
     }
 
@@ -284,7 +285,7 @@ impl GlobalCtx {
             .parse::<crate::common::config::PortMode>()
             .expect("port mode was validated")
             .uses_ethernet_overlay();
-        Self::apply_disable_relay_data_flag(flags, feature_flags)
+        Self::apply_required_feature_flags(flags, feature_flags)
     }
 
     pub fn new(config_fs: impl ConfigLoader + 'static) -> Self {
@@ -657,11 +658,10 @@ impl GlobalCtx {
     pub fn set_base_advertised_feature_flags(&self, feature_flags: PeerFeatureFlag) {
         self.base_feature_flags.store(feature_flags);
         let flags = self.flags.load();
-        self.feature_flags
-            .store(Self::apply_disable_relay_data_flag(
-                flags.as_ref(),
-                feature_flags,
-            ));
+        self.feature_flags.store(Self::apply_required_feature_flags(
+            flags.as_ref(),
+            feature_flags,
+        ));
     }
 
     /// Set the avoid-relay preference that is independent of disable_relay_data.
@@ -793,6 +793,15 @@ impl GlobalCtx {
         // NOTICE: p2p only is conflict with latency first
         let flags = self.flags.load();
         flags.latency_first && !flags.p2p_only
+    }
+
+    pub fn speed_first(&self) -> bool {
+        let flags = self.flags.load();
+        flags.speed_first && !flags.p2p_only
+    }
+
+    pub fn speed_probes_enabled(&self) -> bool {
+        self.flags.load().speed_probe_budget_bps > 0
     }
 
     fn is_port_in_running_listeners(&self, port: u16, is_udp: bool) -> bool {
@@ -1018,7 +1027,13 @@ pub mod tests {
         };
         global_ctx.set_base_advertised_feature_flags(feature_flags);
 
-        assert_eq!(global_ctx.get_feature_flags(), feature_flags);
+        let advertised = global_ctx.get_feature_flags();
+        assert!(advertised.speed_routing);
+        assert_eq!(advertised.is_public_server, feature_flags.is_public_server);
+        assert_eq!(advertised.kcp_input, feature_flags.kcp_input);
+        assert_eq!(advertised.no_relay_kcp, feature_flags.no_relay_kcp);
+        assert_eq!(advertised.quic_input, feature_flags.quic_input);
+        assert_eq!(advertised.no_relay_quic, feature_flags.no_relay_quic);
     }
 
     #[tokio::test]

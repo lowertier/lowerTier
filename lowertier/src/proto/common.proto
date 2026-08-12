@@ -113,6 +113,13 @@ message FlagsInConfig {
   // When two authenticated QUIC connections use distinct local or remote IP
   // surfaces, carry an additional peer-layer parity block on the alternate.
   bool quic_datagram_alternate_path_parity = 57;
+
+  // Prefer the freshest route with the highest measured delivery rate.
+  bool speed_first = 58;
+  // Seconds between directional probe cycles.
+  uint64 speed_probe_interval_seconds = 59;
+  // Maximum node-wide probe traffic in bits per second.
+  uint64 speed_probe_budget_bps = 60;
 }
 
 message RpcDescriptor {
@@ -265,6 +272,7 @@ message PeerFeatureFlag {
   bool disable_p2p = 10;
   bool ipv6_public_addr_provider = 11;
   bool ethernet_input = 12;
+  bool speed_routing = 13;
 }
 
 enum SocketType {

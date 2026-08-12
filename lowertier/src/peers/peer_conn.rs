@@ -2117,6 +2117,10 @@ impl PeerConn {
                 .as_ref()
                 .map(|x| x.peer_identity_type as i32)
                 .unwrap_or(PeerIdentityType::Admin as i32),
+            tx_delivery_bps: None,
+            tx_loss_ppm: None,
+            speed_sample_age_ms: None,
+            speed_probe_generation: None,
         }
     }
 

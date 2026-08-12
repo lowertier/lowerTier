@@ -907,6 +907,15 @@ impl NetworkConfig {
         if let Some(latency_first) = self.latency_first {
             flags.latency_first = latency_first;
         }
+        if let Some(speed_first) = self.speed_first {
+            flags.speed_first = speed_first;
+        }
+        if let Some(speed_probe_interval_seconds) = self.speed_probe_interval_seconds {
+            flags.speed_probe_interval_seconds = speed_probe_interval_seconds;
+        }
+        if let Some(speed_probe_budget_bps) = self.speed_probe_budget_bps {
+            flags.speed_probe_budget_bps = speed_probe_budget_bps;
+        }
 
         if let Some(dev_name) = self.dev_name.clone() {
             flags.dev_name = dev_name;
@@ -1238,6 +1247,13 @@ impl NetworkConfig {
         let flags = config.get_flags();
         let default_flags = default_config.get_flags();
         result.latency_first = Some(flags.latency_first);
+        result.speed_first = Some(flags.speed_first);
+        result.speed_probe_interval_seconds = (flags.speed_probe_interval_seconds
+            != default_flags.speed_probe_interval_seconds)
+            .then_some(flags.speed_probe_interval_seconds);
+        result.speed_probe_budget_bps = (flags.speed_probe_budget_bps
+            != default_flags.speed_probe_budget_bps)
+            .then_some(flags.speed_probe_budget_bps);
         result.dev_name = Some(flags.dev_name.clone());
         result.use_smoltcp = Some(flags.use_smoltcp);
         result.disable_ipv6 = Some(!flags.enable_ipv6);
@@ -1422,6 +1438,34 @@ mod tests {
             flags.l2_fdb_age_seconds
         );
         assert_eq!(regenerated_flags.l2_flood_bps, flags.l2_flood_bps);
+        Ok(())
+    }
+
+    #[test]
+    fn network_config_round_trips_speed_first_settings() -> anyhow::Result<()> {
+        let config = gen_default_config();
+        let mut flags = config.get_flags();
+        flags.speed_first = true;
+        flags.speed_probe_interval_seconds = 15;
+        flags.speed_probe_budget_bps = 8_000_000;
+        config.set_flags(flags.clone());
+
+        let network_config = super::NetworkConfig::new_from_config(&config)?;
+        assert_eq!(network_config.speed_first, Some(true));
+        assert_eq!(network_config.speed_probe_interval_seconds, Some(15));
+        assert_eq!(network_config.speed_probe_budget_bps, Some(8_000_000));
+
+        let regenerated = network_config.gen_config()?;
+        let regenerated_flags = regenerated.get_flags();
+        assert_eq!(regenerated_flags.speed_first, flags.speed_first);
+        assert_eq!(
+            regenerated_flags.speed_probe_interval_seconds,
+            flags.speed_probe_interval_seconds
+        );
+        assert_eq!(
+            regenerated_flags.speed_probe_budget_bps,
+            flags.speed_probe_budget_bps
+        );
         Ok(())
     }
 

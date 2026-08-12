@@ -84,6 +84,9 @@ pub fn gen_default_flags() -> Flags {
         quic_receive_window: (1_u64 << 62) - 1,
         quic_datagram_fec_parity: 0,
         quic_datagram_alternate_path_parity: false,
+        speed_first: false,
+        speed_probe_interval_seconds: 30,
+        speed_probe_budget_bps: 0,
         port_mode: if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             PortMode::Tap
         } else {
@@ -141,6 +144,12 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     }
     if !matches!(flags.quic_datagram_fec_parity, 0 | 2 | 3) {
         anyhow::bail!("quic_datagram_fec_parity must be 0 (off), 2 (16+2), or 3 (16+3)");
+    }
+    if flags.speed_first && flags.speed_probe_budget_bps == 0 {
+        anyhow::bail!("speed_first requires a positive speed_probe_budget_bps");
+    }
+    if flags.speed_probe_budget_bps > 0 && flags.speed_probe_interval_seconds == 0 {
+        anyhow::bail!("speed probes require a positive speed_probe_interval_seconds");
     }
 
     Ok(())
@@ -1670,6 +1679,30 @@ socket_mark = 66
         assert_eq!(flags.quic_receive_window, (1_u64 << 62) - 1);
         assert_eq!(flags.quic_datagram_fec_parity, 0);
         assert!(!flags.quic_datagram_alternate_path_parity);
+        assert!(!flags.speed_first);
+        assert_eq!(flags.speed_probe_interval_seconds, 30);
+        assert_eq!(flags.speed_probe_budget_bps, 0);
+    }
+
+    #[test]
+    fn speed_first_requires_a_positive_probe_budget() {
+        let mut flags = gen_default_flags();
+        flags.speed_first = true;
+
+        let error = validate_flags(&flags).unwrap_err();
+
+        assert!(error.to_string().contains("speed_probe_budget_bps"));
+    }
+
+    #[test]
+    fn speed_probes_require_a_positive_interval() {
+        let mut flags = gen_default_flags();
+        flags.speed_probe_budget_bps = 1;
+        flags.speed_probe_interval_seconds = 0;
+
+        let error = validate_flags(&flags).unwrap_err();
+
+        assert!(error.to_string().contains("speed_probe_interval_seconds"));
     }
 
     #[test]
