@@ -19,6 +19,7 @@ pub(crate) mod public_ipv6;
 pub mod relay_peer_map;
 pub mod route_trait;
 pub mod rpc_service;
+pub(crate) mod speed_probe;
 mod traffic_metrics;
 
 use std::sync::{Arc, OnceLock};
