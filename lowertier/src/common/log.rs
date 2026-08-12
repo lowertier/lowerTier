@@ -135,13 +135,15 @@ fn console_layers(default_level: Option<LevelFilter>) -> anyhow::Result<Vec<BoxL
     let (console_filter, _) =
         tracing_subscriber::reload::Layer::new(parse_env_filter(default_level)?);
 
-    let (stdout, stderr) = cfg_select! {
-        test => {
-            let w = tracing_subscriber::fmt::TestWriter::new;
-            (w, w)
-        }
-        _ => (std::io::stdout, std::io::stderr),
+    // Keep this as plain cfg arms. Nightly rustfmt rewrites cfg_select
+    // expression blocks in a way that drops the required double braces.
+    #[cfg(test)]
+    let (stdout, stderr) = {
+        let writer = tracing_subscriber::fmt::TestWriter::new;
+        (writer, writer)
     };
+    #[cfg(not(test))]
+    let (stdout, stderr) = (std::io::stdout, std::io::stderr);
 
     let ansi = std::io::stderr().is_terminal() || cfg!(test);
 
