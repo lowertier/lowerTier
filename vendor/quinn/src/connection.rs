@@ -17,7 +17,10 @@ use bytes::Bytes;
 use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
-use tokio::sync::{futures::Notified, mpsc, oneshot, Notify};
+use tokio::sync::{
+    futures::{Notified, OwnedNotified},
+    mpsc, oneshot, Notify,
+};
 use tracing::{debug_span, Instrument, Span};
 
 use crate::{
@@ -356,35 +359,17 @@ impl Connection {
         }
     }
 
-    /// Move ready application datagrams into `datagrams` under one connection lock.
+    /// Receive a bounded batch of application datagrams.
     ///
-    /// This method does not wait for data. It adds entries until `datagrams`
-    /// contains `max_datagrams` entries or the receive queue becomes empty.
-    pub fn try_read_datagrams(
-        &self,
-        datagrams: &mut Vec<Bytes>,
-        max_datagrams: usize,
-    ) -> Result<usize, ConnectionError> {
-        if datagrams.len() >= max_datagrams {
-            return Ok(0);
-        }
-
-        let initial_len = datagrams.len();
-        let mut state = self.0.state.lock("Connection::try_read_datagrams");
-        while datagrams.len() < max_datagrams {
-            let Some(datagram) = state.inner.datagrams().recv() else {
-                break;
-            };
-            datagrams.push(datagram);
-        }
-
-        let added = datagrams.len() - initial_len;
-        if added != 0 {
-            Ok(added)
-        } else if let Some(error) = state.error.as_ref() {
-            Err(error.clone())
-        } else {
-            Ok(0)
+    /// This method reuses `datagrams` and waits until one datagram is ready.
+    /// It moves at most `max_datagrams` entries under one connection lock.
+    pub fn read_datagrams(&self, mut datagrams: Vec<Bytes>, max_datagrams: usize) -> ReadDatagrams {
+        datagrams.clear();
+        ReadDatagrams {
+            conn: self.0.clone(),
+            datagrams: Some(datagrams),
+            max_datagrams: max_datagrams.max(1),
+            notify: self.0.shared.datagram_received.clone().notified_owned(),
         }
     }
 
@@ -870,6 +855,53 @@ impl Future for ReadDatagram<'_> {
 }
 
 pin_project! {
+    /// Future produced by [`Connection::read_datagrams`].
+    pub struct ReadDatagrams {
+        conn: ConnectionRef,
+        datagrams: Option<Vec<Bytes>>,
+        max_datagrams: usize,
+        #[pin]
+        notify: OwnedNotified,
+    }
+}
+
+impl Future for ReadDatagrams {
+    type Output = Result<Vec<Bytes>, ConnectionError>;
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let mut state = this.conn.state.lock("ReadDatagrams::poll");
+        let datagrams = this
+            .datagrams
+            .as_mut()
+            .expect("a completed datagram batch future cannot be polled again");
+        while datagrams.len() < *this.max_datagrams {
+            let Some(datagram) = state.inner.datagrams().recv() else {
+                break;
+            };
+            datagrams.push(datagram);
+        }
+        if !datagrams.is_empty() {
+            return Poll::Ready(Ok(this
+                .datagrams
+                .take()
+                .expect("the datagram batch is available")));
+        }
+        if let Some(error) = state.error.as_ref() {
+            return Poll::Ready(Err(error.clone()));
+        }
+        loop {
+            match this.notify.as_mut().poll(ctx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => this
+                    .notify
+                    .set(this.conn.shared.datagram_received.clone().notified_owned()),
+            }
+        }
+    }
+}
+
+pin_project! {
     /// Future produced by [`Connection::send_datagram_wait`]
     pub struct SendDatagram<'a> {
         conn: &'a ConnectionRef,
@@ -1074,7 +1106,7 @@ pub(crate) struct Shared {
     stream_budget_available: [Notify; 2],
     /// Notified when the peer has initiated a new stream
     stream_incoming: [Notify; 2],
-    datagram_received: Notify,
+    datagram_received: Arc<Notify>,
     datagrams_unblocked: Notify,
     closed: Notify,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
@@ -1196,6 +1228,11 @@ impl State {
                 }
                 Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
                     self.inner.handle_event(event);
+                }
+                Poll::Ready(Some(ConnectionEvent::ProtoBatch(events))) => {
+                    for event in events {
+                        self.inner.handle_event(event);
+                    }
                 }
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
                     self.close(error_code, reason, shared);

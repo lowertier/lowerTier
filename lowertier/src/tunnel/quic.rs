@@ -28,8 +28,8 @@ use derive_more::{Deref, DerefMut};
 use futures::{Future, Sink, SinkExt, Stream};
 use parking_lot::RwLock;
 use quinn::{
-    ClientConfig, ConnectError, Connection, ConnectionError, Endpoint, EndpointConfig, RecvStream,
-    SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
+    ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
+    ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
 };
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1246,52 +1246,39 @@ fn decode_received_quic_datagram(bytes: Bytes) -> Option<ZCPacket> {
     }
 }
 
-type DatagramStream = Pin<Box<dyn Stream<Item = Result<Bytes, ConnectionError>> + Send + 'static>>;
-
-fn datagram_stream(connection: Arc<ConnWrapper>) -> DatagramStream {
-    Box::pin(futures::stream::unfold(
-        Some(connection),
-        |connection| async move {
-            let connection = connection?;
-            match connection.conn.read_datagram().await {
-                Ok(bytes) => Some((Ok(bytes), Some(connection))),
-                Err(error) => Some((Err(error), None)),
-            }
-        },
-    ))
-}
-
 /// Combines reliable QUIC control frames with the unordered DATAGRAM data
 /// lane. Poll preference alternates so a saturated data lane cannot starve
 /// control traffic and vice versa.
 struct QuicHybridReader {
     reliable: FramedReader<RecvStream>,
-    datagrams: DatagramStream,
     connection: Arc<ConnWrapper>,
-    ready_datagrams: Vec<Bytes>,
+    datagrams: Pin<Box<quinn::ReadDatagrams>>,
     pending_error: Option<TunnelError>,
     poll_datagram_first: bool,
 }
 
 impl QuicHybridReader {
     fn new(reliable: RecvStream, max_packet_size: usize, connection: Arc<ConnWrapper>) -> Self {
+        let datagrams = Box::pin(connection.conn.read_datagrams(
+            Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
+            MAX_PACKET_BATCH_SIZE,
+        ));
         Self {
             reliable: FramedReader::new_with_initial_capacity(
                 reliable,
                 max_packet_size,
                 QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
             ),
-            datagrams: datagram_stream(connection.clone()),
             connection,
-            ready_datagrams: Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
+            datagrams,
             pending_error: None,
             poll_datagram_first: true,
         }
     }
 
-    fn take_ready_datagram_batch(&mut self) -> Option<PacketBatch> {
-        let mut batch = PacketBatch::with_capacity(self.ready_datagrams.len());
-        for bytes in self.ready_datagrams.drain(..) {
+    fn decode_datagram_batch(datagrams: &mut Vec<Bytes>) -> Option<PacketBatch> {
+        let mut batch = PacketBatch::with_capacity(datagrams.len());
+        for bytes in datagrams.drain(..) {
             if let Some(packet) = decode_received_quic_datagram(bytes) {
                 batch
                     .try_push(packet)
@@ -1302,31 +1289,30 @@ impl QuicHybridReader {
     }
 
     fn poll_datagram(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<BatchStreamItem>> {
-        if let Some(batch) = self.take_ready_datagram_batch() {
-            return Poll::Ready(Some(Ok(batch)));
-        }
-
-        match self.datagrams.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Ok(bytes))) => {
-                self.ready_datagrams.push(bytes);
-                let _ = self
-                    .connection
-                    .conn
-                    .try_read_datagrams(&mut self.ready_datagrams, MAX_PACKET_BATCH_SIZE);
-                match self.take_ready_datagram_batch() {
-                    Some(batch) => Poll::Ready(Some(Ok(batch))),
-                    None => {
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
+        const MAX_INVALID_BATCHES_PER_POLL: usize = 4;
+        for _ in 0..MAX_INVALID_BATCHES_PER_POLL {
+            match self.datagrams.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(mut datagrams)) => {
+                    let batch = Self::decode_datagram_batch(&mut datagrams);
+                    self.datagrams = Box::pin(
+                        self.connection
+                            .conn
+                            .read_datagrams(datagrams, MAX_PACKET_BATCH_SIZE),
+                    );
+                    if let Some(batch) = batch {
+                        return Poll::Ready(Some(Ok(batch)));
                     }
                 }
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Some(Err(TunnelError::Anyhow(
+                        anyhow::Error::new(error).context("read QUIC DATAGRAM batch failed"),
+                    ))));
+                }
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(TunnelError::Anyhow(
-                anyhow::Error::new(error).context("read QUIC DATAGRAM failed"),
-            )))),
-            Poll::Ready(None) => Poll::Pending,
         }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
     fn poll_reliable(&mut self, cx: &mut TaskContext<'_>) -> Poll<Option<BatchStreamItem>> {
@@ -1400,7 +1386,7 @@ type ReliableReserve = Pin<
 type DatagramBatchSend =
     Pin<Box<dyn Future<Output = (Result<(), quinn::SendDatagramError>, VecDeque<Bytes>)> + Send>>;
 
-const RELIABLE_LANE_QUEUE_PACKETS: usize = 64;
+const RELIABLE_LANE_QUEUE_BATCHES: usize = 1;
 
 async fn run_reliable_writer(
     send: SendStream,
@@ -1425,7 +1411,7 @@ async fn run_reliable_writer(
 
 impl QuicHybridWriter {
     fn new(reliable: SendStream, connection: Arc<ConnWrapper>) -> Self {
-        let (reliable_tx, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_PACKETS);
+        let (reliable_tx, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
         let reliable_task = tokio::spawn(run_reliable_writer(reliable, reliable_rx));
         Self {
             connection,
@@ -2329,14 +2315,12 @@ mod tests {
                 .unwrap();
             assert_eq!(first[0], 0);
 
-            let mut ready = Vec::with_capacity(7);
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while ready.len() != 7 {
-                    server.try_read_datagrams(&mut ready, 7).unwrap();
-                    tokio::task::yield_now().await;
-                }
-            })
+            let ready = tokio::time::timeout(
+                Duration::from_secs(2),
+                server.read_datagrams(Vec::with_capacity(7), 7),
+            )
             .await
+            .unwrap()
             .unwrap();
 
             assert_eq!(ready.len(), 7);

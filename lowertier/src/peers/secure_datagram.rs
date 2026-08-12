@@ -719,6 +719,37 @@ impl SecureDatagramSession {
         Ok(())
     }
 
+    pub fn encrypt_payload_batch(
+        &self,
+        dir: SecureDatagramDirection,
+        packets: &mut [ZCPacket],
+    ) -> Result<(), anyhow::Error> {
+        if !self.is_valid() {
+            return Err(anyhow!("session invalidated"));
+        }
+
+        let mut active_epoch = None;
+        let mut encryptor = None;
+        for packet in packets {
+            let (epoch, _seq, nonce_bytes) = self.next_nonce(dir);
+            if active_epoch != Some(epoch) {
+                encryptor =
+                    Some(self.get_or_create_encryptor(epoch, dir, self.session_generation(), true));
+                active_epoch = Some(epoch);
+            }
+            if let Err(error) = encryptor
+                .as_ref()
+                .expect("a batch epoch has an encryptor")
+                .encrypt_with_nonce(packet, Some(nonce_bytes.as_slice()))
+            {
+                tracing::warn!(?error, "secure datagram batch encrypt failed, invalidating");
+                self.invalidate();
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn decrypt_payload(
         &self,
         dir: SecureDatagramDirection,

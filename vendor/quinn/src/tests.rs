@@ -822,6 +822,78 @@ async fn two_datagram_readers() {
 }
 
 #[tokio::test]
+async fn one_datagram_batch_read_drains_to_its_bound() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+
+    let (client, server) = tokio::join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    );
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    for value in 0_u8..4 {
+        server
+            .send_datagram_wait(Bytes::from(vec![value]))
+            .await
+            .unwrap();
+    }
+
+    let first = client
+        .read_datagrams(Vec::with_capacity(3), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.iter().map(|datagram| datagram[0]).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+
+    let second = client.read_datagrams(first, 3).await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0][0], 3);
+}
+
+#[tokio::test]
+async fn datagram_batch_reader_does_not_lose_edge_wakes() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+
+    let (client, server) = tokio::join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    );
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    for value in 0_u8..16 {
+        let reader = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .read_datagrams(Vec::with_capacity(4), 4)
+                    .await
+                    .unwrap()
+            })
+        };
+        tokio::task::yield_now().await;
+        server
+            .send_datagram_wait(Bytes::from(vec![value]))
+            .await
+            .unwrap();
+        let datagrams = timeout(Duration::from_secs(1), reader)
+            .await
+            .expect("the registered batch reader must receive the edge wake")
+            .unwrap();
+        assert_eq!(datagrams[0][0], value);
+    }
+}
+
+#[tokio::test]
 async fn multiple_conns_with_zero_length_cids() {
     let _guard = subscribe();
     let mut factory = EndpointFactory::new();

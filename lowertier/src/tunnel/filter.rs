@@ -13,6 +13,47 @@ use self::stats::Throughput;
 
 use super::*;
 
+pub(crate) fn scalar_before_send_batch<F: TunnelFilter + ?Sized>(
+    filter: &F,
+    data: PacketBatch,
+) -> Option<PacketBatch> {
+    let mut filtered = PacketBatch::with_capacity(data.len());
+    for packet in data {
+        if let Some(packet) = filter.before_send(packet) {
+            filtered
+                .try_push(packet)
+                .expect("a filtered tunnel batch cannot exceed its input");
+        }
+    }
+    (!filtered.is_empty()).then_some(filtered)
+}
+
+pub(crate) fn scalar_after_received_batch<F: TunnelFilter + ?Sized>(
+    filter: &F,
+    data: BatchStreamItem,
+) -> Option<BatchStreamItem> {
+    let batch = match data {
+        Ok(batch) => batch,
+        Err(error) => {
+            return filter
+                .after_received(Err(error))
+                .map(|result| result.map(PacketBatch::singleton));
+        }
+    };
+    let mut filtered = PacketBatch::with_capacity(batch.len());
+    for packet in batch {
+        if let Some(result) = filter.after_received(Ok(packet)) {
+            match result {
+                Ok(packet) => filtered
+                    .try_push(packet)
+                    .expect("a filtered tunnel batch cannot exceed its input"),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+    (!filtered.is_empty()).then_some(Ok(filtered))
+}
+
 #[auto_impl(Arc, Box)]
 pub trait TunnelFilter: Send + Sync {
     type FilterOutput;
@@ -29,38 +70,11 @@ pub trait TunnelFilter: Send + Sync {
     }
 
     fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
-        let mut filtered = PacketBatch::with_capacity(data.len());
-        for packet in data {
-            if let Some(packet) = self.before_send(packet) {
-                filtered
-                    .try_push(packet)
-                    .expect("a filtered tunnel batch cannot exceed its input");
-            }
-        }
-        (!filtered.is_empty()).then_some(filtered)
+        scalar_before_send_batch(self, data)
     }
 
     fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
-        let batch = match data {
-            Ok(batch) => batch,
-            Err(error) => {
-                return self
-                    .after_received(Err(error))
-                    .map(|result| result.map(PacketBatch::singleton));
-            }
-        };
-        let mut filtered = PacketBatch::with_capacity(batch.len());
-        for packet in batch {
-            if let Some(result) = self.after_received(Ok(packet)) {
-                match result {
-                    Ok(packet) => filtered
-                        .try_push(packet)
-                        .expect("a filtered tunnel batch cannot exceed its input"),
-                    Err(error) => return Some(Err(error)),
-                }
-            }
-        }
-        (!filtered.is_empty()).then_some(Ok(filtered))
+        scalar_after_received_batch(self, data)
     }
 
     fn filter_output(&self) -> Self::FilterOutput;
@@ -326,6 +340,20 @@ impl TunnelFilter for StatsRecorderTunnelFilter {
             }
             Err(e) => Some(Err(e)),
         }
+    }
+
+    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+        self.throughput
+            .record_tx_batch(data.buffer_byte_len() as u64, data.len() as u64);
+        Some(data)
+    }
+
+    fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
+        if let Ok(batch) = &data {
+            self.throughput
+                .record_rx_batch(batch.buffer_byte_len() as u64, batch.len() as u64);
+        }
+        Some(data)
     }
 
     fn filter_output(&self) -> Self::FilterOutput {

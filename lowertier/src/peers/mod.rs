@@ -58,6 +58,10 @@ pub trait PeerPacketFilter {
             .any(|packet| self.is_interested_in_packet_from_peer(packet))
     }
 
+    fn is_interested_in_direct_nic_batch(&self, batch: &PacketBatch) -> bool {
+        self.is_interested_in_batch_from_peer(batch)
+    }
+
     async fn try_process_packet_from_peer(&self, _zc_packet: ZCPacket) -> Option<ZCPacket> {
         Some(_zc_packet)
     }

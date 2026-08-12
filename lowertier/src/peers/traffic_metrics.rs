@@ -179,6 +179,17 @@ impl LogicalTrafficMetrics {
         self.update_peer_counters(peer_id, resolved_instance_id.as_deref(), bytes, packets);
     }
 
+    fn try_record_batch_cached(&self, peer_id: PeerId, bytes: u64, packets: u64) -> bool {
+        if let Some(entry) = self.per_peer.get(&peer_id)
+            && entry.value().is_resolved()
+        {
+            self.total.add_batch(bytes, packets);
+            entry.value().add_batch(bytes, packets);
+            return true;
+        }
+        false
+    }
+
     fn update_peer_counters(
         &self,
         peer_id: PeerId,
@@ -373,6 +384,23 @@ impl TrafficMetricRecorder {
                 self.resolve_instance_id(peer_id)
             })
             .await;
+    }
+
+    /// Fast path for the direct NIC receive loop. Returns true when the peer
+    /// counter cache is warm and no async instance lookup is required.
+    pub(crate) fn try_record_rx_batch(
+        &self,
+        peer_id: PeerId,
+        packet_type: u8,
+        bytes: u64,
+        packets: u64,
+    ) -> bool {
+        if peer_id == self.my_peer_id {
+            return true;
+        }
+        self.rx_metrics
+            .select(traffic_kind(packet_type))
+            .try_record_batch_cached(peer_id, bytes, packets)
     }
 
     pub(crate) fn remove_peer(&self, peer_id: PeerId) {

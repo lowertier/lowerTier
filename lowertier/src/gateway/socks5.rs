@@ -880,6 +880,11 @@ pub struct Socks5Server {
 
 #[async_trait::async_trait]
 impl PeerPacketFilter for Socks5Server {
+    fn is_interested_in_direct_nic_batch(&self, batch: &PacketBatch) -> bool {
+        (!self.packet_path_is_idle() || tracing::enabled!(tracing::Level::TRACE))
+            && self.is_interested_in_batch_from_peer(batch)
+    }
+
     fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
         packet.peer_manager_header().is_some_and(|header| {
             matches!(

@@ -185,6 +185,17 @@ fn socket_recv_loop(
 
 #[async_trait::async_trait]
 impl PeerPacketFilter for IcmpProxy {
+    fn is_interested_in_direct_nic_batch(&self, batch: &crate::tunnel::batch::PacketBatch) -> bool {
+        (!self.cidr_set.is_empty()
+            || self.global_ctx.enable_exit_node()
+            || self.global_ctx.no_tun())
+            && batch.first().is_some_and(|packet| {
+                packet
+                    .peer_manager_header()
+                    .is_some_and(|header| header.packet_type == PacketType::Data as u8)
+            })
+    }
+
     fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
         packet
             .peer_manager_header()

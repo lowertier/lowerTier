@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
-    mem,
+    future::Future,
+    io, mem,
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr, slice,
@@ -9,7 +10,7 @@ use std::{
 };
 
 use crossbeam::queue::ArrayQueue;
-use futures::{Sink, Stream, ready};
+use futures::{Sink, Stream, StreamExt, ready};
 use pin_project_lite::pin_project;
 use rayon::prelude::*;
 
@@ -24,6 +25,104 @@ pub const PARALLEL_CRYPTO_MIN_BATCH_SIZE: usize = 32;
 const RETAINED_PACKET_BATCH_CONTAINERS: usize = 32;
 
 static PARALLEL_CRYPTO_ENABLED: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn drain_ready_count<F>(
+    mut count: usize,
+    capacity: usize,
+    mut receive: F,
+) -> (usize, Option<io::Error>)
+where
+    F: FnMut(usize) -> io::Result<usize>,
+{
+    while count < capacity {
+        match receive(count) {
+            Ok(0) => {
+                return (
+                    count,
+                    Some(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "a ready packet read returned no packets",
+                    )),
+                );
+            }
+            Ok(received) if received <= capacity - count => count += received,
+            Ok(_) => {
+                return (
+                    count,
+                    Some(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "a ready packet read exceeded the batch capacity",
+                    )),
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => return (count, Some(error)),
+        }
+    }
+    (count, None)
+}
+
+/// Maximum number of owned receive batches held while one delivery runs.
+///
+/// Slot 0 is the batch currently writing to TUN. The remaining slots keep QUIC
+/// application drain moving without an unbounded queue.
+pub const RECEIVE_PREFETCH_BATCHES: usize = 3;
+
+/// Deliver one batch while continuously prefetching ready stream items.
+///
+/// `max_prefetch` bounds the number of fully received items held beside the
+/// in-flight delivery. When the stream ends, the function stops polling it and
+/// waits only for delivery. The third return value is true when the stream
+/// ended during this wait.
+pub(crate) async fn wait_for_delivery_with_bounded_prefetch<S, F, T, E>(
+    stream: &mut S,
+    delivery: F,
+    max_prefetch: usize,
+) -> (Result<(), E>, VecDeque<T>, bool)
+where
+    S: Stream<Item = T> + Unpin,
+    F: Future<Output = Result<(), E>>,
+{
+    tokio::pin!(delivery);
+    let mut prefetched = VecDeque::with_capacity(max_prefetch.min(8));
+    let mut stream_open = true;
+    let mut stream_ended = false;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut delivery => return (result, prefetched, stream_ended),
+            next = stream.next(), if stream_open && prefetched.len() < max_prefetch => {
+                match next {
+                    Some(item) => prefetched.push_back(item),
+                    None => {
+                        stream_open = false;
+                        stream_ended = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn wait_for_delivery_with_one_prefetch<S, F, T, E>(
+    stream: &mut S,
+    delivery: F,
+) -> (Result<(), E>, Option<Option<T>>)
+where
+    S: Stream<Item = T> + Unpin,
+    F: Future<Output = Result<(), E>>,
+{
+    let (result, mut prefetched, stream_ended) =
+        wait_for_delivery_with_bounded_prefetch(stream, delivery, 1).await;
+    let prefetched = if let Some(item) = prefetched.pop_front() {
+        Some(Some(item))
+    } else if stream_ended {
+        Some(None)
+    } else {
+        None
+    };
+    (result, prefetched)
+}
 
 fn parallel_crypto_configured(
     batch_size: usize,
@@ -515,10 +614,59 @@ impl<'a> IntoIterator for &'a mut PacketBatch {
 mod tests {
     use std::time::Duration;
 
+    use futures::StreamExt;
+
     use super::{
         MAX_PACKET_BATCH_SIZE, PARALLEL_CRYPTO_MIN_BATCH_SIZE, PacketBatchPool,
         ordered_parallel_try_for_each, parallel_crypto_configured,
     };
+
+    #[test]
+    fn ready_drain_fills_one_bounded_batch() {
+        let mut ready_counts = [1_usize, 2, 60].into_iter();
+        let (count, error) = super::drain_ready_count(1, 64, |_| {
+            ready_counts
+                .next()
+                .map(Ok)
+                .unwrap_or_else(|| Err(std::io::ErrorKind::WouldBlock.into()))
+        });
+
+        assert_eq!(count, 64);
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn ready_drain_stops_cleanly_on_would_block() {
+        let (count, error) =
+            super::drain_ready_count(3, 64, |_| Err(std::io::ErrorKind::WouldBlock.into()));
+
+        assert_eq!(count, 3);
+        assert!(error.is_none());
+    }
+
+    #[tokio::test]
+    async fn bounded_prefetch_stops_at_the_configured_limit() {
+        let mut stream = futures::stream::iter([10_u8, 11, 12, 13]);
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            release.send(()).unwrap();
+        });
+
+        let (delivery, prefetched, stream_ended) = super::wait_for_delivery_with_bounded_prefetch(
+            &mut stream,
+            async { wait.await.map_err(|_| ()) },
+            2,
+        )
+        .await;
+
+        assert!(delivery.is_ok());
+        assert!(!stream_ended);
+        assert_eq!(prefetched.len(), 2);
+        assert_eq!(prefetched.front().copied(), Some(10));
+        assert_eq!(stream.next().await, Some(12));
+    }
 
     #[test]
     fn batch_container_pool_reuses_one_fixed_vector() {

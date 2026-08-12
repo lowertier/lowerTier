@@ -117,16 +117,24 @@ impl Throughput {
     }
 
     pub fn record_tx_bytes(&self, bytes: u64) {
+        self.record_tx_batch(bytes, 1);
+    }
+
+    pub fn record_tx_batch(&self, bytes: u64, packets: u64) {
         unsafe {
             *self.tx_bytes.get() += bytes;
-            *self.tx_packets.get() += 1;
+            *self.tx_packets.get() += packets;
         }
     }
 
     pub fn record_rx_bytes(&self, bytes: u64) {
+        self.record_rx_batch(bytes, 1);
+    }
+
+    pub fn record_rx_batch(&self, bytes: u64, packets: u64) {
         unsafe {
             *self.rx_bytes.get() += bytes;
-            *self.rx_packets.get() += 1;
+            *self.rx_packets.get() += packets;
         }
     }
 }

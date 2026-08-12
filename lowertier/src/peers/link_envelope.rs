@@ -10,7 +10,11 @@ use ring::{aead, hmac as ring_hmac};
 use sha2::Sha256;
 
 use crate::tunnel::packet_def::{PacketType, ZCPacket, ZCPacketType};
-use crate::tunnel::{StreamItem, TunnelError, filter::TunnelFilter};
+use crate::tunnel::{
+    BatchStreamItem, StreamItem, TunnelError,
+    batch::PacketBatch,
+    filter::{TunnelFilter, scalar_after_received_batch, scalar_before_send_batch},
+};
 
 const PUBLIC_HEADER_SIZE: usize = 8;
 const AEAD_TAG_SIZE: usize = 16;
@@ -176,6 +180,20 @@ impl TunnelFilter for LinkEnvelopeTunnelFilter {
         Some(session.open(data).map_err(|error| {
             TunnelError::InvalidPacket(format!("protected link packet failed: {error}"))
         }))
+    }
+
+    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+        if !self.enabled || self.session.load().is_none() {
+            return Some(data);
+        }
+        scalar_before_send_batch(self, data)
+    }
+
+    fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
+        if !self.enabled || self.session.load().is_none() {
+            return Some(data);
+        }
+        scalar_after_received_batch(self, data)
     }
 
     fn filter_output(&self) {}

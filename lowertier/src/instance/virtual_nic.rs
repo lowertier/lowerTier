@@ -26,7 +26,7 @@ use crate::{
     },
     tunnel::{
         PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
-        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, wait_for_delivery_with_one_prefetch},
         common::{FramedWriter, TunnelWrapper, ZCPacketToBytes, reserve_buf},
         packet_def::{TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
     },
@@ -89,17 +89,27 @@ fn linux_tun_offload_configured(
     !explicitly_disabled && (explicitly_enabled || vector_checksum_available)
 }
 
+/// Maximum Linux TUN/TAP queues. Each queue is one character device FD with
+/// independent read and write completion. More than four queues adds memory
+/// without helping the single-core receive pump.
+const LINUX_VIRTUAL_NIC_MAX_QUEUES: usize = 4;
+
 #[cfg(target_os = "linux")]
 fn linux_virtual_nic_queue_count(
-    native_ethernet: bool,
+    _native_ethernet: bool,
     parallelism: usize,
     requested: Option<usize>,
 ) -> usize {
-    if native_ethernet {
-        requested.unwrap_or(2).clamp(1, 2).min(parallelism.max(1))
+    let available = parallelism.max(1);
+    let default = if available >= 2 {
+        available.min(LINUX_VIRTUAL_NIC_MAX_QUEUES)
     } else {
         1
-    }
+    };
+    requested
+        .unwrap_or(default)
+        .clamp(1, LINUX_VIRTUAL_NIC_MAX_QUEUES)
+        .min(available)
 }
 
 fn record_nic_batch_size(batch_size: usize) {
@@ -837,11 +847,19 @@ impl VirtualNic {
         let parallelism = std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(1);
-        let requested_queue_count = std::env::var("LOWTIER_TAP_QUEUES")
+        let requested_queue_count = std::env::var("LOWTIER_TUN_QUEUES")
+            .or_else(|_| std::env::var("LOWTIER_TAP_QUEUES"))
             .ok()
             .and_then(|value| value.parse::<usize>().ok());
         let queue_count =
             linux_virtual_nic_queue_count(native_ethernet, parallelism, requested_queue_count);
+        if queue_count > 1 {
+            tracing::info!(
+                queue_count,
+                native_ethernet,
+                "Linux virtual NIC uses multiqueue"
+            );
+        }
         let mut builder = quincy_tun::DeviceBuilder::new()
             .mtu(kernel_mtu)
             .packet_information(false)
@@ -1384,10 +1402,13 @@ impl NicCtx {
                 return;
             }
             let record_batch_stats = std::env::var_os("LOWTIER_DEBUG_BATCH_STATS").is_some();
-            while let Some(result) = stream.next().await {
+            let mut pending = stream.next().await;
+            while let Some(result) = pending {
                 let batch = match result {
                     Ok(batch) => batch,
                     Err(error) => {
+                        mgr.get_global_ctx()
+                            .set_tun_device_error(format!("TUN read failed: {error}"));
                         tracing::error!(?error, "read from nic failed");
                         break;
                     }
@@ -1395,8 +1416,18 @@ impl NicCtx {
                 if record_batch_stats {
                     record_nic_batch_size(batch.len());
                 }
-                Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref()).await;
+                let (_, prefetched) = wait_for_delivery_with_one_prefetch(&mut stream, async {
+                    Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref()).await;
+                    Ok::<(), ()>(())
+                })
+                .await;
+                pending = match prefetched {
+                    Some(next) => next,
+                    None => stream.next().await,
+                };
             }
+            mgr.get_global_ctx()
+                .set_tun_device_error("TUN input stream closed".to_owned());
             close_notifier.notify_one();
             tracing::error!("nic closed when recving from it");
         });
@@ -1948,13 +1979,16 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn native_tap_uses_two_queues_when_parallelism_is_available() {
-        assert_eq!(super::linux_virtual_nic_queue_count(false, 16, None), 1);
+    fn virtual_nic_queues_follow_host_parallelism_with_a_fixed_cap() {
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 1, None), 1);
         assert_eq!(super::linux_virtual_nic_queue_count(true, 1, None), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 2, None), 2);
         assert_eq!(super::linux_virtual_nic_queue_count(true, 2, None), 2);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, None), 2);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 16, None), 4);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, None), 4);
         assert_eq!(super::linux_virtual_nic_queue_count(true, 16, Some(1)), 1);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, Some(8)), 2);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 16, Some(8)), 4);
+        assert_eq!(super::linux_virtual_nic_queue_count(true, 3, Some(8)), 3);
     }
 
     #[tokio::test]

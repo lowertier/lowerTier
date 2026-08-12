@@ -326,6 +326,100 @@ impl AsyncDevice {
         }
     }
 
+    /// Receives one ready packet without waiting and splits a GSO packet.
+    #[cfg(target_os = "linux")]
+    pub fn try_recv_multiple<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<usize> {
+        if bufs.is_empty() || bufs.len() != sizes.len() {
+            return Err(io::Error::other("bufs error"));
+        }
+        if bufs.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many packet buffers",
+            ));
+        }
+
+        let tun = self.get_ref();
+        if tun.vnet_hdr {
+            let direct_capacity = bufs[0].as_ref().len().saturating_sub(offset);
+            if direct_capacity != 0 && original_buffer.len() >= direct_capacity {
+                let mut header = [0_u8; VIRTIO_NET_HDR_LEN];
+                let len = {
+                    let direct = &mut bufs[0].as_mut()[offset..];
+                    let overflow = &mut original_buffer[direct_capacity..];
+                    let mut vectors = [
+                        IoSliceMut::new(&mut header),
+                        IoSliceMut::new(direct),
+                        IoSliceMut::new(overflow),
+                    ];
+                    self.try_recv_vectored(&mut vectors)?
+                };
+                if len <= VIRTIO_NET_HDR_LEN {
+                    return Err(io::Error::other(format!(
+                        "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                    )));
+                }
+                let hdr = VirtioNetHdr::decode(&header)?;
+                let packet_len = len - VIRTIO_NET_HDR_LEN;
+                let direct_len = packet_len.min(direct_capacity);
+                if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+                    if packet_len > direct_capacity {
+                        return Err(io::Error::other(format!(
+                            "non-GSO packet length {packet_len} exceeds direct buffer length {direct_capacity}",
+                        )));
+                    }
+                    let packet = &mut bufs[0].as_mut()[offset..offset + packet_len];
+                    if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                        gso_none_checksum(packet, hdr.csum_start, hdr.csum_offset)?;
+                    }
+                    sizes[0] = packet_len;
+                    return Ok(1);
+                }
+
+                original_buffer[..direct_len]
+                    .copy_from_slice(&bufs[0].as_ref()[offset..offset + direct_len]);
+                return tun.handle_virtio_read(
+                    hdr,
+                    &mut original_buffer[..packet_len],
+                    bufs,
+                    sizes,
+                    offset,
+                );
+            }
+
+            let len = self.try_recv(original_buffer)?;
+            if len <= VIRTIO_NET_HDR_LEN {
+                return Err(io::Error::other(format!(
+                    "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                )));
+            }
+            let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
+            tun.handle_virtio_read(
+                hdr,
+                &mut original_buffer[VIRTIO_NET_HDR_LEN..len],
+                bufs,
+                sizes,
+                offset,
+            )
+        } else {
+            let Some(buf) = bufs[0].as_mut().get_mut(offset..) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            };
+            let len = self.try_recv(buf)?;
+            sizes[0] = len;
+            Ok(1)
+        }
+    }
+
     /// Sends multiple fragmented data packets, optionally merging via GRO.
     ///
     /// `gro_table` may be reused across calls to assist coalescing. `offset`

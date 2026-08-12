@@ -490,6 +490,13 @@ struct QuicPacketReceiver {
 
 #[async_trait::async_trait]
 impl PeerPacketFilter for QuicPacketReceiver {
+    fn is_interested_in_direct_nic_batch(
+        &self,
+        _batch: &crate::tunnel::batch::PacketBatch,
+    ) -> bool {
+        false
+    }
+
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         let header = packet.peer_manager_header().unwrap();
 

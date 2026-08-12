@@ -340,6 +340,16 @@ pub struct TcpProxy<C: NatDstConnector> {
 
 #[async_trait::async_trait]
 impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
+    fn is_interested_in_direct_nic_batch(&self, batch: &crate::tunnel::batch::PacketBatch) -> bool {
+        self.connector
+            .check_packet_from_peer_fast(&self.cidr_set, &self.global_ctx)
+            && batch.first().is_some_and(|packet| {
+                packet
+                    .peer_manager_header()
+                    .is_some_and(|header| header.packet_type == PacketType::Data as u8)
+            })
+    }
+
     fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
         packet.peer_manager_header().is_some_and(|header| {
             matches!(

@@ -50,7 +50,6 @@ mod mutex;
 mod recv_stream;
 mod runtime;
 mod send_stream;
-mod work_limiter;
 
 #[cfg(not(wasm_browser))]
 pub(crate) use std::time::{Duration, Instant};
@@ -75,8 +74,8 @@ pub use rustls;
 pub use udp;
 
 pub use crate::connection::{
-    AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram, SendDatagram,
-    SendDatagramError, ZeroRttAccepted,
+    AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram, ReadDatagrams,
+    SendDatagram, SendDatagramError, ZeroRttAccepted,
 };
 pub use crate::endpoint::{Accept, Endpoint, EndpointStats};
 pub use crate::incoming::{Incoming, IncomingFuture, RetryError};
@@ -100,6 +99,7 @@ enum ConnectionEvent {
         reason: bytes::Bytes,
     },
     Proto(proto::ConnectionEvent),
+    ProtoBatch(Vec<proto::ConnectionEvent>),
     Rebind(Arc<dyn AsyncUdpSocket>),
 }
 
@@ -126,11 +126,3 @@ fn udp_ecn(ecn: proto::EcnCodepoint) -> udp::EcnCodepoint {
 /// This helps ensure we don't starve anything when the CPU is slower than the link.
 /// Value is selected by picking a low number which didn't degrade throughput in benchmarks.
 const IO_LOOP_BOUND: usize = 160;
-
-/// The maximum amount of time that should be spent in `recvmsg()` calls per endpoint iteration
-///
-/// 50us are chosen so that an endpoint iteration with a 50us sendmsg limit blocks
-/// the runtime for a maximum of about 100us.
-/// Going much lower does not yield any noticeable difference, since a single `recvmmsg`
-/// batch of size 32 was observed to take 30us on some systems.
-const RECV_TIME_BOUND: Duration = Duration::from_micros(50);

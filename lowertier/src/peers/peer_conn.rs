@@ -34,7 +34,6 @@ use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet};
 use super::{
     PacketRecvChan,
     encrypt::Encryptor,
-    flow::{FLOW_SHARD_COUNT, classify_packet_flow},
     link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
     peer_conn_ping::PeerConnPinger,
     peer_session::{PeerSession, PeerSessionAction},
@@ -57,13 +56,17 @@ use crate::{
         },
     },
     tunnel::{
-        PacketBatchStream, Tunnel, TunnelError,
+        BatchStreamItem, PacketBatchStream, Tunnel, TunnelError,
         batch::{
             MAX_PACKET_BATCH_SIZE, PacketBatch, ordered_parallel_try_for_each,
-            parallel_crypto_enabled,
+            parallel_crypto_enabled, RECEIVE_PREFETCH_BATCHES,
+            wait_for_delivery_with_bounded_prefetch,
         },
         direct::{DirectTunnel, DirectTunnelSender},
-        filter::{StatsRecorderTunnelFilter, TunnelFilter, TunnelFilterChain, TunnelWithFilter},
+        filter::{
+            StatsRecorderTunnelFilter, TunnelFilter, TunnelFilterChain, TunnelWithFilter,
+            scalar_after_received_batch, scalar_before_send_batch,
+        },
         packet_def::{PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
         stats::{Throughput, WindowLatency},
     },
@@ -234,6 +237,49 @@ impl LegacyNetworkTunnelFilter {
     }
 }
 
+impl LegacyNetworkTunnelFilter {
+    fn direct_authenticated_batch(&self, batch: &PacketBatch) -> bool {
+        if !self.transport_authenticated {
+            return false;
+        }
+        let Some(peer_id) = self.peer_id.load() else {
+            return false;
+        };
+        let my_peer_id = self.my_peer_id.load();
+        batch.iter().all(|packet| {
+            let Some(header) = packet.peer_manager_header() else {
+                return true;
+            };
+            if !Self::protects(header.packet_type) || header.is_encrypted() {
+                return true;
+            }
+            header.from_peer_id.get() == my_peer_id && header.to_peer_id.get() == peer_id
+        })
+    }
+
+    fn direct_authenticated_receive_batch(&self, batch: &PacketBatch) -> bool {
+        if !self.transport_authenticated {
+            return false;
+        }
+        let Some(peer_id) = self.peer_id.load() else {
+            return false;
+        };
+        let my_peer_id = self.my_peer_id.load();
+        batch.iter().all(|packet| {
+            let Some(header) = packet.peer_manager_header() else {
+                return true;
+            };
+            if !Self::protects(header.packet_type) {
+                return true;
+            }
+            if header.is_encrypted() {
+                return false;
+            }
+            header.from_peer_id.get() == peer_id && header.to_peer_id.get() == my_peer_id
+        })
+    }
+}
+
 impl TunnelFilter for LegacyNetworkTunnelFilter {
     type FilterOutput = ();
 
@@ -261,6 +307,30 @@ impl TunnelFilter for LegacyNetworkTunnelFilter {
                 None
             }
         }
+    }
+
+    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+        if !self.enabled || self.opaque_relay.load(Ordering::Acquire) {
+            return Some(data);
+        }
+        // Authenticated QUIC already protects the outer path. Direct data batches
+        // skip the per-packet encrypt scan.
+        if self.direct_authenticated_batch(&data) {
+            return Some(data);
+        }
+        scalar_before_send_batch(self, data)
+    }
+
+    fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
+        if !self.enabled || self.opaque_relay.load(Ordering::Acquire) {
+            return Some(data);
+        }
+        if let Ok(batch) = &data
+            && self.direct_authenticated_receive_batch(batch)
+        {
+            return Some(data);
+        }
+        scalar_after_received_batch(self, data)
     }
 
     fn filter_output(&self) {}
@@ -360,6 +430,17 @@ impl PeerSessionTunnelFilter {
         let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
             return Ok(());
         };
+        let direct_batch = batch.iter().all(|packet| {
+            packet.peer_manager_header().is_some_and(|header| {
+                !self.should_skip_encrypt(header)
+                    && !header.is_encrypted()
+                    && header.from_peer_id.get() == my_peer_id
+                    && header.to_peer_id.get() == peer_id
+            })
+        });
+        if direct_batch {
+            return session.encrypt_payload_batch(my_peer_id, peer_id, batch);
+        }
         batch.iter_mut().try_for_each(|packet| {
             self.encrypt_packet_with_session(packet, my_peer_id, peer_id, &session)
         })
@@ -450,6 +531,43 @@ impl TunnelFilter for PeerSessionTunnelFilter {
         Some(Ok(data))
     }
 
+    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+        if !self.enabled {
+            return Some(data);
+        }
+        let mut data = data;
+        let result = if parallel_crypto_enabled(data.len()) {
+            self.encrypt_batch_parallel(&mut data)
+        } else {
+            self.encrypt_batch_sequential(&mut data)
+        };
+        if let Err(error) = result {
+            tracing::warn!(?error, "peer session batch encryption failed");
+            return None;
+        }
+        Some(data)
+    }
+
+    fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
+        if !self.enabled {
+            return Some(data);
+        }
+        if self.link_protection_active.load(Ordering::Acquire) {
+            return Some(data);
+        }
+        if let Ok(batch) = &data {
+            let needs_decrypt = batch.iter().any(|packet| {
+                packet.peer_manager_header().is_some_and(|header| {
+                    header.is_encrypted() && !self.should_skip_encrypt(header)
+                })
+            });
+            if !needs_decrypt {
+                return Some(data);
+            }
+        }
+        scalar_after_received_batch(self, data)
+    }
+
     fn filter_output(&self) {}
 }
 
@@ -503,7 +621,6 @@ pub struct PeerConn {
 
     tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
     sink: DirectTunnelSender,
-    send_lanes: Arc<[Mutex<()>; FLOW_SHARD_COUNT as usize]>,
     recv: Mutex<Option<Pin<Box<dyn PacketBatchStream>>>>,
     pending_recv: parking_lot::Mutex<VecDeque<ZCPacket>>,
     tunnel_info: Option<TunnelInfo>,
@@ -618,7 +735,6 @@ impl PeerConn {
                 Box::new(direct_tunnel) as Box<dyn Any + Send + 'static>
             )),
             sink,
-            send_lanes: Arc::new(std::array::from_fn(|_| Mutex::new(()))),
             recv: Mutex::new(Some(recv)),
             pending_recv: parking_lot::Mutex::new(VecDeque::new()),
             tunnel_info,
@@ -1704,7 +1820,8 @@ impl PeerConn {
             async move {
                 tracing::info!("start recving peer conn packet");
                 let mut task_ret = Ok(());
-                'receive: while let Some(result) = stream.next().await {
+                let mut next_result = stream.next().await;
+                'receive: while let Some(result) = next_result.take() {
                     let mut incoming = match result {
                         Ok(batch) => batch,
                         Err(error) => {
@@ -1714,13 +1831,24 @@ impl PeerConn {
                         }
                     };
 
+                    // Parse headers only when missing. The QUIC decoder may already
+                    // have filled metadata for a complete direct batch.
                     for packet in incoming.iter_mut() {
-                        let _ = packet.refresh_parsed_metadata();
+                        if packet.parsed_metadata().is_none() {
+                            let _ = packet.refresh_parsed_metadata();
+                        }
                     }
 
                     let received_bytes = incoming.buffer_byte_len() as u64;
                     if packet_batch_is_direct_peer_data(&incoming) {
-                        if sender.send_batch(incoming).await.is_err() {
+                        let (delivery, mut prefetched, stream_ended) =
+                            wait_for_delivery_with_bounded_prefetch(
+                                &mut stream,
+                                sender.send_batch(incoming),
+                                RECEIVE_PREFETCH_BATCHES,
+                            )
+                            .await;
+                        if delivery.is_err() {
                             break;
                         }
                         if received_bytes != 0
@@ -1728,6 +1856,18 @@ impl PeerConn {
                         {
                             limiter.consume(received_bytes).await;
                         }
+                        next_result = if let Some(first) = prefetched.pop_front() {
+                            if !prefetched.is_empty() {
+                                stream = Box::pin(
+                                    futures::stream::iter(prefetched).chain(stream),
+                                );
+                            }
+                            Some(first)
+                        } else if stream_ended {
+                            None
+                        } else {
+                            stream.next().await
+                        };
                         continue;
                     }
 
@@ -1809,6 +1949,7 @@ impl PeerConn {
                     {
                         limiter.consume(received_bytes).await;
                     }
+                    next_result = stream.next().await;
                 }
 
                 tracing::info!("end recving peer conn packet");
@@ -1850,30 +1991,14 @@ impl PeerConn {
     }
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
-        let shard = usize::from(classify_packet_flow(&msg).shard);
-        let _lane = self.send_lanes[shard].lock().await;
         Ok(self.sink.send(msg).await?)
     }
 
     pub async fn send_msg_batch(&self, batch: PacketBatch) -> Result<(), Error> {
-        // Tokio's FIFO mutex is the ordering lane. An uncontended singleton
-        // takes its inline fast path immediately; a concurrent job waits until
-        // every earlier vector has entered the transport queue.
-        let shard = batch
-            .first()
-            .map(classify_packet_flow)
-            .map(|flow| usize::from(flow.shard))
-            .unwrap_or(0);
-        let _lane = self.send_lanes[shard].lock().await;
-        let mut batch = match batch.pop_singleton() {
+        let batch = match batch.pop_singleton() {
             Ok(packet) => return Ok(self.sink.send(packet).await?),
             Err(batch) => batch,
         };
-        if self.session_filter.enabled && parallel_crypto_enabled(batch.len()) {
-            self.session_filter.encrypt_batch_parallel(&mut batch)?;
-        } else {
-            self.session_filter.encrypt_batch_sequential(&mut batch)?;
-        }
         Ok(self.sink.send_batch(batch).await?)
     }
 
@@ -2096,6 +2221,52 @@ pub mod tests {
     use crate::common::global_ctx::tests::get_mock_global_ctx;
     use crate::common::new_peer_id;
     use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
+
+    #[tokio::test]
+    async fn direct_delivery_prefetches_exactly_one_batch() {
+        let mut stream = futures::stream::iter([1_u8, 2_u8]);
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            release.send(()).unwrap();
+        });
+
+        let (delivery, prefetched) = crate::tunnel::batch::wait_for_delivery_with_one_prefetch(
+            &mut stream,
+            async { wait.await.map_err(|_| ()) },
+        )
+        .await;
+
+        assert!(delivery.is_ok());
+        assert_eq!(prefetched, Some(Some(1)));
+        assert_eq!(stream.next().await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn direct_delivery_prefetches_configured_ready_batches() {
+        let mut stream = futures::stream::iter([1_u8, 2_u8, 3_u8, 4_u8]);
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            release.send(()).unwrap();
+        });
+
+        let (delivery, prefetched, stream_ended) =
+            wait_for_delivery_with_bounded_prefetch(
+                &mut stream,
+                async { wait.await.map_err(|_| ()) },
+                RECEIVE_PREFETCH_BATCHES,
+            )
+            .await;
+
+        assert!(delivery.is_ok());
+        assert!(!stream_ended);
+        assert_eq!(
+            prefetched.into_iter().collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(stream.next().await, Some(4));
+    }
     use crate::peers::create_packet_recv_chan;
     use crate::peers::recv_packet_from_chan;
     use crate::tunnel::common::tests::wait_for_condition;

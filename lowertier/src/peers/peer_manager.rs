@@ -252,10 +252,22 @@ fn prepare_direct_nic_batch<F>(
 where
     F: FnMut(&[u8], PeerId),
 {
+    // Tests and callers that only need structural validation pass peer id 0 and
+    // skip the destination identity check by using a dedicated helper below.
+    inspect_direct_nic_batch_structure(batch, ethernet_input, &mut learn_ethernet_source)
+}
+
+fn inspect_direct_nic_batch_structure<F>(
+    batch: &PacketBatch,
+    ethernet_input: bool,
+    learn_ethernet_source: &mut F,
+) -> bool
+where
+    F: FnMut(&[u8], PeerId),
+{
     if batch.is_empty() {
         return false;
     }
-
     for packet in batch {
         if let Some(metadata) = packet.parsed_metadata() {
             let is_ethernet = metadata.packet_type == PacketType::Ethernet as u8;
@@ -288,8 +300,79 @@ where
             learn_ethernet_source(packet.payload(), header.from_peer_id.get());
         }
     }
-
     true
+}
+
+/// One pass validates a direct NIC batch, returns its source, and optionally
+/// learns Ethernet sources. Callers no longer scan the same batch three times.
+fn inspect_direct_nic_batch<F>(
+    batch: &PacketBatch,
+    my_peer_id: PeerId,
+    ethernet_input: bool,
+    learn_ethernet_source: &mut F,
+) -> Option<(PeerId, u8)>
+where
+    F: FnMut(&[u8], PeerId),
+{
+    if batch.is_empty() {
+        return None;
+    }
+
+    let first = batch.first()?;
+    let (source, packet_type) = first
+        .parsed_metadata()
+        .map(|metadata| (metadata.from_peer_id, metadata.packet_type))
+        .or_else(|| {
+            first
+                .peer_manager_header()
+                .map(|header| (header.from_peer_id.get(), header.packet_type))
+        })?;
+    if packet_type != PacketType::Data as u8 && packet_type != PacketType::Ethernet as u8 {
+        return None;
+    }
+    let is_ethernet = packet_type == PacketType::Ethernet as u8;
+    if is_ethernet && !ethernet_input {
+        return None;
+    }
+
+    for packet in batch {
+        if let Some(metadata) = packet.parsed_metadata() {
+            if metadata.packet_type != packet_type
+                || metadata.from_peer_id != source
+                || metadata.to_peer_id != my_peer_id
+                || metadata.not_send_to_tun
+                || metadata.encrypted
+                || metadata.compressed
+                || (is_ethernet
+                    && (metadata.ethernet_destination.is_none()
+                        || metadata.ethernet_source.is_none()))
+            {
+                return None;
+            }
+            if is_ethernet {
+                learn_ethernet_source(packet.payload(), metadata.from_peer_id);
+            }
+            continue;
+        }
+        let Some(header) = packet.peer_manager_header() else {
+            return None;
+        };
+        if header.packet_type != packet_type
+            || header.from_peer_id.get() != source
+            || header.to_peer_id.get() != my_peer_id
+            || header.is_not_send_to_tun()
+            || header.is_encrypted()
+            || header.is_compressed()
+            || (is_ethernet && packet.payload().len() < 14)
+        {
+            return None;
+        }
+        if is_ethernet {
+            learn_ethernet_source(packet.payload(), header.from_peer_id.get());
+        }
+    }
+
+    Some((source, packet_type))
 }
 
 fn packet_batch_contains_peer_rpc(batch: &PacketBatch) -> bool {
@@ -427,14 +510,19 @@ impl DirectNicIngress {
                 return Err(batch);
             }
         }
-        let Some((from_peer_id, packet_type)) =
-            decoded_local_nic_batch_source(&batch, self.my_peer_id)
-        else {
+
+        let mut source_batch = L2SourceBatch::default();
+        let Some((from_peer_id, packet_type)) = inspect_direct_nic_batch(
+            &batch,
+            self.my_peer_id,
+            self.ethernet_input,
+            &mut |frame, peer_id| {
+                source_batch.record(frame, peer_id);
+            },
+        ) else {
             return Err(batch);
         };
-        if !prepare_direct_nic_batch(&batch, self.ethernet_input, |_, _| {}) {
-            return Err(batch);
-        }
+
         if packet_type == PacketType::Ethernet as u8
             && !PeerManager::credential_ethernet_peer_is_allowed(&peers, packet_type, from_peer_id)
                 .await
@@ -465,7 +553,7 @@ impl DirectNicIngress {
             let pipelines = self.peer_packet_process_pipeline.read().await;
             for pipeline in pipelines.iter().rev() {
                 if pipeline.is_direct_nic_terminal()
-                    || !pipeline.is_interested_in_batch_from_peer(&batch)
+                    || !pipeline.is_interested_in_direct_nic_batch(&batch)
                 {
                     continue;
                 }
@@ -476,23 +564,28 @@ impl DirectNicIngress {
             }
         }
 
-        let mut source_batch = L2SourceBatch::default();
-        if !prepare_direct_nic_batch(&batch, self.ethernet_input, |frame, peer_id| {
-            source_batch.record(frame, peer_id);
-        }) {
-            return Err(batch);
+        if packet_type == PacketType::Ethernet as u8 {
+            self.l2_fabric
+                .learn_source_batch_at(source_batch, std::time::Instant::now());
         }
-        self.l2_fabric
-            .learn_source_batch_at(source_batch, std::time::Instant::now());
+        // Stamp flow shards once so multiqueue TUN writers fan out by flow.
+        for packet in batch.iter_mut() {
+            stamp_packet_flow(packet);
+        }
         let bytes = batch.buffer_byte_len() as u64;
         let packets = batch.len() as u64;
         self.self_rx_bytes.add(bytes);
         self.self_rx_packets.add(packets);
         self.compress_rx_bytes_before.add(bytes);
         self.compress_rx_bytes_after.add(bytes);
-        self.traffic_metrics
-            .record_rx_batch(from_peer_id, packet_type, bytes, packets)
-            .await;
+        if !self
+            .traffic_metrics
+            .try_record_rx_batch(from_peer_id, packet_type, bytes, packets)
+        {
+            self.traffic_metrics
+                .record_rx_batch(from_peer_id, packet_type, bytes, packets)
+                .await;
+        }
 
         if let Err(error) = DirectNicBatchWriter::send_to(endpoint, batch).await {
             tracing::error!(?error, "send direct packet batch to NIC failed");
@@ -1829,6 +1922,10 @@ impl PeerManager {
 
         #[async_trait::async_trait]
         impl PeerPacketFilter for PeerRpcPacketProcessor {
+            fn is_interested_in_direct_nic_batch(&self, _batch: &PacketBatch) -> bool {
+                false
+            }
+
             async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
                 let hdr = packet.peer_manager_header().unwrap();
                 if is_peer_rpc_packet_type(hdr.packet_type) {

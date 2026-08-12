@@ -35,8 +35,8 @@ use tracing::{Instrument, Span};
 use udp::{RecvMeta, BATCH_SIZE};
 
 use crate::{
-    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter, ConnectionEvent,
-    EndpointConfig, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND,
+    connection::Connecting, incoming::Incoming, ConnectionEvent, EndpointConfig, VarInt,
+    IO_LOOP_BOUND,
 };
 
 /// A QUIC endpoint.
@@ -494,21 +494,19 @@ pub(crate) struct Shared {
 
 impl State {
     fn drive_recv(&mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
-        let get_time = || self.runtime.now();
-        self.recv_state.recv_limiter.start_cycle(get_time);
+        let mut receive_work = 0;
         if let Some(socket) = &self.prev_socket {
             // We don't care about the `PollProgress` from old sockets.
             let poll_res =
                 self.recv_state
-                    .poll_socket(cx, &mut self.inner, &**socket, &*self.runtime, now);
+                    .poll_socket(cx, &mut self.inner, &**socket, now, &mut receive_work);
             if poll_res.is_err() {
                 self.prev_socket = None;
             }
         };
         let poll_res =
             self.recv_state
-                .poll_socket(cx, &mut self.inner, &*self.socket, &*self.runtime, now);
-        self.recv_state.recv_limiter.finish_cycle(get_time);
+                .poll_socket(cx, &mut self.inner, &*self.socket, now, &mut receive_work);
         let poll_res = poll_res?;
         if poll_res.received_connection_packet {
             // Traffic has arrived on self.socket, therefore there is no need for the abandoned
@@ -741,7 +739,6 @@ struct RecvState {
     incoming: VecDeque<proto::Incoming>,
     connections: ConnectionSet,
     recv_buf: Box<[u8]>,
-    recv_limiter: WorkLimiter,
 }
 
 impl RecvState {
@@ -764,7 +761,6 @@ impl RecvState {
             },
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),
-            recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
         }
     }
 
@@ -773,9 +769,15 @@ impl RecvState {
         cx: &mut Context,
         endpoint: &mut proto::Endpoint,
         socket: &dyn AsyncUdpSocket,
-        runtime: &dyn Runtime,
         now: Instant,
+        receive_work: &mut usize,
     ) -> Result<PollProgress, io::Error> {
+        if receive_cycle_complete(*receive_work) {
+            return Ok(PollProgress {
+                received_connection_packet: false,
+                keep_going: true,
+            });
+        }
         let mut received_connection_packet = false;
         let mut metas = [RecvMeta::default(); BATCH_SIZE];
         let mut iovs: [IoSliceMut; BATCH_SIZE] = {
@@ -792,11 +794,22 @@ impl RecvState {
         loop {
             match socket.poll_recv(cx, &mut iovs, &mut metas) {
                 Poll::Ready(Ok(msgs)) => {
-                    self.recv_limiter.record_work(msgs);
+                    let logical_datagrams = metas
+                        .iter()
+                        .take(msgs)
+                        .map(|meta| logical_datagram_count(meta.len, meta.stride))
+                        .sum();
+                    *receive_work = receive_work.saturating_add(logical_datagrams);
+                    let mut connection_events: FxHashMap<
+                        ConnectionHandle,
+                        Vec<proto::ConnectionEvent>,
+                    > = FxHashMap::default();
                     for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
-                        let mut data: BytesMut = buf[0..meta.len].into();
-                        while !data.is_empty() {
-                            let buf = data.split_to(meta.stride.min(data.len()));
+                        // Give each logical packet one independent allocation. A
+                        // shared GRO allocation forces another complete copy when
+                        // the application requests mutable packet storage.
+                        for segment in buf[..meta.len].chunks(meta.stride) {
+                            let buf = BytesMut::from(segment);
                             let mut response_buffer = Vec::new();
                             match endpoint.handle(
                                 now,
@@ -816,20 +829,20 @@ impl RecvState {
                                     }
                                 }
                                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-                                    // Ignoring errors from dropped connections that haven't yet been cleaned up
                                     received_connection_packet = true;
-                                    let _ = self
-                                        .connections
-                                        .senders
-                                        .get_mut(&handle)
-                                        .unwrap()
-                                        .send(ConnectionEvent::Proto(event));
+                                    connection_events.entry(handle).or_default().push(event);
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
                                     respond(transmit, &response_buffer, socket);
                                 }
                                 None => {}
                             }
+                        }
+                    }
+                    for (handle, events) in connection_events {
+                        // Ignore events for a connection that closed during this receive call.
+                        if let Some(sender) = self.connections.senders.get_mut(&handle) {
+                            let _ = sender.send(ConnectionEvent::ProtoBatch(events));
                         }
                     }
                 }
@@ -848,7 +861,7 @@ impl RecvState {
                     return Err(e);
                 }
             }
-            if !self.recv_limiter.allow_work(|| runtime.now()) {
+            if receive_cycle_complete(*receive_work) {
                 return Ok(PollProgress {
                     received_connection_packet,
                     keep_going: true,
@@ -858,13 +871,24 @@ impl RecvState {
     }
 }
 
+fn logical_datagram_count(len: usize, stride: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        len.div_ceil(stride.max(1))
+    }
+}
+
+fn receive_cycle_complete(receive_work: usize) -> bool {
+    receive_work >= IO_LOOP_BOUND
+}
+
 impl fmt::Debug for RecvState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("RecvState")
             .field("incoming", &self.incoming)
             .field("connections", &self.connections)
             // recv_buf too large
-            .field("recv_limiter", &self.recv_limiter)
             .finish_non_exhaustive()
     }
 }
@@ -875,4 +899,23 @@ struct PollProgress {
     received_connection_packet: bool,
     /// Whether datagram handling was interrupted early by the work limiter for fairness
     keep_going: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{logical_datagram_count, receive_cycle_complete};
+    use crate::IO_LOOP_BOUND;
+
+    #[test]
+    fn gro_work_count_uses_logical_datagrams() {
+        assert_eq!(logical_datagram_count(64 * 1350, 1350), 64);
+        assert_eq!(logical_datagram_count(63 * 1350 + 700, 1350), 64);
+        assert_eq!(logical_datagram_count(1350, 1350), 1);
+    }
+
+    #[test]
+    fn receive_cycle_uses_the_existing_io_bound() {
+        assert!(!receive_cycle_complete(IO_LOOP_BOUND - 1));
+        assert!(receive_cycle_complete(IO_LOOP_BOUND));
+    }
 }

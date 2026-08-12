@@ -389,6 +389,21 @@ impl PeerSession {
             .encrypt_payload(Self::dir_for_sender(sender_peer_id, receiver_peer_id), pkt)
     }
 
+    pub fn encrypt_payload_batch(
+        &self,
+        sender_peer_id: PeerId,
+        receiver_peer_id: PeerId,
+        packets: &mut [ZCPacket],
+    ) -> Result<(), anyhow::Error> {
+        if !self.is_valid() {
+            return Err(anyhow!("session invalidated"));
+        }
+        self.datagram.encrypt_payload_batch(
+            Self::dir_for_sender(sender_peer_id, receiver_peer_id),
+            packets,
+        )
+    }
+
     pub fn decrypt_payload(
         &self,
         sender_peer_id: PeerId,
