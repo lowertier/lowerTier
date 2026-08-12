@@ -223,7 +223,7 @@ impl L2Fabric {
 
     fn try_reserve_entry(&self) -> bool {
         self.entry_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < self.capacity).then_some(count + 1)
             })
             .is_ok()
@@ -261,7 +261,7 @@ impl L2Fabric {
             let frame_len = u64::try_from(frame_len).unwrap_or(u64::MAX);
             return self
                 .flood_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                     used.checked_add(frame_len)
                         .filter(|next| *next <= self.flood_bps)
                 })
