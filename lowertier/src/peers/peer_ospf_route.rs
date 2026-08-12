@@ -39,6 +39,7 @@ use crate::{
         constants::LOWTIER_VERSION,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
         shrink_dashmap,
+        stats_manager::{LabelSet, LabelType, MetricName},
         stun::StunInfoCollectorTrait,
     },
     peers::route_trait::{Route, RouteInterfaceBox},
@@ -2714,6 +2715,26 @@ impl PeerRouteServiceImpl {
             calc_locked.as_ref().unwrap(),
         );
 
+        let network_name = self.global_ctx.get_network_name();
+        for route in self.route_table.next_hop_map.iter() {
+            let dst_peer_id = *route.key();
+            if self.route_table.get_next_hop(dst_peer_id).is_none() {
+                continue;
+            }
+            let delivery_bps = self
+                .route_table_with_speed
+                .get_next_hop(dst_peer_id)
+                .map(|speed_route| speed_route.path_delivery_bps)
+                .unwrap_or_default();
+            let labels = LabelSet::new()
+                .with_label_type(LabelType::NetworkName(network_name.clone()))
+                .with_label_type(LabelType::DstPeerId(dst_peer_id));
+            self.global_ctx
+                .stats_manager()
+                .get_counter(MetricName::SpeedSelectedPathDeliveryBps, labels)
+                .set(delivery_bps);
+        }
+
         drop(calc_locked);
 
         self.cost_calculator
@@ -4507,6 +4528,7 @@ mod tests {
                 GlobalCtxEvent, TrustedKeySource,
                 tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
             },
+            stats_manager::{LabelSet, LabelType, MetricName},
         },
         connector::udp_hole_punch::tests::replace_stun_info_collector,
         peers::{
@@ -7063,6 +7085,20 @@ mod tests {
             .unwrap();
         assert_eq!(route.next_hop_peer_id_speed_first, Some(p_b.my_peer_id()));
         assert_eq!(route.path_delivery_bps_speed_first, Some(100_000_000));
+        let labels = LabelSet::new()
+            .with_label_type(LabelType::NetworkName(
+                r_d.service_impl.global_ctx.get_network_name(),
+            ))
+            .with_label_type(LabelType::DstPeerId(p_a.my_peer_id()));
+        assert_eq!(
+            r_d.service_impl
+                .global_ctx
+                .stats_manager()
+                .get_metric(MetricName::SpeedSelectedPathDeliveryBps, &labels)
+                .unwrap()
+                .value,
+            100_000_000
+        );
     }
 
     #[rstest::rstest]

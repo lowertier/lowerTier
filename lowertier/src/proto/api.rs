@@ -144,6 +144,35 @@ pub mod instance {
             ret
         }
 
+        fn selected_speed_connection(&self) -> Option<&PeerConnInfo> {
+            let peer = self.peer.as_ref()?;
+            let default_conn_id = peer.default_conn_id.map(|id| id.to_string());
+            if let Some(connection) = peer
+                .conns
+                .iter()
+                .find(|connection| default_conn_id.as_deref() == Some(&connection.conn_id))
+            {
+                return Some(connection);
+            }
+            peer.conns
+                .iter()
+                .filter(|connection| connection.tx_delivery_bps.is_some())
+                .max_by(|left, right| {
+                    left.tx_delivery_bps
+                        .cmp(&right.tx_delivery_bps)
+                        .then_with(|| right.speed_sample_age_ms.cmp(&left.speed_sample_age_ms))
+                        .then_with(|| right.conn_id.cmp(&left.conn_id))
+                })
+        }
+
+        pub fn get_speed_delivery_bps(&self) -> Option<u64> {
+            self.selected_speed_connection()?.tx_delivery_bps
+        }
+
+        pub fn get_speed_sample_age_ms(&self) -> Option<u64> {
+            self.selected_speed_connection()?.speed_sample_age_ms
+        }
+
         fn get_tunnel_proto_str(tunnel_info: &super::super::common::TunnelInfo) -> String {
             tunnel_info.display_tunnel_type()
         }
@@ -387,5 +416,34 @@ mod tests {
         };
 
         assert_eq!(pair.get_loss_rate(), Some(0.0));
+    }
+
+    #[test]
+    fn peer_route_pair_speed_uses_the_selected_connection() {
+        let selected_conn_id = uuid::Uuid::new_v4();
+        let pair = PeerRoutePair {
+            peer: Some(PeerInfo {
+                default_conn_id: Some(selected_conn_id.into()),
+                conns: vec![
+                    PeerConnInfo {
+                        conn_id: uuid::Uuid::new_v4().to_string(),
+                        tx_delivery_bps: Some(200_000_000),
+                        speed_sample_age_ms: Some(20),
+                        ..Default::default()
+                    },
+                    PeerConnInfo {
+                        conn_id: selected_conn_id.to_string(),
+                        tx_delivery_bps: Some(100_000_000),
+                        speed_sample_age_ms: Some(125),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(pair.get_speed_delivery_bps(), Some(100_000_000));
+        assert_eq!(pair.get_speed_sample_age_ms(), Some(125));
     }
 }

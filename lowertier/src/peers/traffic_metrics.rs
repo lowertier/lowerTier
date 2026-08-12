@@ -85,6 +85,67 @@ impl AggregateTrafficMetrics {
 }
 
 #[derive(Clone)]
+pub(crate) struct SpeedProbeMetrics {
+    stats_mgr: Arc<StatsManager>,
+    base_labels: LabelSet,
+    tx: TrafficCounters,
+    rx: TrafficCounters,
+    sample_age_ms: CounterHandle,
+}
+
+impl SpeedProbeMetrics {
+    pub(crate) fn new(
+        stats_mgr: Arc<StatsManager>,
+        network_name: String,
+        dst_peer_id: PeerId,
+        connection_id: String,
+    ) -> Self {
+        let base_labels = LabelSet::new()
+            .with_label_type(LabelType::NetworkName(network_name))
+            .with_label_type(LabelType::DstPeerId(dst_peer_id))
+            .with_label("connection_id", connection_id);
+        Self {
+            tx: TrafficCounters {
+                bytes: stats_mgr.get_counter(MetricName::SpeedProbeBytesTx, base_labels.clone()),
+                packets: stats_mgr
+                    .get_counter(MetricName::SpeedProbePacketsTx, base_labels.clone()),
+            },
+            rx: TrafficCounters {
+                bytes: stats_mgr.get_counter(MetricName::SpeedProbeBytesRx, base_labels.clone()),
+                packets: stats_mgr
+                    .get_counter(MetricName::SpeedProbePacketsRx, base_labels.clone()),
+            },
+            sample_age_ms: stats_mgr.get_counter(MetricName::SpeedSampleAgeMs, base_labels.clone()),
+            stats_mgr,
+            base_labels,
+        }
+    }
+
+    pub(crate) fn record_tx(&self, bytes: u64) {
+        self.tx.add_sample(bytes);
+    }
+
+    pub(crate) fn record_rx(&self, bytes: u64) {
+        self.rx.add_sample(bytes);
+    }
+
+    pub(crate) fn record_failure(&self, error_type: &str) {
+        self.stats_mgr
+            .get_counter(
+                MetricName::SpeedProbeFailures,
+                self.base_labels
+                    .clone()
+                    .with_label_type(LabelType::ErrorType(error_type.to_string())),
+            )
+            .inc();
+    }
+
+    pub(crate) fn set_sample_age_ms(&self, age_ms: u64) {
+        self.sample_age_ms.set(age_ms);
+    }
+}
+
+#[derive(Clone)]
 enum CachedPeerTrafficCounters {
     Unknown(TrafficCounters),
     Resolved(TrafficCounters),
@@ -639,5 +700,30 @@ mod tests {
         metrics.clear_peer_cache();
 
         assert_eq!(metrics.peer_cache_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn speed_probe_metrics_report_traffic_failures_and_sample_age() {
+        let stats_mgr = Arc::new(StatsManager::new());
+        let metrics = SpeedProbeMetrics::new(
+            stats_mgr.clone(),
+            "default".to_string(),
+            42,
+            "00000000-0000-0000-0000-000000000001".to_string(),
+        );
+
+        metrics.record_tx(1_200);
+        metrics.record_rx(1_000);
+        metrics.record_failure("timeout");
+        metrics.set_sample_age_ms(125);
+
+        let output = stats_mgr.export_prometheus();
+        assert!(output.contains("speed_probe_bytes_tx"));
+        assert!(output.contains("speed_probe_packets_tx"));
+        assert!(output.contains("speed_probe_bytes_rx"));
+        assert!(output.contains("speed_probe_packets_rx"));
+        assert!(output.contains("error_type=\"timeout\""));
+        assert!(output.contains("speed_sample_age_ms"));
+        assert!(output.contains("dst_peer_id=\"42\""));
     }
 }

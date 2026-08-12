@@ -104,7 +104,31 @@ pub enum MetricName {
     /// Compression bytes after compression
     CompressionBytesTxAfter,
 
+    /// Speed probe bytes sent
+    SpeedProbeBytesTx,
+    /// Speed probe packets sent
+    SpeedProbePacketsTx,
+    /// Speed probe bytes received
+    SpeedProbeBytesRx,
+    /// Speed probe packets received
+    SpeedProbePacketsRx,
+    /// Speed probe failures
+    SpeedProbeFailures,
+    /// Current speed sample age in milliseconds
+    SpeedSampleAgeMs,
+    /// Selected widest-path delivery rate in bits per second
+    SpeedSelectedPathDeliveryBps,
+
     TcpProxyConnect,
+}
+
+impl MetricName {
+    fn is_gauge(self) -> bool {
+        matches!(
+            self,
+            MetricName::SpeedSampleAgeMs | MetricName::SpeedSelectedPathDeliveryBps
+        )
+    }
 }
 
 impl fmt::Display for MetricName {
@@ -194,6 +218,16 @@ impl fmt::Display for MetricName {
             MetricName::CompressionBytesRxAfter => write!(f, "compression_bytes_rx_after"),
             MetricName::CompressionBytesTxBefore => write!(f, "compression_bytes_tx_before"),
             MetricName::CompressionBytesTxAfter => write!(f, "compression_bytes_tx_after"),
+
+            MetricName::SpeedProbeBytesTx => write!(f, "speed_probe_bytes_tx"),
+            MetricName::SpeedProbePacketsTx => write!(f, "speed_probe_packets_tx"),
+            MetricName::SpeedProbeBytesRx => write!(f, "speed_probe_bytes_rx"),
+            MetricName::SpeedProbePacketsRx => write!(f, "speed_probe_packets_rx"),
+            MetricName::SpeedProbeFailures => write!(f, "speed_probe_failures"),
+            MetricName::SpeedSampleAgeMs => write!(f, "speed_sample_age_ms"),
+            MetricName::SpeedSelectedPathDeliveryBps => {
+                write!(f, "speed_selected_path_delivery_bps")
+            }
 
             MetricName::TcpProxyConnect => write!(f, "tcp_proxy_connect"),
         }
@@ -730,7 +764,12 @@ impl StatsManager {
                 if !current_metric.is_empty() {
                     output.push('\n');
                 }
-                output.push_str(&format!("# TYPE {} counter\n", metric_name_str));
+                let metric_type = if metric.name.is_gauge() {
+                    "gauge"
+                } else {
+                    "counter"
+                };
+                output.push_str(&format!("# TYPE {} {}\n", metric_name_str, metric_type));
                 current_metric = metric_name_str.clone();
             }
 
@@ -889,6 +928,32 @@ mod tests {
         assert!(prometheus_output.contains(
             "traffic_bytes_tx_by_instance{network_name=\"default\",to_instance_id=\"87ede5a2-9c3d-492d-9bbe-989b9d07e742\"} 25"
         ));
+    }
+
+    #[tokio::test]
+    async fn speed_measurements_export_with_gauge_types() {
+        let stats = StatsManager::new();
+        stats
+            .get_counter(
+                MetricName::SpeedSampleAgeMs,
+                LabelSet::new()
+                    .with_label_type(LabelType::NetworkName("default".to_string()))
+                    .with_label_type(LabelType::DstPeerId(42)),
+            )
+            .set(125);
+        stats
+            .get_counter(
+                MetricName::SpeedSelectedPathDeliveryBps,
+                LabelSet::new()
+                    .with_label_type(LabelType::NetworkName("default".to_string()))
+                    .with_label_type(LabelType::DstPeerId(42)),
+            )
+            .set(80_000_000);
+
+        let output = stats.export_prometheus();
+
+        assert!(output.contains("# TYPE speed_sample_age_ms gauge"));
+        assert!(output.contains("# TYPE speed_selected_path_delivery_bps gauge"));
     }
 
     #[tokio::test]

@@ -40,7 +40,7 @@ use super::{
     speed_probe::{
         ProbeAck, ProbeReceiver, ProbeReservation, SpeedSample, build_probe_train_with_overhead,
     },
-    traffic_metrics::AggregateTrafficMetrics,
+    traffic_metrics::{AggregateTrafficMetrics, SpeedProbeMetrics},
 };
 use crate::{
     common::{
@@ -1824,6 +1824,12 @@ impl PeerConn {
         let probe_peer_id = self.get_peer_id();
         let conn_info_for_instrument = self.get_conn_info();
         let control_metrics = self.control_metrics(&conn_info_for_instrument.network_name);
+        let speed_metrics = SpeedProbeMetrics::new(
+            self.global_ctx.stats_manager().clone(),
+            conn_info_for_instrument.network_name.clone(),
+            probe_peer_id,
+            self.conn_id.to_string(),
+        );
         #[cfg(feature = "quic")]
         let alternate_fec_decoder = self.alternate_fec_decoder.clone();
 
@@ -1995,6 +2001,7 @@ impl PeerConn {
 
                         if peer_mgr_hdr.packet_type == PacketType::SpeedProbe as u8 {
                             control_metrics.record_rx(buf_len);
+                            speed_metrics.record_rx(buf_len);
                             let probe_result = {
                                 speed_probe_receiver.lock().receive_wire(
                                     zc_packet.payload(),
@@ -2021,6 +2028,7 @@ impl PeerConn {
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
+                                    speed_metrics.record_failure("malformed");
                                     tracing::warn!(?error, "invalid speed probe packet");
                                 }
                             }
@@ -2031,6 +2039,7 @@ impl PeerConn {
                                     let _ = speed_ack_sender.send(ack);
                                 }
                                 Err(error) => {
+                                    speed_metrics.record_failure("malformed");
                                     tracing::warn!(?error, "invalid speed probe acknowledgement");
                                 }
                             }
@@ -2145,13 +2154,34 @@ impl PeerConn {
         wire_packet_size: usize,
         interval: Duration,
     ) -> u64 {
-        if self.is_closed()
-            || !self.supports_speed_routing()
-            || self
-                .speed_probe_active
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
+        if self.is_closed() {
+            return reserved_bytes;
+        }
+        let connection_info = self.get_conn_info();
+        let speed_metrics = SpeedProbeMetrics::new(
+            self.global_ctx.stats_manager().clone(),
+            connection_info.network_name.clone(),
+            self.get_peer_id(),
+            self.conn_id.to_string(),
+        );
+        if let Some(sample) = self.fresh_speed_sample(std::time::Instant::now()) {
+            speed_metrics.set_sample_age_ms(
+                sample
+                    .age(std::time::Instant::now())
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
+        }
+        if !self.supports_speed_routing() {
+            speed_metrics.record_failure("unsupported_peer");
+            return reserved_bytes;
+        }
+        if self
+            .speed_probe_active
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
         {
+            speed_metrics.record_failure("busy");
             return reserved_bytes;
         }
         let _active_guard = ActiveSpeedProbeGuard(&self.speed_probe_active);
@@ -2161,9 +2191,11 @@ impl PeerConn {
             wire_packet_size,
             PEER_MANAGER_HEADER_SIZE,
         ) else {
+            speed_metrics.record_failure("budget");
             return reserved_bytes;
         };
         if train.is_empty() {
+            speed_metrics.record_failure("budget");
             return reserved_bytes;
         }
 
@@ -2186,12 +2218,23 @@ impl PeerConn {
             let packet_len = packet.tunnel_payload().len() as u64;
             let metric_len = packet.buf_len() as u64;
             let send = tokio::time::timeout_at(send_deadline, self.sink.send(packet)).await;
-            if !matches!(send, Ok(Ok(())))
-                || !reservation.record_sent(packet_len, std::time::Instant::now())
-            {
+            match send {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    speed_metrics.record_failure("send");
+                    break;
+                }
+                Err(_) => {
+                    speed_metrics.record_failure("timeout");
+                    break;
+                }
+            }
+            if !reservation.record_sent(packet_len, std::time::Instant::now()) {
+                speed_metrics.record_failure("budget");
                 break;
             }
             self.record_control_tx(&network_name, metric_len);
+            speed_metrics.record_tx(metric_len);
         }
 
         if reservation.sent_bytes() >= (wire_packet_size as u64).saturating_mul(2) {
@@ -2210,7 +2253,12 @@ impl PeerConn {
             if let Some(ack) = acknowledgement {
                 let ttl = interval.checked_mul(3).unwrap_or(Duration::MAX);
                 self.store_speed_sample(SpeedSample::from_ack(ack, std::time::Instant::now(), ttl));
+                speed_metrics.set_sample_age_ms(0);
+            } else {
+                speed_metrics.record_failure("timeout");
             }
+        } else if reservation.sent_bytes() > 0 {
+            speed_metrics.record_failure("incomplete");
         }
 
         reservation.unused_bytes()
@@ -2459,13 +2507,15 @@ pub mod tests {
         let client_id = new_peer_id();
         let server_id = new_peer_id();
         let sessions = Arc::new(PeerSessionStore::new());
+        let client_ctx = get_mock_global_ctx();
+        let server_ctx = get_mock_global_ctx();
         let mut client = PeerConn::new(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx.clone(),
             client_tunnel,
             sessions.clone(),
         );
-        let mut server = PeerConn::new(server_id, get_mock_global_ctx(), server_tunnel, sessions);
+        let mut server = PeerConn::new(server_id, server_ctx.clone(), server_tunnel, sessions);
 
         let (client_result, server_result) = tokio::join!(
             client.do_handshake_as_client(),
@@ -2544,13 +2594,15 @@ pub mod tests {
         let client_id = new_peer_id();
         let server_id = new_peer_id();
         let sessions = Arc::new(PeerSessionStore::new());
+        let client_ctx = get_mock_global_ctx();
+        let server_ctx = get_mock_global_ctx();
         let mut client = PeerConn::new(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx.clone(),
             client_tunnel,
             sessions.clone(),
         );
-        let mut server = PeerConn::new(server_id, get_mock_global_ctx(), server_tunnel, sessions);
+        let mut server = PeerConn::new(server_id, server_ctx.clone(), server_tunnel, sessions);
         let (client_result, server_result) = tokio::join!(
             client.do_handshake_as_client(),
             server.do_handshake_as_server()
@@ -2574,6 +2626,11 @@ pub mod tests {
         assert_eq!(info.speed_probe_generation, Some(77));
         assert_eq!(info.tx_delivery_bps, Some(sample.delivery_bps));
         assert_eq!(info.tx_loss_ppm, Some(0));
+        let client_metrics = client_ctx.stats_manager().export_prometheus();
+        let server_metrics = server_ctx.stats_manager().export_prometheus();
+        assert!(client_metrics.contains("speed_probe_bytes_tx"));
+        assert!(client_metrics.contains("speed_sample_age_ms"));
+        assert!(server_metrics.contains("speed_probe_bytes_rx"));
     }
 
     #[tokio::test]

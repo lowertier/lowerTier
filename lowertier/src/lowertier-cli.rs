@@ -548,6 +548,27 @@ fn is_missing_web_client_service(error: &RpcError) -> bool {
     )
 }
 
+fn format_bitrate(bits_per_second: Option<u64>) -> String {
+    let Some(bits_per_second) = bits_per_second else {
+        return "-".to_string();
+    };
+    if bits_per_second >= 1_000_000_000 {
+        format!("{:.2} Gbit/s", bits_per_second as f64 / 1_000_000_000.0)
+    } else if bits_per_second >= 1_000_000 {
+        format!("{:.2} Mbit/s", bits_per_second as f64 / 1_000_000.0)
+    } else if bits_per_second >= 1_000 {
+        format!("{:.2} kbit/s", bits_per_second as f64 / 1_000.0)
+    } else {
+        format!("{bits_per_second} bit/s")
+    }
+}
+
+fn format_sample_age(age_ms: Option<u64>) -> String {
+    age_ms
+        .map(|age_ms| format!("{:.2}s", age_ms as f64 / 1_000.0))
+        .unwrap_or_else(|| "-".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +592,14 @@ mod tests {
         let error = RpcError::InvalidServiceKey("PeerManageRpc".to_string(), "".to_string());
 
         assert!(!is_missing_web_client_service(&error));
+    }
+
+    #[test]
+    fn speed_diagnostics_use_stable_units() {
+        assert_eq!(format_bitrate(None), "-");
+        assert_eq!(format_bitrate(Some(80_000_000)), "80.00 Mbit/s");
+        assert_eq!(format_bitrate(Some(1_500_000_000)), "1.50 Gbit/s");
+        assert_eq!(format_sample_age(Some(1_250)), "1.25s");
     }
 }
 
@@ -1317,6 +1346,10 @@ impl<'a> CommandHandler<'a> {
             lat_ms: String,
             #[tabled(rename = "loss")]
             loss_rate: String,
+            #[tabled(rename = "speed")]
+            speed: String,
+            #[tabled(rename = "sample age")]
+            speed_sample_age: String,
             #[tabled(rename = "rx")]
             rx_bytes: String,
             #[tabled(rename = "tx")]
@@ -1351,6 +1384,8 @@ impl<'a> CommandHandler<'a> {
                     cost: cost_to_str(route.cost),
                     lat_ms: format!("{:.2}", lat_ms),
                     loss_rate: format!("{:.1}%", p.get_loss_rate().unwrap_or(0.0) * 100.0),
+                    speed: format_bitrate(p.get_speed_delivery_bps()),
+                    speed_sample_age: format_sample_age(p.get_speed_sample_age_ms()),
                     rx_bytes: format_size(p.get_rx_bytes().unwrap_or(0), humansize::DECIMAL),
                     tx_bytes: format_size(p.get_tx_bytes().unwrap_or(0), humansize::DECIMAL),
                     tunnel_proto: p.get_conn_protos().unwrap_or_default().join(","),
@@ -1376,6 +1411,8 @@ impl<'a> CommandHandler<'a> {
                     cost: "Local".to_string(),
                     lat_ms: "-".to_string(),
                     loss_rate: "-".to_string(),
+                    speed: "-".to_string(),
+                    speed_sample_age: "-".to_string(),
                     rx_bytes: "-".to_string(),
                     tx_bytes: "-".to_string(),
                     tunnel_proto: "-".to_string(),
@@ -1721,6 +1758,13 @@ impl<'a> CommandHandler<'a> {
             path_len_lat_first: i32,
             path_latency_lat_first: i32,
 
+            speed_source: String,
+            speed_next_hop_ipv4: String,
+            speed_next_hop_hostname: String,
+            speed_delivery: String,
+            speed_path_len: i32,
+            speed_path_latency: i32,
+
             version: String,
         }
 
@@ -1738,6 +1782,12 @@ impl<'a> CommandHandler<'a> {
                 next_hop_hostname_lat_first: "Local".to_string(),
                 path_len_lat_first: 0,
                 path_latency_lat_first: 0,
+                speed_source: "Local".to_string(),
+                speed_next_hop_ipv4: "-".to_string(),
+                speed_next_hop_hostname: "Local".to_string(),
+                speed_delivery: "-".to_string(),
+                speed_path_len: 0,
+                speed_path_latency: 0,
                 version: data.node_info.version.clone(),
             }];
 
@@ -1755,6 +1805,15 @@ impl<'a> CommandHandler<'a> {
                             .clone()
                             .unwrap_or_default()
                             .next_hop_peer_id_latency_first
+                            .unwrap_or_default()
+                });
+
+                let next_hop_pair_speed_first = data.peer_routes.iter().find(|pair| {
+                    pair.route.clone().unwrap_or_default().peer_id
+                        == p.route
+                            .clone()
+                            .unwrap_or_default()
+                            .next_hop_peer_id_speed_first
                             .unwrap_or_default()
                 });
 
@@ -1802,6 +1861,35 @@ impl<'a> CommandHandler<'a> {
                     },
                     path_latency_lat_first: route.path_latency_latency_first.unwrap_or_default(),
                     path_len_lat_first: route.cost_latency_first.unwrap_or_default(),
+                    speed_source: if route.path_delivery_bps_speed_first.is_some() {
+                        "speed".to_string()
+                    } else if route.next_hop_peer_id_speed_first
+                        == route.next_hop_peer_id_latency_first
+                    {
+                        "latency fallback".to_string()
+                    } else {
+                        "hop fallback".to_string()
+                    },
+                    speed_next_hop_ipv4: if route.path_len_speed_first.unwrap_or_default() == 1 {
+                        "DIRECT".to_string()
+                    } else {
+                        next_hop_pair_speed_first
+                            .map(|pair| pair.route.clone().unwrap_or_default().ipv4_addr)
+                            .unwrap_or_default()
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_default()
+                    },
+                    speed_next_hop_hostname: if route.path_len_speed_first.unwrap_or_default() == 1
+                    {
+                        "DIRECT".to_string()
+                    } else {
+                        next_hop_pair_speed_first
+                            .map(|pair| pair.route.clone().unwrap_or_default().hostname)
+                            .unwrap_or_default()
+                    },
+                    speed_delivery: format_bitrate(route.path_delivery_bps_speed_first),
+                    speed_path_len: route.path_len_speed_first.unwrap_or_default(),
+                    speed_path_latency: route.path_latency_speed_first.unwrap_or_default(),
                     version: if route.version.is_empty() {
                         "unknown".to_string()
                     } else {

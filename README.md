@@ -529,6 +529,9 @@ The table includes every supported flag.
 | `enable_ipv6` | `true` | Enable overlay IPv6. | `--disable-ipv6 false` |
 | `mtu` | `1380` | Set the overlay MTU. Encryption gives the kernel interface a 1360-byte effective MTU. | `--mtu` |
 | `latency_first` | `false` | Prefer the measured low-latency route. | `--latency-first` |
+| `speed_first` | `false` | Prefer the route with the highest measured bottleneck delivery rate. | `--speed-first` |
+| `speed_probe_interval_seconds` | `30` | Set the normal interval between direct-link probe cycles. | `--speed-probe-interval-seconds` |
+| `speed_probe_budget_bps` | `0` | Limit average probe traffic across the complete node. Zero disables probes. | `--speed-probe-budget-bps` |
 | `enable_exit_node` | `false` | Permit other peers to use this node as an exit node. | `--enable-exit-node` |
 | `no_tun` | `false` | Disable local virtual-interface creation. | `--no-tun` |
 | `use_smoltcp` | `false` | Enable the userspace IP stack for proxy paths. | `--use-smoltcp` |
@@ -712,6 +715,60 @@ Use the root options to select another RPC portal or instance.
 | `acl stats` | Show ACL rule counters. |
 | `stats show` | Show general counters. |
 | `stats prometheus` | Print counters in Prometheus text format. |
+
+### Speed-first routing
+
+Speed-first routing measures each direct direction independently.
+The route from node A to node B can differ from the route from node B to node A.
+
+Enable measurement before route selection.
+This example limits average probe traffic to 1 Mbit/s across the complete node.
+
+```toml
+[flags]
+speed_first = false
+speed_probe_interval_seconds = 30
+speed_probe_budget_bps = 1000000
+```
+
+A positive budget enables measurement and reporting.
+The budget applies to all direct connections on the node.
+The token bucket can hold one complete interval of probe traffic.
+
+Inspect samples and routes before you enable selection.
+
+```bash
+lowertier-cli peer list
+lowertier-cli route list
+lowertier-cli stats prometheus
+```
+
+Set `speed_first = true` after fresh samples appear.
+Speed-first mode requires a positive probe budget.
+Speed-first mode takes priority when `latency_first` is also true.
+
+The route selector uses the widest directed path.
+It maximizes the lowest delivery rate on the path.
+It then prefers lower latency, fewer hops, and the lower next-hop peer identifier.
+
+The route fallback order is speed, latency, and hop count.
+The direct-connection fallback order is latency, configured protocol, current live connection, and connection identifier.
+Each active flow keeps one route and one direct connection until expiry or failure.
+
+Critical Ethernet control traffic continues to use latency-first routing.
+Older relays see the compatibility latency flag.
+Nodes without speed samples use the normal fallback order.
+
+The Prometheus output includes these metrics:
+
+- `speed_probe_bytes_tx` and `speed_probe_packets_tx`
+- `speed_probe_bytes_rx` and `speed_probe_packets_rx`
+- `speed_probe_failures`
+- `speed_sample_age_ms`
+- `speed_selected_path_delivery_bps`
+
+Disable `speed_first` to roll back route selection.
+Set `speed_probe_budget_bps = 0` to stop measurement.
 
 ### Runtime change commands
 
