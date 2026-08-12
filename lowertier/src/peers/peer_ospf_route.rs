@@ -3993,7 +3993,8 @@ impl Route for PeerRoute {
         dst_peer_id: PeerId,
         policy: NextHopPolicy,
     ) -> Option<PeerId> {
-        let route_table = if matches!(policy, NextHopPolicy::LeastCost) {
+        let route_table = if matches!(policy, NextHopPolicy::LeastCost | NextHopPolicy::MaxGoodput)
+        {
             &self.service_impl.route_table_with_cost
         } else {
             &self.service_impl.route_table

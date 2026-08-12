@@ -242,6 +242,7 @@ impl PeerMap {
         let policy_flow = match policy {
             NextHopPolicy::LeastHop => flow_hash,
             NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
+            NextHopPolicy::MaxGoodput => flow_hash ^ (1_u64 << 62),
         };
         if let Some(path) = self
             .flow_paths

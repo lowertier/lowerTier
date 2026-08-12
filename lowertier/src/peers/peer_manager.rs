@@ -34,7 +34,10 @@ use crate::{
     },
     peers::{
         PeerPacketFilter,
-        flow::{classify_packet_flow, split_packet_batch_by_flow_shard, stamp_packet_flow},
+        flow::{
+            classify_packet_flow, is_critical_l2_control, split_packet_batch_by_flow_shard,
+            stamp_packet_flow,
+        },
         l2_fabric::{EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch},
         peer_conn::PeerConn,
         peer_rpc::PeerRpcManagerTransport,
@@ -90,6 +93,41 @@ fn check_tunnel_info_underlay(
         anyhow::bail!("local underlay address {local} matches denied CIDR {rule}");
     }
     Ok(())
+}
+
+pub(crate) fn packet_supports_speed_first(packet: &ZCPacket) -> bool {
+    let Some(header) = packet.peer_manager_header() else {
+        return false;
+    };
+    if header.packet_type == PacketType::Ethernet as u8
+        && (header.is_critical_l2_control() || is_critical_l2_control(packet.payload()))
+    {
+        return false;
+    }
+    matches!(
+        header.packet_type,
+        packet_type
+            if packet_type == PacketType::Data as u8
+                || packet_type == PacketType::ForeignNetworkPacket as u8
+                || packet_type == PacketType::KcpSrc as u8
+                || packet_type == PacketType::KcpDst as u8
+                || packet_type == PacketType::QuicSrc as u8
+                || packet_type == PacketType::QuicDst as u8
+                || packet_type == PacketType::DataWithKcpSrcModified as u8
+                || packet_type == PacketType::DataWithQuicSrcModified as u8
+                || packet_type == PacketType::Ethernet as u8
+                || packet_type == PacketType::AlternateFecSource as u8
+                || packet_type == PacketType::AlternateFecParity as u8
+    )
+}
+
+fn apply_local_route_policy(packet: &mut ZCPacket, speed_first: bool, latency_first: bool) {
+    let use_speed = speed_first && packet_supports_speed_first(packet);
+    let header = packet.mut_peer_manager_header().unwrap();
+    header.set_speed_first(use_speed);
+    if !use_speed {
+        header.set_latency_first(latency_first || speed_first);
+    }
 }
 
 use super::{
@@ -1627,7 +1665,7 @@ impl PeerManager {
                                     ?header,
                                     "set_latency_first false because too many hop"
                                 );
-                                header.set_latency_first(false);
+                                header.set_speed_first(false).set_latency_first(false);
                             }
 
                             header.forward_counter += 1;
@@ -2184,8 +2222,20 @@ impl PeerManager {
         }
     }
 
-    fn get_next_hop_policy(is_first_latency: bool) -> NextHopPolicy {
-        if is_first_latency {
+    fn get_next_hop_policy(header: &crate::tunnel::packet_def::PeerManagerHeader) -> NextHopPolicy {
+        if header.is_speed_first() {
+            NextHopPolicy::MaxGoodput
+        } else if header.is_latency_first() {
+            NextHopPolicy::LeastCost
+        } else {
+            NextHopPolicy::LeastHop
+        }
+    }
+
+    fn get_local_data_policy(&self) -> NextHopPolicy {
+        if self.global_ctx.speed_first() {
+            NextHopPolicy::MaxGoodput
+        } else if self.global_ctx.latency_first() {
             NextHopPolicy::LeastCost
         } else {
             NextHopPolicy::LeastHop
@@ -2216,6 +2266,12 @@ impl PeerManager {
         self.self_tx_counters
             .compress_tx_bytes_after
             .add(msg.buf_len() as u64);
+
+        apply_local_route_policy(
+            &mut msg,
+            self.global_ctx.speed_first(),
+            self.global_ctx.latency_first(),
+        );
 
         let msg_len = msg.buf_len() as u64;
         let result = Self::send_msg_internal(
@@ -2317,9 +2373,11 @@ impl PeerManager {
             .compress_tx_bytes_after
             .add(msg.buf_len() as u64);
 
-        msg.mut_peer_manager_header()
-            .unwrap()
-            .set_latency_first(self.global_ctx.latency_first());
+        apply_local_route_policy(
+            &mut msg,
+            self.global_ctx.speed_first(),
+            self.global_ctx.latency_first(),
+        );
 
         let mut errors = Vec::new();
         let total_dst_peers = dst_peers.len();
@@ -2407,6 +2465,7 @@ impl PeerManager {
         let mut errors = Vec::new();
         let mut flood_peers: Option<Vec<PeerId>> = None;
         let latency_first = self.global_ctx.latency_first();
+        let speed_first = self.global_ctx.speed_first();
         let fdb_batch_time = std::time::Instant::now();
         let mut destination_batch = L2DestinationBatch::default();
 
@@ -2431,9 +2490,7 @@ impl PeerManager {
 
             let overridden_dst = msg.peer_manager_header().unwrap().to_peer_id.get();
             if overridden_dst != 0 {
-                msg.mut_peer_manager_header()
-                    .unwrap()
-                    .set_latency_first(latency_first);
+                apply_local_route_policy(msg, speed_first, latency_first);
                 push_ordered_peer_batch(&mut per_peer_batches, overridden_dst, packet, true);
                 continue;
             }
@@ -2462,9 +2519,7 @@ impl PeerManager {
                 }
             };
 
-            msg.mut_peer_manager_header()
-                .unwrap()
-                .set_latency_first(latency_first);
+            apply_local_route_policy(msg, speed_first, latency_first);
 
             let total_dst_peers = dst_peers.len();
             let mut msg = Some(packet);
@@ -2727,8 +2782,7 @@ impl PeerManager {
         msg: ZCPacket,
         dst_peer_id: PeerId,
     ) -> Result<(), Error> {
-        let policy =
-            Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first());
+        let policy = Self::get_next_hop_policy(msg.peer_manager_header().unwrap());
         let is_latency_first = msg.peer_manager_header().unwrap().is_latency_first();
         let packet_type = msg.peer_manager_header().unwrap().packet_type;
         if !Self::credential_ethernet_peer_is_allowed(peers, packet_type, dst_peer_id).await {
@@ -2801,7 +2855,7 @@ impl PeerManager {
             tracing::warn!(dst_peer_id, "block suppressed credential ethernet peer");
             return Err(Error::RouteError(None));
         }
-        let policy = Self::get_next_hop_policy(is_latency_first);
+        let policy = Self::get_next_hop_policy(header);
         let bytes = batch.buffer_byte_len() as u64;
         let packets = batch.len() as u64;
         let latency_first_gateway = if is_latency_first {
@@ -3031,15 +3085,13 @@ impl PeerManager {
         }
 
         let latency_first = self.global_ctx.latency_first();
+        let speed_first = self.global_ctx.speed_first();
         let mut route_cache: SmallVec<[(IpAddr, Vec<PeerId>, bool); 4]> = SmallVec::new();
         let mut peer_batches = OrderedPeerBatches::new();
 
         for mut packet in batch {
             let overridden_peer = packet.peer_manager_header().unwrap().to_peer_id.get();
-            packet
-                .mut_peer_manager_header()
-                .unwrap()
-                .set_latency_first(latency_first);
+            apply_local_route_policy(&mut packet, speed_first, latency_first);
             if overridden_peer != 0 {
                 push_ordered_peer_batch(&mut peer_batches, overridden_peer, packet, true);
                 continue;
@@ -3121,6 +3173,11 @@ impl PeerManager {
         if !self.run_nic_packet_process_pipeline(&mut msg).await {
             return Ok(());
         }
+        apply_local_route_policy(
+            &mut msg,
+            self.global_ctx.speed_first(),
+            self.global_ctx.latency_first(),
+        );
         let cur_to_peer_id = msg.peer_manager_header().unwrap().to_peer_id.into();
         if cur_to_peer_id != 0 {
             self.mark_recent_traffic(cur_to_peer_id);
@@ -3155,10 +3212,8 @@ impl PeerManager {
             .compress_tx_bytes_after
             .add(msg.buf_len() as u64);
 
-        let is_latency_first = self.global_ctx.latency_first();
         msg.mut_peer_manager_header()
             .unwrap()
-            .set_latency_first(is_latency_first)
             .set_exit_node(is_exit_node);
 
         let mut errs: Vec<Error> = vec![];
@@ -3530,7 +3585,7 @@ impl PeerManager {
             return false;
         }
 
-        let next_hop_policy = Self::get_next_hop_policy(self.global_ctx.get_flags().latency_first);
+        let next_hop_policy = self.get_local_data_policy();
         // check relay node allow relay kcp.
         let Some(next_hop_id) = route
             .get_next_hop_with_policy(dst_peer_id, next_hop_policy)
@@ -3578,7 +3633,7 @@ impl PeerManager {
             return false;
         }
 
-        let next_hop_policy = Self::get_next_hop_policy(self.global_ctx.get_flags().latency_first);
+        let next_hop_policy = self.get_local_data_policy();
         // check relay node allow relay quic.
         let Some(next_hop_id) = route
             .get_next_hop_with_policy(dst_peer_id, next_hop_policy)
@@ -3668,10 +3723,92 @@ mod tests {
     };
 
     use super::{
-        DirectNicBatchWriter, PeerManager, check_tunnel_info_underlay,
+        DirectNicBatchWriter, PeerManager, apply_local_route_policy, check_tunnel_info_underlay,
         decoded_local_nic_batch_source, is_foreign_network_packet_type,
-        packet_batch_contains_peer_rpc, prepare_direct_nic_batch, prepare_packet_batch,
+        packet_batch_contains_peer_rpc, packet_supports_speed_first, prepare_direct_nic_batch,
+        prepare_packet_batch,
     };
+
+    #[test]
+    fn speed_first_allowlist_contains_only_data_packets() {
+        for packet_type in [
+            PacketType::Data,
+            PacketType::ForeignNetworkPacket,
+            PacketType::KcpSrc,
+            PacketType::KcpDst,
+            PacketType::QuicSrc,
+            PacketType::QuicDst,
+            PacketType::DataWithKcpSrcModified,
+            PacketType::DataWithQuicSrcModified,
+            PacketType::Ethernet,
+            PacketType::AlternateFecSource,
+            PacketType::AlternateFecParity,
+        ] {
+            let mut packet = ZCPacket::new_with_payload(b"data");
+            packet.fill_peer_manager_hdr(1, 2, packet_type as u8);
+            assert!(packet_supports_speed_first(&packet), "{packet_type:?}");
+        }
+
+        for packet_type in [
+            PacketType::HandShake,
+            PacketType::Ping,
+            PacketType::Pong,
+            PacketType::RpcReq,
+            PacketType::RpcResp,
+            PacketType::RelayHandshake,
+            PacketType::RelayHandshakeAck,
+        ] {
+            let mut packet = ZCPacket::new_with_payload(b"control");
+            packet.fill_peer_manager_hdr(1, 2, packet_type as u8);
+            assert!(!packet_supports_speed_first(&packet), "{packet_type:?}");
+        }
+    }
+
+    #[test]
+    fn critical_ethernet_does_not_use_speed_first() {
+        let mut packet = ZCPacket::new_with_payload(b"control");
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_critical_l2_control(true);
+
+        assert!(!packet_supports_speed_first(&packet));
+    }
+
+    #[test]
+    fn speed_first_policy_precedes_the_compatibility_latency_flag() {
+        let mut packet = ZCPacket::new_with_payload(b"data");
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_speed_first(true);
+
+        assert_eq!(
+            PeerManager::get_next_hop_policy(packet.peer_manager_header().unwrap()),
+            NextHopPolicy::MaxGoodput
+        );
+    }
+
+    #[test]
+    fn speed_mode_keeps_control_packets_on_latency_policy() {
+        let mut data = ZCPacket::new_with_payload(b"data");
+        data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        apply_local_route_policy(&mut data, true, false);
+        assert!(data.peer_manager_header().unwrap().is_speed_first());
+
+        let mut control = ZCPacket::new_with_payload(b"control");
+        control.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+        apply_local_route_policy(&mut control, true, false);
+        let header = control.peer_manager_header().unwrap();
+        assert!(!header.is_speed_first());
+        assert!(header.is_latency_first());
+        assert_eq!(
+            PeerManager::get_next_hop_policy(header),
+            NextHopPolicy::LeastCost
+        );
+    }
 
     #[test]
     fn direct_nic_writer_exposes_the_installed_endpoint() {

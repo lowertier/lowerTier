@@ -19,11 +19,12 @@ use crate::{
     },
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum NextHopPolicy {
     #[default]
     LeastHop,
     LeastCost,
+    MaxGoodput,
 }
 
 pub type ForeignNetworkRouteInfoMap =

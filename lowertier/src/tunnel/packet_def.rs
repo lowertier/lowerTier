@@ -96,6 +96,8 @@ pub enum PacketType {
     Ethernet = 22,
     AlternateFecSource = 23,
     AlternateFecParity = 24,
+    SpeedProbe = 25,
+    SpeedProbeAck = 26,
 
     // used internally,
     DataWithKcpSrcModified = 18,
@@ -109,8 +111,7 @@ bitflags::bitflags! {
         const EXIT_NODE = 0b0000_0100;
         const NO_PROXY = 0b0000_1000;
         const COMPRESSED = 0b0001_0000;
-        // deprecated flags, can be reused.
-        // const KCP_SRC_MODIFIED = 0b0010_0000;
+        const SPEED_FIRST = 0b0010_0000;
         // const QUIC_SRC_MODIFIED = 0b1000_0000;
         const NOT_SEND_TO_TUN = 0b0100_0000;
 
@@ -189,6 +190,12 @@ impl PeerManagerHeader {
             .contains(PeerManagerHeaderFlags::LATENCY_FIRST)
     }
 
+    pub fn is_speed_first(&self) -> bool {
+        PeerManagerHeaderFlags::from_bits(self.flags)
+            .unwrap()
+            .contains(PeerManagerHeaderFlags::SPEED_FIRST)
+    }
+
     pub fn is_exit_node(&self) -> bool {
         PeerManagerHeaderFlags::from_bits(self.flags)
             .unwrap()
@@ -213,6 +220,19 @@ impl PeerManagerHeader {
             flags.insert(PeerManagerHeaderFlags::LATENCY_FIRST);
         } else {
             flags.remove(PeerManagerHeaderFlags::LATENCY_FIRST);
+        }
+        self.flags = flags.bits();
+        self
+    }
+
+    pub fn set_speed_first(&mut self, speed_first: bool) -> &mut Self {
+        let mut flags = PeerManagerHeaderFlags::from_bits(self.flags).unwrap();
+        if speed_first {
+            flags.insert(
+                PeerManagerHeaderFlags::SPEED_FIRST | PeerManagerHeaderFlags::LATENCY_FIRST,
+            );
+        } else {
+            flags.remove(PeerManagerHeaderFlags::SPEED_FIRST);
         }
         self.flags = flags.bits();
         self
@@ -1214,6 +1234,21 @@ mod tests {
         assert!(!header.is_critical_l2_control());
         assert_eq!(header.flow_shard(), None);
         assert_eq!(header.len.get(), 99);
+    }
+
+    #[test]
+    fn speed_first_flag_preserves_old_relay_compatibility() {
+        let mut header = PeerManagerHeader::default();
+
+        header.set_speed_first(true);
+
+        assert!(header.is_speed_first());
+        assert!(header.is_latency_first());
+
+        header.set_speed_first(false);
+
+        assert!(!header.is_speed_first());
+        assert!(header.is_latency_first());
     }
 
     #[test]

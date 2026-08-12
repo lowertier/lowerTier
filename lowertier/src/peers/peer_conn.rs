@@ -187,6 +187,8 @@ impl LegacyNetworkTunnelFilter {
                 || value == PacketType::QuicDst as u8
                 || value == PacketType::AlternateFecSource as u8
                 || value == PacketType::AlternateFecParity as u8
+                || value == PacketType::SpeedProbe as u8
+                || value == PacketType::SpeedProbeAck as u8
         )
     }
 
