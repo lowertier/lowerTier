@@ -751,6 +751,14 @@ The route selector uses the widest directed path.
 It maximizes the lowest delivery rate on the path.
 It then prefers lower latency, fewer hops, and the lower next-hop peer identifier.
 
+The speed route builder keeps one label for each node.
+A higher bottleneck replaces a lower bottleneck label.
+Equal bottlenecks use cumulative latency, hop count, and first-hop peer ID.
+This gives one directed widest-path pass with O(E log V) work.
+The secondary latency choice is deterministic, but it is not a global
+constrained-shortest-path guarantee when a later edge lowers two paths to the
+same final bottleneck.
+
 The route fallback order is speed, latency, and hop count.
 The direct-connection fallback order is latency, configured protocol, current live connection, and connection identifier.
 Each active flow keeps one route and one direct connection until expiry or failure.
