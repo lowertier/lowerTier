@@ -34,6 +34,10 @@ impl AesGcmCipher {
 
 impl Encryptor for AesGcmCipher {
     fn decrypt(&self, zc_packet: &mut ZCPacket) -> Result<(), Error> {
+        self.decrypt_with_aad(zc_packet, &[])
+    }
+
+    fn decrypt_with_aad(&self, zc_packet: &mut ZCPacket, aad: &[u8]) -> Result<(), Error> {
         let pm_header = zc_packet.peer_manager_header().unwrap();
         if !pm_header.is_encrypted() {
             return Ok(());
@@ -56,14 +60,14 @@ impl Encryptor for AesGcmCipher {
         let rs = match &self.cipher {
             AesGcmEnum::AES128GCM(aes_gcm) => aes_gcm.decrypt_in_place_detached(
                 &nonce,
-                &[],
-                &mut zc_packet.mut_payload()[..text_len],
+                aad,
+                &mut zc_packet.mut_payload_preserving_flow_hash()[..text_len],
                 &tag,
             ),
             AesGcmEnum::AES256GCM(aes_gcm) => aes_gcm.decrypt_in_place_detached(
                 &nonce,
-                &[],
-                &mut zc_packet.mut_payload()[..text_len],
+                aad,
+                &mut zc_packet.mut_payload_preserving_flow_hash()[..text_len],
                 &tag,
             ),
         };
@@ -77,19 +81,28 @@ impl Encryptor for AesGcmCipher {
         pm_header.set_encrypted(false);
         let old_len = zc_packet.buf_len();
         zc_packet
-            .mut_inner()
+            .mut_inner_preserving_flow_hash()
             .truncate(old_len - StandardAeadTail::SIZE);
         Ok(())
     }
 
     fn encrypt(&self, zc_packet: &mut ZCPacket) -> Result<(), Error> {
-        self.encrypt_with_nonce(zc_packet, None)
+        self.encrypt_with_nonce_and_aad(zc_packet, None, &[])
     }
 
     fn encrypt_with_nonce(
         &self,
         zc_packet: &mut ZCPacket,
         nonce: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        self.encrypt_with_nonce_and_aad(zc_packet, nonce, &[])
+    }
+
+    fn encrypt_with_nonce_and_aad(
+        &self,
+        zc_packet: &mut ZCPacket,
+        nonce: Option<&[u8]>,
+        aad: &[u8],
     ) -> Result<(), Error> {
         let pm_header = zc_packet.peer_manager_header().unwrap();
         if pm_header.is_encrypted() {
@@ -109,14 +122,22 @@ impl Encryptor for AesGcmCipher {
             AesGcmEnum::AES128GCM(aes_gcm) => {
                 let nonce = nonce.unwrap_or_else(|| Aes128Gcm::generate_nonce(&mut OsRng));
                 (
-                    aes_gcm.encrypt_in_place_detached(&nonce, &[], zc_packet.mut_payload()),
+                    aes_gcm.encrypt_in_place_detached(
+                        &nonce,
+                        aad,
+                        zc_packet.mut_payload_preserving_flow_hash(),
+                    ),
                     nonce,
                 )
             }
             AesGcmEnum::AES256GCM(aes_gcm) => {
                 let nonce = nonce.unwrap_or_else(|| Aes256Gcm::generate_nonce(&mut OsRng));
                 (
-                    aes_gcm.encrypt_in_place_detached(&nonce, &[], zc_packet.mut_payload()),
+                    aes_gcm.encrypt_in_place_detached(
+                        &nonce,
+                        aad,
+                        zc_packet.mut_payload_preserving_flow_hash(),
+                    ),
                     nonce,
                 )
             }
@@ -129,7 +150,9 @@ impl Encryptor for AesGcmCipher {
 
         let pm_header = zc_packet.mut_peer_manager_header().unwrap();
         pm_header.set_encrypted(true);
-        zc_packet.mut_inner().extend_from_slice(tail.as_bytes());
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .extend_from_slice(tail.as_bytes());
         Ok(())
     }
 }

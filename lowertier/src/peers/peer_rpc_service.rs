@@ -1,7 +1,16 @@
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+
+use dashmap::DashMap;
 
 use crate::{
-    common::{global_ctx::ArcGlobalCtx, network::IPCollector, underlay_policy::UnderlayPolicy},
+    common::{
+        PeerId, global_ctx::ArcGlobalCtx, network::IPCollector, token_bucket::TokenBucket,
+        underlay_policy::UnderlayPolicy,
+    },
     proto::{
         common::Void,
         peer_rpc::{
@@ -13,6 +22,9 @@ use crate::{
 };
 
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
+const MAX_FOREIGN_RELAY_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 4;
+const FOREIGN_RELAY_HOLE_PUNCH_BUCKET_CAPACITY: u64 = 4;
+const FOREIGN_RELAY_HOLE_PUNCH_BUCKET_RATE: u64 = 4;
 
 fn filter_denied_advertisements(ret: &mut GetIpListResponse, policy: &UnderlayPolicy) {
     ret.interface_ipv4s
@@ -113,9 +125,11 @@ async fn local_preferred_src_ipv6(
     None
 }
 
-fn connector_addrs_from_request(
+fn connector_addrs_from_request_with_limit(
     req: SendUdpHolePunchPacketRequest,
     underlay_policy: &UnderlayPolicy,
+    max_connector_addrs: usize,
+    global_ctx: Option<&ArcGlobalCtx>,
 ) -> rpc_types::error::Result<(u16, Vec<SocketAddr>, Option<crate::proto::common::Ipv6Addr>)> {
     let listener_port = u16::try_from(req.listener_port)
         .map_err(|_| anyhow::anyhow!("listener_port is out of range: {}", req.listener_port))?;
@@ -139,10 +153,18 @@ fn connector_addrs_from_request(
             tracing::debug!(?addr, "underlay policy removed UDP hole-punch destination");
             continue;
         }
+        if global_ctx.is_some_and(|global_ctx| !is_safe_foreign_relay_destination(addr, global_ctx))
+        {
+            tracing::debug!(
+                ?addr,
+                "foreign relay rejected unsafe UDP hole-punch destination"
+            );
+            continue;
+        }
         if !deduped.contains(&addr) {
             deduped.push(addr);
         }
-        if deduped.len() >= MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS {
+        if deduped.len() >= max_connector_addrs {
             break;
         }
     }
@@ -156,10 +178,36 @@ fn connector_addrs_from_request(
     Ok((listener_port, deduped, req.preferred_src_ipv6))
 }
 
+fn connector_addrs_from_request(
+    req: SendUdpHolePunchPacketRequest,
+    underlay_policy: &UnderlayPolicy,
+) -> rpc_types::error::Result<(u16, Vec<SocketAddr>, Option<crate::proto::common::Ipv6Addr>)> {
+    connector_addrs_from_request_with_limit(
+        req,
+        underlay_policy,
+        MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS,
+        None,
+    )
+}
+
+fn is_safe_foreign_relay_destination(addr: SocketAddr, global_ctx: &ArcGlobalCtx) -> bool {
+    match addr.ip() {
+        IpAddr::V4(ip) => {
+            !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast() && !ip.is_broadcast()
+        }
+        IpAddr::V6(ip) => {
+            !ip.is_unspecified()
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && !global_ctx.is_ip_lowertier_managed_ipv6(&ip)
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DirectConnectorManagerRpcServer {
-    // TODO: this only cache for one src peer, should make it global
     global_ctx: ArcGlobalCtx,
+    foreign_relay_rate_limiters: Arc<DashMap<PeerId, Arc<TokenBucket>>>,
 }
 
 #[async_trait::async_trait]
@@ -193,11 +241,45 @@ impl DirectConnectorRpc for DirectConnectorManagerRpcServer {
 
     async fn send_udp_hole_punch_packet(
         &self,
-        _: BaseController,
+        ctrl: BaseController,
         req: SendUdpHolePunchPacketRequest,
     ) -> rpc_types::error::Result<Void> {
+        let foreign_relay_peer_id = if ctrl.authenticated_peer_identity_type
+            == Some(crate::proto::peer_rpc::PeerIdentityType::ForeignRelay)
+        {
+            match ctrl.authenticated_peer_id.filter(|peer_id| *peer_id != 0) {
+                Some(peer_id) => Some(peer_id),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "foreign relay hole-punch request has no authenticated peer"
+                    )
+                    .into());
+                }
+            }
+        } else {
+            None
+        };
+
         let (listener_port, connector_addrs, preferred_src_ipv6) =
-            connector_addrs_from_request(req, &self.global_ctx.get_underlay_policy())?;
+            connector_addrs_from_request_with_limit(
+                req,
+                &self.global_ctx.get_underlay_policy(),
+                if foreign_relay_peer_id.is_some() {
+                    MAX_FOREIGN_RELAY_HOLE_PUNCH_CONNECTOR_ADDRS
+                } else {
+                    MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS
+                },
+                foreign_relay_peer_id.map(|_| &self.global_ctx),
+            )?;
+
+        if let Some(peer_id) = foreign_relay_peer_id {
+            if !self.try_consume_foreign_relay_hole_punch(peer_id) {
+                return Err(anyhow::anyhow!(
+                    "foreign relay hole-punch request rate limit exceeded"
+                )
+                .into());
+            }
+        }
         let preferred_src_ipv6 =
             local_preferred_src_ipv6(&self.global_ctx, preferred_src_ipv6).await;
 
@@ -236,8 +318,26 @@ impl DirectConnectorRpc for DirectConnectorManagerRpcServer {
 }
 
 impl DirectConnectorManagerRpcServer {
+    fn try_consume_foreign_relay_hole_punch(&self, peer_id: PeerId) -> bool {
+        let limiter = self
+            .foreign_relay_rate_limiters
+            .entry(peer_id)
+            .or_insert_with(|| {
+                TokenBucket::new(
+                    FOREIGN_RELAY_HOLE_PUNCH_BUCKET_CAPACITY,
+                    FOREIGN_RELAY_HOLE_PUNCH_BUCKET_RATE,
+                    Duration::from_secs(1),
+                )
+            })
+            .clone();
+        limiter.try_consume(1)
+    }
+
     pub fn new(global_ctx: ArcGlobalCtx) -> Self {
-        Self { global_ctx }
+        Self {
+            global_ctx,
+            foreign_relay_rate_limiters: Arc::new(DashMap::new()),
+        }
     }
 }
 
@@ -245,12 +345,15 @@ impl DirectConnectorManagerRpcServer {
 mod tests {
     use std::{collections::BTreeSet, net::SocketAddr};
 
+    use super::{
+        DirectConnectorManagerRpcServer, FOREIGN_RELAY_HOLE_PUNCH_BUCKET_CAPACITY,
+        MAX_FOREIGN_RELAY_HOLE_PUNCH_CONNECTOR_ADDRS, connector_addrs_from_request,
+        connector_addrs_from_request_with_limit, filter_denied_advertisements,
+        remove_lowertier_managed_ipv6s,
+    };
+
     use crate::{
         common::{global_ctx::tests::get_mock_global_ctx, underlay_policy::UnderlayPolicy},
-        peers::peer_rpc_service::{
-            connector_addrs_from_request, filter_denied_advertisements,
-            remove_lowertier_managed_ipv6s,
-        },
         proto::peer_rpc::{GetIpListResponse, SendUdpHolePunchPacketRequest},
     };
 
@@ -391,5 +494,77 @@ mod tests {
         let result = connector_addrs_from_request(request(vec![denied]), &policy);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("underlay"));
+    }
+
+    #[test]
+    fn foreign_relay_hole_punch_rejects_special_and_managed_destinations() {
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.set_ipv6(Some("fd00::1/64".parse().unwrap()));
+        let addresses = [
+            "0.0.0.0:11010",
+            "127.0.0.1:11010",
+            "224.0.0.1:11010",
+            "255.255.255.255:11010",
+            "[::]:11010",
+            "[::1]:11010",
+            "[ff02::1]:11010",
+            "[fd00::1]:11010",
+            "192.0.2.10:11010",
+        ]
+        .into_iter()
+        .map(|addr| addr.parse().unwrap())
+        .collect::<Vec<SocketAddr>>();
+        let request = SendUdpHolePunchPacketRequest {
+            connector_addr: None,
+            listener_port: 11010,
+            preferred_src_ipv6: None,
+            connector_addrs: addresses.into_iter().map(Into::into).collect(),
+        };
+
+        let (_, destinations, _) = connector_addrs_from_request_with_limit(
+            request,
+            &UnderlayPolicy::default(),
+            MAX_FOREIGN_RELAY_HOLE_PUNCH_CONNECTOR_ADDRS,
+            Some(&global_ctx),
+        )
+        .unwrap();
+
+        assert_eq!(destinations, ["192.0.2.10:11010".parse().unwrap()]);
+    }
+
+    #[test]
+    fn foreign_relay_hole_punch_limits_destinations_to_four() {
+        let addresses = (1..=6)
+            .map(|octet| format!("192.0.2.{octet}:11010").parse().unwrap())
+            .collect::<Vec<SocketAddr>>();
+        let request = SendUdpHolePunchPacketRequest {
+            connector_addr: None,
+            listener_port: 11010,
+            preferred_src_ipv6: None,
+            connector_addrs: addresses.into_iter().map(Into::into).collect(),
+        };
+
+        let (_, destinations, _) = connector_addrs_from_request_with_limit(
+            request,
+            &UnderlayPolicy::default(),
+            MAX_FOREIGN_RELAY_HOLE_PUNCH_CONNECTOR_ADDRS,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            destinations.len(),
+            MAX_FOREIGN_RELAY_HOLE_PUNCH_CONNECTOR_ADDRS
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_relay_hole_punch_rate_limit_is_peer_scoped() {
+        let server = DirectConnectorManagerRpcServer::new(get_mock_global_ctx());
+        for _ in 0..FOREIGN_RELAY_HOLE_PUNCH_BUCKET_CAPACITY {
+            assert!(server.try_consume_foreign_relay_hole_punch(17));
+        }
+        assert!(!server.try_consume_foreign_relay_hole_punch(17));
+        assert!(server.try_consume_foreign_relay_hole_punch(18));
     }
 }

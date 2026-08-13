@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 pub(crate) const PROBE_HEADER_SIZE: usize = 32;
+pub(crate) const MAX_SPEED_SAMPLE_TTL: Duration = Duration::from_secs(15 * 60);
 const PROBE_ACK_SIZE: usize = 40;
 const MAX_PROBE_PACKETS: u32 = 65_536;
 const PROBE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -8,6 +9,13 @@ const PROBE_MARKER_TIMEOUT: Duration = Duration::from_secs(1);
 const PROBE_INCOMPLETE_TIMEOUT: Duration = Duration::from_secs(2);
 const BITS_PER_BYTE: u128 = 8;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+pub(crate) fn speed_sample_ttl(interval: Duration) -> Duration {
+    interval
+        .checked_mul(3)
+        .unwrap_or(MAX_SPEED_SAMPLE_TTL)
+        .min(MAX_SPEED_SAMPLE_TTL)
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum ProbeError {
@@ -519,8 +527,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ProbeAck, ProbeBudget, ProbeData, ProbeReceiver, ProbeReservation, SpeedSample,
-        build_probe_train, split_cycle_budget,
+        MAX_SPEED_SAMPLE_TTL, ProbeAck, ProbeBudget, ProbeData, ProbeReceiver, ProbeReservation,
+        SpeedSample, build_probe_train, speed_sample_ttl, split_cycle_budget,
     };
 
     #[test]
@@ -673,6 +681,22 @@ mod tests {
             Duration::from_secs(90),
         );
         assert_eq!(one_packet.delivery_bps, 0);
+    }
+
+    #[test]
+    fn sample_ttl_is_three_intervals_and_never_exceeds_protocol_bound() {
+        assert_eq!(
+            speed_sample_ttl(Duration::from_secs(30)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            speed_sample_ttl(Duration::from_secs(300)),
+            MAX_SPEED_SAMPLE_TTL
+        );
+        assert_eq!(
+            speed_sample_ttl(Duration::from_secs(301)),
+            MAX_SPEED_SAMPLE_TTL
+        );
     }
 
     #[test]

@@ -12,11 +12,87 @@ message TrustedCredentialPubkey {
   int64 expiry_unix = 4;        // expiry time (Unix timestamp)
   repeated string allowed_proxy_cidrs = 5; // allowed proxy_cidrs ranges
   optional bool reusable = 6;   // whether multiple peers may use the same credential concurrently
+  uint32 credential_version = 7;
+  // Deprecated. New credentials use certificate_id.
+  uint64 serial = 8 [deprecated = true];
+  string network_name = 9;
+  bytes root_public_key = 10;
+  bytes root_fingerprint = 11;
+  string role = 12;
+  bytes certificate_signature = 13;
+  CredentialCertificate certificate = 14;
+  bytes certificate_id = 15;
 }
 
 message TrustedCredentialPubkeyProof {
   TrustedCredentialPubkey credential = 1;
   bytes credential_hmac = 2;
+}
+
+// Fields in this certificate are signed in protobuf field order.
+message CredentialCertificate {
+  uint32 version = 1;
+  string network_name = 2;
+  bytes root_public_key = 3;
+  bytes root_fingerprint = 4;
+  bytes subject_x25519_public_key = 5;
+  // Deprecated. New credentials use certificate_id.
+  uint64 serial = 6 [deprecated = true];
+  int64 issued_unix = 7;
+  int64 expiry_unix = 8;
+  string role = 9;
+  repeated string groups = 10;
+  bool allow_relay = 11;
+  repeated string allowed_proxy_cidrs = 12;
+  bool reusable = 13;
+  bytes signature = 14;
+  bytes certificate_id = 15;
+}
+
+message CredentialBundle {
+  uint32 version = 1;
+  bytes x25519_private_key = 2;
+  string network_name = 3;
+  bytes root_public_key = 4;
+  bytes root_fingerprint = 5;
+  // Deprecated. New credentials use certificate_id.
+  uint64 serial = 6 [deprecated = true];
+  CredentialCertificate certificate = 7;
+  int64 issued_unix = 8;
+  int64 expiry_unix = 9;
+  string role = 10;
+  repeated string groups = 11;
+  bool allow_relay = 12;
+  repeated string allowed_proxy_cidrs = 13;
+  bool reusable = 14;
+  bytes certificate_id = 15;
+}
+
+message CredentialRevocationState {
+  uint32 version = 1;
+  string network_name = 2;
+  bytes root_public_key = 3;
+  bytes root_fingerprint = 4;
+  uint64 state_version = 5;
+  // Deprecated. New states use revoked_certificate_ids.
+  repeated uint64 revoked_serials = 6 [deprecated = true];
+  int64 issued_unix = 7;
+  bytes signature = 8;
+  repeated bytes revoked_certificate_ids = 9;
+}
+
+// A short-lived root-signed status assertion for one certificate.
+message CredentialCertificateStatus {
+  uint32 version = 1;
+  string network_name = 2;
+  bytes root_fingerprint = 3;
+  bytes certificate_id = 4;
+  uint64 sequence = 5;
+  int64 issued_unix = 6;
+  int64 not_after_unix = 7;
+  bool revoked = 8;
+  bytes signature = 9;
+  bytes root_public_key = 10;
 }
 
 message RoutePeerInfo {
@@ -52,6 +128,12 @@ message RoutePeerInfo {
   optional common.Ipv6Inet ipv6_public_addr_lease = 24;
   // Each item contains one IPv4 or IPv6 multicast address in network order.
   repeated bytes multicast_groups = 25;
+  PeerIdentityType identity_type = 26;
+
+  // HMAC proof for an Admin node that can receive complete Ethernet frames.
+  bytes bridge_attestation_hmac = 27;
+  uint64 bridge_attestation_issued_unix_ms = 28;
+  uint64 bridge_attestation_expiry_unix_ms = 29;
 }
 
 message PeerIdVersion {
@@ -85,6 +167,7 @@ message ForeignNetworkRouteInfoEntry {
   uint32 version = 3;
   bytes network_secret_digest = 4;
   uint32 my_peer_id_for_this_network = 5;
+  bytes owner_noise_static_pubkey = 6;
 }
 
 message RouteForeignNetworkInfos {
@@ -314,6 +397,17 @@ message GetGlobalPeerMapRequest { uint64 digest = 1; }
 message GetGlobalPeerMapResponse {
   map<uint32, PeerInfoForGlobalMap> global_peer_map = 1;
   optional uint64 digest = 2;
+  repeated PeerCenterSourceDelta deltas = 3;
+  bool full_snapshot = 4;
+  uint64 snapshot_residence_age_ms = 5;
+}
+
+message PeerCenterSourceDelta {
+  uint64 generation = 1;
+  uint32 source_peer_id = 2;
+  PeerInfoForGlobalMap peer_info = 3;
+  bool removed = 4;
+  uint64 residence_age_ms = 5;
 }
 
 service PeerCenterRpc {
@@ -344,9 +438,19 @@ enum SecureAuthLevel {
 }
 
 enum PeerIdentityType {
+  // Same-network administrator with network-secret authority.
   Admin = 0;
+  // Credential peer with an administrator-issued credential.
   Credential = 1;
+  // Authenticated peer without administrative authority.
   SharedNode = 2;
+  // Authenticated foreign-scope relay without local authority.
+  ForeignRelay = 3;
+}
+
+enum PeerConnDataProtectionPb {
+  SessionAead = 0;
+  QuicExporter = 1;
 }
 
 enum PeerConnSessionActionPb {
@@ -361,6 +465,27 @@ message PeerConnNoiseMsg1Pb {
   optional uint32 a_session_generation = 3;
   common.UUID a_conn_id = 4;
   string client_encryption_algorithm = 5;
+  optional PeerConnNoiseRecoveryPb recovery = 6;
+  bytes acknowledged_transition_id = 7;
+  // Receive capability mask offered by the initiator.
+  uint64 receive_capabilities = 8;
+  // Pinned Ed25519 credential-root fingerprint for this network.
+  bytes credential_root_fingerprint = 9;
+  // SHA-256 digest of the canonical initiator credential certificate.
+  bytes initiator_certificate_digest = 10;
+  // Transmit capability mask offered by the initiator.
+  uint64 transmit_capabilities = 11;
+}
+
+message PeerConnNoiseRecoveryPb {
+  common.UUID session_metadata_id = 1;
+  PeerConnSessionActionPb action = 2;
+  uint32 session_generation = 3;
+  uint32 initial_epoch = 4;
+  bytes root_key_digest = 6;
+  reserved 5;
+  // Responder-generated opaque transition identity.
+  bytes transition_id = 7;
 }
 
 message PeerConnNoiseMsg2Pb {
@@ -368,12 +493,31 @@ message PeerConnNoiseMsg2Pb {
   uint32 role_hint = 2;
   PeerConnSessionActionPb action = 3;
   uint32 b_session_generation = 4;
-  optional bytes root_key_32 = 5;
+  // Root keys are delivered only in the authenticated Noise transport Commit.
+  reserved 5;
   uint32 initial_epoch = 6;
   common.UUID b_conn_id = 7;
   common.UUID a_conn_id_echo = 8;
   optional bytes secret_proof_32 = 9;
   string server_encryption_algorithm = 10;
+  uint32 version = 11;
+  common.UUID session_metadata_id = 12;
+  optional PeerConnNoiseRecoveryPb recovery = 14;
+  reserved 13;
+  // Responder-generated opaque transition identity.
+  bytes transition_id = 15;
+  // Receive capability mask offered by the responder.
+  uint64 receive_capabilities = 16;
+  // Canonical root-signed responder certificate.
+  bytes responder_certificate = 17;
+  // Ed25519 credential-root fingerprint used by the certificate.
+  bytes credential_root_fingerprint = 18;
+  // Bounded root-signed responder certificate status evidence.
+  bytes responder_certificate_status = 19;
+  // Transmit capability mask offered by the responder.
+  uint64 transmit_capabilities = 20;
+  // Data protection selected from the typed transport binding.
+  PeerConnDataProtectionPb data_protection = 21;
 }
 
 message RelayNoiseMsg1Pb {
@@ -381,6 +525,8 @@ message RelayNoiseMsg1Pb {
   optional uint32 a_session_generation = 3;
   common.UUID a_conn_id = 4;
   string client_encryption_algorithm = 5;
+  optional PeerConnNoiseRecoveryPb recovery = 6;
+  bytes acknowledged_transition_id = 7;
 }
 
 message RelayNoiseMsg2Pb {
@@ -391,6 +537,17 @@ message RelayNoiseMsg2Pb {
   common.UUID b_conn_id = 7;
   common.UUID a_conn_id_echo = 8;
   string server_encryption_algorithm = 10;
+  uint32 version = 11;
+  bool accepted = 12;
+  common.UUID b_session_metadata_id = 14;
+  optional PeerConnNoiseRecoveryPb recovery = 15;
+  reserved 13;
+  // Responder-generated opaque transition identity.
+  bytes transition_id = 16;
+  // Exact prior responder proof accepted by this authenticated handshake.
+  bytes acknowledged_transition_id = 17;
+  // Explicit authenticated reset marker for an abandoned initiator transition.
+  bool recovery_reset = 18;
 }
 
 message PeerConnNoiseMsg3Pb {
@@ -398,4 +555,112 @@ message PeerConnNoiseMsg3Pb {
   common.UUID b_conn_id_echo = 2;
   optional bytes secret_proof_32 = 3;
   bytes secret_digest = 4;
+  // Canonical root-signed Credential certificate.
+  bytes initiator_certificate = 5;
+  // Echo of Msg1 initiator_certificate_digest.
+  bytes initiator_certificate_digest = 6;
+  // Responder identity accepted by the initiator.
+  PeerIdentityType responder_identity_type = 7;
+  // Responder authentication accepted by the initiator.
+  SecureAuthLevel responder_auth_level = 8;
+  // Session protection selected by both peers.
+  PeerConnDataProtectionPb data_protection = 9;
+}
+
+// The responder sends this message before it commits the session transition.
+// Noise transport mode authenticates the complete message.
+message PeerConnNoiseCommitPb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Session key material is sent only after Msg3 authentication.
+  optional bytes root_key_32 = 9;
+  // Hash of the complete authenticated admission context.
+  bytes admission_context_hash = 10;
+}
+
+message PeerConnNoiseCommitAckPb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Echo of PeerConnNoiseCommitPb.admission_context_hash.
+  bytes admission_context_hash = 10;
+}
+
+message PeerConnNoiseCommitDonePb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Echo of PeerConnNoiseCommitPb.admission_context_hash.
+  bytes admission_context_hash = 10;
+}
+
+message PeerConnNoiseReadyPb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Echo of the authenticated admission context.
+  bytes admission_context_hash = 10;
+}
+
+// The responder sends this message before it publishes the session.
+message PeerConnNoiseReadyAckPb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Echo of the authenticated admission context.
+  bytes admission_context_hash = 10;
+}
+
+// The initiator confirms that it committed the responder transition.
+message PeerConnNoiseReadyReceiptPb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Echo of the authenticated admission context.
+  bytes admission_context_hash = 10;
+}
+
+// The responder confirms receipt of the initiator commit receipt.
+message PeerConnNoiseReadyReceiptAckPb {
+  common.UUID a_conn_id_echo = 1;
+  common.UUID b_conn_id_echo = 2;
+  common.UUID session_metadata_id = 3;
+  PeerConnSessionActionPb action = 5;
+  uint32 session_generation = 6;
+  uint32 initial_epoch = 7;
+  reserved 4;
+  bytes transition_id = 8;
+  // Echo of the authenticated admission context.
+  bytes admission_context_hash = 10;
 }

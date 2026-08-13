@@ -11,10 +11,9 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::TunnelInfo;
 use super::{
-    PacketBatchSink, PacketBatchStream, SinkItem, SplitTunnel, StreamItem, Tunnel, TunnelError,
-    ZCPacketSink, ZCPacketStream,
+    DatagramSizeBudget, PacketBatchSink, PacketBatchStream, SinkItem, SplitTunnel, StreamItem,
+    TransportBinding, Tunnel, TunnelError, TunnelInfo, ZCPacketSink, ZCPacketStream,
     batch::{ScalarToBatchSink, ScalarToBatchStream},
     buf::BufList,
     packet_def::{TCP_TUNNEL_HEADER_SIZE, TCPTunnelHeader, ZCPacketType},
@@ -104,6 +103,7 @@ pub struct TunnelWrapper<R, W> {
     writer: Arc<Mutex<Option<W>>>,
     info: Option<TunnelInfo>,
     associate_data: Option<Box<dyn Any + Send + 'static>>,
+    transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
 }
 
@@ -123,6 +123,7 @@ impl<R, W> TunnelWrapper<R, W> {
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
             associate_data,
+            transport_binding: None,
             transport_authenticated: false,
         }
     }
@@ -138,6 +139,39 @@ impl<R, W> TunnelWrapper<R, W> {
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
             associate_data: None,
+            transport_binding: None,
+            transport_authenticated,
+        }
+    }
+
+    pub fn new_with_transport_binding(
+        reader: R,
+        writer: W,
+        info: Option<TunnelInfo>,
+        transport_binding: Option<TransportBinding>,
+    ) -> Self {
+        Self::new_with_transport_authentication_and_binding(
+            reader,
+            writer,
+            info,
+            false,
+            transport_binding,
+        )
+    }
+
+    pub fn new_with_transport_authentication_and_binding(
+        reader: R,
+        writer: W,
+        info: Option<TunnelInfo>,
+        transport_authenticated: bool,
+        transport_binding: Option<TransportBinding>,
+    ) -> Self {
+        TunnelWrapper {
+            reader: Arc::new(Mutex::new(Some(reader))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            info,
+            associate_data: None,
+            transport_binding,
             transport_authenticated,
         }
     }
@@ -161,6 +195,10 @@ where
         self.info.clone()
     }
 
+    fn transport_binding(&self) -> Option<TransportBinding> {
+        self.transport_binding
+    }
+
     fn is_transport_authenticated(&self) -> bool {
         self.transport_authenticated
     }
@@ -172,7 +210,9 @@ pub struct BatchTunnelWrapper<R, W> {
     writer: Arc<Mutex<Option<W>>>,
     info: Option<TunnelInfo>,
     associate_data: Option<Box<dyn Any + Send + 'static>>,
+    transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
+    datagram_size_budget: Option<DatagramSizeBudget>,
 }
 
 impl<R, W> BatchTunnelWrapper<R, W> {
@@ -182,7 +222,9 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
             associate_data: None,
+            transport_binding: None,
             transport_authenticated: false,
+            datagram_size_budget: None,
         }
     }
 
@@ -197,7 +239,46 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
             associate_data: None,
+            transport_binding: None,
             transport_authenticated,
+            datagram_size_budget: None,
+        }
+    }
+
+    pub fn new_with_transport_authentication_and_datagram_size_budget(
+        reader: R,
+        writer: W,
+        info: Option<TunnelInfo>,
+        transport_authenticated: bool,
+        datagram_size_budget: Option<DatagramSizeBudget>,
+    ) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(Some(reader))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            info,
+            associate_data: None,
+            transport_binding: None,
+            transport_authenticated,
+            datagram_size_budget,
+        }
+    }
+
+    pub fn new_with_transport_authentication_and_datagram_size_budget_and_binding(
+        reader: R,
+        writer: W,
+        info: Option<TunnelInfo>,
+        transport_authenticated: bool,
+        datagram_size_budget: Option<DatagramSizeBudget>,
+        transport_binding: Option<TransportBinding>,
+    ) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(Some(reader))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            info,
+            associate_data: None,
+            transport_binding,
+            transport_authenticated,
+            datagram_size_budget,
         }
     }
 }
@@ -215,6 +296,14 @@ where
 
     fn info(&self) -> Option<TunnelInfo> {
         self.info.clone()
+    }
+
+    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
+        self.datagram_size_budget.clone()
+    }
+
+    fn transport_binding(&self) -> Option<TransportBinding> {
+        self.transport_binding
     }
 
     fn is_transport_authenticated(&self) -> bool {
@@ -280,7 +369,7 @@ impl<R> FramedReader<R> {
         }
     }
 
-    fn extract_one_packet(
+    pub(crate) fn extract_one_packet(
         buf: &mut BytesMut,
         max_packet_size: usize,
     ) -> Option<Result<ZCPacket, TunnelError>> {
@@ -302,14 +391,26 @@ impl<R> FramedReader<R> {
             )));
         }
 
-        if buf.len() < TCP_TUNNEL_HEADER_SIZE + body_len {
+        let frame_len = match TCP_TUNNEL_HEADER_SIZE.checked_add(body_len) {
+            Some(frame_len) => frame_len,
+            None => {
+                return Some(Err(TunnelError::InvalidPacket(
+                    "framed packet length overflow".to_string(),
+                )));
+            }
+        };
+        if buf.len() < frame_len {
             // body is not complete
             return None;
         }
 
         // extract one packet
-        let packet_buf = buf.split_to(TCP_TUNNEL_HEADER_SIZE + body_len);
+        let packet_buf = buf.split_to(frame_len);
         Some(Ok(ZCPacket::new_from_buf(packet_buf, ZCPacketType::TCP)))
+    }
+
+    pub(crate) fn into_inner(self) -> R {
+        self.reader
     }
 }
 
@@ -341,10 +442,13 @@ where
                 return Poll::Ready(Some(packet));
             }
 
+            let frame_capacity = self_mut
+                .max_packet_size
+                .saturating_add(TCP_TUNNEL_HEADER_SIZE);
             reserve_buf(
                 self_mut.buf,
-                *self_mut.max_packet_size,
-                *self_mut.max_packet_size * 2,
+                frame_capacity,
+                frame_capacity.saturating_mul(2),
             );
 
             let cap = self_mut.buf.capacity() - self_mut.buf.len();
@@ -359,6 +463,14 @@ where
             match ret {
                 Ok(_) => {
                     if len == 0 {
+                        if !self_mut.buf.is_empty() {
+                            self_mut
+                                .error
+                                .replace(TunnelError::InvalidPacket("truncated frame".to_owned()));
+                            return Poll::Ready(Some(Err(TunnelError::InvalidPacket(
+                                "truncated frame".to_owned(),
+                            ))));
+                        }
                         return Poll::Ready(None);
                     }
                 }
@@ -374,16 +486,41 @@ pub trait ZCPacketToBytes {
     fn zcpacket_into_bytes(&self, zc_packet: ZCPacket) -> Result<Bytes, TunnelError>;
 }
 
-pub struct TcpZCPacketToBytes;
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TcpZCPacketToBytes {
+    max_frame_size: Option<usize>,
+}
+
+impl TcpZCPacketToBytes {
+    /// Limit framed body size to bound receive allocation.
+    pub fn with_max_frame_size(max_frame_size: usize) -> Self {
+        Self {
+            max_frame_size: Some(max_frame_size),
+        }
+    }
+}
+
 impl ZCPacketToBytes for TcpZCPacketToBytes {
     fn zcpacket_into_bytes(&self, item: ZCPacket) -> Result<Bytes, TunnelError> {
         let mut item = item.convert_type(ZCPacketType::TCP);
 
-        let tcp_len = PEER_MANAGER_HEADER_SIZE + item.payload_len();
+        let tcp_len = PEER_MANAGER_HEADER_SIZE
+            .checked_add(item.payload_len())
+            .ok_or_else(|| {
+                TunnelError::InvalidPacket("framed packet length overflow".to_string())
+            })?;
+        if self.max_frame_size.is_some_and(|maximum| tcp_len > maximum) {
+            return Err(TunnelError::InvalidPacket(
+                "framed packet exceeds configured limit".to_string(),
+            ));
+        }
         let Some(header) = item.mut_tcp_tunnel_header() else {
             return Err(TunnelError::InvalidPacket("packet too short".to_string()));
         };
-        header.len.set(tcp_len.try_into().unwrap());
+        let tcp_len = u32::try_from(tcp_len).map_err(|_| {
+            TunnelError::InvalidPacket("framed packet exceeds the 32-bit length".to_string())
+        })?;
+        header.len.set(tcp_len);
 
         Ok(item.into_bytes())
     }
@@ -421,7 +558,7 @@ impl<W> FramedWriter<W, TcpZCPacketToBytes> {
             sending_bufs: BufList::new(),
             associate_data,
             max_buffer_count: 64,
-            converter: TcpZCPacketToBytes {},
+            converter: TcpZCPacketToBytes::default(),
         }
     }
 }
@@ -790,7 +927,9 @@ pub mod tests {
 
     use crate::{
         common::netns::NetNS,
-        tunnel::{TunnelConnector, TunnelListener, batch::PacketBatch, packet_def::ZCPacket},
+        tunnel::{
+            Tunnel, TunnelConnector, TunnelListener, batch::PacketBatch, packet_def::ZCPacket,
+        },
     };
 
     #[cfg(test)]
@@ -889,6 +1028,151 @@ pub mod tests {
             ret,
             Some(Err(TunnelError::InvalidPacket(msg))) if msg == "body too short"
         ));
+    }
+
+    #[test]
+    fn tcp_converter_enforces_the_configured_frame_limit() {
+        use super::ZCPacketToBytes;
+        use crate::tunnel::packet_def::PacketType;
+
+        let frame_limit = PEER_MANAGER_HEADER_SIZE + 64;
+        let mut packet =
+            ZCPacket::new_with_payload(&vec![0x5a; frame_limit - PEER_MANAGER_HEADER_SIZE]);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        let converter = super::TcpZCPacketToBytes::with_max_frame_size(frame_limit);
+
+        let encoded = converter.zcpacket_into_bytes(packet).unwrap();
+        assert_eq!(encoded.len(), TCP_TUNNEL_HEADER_SIZE + frame_limit);
+
+        let mut oversized =
+            ZCPacket::new_with_payload(&vec![0x5a; frame_limit + 1 - PEER_MANAGER_HEADER_SIZE]);
+        oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        assert!(matches!(
+            converter.zcpacket_into_bytes(oversized),
+            Err(TunnelError::InvalidPacket(message))
+                if message == "framed packet exceeds configured limit"
+        ));
+    }
+
+    #[test]
+    fn tunnel_wrappers_preserve_transport_binding() {
+        let binding = Some(super::TransportBinding {
+            kind: super::super::TransportBindingKind::QuicTlsExporterV1,
+            bytes: [0x37_u8; 32],
+        });
+        let tunnel = super::BatchTunnelWrapper::new_with_transport_authentication_and_datagram_size_budget_and_binding(
+            futures::stream::empty::<crate::tunnel::BatchStreamItem>(),
+            futures::sink::drain::<crate::tunnel::BatchSinkItem>()
+                .sink_map_err(|error| match error {}),
+            None,
+            true,
+            None,
+            binding,
+        );
+        assert_eq!(tunnel.transport_binding(), binding);
+        assert!(tunnel.is_transport_authenticated());
+
+        let filtered = crate::tunnel::filter::TunnelWithFilter::new(
+            tunnel,
+            crate::tunnel::filter::EmptyFilter,
+        );
+        assert_eq!(filtered.transport_binding(), binding);
+        assert!(filtered.is_transport_authenticated());
+
+        let scalar_tunnel = super::TunnelWrapper::new_with_transport_authentication_and_binding(
+            futures::stream::empty::<super::StreamItem>(),
+            futures::sink::drain::<super::SinkItem>().sink_map_err(|error| match error {}),
+            None,
+            true,
+            binding,
+        );
+        assert_eq!(scalar_tunnel.transport_binding(), binding);
+        assert!(scalar_tunnel.is_transport_authenticated());
+    }
+
+    #[test]
+    fn non_quic_tunnels_have_no_transport_binding() {
+        let (left, right) = crate::tunnel::ring::create_ring_tunnel_pair();
+        assert_eq!(left.transport_binding(), None);
+        assert_eq!(right.transport_binding(), None);
+    }
+
+    #[tokio::test]
+    async fn framed_reader_rejects_a_partial_header_on_eof() {
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let (mut writer, reader) = duplex(32);
+        writer.write_all(&[1, 0]).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut framed = super::FramedReader::new(reader, 2000);
+        let item = framed
+            .next()
+            .await
+            .expect("the truncated frame is reported");
+        assert!(matches!(
+            item,
+            Err(TunnelError::InvalidPacket(message)) if message == "truncated frame"
+        ));
+        assert!(framed.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn framed_reader_rejects_a_partial_body_on_eof() {
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let (mut writer, reader) = duplex(32);
+        writer
+            .write_all(&(PEER_MANAGER_HEADER_SIZE as u32).to_le_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&[0]).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut framed = super::FramedReader::new(reader, 2000);
+        let item = framed
+            .next()
+            .await
+            .expect("the truncated frame is reported");
+        assert!(matches!(
+            item,
+            Err(TunnelError::InvalidPacket(message)) if message == "truncated frame"
+        ));
+        assert!(framed.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn framed_reader_accepts_empty_eof_at_a_frame_boundary() {
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let (mut writer, reader) = duplex(32);
+        writer.shutdown().await.unwrap();
+
+        let mut framed = super::FramedReader::new(reader, 2000);
+        assert!(framed.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn framed_reader_accepts_a_frame_at_the_body_limit() {
+        use super::ZCPacketToBytes;
+        use crate::tunnel::packet_def::PacketType;
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let frame_limit = 64 * 1024;
+        let mut packet =
+            super::ZCPacket::new_with_payload(&vec![0x5a; frame_limit - PEER_MANAGER_HEADER_SIZE]);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        let frame = super::TcpZCPacketToBytes::with_max_frame_size(frame_limit)
+            .zcpacket_into_bytes(packet)
+            .unwrap();
+        let (mut writer, reader) = duplex(frame.len());
+        writer.write_all(&frame).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut framed = super::FramedReader::new(reader, frame_limit);
+        let packet = framed.next().await.unwrap().unwrap();
+        assert_eq!(packet.payload_len(), frame_limit - PEER_MANAGER_HEADER_SIZE);
+        assert!(framed.next().await.is_none());
     }
 
     pub async fn _tunnel_echo_server(tunnel: Box<dyn super::Tunnel>, once: bool) {

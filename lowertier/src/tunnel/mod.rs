@@ -101,6 +101,25 @@ pub type SinkError = TunnelError;
 pub type BatchStreamItem = Result<batch::PacketBatch, TunnelError>;
 pub type BatchSinkItem = batch::PacketBatch;
 
+/// Identifies the derivation scheme for a transport binding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TransportBindingKind {
+    QuicTlsExporterV1,
+}
+
+/// Immutable, fixed-size binding for one authenticated transport connection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TransportBinding {
+    pub kind: TransportBindingKind,
+    pub bytes: [u8; 32],
+}
+
+/// Read-only access to the current QUIC DATAGRAM payload budget.
+///
+/// The callback reads the transport state without changing it. Non-QUIC
+/// tunnels return no budget and use the conservative FEC fallback.
+pub type DatagramSizeBudget = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
+
 pub trait ZCPacketStream: Stream<Item = StreamItem> + Send {}
 impl<T> ZCPacketStream for T where T: Stream<Item = StreamItem> + Send {}
 pub trait ZCPacketSink: Sink<SinkItem, Error = SinkError> + Send {}
@@ -116,10 +135,40 @@ pub type SplitTunnel = (
     Pin<Box<dyn PacketBatchSink>>,
 );
 
+/// Owned ingress streams and one shared egress sink for a tunnel.
+///
+/// Most tunnel transports expose one stream. Linux multiqueue TUN exposes one
+/// stream per kernel queue so each queue can keep its own bounded worker.
+pub type SplitIngressTunnel = (
+    Vec<Pin<Box<dyn PacketBatchStream>>>,
+    Pin<Box<dyn PacketBatchSink>>,
+);
+
 #[auto_impl::auto_impl(Box, Arc)]
 pub trait Tunnel: Send {
     fn split(&self) -> SplitTunnel;
+
+    /// Return independent ingress streams when the transport can preserve them.
+    ///
+    /// The default keeps every existing tunnel on one stream and one worker.
+    fn split_ingress_queues(&self) -> SplitIngressTunnel {
+        let (stream, sink) = self.split();
+        (vec![stream], sink)
+    }
+
     fn info(&self) -> Option<TunnelInfo>;
+
+    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
+        None
+    }
+
+    /// Return the binding for this transport connection, when one exists.
+    ///
+    /// QUIC tunnels derive this value from the TLS exporter. Other transports
+    /// return `None` because they do not expose an equivalent connection secret.
+    fn transport_binding(&self) -> Option<TransportBinding> {
+        None
+    }
 
     fn is_transport_authenticated(&self) -> bool {
         false

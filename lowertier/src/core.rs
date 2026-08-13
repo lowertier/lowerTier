@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[cfg(feature = "socks5")]
+use crate::common::config::parse_proxy_listener_url;
 use crate::{
     ShellType,
     common::{
@@ -7,22 +9,25 @@ use crate::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
             FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
             TomlConfigLoader, VpnPortalConfig, load_config_from_file, parse_mapped_listener_urls,
-            parse_proxy_listener_url, process_secure_mode_cfg, validate_flags,
+            process_secure_mode_cfg, validate_flags,
         },
         constants::LOWTIER_VERSION,
         log,
     },
     instance_manager::NetworkInstanceManager,
     launcher::add_proxy_network_to_config,
+    peers::credential_manager::CredentialManager,
     proto::common::{CompressionAlgoPb, SecureModeConfig},
     rpc_service::ApiRpcServer,
     utils::panic::setup_panic_handler,
     web_client,
 };
 use anyhow::Context;
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use cidr::IpCidr;
 use clap::{CommandFactory, Parser};
 use guarden::defer;
+use prost::Message;
 use rust_i18n::t;
 use std::{
     net::{IpAddr, SocketAddr},
@@ -849,15 +854,6 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_SECURE_MODE",
-        help = t!("core_clap.secure_mode").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    secure_mode: Option<bool>,
-
-    #[arg(
-        long,
         env = "ET_LOCAL_PRIVATE_KEY",
         help = t!("core_clap.local_private_key").to_string()
     )]
@@ -1050,15 +1046,120 @@ impl NetworkOptions {
             .clone()
             .unwrap_or_else(|| old_ns.network_name.clone());
 
-        if self.credential.is_some() {
-            // Credential mode: no network_secret, authenticate via credential keypair
-            cfg.set_network_identity(NetworkIdentity::new_credential(network_name));
-        } else if let Some(network_secret) = &self.network_secret {
-            cfg.set_network_identity(NetworkIdentity::new(network_name, network_secret.clone()));
-        } else if let Some(network_secret) = old_ns.network_secret {
+        if self
+            .network_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty())
+            && (cfg
+                .get_secure_mode()
+                .and_then(|secure_mode| secure_mode.credential_bundle)
+                .is_some()
+                || self.credential.is_some())
+        {
+            return Err(anyhow::anyhow!(
+                "network secret and credential bundle cannot be used together"
+            ));
+        }
+
+        if let Some(credential_bundle) = self.credential.as_deref() {
+            let pinned_root = old_ns
+                .credential_root_fingerprint()
+                .map(|fingerprint| fingerprint.as_slice());
+            if pinned_root.is_some() && self.network_name.is_none() {
+                return Err(anyhow::anyhow!(
+                    "credential network name is required when a root is pinned"
+                ));
+            }
+            let bundle = CredentialManager::verify_credential_bundle_for_network(
+                credential_bundle,
+                &network_name,
+                pinned_root,
+                crate::peers::credential_manager::current_unix_timestamp(),
+            )
+            .map_err(|error| anyhow::anyhow!("invalid credential bundle: {error}"))?;
+            let private_key: [u8; 32] = bundle
+                .x25519_private_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("credential bundle private key is invalid"))?;
+            let expected_private_key = BASE64_STANDARD.encode(private_key);
+            if self
+                .local_private_key
+                .as_deref()
+                .is_some_and(|key| key != expected_private_key.as_str())
+            {
+                return Err(anyhow::anyhow!(
+                    "credential bundle private key does not match --local-private-key"
+                ));
+            }
+            cfg.set_network_identity(NetworkIdentity::new_credential_with_root_fingerprint(
+                network_name,
+                &bundle.root_fingerprint,
+            )?);
+            cfg.set_secure_mode(Some(
+                crate::common::config::normalize_verified_credential_bundle_cfg(
+                    SecureModeConfig {
+                        enabled: true,
+                        local_private_key: Some(expected_private_key),
+                        local_public_key: None,
+                        credential_bundle: Some(CredentialManager::encode_credential_bundle(
+                            &bundle,
+                        )),
+                        credential_root_fingerprint: bundle.root_fingerprint.clone(),
+                        credential_certificate: bundle
+                            .certificate
+                            .as_ref()
+                            .map(Message::encode_to_vec)
+                            .unwrap_or_default(),
+                    },
+                    &bundle,
+                )?,
+            ));
+        } else if let Some(network_secret) = self
+            .network_secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty())
+        {
+            cfg.set_network_identity(NetworkIdentity::new(
+                network_name,
+                network_secret.to_owned(),
+            ));
+        } else if let Some(network_secret) = old_ns
+            .network_secret
+            .clone()
+            .filter(|secret| !secret.is_empty())
+        {
             cfg.set_network_identity(NetworkIdentity::new(network_name, network_secret));
+        } else if let Some(existing_bundle) = cfg
+            .get_secure_mode()
+            .and_then(|secure_mode| secure_mode.credential_bundle)
+            .filter(|bundle| !bundle.is_empty())
+        {
+            let bundle = CredentialManager::verify_credential_bundle_for_network(
+                &existing_bundle,
+                &network_name,
+                old_ns
+                    .credential_root_fingerprint()
+                    .map(|fingerprint| fingerprint.as_slice()),
+                crate::peers::credential_manager::current_unix_timestamp(),
+            )
+            .map_err(|error| anyhow::anyhow!("invalid existing credential bundle: {error}"))?;
+            cfg.set_network_identity(NetworkIdentity::new_credential_with_root_fingerprint(
+                network_name,
+                &bundle.root_fingerprint,
+            )?);
+        } else if old_ns.network_secret_digest.is_none() {
+            if self.network_name.is_some() || old_ns.network_name != "default" {
+                cfg.set_network_identity(NetworkIdentity {
+                    network_name,
+                    network_secret: None,
+                    network_secret_digest: None,
+                });
+            }
         } else {
-            cfg.set_network_identity(NetworkIdentity::new_credential(network_name));
+            return Err(anyhow::anyhow!(
+                "credential mode requires a signed credential bundle"
+            ));
         }
 
         if let Some(dhcp) = self.dhcp {
@@ -1233,21 +1334,26 @@ impl NetworkOptions {
             cfg.set_credential_file(Some(credential_file.clone()));
         }
 
-        if let Some(ref credential_secret) = self.credential {
-            // --credential implies --secure-mode and sets the credential private key
+        if self.credential.is_none()
+            && cfg
+                .get_network_identity()
+                .network_secret
+                .as_deref()
+                .is_none_or(str::is_empty)
+            && cfg.get_network_identity().network_secret_digest.is_some()
+            && (self.local_private_key.is_some() || self.local_public_key.is_some())
+        {
+            return Err(anyhow::anyhow!(
+                "credential mode requires a signed credential bundle"
+            ));
+        } else if self.local_private_key.is_some() || self.local_public_key.is_some() {
             let c = SecureModeConfig {
                 enabled: true,
-                local_private_key: Some(credential_secret.clone()),
-                local_public_key: None,
-            };
-            cfg.set_secure_mode(Some(process_secure_mode_cfg(c)?));
-        } else if let Some(secure_mode) = self.secure_mode
-            && secure_mode
-        {
-            let c = SecureModeConfig {
-                enabled: secure_mode,
                 local_private_key: self.local_private_key.clone(),
                 local_public_key: self.local_public_key.clone(),
+                credential_bundle: None,
+                credential_root_fingerprint: Vec::new(),
+                credential_certificate: Vec::new(),
             };
             cfg.set_secure_mode(Some(process_secure_mode_cfg(c)?));
         }
@@ -1600,7 +1706,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
                 state_dir: None,
             },
             cli.network_options.hostname.clone(),
-            cli.network_options.secure_mode.unwrap_or(false),
+            true,
             manager.clone(),
             None,
         )
@@ -1888,6 +1994,8 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -1975,7 +2083,19 @@ mod tests {
 
     #[test]
     fn test_network_options_merge_preserves_credential_identity() {
-        let cfg = TomlConfigLoader::new_from_str(
+        let issuer =
+            CredentialManager::new_with_network(None, "credential-network", Some("secret"));
+        let (_, credential_bundle) = issuer
+            .generate_credential_bundle(
+                Vec::new(),
+                false,
+                Vec::new(),
+                Duration::from_secs(3600),
+                None,
+                true,
+            )
+            .unwrap();
+        let cfg = TomlConfigLoader::new_from_str(&format!(
             r#"
 [network_identity]
 network_name = "credential-network"
@@ -1983,8 +2103,9 @@ network_secret = ""
 
 [secure_mode]
 enabled = true
-"#,
-        )
+credential_bundle = "{credential_bundle}"
+"#
+        ))
         .unwrap();
         assert_eq!(cfg.get_network_identity().network_secret, None);
 
@@ -1998,7 +2119,10 @@ enabled = true
         let identity = cfg.get_network_identity();
         assert_eq!(identity.network_name, "credential-network");
         assert_eq!(identity.network_secret, None);
-        assert_eq!(identity.network_secret_digest, None);
+        assert_eq!(
+            identity.credential_root_fingerprint(),
+            Some(issuer.root_fingerprint())
+        );
         assert_eq!(cfg.get_hostname(), "override-host");
     }
 

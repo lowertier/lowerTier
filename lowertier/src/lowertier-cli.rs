@@ -2377,7 +2377,7 @@ impl<'a> CommandHandler<'a> {
             println!();
             println!("To use this credential on a new node:");
             println!(
-                "  lowertier-core --network-name <name> --secure-mode --credential {} -p <node-url>",
+                "  lowertier-core --network-name <name> --credential {} -p <node-url>",
                 response.credential_secret
             );
             Ok(())

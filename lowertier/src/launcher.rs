@@ -19,6 +19,7 @@ use crate::{
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
     },
     instance::instance::Instance,
+    peers::credential_manager::CredentialManager,
     proto::api::instance::list_peer_route_pair,
 };
 use anyhow::Context;
@@ -694,27 +695,75 @@ impl NetworkConfig {
         cfg.set_dhcp(self.dhcp.unwrap_or_default());
         cfg.set_inst_name(self.network_name.clone().unwrap_or_default());
 
-        // The web UI does not expose credential inputs directly, but imported/saved
-        // NetworkConfig objects still need to preserve credential-mode instances via
-        // secure_mode.local_private_key + empty network_secret.
-        let credential_secret = if self.network_secret.is_some() {
+        let network_name = self.network_name.clone().unwrap_or_default();
+        let credential_bundle = if self
+            .network_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty())
+        {
             None
         } else {
             self.secure_mode
                 .as_ref()
-                .and_then(|mode| mode.local_private_key.clone())
-                .filter(|s| !s.is_empty())
+                .and_then(|mode| mode.credential_bundle.clone())
+                .filter(|bundle| !bundle.is_empty())
         };
 
-        if credential_secret.is_some() {
-            cfg.set_network_identity(NetworkIdentity::new_credential(
-                self.network_name.clone().unwrap_or_default(),
-            ));
-        } else {
+        if self
+            .network_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty())
+            && self
+                .secure_mode
+                .as_ref()
+                .and_then(|mode| mode.credential_bundle.as_ref())
+                .is_some()
+        {
+            anyhow::bail!("network secret and credential bundle cannot be used together");
+        }
+
+        if let Some(bundle_text) = credential_bundle.as_deref() {
+            let pinned_root = self
+                .secure_mode
+                .as_ref()
+                .map(|mode| mode.credential_root_fingerprint.as_slice())
+                .filter(|fingerprint| !fingerprint.is_empty());
+            let bundle = CredentialManager::verify_credential_bundle_for_network(
+                bundle_text,
+                &network_name,
+                pinned_root,
+                crate::peers::credential_manager::current_unix_timestamp(),
+            )
+            .map_err(|error| anyhow::anyhow!("invalid credential bundle: {error}"))?;
+            cfg.set_network_identity(NetworkIdentity::new_credential_with_root_fingerprint(
+                network_name,
+                &bundle.root_fingerprint,
+            )?);
+            let verified_secure_mode =
+                crate::common::config::normalize_verified_credential_bundle_cfg(
+                    self.secure_mode
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("credential bundle has no secure mode"))?,
+                    &bundle,
+                )?;
+            cfg.set_secure_mode(Some(verified_secure_mode));
+        } else if let Some(network_secret) = self
+            .network_secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty())
+        {
             cfg.set_network_identity(NetworkIdentity::new(
-                self.network_name.clone().unwrap_or_default(),
-                self.network_secret.clone().unwrap_or_default(),
+                network_name,
+                network_secret.to_owned(),
             ));
+        } else if self.secure_mode.as_ref().is_some_and(|mode| {
+            !mode.credential_root_fingerprint.is_empty() || !mode.credential_certificate.is_empty()
+        }) {
+            anyhow::bail!("credential mode requires a signed credential bundle");
+        } else if network_name == "default" && self.network_secret.is_none() {
+            // Omit the identity so a default shared node remains unauthenticated.
+        } else {
+            anyhow::bail!("credential mode requires a signed credential bundle");
         }
 
         if !cfg.get_dhcp() {
@@ -886,15 +935,7 @@ impl NetworkConfig {
             cfg.set_credential_file(Some(credential_file.into()));
         }
 
-        if let Some(credential_secret) = credential_secret {
-            cfg.set_secure_mode(Some(process_secure_mode_cfg(
-                crate::proto::common::SecureModeConfig {
-                    enabled: true,
-                    local_private_key: Some(credential_secret),
-                    local_public_key: None,
-                },
-            )?));
-        } else {
+        if credential_bundle.is_none() {
             cfg.set_secure_mode(
                 self.secure_mode
                     .clone()
@@ -1523,6 +1564,48 @@ mod tests {
     }
 
     #[test]
+    fn network_config_gen_config_accepts_a_network_secret() -> anyhow::Result<()> {
+        let network_config = super::NetworkConfig {
+            network_name: Some("admin-network".to_owned()),
+            network_secret: Some("admin-secret".to_owned()),
+            secure_mode: Some(SecureModeConfig {
+                enabled: true,
+                local_private_key: None,
+                local_public_key: None,
+                credential_bundle: None,
+                credential_root_fingerprint: Vec::new(),
+                credential_certificate: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let config = network_config.gen_config()?;
+        let identity = config.get_network_identity();
+        assert_eq!(identity.network_name, "admin-network");
+        assert_eq!(identity.network_secret.as_deref(), Some("admin-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn network_config_rejects_credential_mode_without_a_bundle() {
+        let network_config = super::NetworkConfig {
+            network_name: Some("credential-network".to_owned()),
+            secure_mode: Some(SecureModeConfig {
+                enabled: true,
+                credential_root_fingerprint: vec![9; 32],
+                local_private_key: None,
+                local_public_key: None,
+                credential_bundle: None,
+                credential_certificate: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let error = network_config.gen_config().expect_err("bundle is required");
+        assert!(error.to_string().contains("signed credential bundle"));
+    }
+
+    #[test]
     fn network_config_dump_preserves_web_flags() -> Result<(), anyhow::Error> {
         let network_config = super::NetworkConfig {
             instance_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -1768,6 +1851,9 @@ mod tests {
                     enabled: true,
                     local_private_key: None,
                     local_public_key: None,
+                    credential_bundle: None,
+                    credential_root_fingerprint: Vec::new(),
+                    credential_certificate: Vec::new(),
                 }));
             }
 
@@ -1842,21 +1928,46 @@ mod tests {
 
     #[test]
     fn test_network_config_conversion_credential_mode() -> Result<(), anyhow::Error> {
-        let private_key = x25519_dalek::StaticSecret::from([7u8; 32]);
-        let public_key = x25519_dalek::PublicKey::from(&private_key);
-        let credential_secret = BASE64_STANDARD.encode(private_key.as_bytes());
+        let manager = crate::peers::credential_manager::CredentialManager::new_with_network(
+            None,
+            "credential-net",
+            Some("secret"),
+        );
+        let (_, credential_secret) = manager
+            .generate_credential_bundle(
+                vec!["test".to_owned()],
+                false,
+                vec![],
+                std::time::Duration::from_secs(3600),
+                None,
+                true,
+            )
+            .unwrap();
         let credential_file = "/tmp/lowertier-credentials.json".to_string();
 
         let config = gen_default_config();
-        config.set_network_identity(crate::common::config::NetworkIdentity::new_credential(
-            "credential-net".to_string(),
-        ));
+        let bundle = crate::peers::credential_manager::CredentialManager::parse_credential_bundle(
+            &credential_secret,
+        )?;
+        config.set_network_identity(
+            crate::common::config::NetworkIdentity::new_credential_with_root_fingerprint(
+                "credential-net".to_string(),
+                &bundle.root_fingerprint,
+            )?,
+        );
         config.set_inst_name("credential-net".to_string());
         config.set_credential_file(Some(credential_file.clone().into()));
         config.set_secure_mode(Some(SecureModeConfig {
             enabled: true,
-            local_private_key: Some(credential_secret.clone()),
-            local_public_key: Some(BASE64_STANDARD.encode(public_key.as_bytes())),
+            local_private_key: None,
+            local_public_key: None,
+            credential_bundle: Some(credential_secret.clone()),
+            credential_root_fingerprint: bundle.root_fingerprint.clone(),
+            credential_certificate: bundle
+                .certificate
+                .as_ref()
+                .map(prost::Message::encode_to_vec)
+                .unwrap_or_default(),
         }));
 
         let network_config = super::NetworkConfig::new_from_config(&config)?;
@@ -1869,7 +1980,7 @@ mod tests {
             network_config
                 .secure_mode
                 .as_ref()
-                .and_then(|mode| mode.local_private_key.as_deref()),
+                .and_then(|mode| mode.credential_bundle.as_deref()),
             Some(credential_secret.as_str())
         );
 
@@ -1888,7 +1999,7 @@ mod tests {
         assert_eq!(
             generated_config
                 .get_secure_mode()
-                .and_then(|mode| mode.local_private_key),
+                .and_then(|mode| mode.credential_bundle),
             Some(credential_secret)
         );
 

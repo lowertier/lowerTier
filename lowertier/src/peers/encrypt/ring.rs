@@ -77,9 +77,14 @@ impl RingCipher {
 
 impl Encryptor for RingCipher {
     fn decrypt(&self, zc_packet: &mut ZCPacket) -> Result<(), Error> {
+        self.decrypt_with_aad(zc_packet, &[])
+    }
+
+    fn decrypt_with_aad(&self, zc_packet: &mut ZCPacket, aad: &[u8]) -> Result<(), Error> {
         let pm_header = zc_packet.peer_manager_header().unwrap();
         if !pm_header.is_encrypted() {
-            return Ok(());
+            // A secure decrypt call must never turn plaintext into success.
+            return Err(Error::DecryptionFailed);
         }
 
         let payload_len = zc_packet.payload().len();
@@ -96,8 +101,8 @@ impl Encryptor for RingCipher {
             .get_cipher()
             .open_in_place(
                 nonce,
-                aead::Aad::empty(),
-                &mut zc_packet.mut_payload()[..text_and_tag_len],
+                aead::Aad::from(aad),
+                &mut zc_packet.mut_payload_preserving_flow_hash()[..text_and_tag_len],
             )
             .map_err(|_| Error::DecryptionFailed)?;
 
@@ -105,19 +110,28 @@ impl Encryptor for RingCipher {
         pm_header.set_encrypted(false);
         let old_len = zc_packet.buf_len();
         zc_packet
-            .mut_inner()
+            .mut_inner_preserving_flow_hash()
             .truncate(old_len - StandardAeadTail::SIZE);
         Ok(())
     }
 
     fn encrypt(&self, zc_packet: &mut ZCPacket) -> Result<(), Error> {
-        self.encrypt_with_nonce(zc_packet, None)
+        self.encrypt_with_nonce_and_aad(zc_packet, None, &[])
     }
 
     fn encrypt_with_nonce(
         &self,
         zc_packet: &mut ZCPacket,
         nonce: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        self.encrypt_with_nonce_and_aad(zc_packet, nonce, &[])
+    }
+
+    fn encrypt_with_nonce_and_aad(
+        &self,
+        zc_packet: &mut ZCPacket,
+        nonce: Option<&[u8]>,
+        aad: &[u8],
     ) -> Result<(), Error> {
         let pm_header = zc_packet.peer_manager_header().unwrap();
         if pm_header.is_encrypted() {
@@ -136,7 +150,11 @@ impl Encryptor for RingCipher {
         let tag = self
             .cipher
             .get_cipher()
-            .seal_in_place_separate_tag(nonce, aead::Aad::empty(), zc_packet.mut_payload())
+            .seal_in_place_separate_tag(
+                nonce,
+                aead::Aad::from(aad),
+                zc_packet.mut_payload_preserving_flow_hash(),
+            )
             .map_err(|_| Error::EncryptionFailed)?;
 
         let tag = tag.as_ref();
@@ -147,7 +165,9 @@ impl Encryptor for RingCipher {
 
         let pm_header = zc_packet.mut_peer_manager_header().unwrap();
         pm_header.set_encrypted(true);
-        zc_packet.mut_inner().extend_from_slice(tail.as_bytes());
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .extend_from_slice(tail.as_bytes());
         Ok(())
     }
 }
@@ -202,6 +222,16 @@ mod tests {
 
         cipher.decrypt(&mut packet1).unwrap();
         assert_eq!(packet1.payload(), text);
+    }
+
+    #[test]
+    fn ring_decrypt_rejects_plaintext_packet() {
+        let cipher = RingCipher::new_aes128_gcm([0u8; 16]);
+        let mut packet = ZCPacket::new_with_payload(&[0x5a; 4096]);
+        packet.fill_peer_manager_hdr(0, 0, 0);
+
+        assert!(cipher.decrypt(&mut packet).is_err());
+        assert_eq!(packet.payload(), &[0x5a; 4096]);
     }
 
     #[test]

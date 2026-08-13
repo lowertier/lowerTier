@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     hash::{Hash, Hasher},
     time::{Duration, Instant},
 };
@@ -10,7 +11,7 @@ use crate::{
     common::PeerId,
     tunnel::{
         batch::PacketBatch,
-        packet_def::{PacketType, ZCPacket},
+        packet_def::{PacketType, ZCPacket, ethernet_network_metadata},
     },
 };
 
@@ -177,43 +178,25 @@ fn hash_ethernet(hasher: &mut StableFlowHasher, frame: &[u8]) -> bool {
     } else {
         (&frame[6..12], &frame[..6])
     };
-    let mut ether_type = u16::from_be_bytes([frame[12], frame[13]]);
-    let mut offset = 14;
+    let Some(network) = ethernet_network_metadata(frame) else {
+        return false;
+    };
     hasher.write(first_mac);
     hasher.write(second_mac);
-    for _ in 0..2 {
-        if !matches!(ether_type, 0x8100 | 0x88a8) || frame.len() < offset + 4 {
-            break;
-        }
-        hasher.write(&frame[offset..offset + 2]);
-        ether_type = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
-        offset += 4;
+    for vlan in network.vlan_stack.as_slice() {
+        hasher.write_u16(*vlan);
     }
-    hasher.write_u16(ether_type);
-    match ether_type {
-        0x0800 => hash_ipv4(hasher, &frame[offset..]),
-        0x86dd => hash_ipv6(hasher, &frame[offset..]),
+    hasher.write_u16(network.ether_type);
+    match network.ether_type {
+        0x0800 => hash_ipv4(hasher, &frame[network.payload_offset..]),
+        0x86dd => hash_ipv6(hasher, &frame[network.payload_offset..]),
         _ => true,
     }
 }
 
 fn ethernet_payload(frame: &[u8]) -> Option<(u16, &[u8])> {
-    if frame.len() < 14 {
-        return None;
-    }
-    let mut ether_type = u16::from_be_bytes([frame[12], frame[13]]);
-    let mut offset = 14;
-    for _ in 0..2 {
-        if !matches!(ether_type, 0x8100 | 0x88a8) {
-            break;
-        }
-        if frame.len() < offset + 4 {
-            return None;
-        }
-        ether_type = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
-        offset += 4;
-    }
-    Some((ether_type, frame.get(offset..)?))
+    let network = ethernet_network_metadata(frame)?;
+    Some((network.ether_type, frame.get(network.payload_offset..)?))
 }
 
 fn udp_ports_are(payload: &[u8], first: u16, second: u16) -> bool {
@@ -324,6 +307,12 @@ pub(crate) fn stamp_critical_l2_control(packet: &mut ZCPacket) -> bool {
 }
 
 pub(crate) fn classify_packet_flow(packet: &ZCPacket) -> PacketFlow {
+    if let Some(hash) = packet.flow_hash() {
+        return PacketFlow {
+            hash,
+            shard: (hash % u64::from(FLOW_SHARD_COUNT)) as u16,
+        };
+    }
     if let Some(shard) = packet
         .peer_manager_header()
         .and_then(|header| header.flow_shard())
@@ -363,23 +352,19 @@ pub(crate) fn classify_packet_flow(packet: &ZCPacket) -> PacketFlow {
 /// is still available. The reserved header byte carries the shard across
 /// encryption and relay hops without adding wire overhead.
 pub(crate) fn stamp_packet_flow(packet: &mut ZCPacket) -> PacketFlow {
-    if let Some(shard) = packet
+    let flow = classify_packet_flow(packet);
+    if packet.flow_hash().is_none() {
+        packet.set_flow_hash(flow.hash);
+    }
+    if packet
         .peer_manager_header()
         .and_then(|header| header.flow_shard())
+        != Some(flow.shard)
+        && let Some(header) = packet.mut_peer_manager_header()
     {
-        return PacketFlow {
-            hash: u64::from(shard),
-            shard,
-        };
-    }
-    let flow = classify_packet_flow(packet);
-    if let Some(header) = packet.mut_peer_manager_header() {
         header.set_flow_shard(flow.shard);
     }
-    PacketFlow {
-        hash: u64::from(flow.shard),
-        shard: flow.shard,
-    }
+    flow
 }
 
 /// Splits a bounded vector into stable per-shard vectors without copying any
@@ -391,19 +376,57 @@ pub(crate) fn split_packet_batch_by_flow_shard(
     let mut groups = SmallVec::<[(PacketFlow, PacketBatch); 4]>::new();
     for mut packet in batch {
         let flow = stamp_packet_flow(&mut packet);
-        if let Some((_, group)) = groups
-            .iter_mut()
-            .find(|(existing, _)| existing.shard == flow.shard)
+        if let Some((existing, group)) = groups.last_mut()
+            && existing.shard == flow.shard
         {
             group
                 .try_push(packet)
-                .expect("a shard group cannot exceed its source vector");
+                .expect("a contiguous shard group cannot exceed its source vector");
             continue;
         }
         let mut group = PacketBatch::new();
         group
             .try_push(packet)
             .expect("a new shard group accepts its first packet");
+        groups.push((flow, group));
+    }
+    groups
+}
+
+/// Partitions packets by their complete flow hash before path selection.
+/// The first-seen flow order stays stable and each packet keeps its backing buffer.
+pub(crate) fn partition_packet_batch_by_flow(
+    batch: PacketBatch,
+) -> SmallVec<[(PacketFlow, PacketBatch); 4]> {
+    let mut groups = SmallVec::<[(PacketFlow, PacketBatch); 4]>::new();
+    let mut indexes = HashMap::<(u64, u8, u8, u8), usize>::new();
+    for mut packet in batch {
+        let flow = stamp_packet_flow(&mut packet);
+        let (packet_type, policy_bits, flags) = packet
+            .peer_manager_header()
+            .map(|header| {
+                (
+                    header.packet_type,
+                    u8::from(header.is_speed_first())
+                        | (u8::from(header.is_latency_first()) << 1)
+                        | (u8::from(header.is_critical_l2_control()) << 2),
+                    header.flags,
+                )
+            })
+            .unwrap_or((0, 0, 0));
+        let key = (flow.hash, packet_type, policy_bits, flags);
+        if let Some(index) = indexes.get(&key).copied() {
+            groups[index]
+                .1
+                .try_push(packet)
+                .expect("a flow group cannot exceed its source vector");
+            continue;
+        }
+        let mut group = PacketBatch::new();
+        group
+            .try_push(packet)
+            .expect("a new flow group accepts its first packet");
+        indexes.insert(key, groups.len());
         groups.push((flow, group));
     }
     groups
@@ -419,6 +442,7 @@ struct FlowPathKey {
 struct PinnedPath<P> {
     path: P,
     last_used: Instant,
+    route_generation: u64,
 }
 
 pub(crate) struct FlowPathCache<P = PeerId> {
@@ -444,9 +468,24 @@ where
     where
         F: Fn(P) -> bool,
     {
+        self.select_at_generation(destination, flow, candidate, 0, eligible)
+    }
+
+    pub(crate) fn select_at_generation<F>(
+        &self,
+        destination: PeerId,
+        flow: u64,
+        candidate: P,
+        route_generation: u64,
+        eligible: F,
+    ) -> P
+    where
+        F: Fn(P) -> bool,
+    {
         let key = FlowPathKey { destination, flow };
         let now = Instant::now();
-        if let Some(path) = self.lookup_key(key, now, &eligible) {
+        if let Some(path) = self.lookup_key(key, now, route_generation, Some(candidate), &eligible)
+        {
             return path;
         }
         if self.entries.len() >= self.capacity {
@@ -457,6 +496,7 @@ where
             PinnedPath {
                 path: candidate,
                 last_used: now,
+                route_generation,
             },
         );
         candidate
@@ -466,16 +506,49 @@ where
     where
         F: Fn(P) -> bool,
     {
-        self.lookup_key(FlowPathKey { destination, flow }, Instant::now(), &eligible)
+        self.lookup_at_generation(destination, flow, 0, None, eligible)
     }
 
-    fn lookup_key<F>(&self, key: FlowPathKey, now: Instant, eligible: &F) -> Option<P>
+    pub(crate) fn lookup_at_generation<F>(
+        &self,
+        destination: PeerId,
+        flow: u64,
+        route_generation: u64,
+        current_candidate: Option<P>,
+        eligible: F,
+    ) -> Option<P>
+    where
+        F: Fn(P) -> bool,
+    {
+        self.lookup_key(
+            FlowPathKey { destination, flow },
+            Instant::now(),
+            route_generation,
+            current_candidate,
+            &eligible,
+        )
+    }
+
+    fn lookup_key<F>(
+        &self,
+        key: FlowPathKey,
+        now: Instant,
+        route_generation: u64,
+        current_candidate: Option<P>,
+        eligible: &F,
+    ) -> Option<P>
     where
         F: Fn(P) -> bool,
     {
         if let Some(mut pinned) = self.entries.get_mut(&key) {
-            if now.duration_since(pinned.last_used) <= self.ttl && eligible(pinned.path) {
+            let route_unchanged = pinned.route_generation == route_generation
+                || current_candidate.is_some_and(|candidate| candidate == pinned.path);
+            if now.duration_since(pinned.last_used) <= self.ttl
+                && route_unchanged
+                && eligible(pinned.path)
+            {
                 pinned.last_used = now;
+                pinned.route_generation = route_generation;
                 return Some(pinned.path);
             }
             drop(pinned);
@@ -516,7 +589,8 @@ mod tests {
 
     use super::{
         FlowPathCache, classify_packet_flow, is_critical_l2_control,
-        split_packet_batch_by_flow_shard, stamp_critical_l2_control, stamp_packet_flow,
+        partition_packet_batch_by_flow, split_packet_batch_by_flow_shard,
+        stamp_critical_l2_control, stamp_packet_flow,
     };
 
     fn ethernet_ipv4_udp(
@@ -565,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn stamped_flow_survives_payload_encryption_and_relay_hops() {
+    fn stamped_flow_survives_local_payload_encryption() {
         let mut packet = ethernet_ipv4_udp(
             Ipv4Addr::new(10, 0, 0, 1),
             1200,
@@ -573,16 +647,52 @@ mod tests {
             443,
         );
         let stamped = stamp_packet_flow(&mut packet);
-        packet.mut_payload().fill(0xa5);
+        packet.mut_payload_preserving_flow_hash().fill(0xa5);
 
         let relayed = classify_packet_flow(&packet);
 
         assert_eq!(relayed.shard, stamped.shard);
-        assert_eq!(relayed.hash, u64::from(stamped.shard));
+        assert_eq!(relayed.hash, stamped.hash);
     }
 
     #[test]
-    fn mixed_vector_is_split_into_stable_zero_copy_flow_shards() {
+    fn payload_mutation_invalidates_the_cached_flow_hash() {
+        let mut packet = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 1),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 2),
+            443,
+        );
+        let original = stamp_packet_flow(&mut packet);
+
+        packet.mut_payload()[14 + 12] ^= 1;
+
+        assert_eq!(packet.flow_hash(), None);
+        let updated = stamp_packet_flow(&mut packet);
+        assert_ne!(updated.hash, original.hash);
+    }
+
+    #[test]
+    fn inner_mutation_invalidates_the_cached_flow_hash() {
+        let mut packet = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 1),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 2),
+            443,
+        );
+        stamp_packet_flow(&mut packet);
+        let payload_offset = packet.payload_offset();
+        let byte = packet
+            .mut_inner()
+            .get_mut(payload_offset + 14 + 12)
+            .unwrap();
+        *byte = (*byte).wrapping_add(1);
+
+        assert_eq!(packet.flow_hash(), None);
+    }
+
+    #[test]
+    fn mixed_vector_keeps_order_across_contiguous_flow_shard_runs() {
         let first = ethernet_ipv4_udp(
             Ipv4Addr::new(10, 0, 0, 1),
             1200,
@@ -605,17 +715,185 @@ mod tests {
 
         let groups = split_packet_batch_by_flow_shard(batch);
 
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].1.len(), 1);
         assert_eq!(groups[1].1.len(), 1);
+        assert_eq!(groups[2].1.len(), 1);
         assert_eq!(
             groups[0].1.iter().next().unwrap().payload().as_ptr(),
             first_ptr
         );
         assert_eq!(
-            groups[0].1.iter().nth(1).unwrap().payload().as_ptr(),
+            groups[2].1.iter().next().unwrap().payload().as_ptr(),
             third_ptr
         );
+    }
+
+    #[test]
+    fn flow_partition_regroups_noncontiguous_packets_before_path_selection() {
+        let first = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 1),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 2),
+            443,
+        );
+        let second = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 3),
+            2200,
+            Ipv4Addr::new(10, 0, 0, 4),
+            443,
+        );
+        let third = first.clone();
+        let mut batch = crate::tunnel::batch::PacketBatch::new();
+        batch.try_push(first).unwrap();
+        batch.try_push(second).unwrap();
+        batch.try_push(third).unwrap();
+
+        let groups = partition_packet_batch_by_flow(batch);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn flow_partition_separates_route_flags_and_keeps_first_seen_order() {
+        let mut plain = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 1),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 2),
+            443,
+        );
+        let mut exit = plain.clone();
+        let mut compressed = plain.clone();
+        plain.set_flow_hash(77);
+        exit.set_flow_hash(77);
+        compressed.set_flow_hash(77);
+        exit.mut_peer_manager_header().unwrap().set_exit_node(true);
+        compressed
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_compressed(true);
+
+        let mut batch = crate::tunnel::batch::PacketBatch::new();
+        batch.try_push(plain.clone()).unwrap();
+        batch.try_push(exit).unwrap();
+        batch.try_push(compressed).unwrap();
+        batch.try_push(plain).unwrap();
+
+        let groups = partition_packet_batch_by_flow(batch);
+
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
+        assert_eq!(groups[2].1.len(), 1);
+        assert!(
+            !groups[0]
+                .1
+                .first()
+                .unwrap()
+                .peer_manager_header()
+                .unwrap()
+                .is_exit_node()
+        );
+        assert!(
+            !groups[0]
+                .1
+                .iter()
+                .nth(1)
+                .unwrap()
+                .peer_manager_header()
+                .unwrap()
+                .is_exit_node()
+        );
+        assert!(
+            groups[1]
+                .1
+                .first()
+                .unwrap()
+                .peer_manager_header()
+                .unwrap()
+                .is_exit_node()
+        );
+        assert!(
+            groups[2]
+                .1
+                .first()
+                .unwrap()
+                .peer_manager_header()
+                .unwrap()
+                .is_compressed()
+        );
+    }
+
+    #[test]
+    fn flow_partition_separates_colliding_shards_and_policies() {
+        let first = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 1),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 2),
+            443,
+        );
+        let first_flow = classify_packet_flow(&first);
+        let (mut second, second_flow) = (1001..20_000)
+            .map(|source_port| {
+                let packet = ethernet_ipv4_udp(
+                    Ipv4Addr::new(10, 0, 0, 3),
+                    source_port,
+                    Ipv4Addr::new(10, 0, 0, 4),
+                    443,
+                );
+                let flow = classify_packet_flow(&packet);
+                (packet, flow)
+            })
+            .find(|(_, flow)| flow.shard == first_flow.shard && flow.hash != first_flow.hash)
+            .expect("the flow hash must produce a shard collision in the search range");
+
+        let mut first = first;
+        first
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_speed_first(true);
+        second
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_latency_first(true);
+
+        let mut batch = crate::tunnel::batch::PacketBatch::new();
+        batch.try_push(first).unwrap();
+        batch.try_push(second).unwrap();
+
+        let groups = partition_packet_batch_by_flow(batch);
+
+        assert_eq!(first_flow.shard, second_flow.shard);
+        assert_ne!(first_flow.hash, second_flow.hash);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn flow_partition_separates_packet_types_with_the_same_flow_hash() {
+        let mut ethernet = ethernet_ipv4_udp(
+            Ipv4Addr::new(10, 0, 0, 1),
+            1200,
+            Ipv4Addr::new(10, 0, 0, 2),
+            443,
+        );
+        let mut data = ethernet.clone();
+        data.mut_peer_manager_header().unwrap().packet_type = PacketType::Data as u8;
+        ethernet.set_flow_hash(17);
+        data.set_flow_hash(17);
+
+        let mut batch = crate::tunnel::batch::PacketBatch::new();
+        batch.try_push(ethernet).unwrap();
+        batch.try_push(data).unwrap();
+
+        let groups = partition_packet_batch_by_flow(batch);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[1].1.len(), 1);
     }
 
     #[test]
@@ -651,6 +929,25 @@ mod tests {
 
         cache.invalidate_path(first);
         assert_eq!(cache.select(7, 0x3456, second, |_| true), second);
+    }
+
+    #[test]
+    fn path_pin_generation_changes_only_when_destination_route_changes() {
+        let cache = FlowPathCache::new(8, Duration::from_secs(60));
+        let flow = 0x789a;
+
+        assert_eq!(cache.select_at_generation(7, flow, 11, 1, |_| true), 11);
+        // A rebuild that keeps the same destination next hop keeps the pin.
+        assert_eq!(
+            cache.lookup_at_generation(7, flow, 2, Some(11), |_| true),
+            Some(11)
+        );
+        // A rebuild that changes the destination next hop removes the old pin.
+        assert_eq!(
+            cache.lookup_at_generation(7, flow, 3, Some(12), |_| true),
+            None
+        );
+        assert_eq!(cache.select_at_generation(7, flow, 12, 3, |_| true), 12);
     }
 
     #[test]

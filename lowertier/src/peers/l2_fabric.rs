@@ -5,11 +5,11 @@ use std::{
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use pnet::packet::ethernet::EthernetPacket;
 use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::common::PeerId;
+use crate::tunnel::packet_def::{VlanStack, ethernet_network_metadata};
 
 pub type MacAddress = [u8; 6];
 
@@ -31,14 +31,20 @@ struct FdbEntry {
     last_seen: Instant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FdbKey {
+    vlan: VlanStack,
+    mac: MacAddress,
+}
+
 #[derive(Default)]
 pub(crate) struct L2SourceBatch {
-    sources: SmallVec<[(MacAddress, PeerId); 4]>,
+    sources: SmallVec<[(VlanStack, MacAddress, PeerId); 4]>,
 }
 
 #[derive(Default)]
 pub(crate) struct L2DestinationBatch {
-    destinations: SmallVec<[(MacAddress, EthernetDestination); 4]>,
+    destinations: SmallVec<[(VlanStack, MacAddress, EthernetDestination); 4]>,
 }
 
 impl L2DestinationBatch {
@@ -48,42 +54,46 @@ impl L2DestinationBatch {
         frame: &[u8],
         now: Instant,
     ) -> Result<EthernetDestination, L2FrameError> {
-        let (destination, _) = ethernet_addresses(frame)?;
-        if let Some((_, decision)) = self
-            .destinations
-            .iter()
-            .find(|(recorded_destination, _)| *recorded_destination == destination)
+        let (vlan, destination, _) = ethernet_addresses(frame)?;
+        if let Some((_, _, decision)) =
+            self.destinations
+                .iter()
+                .find(|(recorded_vlan, recorded_destination, _)| {
+                    *recorded_vlan == vlan && *recorded_destination == destination
+                })
         {
             return Ok(*decision);
         }
 
-        let decision = fabric.destination_address_at(destination, now);
-        self.destinations.push((destination, decision));
+        let decision = fabric.destination_address_at(vlan, destination, now);
+        self.destinations.push((vlan, destination, decision));
         Ok(decision)
     }
 }
 
 impl L2SourceBatch {
-    pub(crate) fn record_source(&mut self, source: MacAddress, peer_id: PeerId) {
+    pub(crate) fn record_source(&mut self, vlan: VlanStack, source: MacAddress, peer_id: PeerId) {
         if !is_unicast(source) {
             return;
         }
-        if let Some((_, recorded_peer_id)) = self
-            .sources
-            .iter_mut()
-            .find(|(recorded_source, _)| *recorded_source == source)
+        if let Some((_, _, recorded_peer_id)) =
+            self.sources
+                .iter_mut()
+                .find(|(recorded_vlan, recorded_source, _)| {
+                    *recorded_vlan == vlan && *recorded_source == source
+                })
         {
             *recorded_peer_id = peer_id;
             return;
         }
-        self.sources.push((source, peer_id));
+        self.sources.push((vlan, source, peer_id));
     }
 
     pub(crate) fn record(&mut self, frame: &[u8], peer_id: PeerId) {
-        let Ok((_, source)) = ethernet_addresses(frame) else {
+        let Ok((vlan, _, source)) = ethernet_addresses(frame) else {
             return;
         };
-        self.record_source(source, peer_id);
+        self.record_source(vlan, source, peer_id);
     }
 
     #[cfg(test)]
@@ -98,7 +108,7 @@ impl L2SourceBatch {
 /// The entry reservation counter keeps the configured capacity strict even
 /// when multiple peer receive tasks learn new addresses concurrently.
 pub struct L2Fabric {
-    fdb: DashMap<MacAddress, FdbEntry>,
+    fdb: DashMap<FdbKey, FdbEntry>,
     entry_count: AtomicUsize,
     capacity: usize,
     age: Duration,
@@ -106,6 +116,9 @@ pub struct L2Fabric {
     flood_epoch: AtomicU64,
     flood_bytes: AtomicU64,
 }
+
+/// Keep one packet fanout within the maximum peer set accepted by route sync.
+pub const MAX_FANOUT_RECIPIENTS: usize = 4_096;
 
 impl L2Fabric {
     const FLOOD_EPOCH_RESETTING: u64 = 1 << 63;
@@ -131,6 +144,29 @@ impl L2Fabric {
     }
 
     pub fn allow_flood(&self, frame_len: usize) -> bool {
+        self.allow_flood_replicated(frame_len, 1)
+    }
+
+    /// Reserve the complete output byte cost before a frame is replicated.
+    ///
+    /// The recipient bound prevents an untrusted route table from forcing an
+    /// unbounded clone set. The byte multiplication saturates before accounting.
+    pub fn allow_flood_replicated(&self, frame_len: usize, recipient_count: usize) -> bool {
+        let output_bytes = frame_len.saturating_mul(recipient_count);
+        self.allow_flood_output_bytes(output_bytes, recipient_count)
+    }
+
+    /// Reserve an already aggregated output byte cost before any clone is made.
+    ///
+    /// Callers use this for mixed compact and full Ethernet fanout.
+    pub fn allow_flood_output_bytes(&self, output_bytes: usize, recipient_count: usize) -> bool {
+        if recipient_count > MAX_FANOUT_RECIPIENTS {
+            return false;
+        }
+        self.allow_flood_bytes(output_bytes)
+    }
+
+    fn allow_flood_bytes(&self, frame_len: usize) -> bool {
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -152,24 +188,24 @@ impl L2Fabric {
     }
 
     pub(crate) fn learn_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) {
-        let Ok((_, source)) = ethernet_addresses(frame) else {
+        let Ok((vlan, _, source)) = ethernet_addresses(frame) else {
             return;
         };
         if !is_unicast(source) {
             return;
         }
 
-        self.learn_address_at(source, peer_id, now);
+        self.learn_address_at(vlan, source, peer_id, now);
     }
 
     pub(crate) fn learn_source_batch_at(&self, batch: L2SourceBatch, now: Instant) {
-        for (source, peer_id) in batch.sources {
-            self.learn_address_at(source, peer_id, now);
+        for (vlan, source, peer_id) in batch.sources {
+            self.learn_address_at(vlan, source, peer_id, now);
         }
     }
 
-    fn learn_address_at(&self, source: MacAddress, peer_id: PeerId, now: Instant) {
-        match self.fdb.entry(source) {
+    fn learn_address_at(&self, vlan: VlanStack, source: MacAddress, peer_id: PeerId, now: Instant) {
+        match self.fdb.entry(FdbKey { vlan, mac: source }) {
             Entry::Occupied(mut occupied) => {
                 *occupied.get_mut() = FdbEntry {
                     peer_id,
@@ -192,16 +228,25 @@ impl L2Fabric {
         frame: &[u8],
         now: Instant,
     ) -> Result<EthernetDestination, L2FrameError> {
-        let (destination, _) = ethernet_addresses(frame)?;
-        Ok(self.destination_address_at(destination, now))
+        let (vlan, destination, _) = ethernet_addresses(frame)?;
+        Ok(self.destination_address_at(vlan, destination, now))
     }
 
-    fn destination_address_at(&self, destination: MacAddress, now: Instant) -> EthernetDestination {
+    fn destination_address_at(
+        &self,
+        vlan: VlanStack,
+        destination: MacAddress,
+        now: Instant,
+    ) -> EthernetDestination {
         if !is_unicast(destination) {
             return EthernetDestination::Flood;
         }
 
-        let Some(entry) = self.fdb.get(&destination) else {
+        let key = FdbKey {
+            vlan,
+            mac: destination,
+        };
+        let Some(entry) = self.fdb.get(&key) else {
             return EthernetDestination::Flood;
         };
         if now.saturating_duration_since(entry.last_seen) <= self.age {
@@ -211,7 +256,7 @@ impl L2Fabric {
 
         if self
             .fdb
-            .remove_if(&destination, |_, entry| {
+            .remove_if(&key, |_, entry| {
                 now.saturating_duration_since(entry.last_seen) > self.age
             })
             .is_some()
@@ -270,12 +315,17 @@ impl L2Fabric {
     }
 }
 
-fn ethernet_addresses(frame: &[u8]) -> Result<(MacAddress, MacAddress), L2FrameError> {
-    let packet = EthernetPacket::new(frame).ok_or(L2FrameError::TooShort)?;
-    Ok((
-        packet.get_destination().octets(),
-        packet.get_source().octets(),
-    ))
+fn ethernet_addresses(frame: &[u8]) -> Result<(VlanStack, MacAddress, MacAddress), L2FrameError> {
+    let network = ethernet_network_metadata(frame).ok_or(L2FrameError::TooShort)?;
+    let destination = frame
+        .get(..6)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(L2FrameError::TooShort)?;
+    let source = frame
+        .get(6..12)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(L2FrameError::TooShort)?;
+    Ok((network.vlan_stack, destination, source))
 }
 
 fn is_unicast(address: MacAddress) -> bool {
@@ -286,13 +336,25 @@ fn is_unicast(address: MacAddress) -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch};
+    use super::{
+        EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch, MAX_FANOUT_RECIPIENTS,
+    };
 
     fn frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
         let mut bytes = vec![0_u8; 64];
         bytes[..6].copy_from_slice(&destination);
         bytes[6..12].copy_from_slice(&source);
         bytes[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        bytes
+    }
+
+    fn vlan_frame(vlan: u16, destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 68];
+        bytes[..6].copy_from_slice(&destination);
+        bytes[6..12].copy_from_slice(&source);
+        bytes[12..14].copy_from_slice(&0x8100_u16.to_be_bytes());
+        bytes[14..16].copy_from_slice(&(vlan & 0x0fff).to_be_bytes());
+        bytes[16..18].copy_from_slice(&0x0800_u16.to_be_bytes());
         bytes
     }
 
@@ -352,6 +414,26 @@ mod tests {
         );
         assert_eq!(
             L2DestinationBatch::default().resolve_at(&fabric, &outbound, now),
+            Ok(EthernetDestination::Known(8))
+        );
+    }
+
+    #[test]
+    fn vlan_stack_is_part_of_the_forwarding_database_key() {
+        let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
+        let now = Instant::now();
+        let destination = [0x02, 0, 0, 0, 0, 9];
+        let source = [0x02, 0, 0, 0, 0, 1];
+
+        fabric.learn_source_at(&vlan_frame(7, [0xff; 6], destination), 7, now);
+        fabric.learn_source_at(&vlan_frame(8, [0xff; 6], destination), 8, now);
+
+        assert_eq!(
+            fabric.destination_at(&vlan_frame(7, destination, source), now),
+            Ok(EthernetDestination::Known(7))
+        );
+        assert_eq!(
+            fabric.destination_at(&vlan_frame(8, destination, source), now),
             Ok(EthernetDestination::Known(8))
         );
     }
@@ -466,6 +548,22 @@ mod tests {
 
         assert!(fabric.allow_flood_at(usize::MAX, 10));
         assert!(fabric.allow_flood_at(usize::MAX, 10));
+    }
+
+    #[test]
+    fn replicated_flood_accounts_for_all_outputs_before_cloning() {
+        let fabric = L2Fabric::new(16, Duration::from_secs(300), 100);
+
+        assert!(fabric.allow_flood_replicated(25, 4));
+        assert!(!fabric.allow_flood_replicated(25, 1));
+    }
+
+    #[test]
+    fn replicated_flood_rejects_excessive_recipient_count() {
+        let fabric = L2Fabric::new(16, Duration::from_secs(300), 0);
+
+        assert!(!fabric.allow_flood_replicated(1, MAX_FANOUT_RECIPIENTS + 1));
+        assert!(fabric.allow_flood_replicated(1, MAX_FANOUT_RECIPIENTS));
     }
 
     #[test]

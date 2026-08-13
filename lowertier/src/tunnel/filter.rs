@@ -260,6 +260,14 @@ where
         self.inner.info()
     }
 
+    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
+        self.inner.datagram_size_budget()
+    }
+
+    fn transport_binding(&self) -> Option<TransportBinding> {
+        self.inner.transport_binding()
+    }
+
     fn is_transport_authenticated(&self) -> bool {
         self.inner.is_transport_authenticated()
     }

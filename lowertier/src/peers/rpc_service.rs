@@ -228,7 +228,12 @@ impl CredentialManageRpc for PeerManagerRpcService {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
 
-        if global_ctx.get_network_identity().network_secret.is_none() {
+        if global_ctx
+            .get_network_identity()
+            .network_secret
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
             return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                 "only admin nodes (with network_secret) can generate credentials"
             )));
@@ -244,20 +249,29 @@ impl CredentialManageRpc for PeerManagerRpcService {
 
         let (id, secret) = global_ctx
             .get_credential_manager()
-            .generate_credential_with_options(
+            .generate_credential_bundle(
                 request.groups,
                 request.allow_relay,
                 request.allowed_proxy_cidrs,
                 ttl,
                 request.credential_id,
                 request.reusable.unwrap_or(true),
-            );
+            )
+            .map_err(|error| {
+                rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "failed to issue credential: {error}"
+                ))
+            })?;
 
         global_ctx.issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);
 
+        let bundle =
+            crate::peers::credential_manager::CredentialManager::parse_credential_bundle(&secret)
+                .ok();
         Ok(GenerateCredentialResponse {
             credential_id: id,
             credential_secret: secret,
+            bundle,
         })
     }
 
@@ -268,7 +282,12 @@ impl CredentialManageRpc for PeerManagerRpcService {
     ) -> Result<RevokeCredentialResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
-        if global_ctx.get_network_identity().network_secret.is_none() {
+        if global_ctx
+            .get_network_identity()
+            .network_secret
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
             return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                 "only admin nodes (with network_secret) can revoke credentials"
             )));
@@ -276,7 +295,12 @@ impl CredentialManageRpc for PeerManagerRpcService {
 
         let success = global_ctx
             .get_credential_manager()
-            .revoke_credential(&request.credential_id);
+            .try_revoke_credential(&request.credential_id)
+            .map_err(|error| {
+                rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "failed to revoke credential: {error}"
+                ))
+            })?;
 
         if success {
             global_ctx.issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);

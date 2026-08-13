@@ -13,7 +13,9 @@ use crate::{
         global_ctx::GlobalCtxEvent,
     },
     instance::instance::Instance,
-    tests::three_node::{generate_secure_mode_config, generate_secure_mode_config_with_key},
+    peers::credential_manager::CredentialManager,
+    proto::common::SecureModeConfig,
+    tests::three_node::generate_secure_mode_config,
     tunnel::{common::tests::wait_for_condition, tcp::TcpTunnelConnector, udp::UdpTunnelConnector},
 };
 
@@ -88,34 +90,40 @@ pub fn prepare_credential_network() {
     add_ns_to_bridge("br_b", "ns_adm2");
 }
 
-fn credential_private_key_from_secret(credential_secret: &str) -> x25519_dalek::StaticSecret {
-    use base64::Engine as _;
-
-    let privkey_bytes: [u8; 32] = base64::prelude::BASE64_STANDARD
-        .decode(credential_secret)
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-    x25519_dalek::StaticSecret::from(privkey_bytes)
-}
-
 fn build_credential_config(
     network_name: String,
-    private_key: &x25519_dalek::StaticSecret,
+    credential_secret: &str,
     inst_name: &str,
     ns: Option<&str>,
     ipv4: &str,
     ipv6: &str,
 ) -> TomlConfigLoader {
+    let bundle = CredentialManager::parse_credential_bundle(credential_secret)
+        .expect("credential RPC returns a signed bundle");
+    let root_fingerprint = bundle.root_fingerprint.clone();
+    let certificate = bundle
+        .certificate
+        .as_ref()
+        .map(prost::Message::encode_to_vec)
+        .unwrap_or_default();
     let config = TomlConfigLoader::default();
     config.set_inst_name(inst_name.to_owned());
     config.set_netns(ns.map(|s| s.to_owned()));
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
     config.set_listeners(vec![]);
-    config.set_network_identity(NetworkIdentity::new_credential(network_name));
-    config.set_secure_mode(Some(generate_secure_mode_config_with_key(private_key)));
+    config.set_network_identity(
+        NetworkIdentity::new_credential_with_root_fingerprint(network_name, &root_fingerprint)
+            .expect("credential bundle root fingerprint is 32 bytes"),
+    );
+    config.set_secure_mode(Some(SecureModeConfig {
+        enabled: true,
+        local_private_key: None,
+        local_public_key: None,
+        credential_bundle: Some(credential_secret.to_owned()),
+        credential_root_fingerprint: root_fingerprint,
+        credential_certificate: certificate,
+    }));
 
     config
 }
@@ -131,7 +139,8 @@ async fn create_credential_config(
     let (_cred_id, cred_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], Duration::from_secs(3600));
+        .generate_credential(vec![], false, vec![], Duration::from_secs(3600))
+        .unwrap();
 
     build_credential_config(
         admin_inst
@@ -139,7 +148,7 @@ async fn create_credential_config(
             .get_network_identity()
             .network_name
             .clone(),
-        &credential_private_key_from_secret(&cred_secret),
+        &cred_secret,
         inst_name,
         ns,
         ipv4,
@@ -155,14 +164,7 @@ fn create_credential_config_from_secret(
     ipv4: &str,
     ipv6: &str,
 ) -> TomlConfigLoader {
-    build_credential_config(
-        network_name,
-        &credential_private_key_from_secret(credential_secret),
-        inst_name,
-        ns,
-        ipv4,
-        ipv6,
-    )
+    build_credential_config(network_name, credential_secret, inst_name, ns, ipv4, ipv6)
 }
 
 /// Helper: Create credential node config with a random, unknown key
@@ -173,8 +175,15 @@ fn create_unknown_credential_config(
     ipv4: &str,
     ipv6: &str,
 ) -> TomlConfigLoader {
-    let random_private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-    build_credential_config(network_name, &random_private, inst_name, ns, ipv4, ipv6)
+    let issuer = CredentialManager::new_with_network(
+        None,
+        network_name.clone(),
+        Some("unknown-credential-root"),
+    );
+    let (_, credential_secret) = issuer
+        .generate_credential_bundle(vec![], false, vec![], Duration::from_secs(3600), None, true)
+        .expect("unknown credential issuer must sign a test bundle");
+    build_credential_config(network_name, &credential_secret, inst_name, ns, ipv4, ipv6)
 }
 
 /// Helper: Create admin node config
@@ -442,7 +451,8 @@ async fn run_credential_peers_p2p_to_need_p2p_admin_through_public_server(
             Duration::from_secs(3600),
             Some("credential-peer-a".to_string()),
             false,
-        );
+        )
+        .unwrap();
     let (_credential_b_id, credential_b_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
@@ -453,7 +463,8 @@ async fn run_credential_peers_p2p_to_need_p2p_admin_through_public_server(
             Duration::from_secs(3600),
             Some("credential-peer-b".to_string()),
             false,
-        );
+        )
+        .unwrap();
     admin_inst
         .get_global_ctx()
         .issue_event(GlobalCtxEvent::CredentialChanged);
@@ -568,14 +579,15 @@ fn create_generated_credential_config(
     let (cred_id, cred_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], Duration::from_secs(3600));
+        .generate_credential(vec![], false, vec![], Duration::from_secs(3600))
+        .unwrap();
     let config = build_credential_config(
         admin_inst
             .get_global_ctx()
             .get_network_identity()
             .network_name
             .clone(),
-        &credential_private_key_from_secret(&cred_secret),
+        &cred_secret,
         inst_name,
         ns,
         ipv4,
@@ -851,98 +863,62 @@ async fn credential_relay_capability(#[case] allow_relay: bool) {
     let (_cred_a_id, cred_a_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], Duration::from_secs(3600));
+        .generate_credential(vec![], false, vec![], Duration::from_secs(3600))
+        .unwrap();
 
     let (_cred_b_id, cred_b_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], Duration::from_secs(3600));
+        .generate_credential(vec![], false, vec![], Duration::from_secs(3600))
+        .unwrap();
 
     let (_cred_c_id, cred_c_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], allow_relay, vec![], Duration::from_secs(3600));
+        .generate_credential(vec![], allow_relay, vec![], Duration::from_secs(3600))
+        .unwrap();
+
+    let credential_network_name = admin_inst
+        .get_global_ctx()
+        .get_network_identity()
+        .network_name
+        .clone();
 
     // Create credential A on ns_c1
-    let cred_a_config = {
-        use base64::Engine as _;
-        let privkey_bytes: [u8; 32] = base64::prelude::BASE64_STANDARD
-            .decode(&cred_a_secret)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let private = x25519_dalek::StaticSecret::from(privkey_bytes);
-        let config = TomlConfigLoader::default();
-        config.set_inst_name("cred_a".to_string());
-        config.set_netns(Some("ns_c1".to_string()));
-        config.set_ipv4(Some("10.144.144.2".parse().unwrap()));
-        config.set_ipv6(Some("fd00::2/64".parse().unwrap()));
-        config.set_network_identity(NetworkIdentity::new_credential(
-            admin_inst
-                .get_global_ctx()
-                .get_network_identity()
-                .network_name
-                .clone(),
-        ));
-        config.set_secure_mode(Some(generate_secure_mode_config_with_key(&private)));
-        config
-    };
+    let cred_a_config = build_credential_config(
+        credential_network_name.clone(),
+        &cred_a_secret,
+        "cred_a",
+        Some("ns_c1"),
+        "10.144.144.2",
+        "fd00::2/64",
+    );
     let mut cred_a_inst = Instance::new(cred_a_config);
     cred_a_inst.run().await.unwrap();
 
     // Create credential B on ns_c2
-    let cred_b_config = {
-        use base64::Engine as _;
-        let privkey_bytes: [u8; 32] = base64::prelude::BASE64_STANDARD
-            .decode(&cred_b_secret)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let private = x25519_dalek::StaticSecret::from(privkey_bytes);
-        let config = TomlConfigLoader::default();
-        config.set_inst_name("cred_b".to_string());
-        config.set_netns(Some("ns_c2".to_string()));
-        config.set_ipv4(Some("10.144.144.3".parse().unwrap()));
-        config.set_ipv6(Some("fd00::3/64".parse().unwrap()));
-        config.set_network_identity(NetworkIdentity::new_credential(
-            admin_inst
-                .get_global_ctx()
-                .get_network_identity()
-                .network_name
-                .clone(),
-        ));
-        config.set_secure_mode(Some(generate_secure_mode_config_with_key(&private)));
-        config
-    };
+    let cred_b_config = build_credential_config(
+        credential_network_name.clone(),
+        &cred_b_secret,
+        "cred_b",
+        Some("ns_c2"),
+        "10.144.144.3",
+        "fd00::3/64",
+    );
     let mut cred_b_inst = Instance::new(cred_b_config);
     cred_b_inst.run().await.unwrap();
 
     // Create credential C on ns_c3 WITH listener (so A and B can connect to it)
-    let cred_c_config = {
-        use base64::Engine as _;
-        let privkey_bytes: [u8; 32] = base64::prelude::BASE64_STANDARD
-            .decode(&cred_c_secret)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let private = x25519_dalek::StaticSecret::from(privkey_bytes);
-        let config = TomlConfigLoader::default();
-        config.set_inst_name("cred_c".to_string());
-        config.set_netns(Some("ns_c3".to_string()));
-        config.set_ipv4(Some("10.144.144.4".parse().unwrap()));
-        config.set_ipv6(Some("fd00::4/64".parse().unwrap()));
-        // C has listener so A and B can connect to it
-        config.set_listeners(vec!["tcp://0.0.0.0:11020".parse().unwrap()]);
-        config.set_network_identity(NetworkIdentity::new_credential(
-            admin_inst
-                .get_global_ctx()
-                .get_network_identity()
-                .network_name
-                .clone(),
-        ));
-        config.set_secure_mode(Some(generate_secure_mode_config_with_key(&private)));
-        config
-    };
+    let cred_c_config = build_credential_config(
+        credential_network_name,
+        &cred_c_secret,
+        "cred_c",
+        Some("ns_c3"),
+        "10.144.144.4",
+        "fd00::4/64",
+    );
+    // C has listener so A and B can connect to it.
+    cred_c_config.set_listeners(vec!["tcp://0.0.0.0:11020".parse().unwrap()]);
     let mut cred_c_inst = Instance::new(cred_c_config);
     cred_c_inst.run().await.unwrap();
 
@@ -1195,34 +1171,22 @@ async fn credential_revocation_propagates() {
     let (cred_id, cred_secret) = admin_inst
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], Duration::from_secs(3600));
+        .generate_credential(vec![], false, vec![], Duration::from_secs(3600))
+        .unwrap();
 
     // Create credential node
-    let cred_config = {
-        use base64::Engine as _;
-        let privkey_bytes: [u8; 32] = base64::prelude::BASE64_STANDARD
-            .decode(&cred_secret)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let private = x25519_dalek::StaticSecret::from(privkey_bytes);
-
-        let config = TomlConfigLoader::default();
-        config.set_inst_name("cred".to_string());
-        config.set_netns(Some("ns_c1".to_string()));
-        config.set_ipv4(Some("10.144.144.2".parse().unwrap()));
-        config.set_ipv6(Some("fd00::2/64".parse().unwrap()));
-        config.set_listeners(vec![]);
-        config.set_network_identity(NetworkIdentity::new_credential(
-            admin_inst
-                .get_global_ctx()
-                .get_network_identity()
-                .network_name
-                .clone(),
-        ));
-        config.set_secure_mode(Some(generate_secure_mode_config_with_key(&private)));
-        config
-    };
+    let cred_config = build_credential_config(
+        admin_inst
+            .get_global_ctx()
+            .get_network_identity()
+            .network_name
+            .clone(),
+        &cred_secret,
+        "cred",
+        Some("ns_c1"),
+        "10.144.144.2",
+        "fd00::2/64",
+    );
 
     let mut cred_inst = Instance::new(cred_config);
     cred_inst.run().await.unwrap();
@@ -1262,7 +1226,8 @@ async fn credential_revocation_propagates() {
         admin_inst
             .get_global_ctx()
             .get_credential_manager()
-            .revoke_credential(&cred_id),
+            .try_revoke_credential(&cred_id)
+            .unwrap(),
         "Credential should be revoked successfully"
     );
 
@@ -1320,7 +1285,8 @@ async fn credential_non_reusable_allows_only_one_peer() {
             Duration::from_secs(3600),
             None,
             false,
-        );
+        )
+        .unwrap();
 
     let network_name = admin_inst
         .get_global_ctx()
@@ -1468,25 +1434,18 @@ async fn credential_unknown_rejected() {
     let mut admin_inst = Instance::new(admin_config);
     admin_inst.run().await.unwrap();
 
-    // Create credential node with random key (not generated by admin)
-    let random_private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let cred_config = {
-        let config = TomlConfigLoader::default();
-        config.set_inst_name("cred".to_string());
-        config.set_netns(Some("ns_c1".to_string()));
-        config.set_ipv4(Some("10.144.144.2".parse().unwrap()));
-        config.set_ipv6(Some("fd00::2/64".parse().unwrap()));
-        config.set_listeners(vec![]);
-        config.set_network_identity(NetworkIdentity::new_credential(
-            admin_inst
-                .get_global_ctx()
-                .get_network_identity()
-                .network_name
-                .clone(),
-        ));
-        config.set_secure_mode(Some(generate_secure_mode_config_with_key(&random_private)));
-        config
-    };
+    // Create credential node with a bundle signed by a different root.
+    let cred_config = create_unknown_credential_config(
+        admin_inst
+            .get_global_ctx()
+            .get_network_identity()
+            .network_name
+            .clone(),
+        "cred",
+        Some("ns_c1"),
+        "10.144.144.2",
+        "fd00::2/64",
+    );
 
     let mut cred_inst = Instance::new(cred_config);
     cred_inst.run().await.unwrap();
@@ -1621,7 +1580,8 @@ async fn credential_unknown_via_shared_rejected(#[values(true, false)] test_revo
             admin_a_inst
                 .get_global_ctx()
                 .get_credential_manager()
-                .revoke_credential(credential_id.as_ref().unwrap()),
+                .try_revoke_credential(credential_id.as_ref().unwrap())
+                .unwrap(),
             "credential should be revoked successfully"
         );
         admin_a_inst
@@ -1851,7 +1811,8 @@ async fn credential_non_reusable_across_two_admins_allows_only_one_peer() {
             Duration::from_secs(3600),
             None,
             false,
-        );
+        )
+        .unwrap();
     admin_a_inst
         .get_global_ctx()
         .issue_event(GlobalCtxEvent::CredentialChanged);

@@ -668,6 +668,23 @@ pub(crate) struct PublicIpv6AddrRpcServerImpl {
 }
 
 impl PublicIpv6AddrRpcServerImpl {
+    fn require_authenticated_peer(
+        ctrl: &BaseController,
+        claimed_peer_id: PeerId,
+    ) -> rpc_types::error::Result<()> {
+        let authenticated_peer_id = ctrl.authenticated_peer_id().ok_or_else(|| {
+            rpc_types::error::Error::MalformatRpcPacket(
+                "public IPv6 lease request requires an authenticated peer".to_string(),
+            )
+        })?;
+        if authenticated_peer_id != claimed_peer_id {
+            return Err(rpc_types::error::Error::MalformatRpcPacket(format!(
+                "public IPv6 lease peer mismatch: authenticated {authenticated_peer_id}, claimed {claimed_peer_id}"
+            )));
+        }
+        Ok(())
+    }
+
     fn selected_provider(
         service: &PublicIpv6Service,
     ) -> rpc_types::error::Result<PublicIpv6Provider> {
@@ -694,9 +711,10 @@ impl PublicIpv6AddrRpc for PublicIpv6AddrRpcServerImpl {
 
     async fn acquire_lease(
         &self,
-        _: BaseController,
+        ctrl: BaseController,
         request: AcquireIpv6PublicAddrLeaseRequest,
     ) -> rpc_types::error::Result<Ipv6PublicAddrLeaseReply> {
+        Self::require_authenticated_peer(&ctrl, request.peer_id)?;
         let Some(service) = self.service.upgrade() else {
             return Err(anyhow::anyhow!("public ipv6 service stopped").into());
         };
@@ -720,9 +738,10 @@ impl PublicIpv6AddrRpc for PublicIpv6AddrRpcServerImpl {
 
     async fn renew_lease(
         &self,
-        _: BaseController,
+        ctrl: BaseController,
         request: RenewIpv6PublicAddrLeaseRequest,
     ) -> rpc_types::error::Result<Ipv6PublicAddrLeaseReply> {
+        Self::require_authenticated_peer(&ctrl, request.peer_id)?;
         let Some(service) = self.service.upgrade() else {
             return Err(anyhow::anyhow!("public ipv6 service stopped").into());
         };
@@ -747,9 +766,10 @@ impl PublicIpv6AddrRpc for PublicIpv6AddrRpcServerImpl {
 
     async fn release_lease(
         &self,
-        _: BaseController,
+        ctrl: BaseController,
         request: ReleaseIpv6PublicAddrLeaseRequest,
     ) -> rpc_types::error::Result<crate::proto::common::Void> {
+        Self::require_authenticated_peer(&ctrl, request.peer_id)?;
         let Some(service) = self.service.upgrade() else {
             return Err(anyhow::anyhow!("public ipv6 service stopped").into());
         };
@@ -763,9 +783,10 @@ impl PublicIpv6AddrRpc for PublicIpv6AddrRpcServerImpl {
 
     async fn get_lease(
         &self,
-        _: BaseController,
+        ctrl: BaseController,
         request: GetIpv6PublicAddrLeaseRequest,
     ) -> rpc_types::error::Result<Ipv6PublicAddrLeaseReply> {
+        Self::require_authenticated_peer(&ctrl, request.peer_id)?;
         let Some(service) = self.service.upgrade() else {
             return Err(anyhow::anyhow!("public ipv6 service stopped").into());
         };
@@ -860,11 +881,12 @@ mod tests {
     use crate::{
         common::{PeerId, global_ctx::tests::get_mock_global_ctx},
         peers::peer_rpc::PeerRpcManager,
+        proto::rpc_types::controller::{BaseController, Controller},
     };
 
     use super::{
-        PublicIpv6PeerRouteInfo, PublicIpv6RouteControl, PublicIpv6Service, PublicIpv6SyncTrigger,
-        allocate_public_ipv6_leases,
+        PublicIpv6AddrRpcServerImpl, PublicIpv6PeerRouteInfo, PublicIpv6RouteControl,
+        PublicIpv6Service, PublicIpv6SyncTrigger, allocate_public_ipv6_leases,
     };
 
     struct TestRouteControl {
@@ -908,6 +930,17 @@ mod tests {
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].addr, leases[0].addr);
         assert!(next[0].reused);
+    }
+
+    #[test]
+    fn public_ipv6_lease_authentication_binds_the_claimed_peer() {
+        let mut ctrl = BaseController::default();
+        ctrl.set_authenticated_peer_id(Some(7));
+        assert!(PublicIpv6AddrRpcServerImpl::require_authenticated_peer(&ctrl, 7).is_ok());
+        assert!(matches!(
+            PublicIpv6AddrRpcServerImpl::require_authenticated_peer(&ctrl, 8),
+            Err(crate::proto::rpc_types::error::Error::MalformatRpcPacket(_))
+        ));
     }
 
     #[test]

@@ -132,7 +132,6 @@ sudo lowertier-core \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
   --port-mode ethernet \
-  --secure-mode true \
   --listeners udp://0.0.0.0:11010
 ```
 
@@ -145,7 +144,6 @@ sudo lowertier-core \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
   --port-mode ethernet \
-  --secure-mode true \
   --peers udp://192.0.2.10:11010
 ```
 
@@ -176,8 +174,7 @@ sudo lowertier-core \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --port-mode ethernet \
-  --secure-mode true
+  --port-mode ethernet
 ```
 
 macOS:
@@ -188,7 +185,6 @@ sudo lowertier-core \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
   --port-mode compatible-ethernet \
-  --secure-mode true \
   --peers udp://192.0.2.10:11010
 ```
 
@@ -654,7 +650,6 @@ The remaining security options configure keys, credentials, and port access.
 
 | Option | Purpose |
 | --- | --- |
-| `--secure-mode` | Enable secure peer sessions. |
 | `--local-private-key` | Set the base64 X25519 private key. |
 | `--local-public-key` | Set the matching base64 X25519 public key. |
 | `--credential` | Join with a base64 temporary credential instead of a network secret. |

@@ -2,8 +2,11 @@ use std::{
     collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
     hash::Hasher,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use arc_swap::ArcSwap;
@@ -11,7 +14,7 @@ use dashmap::DashMap;
 
 use super::{
     PeerId,
-    config::{ConfigLoader, Flags, validate_flags},
+    config::{ConfigLoader, Flags, process_secure_mode_cfg, validate_flags},
     netns::NetNS,
     network::IPCollector,
     stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -26,7 +29,7 @@ use crate::{
     proto::{
         acl::GroupIdentity,
         api::{config::InstanceConfigPatch, instance::PeerConnInfo},
-        common::{PeerFeatureFlag, PortForwardConfigPb},
+        common::{PeerFeatureFlag, PortForwardConfigPb, SecureModeConfig},
         peer_rpc::PeerGroupInfo,
     },
     rpc_service::protected_port,
@@ -38,6 +41,69 @@ use sha2::Sha256;
 use socket2::Protocol;
 
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
+
+pub(crate) const FEC_INSTANCE_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct FecResourceBudget {
+    limit: usize,
+    retained: AtomicUsize,
+}
+
+impl FecResourceBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limit(FEC_INSTANCE_MAX_RETAINED_BYTES)
+    }
+
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            retained: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn reserve(&self, bytes: usize) -> bool {
+        self.retained
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|total| *total <= self.limit)
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn release(&self, bytes: usize) -> bool {
+        let mut current = self.retained.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_sub(bytes) else {
+                tracing::error!(
+                    retained = current,
+                    release = bytes,
+                    "alternate FEC resource budget underflow"
+                );
+                debug_assert!(
+                    false,
+                    "alternate FEC resource budget released more bytes than retained"
+                );
+                return false;
+            };
+            match self.retained.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> usize {
+        self.retained.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GlobalCtxEvent {
@@ -211,7 +277,7 @@ pub struct GlobalCtx {
     cached_ipv6: AtomicCell<Option<cidr::Ipv6Inet>>,
     public_ipv6_lease: AtomicCell<Option<cidr::Ipv6Inet>>,
     public_ipv6_routes: Mutex<BTreeSet<std::net::Ipv6Addr>>,
-    multicast_groups: Mutex<BTreeSet<std::net::IpAddr>>,
+    multicast_membership_state: Mutex<MulticastMembershipState>,
     cached_proxy_cidrs: AtomicCell<Option<Vec<ProxyNetworkConfig>>>,
 
     ip_collector: Mutex<Option<Arc<IPCollector>>>,
@@ -246,6 +312,8 @@ pub struct GlobalCtx {
     /// OSPF propagated trusted keys (peer pubkeys and admin credentials)
     /// Stored in ArcSwap for lock-free reads and atomic batch updates
     trusted_keys: Arc<TrustedKeyMapManager>,
+
+    fec_resource_budget: Arc<FecResourceBudget>,
 }
 
 impl std::fmt::Debug for GlobalCtx {
@@ -262,6 +330,184 @@ impl std::fmt::Debug for GlobalCtx {
 
 pub type ArcGlobalCtx = std::sync::Arc<GlobalCtx>;
 
+/// Identifies the edge reporter that announced a multicast membership.
+///
+/// The key keeps VLAN context and both source identities. This prevents a
+/// leave from one edge host or VLAN from removing another host membership.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct MulticastReporterKey {
+    pub vlan_tags: [u16; 4],
+    pub vlan_len: u8,
+    pub source_mac: [u8; 6],
+    pub source_ip: Option<IpAddr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct MulticastMembershipKey {
+    reporter: MulticastReporterKey,
+    group: IpAddr,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MulticastMembershipWorkCounters {
+    /// Number of report entries processed by the membership state.
+    pub updates: u64,
+    /// Number of live membership entries removed by expiry or capacity eviction.
+    pub expired_or_evicted: u64,
+    /// Number of deadline index entries popped from the head.
+    pub deadline_index_pops: u64,
+    /// Number of stale deadline index entries discarded from the head.
+    pub stale_deadline_entries: u64,
+    /// Number of group reference count changes.
+    pub group_refcount_updates: u64,
+    /// Full-map scans must remain zero on the report path.
+    pub full_map_scans: u64,
+}
+
+#[derive(Debug)]
+struct MulticastMembershipEntry {
+    deadline: Instant,
+}
+
+#[derive(Debug)]
+struct MulticastMembershipState {
+    configured_groups: BTreeSet<IpAddr>,
+    memberships: HashMap<MulticastMembershipKey, MulticastMembershipEntry>,
+    group_refcounts: HashMap<IpAddr, usize>,
+    deadline_index: BTreeSet<(Instant, MulticastMembershipKey)>,
+    next_expiry: Option<Instant>,
+    expiry_notify: Arc<tokio::sync::Notify>,
+    work: MulticastMembershipWorkCounters,
+}
+
+impl MulticastMembershipState {
+    fn new() -> Self {
+        Self {
+            configured_groups: BTreeSet::new(),
+            memberships: HashMap::new(),
+            group_refcounts: HashMap::new(),
+            deadline_index: BTreeSet::new(),
+            next_expiry: None,
+            expiry_notify: Arc::new(tokio::sync::Notify::new()),
+            work: MulticastMembershipWorkCounters::default(),
+        }
+    }
+
+    fn advertised_groups(&self) -> BTreeSet<IpAddr> {
+        let mut groups = self.configured_groups.clone();
+        groups.extend(
+            self.group_refcounts
+                .iter()
+                .filter_map(|(group, count)| (*count > 0).then_some(*group)),
+        );
+        groups
+    }
+
+    fn refresh_next_expiry(&mut self) {
+        self.next_expiry = self.deadline_index.first().map(|(deadline, _)| *deadline);
+    }
+
+    fn decrement_group_refcount(&mut self, group: IpAddr) -> bool {
+        let Some(count) = self.group_refcounts.get_mut(&group) else {
+            return false;
+        };
+        self.work.group_refcount_updates += 1;
+        if *count <= 1 {
+            self.group_refcounts.remove(&group);
+            true
+        } else {
+            *count -= 1;
+            false
+        }
+    }
+
+    fn increment_group_refcount(&mut self, group: IpAddr) -> bool {
+        let count = self.group_refcounts.entry(group).or_insert(0);
+        self.work.group_refcount_updates += 1;
+        let crossed_zero = *count == 0;
+        *count += 1;
+        crossed_zero
+    }
+
+    fn expire_from_deadline_head(&mut self, now: Instant) -> bool {
+        let mut groups_changed = false;
+        while let Some((deadline, key)) = self.deadline_index.first().copied() {
+            if deadline > now {
+                break;
+            }
+            self.deadline_index.pop_first();
+            self.work.deadline_index_pops += 1;
+            let is_current = self
+                .memberships
+                .get(&key)
+                .is_some_and(|entry| entry.deadline == deadline);
+            if !is_current {
+                self.work.stale_deadline_entries += 1;
+                continue;
+            }
+            self.memberships.remove(&key);
+            self.work.expired_or_evicted += 1;
+            let crossed_one = self.decrement_group_refcount(key.group);
+            groups_changed |= crossed_one && !self.configured_groups.contains(&key.group);
+        }
+        self.refresh_next_expiry();
+        groups_changed
+    }
+
+    fn refresh_membership_deadline(
+        &mut self,
+        key: MulticastMembershipKey,
+        deadline: Instant,
+    ) -> bool {
+        let Some(old_deadline) = self.memberships.get(&key).map(|entry| entry.deadline) else {
+            return false;
+        };
+        if old_deadline == deadline {
+            return true;
+        }
+        self.deadline_index.remove(&(old_deadline, key));
+        self.memberships
+            .get_mut(&key)
+            .expect("membership exists after deadline lookup")
+            .deadline = deadline;
+        self.deadline_index.insert((deadline, key));
+        true
+    }
+
+    fn remove_membership(&mut self, key: MulticastMembershipKey) -> bool {
+        let Some(entry) = self.memberships.remove(&key) else {
+            return false;
+        };
+        self.deadline_index.remove(&(entry.deadline, key));
+        let crossed_one = self.decrement_group_refcount(key.group);
+        crossed_one && !self.configured_groups.contains(&key.group)
+    }
+
+    fn evict_oldest(&mut self) -> Option<(IpAddr, bool)> {
+        while let Some((deadline, key)) = self.deadline_index.pop_first() {
+            self.work.deadline_index_pops += 1;
+            let is_current = self
+                .memberships
+                .get(&key)
+                .is_some_and(|entry| entry.deadline == deadline);
+            if !is_current {
+                self.work.stale_deadline_entries += 1;
+                continue;
+            }
+            self.memberships.remove(&key);
+            self.work.expired_or_evicted += 1;
+            let crossed_one = self.decrement_group_refcount(key.group);
+            self.refresh_next_expiry();
+            return Some((key.group, crossed_one));
+        }
+        self.refresh_next_expiry();
+        None
+    }
+}
+
+pub(crate) const MAX_MULTICAST_MEMBERSHIPS: usize = 4096;
+pub(crate) const MULTICAST_MEMBERSHIP_TTL: Duration = Duration::from_secs(260);
+
 impl GlobalCtx {
     fn apply_required_feature_flags(
         flags: &Flags,
@@ -271,6 +517,7 @@ impl GlobalCtx {
             feature_flags.avoid_relay_data = true;
         }
         feature_flags.speed_routing = true;
+        feature_flags.relay_origin_proof = true;
         feature_flags
     }
 
@@ -287,14 +534,32 @@ impl GlobalCtx {
             .parse::<crate::common::config::PortMode>()
             .expect("port mode was validated");
         feature_flags.ethernet_input = port_mode.uses_ethernet_overlay();
-        feature_flags.hybrid_l3 = port_mode == crate::common::config::PortMode::Auto;
+        feature_flags.hybrid_l3 = true;
         feature_flags.bridge_input =
             feature_flags.hybrid_l3 && port_mode.uses_native_ethernet() && flags.enable_bridge;
-        feature_flags.multicast_membership = feature_flags.hybrid_l3;
+        feature_flags.multicast_membership = true;
         Self::apply_required_feature_flags(flags, feature_flags)
     }
 
     pub fn new(config_fs: impl ConfigLoader + 'static) -> Self {
+        let secure_mode = match config_fs.get_secure_mode() {
+            Some(secure_mode) => Some(
+                process_secure_mode_cfg(secure_mode)
+                    .expect("secure mode configuration must be valid"),
+            ),
+            None => Some(
+                process_secure_mode_cfg(SecureModeConfig {
+                    enabled: true,
+                    local_private_key: None,
+                    local_public_key: None,
+                    credential_bundle: None,
+                    credential_root_fingerprint: Vec::new(),
+                    credential_certificate: Vec::new(),
+                })
+                .expect("automatic secure mode configuration must be valid"),
+            ),
+        };
+        config_fs.set_secure_mode(secure_mode);
         let id = config_fs.get_id();
         let network = config_fs.get_network_identity();
         let net_ns = NetNS::new(config_fs.get_netns());
@@ -329,7 +594,52 @@ impl GlobalCtx {
         let feature_flags = Self::derive_feature_flags(&flags, base_feature_flags);
 
         let credential_storage_path = config_fs.get_credential_file();
-        let credential_manager = Arc::new(CredentialManager::new(credential_storage_path));
+        let secure_mode = config_fs.get_secure_mode();
+        let network_secret = network
+            .network_secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty());
+        if network_secret.is_some()
+            && secure_mode
+                .as_ref()
+                .and_then(|secure_mode| secure_mode.credential_bundle.as_deref())
+                .is_some()
+        {
+            panic!("network secret and credential bundle cannot be used together");
+        }
+        if network_secret.is_none()
+            && network.network_secret_digest.is_some()
+            && secure_mode
+                .as_ref()
+                .and_then(|secure_mode| secure_mode.credential_bundle.as_deref())
+                .is_none()
+        {
+            panic!("credential identity requires a signed credential bundle");
+        }
+        let credential_manager = if let Some(network_secret) = network_secret {
+            CredentialManager::new_with_network(
+                credential_storage_path,
+                network.network_name.clone(),
+                Some(network_secret),
+            )
+        } else {
+            let credential_bundle = secure_mode
+                .as_ref()
+                .and_then(|secure_mode| secure_mode.credential_bundle.as_deref());
+            CredentialManager::new_with_network_and_bundle_pinned(
+                credential_storage_path,
+                network.network_name.clone(),
+                None,
+                credential_bundle,
+                network
+                    .credential_root_fingerprint()
+                    .map(|fingerprint| fingerprint.as_slice()),
+            )
+            .unwrap_or_else(|error| {
+                panic!("credential identity failed validation before startup: {error}")
+            })
+        };
+        let credential_manager = Arc::new(credential_manager);
 
         GlobalCtx {
             inst_name: config_fs.get_inst_name(),
@@ -343,7 +653,7 @@ impl GlobalCtx {
             cached_ipv6: AtomicCell::new(None),
             public_ipv6_lease: AtomicCell::new(None),
             public_ipv6_routes: Mutex::new(BTreeSet::new()),
-            multicast_groups: Mutex::new(BTreeSet::new()),
+            multicast_membership_state: Mutex::new(MulticastMembershipState::new()),
             cached_proxy_cidrs: AtomicCell::new(None),
 
             ip_collector: Mutex::new(Some(Arc::new(IPCollector::new(
@@ -376,6 +686,8 @@ impl GlobalCtx {
             credential_manager,
 
             trusted_keys: Arc::new(TrustedKeyMapManager::new()),
+
+            fec_resource_budget: Arc::new(FecResourceBudget::new()),
         }
     }
 
@@ -413,7 +725,16 @@ impl GlobalCtx {
     }
 
     pub fn get_multicast_groups(&self) -> BTreeSet<std::net::IpAddr> {
-        self.multicast_groups.lock().unwrap().clone()
+        let now = Instant::now();
+        let (groups, changed) = {
+            let mut state = self.multicast_membership_state.lock().unwrap();
+            let changed = state.expire_from_deadline_head(now);
+            (state.advertised_groups(), changed)
+        };
+        if changed {
+            self.issue_event(GlobalCtxEvent::MulticastGroupsUpdated);
+        }
+        groups
     }
 
     pub fn set_multicast_groups(&self, groups: BTreeSet<std::net::IpAddr>) -> bool {
@@ -423,14 +744,109 @@ impl GlobalCtx {
             .filter(std::net::IpAddr::is_multicast)
             .take(MAX_MULTICAST_GROUPS)
             .collect();
-        let mut current = self.multicast_groups.lock().unwrap();
-        if *current == groups {
+        let mut state = self.multicast_membership_state.lock().unwrap();
+        if state.configured_groups == groups {
             return false;
         }
-        *current = groups;
-        drop(current);
+        state.configured_groups = groups;
+        drop(state);
         self.issue_event(GlobalCtxEvent::MulticastGroupsUpdated);
         true
+    }
+
+    /// Updates one reporter membership and returns whether the advertised group set changed.
+    pub(crate) fn update_multicast_membership(
+        &self,
+        reporter: MulticastReporterKey,
+        group: IpAddr,
+        joined: bool,
+        now: Instant,
+    ) -> bool {
+        self.update_multicast_memberships(&[(reporter, group, joined)], now)
+    }
+
+    /// Updates a batch of reporter memberships while holding each state lock once.
+    pub(crate) fn update_multicast_memberships(
+        &self,
+        updates: &[(MulticastReporterKey, IpAddr, bool)],
+        now: Instant,
+    ) -> bool {
+        if updates.is_empty() {
+            return false;
+        }
+        let deadline = now + MULTICAST_MEMBERSHIP_TTL;
+        let (changed, expiry_notify) = {
+            let mut state = self.multicast_membership_state.lock().unwrap();
+            let mut changed = state.expire_from_deadline_head(now);
+
+            for &(reporter, group, joined) in updates {
+                if !group.is_multicast() {
+                    continue;
+                }
+                state.work.updates += 1;
+                let key = MulticastMembershipKey { reporter, group };
+                if joined {
+                    if state.memberships.contains_key(&key) {
+                        debug_assert!(state.refresh_membership_deadline(key, deadline));
+                    } else {
+                        while state.memberships.len() >= MAX_MULTICAST_MEMBERSHIPS {
+                            let Some((evicted_group, crossed_one)) = state.evict_oldest() else {
+                                break;
+                            };
+                            changed |=
+                                crossed_one && !state.configured_groups.contains(&evicted_group);
+                        }
+                        if state.memberships.len() >= MAX_MULTICAST_MEMBERSHIPS {
+                            continue;
+                        }
+                        let crossed_zero = state.increment_group_refcount(group);
+                        changed |= crossed_zero && !state.configured_groups.contains(&group);
+                        state
+                            .memberships
+                            .insert(key, MulticastMembershipEntry { deadline });
+                        state.deadline_index.insert((deadline, key));
+                    }
+                } else {
+                    changed |= state.remove_membership(key);
+                }
+            }
+            state.refresh_next_expiry();
+            (changed, state.expiry_notify.clone())
+        };
+        expiry_notify.notify_one();
+        changed
+    }
+
+    /// Removes expired reporter entries and returns whether advertised groups changed.
+    pub(crate) fn expire_multicast_memberships(&self, now: Instant) -> bool {
+        let (changed, expiry_notify) = {
+            let mut state = self.multicast_membership_state.lock().unwrap();
+            let changed = state.expire_from_deadline_head(now);
+            (changed, state.expiry_notify.clone())
+        };
+        expiry_notify.notify_one();
+        if changed {
+            self.issue_event(GlobalCtxEvent::MulticastGroupsUpdated);
+        }
+        changed
+    }
+
+    pub(crate) fn multicast_membership_next_expiry(&self) -> Option<Instant> {
+        self.multicast_membership_state.lock().unwrap().next_expiry
+    }
+
+    pub(crate) fn multicast_membership_notify(&self) -> Arc<tokio::sync::Notify> {
+        let notify = self
+            .multicast_membership_state
+            .lock()
+            .unwrap()
+            .expiry_notify
+            .clone();
+        notify
+    }
+
+    pub(crate) fn multicast_membership_work_counters(&self) -> MulticastMembershipWorkCounters {
+        self.multicast_membership_state.lock().unwrap().work
     }
 
     pub fn check_network_in_whitelist(&self, network_name: &str) -> Result<(), anyhow::Error> {
@@ -537,7 +953,10 @@ impl GlobalCtx {
     }
 
     pub fn get_secret_proof(&self, challenge: &[u8]) -> Option<Hmac<Sha256>> {
-        let network_secret = self.get_network_identity().network_secret?;
+        let network_secret = self
+            .get_network_identity()
+            .network_secret
+            .filter(|secret| !secret.is_empty())?;
         let key = network_secret.as_bytes();
         let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
         mac.update(b"lowertier secret proof");
@@ -594,6 +1013,10 @@ impl GlobalCtx {
 
     pub fn get_flags(&self) -> Flags {
         self.flags.load().as_ref().clone()
+    }
+
+    pub(crate) fn fec_resource_budget(&self) -> Arc<FecResourceBudget> {
+        self.fec_resource_budget.clone()
     }
 
     pub fn set_flags(&self, flags: Flags) {
@@ -910,6 +1333,19 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn global_context_enables_secure_mode_automatically() {
+        let config = TomlConfigLoader::default();
+        config.set_secure_mode(None);
+
+        let global_ctx = GlobalCtx::new(config);
+        let secure_mode = global_ctx.config.get_secure_mode().unwrap();
+
+        assert!(secure_mode.enabled);
+        assert!(secure_mode.local_private_key.is_some());
+        assert!(secure_mode.local_public_key.is_some());
+    }
+
+    #[tokio::test]
     async fn test_tun_device_name_tracks_explicit_runtime_state() {
         let config = TomlConfigLoader::default();
         let global_ctx = GlobalCtx::new(config);
@@ -936,6 +1372,261 @@ pub mod tests {
         assert_eq!(
             subscriber.recv().await.unwrap(),
             GlobalCtxEvent::TunDeviceError("closed".to_string())
+        );
+    }
+
+    #[test]
+    fn multicast_memberships_are_reporter_scoped_and_vlan_scoped() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let group: IpAddr = "239.1.2.3".parse().unwrap();
+        let now = Instant::now();
+        let reporter_a = MulticastReporterKey {
+            source_mac: [1, 2, 3, 4, 5, 6],
+            vlan_tags: [100, 0, 0, 0],
+            vlan_len: 1,
+            ..MulticastReporterKey::default()
+        };
+        let reporter_b = MulticastReporterKey {
+            source_mac: [7, 8, 9, 10, 11, 12],
+            vlan_tags: [100, 0, 0, 0],
+            vlan_len: 1,
+            ..MulticastReporterKey::default()
+        };
+        let reporter_other_vlan = MulticastReporterKey {
+            source_mac: reporter_a.source_mac,
+            vlan_tags: [200, 0, 0, 0],
+            vlan_len: 1,
+            ..MulticastReporterKey::default()
+        };
+
+        assert!(global_ctx.update_multicast_membership(reporter_a, group, true, now));
+        assert!(!global_ctx.update_multicast_membership(reporter_b, group, true, now));
+        assert!(!global_ctx.update_multicast_membership(reporter_a, group, false, now));
+        assert!(global_ctx.get_multicast_groups().contains(&group));
+
+        assert!(!global_ctx.update_multicast_membership(reporter_other_vlan, group, true, now,));
+        assert!(!global_ctx.update_multicast_membership(reporter_b, group, false, now,));
+        assert!(global_ctx.get_multicast_groups().contains(&group));
+        assert!(global_ctx.update_multicast_membership(reporter_other_vlan, group, false, now,));
+        assert!(global_ctx.get_multicast_groups().is_empty());
+    }
+
+    #[test]
+    fn multicast_memberships_expire_after_bounded_lifetime() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let group: IpAddr = "239.1.2.4".parse().unwrap();
+        let now = Instant::now();
+        let reporter = MulticastReporterKey {
+            source_ip: Some("192.0.2.10".parse().unwrap()),
+            ..MulticastReporterKey::default()
+        };
+
+        assert!(global_ctx.update_multicast_membership(reporter, group, true, now));
+        assert!(global_ctx.get_multicast_groups().contains(&group));
+        assert!(global_ctx.expire_multicast_memberships(now + MULTICAST_MEMBERSHIP_TTL));
+        assert!(!global_ctx.get_multicast_groups().contains(&group));
+    }
+
+    #[test]
+    fn multicast_membership_updates_touch_only_report_entries() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let now = Instant::now();
+        let updates = (0..MAX_MULTICAST_MEMBERSHIPS)
+            .map(|index| {
+                let reporter = MulticastReporterKey {
+                    source_mac: [
+                        (index & 0xff) as u8,
+                        ((index >> 8) & 0xff) as u8,
+                        1,
+                        2,
+                        3,
+                        4,
+                    ],
+                    ..MulticastReporterKey::default()
+                };
+                let group = IpAddr::V4(std::net::Ipv4Addr::new(
+                    239,
+                    1,
+                    (index / 255) as u8,
+                    (index % 255) as u8,
+                ));
+                (reporter, group, true)
+            })
+            .collect::<Vec<_>>();
+        assert!(global_ctx.update_multicast_memberships(&updates, now));
+
+        let refreshes = updates[..256]
+            .iter()
+            .map(|(reporter, group, _)| (*reporter, *group, true))
+            .collect::<Vec<_>>();
+        let before = global_ctx.multicast_membership_work_counters();
+        assert!(!global_ctx.update_multicast_memberships(&refreshes, now + Duration::from_secs(1)));
+        let after = global_ctx.multicast_membership_work_counters();
+
+        assert_eq!(after.updates - before.updates, 256);
+        assert_eq!(after.full_map_scans, 0);
+        assert_eq!(
+            global_ctx.get_multicast_groups().len(),
+            MAX_MULTICAST_MEMBERSHIPS
+        );
+    }
+
+    #[test]
+    fn multicast_membership_refresh_keeps_entry_until_new_deadline() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let group: IpAddr = "239.1.2.5".parse().unwrap();
+        let reporter = MulticastReporterKey {
+            source_mac: [9, 8, 7, 6, 5, 4],
+            ..MulticastReporterKey::default()
+        };
+        let now = Instant::now();
+
+        assert!(global_ctx.update_multicast_membership(reporter, group, true, now));
+        assert!(!global_ctx.update_multicast_membership(
+            reporter,
+            group,
+            true,
+            now + MULTICAST_MEMBERSHIP_TTL / 2,
+        ));
+        assert_eq!(
+            global_ctx
+                .multicast_membership_state
+                .lock()
+                .unwrap()
+                .deadline_index
+                .len(),
+            1
+        );
+        assert!(!global_ctx.expire_multicast_memberships(now + MULTICAST_MEMBERSHIP_TTL));
+        assert!(global_ctx.get_multicast_groups().contains(&group));
+        assert!(global_ctx.expire_multicast_memberships(
+            now + MULTICAST_MEMBERSHIP_TTL + MULTICAST_MEMBERSHIP_TTL / 2,
+        ));
+        assert!(!global_ctx.get_multicast_groups().contains(&group));
+
+        assert_eq!(
+            global_ctx
+                .multicast_membership_state
+                .lock()
+                .unwrap()
+                .deadline_index
+                .len(),
+            0
+        );
+        let work = global_ctx.multicast_membership_work_counters();
+        assert_eq!(work.stale_deadline_entries, 0);
+        assert_eq!(work.full_map_scans, 0);
+    }
+
+    #[test]
+    fn multicast_membership_expiry_discards_stale_deadline_index_entries() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let now = Instant::now();
+        let stale_key = MulticastMembershipKey {
+            reporter: MulticastReporterKey {
+                source_mac: [4, 3, 2, 1, 0, 9],
+                ..MulticastReporterKey::default()
+            },
+            group: "239.1.2.9".parse().unwrap(),
+        };
+        {
+            let mut state = global_ctx.multicast_membership_state.lock().unwrap();
+            state
+                .deadline_index
+                .insert((now - Duration::from_secs(1), stale_key));
+            state.refresh_next_expiry();
+        }
+
+        assert!(!global_ctx.expire_multicast_memberships(now));
+        let state = global_ctx.multicast_membership_state.lock().unwrap();
+        assert!(state.deadline_index.is_empty());
+        assert_eq!(state.memberships.len(), 0);
+        assert_eq!(state.work.stale_deadline_entries, 1);
+    }
+
+    #[test]
+    fn multicast_membership_capacity_evicts_oldest_deadline() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let now = Instant::now();
+        let oldest_group: IpAddr = "239.1.2.6".parse().unwrap();
+        let oldest_reporter = MulticastReporterKey {
+            source_mac: [0, 0, 0, 0, 0, 1],
+            ..MulticastReporterKey::default()
+        };
+        assert!(global_ctx.update_multicast_membership(oldest_reporter, oldest_group, true, now,));
+
+        let mut fill = Vec::with_capacity(MAX_MULTICAST_MEMBERSHIPS - 1);
+        for index in 1..MAX_MULTICAST_MEMBERSHIPS {
+            let reporter = MulticastReporterKey {
+                source_mac: [
+                    (index & 0xff) as u8,
+                    ((index >> 8) & 0xff) as u8,
+                    2,
+                    3,
+                    4,
+                    5,
+                ],
+                ..MulticastReporterKey::default()
+            };
+            let group = IpAddr::V4(std::net::Ipv4Addr::new(
+                239,
+                2,
+                (index / 255) as u8,
+                (index % 255) as u8,
+            ));
+            fill.push((reporter, group, true));
+        }
+        assert!(global_ctx.update_multicast_memberships(&fill, now + Duration::from_millis(1)));
+
+        let new_group: IpAddr = "239.1.2.7".parse().unwrap();
+        let new_reporter = MulticastReporterKey {
+            source_mac: [0, 0, 0, 0, 0, 255],
+            ..MulticastReporterKey::default()
+        };
+        assert!(global_ctx.update_multicast_membership(
+            new_reporter,
+            new_group,
+            true,
+            now + Duration::from_millis(2),
+        ));
+        assert!(!global_ctx.get_multicast_groups().contains(&oldest_group));
+        assert!(global_ctx.get_multicast_groups().contains(&new_group));
+        assert_eq!(
+            global_ctx
+                .multicast_membership_work_counters()
+                .full_map_scans,
+            0
+        );
+    }
+
+    #[test]
+    fn multicast_membership_report_without_change_does_not_emit_event() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let group: IpAddr = "239.1.2.8".parse().unwrap();
+        let reporter = MulticastReporterKey {
+            source_mac: [1, 1, 1, 1, 1, 1],
+            ..MulticastReporterKey::default()
+        };
+        let mut subscriber = global_ctx.subscribe();
+        let now = Instant::now();
+
+        assert!(global_ctx.update_multicast_membership(reporter, group, true, now));
+        global_ctx.issue_event(GlobalCtxEvent::MulticastGroupsUpdated);
+        assert_eq!(
+            subscriber.try_recv().unwrap(),
+            GlobalCtxEvent::MulticastGroupsUpdated
+        );
+        assert!(!global_ctx.update_multicast_membership(reporter, group, true, now));
+        assert!(subscriber.try_recv().is_err());
+        assert!(global_ctx.update_multicast_membership(reporter, group, false, now));
+        assert_eq!(
+            global_ctx
+                .multicast_membership_state
+                .lock()
+                .unwrap()
+                .deadline_index
+                .len(),
+            0
         );
     }
 
@@ -998,7 +1689,7 @@ pub mod tests {
         assert!(feature_flags.need_p2p);
         assert!(feature_flags.disable_p2p);
         assert!(feature_flags.ethernet_input);
-        assert!(!feature_flags.hybrid_l3);
+        assert!(feature_flags.hybrid_l3);
         assert!(!feature_flags.bridge_input);
         assert!(feature_flags.support_conn_list_sync);
         assert!(feature_flags.avoid_relay_data);
@@ -1008,7 +1699,10 @@ pub mod tests {
         let mut flags = global_ctx.get_flags();
         flags.port_mode = "routed".to_string();
         global_ctx.set_flags(flags);
-        assert!(!global_ctx.get_feature_flags().ethernet_input);
+        let feature_flags = global_ctx.get_feature_flags();
+        assert!(!feature_flags.ethernet_input);
+        assert!(feature_flags.hybrid_l3);
+        assert!(feature_flags.multicast_membership);
 
         let mut flags = global_ctx.get_flags();
         flags.port_mode = "compatible-ethernet".to_string();
@@ -1195,7 +1889,59 @@ pub mod tests {
     ) -> ArcGlobalCtx {
         let config_fs = TomlConfigLoader::default();
         config_fs.set_inst_name(format!("test_{}", config_fs.get_id()));
-        config_fs.set_network_identity(network_identy.unwrap_or_default());
+        let network_identity = network_identy.unwrap_or_else(|| {
+            NetworkIdentity::new("default".to_owned(), "test-default-root".to_owned())
+        });
+        config_fs.set_network_identity(network_identity);
+
+        let ctx = Arc::new(GlobalCtx::new(config_fs));
+        ctx.replace_stun_info_collector(Box::new(MockStunInfoCollector {
+            udp_nat_type: NatType::Unknown,
+        }));
+        ctx
+    }
+
+    /// Create a mock context with an explicit signed credential bundle.
+    pub fn get_mock_credential_global_ctx(network_name: impl Into<String>) -> ArcGlobalCtx {
+        let network_name = network_name.into();
+        let config_fs = TomlConfigLoader::default();
+        config_fs.set_inst_name(format!("test_{}", config_fs.get_id()));
+
+        let issuer = CredentialManager::new_with_network(
+            None,
+            network_name.clone(),
+            Some("test-credential-issuer"),
+        );
+        let (_, encoded_bundle) = issuer
+            .generate_credential_bundle(
+                Vec::new(),
+                false,
+                Vec::new(),
+                Duration::from_secs(3600),
+                None,
+                true,
+            )
+            .expect("test credential issuer must sign a bundle");
+        let bundle = CredentialManager::parse_credential_bundle(&encoded_bundle)
+            .expect("test credential bundle must decode");
+        config_fs.set_network_identity(
+            crate::common::config::NetworkIdentity::new_credential_with_root_fingerprint(
+                network_name,
+                &bundle.root_fingerprint,
+            )
+            .expect("test credential root fingerprint must be valid"),
+        );
+        config_fs.set_secure_mode(Some(SecureModeConfig {
+            enabled: true,
+            local_private_key: None,
+            local_public_key: None,
+            credential_bundle: Some(encoded_bundle),
+            credential_root_fingerprint: bundle.root_fingerprint,
+            credential_certificate: bundle
+                .certificate
+                .map(|certificate| prost::Message::encode_to_vec(&certificate))
+                .unwrap_or_default(),
+        }));
 
         let ctx = Arc::new(GlobalCtx::new(config_fs));
         ctx.replace_stun_info_collector(Box::new(MockStunInfoCollector {
@@ -1206,5 +1952,23 @@ pub mod tests {
 
     pub fn get_mock_global_ctx() -> ArcGlobalCtx {
         get_mock_global_ctx_with_network(None)
+    }
+
+    #[test]
+    fn mock_credential_context_uses_a_signed_bundle() {
+        let global_ctx = get_mock_credential_global_ctx("credential-test");
+        let secure_mode = global_ctx
+            .config
+            .get_secure_mode()
+            .expect("credential context has secure mode");
+        assert!(secure_mode.credential_bundle.is_some());
+        assert!(secure_mode.local_private_key.is_some());
+        assert!(secure_mode.local_public_key.is_some());
+        assert!(
+            global_ctx
+                .get_network_identity()
+                .credential_root_fingerprint()
+                .is_some()
+        );
     }
 }

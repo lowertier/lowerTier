@@ -317,6 +317,7 @@ mod tests {
             expiry_unix: 123456,
             allowed_proxy_cidrs: vec!["10.0.0.0/24".to_string()],
             reusable: Some(true),
+            ..Default::default()
         };
         let tc = TrustedCredentialPubkeyProof::new_signed(credential, "sec-1");
 
@@ -333,6 +334,7 @@ mod tests {
             expiry_unix: 1,
             allowed_proxy_cidrs: vec![],
             reusable: Some(true),
+            ..Default::default()
         };
         let tc = TrustedCredentialPubkeyProof::new_signed(credential, "sec-1");
 
@@ -350,6 +352,7 @@ mod tests {
             expiry_unix: 123456,
             allowed_proxy_cidrs: vec![],
             reusable: Some(true),
+            ..Default::default()
         };
 
         let mut raw_credential_bytes = credential.encode_to_vec();

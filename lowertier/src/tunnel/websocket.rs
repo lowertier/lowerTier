@@ -39,7 +39,7 @@ fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
 }
 
 async fn sink_from_zc_packet<E>(msg: ZCPacket) -> Result<Message, E> {
-    Ok(Message::binary(msg.tunnel_payload_bytes().freeze()))
+    Ok(Message::binary(msg.tunnel_payload_into_bytes()))
 }
 
 async fn map_from_ws_message(

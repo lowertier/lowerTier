@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     common::{PeerId, error::Error, global_ctx::ArcGlobalCtx},
+    proto::peer_rpc::PeerIdentityType,
     tunnel::packet_def::ZCPacket,
 };
 use tokio_util::task::AbortOnDropHandle;
@@ -39,8 +40,9 @@ impl ForeignNetworkClient {
         }
     }
 
-    pub async fn add_new_peer_conn(&self, peer_conn: PeerConn) -> Result<(), Error> {
+    pub async fn add_new_peer_conn(&self, mut peer_conn: PeerConn) -> Result<(), Error> {
         tracing::warn!(peer_conn = ?peer_conn.get_conn_info(), network = ?peer_conn.get_network_identity(), "add new peer conn in foreign network client");
+        peer_conn.set_peer_identity_type(PeerIdentityType::ForeignRelay);
         self.peer_map.add_new_peer_conn(peer_conn).await
     }
 

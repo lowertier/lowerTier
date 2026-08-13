@@ -227,7 +227,6 @@ start_node() {
         lowertier-core
         --network-name colima-l2
         --network-secret colima-l2-secret
-        --secure-mode
         --port-mode "${mode}"
         --dev-name et0
         --ipv4 "${overlay_ip}/24"

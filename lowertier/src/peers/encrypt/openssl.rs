@@ -81,12 +81,12 @@ impl Encryptor for OpenSslCipher {
             .map_err(|_| Error::DecryptionFailed)?;
 
         // 更新数据包
-        zc_packet.mut_payload()[..count].copy_from_slice(&output[..count]);
+        zc_packet.mut_payload_preserving_flow_hash()[..count].copy_from_slice(&output[..count]);
         let pm_header = zc_packet.mut_peer_manager_header().unwrap();
         pm_header.set_encrypted(false);
 
         let len = zc_packet.buf_len() - (len - count);
-        zc_packet.mut_inner().truncate(len);
+        zc_packet.mut_inner_preserving_flow_hash().truncate(len);
 
         Ok(())
     }
@@ -133,14 +133,16 @@ impl Encryptor for OpenSslCipher {
             .map_err(|_| Error::EncryptionFailed)?;
 
         // 更新数据包内容
-        zc_packet.mut_payload()[..count].copy_from_slice(&output[..count]);
+        zc_packet.mut_payload_preserving_flow_hash()[..count].copy_from_slice(&output[..count]);
 
         encrypter
             .get_tag(&mut tail.tag)
             .map_err(|_| Error::EncryptionFailed)?;
 
         // 添加 nonce/IV & tag 的结构
-        zc_packet.mut_inner().extend_from_slice(tail.as_bytes());
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .extend_from_slice(tail.as_bytes());
 
         let pm_header = zc_packet.mut_peer_manager_header().unwrap();
         pm_header.set_encrypted(true);

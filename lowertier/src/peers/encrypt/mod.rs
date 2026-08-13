@@ -26,6 +26,9 @@ pub enum Error {
 
 pub trait Encryptor: Send + Sync + 'static {
     fn decrypt(&self, zc_packet: &mut ZCPacket) -> Result<(), Error>;
+    fn decrypt_with_aad(&self, zc_packet: &mut ZCPacket, _aad: &[u8]) -> Result<(), Error> {
+        self.decrypt(zc_packet)
+    }
     fn encrypt(&self, zc_packet: &mut ZCPacket) -> Result<(), Error>;
     fn encrypt_with_nonce(
         &self,
@@ -33,6 +36,14 @@ pub trait Encryptor: Send + Sync + 'static {
         _nonce: Option<&[u8]>,
     ) -> Result<(), Error> {
         self.encrypt(zc_packet)
+    }
+    fn encrypt_with_nonce_and_aad(
+        &self,
+        zc_packet: &mut ZCPacket,
+        nonce: Option<&[u8]>,
+        _aad: &[u8],
+    ) -> Result<(), Error> {
+        self.encrypt_with_nonce(zc_packet, nonce)
     }
 }
 
@@ -112,6 +123,24 @@ pub fn create_encryptor(
             {
                 Arc::new(ring::RingCipher::new_chacha20_poly1305(key_256))
             }
+        }
+    }
+}
+
+/// Create the in-place backend used by secure datagram sessions.
+///
+/// Secure datagrams avoid the OpenSSL path because it allocates a second
+/// payload buffer for each packet. The ring backend supports all algorithms.
+pub fn create_secure_datagram_encryptor(
+    algorithm: &str,
+    key_128: [u8; 16],
+    key_256: [u8; 32],
+) -> Arc<dyn Encryptor> {
+    match EncryptionAlgorithm::try_from(algorithm).unwrap_or_default() {
+        EncryptionAlgorithm::AesGcm => Arc::new(ring::RingCipher::new_aes128_gcm(key_128)),
+        EncryptionAlgorithm::Aes256Gcm => Arc::new(ring::RingCipher::new_aes256_gcm(key_256)),
+        EncryptionAlgorithm::ChaCha20Poly1305 => {
+            Arc::new(ring::RingCipher::new_chacha20_poly1305(key_256))
         }
     }
 }

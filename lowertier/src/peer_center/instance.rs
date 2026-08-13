@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -20,6 +21,7 @@ use crate::{
         rpc_service::PeerManagerRpcService,
     },
     proto::{
+        api::instance::Route,
         peer_rpc::{
             GetGlobalPeerMapRequest, GetGlobalPeerMapResponse, GlobalPeerMap, PeerCenterRpc,
             PeerCenterRpcClientFactory, PeerCenterRpcServer, PeerInfoForGlobalMap,
@@ -39,6 +41,25 @@ pub trait PeerCenterPeerManagerTrait: Send + Sync + 'static {
     fn get_global_ctx(&self) -> Arc<GlobalCtx>;
     fn get_rpc_mgr(&self) -> Weak<PeerRpcManager>;
     async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route>;
+
+    fn local_center_route(&self) -> Option<Route> {
+        let global_ctx = self.get_global_ctx();
+        if global_ctx.get_network_identity().network_secret.is_none()
+            || global_ctx
+                .get_hostname()
+                .starts_with(crate::peers::PUBLIC_SERVER_HOSTNAME_PREFIX)
+        {
+            return None;
+        }
+        Some(Route {
+            peer_id: self.my_peer_id(),
+            feature_flag: Some(global_ctx.get_feature_flags()),
+            peer_identity_type: crate::proto::peer_rpc::PeerIdentityType::Admin as i32,
+            secure_auth_level: crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed
+                as i32,
+            ..Default::default()
+        })
+    }
 }
 
 struct PeerCenterBase {
@@ -71,37 +92,46 @@ impl PeerCenterBase {
     }
 
     fn select_center_peer_from_routes(
-        my_peer_id: PeerId,
         peers: &[crate::proto::api::instance::Route],
-        prefer_speed_capable: bool,
     ) -> Option<PeerId> {
-        if peers.is_empty() {
-            return None;
-        }
-
-        let eligible_peers = peers
+        let mut eligible_peers = peers
             .iter()
+            .filter(|route| {
+                route.peer_identity_type == crate::proto::peer_rpc::PeerIdentityType::Admin as i32
+            })
+            .filter(|route| {
+                route.secure_auth_level
+                    == crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed as i32
+            })
             .filter(|route| {
                 route
                     .feature_flag
                     .map(|flags| !flags.is_public_server)
                     .unwrap_or(true)
             })
-            .filter(|route| {
-                !prefer_speed_capable || route.feature_flag.is_some_and(|flags| flags.speed_routing)
-            })
-            .map(|route| route.peer_id);
+            .collect::<Vec<_>>();
 
-        std::iter::once(my_peer_id).chain(eligible_peers).min()
+        // All peers run this rule over the same authenticated route snapshot.
+        // A speed-capable administrator wins only when one exists.
+        if eligible_peers
+            .iter()
+            .any(|route| route.feature_flag.is_some_and(|flags| flags.speed_routing))
+        {
+            eligible_peers
+                .retain(|route| route.feature_flag.is_some_and(|flags| flags.speed_routing));
+        }
+        eligible_peers
+            .into_iter()
+            .min_by_key(|route| route.peer_id)
+            .map(|route| route.peer_id)
     }
 
     async fn select_center_peer(peer_mgr: &dyn PeerCenterPeerManagerTrait) -> Option<PeerId> {
-        let peers = peer_mgr.list_routes().await;
-        Self::select_center_peer_from_routes(
-            peer_mgr.my_peer_id(),
-            &peers,
-            peer_mgr.get_global_ctx().speed_probes_enabled(),
-        )
+        let mut peers = peer_mgr.list_routes().await;
+        if let Some(local_route) = peer_mgr.local_center_route() {
+            peers.push(local_route);
+        }
+        Self::select_center_peer_from_routes(&peers)
     }
 
     async fn init_periodic_job<
@@ -185,6 +215,73 @@ pub struct PeerCenterInstanceService {
     global_peer_map_digest: Arc<AtomicCell<Digest>>,
 }
 
+fn apply_global_peer_map_response(
+    global_peer_map: &RwLock<GlobalPeerMap>,
+    global_peer_map_digest: &AtomicCell<Digest>,
+    global_peer_map_update_time: &AtomicCell<Instant>,
+    source_update_times: &RwLock<HashMap<PeerId, Instant>>,
+    requested_digest: Digest,
+    response: GetGlobalPeerMapResponse,
+) -> bool {
+    // A digest match must not replace a populated cache with an empty map.
+    // Accept the legacy default response and the explicit digest-only form.
+    if response == GetGlobalPeerMapResponse::default()
+        || (requested_digest != 0
+            && response.global_peer_map.is_empty()
+            && response.digest == Some(requested_digest))
+    {
+        return false;
+    }
+
+    let received_at = Instant::now();
+    let full_snapshot = response.full_snapshot
+        || (!response.global_peer_map.is_empty() && response.deltas.is_empty());
+    let snapshot_residence_age_ms = response.snapshot_residence_age_ms;
+    let mut next_map = if full_snapshot {
+        response.global_peer_map
+    } else {
+        global_peer_map.read().unwrap().map.clone()
+    };
+    let mut next_source_times = if full_snapshot {
+        HashMap::with_capacity(next_map.len())
+    } else {
+        source_update_times.read().unwrap().clone()
+    };
+    if full_snapshot {
+        for peer_info in next_map.values_mut() {
+            for info in peer_info.direct_peers.values_mut() {
+                info.speed_sample_age_ms = info
+                    .speed_sample_age_ms
+                    .saturating_add(snapshot_residence_age_ms);
+            }
+        }
+        next_source_times.extend(next_map.keys().copied().map(|source| (source, received_at)));
+    }
+    if !response.deltas.is_empty() {
+        for delta in response.deltas {
+            if delta.removed {
+                next_map.remove(&delta.source_peer_id);
+                next_source_times.remove(&delta.source_peer_id);
+            } else if let Some(peer_info) = delta.peer_info {
+                let mut peer_info = peer_info;
+                for info in peer_info.direct_peers.values_mut() {
+                    info.speed_sample_age_ms = info
+                        .speed_sample_age_ms
+                        .saturating_add(delta.residence_age_ms);
+                }
+                next_map.insert(delta.source_peer_id, peer_info);
+                next_source_times.insert(delta.source_peer_id, received_at);
+            }
+        }
+    }
+
+    *global_peer_map.write().unwrap() = GlobalPeerMap { map: next_map };
+    *source_update_times.write().unwrap() = next_source_times;
+    global_peer_map_digest.store(response.digest.unwrap_or_default());
+    global_peer_map_update_time.store(received_at);
+    true
+}
+
 #[async_trait::async_trait]
 impl PeerCenterRpc for PeerCenterInstanceService {
     type Controller = BaseController;
@@ -198,6 +295,8 @@ impl PeerCenterRpc for PeerCenterInstanceService {
         Ok(GetGlobalPeerMapResponse {
             global_peer_map: global_peer_map.map.clone(),
             digest: Some(self.global_peer_map_digest.load()),
+            full_snapshot: true,
+            ..Default::default()
         })
     }
 
@@ -217,6 +316,7 @@ pub struct PeerCenterInstance {
     global_peer_map: Arc<RwLock<GlobalPeerMap>>,
     global_peer_map_digest: Arc<AtomicCell<Digest>>,
     global_peer_map_update_time: Arc<AtomicCell<Instant>>,
+    source_update_times: Arc<RwLock<HashMap<PeerId, Instant>>>,
 }
 
 impl PeerCenterInstance {
@@ -227,6 +327,7 @@ impl PeerCenterInstance {
             global_peer_map: Arc::new(RwLock::new(GlobalPeerMap::default())),
             global_peer_map_digest: Arc::new(AtomicCell::new(Digest::default())),
             global_peer_map_update_time: Arc::new(AtomicCell::new(Instant::now())),
+            source_update_times: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -241,12 +342,14 @@ impl PeerCenterInstance {
             global_peer_map: Arc<RwLock<GlobalPeerMap>>,
             global_peer_map_digest: Arc<AtomicCell<Digest>>,
             global_peer_map_update_time: Arc<AtomicCell<Instant>>,
+            source_update_times: Arc<RwLock<HashMap<PeerId, Instant>>>,
         }
 
         let ctx = Arc::new(Ctx {
             global_peer_map: self.global_peer_map.clone(),
             global_peer_map_digest: self.global_peer_map_digest.clone(),
             global_peer_map_update_time: self.global_peer_map_update_time.clone(),
+            source_update_times: self.source_update_times.clone(),
         });
 
         self.client
@@ -279,26 +382,30 @@ impl PeerCenterInstance {
                     return Ok(10000);
                 };
 
-                if resp == GetGlobalPeerMapResponse::default() {
-                    // digest match, no need to update
-                    return Ok(15000);
-                }
-
-                tracing::info!(
-                    "get global info from center server: {:?}, digest: {:?}",
-                    resp.global_peer_map,
-                    resp.digest
+                let source_count = resp.global_peer_map.len();
+                let delta_count = resp.deltas.len();
+                let edge_count = resp
+                    .global_peer_map
+                    .values()
+                    .map(|peer_info| peer_info.direct_peers.len())
+                    .sum::<usize>();
+                tracing::debug!(
+                    digest = ?resp.digest,
+                    source_count,
+                    edge_count,
+                    delta_count,
+                    full_snapshot = resp.full_snapshot,
+                    "received peer center map update"
                 );
 
-                *ctx.job_ctx.global_peer_map.write().unwrap() = GlobalPeerMap {
-                    map: resp.global_peer_map,
-                };
-                ctx.job_ctx
-                    .global_peer_map_digest
-                    .store(resp.digest.unwrap_or_default());
-                ctx.job_ctx
-                    .global_peer_map_update_time
-                    .store(Instant::now());
+                apply_global_peer_map_response(
+                    &ctx.job_ctx.global_peer_map,
+                    &ctx.job_ctx.global_peer_map_digest,
+                    &ctx.job_ctx.global_peer_map_update_time,
+                    &ctx.job_ctx.source_update_times,
+                    ctx.job_ctx.global_peer_map_digest.load(),
+                    resp,
+                );
 
                 Ok(15000)
             })
@@ -372,6 +479,8 @@ impl PeerCenterInstance {
             global_peer_map: Arc<RwLock<GlobalPeerMap>>,
 
             global_peer_map_clone: GlobalPeerMap,
+            source_update_times: Arc<RwLock<HashMap<PeerId, Instant>>>,
+            source_update_times_clone: HashMap<PeerId, Instant>,
 
             last_update_time: AtomicCell<Instant>,
             global_peer_map_update_time: Arc<AtomicCell<Instant>>,
@@ -396,13 +505,20 @@ impl PeerCenterInstance {
                 if info.tx_delivery_bps == 0 || info.speed_sample_ttl_ms == 0 {
                     return None;
                 }
-                let local_residence_ms = u64::try_from(
-                    self.global_peer_map_update_time
-                        .load()
-                        .elapsed()
-                        .as_millis(),
-                )
-                .unwrap_or(u64::MAX);
+                let local_residence_ms = self
+                    .source_update_times_clone
+                    .get(&src)
+                    .or_else(|| self.source_update_times_clone.get(&dst))
+                    .map(|updated| u64::try_from(updated.elapsed().as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or_else(|| {
+                        u64::try_from(
+                            self.global_peer_map_update_time
+                                .load()
+                                .elapsed()
+                                .as_millis(),
+                        )
+                        .unwrap_or(u64::MAX)
+                    });
                 let total_age_ms = info.speed_sample_age_ms.saturating_add(local_residence_ms);
                 (total_age_ms < info.speed_sample_ttl_ms).then_some(info.tx_delivery_bps)
             }
@@ -423,6 +539,7 @@ impl PeerCenterInstance {
             fn begin_update(&mut self) {
                 let global_peer_map = self.global_peer_map.read().unwrap();
                 self.global_peer_map_clone = global_peer_map.clone();
+                self.source_update_times_clone = self.source_update_times.read().unwrap().clone();
             }
 
             fn end_update(&mut self) {
@@ -438,6 +555,8 @@ impl PeerCenterInstance {
         Box::new(RouteCostCalculatorImpl {
             global_peer_map: self.global_peer_map.clone(),
             global_peer_map_clone: GlobalPeerMap::default(),
+            source_update_times: self.source_update_times.clone(),
+            source_update_times_clone: HashMap::new(),
             last_update_time: AtomicCell::new(
                 self.global_peer_map_update_time.load() - Duration::from_secs(1),
             ),
@@ -529,6 +648,9 @@ mod tests {
             Route {
                 peer_id: 1,
                 feature_flag: Some(PeerFeatureFlag::default()),
+                peer_identity_type: crate::proto::peer_rpc::PeerIdentityType::Admin as i32,
+                secure_auth_level: crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed
+                    as i32,
                 ..Default::default()
             },
             Route {
@@ -537,17 +659,69 @@ mod tests {
                     speed_routing: true,
                     ..Default::default()
                 }),
+                peer_identity_type: crate::proto::peer_rpc::PeerIdentityType::Admin as i32,
+                secure_auth_level: crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed
+                    as i32,
                 ..Default::default()
             },
         ];
 
         assert_eq!(
-            PeerCenterBase::select_center_peer_from_routes(30, &routes, true),
+            PeerCenterBase::select_center_peer_from_routes(&routes),
             Some(20)
         );
         assert_eq!(
-            PeerCenterBase::select_center_peer_from_routes(30, &routes, false),
-            Some(1)
+            PeerCenterBase::select_center_peer_from_routes(&routes),
+            Some(20)
+        );
+
+        let mut routes_with_untrusted_admin = routes.clone();
+        routes_with_untrusted_admin.push(Route {
+            peer_id: 0,
+            peer_identity_type: crate::proto::peer_rpc::PeerIdentityType::Admin as i32,
+            secure_auth_level: crate::proto::peer_rpc::SecureAuthLevel::PeerVerified as i32,
+            feature_flag: Some(PeerFeatureFlag {
+                speed_routing: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            PeerCenterBase::select_center_peer_from_routes(&routes_with_untrusted_admin),
+            Some(20)
+        );
+
+        let local_only = vec![Route {
+            peer_id: 30,
+            peer_identity_type: crate::proto::peer_rpc::PeerIdentityType::Admin as i32,
+            secure_auth_level: crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed
+                as i32,
+            feature_flag: Some(PeerFeatureFlag {
+                speed_routing: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        assert_eq!(
+            PeerCenterBase::select_center_peer_from_routes(&local_only),
+            Some(30)
+        );
+
+        let mut shared_snapshot = local_only.clone();
+        shared_snapshot.push(Route {
+            peer_id: 20,
+            peer_identity_type: crate::proto::peer_rpc::PeerIdentityType::Admin as i32,
+            secure_auth_level: crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed
+                as i32,
+            feature_flag: Some(PeerFeatureFlag {
+                speed_routing: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            PeerCenterBase::select_center_peer_from_routes(&shared_snapshot),
+            Some(20)
         );
     }
 
@@ -648,5 +822,123 @@ mod tests {
             route_cost.end_update();
             assert!(!route_cost.need_update());
         }
+    }
+
+    #[test]
+    fn matching_digest_keeps_cached_map_and_new_digest_replaces_it() {
+        let global_peer_map = RwLock::new(GlobalPeerMap::default());
+        let global_peer_map_digest = AtomicCell::new(0);
+        let global_peer_map_update_time = AtomicCell::new(Instant::now());
+        let source_update_times = RwLock::new(HashMap::new());
+        let initial_map: std::collections::BTreeMap<PeerId, PeerInfoForGlobalMap> = [(
+            1,
+            PeerInfoForGlobalMap {
+                direct_peers: [(
+                    2,
+                    DirectConnectedPeerInfo {
+                        tx_delivery_bps: 10_000,
+                        speed_sample_age_ms: 10,
+                        speed_sample_ttl_ms: 1_000,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        assert!(apply_global_peer_map_response(
+            &global_peer_map,
+            &global_peer_map_digest,
+            &global_peer_map_update_time,
+            &source_update_times,
+            0,
+            GetGlobalPeerMapResponse {
+                global_peer_map: initial_map.clone(),
+                digest: Some(11),
+                full_snapshot: true,
+                snapshot_residence_age_ms: 200,
+                ..Default::default()
+            },
+        ));
+        assert_eq!(global_peer_map.read().unwrap().map, initial_map);
+        assert_eq!(global_peer_map_digest.load(), 11);
+
+        assert_eq!(
+            global_peer_map.read().unwrap().map[&1].direct_peers[&2].speed_sample_age_ms,
+            210
+        );
+
+        assert!(!apply_global_peer_map_response(
+            &global_peer_map,
+            &global_peer_map_digest,
+            &global_peer_map_update_time,
+            &source_update_times,
+            11,
+            GetGlobalPeerMapResponse::default(),
+        ));
+        assert_eq!(global_peer_map.read().unwrap().map.len(), 1);
+        assert_eq!(global_peer_map_digest.load(), 11);
+
+        let updated_map: std::collections::BTreeMap<PeerId, PeerInfoForGlobalMap> =
+            [(2, PeerInfoForGlobalMap::default())].into_iter().collect();
+        assert!(apply_global_peer_map_response(
+            &global_peer_map,
+            &global_peer_map_digest,
+            &global_peer_map_update_time,
+            &source_update_times,
+            11,
+            GetGlobalPeerMapResponse {
+                global_peer_map: updated_map.clone(),
+                digest: Some(12),
+                full_snapshot: true,
+                ..Default::default()
+            },
+        ));
+        assert_eq!(global_peer_map.read().unwrap().map, updated_map);
+        assert_eq!(global_peer_map_digest.load(), 12);
+    }
+
+    #[test]
+    fn delta_residence_age_is_charged_to_speed_samples_per_source() {
+        let global_peer_map = RwLock::new(GlobalPeerMap::default());
+        let global_peer_map_digest = AtomicCell::new(0);
+        let global_peer_map_update_time = AtomicCell::new(Instant::now());
+        let source_update_times = RwLock::new(HashMap::new());
+        let response = GetGlobalPeerMapResponse {
+            digest: Some(2),
+            deltas: vec![crate::proto::peer_rpc::PeerCenterSourceDelta {
+                generation: 2,
+                source_peer_id: 1,
+                peer_info: Some(PeerInfoForGlobalMap {
+                    direct_peers: [(
+                        2,
+                        DirectConnectedPeerInfo {
+                            tx_delivery_bps: 10_000,
+                            speed_sample_age_ms: 10,
+                            speed_sample_ttl_ms: 100,
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                }),
+                residence_age_ms: 200,
+                removed: false,
+            }],
+            ..Default::default()
+        };
+
+        assert!(apply_global_peer_map_response(
+            &global_peer_map,
+            &global_peer_map_digest,
+            &global_peer_map_update_time,
+            &source_update_times,
+            0,
+            response,
+        ));
+        let info = &global_peer_map.read().unwrap().map[&1].direct_peers[&2];
+        assert_eq!(info.speed_sample_age_ms, 210);
+        assert_eq!(source_update_times.read().unwrap().len(), 1);
     }
 }
