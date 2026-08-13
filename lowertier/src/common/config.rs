@@ -10,6 +10,7 @@ use ariadne::{CharSet, Config as AriadneConfig, IndexType, Label, Report, Report
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use clap::ValueEnum;
 use clap::builder::PossibleValue;
+use prost::Message;
 use prost_reflect::{DynamicMessage, ReflectMessage, SerializeOptions};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, VariantArray};
@@ -18,10 +19,12 @@ use tokio::io::AsyncReadExt as _;
 use crate::{
     common::{stun::StunInfoCollector, underlay_policy::UnderlayPolicy},
     instance::dns_server::DEFAULT_ET_DNS_ZONE,
+    peers::credential_manager::CredentialManager,
     proto::{
         acl::Acl,
         api::manage::ConfigSource as RpcConfigSource,
         common::{CompressionAlgoPb, PortForwardConfigPb, SecureModeConfig, SocketType},
+        peer_rpc::CredentialBundle,
     },
     tunnel::{IpScheme, TunnelScheme, generate_digest_from_str},
 };
@@ -29,6 +32,8 @@ use crate::{
 use super::env_parser;
 
 pub type Flags = crate::proto::common::FlagsInConfig;
+
+const MAX_SPEED_PROBE_INTERVAL_SECONDS: u64 = 300;
 
 pub fn gen_default_flags() -> Flags {
     #[allow(deprecated)]
@@ -144,8 +149,15 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     if flags.speed_first && flags.speed_probe_budget_bps == 0 {
         anyhow::bail!("speed_first requires a positive speed_probe_budget_bps");
     }
-    if flags.speed_probe_budget_bps > 0 && flags.speed_probe_interval_seconds == 0 {
-        anyhow::bail!("speed probes require a positive speed_probe_interval_seconds");
+    if flags.speed_probe_budget_bps > 0 {
+        if flags.speed_probe_interval_seconds == 0 {
+            anyhow::bail!("speed probes require a positive speed_probe_interval_seconds");
+        }
+        if flags.speed_probe_interval_seconds > MAX_SPEED_PROBE_INTERVAL_SECONDS {
+            anyhow::bail!(
+                "speed_probe_interval_seconds must be at most {MAX_SPEED_PROBE_INTERVAL_SECONDS} when speed probes are enabled"
+            );
+        }
     }
 
     Ok(())
@@ -440,6 +452,7 @@ pub trait LoggingConfigLoader {
 }
 
 pub type NetworkSecretDigest = [u8; 32];
+const CREDENTIAL_MODE_MARKER: NetworkSecretDigest = [0_u8; 32];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NetworkIdentity {
@@ -550,6 +563,13 @@ impl std::hash::Hash for NetworkIdentity {
 
 impl NetworkIdentity {
     pub fn new(network_name: String, network_secret: String) -> Self {
+        if network_secret.is_empty() {
+            return Self {
+                network_name,
+                network_secret: None,
+                network_secret_digest: None,
+            };
+        }
         let mut network_secret_digest = [0u8; 32];
         generate_digest_from_str(&network_name, &network_secret, &mut network_secret_digest);
 
@@ -566,14 +586,48 @@ impl NetworkIdentity {
         NetworkIdentity {
             network_name,
             network_secret: None,
-            network_secret_digest: None,
+            network_secret_digest: Some(CREDENTIAL_MODE_MARKER),
+        }
+    }
+
+    /// Create credential identity with its pinned certificate root fingerprint.
+    pub fn new_credential_with_root_fingerprint(
+        network_name: String,
+        root_fingerprint: &[u8],
+    ) -> anyhow::Result<Self> {
+        let network_secret_digest: NetworkSecretDigest = root_fingerprint
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("credential root fingerprint must be 32 bytes"))?;
+        if network_secret_digest.iter().all(|byte| *byte == 0) {
+            return Err(anyhow::anyhow!(
+                "credential root fingerprint must not be all zero"
+            ));
+        }
+        Ok(NetworkIdentity {
+            network_name,
+            network_secret: None,
+            network_secret_digest: Some(network_secret_digest),
+        })
+    }
+
+    pub fn credential_root_fingerprint(&self) -> Option<&[u8; 32]> {
+        if self.network_secret.is_none() {
+            self.network_secret_digest
+                .as_ref()
+                .filter(|fingerprint| **fingerprint != CREDENTIAL_MODE_MARKER)
+        } else {
+            None
         }
     }
 }
 
 impl Default for NetworkIdentity {
     fn default() -> Self {
-        Self::new("default".to_string(), "".to_string())
+        Self {
+            network_name: "default".to_owned(),
+            network_secret: None,
+            network_secret_digest: None,
+        }
     }
 }
 
@@ -668,6 +722,19 @@ pub fn process_secure_mode_cfg(mut user_cfg: SecureModeConfig) -> anyhow::Result
         return Ok(user_cfg);
     }
 
+    if let Some(bundle_text) = user_cfg.credential_bundle.clone() {
+        let bundle = CredentialManager::parse_credential_bundle(&bundle_text)
+            .map_err(|error| anyhow::anyhow!("invalid credential bundle: {error}"))?;
+        let verified = CredentialManager::verify_credential_bundle(
+            &bundle_text,
+            &bundle.network_name,
+            &bundle.root_public_key,
+            crate::peers::credential_manager::current_unix_timestamp(),
+        )
+        .map_err(|error| anyhow::anyhow!("invalid credential certificate: {error}"))?;
+        return normalize_verified_credential_bundle_cfg(user_cfg, &verified);
+    }
+
     let private_key = if user_cfg.local_private_key.is_none() {
         // if no private key, generate random one
         let private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -696,6 +763,63 @@ pub fn process_secure_mode_cfg(mut user_cfg: SecureModeConfig) -> anyhow::Result
         }
     }
 
+    Ok(user_cfg)
+}
+
+/// Normalize a secure mode configuration after the caller verifies its bundle.
+pub(crate) fn normalize_verified_credential_bundle_cfg(
+    mut user_cfg: SecureModeConfig,
+    bundle: &CredentialBundle,
+) -> anyhow::Result<SecureModeConfig> {
+    if bundle.x25519_private_key.len() != 32 {
+        return Err(anyhow::anyhow!(
+            "credential bundle private key must be 32 bytes"
+        ));
+    }
+    if bundle.root_public_key.len() != 32 || bundle.root_fingerprint.len() != 32 {
+        return Err(anyhow::anyhow!(
+            "credential bundle root metadata must be 32 bytes"
+        ));
+    }
+    let private_bytes: [u8; 32] = bundle
+        .x25519_private_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("credential bundle private key is invalid"))?;
+    let private_key = x25519_dalek::StaticSecret::from(private_bytes);
+    let public_key = x25519_dalek::PublicKey::from(&private_key);
+    if let Some(local_private_key) = user_cfg.local_private_key.as_deref() {
+        let expected = BASE64_STANDARD.encode(private_key.as_bytes());
+        if local_private_key != expected {
+            return Err(anyhow::anyhow!(
+                "credential bundle private key does not match local_private_key"
+            ));
+        }
+    }
+    if let Some(local_public_key) = user_cfg.local_public_key.as_deref() {
+        let expected = BASE64_STANDARD.encode(public_key.as_bytes());
+        if local_public_key != expected {
+            return Err(anyhow::anyhow!(
+                "credential bundle public key does not match local_public_key"
+            ));
+        }
+    }
+    user_cfg.local_private_key = Some(BASE64_STANDARD.encode(private_key.as_bytes()));
+    user_cfg.local_public_key = Some(BASE64_STANDARD.encode(public_key.as_bytes()));
+    if !user_cfg.credential_root_fingerprint.is_empty()
+        && user_cfg.credential_root_fingerprint != bundle.root_fingerprint
+    {
+        return Err(anyhow::anyhow!(
+            "credential bundle root fingerprint does not match the pinned root"
+        ));
+    }
+    user_cfg.credential_root_fingerprint = bundle.root_fingerprint.clone();
+    user_cfg.credential_certificate = bundle
+        .certificate
+        .as_ref()
+        .map(Message::encode_to_vec)
+        .unwrap_or_default();
+    user_cfg.credential_bundle = Some(CredentialManager::encode_credential_bundle(bundle));
     Ok(user_cfg)
 }
 
@@ -838,30 +962,75 @@ impl TomlConfigLoader {
             .context("failed to configure secure mode")?;
         let has_network_identity = config.network_identity.is_some();
 
+        if config
+            .network_identity
+            .as_ref()
+            .and_then(|identity| identity.network_secret.as_deref())
+            .is_some_and(|secret| !secret.is_empty())
+            && config
+                .secure_mode
+                .as_ref()
+                .and_then(|secure_mode| secure_mode.credential_bundle.as_ref())
+                .is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "network secret and credential bundle cannot be used together"
+            ));
+        }
+
         let config = TomlConfigLoader {
             config: Arc::new(Mutex::new(config)),
         };
 
         let old_ns = config.get_network_identity();
 
-        // Detect credential mode: secure_mode enabled + no network_secret in TOML
+        // Detect credential mode from the absence of a usable network secret.
         let is_credential = has_network_identity
-            && config
-                .get_secure_mode()
-                .map(|sm| sm.enabled)
-                .unwrap_or(false)
             && old_ns
                 .network_secret
                 .as_deref()
                 .is_none_or(|s| s.is_empty());
 
         if is_credential {
-            config.set_network_identity(NetworkIdentity::new_credential(old_ns.network_name));
+            let secure_mode = config
+                .get_secure_mode()
+                .filter(|secure_mode| secure_mode.enabled)
+                .ok_or_else(|| anyhow::anyhow!("credential mode requires enabled secure mode"))?;
+            if secure_mode.credential_bundle.is_none() {
+                return Err(anyhow::anyhow!(
+                    "credential mode requires a signed credential bundle"
+                ));
+            }
+            let bundle = CredentialManager::verify_credential_bundle_for_network(
+                secure_mode
+                    .credential_bundle
+                    .as_deref()
+                    .expect("credential bundle was checked"),
+                &old_ns.network_name,
+                (!secure_mode.credential_root_fingerprint.is_empty())
+                    .then_some(secure_mode.credential_root_fingerprint.as_slice()),
+                crate::peers::credential_manager::current_unix_timestamp(),
+            )
+            .map_err(|error| anyhow::anyhow!("invalid credential bundle: {error}"))?;
+            config.set_network_identity(NetworkIdentity::new_credential_with_root_fingerprint(
+                old_ns.network_name.clone(),
+                &bundle.root_fingerprint,
+            )?);
+        } else if !has_network_identity
+            && old_ns.network_secret.as_deref().is_none_or(str::is_empty)
+        {
+            config.set_network_identity(NetworkIdentity {
+                network_name: old_ns.network_name,
+                network_secret: None,
+                network_secret_digest: None,
+            });
         } else {
-            config.set_network_identity(NetworkIdentity::new(
-                old_ns.network_name,
-                old_ns.network_secret.unwrap_or_default(),
-            ));
+            let network_name = old_ns.network_name;
+            let network_secret = old_ns
+                .network_secret
+                .filter(|secret| !secret.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("network secret must not be empty"))?;
+            config.set_network_identity(NetworkIdentity::new(network_name, network_secret));
         }
 
         Ok(config)
@@ -1698,6 +1867,22 @@ socket_mark = 66
     }
 
     #[test]
+    fn speed_probe_interval_has_a_protocol_bound() {
+        let mut flags = gen_default_flags();
+        flags.speed_probe_budget_bps = 1;
+        flags.speed_probe_interval_seconds = 300;
+        validate_flags(&flags).unwrap();
+
+        flags.speed_probe_interval_seconds = 301;
+        let error = validate_flags(&flags).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("at most 300 when speed probes are enabled")
+        );
+    }
+
+    #[test]
     fn l2_tun_uses_ethernet_overlay_without_native_ethernet_device() {
         let mode = "compatible-ethernet".parse::<PortMode>().unwrap();
 
@@ -1953,7 +2138,7 @@ outbound_http_proxy = "http://localhost:1055"
     #[test]
     fn test_toml_credential_mode_omits_network_secret() {
         for network_secret in ["", r#"network_secret = """#] {
-            let config = TomlConfigLoader::new_from_str(&format!(
+            let result = TomlConfigLoader::new_from_str(&format!(
                 r#"
 [network_identity]
 network_name = "credential-network"
@@ -1962,19 +2147,13 @@ network_name = "credential-network"
 [secure_mode]
 enabled = true
 "#
-            ))
-            .unwrap();
-
-            let identity = config.get_network_identity();
-            assert_eq!(identity.network_name, "credential-network");
-            assert_eq!(identity.network_secret, None);
-            assert_eq!(identity.network_secret_digest, None);
-            assert!(!config.dump().contains("network_secret"));
+            ));
+            assert!(result.is_err());
         }
     }
 
     #[test]
-    fn test_toml_secure_mode_without_network_identity_uses_default_secret() {
+    fn test_toml_secure_mode_without_network_identity_uses_no_secret() {
         let config = TomlConfigLoader::new_from_str(
             r#"
 [secure_mode]
@@ -1985,8 +2164,73 @@ enabled = true
 
         let identity = config.get_network_identity();
         assert_eq!(identity.network_name, "default");
-        assert_eq!(identity.network_secret.as_deref(), Some(""));
-        assert!(identity.network_secret_digest.is_some());
+        assert_eq!(identity.network_secret, None);
+        assert!(identity.network_secret_digest.is_none());
+    }
+
+    #[test]
+    fn credential_startup_rejects_a_mismatched_pinned_root() {
+        let issuer =
+            CredentialManager::new_with_network(None, "credential-network", Some("secret"));
+        let (_, encoded_bundle) = issuer
+            .generate_credential_bundle(
+                Vec::new(),
+                false,
+                Vec::new(),
+                std::time::Duration::from_secs(3600),
+                None,
+                true,
+            )
+            .unwrap();
+        let secure_mode = SecureModeConfig {
+            enabled: true,
+            local_private_key: None,
+            local_public_key: None,
+            credential_bundle: Some(encoded_bundle),
+            credential_root_fingerprint: vec![7; 32],
+            credential_certificate: Vec::new(),
+        };
+
+        assert!(process_secure_mode_cfg(secure_mode).is_err());
+    }
+
+    #[test]
+    fn config_rejects_a_network_secret_with_a_credential_bundle() {
+        let issuer = CredentialManager::new_with_network(None, "mixed-network", Some("secret"));
+        let (_, encoded_bundle) = issuer
+            .generate_credential_bundle(
+                Vec::new(),
+                false,
+                Vec::new(),
+                std::time::Duration::from_secs(3600),
+                None,
+                true,
+            )
+            .unwrap();
+        let config = format!(
+            r#"
+[network_identity]
+network_name = "mixed-network"
+network_secret = "network-secret"
+
+[secure_mode]
+enabled = true
+credential_bundle = "{encoded_bundle}"
+"#
+        );
+
+        assert!(TomlConfigLoader::new_from_str(&config).is_err());
+    }
+
+    #[test]
+    fn credential_identity_rejects_an_all_zero_root_fingerprint() {
+        assert!(
+            NetworkIdentity::new_credential_with_root_fingerprint(
+                "credential-network".to_owned(),
+                &[0; 32],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2157,7 +2401,7 @@ routes = [ "192.168.0.0/16" ]
 
 [network_identity]
 network_name = "default"
-network_secret = ""
+network_secret = "test-secret"
 
 [[peer]]
 uri = "tcp://public.kkrainbow.top:11010"

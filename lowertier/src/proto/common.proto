@@ -278,6 +278,7 @@ message PeerFeatureFlag {
   bool hybrid_l3 = 14;
   bool bridge_input = 15;
   bool multicast_membership = 16;
+  bool relay_origin_proof = 17;
 }
 
 enum SocketType {
@@ -309,4 +310,11 @@ message SecureModeConfig {
 
   // base64(X25519 public key), required if local_private_key is set
   optional string local_public_key = 3;
+
+  // Canonical URL-safe signed credential bundle.
+  optional string credential_bundle = 4;
+  // SHA-256 fingerprint of the pinned credential root.
+  bytes credential_root_fingerprint = 5;
+  // Deterministic protobuf-encoded signed certificate.
+  bytes credential_certificate = 6;
 }

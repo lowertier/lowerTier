@@ -254,6 +254,122 @@ impl PacketBatch {
     pub fn iter_mut(&mut self) -> slice::IterMut<'_, ZCPacket> {
         self.packets.iter_mut()
     }
+
+    /// Keep packets in their original order and reuse this batch allocation.
+    pub(crate) fn retain_flags(&mut self, keep: &[bool]) {
+        assert_eq!(keep.len(), self.packets.len());
+        let len = self.packets.len();
+        let ptr = self.packets.as_mut_ptr();
+        let mut write = 0;
+        for (read, should_keep) in keep.iter().copied().enumerate() {
+            unsafe {
+                if should_keep {
+                    let packet = ptr::read(ptr.add(read));
+                    ptr::write(ptr.add(write), packet);
+                    write += 1;
+                } else {
+                    ptr::drop_in_place(ptr.add(read));
+                }
+            }
+        }
+        debug_assert!(write <= len);
+        unsafe { self.packets.set_len(write) };
+    }
+
+    /// Process one selected packet group and merge it back into this batch.
+    ///
+    /// The selected packets keep their original order. The batch keeps its
+    /// original allocation. The closure returns one keep flag per selection.
+    pub(crate) fn process_selected_with_keep_flags<F, E>(
+        &mut self,
+        selected: &[bool],
+        keep_unselected: &[bool],
+        process: F,
+    ) -> Result<(), E>
+    where
+        F: FnOnce(&mut [ZCPacket]) -> Result<Vec<bool>, E>,
+    {
+        assert_eq!(selected.len(), self.packets.len());
+        assert_eq!(keep_unselected.len(), self.packets.len());
+
+        let len = self.packets.len();
+        let selected_len = selected.iter().filter(|selected| **selected).count();
+        let ptr = self.packets.as_mut_ptr();
+        let mut selected_packets = Vec::with_capacity(selected_len);
+        for (index, is_selected) in selected.iter().copied().enumerate() {
+            if is_selected {
+                unsafe { selected_packets.push(ptr::read(ptr.add(index))) };
+            }
+        }
+
+        // Restore moved packets before unwinding. This keeps PacketBatch safe
+        // when a crypto implementation reports an unexpected panic.
+        let process_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process(selected_packets.as_mut_slice())
+        }));
+        let selected_keep = match process_result {
+            Ok(Ok(flags)) => {
+                assert_eq!(flags.len(), selected_len);
+                flags
+            }
+            Ok(Err(error)) => {
+                unsafe { restore_selected_packets(ptr, selected, selected_packets) };
+                return Err(error);
+            }
+            Err(payload) => {
+                unsafe { restore_selected_packets(ptr, selected, selected_packets) };
+                std::panic::resume_unwind(payload);
+            }
+        };
+
+        let mut selected_index = 0;
+        let mut selected_packets = selected_packets.into_iter();
+        let mut write = 0;
+        for (index, is_selected) in selected.iter().copied().enumerate() {
+            unsafe {
+                if is_selected {
+                    let packet = selected_packets
+                        .next()
+                        .expect("selected packet count stays stable");
+                    selected_index += 1;
+                    if selected_keep[selected_index - 1] {
+                        ptr::write(ptr.add(write), packet);
+                        write += 1;
+                    } else {
+                        drop(packet);
+                    }
+                } else if keep_unselected[index] {
+                    let packet = ptr::read(ptr.add(index));
+                    ptr::write(ptr.add(write), packet);
+                    write += 1;
+                } else {
+                    ptr::drop_in_place(ptr.add(index));
+                }
+            }
+        }
+        debug_assert_eq!(selected_index, selected_len);
+        debug_assert!(selected_packets.next().is_none());
+        debug_assert!(write <= len);
+        unsafe { self.packets.set_len(write) };
+        Ok(())
+    }
+}
+
+unsafe fn restore_selected_packets(
+    ptr: *mut ZCPacket,
+    selected: &[bool],
+    selected_packets: Vec<ZCPacket>,
+) {
+    let mut selected_packets = selected_packets.into_iter();
+    for (index, is_selected) in selected.iter().copied().enumerate() {
+        if is_selected {
+            let packet = selected_packets
+                .next()
+                .expect("selected packet count stays stable");
+            ptr::write(ptr.add(index), packet);
+        }
+    }
+    debug_assert!(selected_packets.next().is_none());
 }
 
 impl Drop for PacketBatch {

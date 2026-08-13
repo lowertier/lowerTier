@@ -2,7 +2,13 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use crate::proto::common::TunnelInfo;
+use crate::{
+    common::PeerId,
+    proto::{
+        common::TunnelInfo,
+        peer_rpc::{PeerIdentityType, SecureAuthLevel},
+    },
+};
 
 // Controller must impl clone and all cloned controllers share the same data
 pub trait Controller: Send + Sync + Clone + 'static {
@@ -28,6 +34,21 @@ pub trait Controller: Send + Sync + Clone + 'static {
         None
     }
 
+    fn set_authenticated_peer_id(&mut self, _peer_id: Option<PeerId>) {}
+    fn authenticated_peer_id(&self) -> Option<PeerId> {
+        None
+    }
+
+    fn set_authenticated_peer_identity_type(&mut self, _identity_type: Option<PeerIdentityType>) {}
+    fn authenticated_peer_identity_type(&self) -> Option<PeerIdentityType> {
+        None
+    }
+
+    fn set_authenticated_peer_secure_auth_level(&mut self, _level: Option<SecureAuthLevel>) {}
+    fn authenticated_peer_secure_auth_level(&self) -> Option<SecureAuthLevel> {
+        None
+    }
+
     fn set_raw_output(&mut self, _raw_output: Bytes) {}
     fn get_raw_output(&self) -> Option<Bytes> {
         None
@@ -46,6 +67,9 @@ pub struct BaseController {
     pub trace_id: i32,
     pub raw_data: Arc<Mutex<BaseControllerRawData>>,
     pub tunnel_info: Option<TunnelInfo>,
+    pub authenticated_peer_id: Option<PeerId>,
+    pub authenticated_peer_identity_type: Option<PeerIdentityType>,
+    pub authenticated_peer_secure_auth_level: Option<SecureAuthLevel>,
 }
 
 impl Controller for BaseController {
@@ -88,6 +112,30 @@ impl Controller for BaseController {
     fn set_tunnel_info(&mut self, tunnel_info: Option<TunnelInfo>) {
         self.tunnel_info = tunnel_info;
     }
+
+    fn set_authenticated_peer_id(&mut self, peer_id: Option<PeerId>) {
+        self.authenticated_peer_id = peer_id;
+    }
+
+    fn authenticated_peer_id(&self) -> Option<PeerId> {
+        self.authenticated_peer_id
+    }
+
+    fn set_authenticated_peer_identity_type(&mut self, identity_type: Option<PeerIdentityType>) {
+        self.authenticated_peer_identity_type = identity_type;
+    }
+
+    fn authenticated_peer_identity_type(&self) -> Option<PeerIdentityType> {
+        self.authenticated_peer_identity_type
+    }
+
+    fn set_authenticated_peer_secure_auth_level(&mut self, level: Option<SecureAuthLevel>) {
+        self.authenticated_peer_secure_auth_level = level;
+    }
+
+    fn authenticated_peer_secure_auth_level(&self) -> Option<SecureAuthLevel> {
+        self.authenticated_peer_secure_auth_level
+    }
 }
 
 impl Default for BaseController {
@@ -100,6 +148,9 @@ impl Default for BaseController {
                 raw_output: None,
             })),
             tunnel_info: None,
+            authenticated_peer_id: None,
+            authenticated_peer_identity_type: None,
+            authenticated_peer_secure_auth_level: None,
         }
     }
 }

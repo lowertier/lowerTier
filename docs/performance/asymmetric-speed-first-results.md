@@ -24,6 +24,23 @@ The focused route test completed in 0.02 seconds.
 The process used 14.3 MB of resident memory.
 The matrix did not identify an algorithmic or memory regression.
 
+The maximum-goodput builder first computes the widest directed capacity.
+It then runs a least-cost search for each selected capacity class.
+Equal-capacity paths use cumulative latency, hop count, and first-hop peer ID.
+This two-stage method preserves loop-safe path selection.
+Each threshold search stops after it settles every destination in that capacity
+class. It does not scan unrelated remaining nodes.
+
+Before graph construction, each non-zero delivery sample uses its floor
+power-of-two class. Zero remains unavailable. This limits threshold runs to
+the 64 non-zero `u64` classes and keeps speed ordering monotonic. The selected
+route reports the class value, not the raw probe value.
+
+The route test compares this bounded search with the complete threshold search.
+It checks route equality for sparse, dense, asymmetric, and many-capacity
+graphs. It records settled nodes, scanned edges, wall time, and peak temporary
+storage. Run the focused test with `--nocapture` to record the current values.
+
 ## Live topology
 
 The live topology used a Mac endpoint, a public relay, and the `.40` router endpoint.

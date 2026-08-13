@@ -128,6 +128,7 @@ pub struct AdaptiveController {
     accumulator: RoundAccumulator,
     last_sent_packet: u64,
     round_end_packet: u64,
+    round_initialized: bool,
     last_reliable_drop_count: u64,
     last_decision: Option<AdaptiveDecision>,
 }
@@ -155,6 +156,7 @@ impl AdaptiveController {
             accumulator: RoundAccumulator::default(),
             last_sent_packet: 0,
             round_end_packet: 0,
+            round_initialized: false,
             last_reliable_drop_count: 0,
             last_decision: None,
         }
@@ -214,10 +216,9 @@ impl AdaptiveController {
 impl Controller for AdaptiveController {
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {
         self.last_sent_packet = last_packet_number;
-        if self.last_decision.is_none() || self.round_end_packet == 0 {
-            // Before the first acknowledgement, keep extending the initial
-            // round to the latest packet already emitted.
+        if !self.round_initialized {
             self.round_end_packet = last_packet_number;
+            self.round_initialized = true;
         }
         self.accumulator.record_sent(now, bytes);
     }
@@ -247,6 +248,7 @@ impl Controller for AdaptiveController {
         }
         self.finish_round(in_flight, app_limited);
         self.round_end_packet = self.last_sent_packet;
+        self.round_initialized = true;
     }
 
     fn on_congestion_event(
@@ -336,5 +338,24 @@ mod tests {
             bytes_per_interval_to_bps(u64::MAX, Duration::from_nanos(1)),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn sustained_send_keeps_the_initial_round_boundary() {
+        let config = AdaptiveConfig {
+            initial_rate_bps: 10_000_000,
+            max_rate_bps: 1_000_000_000,
+            ..AdaptiveConfig::default()
+        };
+        let core = AdaptiveCore::new(config.clone(), 1200).unwrap();
+        let signals = Arc::new(AdaptiveSignals::default());
+        let mut controller = AdaptiveController::new(core, config, signals, 1200);
+        let now = Instant::now();
+
+        for packet_number in 0..1024 {
+            controller.on_sent(now, 1200, packet_number);
+        }
+
+        assert_eq!(controller.round_end_packet, 0);
     }
 }

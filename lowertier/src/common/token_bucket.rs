@@ -172,7 +172,7 @@ impl TokenBucket {
 pub struct TokenBucketManager {
     buckets: Arc<DashMap<String, Arc<TokenBucket>>>,
 
-    retain_task: AbortOnDropHandle<()>,
+    retain_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl Default for TokenBucketManager {
@@ -186,26 +186,27 @@ impl TokenBucketManager {
     pub fn new() -> Self {
         let buckets = Arc::new(DashMap::new());
 
-        let buckets_clone = buckets.clone();
-        let retain_task = tokio::spawn(async move {
-            loop {
-                // Retain only buckets that are still in use
-                let old_len = buckets_clone.len();
-                buckets_clone.retain(|_, bucket| Arc::<TokenBucket>::strong_count(bucket) > 1);
-                buckets_clone.shrink_to_fit();
-                // Sleep for a while before next retention check
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                tracing::info!(
-                    "Retained buckets: {} ({} dropped)",
-                    buckets_clone.len(),
-                    old_len.saturating_sub(buckets_clone.len())
-                );
-            }
+        let retain_task = tokio::runtime::Handle::try_current().ok().map(|runtime| {
+            let buckets_clone = buckets.clone();
+            AbortOnDropHandle::new(runtime.spawn(async move {
+                loop {
+                    // Retain only buckets that are still in use.
+                    let old_len = buckets_clone.len();
+                    buckets_clone.retain(|_, bucket| Arc::<TokenBucket>::strong_count(bucket) > 1);
+                    buckets_clone.shrink_to_fit();
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tracing::info!(
+                        "Retained buckets: {} ({} dropped)",
+                        buckets_clone.len(),
+                        old_len.saturating_sub(buckets_clone.len())
+                    );
+                }
+            }))
         });
 
         Self {
             buckets,
-            retain_task: AbortOnDropHandle::new(retain_task),
+            retain_task,
         }
     }
 

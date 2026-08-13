@@ -94,6 +94,8 @@ message Route {
   optional int32 path_latency_speed_first = 20;
   optional int32 path_len_speed_first = 21;
   repeated bytes multicast_groups = 22;
+  peer_rpc.PeerIdentityType peer_identity_type = 23;
+  peer_rpc.SecureAuthLevel secure_auth_level = 24;
 }
 
 message PeerRoutePair {
@@ -355,7 +357,8 @@ message GenerateCredentialRequest {
 
 message GenerateCredentialResponse {
   string credential_id = 1;       // UUID
-  string credential_secret = 2;   // private key base64
+  string credential_secret = 2;   // signed URL-safe credential bundle
+  peer_rpc.CredentialBundle bundle = 3;
 }
 
 message RevokeCredentialRequest {
@@ -378,6 +381,12 @@ message CredentialInfo {
   int64 expiry_unix = 4;
   repeated string allowed_proxy_cidrs = 5;
   optional bool reusable = 6;
+  uint32 credential_version = 7;
+  uint64 serial = 8;
+  string role = 9;
+  string network_name = 10;
+  bytes root_fingerprint = 11;
+  bytes certificate_id = 12;
 }
 
 message ListCredentialsResponse {

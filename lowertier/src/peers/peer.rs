@@ -20,7 +20,7 @@ use super::alternate_fec::{
 };
 use super::{
     PacketRecvChan,
-    flow::{FlowPathCache, classify_packet_flow, stamp_critical_l2_control},
+    flow::{FlowPathCache, classify_packet_flow, stamp_critical_l2_control, stamp_packet_flow},
     peer_conn::{PeerConn, PeerConnId},
     route_trait::NextHopPolicy,
 };
@@ -33,13 +33,26 @@ use crate::{
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
     },
-    proto::peer_rpc::PeerIdentityType,
+    proto::peer_rpc::{PeerIdentityType, SecureAuthLevel},
     tunnel::{batch::PacketBatch, packet_def::ZCPacket},
 };
 use tokio_util::task::AbortOnDropHandle;
 
 pub(crate) type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
+
+#[cfg(feature = "quic")]
+const ALTERNATE_FEC_PARITY_QUEUE_CAPACITY: usize = 32;
+
+#[cfg(feature = "quic")]
+struct AlternateFecParityWork {
+    conn: ArcPeerConn,
+    local_peer_id: PeerId,
+    block: CompletedAlternateFecBlock,
+}
+
+pub(crate) type OriginAuthUpdate =
+    Arc<dyn Fn(PeerId, Option<(PeerIdentityType, Vec<u8>, SecureAuthLevel)>) + Send + Sync>;
 
 pub struct Peer {
     pub peer_node_id: PeerId,
@@ -57,6 +70,7 @@ pub struct Peer {
     connection_flow_paths: Arc<FlowPathCache<PeerConnId>>,
     peer_identity_type: Arc<AtomicCell<Option<PeerIdentityType>>>,
     peer_public_key: Arc<RwLock<Option<Vec<u8>>>>,
+    origin_auth_update: Arc<RwLock<OriginAuthUpdate>>,
     default_conn_refresh_task: AbortOnDropHandle<()>,
 
     #[cfg(feature = "quic")]
@@ -67,7 +81,10 @@ pub struct Peer {
     alternate_fec_primary: Arc<AtomicCell<PeerConnId>>,
     #[cfg(feature = "quic")]
     alternate_fec_local_peer_id: Arc<AtomicU32>,
+    #[cfg(feature = "quic")]
     alternate_fec_notify: Option<Arc<tokio::sync::Notify>>,
+    #[cfg(feature = "quic")]
+    alternate_fec_parity_sender: Option<mpsc::Sender<AlternateFecParityWork>>,
     #[cfg(feature = "quic")]
     alternate_fec_worker_task: Option<AbortOnDropHandle<()>>,
 }
@@ -79,6 +96,7 @@ fn select_alternate_conn(conns: &ConnMap, primary: &ArcPeerConn) -> Option<ArcPe
         .filter(|candidate| {
             !candidate.value().is_closed()
                 && candidate.get_conn_id() != primary.get_conn_id()
+                && candidate.value().alternate_fec_remote_receive_ready()
                 && candidate.value().alternate_parity_path_allowed()
                 && primary.has_distinct_quic_surface(candidate.value())
         })
@@ -99,20 +117,51 @@ fn is_alternate_fec_source(packet: &ZCPacket, peer_node_id: PeerId) -> bool {
 }
 
 #[cfg(feature = "quic")]
-async fn send_alternate_parity(
-    conn: &ArcPeerConn,
-    local_peer_id: PeerId,
-    remote_peer_id: PeerId,
-    block: CompletedAlternateFecBlock,
-) {
+fn alternate_fec_capture_allowed(
+    primary: &ArcPeerConn,
+    alternate: &ArcPeerConn,
+    packet: &ZCPacket,
+    encoder: &AlternateFecEncoder,
+) -> bool {
+    let Some(source_payload_len) = primary.alternate_fec_source_payload_len(packet) else {
+        return false;
+    };
+    let Some((source_record_len, parity_record_len)) =
+        encoder.record_lengths_for_source(source_payload_len)
+    else {
+        return false;
+    };
+    primary.alternate_fec_record_fits(source_record_len)
+        && alternate.alternate_fec_record_fits(parity_record_len)
+}
+
+#[cfg(feature = "quic")]
+async fn send_alternate_parity(remote_peer_id: PeerId, work: AlternateFecParityWork) {
+    let AlternateFecParityWork {
+        conn,
+        local_peer_id,
+        block,
+    } = work;
     let block_id = block.block_id;
     let source_count = block.source_count;
     let packets = parity_packets(local_peer_id, remote_peer_id, block);
     let mut batch = PacketBatch::with_capacity(packets.len());
     for packet in packets {
+        if !conn.alternate_fec_record_fits(packet.payload().len()) {
+            tracing::debug!(
+                block_id,
+                record_len = packet.payload().len(),
+                budget = conn.alternate_fec_datagram_budget(),
+                "dropping alternate-path parity record above current DATAGRAM budget"
+            );
+            continue;
+        }
         batch
             .try_push(packet)
             .expect("alternate parity batch is bounded to three packets");
+    }
+    if batch.is_empty() {
+        return;
     }
     if let Err(error) = conn.send_msg_batch(batch).await {
         tracing::warn!(
@@ -121,6 +170,104 @@ async fn send_alternate_parity(
             source_count,
             "alternate-path parity send failed"
         );
+    }
+}
+
+#[cfg(feature = "quic")]
+fn enqueue_alternate_parity(
+    sender: &mpsc::Sender<AlternateFecParityWork>,
+    work: AlternateFecParityWork,
+) {
+    match sender.try_send(work) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(work)) => {
+            tracing::debug!(
+                block_id = work.block.block_id,
+                "alternate-path parity queue is full; dropping parity block"
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(work)) => {
+            tracing::debug!(
+                block_id = work.block.block_id,
+                "alternate-path parity owner is closed"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "quic")]
+fn timer_alternate_parity_work(
+    conns: &ConnMap,
+    primary_id: &Arc<AtomicCell<PeerConnId>>,
+    local_peer_id: &Arc<AtomicU32>,
+    block: CompletedAlternateFecBlock,
+) -> Option<AlternateFecParityWork> {
+    let primary = conns.get(&primary_id.load()).map(|conn| conn.clone())?;
+    let conn = select_alternate_conn(conns, &primary)?;
+    let local_peer_id = local_peer_id.load(Ordering::Relaxed);
+    (local_peer_id != 0).then_some(AlternateFecParityWork {
+        conn,
+        local_peer_id,
+        block,
+    })
+}
+
+#[cfg(feature = "quic")]
+async fn run_alternate_fec_owner(
+    encoder: Arc<Mutex<AlternateFecEncoder>>,
+    mut parity_receiver: mpsc::Receiver<AlternateFecParityWork>,
+    notify: Arc<tokio::sync::Notify>,
+    shutdown: Arc<tokio::sync::Notify>,
+    conns: ConnMap,
+    primary_id: Arc<AtomicCell<PeerConnId>>,
+    local_peer_id: Arc<AtomicU32>,
+    remote_peer_id: PeerId,
+) {
+    loop {
+        let deadline = encoder.lock().next_flush_at();
+        match deadline {
+            Some(deadline) => {
+                let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+                tokio::pin!(sleep);
+                tokio::select! {
+                    biased;
+                    work = parity_receiver.recv() => {
+                        let Some(work) = work else { break };
+                        send_alternate_parity(remote_peer_id, work).await;
+                    }
+                    _ = shutdown.notified() => break,
+                    _ = &mut sleep => {
+                        let block = match encoder.lock().take_due(std::time::Instant::now()) {
+                            Ok(Some(block)) => block,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                tracing::warn!(?error, "alternate-path FEC flush failed");
+                                continue;
+                            }
+                        };
+                        if let Some(work) = timer_alternate_parity_work(
+                            &conns,
+                            &primary_id,
+                            &local_peer_id,
+                            block,
+                        ) {
+                            send_alternate_parity(remote_peer_id, work).await;
+                        }
+                    }
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    work = parity_receiver.recv() => {
+                        let Some(work) = work else { break };
+                        send_alternate_parity(remote_peer_id, work).await;
+                    }
+                    _ = shutdown.notified() => break,
+                    _ = notify.notified() => {}
+                }
+            }
+        }
     }
 }
 
@@ -151,6 +298,8 @@ impl Peer {
         let peer_identity_type_copy = peer_identity_type.clone();
         let peer_public_key = Arc::new(RwLock::new(None));
         let peer_public_key_copy = peer_public_key.clone();
+        let origin_auth_update = Arc::new(RwLock::new(Arc::new(|_, _| {}) as OriginAuthUpdate));
+        let origin_auth_update_copy = origin_auth_update.clone();
         let connection_flow_paths = Arc::new(FlowPathCache::new(
             65_536,
             std::time::Duration::from_secs(120),
@@ -180,6 +329,8 @@ impl Peer {
                                 global_ctx_copy.issue_event(GlobalCtxEvent::PeerConnRemoved(
                                     conn.get_conn_info(),
                                 ));
+                                let evidence = Peer::authenticated_origin_evidence_from_map(&conns_copy);
+                                (origin_auth_update_copy.read())(peer_node_id, evidence);
                                 shrink_dashmap(&conns_copy, Some(4));
                                 if conns_copy.is_empty() {
                                     peer_identity_type_copy.store(None);
@@ -246,7 +397,9 @@ impl Peer {
                         )
                         .expect("validated alternate FEC configuration"),
                     ))),
-                    Some(Arc::new(Mutex::new(AlternateFecDecoder::default()))),
+                    Some(Arc::new(Mutex::new(AlternateFecDecoder::new(
+                        global_ctx.fec_resource_budget(),
+                    )))),
                 )
             } else {
                 (None, None)
@@ -256,48 +409,45 @@ impl Peer {
         let alternate_fec_primary = Arc::new(AtomicCell::new(PeerConnId::default()));
         #[cfg(feature = "quic")]
         let alternate_fec_local_peer_id = Arc::new(AtomicU32::new(0));
+        #[cfg(feature = "quic")]
         let alternate_fec_notify = alternate_fec_encoder
             .as_ref()
             .map(|_| Arc::new(tokio::sync::Notify::new()));
         #[cfg(feature = "quic")]
-        let alternate_fec_worker_task = alternate_fec_encoder
-            .as_ref()
-            .zip(alternate_fec_notify.as_ref())
-            .map(|(encoder, notify)| {
-                let encoder = encoder.clone();
-                let notify = notify.clone();
+        let (alternate_fec_parity_sender, alternate_fec_parity_receiver) =
+            if alternate_fec_encoder.is_some() {
+                let (sender, receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
+        #[cfg(feature = "quic")]
+        let alternate_fec_worker_task = match (
+            alternate_fec_encoder.clone(),
+            alternate_fec_parity_receiver,
+            alternate_fec_notify.clone(),
+            alternate_fec_parity_sender.clone(),
+        ) {
+            (Some(encoder), Some(receiver), Some(notify), Some(_sender)) => {
                 let conns = conns.clone();
                 let primary_id = alternate_fec_primary.clone();
                 let local_peer_id = alternate_fec_local_peer_id.clone();
-                AbortOnDropHandle::new(tokio::spawn(async move {
-                    loop {
-                        let deadline =
-                            wait_for_alternate_fec_deadline(encoder.clone(), notify.clone()).await;
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                        let now = std::time::Instant::now();
-                        let block = match encoder.lock().take_due(now) {
-                            Ok(Some(block)) => block,
-                            Ok(None) => continue,
-                            Err(error) => {
-                                tracing::warn!(?error, "alternate-path FEC flush failed");
-                                continue;
-                            }
-                        };
-                        let Some(primary) = conns.get(&primary_id.load()).map(|conn| conn.clone())
-                        else {
-                            continue;
-                        };
-                        let Some(alternate) = select_alternate_conn(&conns, &primary) else {
-                            continue;
-                        };
-                        let local_peer_id = local_peer_id.load(Ordering::Relaxed);
-                        if local_peer_id != 0 {
-                            send_alternate_parity(&alternate, local_peer_id, peer_node_id, block)
-                                .await;
-                        }
-                    }
-                }))
-            });
+                let shutdown = shutdown_notifier.clone();
+                Some(AbortOnDropHandle::new(tokio::spawn(
+                    run_alternate_fec_owner(
+                        encoder,
+                        receiver,
+                        notify,
+                        shutdown,
+                        conns,
+                        primary_id,
+                        local_peer_id,
+                        peer_node_id,
+                    ),
+                )))
+            }
+            _ => None,
+        };
 
         Peer {
             peer_node_id,
@@ -313,6 +463,7 @@ impl Peer {
             connection_flow_paths,
             peer_identity_type,
             peer_public_key,
+            origin_auth_update,
             default_conn_refresh_task,
 
             #[cfg(feature = "quic")]
@@ -323,7 +474,10 @@ impl Peer {
             alternate_fec_primary,
             #[cfg(feature = "quic")]
             alternate_fec_local_peer_id,
+            #[cfg(feature = "quic")]
             alternate_fec_notify,
+            #[cfg(feature = "quic")]
+            alternate_fec_parity_sender,
             #[cfg(feature = "quic")]
             alternate_fec_worker_task,
         }
@@ -382,6 +536,10 @@ impl Peer {
         self.global_ctx
             .issue_event(GlobalCtxEvent::PeerConnAdded(conn_info));
         Ok(())
+    }
+
+    pub(crate) fn set_origin_auth_update(&self, update: OriginAuthUpdate) {
+        *self.origin_auth_update.write() = update;
     }
 
     fn best_connection(&self, policy: NextHopPolicy) -> Option<ArcPeerConn> {
@@ -448,7 +606,11 @@ impl Peer {
         }
     }
 
-    async fn select_conn(&self, policy: NextHopPolicy, flow_hash: u64) -> Option<ArcPeerConn> {
+    pub(crate) fn select_conn_for_flow(
+        &self,
+        policy: NextHopPolicy,
+        flow_hash: u64,
+    ) -> Option<ArcPeerConn> {
         let policy_flow = match policy {
             NextHopPolicy::LeastHop => flow_hash,
             NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
@@ -505,34 +667,56 @@ impl Peer {
 
     pub async fn send_msg(&self, mut msg: ZCPacket) -> Result<(), Error> {
         stamp_critical_l2_control(&mut msg);
+        stamp_packet_flow(&mut msg);
         let policy = Self::packet_connection_policy(&msg);
         let flow_hash = classify_packet_flow(&msg).hash;
-        let Some(conn) = self.select_conn(policy, flow_hash).await else {
+        let Some(conn) = self.select_conn_for_flow(policy, flow_hash) else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
         #[cfg(feature = "quic")]
         if let Some(encoder) = self.alternate_fec_encoder.as_ref()
+            && conn.alternate_fec_remote_receive_ready()
             && is_alternate_fec_source(&msg, self.peer_node_id)
             && let Some(alternate) = select_alternate_conn(&self.conns, &conn)
+            && alternate.alternate_fec_remote_receive_ready()
         {
-            let metadata = source_metadata(&msg)?;
-            let local_peer_id = msg.peer_manager_header().unwrap().from_peer_id.get();
-            self.alternate_fec_primary.store(conn.get_conn_id());
-            self.alternate_fec_local_peer_id
-                .store(local_peer_id, Ordering::Relaxed);
-            let output = encoder.lock().push(
-                msg.tunnel_payload_bytes().freeze(),
-                std::time::Instant::now(),
-            )?;
-            if let Some(notify) = self.alternate_fec_notify.as_ref() {
-                notify.notify_one();
+            let capture_allowed = {
+                let encoder = encoder.lock();
+                alternate_fec_capture_allowed(&conn, &alternate, &msg, &encoder)
+            };
+            if capture_allowed {
+                conn.encrypt_alternate_fec_source(&mut msg)?;
+                let metadata = source_metadata(&msg)?;
+                let local_peer_id = msg.peer_manager_header().unwrap().from_peer_id.get();
+                self.alternate_fec_primary.store(conn.get_conn_id());
+                self.alternate_fec_local_peer_id
+                    .store(local_peer_id, Ordering::Relaxed);
+                let parity_sender = self.alternate_fec_parity_sender.as_ref();
+                let source = {
+                    let mut encoder = encoder.lock();
+                    let output =
+                        encoder.push(msg.tunnel_payload_into_bytes(), std::time::Instant::now())?;
+                    if let Some(block) = output.completed
+                        && let Some(sender) = parity_sender.as_ref()
+                    {
+                        enqueue_alternate_parity(
+                            sender,
+                            AlternateFecParityWork {
+                                conn: alternate.clone(),
+                                local_peer_id,
+                                block,
+                            },
+                        );
+                    }
+                    output.source
+                };
+                if let Some(notify) = self.alternate_fec_notify.as_ref() {
+                    notify.notify_one();
+                }
+                let wrapped = wrap_source_packet(metadata, source);
+                conn.send_msg(wrapped).await?;
+                return Ok(());
             }
-            let wrapped = wrap_source_packet(metadata, output.source);
-            conn.send_msg(wrapped).await?;
-            if let Some(block) = output.completed {
-                send_alternate_parity(&alternate, local_peer_id, self.peer_node_id, block).await;
-            }
-            return Ok(());
         }
 
         conn.send_msg(msg).await?;
@@ -547,45 +731,73 @@ impl Peer {
         };
         for packet in batch.iter_mut() {
             stamp_critical_l2_control(packet);
+            stamp_packet_flow(packet);
         }
         let first = batch.first().expect("a non-singleton batch is not empty");
         let policy = Self::packet_connection_policy(first);
         let flow_hash = classify_packet_flow(first).hash;
-        let Some(conn) = self.select_conn(policy, flow_hash).await else {
+        let Some(conn) = self.select_conn_for_flow(policy, flow_hash) else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
+        self.send_msg_batch_to_conn(conn, batch).await
+    }
+
+    async fn send_msg_batch_to_conn(
+        &self,
+        conn: ArcPeerConn,
+        batch: PacketBatch,
+    ) -> Result<(), Error> {
         #[cfg(feature = "quic")]
         if let Some(encoder) = self.alternate_fec_encoder.as_ref()
+            && conn.alternate_fec_remote_receive_ready()
             && batch
                 .iter()
                 .any(|packet| is_alternate_fec_source(packet, self.peer_node_id))
             && let Some(alternate) = select_alternate_conn(&self.conns, &conn)
+            && alternate.alternate_fec_remote_receive_ready()
         {
-            let mut primary_batch = PacketBatch::with_capacity(batch.len());
-            let mut completed = Vec::new();
-            let mut local_peer_id = 0;
-            let mut source_records = 0;
-            for packet in batch {
-                if is_alternate_fec_source(&packet, self.peer_node_id) {
-                    let metadata = source_metadata(&packet)?;
-                    local_peer_id = packet.peer_manager_header().unwrap().from_peer_id.get();
-                    source_records += 1;
-                    let output = encoder.lock().push(
-                        packet.tunnel_payload_bytes().freeze(),
-                        std::time::Instant::now(),
-                    )?;
-                    primary_batch
-                        .try_push(wrap_source_packet(metadata, output.source))
-                        .expect("alternate FEC source preserves the input batch bound");
-                    if let Some(block) = output.completed {
-                        completed.push(block);
+            let parity_sender = self.alternate_fec_parity_sender.as_ref();
+            let (primary_batch, local_peer_id, source_records) = {
+                let mut primary_batch = PacketBatch::with_capacity(batch.len());
+                let mut local_peer_id = 0;
+                let mut source_records = 0;
+                let mut encoder = encoder.lock();
+                for mut packet in batch {
+                    if is_alternate_fec_source(&packet, self.peer_node_id)
+                        && alternate_fec_capture_allowed(&conn, &alternate, &packet, &encoder)
+                    {
+                        conn.encrypt_alternate_fec_source(&mut packet)?;
+                        let metadata = source_metadata(&packet)?;
+                        local_peer_id = packet.peer_manager_header().unwrap().from_peer_id.get();
+                        source_records += 1;
+                        let output = encoder.push(
+                            packet.tunnel_payload_into_bytes(),
+                            std::time::Instant::now(),
+                        )?;
+                        let completed = output.completed;
+                        primary_batch
+                            .try_push(wrap_source_packet(metadata, output.source))
+                            .expect("alternate FEC source preserves the input batch bound");
+                        if let Some(block) = completed
+                            && let Some(sender) = parity_sender
+                        {
+                            enqueue_alternate_parity(
+                                sender,
+                                AlternateFecParityWork {
+                                    conn: alternate.clone(),
+                                    local_peer_id,
+                                    block,
+                                },
+                            );
+                        }
+                    } else {
+                        primary_batch
+                            .try_push(packet)
+                            .expect("alternate FEC preserves the input batch bound");
                     }
-                } else {
-                    primary_batch
-                        .try_push(packet)
-                        .expect("alternate FEC preserves the input batch bound");
                 }
-            }
+                (primary_batch, local_peer_id, source_records)
+            };
             self.alternate_fec_primary.store(conn.get_conn_id());
             self.alternate_fec_local_peer_id
                 .store(local_peer_id, Ordering::Relaxed);
@@ -595,15 +807,34 @@ impl Peer {
                 notify.notify_one();
             }
             conn.send_msg_batch(primary_batch).await?;
-            for block in completed {
-                send_alternate_parity(&alternate, local_peer_id, self.peer_node_id, block).await;
-            }
             return Ok(());
         }
 
         conn.send_msg_batch(batch).await?;
 
         Ok(())
+    }
+
+    pub(crate) async fn send_msg_on_conn(
+        &self,
+        conn: &ArcPeerConn,
+        mut msg: ZCPacket,
+    ) -> Result<(), Error> {
+        stamp_critical_l2_control(&mut msg);
+        stamp_packet_flow(&mut msg);
+        conn.send_msg(msg).await
+    }
+
+    pub(crate) async fn send_msg_batch_on_conn(
+        &self,
+        conn: &ArcPeerConn,
+        mut batch: PacketBatch,
+    ) -> Result<(), Error> {
+        for packet in batch.iter_mut() {
+            stamp_critical_l2_control(packet);
+            stamp_packet_flow(packet);
+        }
+        self.send_msg_batch_to_conn(conn.clone(), batch).await
     }
 
     pub async fn close_peer_conn(&self, conn_id: &PeerConnId) -> Result<(), Error> {
@@ -661,16 +892,76 @@ impl Peer {
             .collect()
     }
 
+    /// Return one live connection only when the caller names its exact session.
+    pub(crate) fn get_live_conn(&self, conn_id: PeerConnId) -> Option<ArcPeerConn> {
+        self.conns
+            .get(&conn_id)
+            .filter(|entry| !entry.value().is_closed())
+            .map(|entry| entry.value().clone())
+    }
+
     pub fn get_default_conn_id(&self) -> PeerConnId {
         self.default_conn_id.load()
     }
 
     pub fn get_peer_identity_type(&self) -> Option<PeerIdentityType> {
-        self.peer_identity_type.load()
+        if let Some(identity_type) = self.peer_identity_type.load() {
+            return Some(identity_type);
+        }
+
+        let identity_type = self
+            .conns
+            .iter()
+            .next()
+            .map(|connection| connection.get_peer_identity_type());
+        if let Some(identity_type) = identity_type {
+            self.peer_identity_type.store(Some(identity_type));
+        }
+        identity_type
     }
 
     pub fn get_peer_public_key(&self) -> Option<Vec<u8>> {
         self.peer_public_key.read().clone()
+    }
+
+    /// Return the strongest authenticated level from a live direct session.
+    pub fn get_peer_secure_auth_level(&self) -> Option<SecureAuthLevel> {
+        self.conns
+            .iter()
+            .filter(|entry| !entry.value().is_closed())
+            .filter_map(|entry| entry.value().secure_auth_level())
+            .max_by_key(|level| *level as i32)
+    }
+
+    /// Return one direct authentication tuple only when every live connection
+    /// agrees on the same peer key, role, and authentication level.
+    pub(crate) fn authenticated_origin_evidence(
+        &self,
+    ) -> Option<(PeerIdentityType, Vec<u8>, SecureAuthLevel)> {
+        Self::authenticated_origin_evidence_from_map(&self.conns)
+    }
+
+    fn authenticated_origin_evidence_from_map(
+        conns: &ConnMap,
+    ) -> Option<(PeerIdentityType, Vec<u8>, SecureAuthLevel)> {
+        let mut evidence = None;
+        for connection in conns.iter().filter(|entry| !entry.value().is_closed()) {
+            let candidate = connection.value().origin_auth_tuple()?;
+            if candidate.1.len() != 32
+                || !crate::peers::route_trait::AuthenticatedRoutePeerEvidence::
+                    is_allowed_role_auth_pair(candidate.0, candidate.2)
+            {
+                return None;
+            }
+            if evidence
+                .as_ref()
+                .is_some_and(|current| current != &candidate)
+            {
+                return None;
+            }
+            evidence = Some(candidate);
+        }
+        evidence
     }
 }
 
@@ -692,8 +983,16 @@ mod tests {
     use base64::prelude::{BASE64_STANDARD, Engine as _};
     use rand::rngs::OsRng;
     use std::{sync::Arc, time::Duration};
+    #[cfg(feature = "quic")]
+    use tokio::sync::mpsc;
     use tokio::time::timeout;
 
+    use crate::proto::common::TunnelInfo;
+    #[cfg(feature = "quic")]
+    use crate::tunnel::{
+        batch::PacketBatch,
+        packet_def::{PacketType, ZCPacket},
+    };
     use crate::{
         common::{
             config::{NetworkIdentity, PeerConfig},
@@ -707,18 +1006,15 @@ mod tests {
         proto::common::SecureModeConfig,
         tunnel::ring::create_ring_tunnel_pair,
     };
-    #[cfg(feature = "quic")]
-    use crate::{
-        proto::common::TunnelInfo,
-        tunnel::{
-            batch::PacketBatch,
-            packet_def::{PacketType, ZCPacket},
-        },
-    };
 
     use super::Peer;
     #[cfg(feature = "quic")]
-    use super::{is_alternate_fec_source, wait_for_alternate_fec_deadline};
+    use super::{
+        ALTERNATE_FEC_PARITY_QUEUE_CAPACITY, AlternateFecParityWork, enqueue_alternate_parity,
+        is_alternate_fec_source, wait_for_alternate_fec_deadline,
+    };
+    #[cfg(feature = "quic")]
+    use crate::peers::alternate_fec::CompletedAlternateFecBlock;
 
     #[cfg(feature = "quic")]
     #[test]
@@ -754,6 +1050,78 @@ mod tests {
         assert_eq!(wait.await, now + delay);
     }
 
+    #[cfg(feature = "quic")]
+    fn parity_work(
+        conn: Arc<PeerConn>,
+        block_id: u64,
+        local_peer_id: crate::common::PeerId,
+    ) -> AlternateFecParityWork {
+        AlternateFecParityWork {
+            conn,
+            local_peer_id,
+            block: CompletedAlternateFecBlock {
+                block_id,
+                source_count: 1,
+                parity: vec![bytes::Bytes::from_static(b"parity")],
+            },
+        }
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn alternate_fec_primary_enqueue_does_not_wait_for_blocked_sink() {
+        let global_ctx = get_mock_global_ctx();
+        let conn = Arc::new(unstarted_peer_conn(global_ctx));
+        let (sender, _receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
+        for block_id in 1..=ALTERNATE_FEC_PARITY_QUEUE_CAPACITY as u64 {
+            enqueue_alternate_parity(&sender, parity_work(conn.clone(), block_id, 11));
+        }
+
+        let result = timeout(Duration::from_millis(50), async {
+            enqueue_alternate_parity(&sender, parity_work(conn.clone(), 10_000, 11));
+        })
+        .await;
+        assert!(result.is_ok(), "primary enqueue waited for the parity sink");
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn alternate_fec_parity_queue_preserves_block_order() {
+        let global_ctx = get_mock_global_ctx();
+        let conn = Arc::new(unstarted_peer_conn(global_ctx));
+        let (sender, mut receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
+        for block_id in 1..=3 {
+            enqueue_alternate_parity(&sender, parity_work(conn.clone(), block_id, 11));
+        }
+
+        let mut received = Vec::new();
+        while let Some(work) = receiver.recv().await {
+            received.push(work.block.block_id);
+            if received.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(received, vec![1, 2, 3]);
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn alternate_fec_parity_queue_is_bounded_and_releases_work_on_shutdown() {
+        let global_ctx = get_mock_global_ctx();
+        let conn = Arc::new(unstarted_peer_conn(global_ctx));
+        let (sender, receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
+        for block_id in 1..=ALTERNATE_FEC_PARITY_QUEUE_CAPACITY as u64 {
+            enqueue_alternate_parity(&sender, parity_work(conn.clone(), block_id, 11));
+        }
+        assert!(matches!(
+            sender.try_send(parity_work(conn.clone(), 10_000, 11)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert!(Arc::strong_count(&conn) > 1);
+        drop(receiver);
+        assert_eq!(Arc::strong_count(&conn), 1);
+    }
+
     fn unstarted_peer_conn(global_ctx: Arc<GlobalCtx>) -> PeerConn {
         let (tunnel, _other_end) = create_ring_tunnel_pair();
         PeerConn::new(
@@ -764,7 +1132,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "quic")]
     fn test_tunnel_info(protocol: &str, local: &str, remote: &str) -> TunnelInfo {
         TunnelInfo {
             tunnel_type: protocol.into(),
@@ -841,7 +1208,12 @@ mod tests {
             packet.fill_peer_manager_hdr(peer_a_id, peer_b_id, PacketType::Ethernet as u8);
             batch.try_push(packet).unwrap();
         }
-        peer_a.send_msg_batch(batch).await.unwrap();
+        let selected_primary = peer_a.conns.get(&local_ids[0]).unwrap().clone();
+        let primary_before = selected_primary.get_stats().tx_packets;
+        peer_a
+            .send_msg_batch_on_conn(&selected_primary, batch)
+            .await
+            .unwrap();
 
         let mut received = Vec::new();
         timeout(std::time::Duration::from_secs(2), async {
@@ -853,13 +1225,26 @@ mod tests {
         .unwrap();
         received.sort_unstable();
         assert_eq!(received, (0_u8..16).collect::<Vec<_>>());
-        let alternate_after = peer_a
-            .conns
-            .get(&local_ids[1])
-            .unwrap()
-            .get_stats()
-            .tx_packets;
-        assert!(alternate_after >= alternate_before + 2);
+        assert!(
+            selected_primary.get_stats().tx_packets >= primary_before + 16,
+            "source records must stay on the selected primary connection"
+        );
+        timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let alternate_after = peer_a
+                    .conns
+                    .get(&local_ids[1])
+                    .unwrap()
+                    .get_stats()
+                    .tx_packets;
+                if alternate_after >= alternate_before + 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -876,8 +1261,7 @@ mod tests {
         peer.conns.insert(sampled_id, sampled);
 
         let selected_id = peer
-            .select_conn(NextHopPolicy::LeastHop, 0)
-            .await
+            .select_conn_for_flow(NextHopPolicy::LeastHop, 0)
             .unwrap()
             .get_conn_id();
         peer.conns.clear();
@@ -912,8 +1296,7 @@ mod tests {
         peer.conns.insert(second_id, second.clone());
 
         let first_flow = peer
-            .select_conn(NextHopPolicy::MaxGoodput, 10)
-            .await
+            .select_conn_for_flow(NextHopPolicy::MaxGoodput, 10)
             .unwrap();
         second.record_speed_sample_for_test(SpeedSample {
             delivery_bps: 200_000_000,
@@ -923,12 +1306,10 @@ mod tests {
             ttl: Duration::from_secs(30),
         });
         let pinned_flow = peer
-            .select_conn(NextHopPolicy::MaxGoodput, 10)
-            .await
+            .select_conn_for_flow(NextHopPolicy::MaxGoodput, 10)
             .unwrap();
         let new_flow = peer
-            .select_conn(NextHopPolicy::MaxGoodput, 11)
-            .await
+            .select_conn_for_flow(NextHopPolicy::MaxGoodput, 11)
             .unwrap();
         peer.conns.clear();
 
@@ -969,8 +1350,7 @@ mod tests {
         peer.conns.insert(quic.get_conn_id(), quic);
 
         let selected_id = peer
-            .select_conn(NextHopPolicy::MaxGoodput, 20)
-            .await
+            .select_conn_for_flow(NextHopPolicy::MaxGoodput, 20)
             .unwrap()
             .get_conn_id();
         peer.conns.clear();
@@ -1009,8 +1389,7 @@ mod tests {
         peer.conns.insert(quic_id, quic);
 
         let selected_id = peer
-            .select_conn(NextHopPolicy::LeastHop, 0)
-            .await
+            .select_conn_for_flow(NextHopPolicy::LeastHop, 0)
             .unwrap()
             .get_conn_id();
         peer.conns.clear();
@@ -1034,8 +1413,7 @@ mod tests {
 
         let retained_id = peer.default_conn_id.load();
         let selected_id = peer
-            .select_conn(NextHopPolicy::LeastHop, 0)
-            .await
+            .select_conn_for_flow(NextHopPolicy::LeastHop, 0)
             .unwrap()
             .get_conn_id();
         peer.conns.clear();
@@ -1053,6 +1431,7 @@ mod tests {
                 enabled: true,
                 local_private_key: Some(BASE64_STANDARD.encode(private.as_bytes())),
                 local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
+                ..Default::default()
             }));
         }
     }

@@ -4,8 +4,8 @@
 //! inner Noise session remains responsible for authenticated peer identity.
 
 use super::{
-    BatchStreamItem, FromUrl, IpVersion, SinkError, Tunnel, TunnelConnector, TunnelError,
-    TunnelListener,
+    BatchStreamItem, DatagramSizeBudget, FromUrl, IpVersion, SinkError, TransportBinding,
+    TransportBindingKind, Tunnel, TunnelConnector, TunnelError, TunnelListener,
 };
 use crate::common::{
     config::{Flags, gen_default_flags},
@@ -19,7 +19,7 @@ use crate::tunnel::common::{
 use crate::tunnel::{
     TunnelInfo,
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-    common::{BatchTunnelWrapper, FramedReader, ZCPacketToBytes},
+    common::{BatchTunnelWrapper, FramedReader},
 };
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
@@ -28,25 +28,29 @@ use derive_more::{Deref, DerefMut};
 use futures::{Future, FutureExt, Sink, Stream, StreamExt};
 use parking_lot::RwLock;
 use quinn::{
-    ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
-    ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
+    ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, Incoming, RecvStream,
+    SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
 };
-use std::collections::VecDeque;
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::OnceLock;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{OnceLock, Weak};
 use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{Context as TaskContext, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::{io::AsyncWriteExt as _, net::UdpSocket, sync::mpsc, task::JoinHandle};
+use tokio::{
+    io::AsyncWriteExt as _,
+    net::UdpSocket,
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
-use super::{
-    common::TcpZCPacketToBytes,
-    packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket, ZCPacketType},
-};
+#[cfg(test)]
+use super::common::TcpZCPacketToBytes;
+use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket, ZCPacketType};
 
 pub(crate) mod adaptive;
 pub(crate) mod brutal;
@@ -58,8 +62,28 @@ use self::adaptive::{AdaptiveConfig, AdaptiveFactory};
 const QUIC_INITIAL_MTU: u16 = 1452;
 const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize;
 const QUIC_RELIABLE_INITIAL_BUFFER_SIZE: usize = 4500;
-const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = u16::MAX as usize + PEER_MANAGER_HEADER_SIZE;
+/// Bound reliable frame allocation even though the wire length field is 32-bit.
+const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 64 * 1024;
 const QUIC_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
+const QUIC_TRANSPORT_BINDING_LABEL: &[u8] = b"EXPORTER-LowTier-PeerConn-v1";
+const QUIC_TRANSPORT_BINDING_CONTEXT: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256|peerconn-v3";
+
+fn derive_transport_binding(connection: &Connection) -> Result<TransportBinding, TunnelError> {
+    let mut bytes = [0_u8; 32];
+    connection
+        .export_keying_material(
+            &mut bytes,
+            QUIC_TRANSPORT_BINDING_LABEL,
+            QUIC_TRANSPORT_BINDING_CONTEXT,
+        )
+        .map_err(|error| {
+            TunnelError::InternalError(format!("derive QUIC transport binding: {error:?}"))
+        })?;
+    Ok(TransportBinding {
+        kind: TransportBindingKind::QuicTlsExporterV1,
+        bytes,
+    })
+}
 
 const fn quic_socket_buffer_bytes() -> usize {
     QUIC_SOCKET_BUFFER_BYTES
@@ -89,18 +113,53 @@ async fn activate_reliable_lane(
     recv: &mut RecvStream,
     client: bool,
 ) -> Result<(), TunnelError> {
-    if client {
-        send.write_all(&[0])
-            .await
-            .context("activate reliable QUIC lane")?;
-        send.flush().await.context("flush reliable QUIC lane")?;
-    } else {
-        let mut activation = [0_u8; 1];
-        recv.read_exact(&mut activation)
-            .await
-            .context("receive reliable QUIC lane activation")?;
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        if client {
+            send.write_all(&[0])
+                .await
+                .context("activate reliable QUIC lane")?;
+            send.flush().await.context("flush reliable QUIC lane")?;
+        } else {
+            let mut activation = [0_u8; 1];
+            recv.read_exact(&mut activation)
+                .await
+                .context("receive reliable QUIC lane activation")?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("reliable QUIC lane activation timed out")??;
     Ok(())
+}
+
+async fn accept_activated_reliable_lane(
+    connection: &Connection,
+) -> Result<(SendStream, RecvStream), TunnelError> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut send, mut recv) = connection
+            .accept_bi()
+            .await
+            .with_context(|| "accept reliable QUIC lane")?;
+        activate_reliable_lane(&mut send, &mut recv, false).await?;
+        Ok::<_, TunnelError>((send, recv))
+    })
+    .await
+    .context("accept reliable QUIC lane timed out")?
+}
+
+async fn open_activated_reliable_lane(
+    connection: &Connection,
+) -> Result<(SendStream, RecvStream), TunnelError> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .with_context(|| "open reliable QUIC lane")?;
+        activate_reliable_lane(&mut send, &mut recv, true).await?;
+        Ok::<_, TunnelError>((send, recv))
+    })
+    .await
+    .context("open reliable QUIC lane timed out")?
 }
 
 // region config
@@ -449,7 +508,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .map_err(|error| TunnelError::InternalError(error.to_string()))?;
 
     config
-        .max_concurrent_bidi_streams(u8::MAX.into())
+        .max_concurrent_bidi_streams(1_u8.into())
         .max_concurrent_uni_streams(0u8.into())
         .keep_alive_interval(Some(Duration::from_secs(5)))
         .initial_mtu(QUIC_INITIAL_MTU)
@@ -498,6 +557,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
 pub fn server_config(flags: &Flags) -> Result<ServerConfig, TunnelError> {
     let mut config = ServerConfig::with_crypto(Arc::new(tls::server_crypto()?));
     config.transport_config(transport_config(flags)?);
+    configure_server_admission(&mut config);
     Ok(config)
 }
 
@@ -513,7 +573,13 @@ fn server_config_for_network(
 ) -> Result<ServerConfig, TunnelError> {
     let mut config = ServerConfig::with_crypto(Arc::new(tls::network_server_crypto(identity)?));
     config.transport_config(transport_config(flags)?);
+    configure_server_admission(&mut config);
     Ok(config)
+}
+
+fn configure_server_admission(config: &mut ServerConfig) {
+    config.max_incoming(MAX_PENDING_QUIC_ACCEPTS * 2);
+    config.incoming_buffer_size_total(8 * 1024 * 1024);
 }
 
 fn client_config_for_network(
@@ -721,9 +787,23 @@ pub struct QuicEndpointManager {
     ipv4: RwPool<Endpoint>,
     ipv6: RwPool<Endpoint>,
     both: RwPool<Endpoint>,
+    servers: dashmap::DashMap<SocketAddr, Endpoint>,
+    flags: Arc<Flags>,
 }
 
-static QUIC_ENDPOINT_MANAGER: OnceLock<QuicEndpointManager> = OnceLock::new();
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct QuicEndpointManagerKey {
+    owner_id: uuid::Uuid,
+    socket_mark: Option<u32>,
+    net_namespace: Option<String>,
+    bind_device: bool,
+    denied_interfaces: Vec<String>,
+    denied_cidrs: Vec<String>,
+}
+
+static QUIC_ENDPOINT_MANAGERS: OnceLock<
+    dashmap::DashMap<QuicEndpointManagerKey, Weak<QuicEndpointManager>>,
+> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct QuicConnectSecurity<'a> {
@@ -789,36 +869,74 @@ impl QuicEndpointManager {
 
 impl QuicEndpointManager {
     fn new(capacity: usize) -> Self {
+        Self::new_with_flags(capacity, Arc::new(gen_default_flags()))
+    }
+
+    fn new_with_flags(capacity: usize, flags: Arc<Flags>) -> Self {
         let ipv4 = RwPool::new(capacity.div_ceil(2));
         let ipv6 = RwPool::new(capacity.div_ceil(2));
         let both = RwPool::new(capacity);
         both.enable();
-        Self { ipv4, ipv6, both }
+        Self {
+            ipv4,
+            ipv6,
+            both,
+            servers: dashmap::DashMap::new(),
+            flags,
+        }
     }
 
-    fn load(global_ctx: &ArcGlobalCtx) -> &Self {
-        let capacity = global_ctx
-            .config
-            .get_flags()
+    fn manager_key(global_ctx: &ArcGlobalCtx) -> QuicEndpointManagerKey {
+        let flags = global_ctx.flags_arc();
+        Self::manager_key_for_flags(global_ctx, &flags)
+    }
+
+    fn manager_key_for_flags(global_ctx: &ArcGlobalCtx, flags: &Flags) -> QuicEndpointManagerKey {
+        QuicEndpointManagerKey {
+            owner_id: global_ctx.id,
+            socket_mark: flags.socket_mark,
+            net_namespace: global_ctx.net_ns.name(),
+            bind_device: flags.bind_device,
+            denied_interfaces: flags.underlay_deny_interfaces.clone(),
+            denied_cidrs: flags.underlay_deny_cidrs.clone(),
+        }
+    }
+
+    fn load(global_ctx: &ArcGlobalCtx) -> Arc<Self> {
+        use dashmap::mapref::entry::Entry;
+
+        let flags = global_ctx.flags_arc();
+        let capacity = flags
             .multi_thread
             .then(std::thread::available_parallelism)
             .and_then(|r| r.ok())
             .map(|n| n.get())
             .unwrap_or(1);
-
-        let mgr = QUIC_ENDPOINT_MANAGER.get();
-        match mgr {
-            Some(mgr) => {
-                for pool in [&mgr.ipv4, &mgr.ipv6, &mgr.both] {
-                    pool.resize();
+        let managers = QUIC_ENDPOINT_MANAGERS.get_or_init(dashmap::DashMap::new);
+        managers.retain(|_, manager| manager.strong_count() > 0);
+        let key = Self::manager_key_for_flags(global_ctx, &flags);
+        let manager = match managers.entry(key) {
+            Entry::Occupied(mut entry) => {
+                if let Some(manager) = entry.get().upgrade()
+                    && Arc::ptr_eq(&manager.flags, &flags)
+                {
+                    manager
+                } else {
+                    let manager = Arc::new(Self::new_with_flags(capacity, flags));
+                    entry.insert(Arc::downgrade(&manager));
+                    manager
                 }
             }
-            None => {
-                let _ = QUIC_ENDPOINT_MANAGER.set(Self::new(capacity));
+            Entry::Vacant(entry) => {
+                let manager = Arc::new(Self::new_with_flags(capacity, flags));
+                entry.insert(Arc::downgrade(&manager));
+                manager
             }
+        };
+        for pool in [&manager.ipv4, &manager.ipv6, &manager.both] {
+            pool.resize();
         }
-
-        QUIC_ENDPOINT_MANAGER.get().unwrap()
+        manager
     }
 
     fn client_pool(&self, ip_version: IpVersion) -> &RwPool<Endpoint> {
@@ -839,11 +957,14 @@ impl QuicEndpointManager {
     ///
     /// # Arguments
     /// * `addr`: listen address
-    fn server(global_ctx: &ArcGlobalCtx, addr: SocketAddr) -> Result<Endpoint, TunnelError> {
-        let mgr = Self::load(global_ctx);
-        let socket_mark = global_ctx.config.get_flags().socket_mark;
+    fn server(
+        global_ctx: &ArcGlobalCtx,
+        mgr: &Arc<Self>,
+        addr: SocketAddr,
+    ) -> Result<Endpoint, TunnelError> {
+        let socket_mark = mgr.flags.socket_mark;
 
-        let (pool, endpoint) = mgr.create(socket_mark, |mgr| {
+        let (_pool, endpoint) = mgr.create(socket_mark, |mgr| {
             let dual_stack = addr.ip() == Ipv6Addr::UNSPECIFIED && mgr.both.is_enabled();
             let pool = if addr.is_ipv4() {
                 &mgr.ipv4
@@ -857,10 +978,10 @@ impl QuicEndpointManager {
 
         let endpoint = endpoint.expect("server endpoint creation should not return None");
         endpoint.set_server_config(Some(server_config_for_network(
-            &global_ctx.get_flags(),
+            &mgr.flags,
             &global_ctx.get_network_identity(),
         )?));
-        pool.push(endpoint.clone());
+        mgr.servers.insert(endpoint.local_addr()?, endpoint.clone());
 
         Ok(endpoint)
     }
@@ -908,9 +1029,10 @@ impl QuicEndpointManager {
 
         if let Some(endpoint) = pool.with_iter(|iter| {
             iter.filter(|endpoint| {
-                endpoint
-                    .local_addr()
-                    .is_ok_and(|local| local.ip() == source.ip())
+                endpoint.local_addr().is_ok_and(|local| {
+                    local.ip() == source.ip()
+                        && (source.port() == 0 || local.port() == source.port())
+                })
             })
             .min_by_key(|endpoint| endpoint.open_connections())
             .cloned()
@@ -944,20 +1066,33 @@ impl QuicEndpointManager {
     }
 
     fn remove_endpoint_by_local_addr(&self, local_addr: SocketAddr) -> usize {
-        [&self.ipv4, &self.ipv6, &self.both]
+        let client_removed: usize = [&self.ipv4, &self.ipv6, &self.both]
             .into_iter()
             .map(|pool| pool.remove_by_local_addr(local_addr))
-            .sum()
+            .sum();
+        client_removed + usize::from(self.servers.remove(&local_addr).is_some())
     }
 
     fn contains_local_addr(&self, local_addr: SocketAddr) -> bool {
-        [&self.ipv4, &self.ipv6, &self.both]
-            .into_iter()
-            .any(|pool| pool.contains_local_addr(local_addr))
+        self.servers.contains_key(&local_addr)
+            || [&self.ipv4, &self.ipv6, &self.both]
+                .into_iter()
+                .any(|pool| pool.contains_local_addr(local_addr))
     }
 
     async fn connect(
         global_ctx: &ArcGlobalCtx,
+        addr: SocketAddr,
+        bind_addrs: &[SocketAddr],
+        policy: Arc<UnderlayPolicy>,
+    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
+        let manager = Self::load(global_ctx);
+        Self::connect_with_manager(global_ctx, &manager, addr, bind_addrs, policy).await
+    }
+
+    async fn connect_with_manager(
+        global_ctx: &ArcGlobalCtx,
+        manager: &Arc<Self>,
         addr: SocketAddr,
         bind_addrs: &[SocketAddr],
         policy: Arc<UnderlayPolicy>,
@@ -967,21 +1102,20 @@ impl QuicEndpointManager {
         } else {
             IpVersion::V6
         };
-        let flags = global_ctx.get_flags();
+        let flags = manager.flags.clone();
         let identity = global_ctx.get_network_identity();
         let allow_noise_protected_transport = global_ctx
             .config
             .get_secure_mode()
             .is_some_and(|config| config.enabled);
         let security = QuicConnectSecurity {
-            flags: &flags,
+            flags: flags.as_ref(),
             identity: &identity,
             allow_noise_protected_transport,
         };
         let socket_mark = flags.socket_mark;
         ensure_remote_allowed(&policy, addr)?;
         let bind_addrs = eligible_bind_addrs(&policy, bind_addrs, addr)?;
-        let manager = Self::load(global_ctx);
         if bind_addrs.is_empty() {
             return manager
                 .connect_with_ip_version(addr, ip_version, socket_mark, security)
@@ -1145,6 +1279,8 @@ impl QuicEndpointManager {
 
 struct ConnWrapper {
     conn: Connection,
+    _endpoint_manager: Option<Arc<QuicEndpointManager>>,
+    _endpoint_owner: Option<Endpoint>,
 }
 
 impl Drop for ConnWrapper {
@@ -1352,23 +1488,97 @@ struct QuicHybridWriter {
     connection: Arc<ConnWrapper>,
     pending_datagrams: Option<VecDeque<Bytes>>,
     pending_datagram_send: Option<DatagramBatchSend>,
-    reliable_tx: Option<mpsc::Sender<PacketBatch>>,
-    pending_reliable: Option<PacketBatch>,
+    reliable_tx: Option<mpsc::Sender<ReliableWriteRequest>>,
+    pending_reliable: Option<ReliableWriteRequest>,
+    pending_reliable_since: Option<Instant>,
     reliable_reserve: Option<ReliableReserve>,
+    reliable_completion: Option<oneshot::Receiver<Result<(), TunnelError>>>,
     reliable_task: Option<JoinHandle<Result<(), TunnelError>>>,
+    graceful_close: bool,
+    adaptive_signals: Option<Arc<adaptive::signals::AdaptiveSignals>>,
+}
+
+struct ReliableWriteRequest {
+    batch: PacketBatch,
+    completed: oneshot::Sender<Result<(), TunnelError>>,
+}
+
+/// A reliable frame stores its length separately from its existing packet bytes.
+///
+/// The old converter changed a `DummyTunnel` packet to `TCP`. That conversion copied the full
+/// peer header and payload when the packet had no TCP headroom. QUIC stream framing only needs a
+/// four-byte length prefix, so the existing packet allocation can stay shared.
+struct ReliableFrame {
+    header: Bytes,
+    body: Bytes,
+}
+
+fn encode_reliable_frame(
+    packet: ZCPacket,
+    max_frame_size: usize,
+) -> Result<ReliableFrame, TunnelError> {
+    let peer_manager_offset = packet
+        .packet_type()
+        .get_packet_offsets()
+        .peer_manager_header_offset;
+    let body_len = packet
+        .buf_len()
+        .checked_sub(peer_manager_offset)
+        .ok_or_else(|| TunnelError::InvalidPacket("packet is too short".to_owned()))?;
+    if body_len < PEER_MANAGER_HEADER_SIZE {
+        return Err(TunnelError::InvalidPacket(
+            "packet body is too short".to_owned(),
+        ));
+    }
+    if body_len > max_frame_size {
+        return Err(TunnelError::InvalidPacket(
+            "framed packet exceeds configured limit".to_owned(),
+        ));
+    }
+    let body_len = u32::try_from(body_len).map_err(|_| {
+        TunnelError::InvalidPacket("framed packet exceeds the 32-bit length".to_owned())
+    })?;
+    Ok(ReliableFrame {
+        header: Bytes::copy_from_slice(&body_len.to_le_bytes()),
+        body: packet.tunnel_payload_into_bytes(),
+    })
+}
+
+struct PendingReliableWrite {
+    frames: VecDeque<Bytes>,
+    completed: Option<oneshot::Sender<Result<(), TunnelError>>>,
+}
+
+impl PendingReliableWrite {
+    fn complete(&mut self, result: Result<(), TunnelError>) {
+        if let Some(completed) = self.completed.take() {
+            let _ = completed.send(result);
+        }
+    }
+}
+
+impl Drop for PendingReliableWrite {
+    fn drop(&mut self) {
+        self.complete(Err(TunnelError::InternalError(
+            "reliable QUIC lane stopped before batch completion".to_owned(),
+        )));
+    }
 }
 
 type ReliableReserve = Pin<
     Box<
-        dyn Future<Output = Result<mpsc::OwnedPermit<PacketBatch>, mpsc::error::SendError<()>>>
-            + Send,
+        dyn Future<
+                Output = Result<
+                    mpsc::OwnedPermit<ReliableWriteRequest>,
+                    mpsc::error::SendError<()>,
+                >,
+            > + Send,
     >,
 >;
 type DatagramBatchSend =
     Pin<Box<dyn Future<Output = (Result<(), quinn::SendDatagramError>, VecDeque<Bytes>)> + Send>>;
 
 const RELIABLE_LANE_QUEUE_BATCHES: usize = 1;
-
 #[derive(Clone, Copy, Debug)]
 enum ReliableLaneRole {
     Initiator,
@@ -1378,7 +1588,7 @@ enum ReliableLaneRole {
 fn poll_reliable_reservation(
     reservation: &mut Option<ReliableReserve>,
     cx: &mut TaskContext<'_>,
-) -> Poll<Result<mpsc::OwnedPermit<PacketBatch>, SinkError>> {
+) -> Poll<Result<mpsc::OwnedPermit<ReliableWriteRequest>, SinkError>> {
     let reserve = reservation
         .as_mut()
         .expect("the reliable reservation exists before polling");
@@ -1399,155 +1609,299 @@ fn poll_reliable_reservation(
 
 async fn run_reliable_writer(
     mut send: SendStream,
-    receiver: &mut mpsc::Receiver<PacketBatch>,
-    pending: &mut Option<Vec<Bytes>>,
+    mut receiver: mpsc::Receiver<ReliableWriteRequest>,
+    mut pending: Option<PendingReliableWrite>,
 ) -> Result<(), TunnelError> {
     loop {
         if pending.is_none() {
-            let Some(batch) = receiver.recv().await else {
-                send.finish().context("finish reliable QUIC lane")?;
+            let Some(request) = receiver.recv().await else {
+                if let Err(error) = send.finish() {
+                    // Quinn reports an already finished or stopped stream as `ClosedStream`.
+                    // The state is terminal, so continue to observe the peer stop reason.
+                    tracing::debug!(?error, "reliable QUIC lane was already closed before FIN");
+                }
+                let stop_reason = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+                    .await
+                    .context("wait for reliable QUIC lane completion")?
+                    .map_err(|error| {
+                        anyhow::Error::new(error).context("reliable QUIC lane stopped")
+                    })?;
+                if let Some(error_code) = stop_reason {
+                    return Err(TunnelError::InternalError(format!(
+                        "peer stopped the reliable QUIC lane with error code {error_code}"
+                    )));
+                }
                 return Ok(());
             };
-            let converter = TcpZCPacketToBytes;
-            let mut frames = Vec::with_capacity(batch.len());
-            for packet in batch {
-                frames.push(converter.zcpacket_into_bytes(packet)?);
+            let mut frames = VecDeque::with_capacity(request.batch.len().saturating_mul(2));
+            for packet in request.batch {
+                match encode_reliable_frame(packet, QUIC_RELIABLE_MAX_PACKET_SIZE) {
+                    Ok(frame) => {
+                        frames.push_back(frame.header);
+                        frames.push_back(frame.body);
+                    }
+                    Err(error) => {
+                        let _ = request.completed.send(Err(clone_reliable_error(&error)));
+                        return Err(error);
+                    }
+                }
             }
-            *pending = Some(frames);
+            pending = Some(PendingReliableWrite {
+                frames,
+                completed: Some(request.completed),
+            });
         }
 
-        tokio::time::timeout(Duration::from_secs(7), async {
-            for frame in pending.as_ref().unwrap() {
-                send.write_all(frame).await?;
+        let write_result: Result<(), anyhow::Error> =
+            tokio::time::timeout(Duration::from_secs(7), async {
+                while pending
+                    .as_ref()
+                    .is_some_and(|request| !request.frames.is_empty())
+                {
+                    // `write_chunks` is cancellation-safe. It mutates each chunk to its unsent
+                    // suffix, so a reader event cannot cause a partial frame to be replayed.
+                    let written = {
+                        let frames = &mut pending
+                            .as_mut()
+                            .expect("pending request remains while the write is in progress")
+                            .frames;
+                        let (front, back) = frames.as_mut_slices();
+                        let chunks = if front.is_empty() { back } else { front };
+                        send.write_chunks(chunks).await?
+                    };
+                    for _ in 0..written.chunks {
+                        pending
+                            .as_mut()
+                            .expect("pending request remains while completed chunks are removed")
+                            .frames
+                            .pop_front();
+                    }
+                }
+                send.flush().await.context("flush reliable QUIC lane")
+            })
+            .await
+            .context("reliable QUIC lane timed out")?;
+        match write_result {
+            Ok(()) => {
+                if let Some(mut request) = pending.take() {
+                    request.complete(Ok(()));
+                }
             }
-            send.flush().await
-        })
-        .await
-        .context("reliable QUIC lane timed out")??;
-        pending.take();
+            Err(error) => {
+                let error = TunnelError::Anyhow(error);
+                if let Some(mut request) = pending.take() {
+                    request.complete(Err(clone_reliable_error(&error)));
+                }
+                return Err(error);
+            }
+        }
     }
+}
+
+fn clone_reliable_error(error: &TunnelError) -> TunnelError {
+    TunnelError::InternalError(format!("reliable QUIC lane failed: {error}"))
 }
 
 async fn run_reliable_reader(
     recv: RecvStream,
     max_packet_size: usize,
-    sender: &mpsc::Sender<BatchStreamItem>,
+    sender: mpsc::Sender<BatchStreamItem>,
 ) -> Result<(), TunnelError> {
     let mut reader = FramedReader::new_with_initial_capacity(
         recv,
         max_packet_size,
         QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
     );
-    loop {
-        let Some(first) = reader.next().await else {
-            return Ok(());
-        };
-        let first = first?;
-        let mut batch = PacketBatch::new();
-        batch
-            .try_push(first)
-            .expect("a new reliable QUIC batch accepts one packet");
-        let mut reached_end = false;
-        while batch.len() < MAX_PACKET_BATCH_SIZE {
-            match reader.next().now_or_never() {
-                Some(Some(Ok(packet))) => batch
-                    .try_push(packet)
-                    .expect("the reliable QUIC batch checks its bound"),
-                Some(Some(Err(error))) => return Err(error),
-                Some(None) => {
-                    reached_end = true;
-                    break;
+    async {
+        loop {
+            let Some(first) = reader.next().await else {
+                return Ok(());
+            };
+            let first = first?;
+            let mut batch = PacketBatch::new();
+            batch
+                .try_push(first)
+                .expect("a new reliable QUIC batch accepts one packet");
+            let mut reached_end = false;
+            while batch.len() < MAX_PACKET_BATCH_SIZE {
+                match reader.next().now_or_never() {
+                    Some(Some(Ok(packet))) => batch
+                        .try_push(packet)
+                        .expect("the reliable QUIC batch checks its bound"),
+                    Some(Some(Err(error))) => return Err(error),
+                    Some(None) => {
+                        reached_end = true;
+                        break;
+                    }
+                    None => break,
                 }
-                None => break,
+            }
+            // A dropped public reader is a local half-close. It must not turn into a
+            // transport error for the opposite reliable direction.
+            if sender.send(Ok(batch)).await.is_err() {
+                return Ok(());
+            }
+            if reached_end {
+                return Ok(());
             }
         }
-        sender
-            .send(Ok(batch))
-            .await
-            .map_err(|_| TunnelError::InternalError("QUIC tunnel reader stopped".to_owned()))?;
-        if reached_end {
-            return Ok(());
-        }
     }
+    .await
 }
 
-async fn open_replacement_reliable_lane(
+async fn send_reliable_lane_error(incoming: mpsc::Sender<BatchStreamItem>, error: TunnelError) {
+    let _ = incoming.send(Err(error)).await;
+}
+
+async fn terminate_reliable_lane(
     connection: &Connection,
-    role: ReliableLaneRole,
-) -> Result<(SendStream, RecvStream), TunnelError> {
-    let (mut send, mut recv) = match role {
-        ReliableLaneRole::Initiator => connection
-            .open_bi()
-            .await
-            .with_context(|| "open replacement reliable QUIC lane")?,
-        ReliableLaneRole::Acceptor => connection
-            .accept_bi()
-            .await
-            .with_context(|| "accept replacement reliable QUIC lane")?,
-    };
-    activate_reliable_lane(
-        &mut send,
-        &mut recv,
-        matches!(role, ReliableLaneRole::Initiator),
-    )
-    .await?;
-    Ok((send, recv))
+    incoming: &mpsc::Sender<BatchStreamItem>,
+    writer_done: &mut Option<oneshot::Sender<Result<(), TunnelError>>>,
+    writer_task: Option<&mut JoinHandle<Result<(), TunnelError>>>,
+    reader_task: Option<&mut JoinHandle<Result<(), TunnelError>>>,
+    error: TunnelError,
+) -> TunnelError {
+    connection.close(VarInt::from_u32(1), b"reliable QUIC lane failed");
+    if let Some(task) = writer_task {
+        task.abort();
+    }
+    if let Some(task) = reader_task {
+        task.abort();
+    }
+    let message = error.to_string();
+    if let Some(done) = writer_done.take() {
+        let _ = done.send(Err(TunnelError::InternalError(message.clone())));
+    }
+    let _ = incoming
+        .send(Err(TunnelError::InternalError(message)))
+        .await;
+    error
+}
+
+fn connection_closed_error(error: quinn::ConnectionError, context: &'static str) -> TunnelError {
+    anyhow::Error::new(error).context(context).into()
+}
+
+fn reliable_task_result(
+    result: Result<Result<(), TunnelError>, tokio::task::JoinError>,
+    context: &'static str,
+) -> Result<(), TunnelError> {
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(TunnelError::Anyhow(
+            anyhow::Error::new(error).context(context),
+        )),
+    }
 }
 
 async fn run_reliable_lane(
     connection: Connection,
-    mut send: SendStream,
-    mut recv: RecvStream,
-    role: ReliableLaneRole,
+    send: SendStream,
+    recv: RecvStream,
     max_packet_size: usize,
-    mut outgoing: mpsc::Receiver<PacketBatch>,
+    outgoing: mpsc::Receiver<ReliableWriteRequest>,
     incoming: mpsc::Sender<BatchStreamItem>,
+    writer_done: oneshot::Sender<Result<(), TunnelError>>,
 ) -> Result<(), TunnelError> {
-    let mut pending = None;
+    // Each direction owns its stream for the full lane lifetime. A clean FIN in one
+    // direction must not cancel or restart the other direction's writer future.
+    let mut writer_task = tokio::spawn(run_reliable_writer(send, outgoing, None));
+    let mut reader_task =
+        tokio::spawn(run_reliable_reader(recv, max_packet_size, incoming.clone()));
+    let mut writer_finished = false;
+    let mut reader_finished = false;
+    let mut writer_done = Some(writer_done);
+
     loop {
-        let writer = run_reliable_writer(send, &mut outgoing, &mut pending);
-        let reader = run_reliable_reader(recv, max_packet_size, &incoming);
-        tokio::pin!(writer, reader);
-
-        let lane_error = tokio::select! {
-            result = &mut writer => match result {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            },
-            result = &mut reader => match result {
-                Ok(()) => return Ok(()),
-                Err(_error) if incoming.is_closed() => return Ok(()),
-                Err(error) => error,
-            },
-            error = connection.closed() => {
-                return Err(anyhow::Error::new(error)
-                    .context("QUIC connection closed during reliable lane operation")
-                    .into());
-            }
-        };
-
-        tracing::warn!(?lane_error, ?role, "recovering reliable QUIC lane");
-        if connection.close_reason().is_some() {
-            return Err(lane_error);
+        if writer_finished && reader_finished {
+            return Ok(());
         }
-        (send, recv) = open_replacement_reliable_lane(&connection, role).await?;
+
+        tokio::select! {
+            biased;
+            result = &mut writer_task, if !writer_finished => {
+                match reliable_task_result(result, "reliable QUIC writer task stopped") {
+                    Ok(()) => {
+                        writer_finished = true;
+                        if let Some(done) = writer_done.take() {
+                            let _ = done.send(Ok(()));
+                        }
+                    }
+                    Err(error) => {
+                        return Err(
+                            terminate_reliable_lane(
+                                &connection,
+                                &incoming,
+                                &mut writer_done,
+                                None,
+                                Some(&mut reader_task),
+                                error,
+                            )
+                            .await,
+                        );
+                    }
+                }
+            }
+            result = &mut reader_task, if !reader_finished => {
+                match reliable_task_result(result, "reliable QUIC reader task stopped") {
+                    Ok(()) => {
+                        reader_finished = true;
+                    }
+                    Err(error) => {
+                        return Err(
+                            terminate_reliable_lane(
+                                &connection,
+                                &incoming,
+                                &mut writer_done,
+                                Some(&mut writer_task),
+                                None,
+                                error,
+                            )
+                            .await,
+                        );
+                    }
+                }
+            }
+            error = connection.closed() => {
+                let error = connection_closed_error(
+                    error,
+                    "QUIC connection closed during reliable lane operation",
+                );
+                return Err(
+                    terminate_reliable_lane(
+                        &connection,
+                        &incoming,
+                        &mut writer_done,
+                        Some(&mut writer_task),
+                        Some(&mut reader_task),
+                        error,
+                    )
+                    .await,
+                );
+            }
+        }
     }
 }
 
 impl QuicHybridWriter {
     fn new(
-        reliable_tx: mpsc::Sender<PacketBatch>,
+        reliable_tx: mpsc::Sender<ReliableWriteRequest>,
         reliable_task: JoinHandle<Result<(), TunnelError>>,
         connection: Arc<ConnWrapper>,
     ) -> Self {
+        let adaptive_signals = adaptive::quinn::signals_from_connection(&connection.conn);
         Self {
             connection,
             pending_datagrams: Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE)),
             pending_datagram_send: None,
             reliable_tx: Some(reliable_tx),
             pending_reliable: None,
+            pending_reliable_since: None,
             reliable_reserve: None,
+            reliable_completion: None,
             reliable_task: Some(reliable_task),
+            graceful_close: false,
+            adaptive_signals,
         }
     }
 
@@ -1564,10 +1918,29 @@ impl QuicHybridWriter {
             .pending_datagrams
             .take()
             .expect("the pending QUIC batch is available before a flush");
+        self.pending_datagrams = Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE));
         let connection = self.connection.conn.clone();
         self.pending_datagram_send = Some(Box::pin(async move {
             connection.send_datagrams_wait(datagrams).await
         }));
+    }
+
+    fn requeue_datagrams_after_send(
+        result: Result<(), quinn::SendDatagramError>,
+        mut unsent: VecDeque<Bytes>,
+        newly_queued: VecDeque<Bytes>,
+    ) -> (Result<(), SinkError>, VecDeque<Bytes>) {
+        // Quinn removes a datagram that returns `TooLarge` before it returns the
+        // remaining queue. Drop only that offending datagram. Preserve all later
+        // datagrams before packets that arrived while the send was pending.
+        unsent.extend(newly_queued);
+        let result = match result {
+            Ok(()) | Err(quinn::SendDatagramError::TooLarge) => Ok(()),
+            Err(error) => Err(TunnelError::Anyhow(
+                anyhow::Error::new(error).context("send QUIC DATAGRAM batch failed"),
+            )),
+        };
+        (result, unsent)
     }
 
     fn poll_datagram_queue(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
@@ -1576,21 +1949,34 @@ impl QuicHybridWriter {
         };
         match send.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready((result, mut datagrams)) => {
-                datagrams.clear();
+            Poll::Ready((result, datagrams)) => {
+                let queued = self.pending_datagrams.take().unwrap_or_default();
+                let (result, datagrams) =
+                    Self::requeue_datagrams_after_send(result, datagrams, queued);
                 self.pending_datagrams = Some(datagrams);
                 self.pending_datagram_send = None;
                 match result {
-                    Ok(()) | Err(quinn::SendDatagramError::TooLarge) => Poll::Ready(Ok(())),
-                    Err(error) => Poll::Ready(Err(TunnelError::Anyhow(
-                        anyhow::Error::new(error).context("send QUIC DATAGRAM batch failed"),
-                    ))),
+                    Ok(()) => Poll::Ready(Ok(())),
+                    Err(error) => Poll::Ready(Err(error)),
                 }
             }
         }
     }
 
     fn poll_ready_queues(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+        match self.poll_reliable_queue(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
+        if self.pending_reliable.is_some() {
+            return Poll::Pending;
+        }
+        match self.poll_reliable_completion(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
         if self
             .pending_datagrams
             .as_ref()
@@ -1599,18 +1985,54 @@ impl QuicHybridWriter {
             self.begin_datagram_flush();
         }
         match self.poll_datagram_queue(cx) {
+            Poll::Pending
+                if self.pending_datagram_send.is_some()
+                    && self
+                        .pending_datagrams
+                        .as_ref()
+                        .is_none_or(VecDeque::is_empty) =>
+            {
+                Poll::Ready(Ok(()))
+            }
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => self.poll_reliable_queue(cx),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
         }
     }
 
     fn poll_flush_queues(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+        match self.poll_reliable_queue(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
         self.begin_datagram_flush();
         match self.poll_datagram_queue(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => self.poll_reliable_queue(cx),
+            Poll::Ready(Ok(())) => self.poll_reliable_completion(cx),
+        }
+    }
+
+    fn poll_reliable_completion(
+        &mut self,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        let Some(completion) = self.reliable_completion.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match Pin::new(completion).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(result)) => {
+                self.reliable_completion = None;
+                Poll::Ready(result)
+            }
+            Poll::Ready(Err(_)) => {
+                self.reliable_completion = None;
+                Poll::Ready(Err(TunnelError::InternalError(
+                    "reliable QUIC lane stopped before batch completion".to_owned(),
+                )))
+            }
         }
     }
 
@@ -1619,26 +2041,46 @@ impl QuicHybridWriter {
             return Poll::Ready(Ok(()));
         }
         if self.reliable_reserve.is_none() {
-            let sender = self.reliable_tx.as_ref().ok_or_else(|| {
-                TunnelError::InternalError("reliable QUIC lane is closed".to_owned())
-            })?;
+            let Some(sender) = self.reliable_tx.as_ref() else {
+                if let Some(signals) = &self.adaptive_signals {
+                    signals.record_local_reliable_drop();
+                }
+                return Poll::Ready(Err(TunnelError::InternalError(
+                    "reliable QUIC lane is closed".to_owned(),
+                )));
+            };
             self.reliable_reserve = Some(Box::pin(sender.clone().reserve_owned()));
         }
 
         match poll_reliable_reservation(&mut self.reliable_reserve, cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(permit)) => {
-                let packet = self.pending_reliable.take().unwrap();
-                permit.send(packet);
+                let request = self.pending_reliable.take().unwrap();
+                if let Some(since) = self.pending_reliable_since.take()
+                    && let Some(signals) = &self.adaptive_signals
+                {
+                    signals.set_queue_sojourn(since.elapsed());
+                }
+                permit.send(request);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                if let Some(signals) = &self.adaptive_signals {
+                    signals.record_local_reliable_drop();
+                }
+                Poll::Ready(Err(error))
+            }
         }
     }
 }
 
 impl Drop for QuicHybridWriter {
     fn drop(&mut self) {
+        if !self.graceful_close {
+            self.connection
+                .conn
+                .close(0_u32.into(), b"QUIC writer closed");
+        }
         if let Some(task) = self.reliable_task.take() {
             task.abort();
         }
@@ -1684,20 +2126,37 @@ impl Sink<PacketBatch> for QuicHybridWriter {
         if reliable.is_empty() {
             return Ok(());
         }
+        let (completed, completion) = oneshot::channel();
+        let request = ReliableWriteRequest {
+            batch: reliable,
+            completed,
+        };
         let Some(sender) = writer.reliable_tx.as_ref() else {
             return Err(TunnelError::InternalError(
                 "reliable QUIC lane is closed".to_owned(),
             ));
         };
-        match sender.try_send(reliable) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(batch)) => {
-                writer.pending_reliable = Some(batch);
+        match sender.try_send(request) {
+            Ok(()) => {
+                writer.reliable_completion = Some(completion);
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(TunnelError::InternalError(
-                "reliable QUIC lane stopped".to_owned(),
-            )),
+            Err(mpsc::error::TrySendError::Full(request)) => {
+                writer.pending_reliable = Some(request);
+                writer.reliable_completion = Some(completion);
+                if writer.pending_reliable_since.is_none() {
+                    writer.pending_reliable_since = Some(Instant::now());
+                }
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                if let Some(signals) = &writer.adaptive_signals {
+                    signals.record_local_reliable_drop();
+                }
+                Err(TunnelError::InternalError(
+                    "reliable QUIC lane stopped".to_owned(),
+                ))
+            }
         }
     }
 
@@ -1724,6 +2183,7 @@ impl Sink<PacketBatch> for QuicHybridWriter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(result)) => {
                 writer.reliable_task = None;
+                writer.graceful_close = result.is_ok();
                 Poll::Ready(result)
             }
             Poll::Ready(Err(error)) => {
@@ -1738,31 +2198,78 @@ fn build_quic_hybrid_tunnel(
     connection: Connection,
     reliable_send: SendStream,
     reliable_recv: RecvStream,
-    reliable_role: ReliableLaneRole,
+    _reliable_role: ReliableLaneRole,
     max_packet_size: usize,
     info: TunnelInfo,
     _flags: &Flags,
     transport_authenticated: bool,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
-    let connection = Arc::new(ConnWrapper { conn: connection });
+    build_quic_hybrid_tunnel_with_manager(
+        connection,
+        reliable_send,
+        reliable_recv,
+        _reliable_role,
+        max_packet_size,
+        info,
+        _flags,
+        transport_authenticated,
+        None,
+        None,
+    )
+}
+
+fn build_quic_hybrid_tunnel_with_manager(
+    connection: Connection,
+    reliable_send: SendStream,
+    reliable_recv: RecvStream,
+    _reliable_role: ReliableLaneRole,
+    max_packet_size: usize,
+    info: TunnelInfo,
+    _flags: &Flags,
+    transport_authenticated: bool,
+    endpoint_manager: Option<Arc<QuicEndpointManager>>,
+    endpoint_owner: Option<Endpoint>,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    let transport_binding = derive_transport_binding(&connection)?;
+    let connection = Arc::new(ConnWrapper {
+        conn: connection,
+        _endpoint_manager: endpoint_manager,
+        _endpoint_owner: endpoint_owner,
+    });
+    let datagram_size_budget: DatagramSizeBudget = {
+        let connection = connection.conn.clone();
+        Arc::new(move || connection.max_datagram_size())
+    };
     observe_quic_path(&connection);
     let (reliable_tx, reliable_outgoing) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
     let (reliable_incoming, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
-    let reliable_task = tokio::spawn(run_reliable_lane(
+    let (writer_done_tx, writer_done_rx) = oneshot::channel();
+    let _supervisor_task = tokio::spawn(run_reliable_lane(
         connection.conn.clone(),
         reliable_send,
         reliable_recv,
-        reliable_role,
         max_packet_size,
         reliable_outgoing,
-        reliable_incoming,
+        reliable_incoming.clone(),
+        writer_done_tx,
     ));
+    let writer_task = tokio::spawn(async move {
+        writer_done_rx.await.unwrap_or_else(|_| {
+            Err(TunnelError::InternalError(
+                "reliable QUIC supervisor stopped".to_owned(),
+            ))
+        })
+    });
     Ok(Box::new(
-        BatchTunnelWrapper::new_with_transport_authentication(
+        BatchTunnelWrapper::new_with_transport_authentication_and_datagram_size_budget_and_binding(
+            // The exporter binding is created before the QUIC connection is
+            // wrapped and before either half is split.
             QuicHybridReader::new(reliable_rx, connection.clone()),
-            QuicHybridWriter::new(reliable_tx, reliable_task, connection),
+            QuicHybridWriter::new(reliable_tx, writer_task, connection),
             Some(info),
             transport_authenticated,
+            Some(datagram_size_budget),
+            Some(transport_binding),
         ),
     ))
 }
@@ -1771,7 +2278,20 @@ pub struct QuicTunnelListener {
     addr: url::Url,
     global_ctx: ArcGlobalCtx,
     endpoint: Option<Endpoint>,
+    endpoint_manager: Option<Arc<QuicEndpointManager>>,
+    pending_state: std::sync::Mutex<PendingQuicAcceptState>,
 }
+
+struct PendingQuicAcceptState {
+    pending_accepts: futures::stream::FuturesUnordered<PendingQuicAccept>,
+    pending_by_ip: HashMap<IpAddr, usize>,
+}
+
+type PendingQuicAccept =
+    Pin<Box<dyn Future<Output = (IpAddr, Result<Box<dyn Tunnel>, TunnelError>)> + Send + 'static>>;
+
+const MAX_PENDING_QUIC_ACCEPTS: usize = 32;
+const MAX_PENDING_QUIC_ACCEPTS_PER_IP: usize = 4;
 
 impl QuicTunnelListener {
     pub fn new(addr: url::Url, global_ctx: ArcGlobalCtx) -> Self {
@@ -1779,28 +2299,37 @@ impl QuicTunnelListener {
             addr,
             global_ctx,
             endpoint: None,
+            endpoint_manager: None,
+            pending_state: std::sync::Mutex::new(PendingQuicAcceptState {
+                pending_accepts: futures::stream::FuturesUnordered::new(),
+                pending_by_ip: HashMap::new(),
+            }),
         }
     }
 
-    async fn do_accept(&self) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        // accept a single connection
-        let conn = self
-            .endpoint
-            .as_ref()
-            .unwrap()
-            .accept()
+    async fn finish_accept(
+        incoming: Incoming,
+        global_ctx: ArcGlobalCtx,
+        local_url: url::Url,
+    ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let conn = tokio::time::timeout(Duration::from_secs(7), incoming)
             .await
-            .ok_or_else(|| anyhow::anyhow!("accept failed, no incoming"))?;
-        let conn = conn.await.with_context(|| "accept connection failed")?;
+            .context("accept QUIC connection timed out")?
+            .with_context(|| "accept QUIC connection failed")?;
         let transport_authenticated =
-            connection_has_network_identity(&conn, &self.global_ctx.get_network_identity());
+            connection_has_network_identity(&conn, &global_ctx.get_network_identity());
         let remote_addr = conn.remote_address();
-        let (mut w, mut r) = conn.accept_bi().await.with_context(|| "accept_bi failed")?;
-        activate_reliable_lane(&mut w, &mut r, false).await?;
+        let (w, r) = match accept_activated_reliable_lane(&conn).await {
+            Ok(lane) => lane,
+            Err(error) => {
+                conn.close(VarInt::from_u32(1), b"reliable lane activation failed");
+                return Err(error);
+            }
+        };
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
-            local_addr: Some(self.local_url().into()),
+            local_addr: Some(local_url.into()),
             remote_addr: Some(
                 super::build_url_from_socket_addr(&remote_addr.to_string(), "quic").into(),
             ),
@@ -1809,7 +2338,7 @@ impl QuicTunnelListener {
             ),
         };
 
-        let flags = self.global_ctx.config.get_flags();
+        let flags = global_ctx.config.get_flags();
         build_quic_hybrid_tunnel(
             conn,
             w,
@@ -1821,6 +2350,53 @@ impl QuicTunnelListener {
             transport_authenticated,
         )
     }
+
+    fn release_pending_ip(&mut self, ip: IpAddr) {
+        let state = self.pending_state.get_mut().unwrap();
+        let Some(count) = state.pending_by_ip.get_mut(&ip) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            state.pending_by_ip.remove(&ip);
+        }
+    }
+
+    fn start_pending_accept(&mut self, incoming: Incoming) {
+        let ip = incoming.remote_address().ip();
+        let global_ctx = self.global_ctx.clone();
+        let local_url = self.local_url();
+        let state = self.pending_state.get_mut().unwrap();
+        let count = state.pending_by_ip.entry(ip).or_default();
+        if *count >= MAX_PENDING_QUIC_ACCEPTS_PER_IP {
+            incoming.refuse();
+            tracing::warn!(
+                ?ip,
+                "reject QUIC connection because the pending peer limit is full"
+            );
+            return;
+        }
+        *count += 1;
+        state.pending_accepts.push(Box::pin(async move {
+            let result = Self::finish_accept(incoming, global_ctx, local_url).await;
+            (ip, result)
+        }));
+    }
+
+    fn handle_completed_accept(
+        &mut self,
+        completed: (IpAddr, Result<Box<dyn Tunnel>, TunnelError>),
+    ) -> Option<Box<dyn Tunnel>> {
+        let (ip, result) = completed;
+        self.release_pending_ip(ip);
+        match result {
+            Ok(tunnel) => Some(tunnel),
+            Err(error) => {
+                tracing::warn!(?error, ?ip, "QUIC connection activation failed");
+                None
+            }
+        }
+    }
 }
 
 impl Drop for QuicTunnelListener {
@@ -1831,7 +2407,9 @@ impl Drop for QuicTunnelListener {
         let Ok(local_addr) = endpoint.local_addr() else {
             return;
         };
-        QuicEndpointManager::load(&self.global_ctx).remove_endpoint_by_local_addr(local_addr);
+        if let Some(manager) = &self.endpoint_manager {
+            manager.remove_endpoint_by_local_addr(local_addr);
+        }
     }
 }
 
@@ -1839,22 +2417,53 @@ impl Drop for QuicTunnelListener {
 impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
-        let endpoint = QuicEndpointManager::server(&self.global_ctx, addr)?;
+        let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
+        let endpoint = QuicEndpointManager::server(&self.global_ctx, &endpoint_manager, addr)?;
         self.addr
             .set_port(Some(endpoint.local_addr()?.port()))
             .unwrap();
         self.endpoint = Some(endpoint);
+        self.endpoint_manager = Some(endpoint_manager);
 
         Ok(())
     }
 
     async fn accept(&mut self) -> Result<Box<dyn Tunnel>, super::TunnelError> {
         loop {
-            match self.do_accept().await {
-                Ok(ret) => return Ok(ret),
-                Err(e) => {
-                    tracing::warn!(?e, "accept fail");
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+            let endpoint = self.endpoint.as_ref().unwrap().clone();
+            let (completed, incoming) = {
+                let pending_state = self.pending_state.get_mut().unwrap();
+                tokio::select! {
+                    completed = pending_state.pending_accepts.next(), if !pending_state.pending_accepts.is_empty() => {
+                        (Some(completed), None)
+                    }
+                    incoming = endpoint.accept() => {
+                        (None, Some(incoming))
+                    }
+                }
+            };
+            if let Some(completed) = completed
+                && let Some(completed) = completed
+                && let Some(tunnel) = self.handle_completed_accept(completed)
+            {
+                return Ok(tunnel);
+            }
+            if let Some(incoming) = incoming {
+                let Some(incoming) = incoming else {
+                    return Err(TunnelError::InternalError(
+                        "QUIC endpoint stopped accepting connections".to_string(),
+                    ));
+                };
+                if self.pending_state.get_mut().unwrap().pending_accepts.len()
+                    >= MAX_PENDING_QUIC_ACCEPTS
+                {
+                    tracing::warn!(
+                        remote = ?incoming.remote_address(),
+                        "reject QUIC connection because the pending limit is full"
+                    );
+                    incoming.refuse();
+                } else {
+                    self.start_pending_accept(incoming);
                 }
             }
         }
@@ -1872,6 +2481,7 @@ pub struct QuicTunnelConnector {
     resolved_addr: Option<SocketAddr>,
     bind_addrs: Vec<SocketAddr>,
     underlay_policy: Arc<UnderlayPolicy>,
+    endpoint_manager: Option<Arc<QuicEndpointManager>>,
 }
 
 impl QuicTunnelConnector {
@@ -1883,6 +2493,7 @@ impl QuicTunnelConnector {
             resolved_addr: None,
             bind_addrs: Vec::new(),
             underlay_policy: Arc::new(UnderlayPolicy::default()),
+            endpoint_manager: None,
         }
     }
 }
@@ -1894,21 +2505,21 @@ impl TunnelConnector for QuicTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
-        let (endpoint, connection, transport_authenticated) = QuicEndpointManager::connect(
-            &self.global_ctx,
-            addr,
-            &self.bind_addrs,
-            self.underlay_policy.clone(),
-        )
-        .await?;
+        let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
+        let (endpoint, connection, transport_authenticated) =
+            QuicEndpointManager::connect_with_manager(
+                &self.global_ctx,
+                &endpoint_manager,
+                addr,
+                &self.bind_addrs,
+                self.underlay_policy.clone(),
+            )
+            .await?;
+        self.endpoint_manager = Some(endpoint_manager);
 
         let local_addr = endpoint.local_addr()?;
 
-        let (mut w, mut r) = connection
-            .open_bi()
-            .await
-            .with_context(|| "open_bi failed")?;
-        activate_reliable_lane(&mut w, &mut r, true).await?;
+        let (w, r) = open_activated_reliable_lane(&connection).await?;
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -1923,7 +2534,7 @@ impl TunnelConnector for QuicTunnelConnector {
         };
 
         let flags = self.global_ctx.config.get_flags();
-        build_quic_hybrid_tunnel(
+        build_quic_hybrid_tunnel_with_manager(
             connection,
             w,
             r,
@@ -1932,6 +2543,8 @@ impl TunnelConnector for QuicTunnelConnector {
             info,
             &flags,
             transport_authenticated,
+            self.endpoint_manager.clone(),
+            Some(endpoint),
         )
     }
 
@@ -1963,7 +2576,7 @@ mod tests {
     };
     use crate::tunnel::{
         TunnelConnector,
-        common::tests::_tunnel_pingpong,
+        common::{ZCPacketToBytes, tests::_tunnel_pingpong},
         packet_def::{PacketType, ZCPacket},
     };
     use futures::{SinkExt, StreamExt};
@@ -2002,7 +2615,8 @@ mod tests {
     }
 
     fn hybrid_writer_without_reliable_io(connection: Arc<ConnWrapper>) -> QuicHybridWriter {
-        let (sender, mut receiver) = mpsc::channel::<PacketBatch>(RELIABLE_LANE_QUEUE_BATCHES);
+        let (sender, mut receiver) =
+            mpsc::channel::<ReliableWriteRequest>(RELIABLE_LANE_QUEUE_BATCHES);
         let task = tokio::spawn(async move {
             while receiver.recv().await.is_some() {}
             Ok(())
@@ -2036,7 +2650,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_reliable_reservation_is_removed_before_another_poll() {
-        let (sender, receiver) = mpsc::channel::<PacketBatch>(1);
+        let (sender, receiver) = mpsc::channel::<ReliableWriteRequest>(1);
         drop(receiver);
         let mut reservation: Option<ReliableReserve> = Some(Box::pin(sender.reserve_owned()));
 
@@ -2045,6 +2659,108 @@ mod tests {
 
         assert!(result.is_err());
         assert!(reservation.is_none());
+    }
+
+    #[tokio::test]
+    async fn reliable_lane_error_waits_for_room_in_the_incoming_queue() {
+        let (incoming, mut receiver) = mpsc::channel::<BatchStreamItem>(1);
+        incoming
+            .send(Ok(PacketBatch::singleton(ZCPacket::new_with_payload(
+                b"queued",
+            ))))
+            .await
+            .unwrap();
+        let error = TunnelError::InternalError("lane failed".to_owned());
+        let sender = tokio::spawn(send_reliable_lane_error(incoming, error));
+
+        tokio::task::yield_now().await;
+        assert!(!sender.is_finished());
+        assert!(receiver.recv().await.unwrap().is_ok());
+        let terminal = receiver.recv().await.unwrap();
+        assert!(
+            matches!(terminal, Err(TunnelError::InternalError(message)) if message == "lane failed")
+        );
+        sender.await.unwrap();
+    }
+
+    #[test]
+    fn reliable_frame_limit_matches_the_reader_and_converter() {
+        let frame_limit = QUIC_RELIABLE_MAX_PACKET_SIZE;
+        let mut packet =
+            ZCPacket::new_with_payload(&vec![0x5a; frame_limit - PEER_MANAGER_HEADER_SIZE]);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        let converter = TcpZCPacketToBytes::with_max_frame_size(frame_limit);
+        let encoded = converter.zcpacket_into_bytes(packet).unwrap();
+        let mut reader_buf = BytesMut::from(encoded.as_ref());
+        assert!(matches!(
+            FramedReader::<tokio::io::Empty>::extract_one_packet(
+                &mut reader_buf,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+            ),
+            Some(Ok(_))
+        ));
+
+        let mut oversized =
+            ZCPacket::new_with_payload(&vec![0x5a; frame_limit + 1 - PEER_MANAGER_HEADER_SIZE]);
+        oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        assert!(matches!(
+            converter.zcpacket_into_bytes(oversized),
+            Err(TunnelError::InvalidPacket(message))
+                if message == "framed packet exceeds configured limit"
+        ));
+    }
+
+    #[test]
+    fn reliable_frame_preserves_packet_bytes_without_payload_copy() {
+        let mut packet = ZCPacket::new_with_payload(b"reliable zero copy");
+        packet.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+        let mut packet = packet.convert_type(ZCPacketType::DummyTunnel);
+        let body_offset = packet
+            .packet_type()
+            .get_packet_offsets()
+            .peer_manager_header_offset;
+        let body_ptr = packet.mut_inner().as_ptr().wrapping_add(body_offset);
+        let expected_body = packet.tunnel_payload().to_vec();
+
+        let frame = encode_reliable_frame(packet, QUIC_RELIABLE_MAX_PACKET_SIZE).unwrap();
+
+        assert_eq!(
+            frame.header.as_ref(),
+            &(expected_body.len() as u32).to_le_bytes()
+        );
+        assert_eq!(frame.body.as_ref(), expected_body.as_slice());
+        assert_eq!(frame.body.as_ptr(), body_ptr);
+    }
+
+    #[test]
+    fn reliable_frame_batch_keeps_wire_order() {
+        let mut first = ZCPacket::new_with_payload(b"first reliable frame");
+        first.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+        let mut second = ZCPacket::new_with_payload(b"second reliable frame");
+        second.fill_peer_manager_hdr(1, 2, PacketType::RpcResp as u8);
+
+        let mut encoded = BytesMut::new();
+        for packet in [first, second] {
+            let frame = encode_reliable_frame(packet, QUIC_RELIABLE_MAX_PACKET_SIZE).unwrap();
+            encoded.extend_from_slice(&frame.header);
+            encoded.extend_from_slice(&frame.body);
+        }
+
+        let first = FramedReader::<tokio::io::Empty>::extract_one_packet(
+            &mut encoded,
+            QUIC_RELIABLE_MAX_PACKET_SIZE,
+        )
+        .unwrap()
+        .unwrap();
+        let second = FramedReader::<tokio::io::Empty>::extract_one_packet(
+            &mut encoded,
+            QUIC_RELIABLE_MAX_PACKET_SIZE,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.payload(), b"first reliable frame");
+        assert_eq!(second.payload(), b"second reliable frame");
+        assert!(encoded.is_empty());
     }
 
     fn stopped_client_endpoint() -> (Endpoint, SocketAddr) {
@@ -2086,6 +2802,28 @@ mod tests {
             let denied = UnderlayPolicy::new(&[], &["127.0.0.0/8".into()]).unwrap();
             let result = mgr.client_endpoint_for_source(source_a, None, &denied);
             assert!(matches!(result, Err(TunnelError::UnderlayPolicyDenied(_))));
+        });
+    }
+
+    #[test]
+    fn source_port_request_does_not_reuse_a_different_port() {
+        RUNTIME.block_on(async {
+            let mgr = QuicEndpointManager::new(4);
+            let policy = UnderlayPolicy::default();
+            let dynamic = mgr
+                .client_endpoint_for_source("127.0.0.1:0".parse().unwrap(), None, &policy)
+                .unwrap();
+            let dynamic_addr = dynamic.local_addr().unwrap();
+            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let requested_addr = reservation.local_addr().unwrap();
+            drop(reservation);
+
+            let requested = mgr
+                .client_endpoint_for_source(requested_addr, None, &policy)
+                .unwrap();
+
+            assert_eq!(requested.local_addr().unwrap(), requested_addr);
+            assert_ne!(requested.local_addr().unwrap(), dynamic_addr);
         });
     }
 
@@ -2187,7 +2925,7 @@ mod tests {
     }
 
     #[test]
-    fn reliable_lane_recovers_without_reconnecting() {
+    fn reliable_lane_reset_reports_one_terminal_error() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_endpoint = Endpoint::server(
@@ -2196,44 +2934,15 @@ mod tests {
             )
             .unwrap();
             let server_addr = server_endpoint.local_addr().unwrap();
-            let (recovered_tx, recovered_rx) = tokio::sync::oneshot::channel();
             let server = tokio::spawn(async move {
                 let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let stable_id = connection.stable_id();
                 let (mut send, mut recv) = connection.accept_bi().await.unwrap();
                 activate_reliable_lane(&mut send, &mut recv, false)
                     .await
                     .unwrap();
                 send.reset(0_u32.into()).unwrap();
                 recv.stop(0_u32.into()).unwrap();
-
-                let (mut send, mut recv) =
-                    tokio::time::timeout(Duration::from_secs(2), connection.accept_bi())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                assert_eq!(connection.stable_id(), stable_id);
-                activate_reliable_lane(&mut send, &mut recv, false)
-                    .await
-                    .unwrap();
-                recovered_tx.send(()).unwrap();
-
-                let mut reader = FramedReader::new_with_initial_capacity(
-                    recv,
-                    QUIC_RELIABLE_MAX_PACKET_SIZE,
-                    QUIC_RELIABLE_INITIAL_BUFFER_SIZE,
-                );
-                for _ in 0..2 {
-                    let packet = tokio::time::timeout(Duration::from_secs(2), reader.next())
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .unwrap();
-                    if packet.payload() == b"after recovery" {
-                        return packet;
-                    }
-                }
-                panic!("replacement reliable lane did not deliver the expected packet");
+                let _ = connection.closed().await;
             });
 
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -2243,13 +2952,127 @@ mod tests {
                 .unwrap()
                 .await
                 .unwrap();
-            let stable_id = connection.stable_id();
             let (mut send_stream, mut recv_stream) = connection.open_bi().await.unwrap();
             activate_reliable_lane(&mut send_stream, &mut recv_stream, true)
                 .await
                 .unwrap();
             let tunnel = build_quic_hybrid_tunnel(
-                connection.clone(),
+                connection,
+                send_stream,
+                recv_stream,
+                ReliableLaneRole::Initiator,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+                TunnelInfo::default(),
+                &flags,
+                false,
+            )
+            .unwrap();
+            let (mut reader, writer) = tunnel.split();
+            let first = tokio::time::timeout(Duration::from_secs(2), reader.next())
+                .await
+                .unwrap()
+                .expect("the reliable lane reports one terminal error");
+            assert!(first.is_err());
+            drop(writer);
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn reliable_lane_truncated_frames_close_the_connection() {
+        RUNTIME.block_on(async {
+            let mut truncated_frames = vec![vec![1, 0]];
+            let mut partial_body = (PEER_MANAGER_HEADER_SIZE as u32).to_le_bytes().to_vec();
+            partial_body.push(0);
+            truncated_frames.push(partial_body);
+
+            for truncated_frame in truncated_frames {
+                let flags = gen_default_flags();
+                let server_endpoint = Endpoint::server(
+                    server_config(&flags).unwrap(),
+                    "127.0.0.1:0".parse().unwrap(),
+                )
+                .unwrap();
+                let server_addr = server_endpoint.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                    let (mut send, _recv) =
+                        accept_activated_reliable_lane(&connection).await.unwrap();
+                    send.write_all(&truncated_frame).await.unwrap();
+                    send.finish().unwrap();
+                    connection.closed().await
+                });
+
+                let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+                client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+                let connection = client_endpoint
+                    .connect(server_addr, &server_addr.ip().to_string())
+                    .unwrap()
+                    .await
+                    .unwrap();
+                let client_connection = connection.clone();
+                let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
+                let tunnel = build_quic_hybrid_tunnel(
+                    connection,
+                    send,
+                    recv,
+                    ReliableLaneRole::Initiator,
+                    QUIC_RELIABLE_MAX_PACKET_SIZE,
+                    TunnelInfo::default(),
+                    &flags,
+                    false,
+                )
+                .unwrap();
+                let (mut reader, mut writer) = tunnel.split();
+                let item = tokio::time::timeout(Duration::from_secs(2), reader.next())
+                    .await
+                    .unwrap()
+                    .expect("the truncated frame is reported");
+                assert!(item.is_err());
+
+                let close_result = tokio::time::timeout(Duration::from_secs(2), writer.close())
+                    .await
+                    .unwrap();
+                assert!(close_result.is_err());
+                tokio::time::timeout(Duration::from_secs(2), client_connection.closed())
+                    .await
+                    .unwrap();
+                server.await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn reliable_lane_allows_outbound_after_remote_send_fin() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                let (mut send, mut recv) =
+                    accept_activated_reliable_lane(&connection).await.unwrap();
+                send.finish().unwrap();
+                let _keep_initial_receive_open = &mut recv;
+
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let (send_stream, recv_stream) =
+                open_activated_reliable_lane(&connection).await.unwrap();
+            let tunnel = build_quic_hybrid_tunnel(
+                connection,
                 send_stream,
                 recv_stream,
                 ReliableLaneRole::Initiator,
@@ -2260,27 +3083,418 @@ mod tests {
             )
             .unwrap();
             let (_recv, mut send) = tunnel.split();
+            tokio::time::sleep(Duration::from_millis(50)).await;
 
-            let mut trigger = ZCPacket::new_with_payload(b"trigger recovery");
-            trigger.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-            let _ = send.send(PacketBatch::singleton(trigger)).await;
-            let _ = send.flush().await;
+            let mut packet = ZCPacket::new_with_payload(b"after clean eof");
+            packet.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+            send.send(PacketBatch::singleton(packet)).await.unwrap();
+            send.flush().await.unwrap();
+            server.await.unwrap();
+        });
+    }
 
-            tokio::time::timeout(Duration::from_secs(2), recovered_rx)
+    #[test]
+    fn reliable_writer_survives_clean_reader_half_close_during_blocked_write() {
+        RUNTIME.block_on(async {
+            let mut flags = gen_default_flags();
+            // Keep the peer receive window below one frame. The writer must then resume
+            // a partially written frame after the reader observes a clean FIN.
+            flags.quic_initial_receive_window = 16 * 1024;
+            flags.quic_receive_window = 16 * 1024;
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let (start_server_tx, start_server_rx) = oneshot::channel();
+            let (reader_progress_tx, reader_progress_rx) = oneshot::channel();
+            let (writer_closed_tx, writer_closed_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                // Keep the receive stream unpolled until the client observes the inbound
+                // reader event. This forces the independent client writer task to suspend
+                // on stream flow control while the client reader observes a clean FIN.
+                let (mut send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
+                start_server_rx.await.unwrap();
+                let mut inbound = ZCPacket::new_with_payload(b"reader progress");
+                inbound.fill_peer_manager_hdr(1, 2, PacketType::RpcResp as u8);
+                let converter =
+                    TcpZCPacketToBytes::with_max_frame_size(QUIC_RELIABLE_MAX_PACKET_SIZE);
+                let frame = converter.zcpacket_into_bytes(inbound).unwrap();
+                send.write_all(frame.as_ref()).await.unwrap();
+                send.finish().unwrap();
+
+                reader_progress_rx.await.unwrap();
+                let mut reader = FramedReader::new(recv, QUIC_RELIABLE_MAX_PACKET_SIZE);
+                let mut received = Vec::with_capacity(2);
+                while received.len() < 2 {
+                    let batch = tokio::time::timeout(Duration::from_secs(5), reader.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    received.push(batch);
+                }
+                let end = tokio::time::timeout(Duration::from_secs(5), reader.next())
+                    .await
+                    .unwrap();
+                assert!(end.is_none(), "the client frame must not be replayed");
+                writer_closed_rx.await.unwrap();
+                assert_eq!(received.len(), 2, "the client sent exactly two frames");
+                let second = received.pop().expect("the second client frame exists");
+                let first = received.pop().expect("the first client frame exists");
+                (first, second)
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
+            let tunnel = build_quic_hybrid_tunnel(
+                connection,
+                send,
+                recv,
+                ReliableLaneRole::Initiator,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+                TunnelInfo::default(),
+                &flags,
+                false,
+            )
+            .unwrap();
+            let (mut reader, mut writer) = tunnel.split();
+            let inbound = tokio::spawn(async move {
+                let packet = tokio::time::timeout(Duration::from_secs(5), reader.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .pop_singleton()
+                    .unwrap();
+                reader_progress_tx.send(()).unwrap();
+                let end = tokio::time::timeout(Duration::from_secs(5), reader.next())
+                    .await
+                    .unwrap();
+                assert!(end.is_none());
+                packet
+            });
+
+            let frame_payload_len = 32 * 1024 - PEER_MANAGER_HEADER_SIZE;
+            let mut outbound = ZCPacket::new_with_payload(&vec![0xa5; frame_payload_len]);
+            outbound.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+            let mut outbound_second = ZCPacket::new_with_payload(&vec![0x5a; frame_payload_len]);
+            outbound_second.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+            let mut outbound_batch = PacketBatch::new();
+            outbound_batch.try_push(outbound.clone()).unwrap();
+            outbound_batch.try_push(outbound_second.clone()).unwrap();
+            writer.feed(outbound_batch).await.unwrap();
+            start_server_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), writer.close())
                 .await
                 .unwrap()
                 .unwrap();
+            writer_closed_tx.send(()).unwrap();
 
-            let mut expected = ZCPacket::new_with_payload(b"after recovery");
-            expected.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-            send.send(PacketBatch::singleton(expected.clone()))
+            let inbound = inbound.await.unwrap();
+            assert_eq!(inbound.payload(), b"reader progress");
+            let (received, received_second) = server.await.unwrap();
+            assert_eq!(received.payload(), outbound.payload());
+            assert_eq!(
+                received.peer_manager_header().unwrap().packet_type,
+                PacketType::RpcReq as u8
+            );
+            assert_eq!(received_second.payload(), outbound_second.payload());
+            assert_eq!(
+                received_second.peer_manager_header().unwrap().packet_type,
+                PacketType::RpcReq as u8
+            );
+        });
+    }
+
+    #[test]
+    fn reliable_close_delivers_the_final_queued_batch() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server_flags = flags.clone();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                let (send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
+                let tunnel = build_quic_hybrid_tunnel(
+                    connection,
+                    send,
+                    recv,
+                    ReliableLaneRole::Acceptor,
+                    QUIC_RELIABLE_MAX_PACKET_SIZE,
+                    TunnelInfo::default(),
+                    &server_flags,
+                    false,
+                )
+                .unwrap();
+                let (mut reader, _writer) = tunnel.split();
+                let packet = reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pop_singleton()
+                    .unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), reader.next()).await;
+                packet
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
                 .await
                 .unwrap();
-            send.flush().await.unwrap();
+            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
+            let tunnel = build_quic_hybrid_tunnel(
+                connection,
+                send,
+                recv,
+                ReliableLaneRole::Initiator,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+                TunnelInfo::default(),
+                &flags,
+                false,
+            )
+            .unwrap();
+            let (_reader, mut writer) = tunnel.split();
+            let mut packet = ZCPacket::new_with_payload(b"final reliable batch");
+            packet.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
+            writer
+                .feed(PacketBatch::singleton(packet.clone()))
+                .await
+                .unwrap();
+            writer.close().await.unwrap();
 
             let received = server.await.unwrap();
+            assert_eq!(received.payload(), packet.payload());
+        });
+    }
+
+    #[test]
+    fn local_reliable_close_does_not_cancel_inbound_frames() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server_flags = flags.clone();
+            let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                let (send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
+                let tunnel = build_quic_hybrid_tunnel(
+                    connection,
+                    send,
+                    recv,
+                    ReliableLaneRole::Acceptor,
+                    QUIC_RELIABLE_MAX_PACKET_SIZE,
+                    TunnelInfo::default(),
+                    &server_flags,
+                    false,
+                )
+                .unwrap();
+                let (_reader, mut writer) = tunnel.split();
+                let mut packet = ZCPacket::new_with_payload(b"final inbound frame");
+                packet.fill_peer_manager_hdr(1, 2, PacketType::RpcResp as u8);
+                writer
+                    .send(PacketBatch::singleton(packet.clone()))
+                    .await
+                    .unwrap();
+                writer.flush().await.unwrap();
+                delivered_rx.await.unwrap();
+                packet
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
+            let tunnel = build_quic_hybrid_tunnel(
+                connection,
+                send,
+                recv,
+                ReliableLaneRole::Initiator,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+                TunnelInfo::default(),
+                &flags,
+                false,
+            )
+            .unwrap();
+            let (mut reader, mut writer) = tunnel.split();
+            writer.close().await.unwrap();
+
+            let received = tokio::time::timeout(Duration::from_secs(2), reader.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .pop_singleton()
+                .unwrap();
+            delivered_tx.send(()).unwrap();
+            let expected = server.await.unwrap();
             assert_eq!(received.payload(), expected.payload());
-            assert_eq!(connection.stable_id(), stable_id);
+        });
+    }
+
+    #[test]
+    fn datagram_only_traffic_keeps_the_reliable_lane_alive() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server_flags = flags.clone();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                let (send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
+                let tunnel = build_quic_hybrid_tunnel(
+                    connection,
+                    send,
+                    recv,
+                    ReliableLaneRole::Acceptor,
+                    QUIC_RELIABLE_MAX_PACKET_SIZE,
+                    TunnelInfo::default(),
+                    &server_flags,
+                    false,
+                )
+                .unwrap();
+                let (mut reader, _writer) = tunnel.split();
+                tokio::time::timeout(Duration::from_secs(12), reader.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
+            let tunnel = build_quic_hybrid_tunnel(
+                connection,
+                send,
+                recv,
+                ReliableLaneRole::Initiator,
+                QUIC_RELIABLE_MAX_PACKET_SIZE,
+                TunnelInfo::default(),
+                &flags,
+                false,
+            )
+            .unwrap();
+            let (_reader, mut writer) = tunnel.split();
+            tokio::time::sleep(Duration::from_secs(8)).await;
+
+            let mut packet = ZCPacket::new_with_payload(b"after idle");
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+            writer
+                .send(PacketBatch::singleton(packet.clone()))
+                .await
+                .unwrap();
+            writer.flush().await.unwrap();
+
+            let received = server.await.unwrap().pop_singleton().unwrap();
+            assert_eq!(received.payload(), packet.payload());
+        });
+    }
+
+    #[test]
+    fn reliable_lane_activation_has_an_internal_timeout() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
+                accept_activated_reliable_lane(&connection)
+                    .await
+                    .map(|_| ())
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let connection = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let (_send, _recv) = connection.open_bi().await.unwrap();
+
+            let outcome = tokio::time::timeout(Duration::from_secs(6), server).await;
+            assert!(matches!(outcome, Ok(Ok(Err(_)))));
+        });
+    }
+
+    #[test]
+    fn stalled_activation_does_not_block_a_later_connection() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+            listener.listen().await.unwrap();
+            let server_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let accepting = tokio::spawn(async move { listener.accept().await });
+
+            let mut first_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            first_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let first = first_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let (_stalled_send, _stalled_recv) = first.open_bi().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let mut second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            second_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let second_connecting = second_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(2), second_connecting)
+                .await
+                .unwrap()
+                .unwrap();
+            let activated = tokio::time::timeout(
+                Duration::from_secs(2),
+                open_activated_reliable_lane(&second),
+            )
+            .await;
+            assert!(matches!(activated, Ok(Ok(_))));
+
+            let accepted = tokio::time::timeout(Duration::from_secs(2), accepting).await;
+            assert!(matches!(accepted, Ok(Ok(Ok(_)))));
         });
     }
 
@@ -2379,6 +3593,54 @@ mod tests {
         };
 
         assert!(!QuicEndpointManager::load(&global_ctx).contains_local_addr(endpoint_addr));
+    }
+
+    #[test]
+    fn endpoint_manager_key_changes_with_socket_policy() {
+        RUNTIME.block_on(async {
+            let global_ctx = global_ctx();
+            let first = QuicEndpointManager::manager_key(&global_ctx);
+            let mut flags = global_ctx.get_flags();
+            flags.socket_mark = Some(73);
+            global_ctx.set_flags(flags);
+            let second = QuicEndpointManager::manager_key(&global_ctx);
+
+            assert_ne!(first, second);
+        });
+    }
+
+    #[test]
+    fn endpoint_registry_does_not_keep_an_owner_alive() {
+        RUNTIME.block_on(async {
+            let global_ctx = global_ctx();
+            let manager = QuicEndpointManager::load(&global_ctx);
+            let weak = Arc::downgrade(&manager);
+
+            drop(manager);
+
+            assert!(weak.upgrade().is_none());
+        });
+    }
+
+    #[test]
+    fn endpoint_manager_does_not_reuse_an_old_policy_after_aba_update() {
+        RUNTIME.block_on(async {
+            let global_ctx = global_ctx();
+            let original_flags = global_ctx.get_flags();
+            let first = QuicEndpointManager::load(&global_ctx);
+
+            let mut changed_flags = original_flags.clone();
+            changed_flags.socket_mark = Some(81);
+            global_ctx.set_flags(changed_flags);
+            let second = QuicEndpointManager::load(&global_ctx);
+
+            global_ctx.set_flags(original_flags);
+            let third = QuicEndpointManager::load(&global_ctx);
+
+            assert!(!Arc::ptr_eq(&first, &second));
+            assert!(!Arc::ptr_eq(&first, &third));
+            assert!(!Arc::ptr_eq(&second, &third));
+        });
     }
 
     #[test]
@@ -2497,6 +3759,53 @@ mod tests {
         assert_eq!(
             QUIC_DATAGRAM_SEND_BUFFER_BYTES,
             crate::tunnel::batch::MAX_PACKET_BATCH_SIZE * 1452
+        );
+    }
+
+    #[test]
+    fn too_large_datagram_keeps_later_and_new_queue_arrivals() {
+        // Quinn returns only the datagrams after the offending mid-batch item.
+        let returned_by_quinn = VecDeque::from([Bytes::from_static(b"after-too-large")]);
+        let arrived_during_send = VecDeque::from([Bytes::from_static(b"new-arrival")]);
+
+        let (result, pending) = QuicHybridWriter::requeue_datagrams_after_send(
+            Err(quinn::SendDatagramError::TooLarge),
+            returned_by_quinn,
+            arrived_during_send,
+        );
+
+        assert!(result.is_ok());
+        let payloads: Vec<&[u8]> = pending.iter().map(Bytes::as_ref).collect();
+        assert_eq!(payloads, [&b"after-too-large"[..], &b"new-arrival"[..]]);
+    }
+
+    #[test]
+    fn datagram_requeue_preserves_wire_order() {
+        let returned_by_quinn = VecDeque::from([
+            Bytes::from_static(b"unsent-one"),
+            Bytes::from_static(b"unsent-two"),
+        ]);
+        let arrived_during_send = VecDeque::from([
+            Bytes::from_static(b"new-one"),
+            Bytes::from_static(b"new-two"),
+        ]);
+
+        let (result, pending) = QuicHybridWriter::requeue_datagrams_after_send(
+            Ok(()),
+            returned_by_quinn,
+            arrived_during_send,
+        );
+
+        assert!(result.is_ok());
+        let payloads: Vec<&[u8]> = pending.iter().map(Bytes::as_ref).collect();
+        assert_eq!(
+            payloads,
+            [
+                &b"unsent-one"[..],
+                &b"unsent-two"[..],
+                &b"new-one"[..],
+                &b"new-two"[..]
+            ]
         );
     }
 
@@ -2635,6 +3944,8 @@ mod tests {
 
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
+                _endpoint_manager: None,
+                _endpoint_owner: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let payload = vec![0x5a; maximum - PEER_MANAGER_HEADER_SIZE];
@@ -2692,6 +4003,8 @@ mod tests {
             let server = server_task.await.unwrap();
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
+                _endpoint_manager: None,
+                _endpoint_owner: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let mut batch = PacketBatch::with_capacity(8);
@@ -2840,11 +4153,61 @@ mod tests {
 
             assert!(client.is_transport_authenticated());
             assert!(server.is_transport_authenticated());
+            assert_eq!(client.transport_binding(), server.transport_binding());
+            assert_eq!(
+                client.transport_binding().map(|binding| binding.kind),
+                Some(TransportBindingKind::QuicTlsExporterV1)
+            );
         });
     }
 
     #[test]
-    fn direct_quic_connection_rejects_an_unauthenticated_server() {
+    fn quic_transport_binding_matches_peers_and_separates_connections() {
+        RUNTIME.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let first = server_endpoint.accept().await.unwrap().await.unwrap();
+                let second = server_endpoint.accept().await.unwrap().await.unwrap();
+                (
+                    derive_transport_binding(&first).unwrap(),
+                    derive_transport_binding(&second).unwrap(),
+                )
+            });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let first = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let second = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+
+            let first_binding = derive_transport_binding(&first).unwrap();
+            let second_binding = derive_transport_binding(&second).unwrap();
+            let (server_first_binding, server_second_binding) = server.await.unwrap();
+
+            assert_eq!(first_binding, server_first_binding);
+            assert_eq!(second_binding, server_second_binding);
+            assert_ne!(first_binding, second_binding);
+
+            first.close(0_u32.into(), b"test complete");
+            second.close(0_u32.into(), b"test complete");
+        });
+    }
+
+    #[test]
+    fn secure_protocol_defers_quic_peer_authentication_to_noise() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_endpoint = Endpoint::server(
@@ -2872,8 +4235,10 @@ mod tests {
             )
             .await;
 
-            assert!(result.is_err());
-            server.abort();
+            let (_endpoint, connection, authenticated) = result.unwrap();
+            assert!(!authenticated);
+            connection.close(0_u32.into(), b"test complete");
+            let _ = server.await.unwrap();
         });
     }
 
@@ -2904,6 +4269,7 @@ mod tests {
                     enabled: true,
                     local_private_key: None,
                     local_public_key: None,
+                    ..Default::default()
                 }));
             let (_endpoint, connection, authenticated) = QuicEndpointManager::connect(
                 &context,
@@ -2921,7 +4287,7 @@ mod tests {
     }
 
     #[test]
-    fn different_network_secrets_are_rejected() {
+    fn secure_protocol_defers_network_secret_rejection_to_noise() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_identity = crate::common::config::NetworkIdentity::new(
@@ -2959,8 +4325,10 @@ mod tests {
             )
             .await;
 
-            assert!(result.is_err());
-            server.abort();
+            let (_endpoint, connection, authenticated) = result.unwrap();
+            assert!(!authenticated);
+            connection.close(0_u32.into(), b"test complete");
+            let _ = server.await.unwrap();
         });
     }
 }

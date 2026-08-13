@@ -634,7 +634,7 @@ impl MetricSnapshot {
 /// StatsManager manages global statistics with high performance counters
 pub struct StatsManager {
     counters: Arc<DashMap<MetricKey, Arc<MetricData>>>,
-    cleanup_task: AbortOnDropHandle<()>,
+    cleanup_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl StatsManager {
@@ -642,32 +642,34 @@ impl StatsManager {
     pub fn new() -> Self {
         let counters = Arc::new(DashMap::new());
 
-        // Start cleanup task only if we're in a tokio runtime
-        let counters_clone = Arc::downgrade(&counters);
-        let cleanup_task = tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(60)); // Check every minute
-            loop {
-                interval.tick().await;
+        let cleanup_task = tokio::runtime::Handle::try_current().ok().map(|runtime| {
+            let counters_clone = Arc::downgrade(&counters);
+            AbortOnDropHandle::new(runtime.spawn(async move {
+                let mut interval = interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
 
-                let Some(cutoff_time) = Instant::now().checked_sub(Duration::from_secs(180)) else {
-                    continue;
-                };
+                    let Some(cutoff_time) = Instant::now().checked_sub(Duration::from_secs(180))
+                    else {
+                        continue;
+                    };
 
-                let Some(counters) = counters_clone.upgrade() else {
-                    break;
-                };
+                    let Some(counters) = counters_clone.upgrade() else {
+                        break;
+                    };
 
-                counters.retain(|_, metric_data: &mut Arc<MetricData>| {
-                    Arc::strong_count(metric_data) > 1
-                        || unsafe { metric_data.get_last_updated() > cutoff_time }
-                });
-                counters.shrink_to_fit();
-            }
+                    counters.retain(|_, metric_data: &mut Arc<MetricData>| {
+                        Arc::strong_count(metric_data) > 1
+                            || unsafe { metric_data.get_last_updated() > cutoff_time }
+                    });
+                    counters.shrink_to_fit();
+                }
+            }))
         });
 
         Self {
             counters,
-            cleanup_task: AbortOnDropHandle::new(cleanup_task),
+            cleanup_task,
         }
     }
 

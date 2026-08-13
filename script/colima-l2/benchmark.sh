@@ -1,20 +1,70 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This harness measures work and traffic for each selected data-plane path.
+# Build the image before this script and reuse the same image for every case.
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 docker_context=${COLIMA_DOCKER_CONTEXT:-colima-lowertier-l2}
 image_name=${LOWTIER_L2_IMAGE:-lowertier-l2-qemu-test:local}
-secure_mode=${LOWTIER_L2_SECURE_MODE:-1}
-ping_count=${LOWTIER_L2_PING_COUNT:-1000}
 duration=${LOWTIER_L2_IPERF_DURATION:-10}
+udp_rate=${LOWTIER_L2_UDP_RATE:-500M}
+queue_matrix=${LOWTIER_L2_QUEUE_MATRIX:-${LOWTIER_TUN_QUEUE_MATRIX:-1,2,4}}
+scenario_matrix=${LOWTIER_L2_SCENARIOS:-direct-underlay,automatic-compact-l3,authorized-full-ethernet,relay-compact-l3}
 result_dir=${LOWTIER_L2_RESULT_DIR:-$(mktemp -d -t lowertier-l2-benchmark.XXXXXX)}
+
 network_name=lowertier-l2-benchmark-net
 node_a=lowertier-l2-benchmark-a
 node_b=lowertier-l2-benchmark-b
+node_relay=lowertier-l2-benchmark-relay
+underlay_a=172.31.77.2
+underlay_b=172.31.77.3
+overlay_a=10.88.0.1
+overlay_b=10.88.0.2
 docker_cmd=(docker --context "$docker_context")
+cases_file="$result_dir/cases.tsv"
+
+if ! [[ "$duration" =~ ^[1-9][0-9]*$ ]]; then
+    echo "LOWTIER_L2_IPERF_DURATION must be a positive integer" >&2
+    exit 2
+fi
+
+mkdir -p "$result_dir"
+
+IFS=',' read -r -a queue_counts <<< "$queue_matrix"
+if [[ "${#queue_counts[@]}" -eq 0 ]]; then
+    echo "LOWTIER_L2_QUEUE_MATRIX must contain at least one queue count" >&2
+    exit 2
+fi
+for queue_count in "${queue_counts[@]}"; do
+    if ! [[ "$queue_count" =~ ^[1-4]$ ]]; then
+        echo "queue count must be one, two, three, or four: $queue_count" >&2
+        exit 2
+    fi
+done
+
+IFS=',' read -r -a scenarios <<< "$scenario_matrix"
+for scenario in "${scenarios[@]}"; do
+    case "$scenario" in
+        direct-underlay|automatic-compact-l3|authorized-full-ethernet|relay-compact-l3)
+            ;;
+        *)
+            echo "unsupported benchmark scenario: $scenario" >&2
+            exit 2
+            ;;
+    esac
+done
+
+printf '%s\n' \
+    'case_id\tscenario\tmode\tqueue_count\tprotocol\tdirection\tstreams\toffered_rate\twall_time_ms\tiperf_json\tresource_a\tresource_b' \
+    >"$cases_file"
+
+now_ms() {
+    python3 -c 'import time; print(time.time_ns() // 1_000_000)'
+}
 
 cleanup() {
-    "${docker_cmd[@]}" rm -f "$node_a" "$node_b" >/dev/null 2>&1 || true
+    "${docker_cmd[@]}" rm -f "$node_a" "$node_b" "$node_relay" >/dev/null 2>&1 || true
     "${docker_cmd[@]}" network rm "$network_name" >/dev/null 2>&1 || true
 }
 
@@ -32,220 +82,298 @@ wait_for_interface() {
 }
 
 wait_for_ping() {
-    local destination=$1
+    local node=$1
+    local destination=$2
     local attempt
     for attempt in $(seq 1 30); do
-        if "${docker_cmd[@]}" exec "$node_a" ping -n -c 1 -W 1 "$destination" \
-            >/dev/null 2>&1; then
+        if "${docker_cmd[@]}" exec "$node" ping -n -c 1 -W 2 "$destination" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
     done
+    "${docker_cmd[@]}" exec "$node" cat /tmp/lowertier.log >&2 || true
     return 1
 }
 
-start_resource_sampler() {
+start_container() {
     local node=$1
-    local sample_count=$((duration + 1))
-    "${docker_cmd[@]}" exec -d "$node" sh -c '
-output=$1
-done_file=$2
-sample_count=$3
-node_name=$4
-pid=$(pidof lowertier-core | cut -d " " -f 1)
-: >"$output"
-rm -f "$done_file"
-for sample in $(seq 1 "$sample_count"); do
-    rss=$(sed -n "s/^VmRSS:[[:space:]]*\\([0-9]*\\).*/\\1/p" "/proc/$pid/status")
-    threads=$(sed -n "s/^Threads:[[:space:]]*\\([0-9]*\\).*/\\1/p" "/proc/$pid/status")
-    if [ -n "$rss" ] && [ -n "$threads" ]; then
-        printf "%s\t%s\t%s\t%s\n" "$sample" "$node_name" "$rss" "$threads" >>"$output"
-    fi
-    sleep 1
-done
-touch "$done_file"
-' sh /tmp/lowertier-resource-samples.tsv /tmp/lowertier-resource-done \
-        "$sample_count" "$node"
-}
-
-collect_resource_samples() {
-    local output=$1
-    local node
-    local attempt
-
-    printf 'sample\tnode\trss_kib\tthreads\n' >"$output"
-    for node in "$node_a" "$node_b"; do
-        for attempt in $(seq 1 $((duration + 20))); do
-            if "${docker_cmd[@]}" exec "$node" \
-                test -f /tmp/lowertier-resource-done; then
-                break
-            fi
-            sleep 1
-        done
-        "${docker_cmd[@]}" exec "$node" \
-            cat /tmp/lowertier-resource-samples.tsv >>"$output"
-    done
+    local underlay_ip=$2
+    "${docker_cmd[@]}" run -d --name "$node" --network "$network_name" \
+        --ip "$underlay_ip" --cap-add NET_ADMIN --device /dev/net/tun \
+        "$image_name" sleep infinity >/dev/null
 }
 
 start_core() {
     local node=$1
-    local overlay_ip=$2
-    local peer_url=${3:-}
+    local port_mode=$2
+    local overlay_ip=${3:-}
+    local peer_url=${4:-}
+    local disable_p2p=${5:-false}
+    local no_tun=${6:-false}
+    local relay_node=${7:-false}
     local args=(
         lowertier-core
         --network-name l2-benchmark
         --network-secret l2-benchmark-secret
-        --port-mode ethernet
-        --dev-name et0
-        --ipv4 "$overlay_ip/24"
+        --port-mode "$port_mode"
         --listeners udp://0.0.0.0:11010
         --disable-upnp true
+        --disable-p2p "$disable_p2p"
     )
-    if [[ "$secure_mode" == 1 ]]; then
-        args+=(--secure-mode)
+    if [[ -n "$overlay_ip" ]]; then
+        args+=(--dev-name et0 --ipv4 "$overlay_ip/24")
+    fi
+    if [[ "$no_tun" == true ]]; then
+        args+=(--no-tun true)
+    fi
+    if [[ "$relay_node" == true ]]; then
+        args+=(--relay-network-whitelist l2-benchmark)
     fi
     if [[ -n "$peer_url" ]]; then
         args+=(--peers "$peer_url")
     fi
     "${docker_cmd[@]}" exec -d "$node" \
-        sh -c 'exec "$@" >/tmp/lowertier.log 2>&1' sh "${args[@]}"
+        sh -c 'export LOWTIER_TUN_QUEUES="$1"; shift; exec "$@" >/tmp/lowertier.log 2>&1' \
+        sh "$queue_count" "${args[@]}"
+}
+
+start_resource_sampler() {
+    local node=$1
+    local case_id=$2
+    local resource_file="/tmp/lowertier-${case_id}-resources.tsv"
+    local done_file="/tmp/lowertier-${case_id}-resources.done"
+    local stop_file="/tmp/lowertier-${case_id}-resources.stop"
+    "${docker_cmd[@]}" exec "$node" rm -f "$resource_file" "$done_file" "$stop_file"
+    "${docker_cmd[@]}" exec -d "$node" sh -c '
+resource_file=$1
+done_file=$2
+stop_file=$3
+sample=0
+previous_cpu=0
+previous_time=0
+
+cgroup_cpu_usec() {
+    if [ -r /sys/fs/cgroup/cpu.stat ]; then
+        awk "\$1 == \"usage_usec\" {print \$2; exit}" /sys/fs/cgroup/cpu.stat
+    elif [ -r /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then
+        awk "{print int(\$1 / 1000)}" /sys/fs/cgroup/cpuacct/cpuacct.usage
+    else
+        printf "0"
+    fi
+}
+
+process_rss_kib() {
+    awk "/^VmRSS:/ {rss += \$2} END {print rss + 0}" /proc/[0-9]*/status 2>/dev/null || printf "0"
+}
+
+process_threads() {
+    awk "/^Threads:/ {threads += \$2} END {print threads + 0}" /proc/[0-9]*/status 2>/dev/null || printf "0"
+}
+
+interface_stats() {
+    awk -v interface_name=eth0 "\$1 == interface_name \":\" {print \$2, \$3, \$10, \$11; exit}" /proc/net/dev
+}
+
+: >"$resource_file"
+printf "sample\tepoch_ms\tcpu_pct\trss_kib\tthreads\trx_bytes\ttx_bytes\trx_packets\ttx_packets\n" >"$resource_file"
+while [ ! -f "$stop_file" ]; do
+    now=$(date +%s%3N)
+    cpu=$(cgroup_cpu_usec)
+    if [ "$previous_time" -gt 0 ] && [ "$cpu" -ge "$previous_cpu" ]; then
+        elapsed=$((now - previous_time))
+        cpu_delta=$((cpu - previous_cpu))
+        if [ "$elapsed" -gt 0 ]; then
+            cpu_pct=$(awk -v delta="$cpu_delta" -v elapsed="$elapsed" "BEGIN {printf \"%.6f\", delta / (elapsed * 1000.0) * 100.0}")
+        else
+            cpu_pct=0
+        fi
+    else
+        cpu_pct=0
+    fi
+    read -r rx_bytes rx_packets tx_bytes tx_packets <<EOF
+$(interface_stats)
+EOF
+    rx_bytes=${rx_bytes:-0}
+    rx_packets=${rx_packets:-0}
+    tx_bytes=${tx_bytes:-0}
+    tx_packets=${tx_packets:-0}
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$sample" "$now" "$cpu_pct" "$(process_rss_kib)" "$(process_threads)" \
+        "$rx_bytes" "$tx_bytes" "$rx_packets" "$tx_packets" >>"$resource_file"
+    sample=$((sample + 1))
+    previous_cpu=$cpu
+    previous_time=$now
+    sleep 0.2
+done
+touch "$done_file"
+' sh "$resource_file" "$done_file" "$stop_file"
+}
+
+stop_resource_sampler() {
+    local node=$1
+    local case_id=$2
+    local local_file=$3
+    local resource_file="/tmp/lowertier-${case_id}-resources.tsv"
+    local done_file="/tmp/lowertier-${case_id}-resources.done"
+    local stop_file="/tmp/lowertier-${case_id}-resources.stop"
+    local attempt
+
+    "${docker_cmd[@]}" exec "$node" touch "$stop_file"
+    for attempt in $(seq 1 100); do
+        if "${docker_cmd[@]}" exec "$node" test -f "$done_file"; then
+            break
+        fi
+        sleep 0.1
+    done
+    "${docker_cmd[@]}" cp "$node:$resource_file" "$local_file"
+}
+
+start_iperf_server() {
+    "${docker_cmd[@]}" exec -d "$node_b" iperf3 -s -D -p 5201
+    sleep 1
+}
+
+run_iperf_case() {
+    local scenario=$1
+    local mode=$2
+    local queue_count=$3
+    local target_ip=$4
+    local protocol=$5
+    local direction=$6
+    local streams=$7
+    local case_id="${scenario}-q${queue_count}-${protocol}-${direction}-s${streams}"
+    local iperf_json="$result_dir/${case_id}.iperf.json"
+    local iperf_stderr="$result_dir/${case_id}.iperf.stderr"
+    local resource_a="$result_dir/${case_id}.a.resources.tsv"
+    local resource_b="$result_dir/${case_id}.b.resources.tsv"
+    local started_ms
+    local finished_ms
+    local wall_time_ms
+    local offered_rate=0
+    local -a iperf_args
+
+    if [[ "$protocol" == tcp ]]; then
+        iperf_args=(iperf3 -c "$target_ip" -p 5201 -t "$duration" -O 1 -P "$streams" -J)
+    else
+        iperf_args=(iperf3 -u -b "$udp_rate" -c "$target_ip" -p 5201 -t "$duration" -O 1 -P "$streams" -J)
+        offered_rate="$udp_rate"
+    fi
+    if [[ "$direction" == reverse ]]; then
+        iperf_args+=(-R)
+    fi
+
+    start_resource_sampler "$node_a" "$case_id"
+    start_resource_sampler "$node_b" "$case_id"
+    started_ms=$(now_ms)
+    if ! "${docker_cmd[@]}" exec "$node_a" "${iperf_args[@]}" \
+        >"$iperf_json" 2>"$iperf_stderr"; then
+        stop_resource_sampler "$node_a" "$case_id" "$resource_a" || true
+        stop_resource_sampler "$node_b" "$case_id" "$resource_b" || true
+        echo "iperf3 failed for $case_id; see $iperf_stderr" >&2
+        return 1
+    fi
+    finished_ms=$(now_ms)
+    wall_time_ms=$((finished_ms - started_ms))
+    stop_resource_sampler "$node_a" "$case_id" "$resource_a"
+    stop_resource_sampler "$node_b" "$case_id" "$resource_b"
+
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$case_id" "$scenario" "$mode" "$queue_count" "$protocol" "$direction" \
+        "$streams" "$offered_rate" "$wall_time_ms" "${iperf_json#$result_dir/}" \
+        "${resource_a#$result_dir/}" "${resource_b#$result_dir/}" >>"$cases_file"
+}
+
+run_case_matrix() {
+    local scenario=$1
+    local mode=$2
+    local queue_count=$3
+    local target_ip=$4
+    local streams
+    local direction
+
+    for streams in 1 8; do
+        for direction in forward reverse; do
+            run_iperf_case "$scenario" "$mode" "$queue_count" "$target_ip" \
+                tcp "$direction" "$streams"
+        done
+    done
+    for direction in forward reverse; do
+        run_iperf_case "$scenario" "$mode" "$queue_count" "$target_ip" \
+            udp "$direction" 1
+    done
+}
+
+run_scenario() {
+    local scenario=$1
+    local queue_count=$2
+    local mode
+    local topology
+    local target_ip
+
+    case "$scenario" in
+        direct-underlay)
+            mode=underlay
+            topology=direct
+            target_ip="$underlay_b"
+            ;;
+        automatic-compact-l3)
+            mode=auto
+            topology=direct
+            target_ip="$overlay_b"
+            ;;
+        authorized-full-ethernet)
+            mode=ethernet
+            topology=direct
+            target_ip="$overlay_b"
+            ;;
+        relay-compact-l3)
+            mode=auto
+            topology=relay
+            target_ip="$overlay_b"
+            ;;
+    esac
+
+    echo "Benchmark scenario=$scenario queue_count=$queue_count"
+    cleanup
+    "${docker_cmd[@]}" network create --driver bridge --subnet 172.31.77.0/24 \
+        "$network_name" >/dev/null
+    start_container "$node_a" "$underlay_a"
+    start_container "$node_b" "$underlay_b"
+
+    if [[ "$topology" == relay ]]; then
+        start_container "$node_relay" 172.31.77.4
+        start_core "$node_relay" routed "" "" false true true
+        start_core "$node_a" "$mode" "$overlay_a" "udp://$node_relay:11010" true
+        start_core "$node_b" "$mode" "$overlay_b" "udp://$node_relay:11010" true
+    elif [[ "$scenario" != direct-underlay ]]; then
+        start_core "$node_a" "$mode" "$overlay_a"
+        start_core "$node_b" "$mode" "$overlay_b" "udp://$node_a:11010"
+    fi
+
+    if [[ "$scenario" != direct-underlay ]]; then
+        wait_for_interface "$node_a"
+        wait_for_interface "$node_b"
+        wait_for_ping "$node_a" "$overlay_b"
+        wait_for_ping "$node_b" "$overlay_a"
+        if [[ "$scenario" == authorized-full-ethernet ]]; then
+            "${docker_cmd[@]}" exec "$node_a" ip -d link show et0 | grep -q tap
+            "${docker_cmd[@]}" exec "$node_b" ip -d link show et0 | grep -q tap
+        fi
+    fi
+    start_iperf_server
+    run_case_matrix "$scenario" "$mode" "$queue_count" "$target_ip"
 }
 
 trap cleanup EXIT INT TERM
-mkdir -p "$result_dir"
-cleanup
-"${docker_cmd[@]}" network create --driver bridge --subnet 172.31.77.0/24 \
-    "$network_name" >/dev/null
 
-"${docker_cmd[@]}" run -d --name "$node_a" --network "$network_name" \
-    --ip 172.31.77.2 --cap-add NET_ADMIN --device /dev/net/tun \
-    "$image_name" sleep infinity >/dev/null
-"${docker_cmd[@]}" run -d --name "$node_b" --network "$network_name" \
-    --ip 172.31.77.3 --cap-add NET_ADMIN --device /dev/net/tun \
-    "$image_name" sleep infinity >/dev/null
-
-start_core "$node_a" 10.88.0.1
-start_core "$node_b" 10.88.0.2 "udp://$node_a:11010"
-wait_for_interface "$node_a"
-wait_for_interface "$node_b"
-wait_for_ping 10.88.0.2
-
-"${docker_cmd[@]}" exec "$node_a" ping -n -c "$ping_count" -i 0.01 172.31.77.3 \
-    >"$result_dir/direct-underlay-ping.txt"
-"${docker_cmd[@]}" exec -d "$node_b" python3 /usr/local/bin/traffic_signature_scan.py \
-    capture --interface eth0 --udp-port 11010 --count 128 --timeout 20 \
-    --output /tmp/steady-state-traffic.hex
-sleep 0.2
-"${docker_cmd[@]}" exec "$node_a" ping -n -c "$ping_count" -i 0.01 10.88.0.2 \
-    >"$result_dir/overlay-tap-ping.txt"
-
-for attempt in $(seq 1 100); do
-    if "${docker_cmd[@]}" exec "$node_b" test -f /tmp/steady-state-traffic.hex; then
-        break
-    fi
-    sleep 0.1
+for queue_count in "${queue_counts[@]}"; do
+    for scenario in "${scenarios[@]}"; do
+        run_scenario "$scenario" "$queue_count"
+    done
 done
-"${docker_cmd[@]}" cp "$node_b:/tmp/steady-state-traffic.hex" \
-    "$result_dir/steady-state-traffic.hex"
-python3 "$repo_root/script/traffic_signature_scan.py" scan \
-    --input "$result_dir/steady-state-traffic.hex" \
-    --output "$result_dir/steady-state-signature.json" \
-    --strip-bytes 8 \
-    --forbid lowertier \
-    --forbid l2-benchmark \
-    --forbid l2-benchmark-secret \
-    --forbid ETL1 \
-    --max-common-edge 0
 
-"${docker_cmd[@]}" exec "$node_b" iperf3 -s -D -p 5201
-"${docker_cmd[@]}" exec "$node_a" iperf3 -c 172.31.77.3 -p 5201 \
-    -t "$duration" -O 1 -P 4 -J >"$result_dir/direct-underlay-iperf.json"
-start_resource_sampler "$node_a"
-start_resource_sampler "$node_b"
-"${docker_cmd[@]}" exec "$node_a" iperf3 -c 10.88.0.2 -p 5201 \
-    -t "$duration" -O 1 -P 4 -J >"$result_dir/overlay-tap-iperf.json"
-collect_resource_samples "$result_dir/resource-samples.tsv"
-
-python3 - "$result_dir" "$secure_mode" <<'PY'
-from __future__ import annotations
-
-import json
-import math
-import re
-import statistics
-import sys
-from pathlib import Path
-
-
-result_dir = Path(sys.argv[1])
-secure_mode = sys.argv[2]
-
-
-def ping_samples(path: Path) -> list[float]:
-    samples = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = re.search(r"time[=<]([0-9.]+) ms", line)
-        if match:
-            samples.append(float(match.group(1)))
-    if not samples:
-        raise RuntimeError(f"no ping samples in {path}")
-    return sorted(samples)
-
-
-def percentile(samples: list[float], value: float) -> float:
-    index = max(0, math.ceil(len(samples) * value) - 1)
-    return samples[index]
-
-
-def throughput(path: Path) -> float:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return float(data["end"]["sum_received"]["bits_per_second"])
-
-
-direct = ping_samples(result_dir / "direct-underlay-ping.txt")
-overlay = ping_samples(result_dir / "overlay-tap-ping.txt")
-direct_bps = throughput(result_dir / "direct-underlay-iperf.json")
-overlay_bps = throughput(result_dir / "overlay-tap-iperf.json")
-
-rows = [("sample_count", len(direct), len(overlay), len(overlay) - len(direct))]
-for name, function in (
-    ("median_rtt_ms", statistics.median),
-    ("p95_rtt_ms", lambda values: percentile(values, 0.95)),
-    ("p99_rtt_ms", lambda values: percentile(values, 0.99)),
-    ("maximum_rtt_ms", max),
-):
-    direct_value = function(direct)
-    overlay_value = function(overlay)
-    rows.append((name, direct_value, overlay_value, overlay_value - direct_value))
-rows.append(("throughput_bps", direct_bps, overlay_bps, overlay_bps - direct_bps))
-rows.append(("throughput_ratio", 1.0, overlay_bps / direct_bps, overlay_bps / direct_bps - 1.0))
-
-with (result_dir / "summary.tsv").open("w", encoding="utf-8") as output:
-    output.write("metric\tdirect-underlay\toverlay-tap\toverlay-difference\n")
-    for row in rows:
-        output.write("\t".join(str(value) for value in row) + "\n")
-
-(result_dir / "environment.txt").write_text(
-    f"secure_mode={secure_mode}\n", encoding="utf-8"
-)
-
-resource_rows = []
-for line in (result_dir / "resource-samples.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-    sample, node, rss_kib, threads = line.split("\t")
-    resource_rows.append((int(sample), node, int(rss_kib), int(threads)))
-
-with (result_dir / "resources.tsv").open("w", encoding="utf-8") as output:
-    output.write("node\tsample_count\tmean_rss_kib\tpeak_rss_kib\tmean_threads\tpeak_threads\n")
-    for node in sorted({row[1] for row in resource_rows}):
-        node_rows = [row for row in resource_rows if row[1] == node]
-        rss_values = [row[2] for row in node_rows]
-        thread_values = [row[3] for row in node_rows]
-        output.write(
-            f"{node}\t{len(node_rows)}\t{statistics.mean(rss_values):.2f}\t{max(rss_values)}\t"
-            f"{statistics.mean(thread_values):.2f}\t{max(thread_values)}\n"
-        )
-PY
-
-cat "$result_dir/summary.tsv"
-cat "$result_dir/resources.tsv"
+python3 "$repo_root/script/colima-l2/benchmark_report.py" "$result_dir"
+cat "$result_dir/results.tsv"
+printf "secure_mode=mandatory\ndocker_context=%s\nimage=%s\nduration_seconds=%s\nqueue_matrix=%s\n" \
+    "$docker_context" "$image_name" "$duration" "$queue_matrix" >"$result_dir/environment.txt"
 echo "Results: $result_dir"

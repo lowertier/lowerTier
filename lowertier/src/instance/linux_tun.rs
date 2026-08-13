@@ -2,7 +2,7 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -11,9 +11,9 @@ use futures::{Sink, Stream, ready, stream::FuturesUnordered};
 use quincy_tun::{AsyncDevice, GROTable, VIRTIO_NET_HDR_LEN};
 
 use crate::tunnel::{
-    BatchStreamItem, Tunnel, TunnelError,
+    BatchStreamItem, PacketBatchSink, PacketBatchStream, SplitIngressTunnel, SplitTunnel, Tunnel,
+    TunnelError,
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-    common::BatchTunnelWrapper,
     packet_def::{ReusableBufferPool, TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
 };
 
@@ -418,6 +418,49 @@ impl Sink<PacketBatch> for LinuxTunSink {
     }
 }
 
+/// Owns the Linux TUN ingress queues and one shared egress sink.
+///
+/// The owner keeps each kernel queue as an independent stream. Generic tunnel
+/// users can still request one merged stream through `split`.
+struct LinuxTunTunnel {
+    parts: Mutex<Option<SplitIngressTunnel>>,
+}
+
+impl LinuxTunTunnel {
+    fn new(
+        streams: Vec<Pin<Box<dyn PacketBatchStream>>>,
+        sink: Pin<Box<dyn PacketBatchSink>>,
+    ) -> Self {
+        assert!(!streams.is_empty(), "Linux virtual NIC needs one queue");
+        Self {
+            parts: Mutex::new(Some((streams, sink))),
+        }
+    }
+
+    fn take_parts(&self) -> SplitIngressTunnel {
+        self.parts
+            .lock()
+            .expect("Linux TUN tunnel owner lock is not poisoned")
+            .take()
+            .expect("a Linux TUN tunnel can only be split once")
+    }
+}
+
+impl Tunnel for LinuxTunTunnel {
+    fn split(&self) -> SplitTunnel {
+        let (streams, sink) = self.take_parts();
+        (Box::pin(futures::stream::select_all(streams)), sink)
+    }
+
+    fn split_ingress_queues(&self) -> SplitIngressTunnel {
+        self.take_parts()
+    }
+
+    fn info(&self) -> Option<crate::proto::common::TunnelInfo> {
+        None
+    }
+}
+
 pub(crate) fn wrap_devices(devices: Vec<AsyncDevice>, l2_tun: bool, mtu: usize) -> Box<dyn Tunnel> {
     assert!(!devices.is_empty(), "Linux virtual NIC needs one queue");
     let devices = devices.into_iter().map(Arc::new).collect::<Vec<_>>();
@@ -426,26 +469,136 @@ pub(crate) fn wrap_devices(devices: Vec<AsyncDevice>, l2_tun: bool, mtu: usize) 
         .map(|device| {
             Box::pin(LinuxTunStream {
                 state: ReadState::new(device.clone(), l2_tun, mtu),
-            }) as Pin<Box<dyn Stream<Item = BatchStreamItem> + Send>>
+            }) as Pin<Box<dyn PacketBatchStream>>
         })
         .collect::<Vec<_>>();
-    let stream = futures::stream::select_all(streams);
-    let sink = LinuxTunSink::new(devices, l2_tun);
-    Box::new(BatchTunnelWrapper::new(stream, sink, None))
+    let sink: Pin<Box<dyn PacketBatchSink>> = Box::pin(LinuxTunSink::new(devices, l2_tun));
+    Box::new(LinuxTunTunnel::new(streams, sink))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use futures::{Sink, Stream, StreamExt, stream};
+
     use crate::tunnel::{
-        PacketBatchSink,
+        BatchStreamItem, PacketBatchSink, PacketBatchStream, Tunnel,
+        batch::PacketBatch,
         packet_def::{ZCPacket, ZCPacketType},
     };
+
+    struct TestSink;
+
+    impl Sink<crate::tunnel::batch::PacketBatch> for TestSink {
+        type Error = crate::tunnel::TunnelError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            self: Pin<&mut Self>,
+            _item: crate::tunnel::batch::PacketBatch,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn linux_tap_writer_accepts_owned_packet_batches() {
         fn assert_batch_sink<T: PacketBatchSink>() {}
 
         assert_batch_sink::<super::LinuxTunSink>();
+    }
+
+    #[test]
+    fn linux_tunnel_exposes_one_ingress_stream_per_queue() {
+        let streams = (0..3)
+            .map(|_| {
+                Box::pin(stream::empty::<BatchStreamItem>()) as Pin<Box<dyn PacketBatchStream>>
+            })
+            .collect();
+        let sink: Pin<Box<dyn PacketBatchSink>> = Box::pin(TestSink);
+        let tunnel = super::LinuxTunTunnel::new(streams, sink);
+
+        let (streams, _sink) = tunnel.split_ingress_queues();
+        assert_eq!(streams.len(), 3);
+    }
+
+    #[test]
+    fn generic_split_merges_linux_ingress_streams() {
+        let streams = (0..2)
+            .map(|_| {
+                Box::pin(stream::empty::<BatchStreamItem>()) as Pin<Box<dyn PacketBatchStream>>
+            })
+            .collect();
+        let sink: Pin<Box<dyn PacketBatchSink>> = Box::pin(TestSink);
+        let tunnel = super::LinuxTunTunnel::new(streams, sink);
+
+        let (_stream, _sink) = tunnel.split();
+    }
+
+    #[test]
+    fn default_ingress_split_keeps_one_stream() {
+        let tunnel = crate::tunnel::common::BatchTunnelWrapper::new(
+            stream::empty::<BatchStreamItem>(),
+            TestSink,
+            None,
+        );
+        let (streams, _sink) = tunnel.split_ingress_queues();
+        assert_eq!(streams.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingress_queue_order_is_preserved() {
+        let streams = (0..2)
+            .map(|queue| {
+                let batches = (0..3)
+                    .map(|sequence| {
+                        Ok(PacketBatch::singleton(ZCPacket::new_with_payload(&[
+                            queue as u8,
+                            sequence as u8,
+                        ])))
+                    })
+                    .collect::<Vec<_>>();
+                Box::pin(stream::iter(batches)) as Pin<Box<dyn PacketBatchStream>>
+            })
+            .collect();
+        let sink: Pin<Box<dyn PacketBatchSink>> = Box::pin(TestSink);
+        let tunnel = super::LinuxTunTunnel::new(streams, sink);
+        let (mut streams, _sink) = tunnel.split_ingress_queues();
+
+        for (queue, stream) in streams.iter_mut().enumerate() {
+            for sequence in 0..3 {
+                let batch = stream.next().await.unwrap().unwrap();
+                assert_eq!(
+                    batch.iter().next().unwrap().payload(),
+                    &[queue as u8, sequence]
+                );
+            }
+            assert!(stream.next().await.is_none());
+        }
     }
 
     #[test]

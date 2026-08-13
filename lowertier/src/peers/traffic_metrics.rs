@@ -425,6 +425,24 @@ impl TrafficMetricRecorder {
             .await;
     }
 
+    /// Record a transmit batch without resolving a cold peer label.
+    ///
+    /// The caller must await `record_tx_batch` when this returns `false`.
+    pub(crate) fn try_record_tx_batch(
+        &self,
+        peer_id: PeerId,
+        packet_type: u8,
+        bytes: u64,
+        packets: u64,
+    ) -> bool {
+        if peer_id == self.my_peer_id {
+            return true;
+        }
+        self.tx_metrics
+            .select(traffic_kind(packet_type))
+            .try_record_batch_cached(peer_id, bytes, packets)
+    }
+
     pub(crate) async fn record_rx(&self, peer_id: PeerId, packet_type: u8, bytes: u64) {
         self.record_rx_batch(peer_id, packet_type, bytes, 1).await;
     }
@@ -503,6 +521,8 @@ pub(crate) fn route_peer_info_instance_id(route_peer_info: &RoutePeerInfo) -> Op
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::common::stats_manager::LabelSet;
 
@@ -700,6 +720,110 @@ mod tests {
         metrics.clear_peer_cache();
 
         assert_eq!(metrics.peer_cache_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn transmit_fast_path_records_cold_and_warm_batches_exactly() {
+        let stats_mgr = Arc::new(StatsManager::new());
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let resolver_calls_for_metrics = resolver_calls.clone();
+        let metrics = TrafficMetricRecorder::new(
+            1,
+            Arc::new(LogicalTrafficMetrics::new(
+                stats_mgr.clone(),
+                "default".to_string(),
+                MetricName::TrafficBytesTx,
+                MetricName::TrafficPacketsTx,
+                MetricName::TrafficBytesTxByInstance,
+                MetricName::TrafficPacketsTxByInstance,
+                InstanceLabelKind::To,
+            )),
+            Arc::new(LogicalTrafficMetrics::new(
+                stats_mgr.clone(),
+                "default".to_string(),
+                MetricName::TrafficControlBytesTx,
+                MetricName::TrafficControlPacketsTx,
+                MetricName::TrafficControlBytesTxByInstance,
+                MetricName::TrafficControlPacketsTxByInstance,
+                InstanceLabelKind::To,
+            )),
+            Arc::new(LogicalTrafficMetrics::new(
+                stats_mgr.clone(),
+                "default".to_string(),
+                MetricName::TrafficBytesRx,
+                MetricName::TrafficPacketsRx,
+                MetricName::TrafficBytesRxByInstance,
+                MetricName::TrafficPacketsRxByInstance,
+                InstanceLabelKind::From,
+            )),
+            Arc::new(LogicalTrafficMetrics::new(
+                stats_mgr.clone(),
+                "default".to_string(),
+                MetricName::TrafficControlBytesRx,
+                MetricName::TrafficControlPacketsRx,
+                MetricName::TrafficControlBytesRxByInstance,
+                MetricName::TrafficControlPacketsRxByInstance,
+                InstanceLabelKind::From,
+            )),
+            move |_peer_id| {
+                resolver_calls_for_metrics.fetch_add(1, Ordering::SeqCst);
+                async { Some("instance-a".to_string()) }
+            },
+        );
+        let peer_id = 42;
+
+        // A cold try must not update counters or invoke the resolver.
+        assert!(!metrics.try_record_tx_batch(peer_id, PacketType::Data as u8, 100, 2));
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            stats_mgr
+                .get_metric(MetricName::TrafficBytesTx, &network_labels("default"),)
+                .is_none()
+        );
+
+        // The cold fallback resolves one label and records the full batch.
+        metrics
+            .record_tx_batch(peer_id, PacketType::Data as u8, 100, 2)
+            .await;
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+
+        // A warm try updates counters synchronously and performs no lookup.
+        assert!(metrics.try_record_tx_batch(peer_id, PacketType::Data as u8, 200, 3));
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stats_mgr
+                .get_metric(MetricName::TrafficBytesTx, &network_labels("default"))
+                .unwrap()
+                .value,
+            300
+        );
+        assert_eq!(
+            stats_mgr
+                .get_metric(MetricName::TrafficPacketsTx, &network_labels("default"))
+                .unwrap()
+                .value,
+            5
+        );
+        assert_eq!(
+            stats_mgr
+                .get_metric(
+                    MetricName::TrafficBytesTxByInstance,
+                    &to_instance_labels("default", "instance-a"),
+                )
+                .unwrap()
+                .value,
+            300
+        );
+        assert_eq!(
+            stats_mgr
+                .get_metric(
+                    MetricName::TrafficPacketsTxByInstance,
+                    &to_instance_labels("default", "instance-a"),
+                )
+                .unwrap()
+                .value,
+            5
+        );
     }
 
     #[tokio::test]

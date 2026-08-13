@@ -5,9 +5,10 @@ use std::{
     pin::Pin,
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
+    time::Instant,
 };
 
 use crate::{
@@ -45,6 +46,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::bytes::Bytes;
+use tokio_util::sync::CancellationToken;
 #[cfg(target_os = "windows")]
 use tokio_util::task::AbortOnDropHandle;
 use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
@@ -85,11 +87,13 @@ fn restore_compact_ip_for_tap(
         Some(6) => 0x86dd_u16,
         _ => return Err("compact packet is not IPv4 or IPv6"),
     };
+    let destination_mac = crate::instance::l2_tun::ip_destination_mac(packet.payload(), local_mac)
+        .ok_or("compact packet has an invalid IP destination")?;
     let mut ethernet_header = [0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN];
-    ethernet_header[..6].copy_from_slice(&local_mac);
+    ethernet_header[..6].copy_from_slice(&destination_mac);
     ethernet_header[6..12].copy_from_slice(&source_mac);
     ethernet_header[12..14].copy_from_slice(&ether_type.to_be_bytes());
-    packet.prepend_payload(&ethernet_header)
+    packet.prepend_payload_preserving_flow_hash(&ethernet_header)
 }
 
 struct HybridTapSink {
@@ -1173,6 +1177,7 @@ pub struct NicCtx {
 
     nic: Arc<Mutex<VirtualNic>>,
     tasks: JoinSet<()>,
+    multicast_expiry_task_started: bool,
     direct_nic_endpoint: Option<Arc<DirectNicEndpoint>>,
 
     #[cfg(target_os = "windows")]
@@ -1195,11 +1200,39 @@ impl NicCtx {
 
             nic: Arc::new(Mutex::new(VirtualNic::new(global_ctx))),
             tasks: JoinSet::new(),
+            multicast_expiry_task_started: false,
             direct_nic_endpoint: None,
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
         }
+    }
+
+    fn start_multicast_membership_expiry_task(&mut self) {
+        if self.multicast_expiry_task_started {
+            return;
+        }
+        self.multicast_expiry_task_started = true;
+        let global_ctx = self.global_ctx.clone();
+        self.tasks.spawn(async move {
+            loop {
+                let notify = global_ctx.multicast_membership_notify();
+                let notified = notify.notified();
+                let deadline = global_ctx.multicast_membership_next_expiry();
+                tokio::select! {
+                    biased;
+                    _ = notified => {},
+                    _ = async {
+                        let Some(deadline) = deadline else {
+                            std::future::pending::<()>().await;
+                            return;
+                        };
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        global_ctx.expire_multicast_memberships(Instant::now());
+                    } => {},
+                }
+            }
+        });
     }
 
     pub async fn ifname(&self) -> Option<String> {
@@ -1410,6 +1443,7 @@ impl NicCtx {
         }
 
         if VirtualNic::uses_hybrid_mode(&flags) {
+            Self::learn_hybrid_ip_multicast_membership(ret.payload(), mgr);
             let Some((destination, local_source)) = mgr.routed_packet_destination(&ret) else {
                 tracing::warn!(?ret, "[USER_PACKET] invalid automatic IP packet");
                 return;
@@ -1491,6 +1525,9 @@ impl NicCtx {
         }
 
         let result = if VirtualNic::uses_hybrid_mode(&flags) {
+            for packet in &batch {
+                Self::learn_hybrid_ip_multicast_membership(packet.payload(), mgr);
+            }
             mgr.send_msg_by_hybrid_ip_batch(batch).await
         } else {
             mgr.send_msg_by_ip_batch(batch).await
@@ -1502,139 +1539,229 @@ impl NicCtx {
 
     async fn handle_hybrid_control_frame(packet: &ZCPacket, mgr: &PeerManager) -> bool {
         let frame = packet.payload();
-        let Some(ether_type) = frame.get(12..14) else {
+        let Some(request) = crate::instance::l2_tun::validated_neighbor_request(frame) else {
             return false;
         };
-        let reply = match ether_type {
-            [0x08, 0x06] => {
-                let Some(target) = frame
-                    .get(38..42)
-                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                    .map(Ipv4Addr::from)
-                else {
-                    return false;
-                };
+        let peer_id = match request.target() {
+            crate::instance::l2_tun::NeighborTarget::Ipv4(target) => {
                 let Some(peer_id) = mgr.get_route().get_peer_id_by_ipv4(&target).await else {
                     return false;
                 };
-                crate::instance::l2_tun::arp_reply_for_known_ipv4(frame, peer_id, target)
-                    .map(|reply| reply.to_vec())
+                peer_id
             }
-            [0x86, 0xdd] => {
-                let Some(target) = frame
-                    .get(62..78)
-                    .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
-                    .map(Ipv6Addr::from)
-                else {
-                    return false;
-                };
+            crate::instance::l2_tun::NeighborTarget::Ipv6(target) => {
                 let Some(peer_id) = mgr.get_route().get_peer_id_by_ipv6(&target).await else {
                     return false;
                 };
-                crate::instance::l2_tun::ndp_reply_for_known_ipv6(frame, peer_id, target)
-                    .map(|reply| reply.to_vec())
+                peer_id
             }
-            _ => None,
         };
-        let Some(reply) = reply else {
-            return false;
-        };
+        let reply = request.reply(peer_id);
         let mut reply = ZCPacket::new_with_payload(&reply);
         reply.fill_peer_manager_hdr(
             mgr.my_peer_id(),
             mgr.my_peer_id(),
             crate::tunnel::packet_def::PacketType::Ethernet as u8,
         );
-        if let Err(error) = mgr.inject_packet_to_nic(reply).await {
-            tracing::debug!(?error, "local hybrid neighbor reply failed");
+        match mgr.inject_packet_to_nic(reply).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::debug!(?error, "local hybrid neighbor reply failed");
+                false
+            }
         }
-        true
     }
 
     fn learn_hybrid_multicast_membership(frame: &[u8], mgr: &PeerManager) {
-        const MAX_GROUPS: usize = 256;
-        let updates = crate::instance::l2_tun::multicast_membership_updates(frame);
+        let updates = crate::instance::l2_tun::multicast_membership_updates_with_reporter(frame);
+        Self::apply_hybrid_multicast_membership_updates(updates, mgr);
+    }
+
+    fn learn_hybrid_ip_multicast_membership(packet: &[u8], mgr: &PeerManager) {
+        let updates =
+            crate::instance::l2_tun::multicast_membership_updates_from_ip_with_reporter(packet);
+        Self::apply_hybrid_multicast_membership_updates(updates, mgr);
+    }
+
+    fn apply_hybrid_multicast_membership_updates(
+        updates: Vec<(
+            crate::common::global_ctx::MulticastReporterKey,
+            std::net::IpAddr,
+            bool,
+        )>,
+        mgr: &PeerManager,
+    ) {
         if updates.is_empty() {
             return;
         }
         let global_ctx = mgr.get_global_ctx_ref();
-        let mut groups = global_ctx.get_multicast_groups();
-        let mut changed = false;
-        for (group, joined) in updates {
-            if joined {
-                if groups.len() < MAX_GROUPS || groups.contains(&group) {
-                    changed |= groups.insert(group);
+        let now = Instant::now();
+        let changed = global_ctx.update_multicast_memberships(&updates, now);
+        if changed {
+            global_ctx.issue_event(GlobalCtxEvent::MulticastGroupsUpdated);
+        }
+    }
+
+    fn report_nic_ingress_failure(
+        mgr: &PeerManager,
+        close_notifier: &Notify,
+        cancellation: &CancellationToken,
+        reported: &AtomicBool,
+        error: Option<&TunnelError>,
+    ) {
+        if !Self::claim_nic_ingress_failure(reported) {
+            cancellation.cancel();
+            return;
+        }
+        if let Some(error) = error {
+            mgr.get_global_ctx()
+                .set_tun_device_error(format!("TUN read failed: {error}"));
+            tracing::error!(?error, "read from nic failed");
+        } else {
+            mgr.get_global_ctx()
+                .set_tun_device_error("TUN input stream closed".to_owned());
+            tracing::error!("nic closed when receiving from it");
+        }
+        cancellation.cancel();
+        close_notifier.notify_one();
+    }
+
+    fn claim_nic_ingress_failure(reported: &AtomicBool) -> bool {
+        !reported.swap(true, Ordering::AcqRel)
+    }
+
+    async fn run_nic_ingress_worker(
+        mut stream: Pin<Box<dyn PacketBatchStream>>,
+        mgr: Arc<PeerManager>,
+        close_notifier: Arc<Notify>,
+        cancellation: CancellationToken,
+        reported: Arc<AtomicBool>,
+    ) {
+        let disable_batching = std::env::var_os("LOWTIER_DEBUG_DISABLE_PACKET_BATCH").is_some()
+            || std::env::var_os("LOWTIER_DEBUG_DISABLE_NIC_BATCH").is_some();
+
+        if disable_batching {
+            loop {
+                let Some(result) = (tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => None,
+                    result = stream.next() => result,
+                }) else {
+                    if !cancellation.is_cancelled() {
+                        Self::report_nic_ingress_failure(
+                            mgr.as_ref(),
+                            close_notifier.as_ref(),
+                            &cancellation,
+                            reported.as_ref(),
+                            None,
+                        );
+                    }
+                    return;
+                };
+
+                match result {
+                    Ok(batch) => {
+                        for packet in batch {
+                            tokio::select! {
+                                biased;
+                                _ = cancellation.cancelled() => return,
+                                _ = Self::do_forward_nic_to_peers(packet, mgr.as_ref()) => {}
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if !cancellation.is_cancelled() {
+                            Self::report_nic_ingress_failure(
+                                mgr.as_ref(),
+                                close_notifier.as_ref(),
+                                &cancellation,
+                                reported.as_ref(),
+                                Some(&error),
+                            );
+                        }
+                        return;
+                    }
                 }
-            } else {
-                changed |= groups.remove(&group);
             }
         }
-        if changed {
-            global_ctx.set_multicast_groups(groups);
+
+        let record_batch_stats = std::env::var_os("LOWTIER_DEBUG_BATCH_STATS").is_some();
+        let mut pending = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return,
+            result = stream.next() => result,
+        };
+        while let Some(result) = pending {
+            let batch = match result {
+                Ok(batch) => batch,
+                Err(error) => {
+                    if !cancellation.is_cancelled() {
+                        Self::report_nic_ingress_failure(
+                            mgr.as_ref(),
+                            close_notifier.as_ref(),
+                            &cancellation,
+                            reported.as_ref(),
+                            Some(&error),
+                        );
+                    }
+                    return;
+                }
+            };
+            if record_batch_stats {
+                record_nic_batch_size(batch.len());
+            }
+            let (_, prefetched) = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return,
+                result = wait_for_delivery_with_one_prefetch(&mut stream, async {
+                    Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref()).await;
+                    Ok::<(), ()>(())
+                }) => result,
+            };
+            pending = match prefetched {
+                Some(next) => next,
+                None => tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return,
+                    result = stream.next() => result,
+                },
+            };
+        }
+
+        if !cancellation.is_cancelled() {
+            Self::report_nic_ingress_failure(
+                mgr.as_ref(),
+                close_notifier.as_ref(),
+                &cancellation,
+                reported.as_ref(),
+                None,
+            );
         }
     }
 
     fn do_forward_nic_to_peers_task(
         &mut self,
-        mut stream: Pin<Box<dyn PacketBatchStream>>,
+        streams: Vec<Pin<Box<dyn PacketBatchStream>>>,
     ) -> Result<(), Error> {
-        // read from nic and write to corresponding tunnel
         let Some(mgr) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager not available").into());
         };
-        let close_notifier = self.close_notifier.clone();
-        self.tasks.spawn(async move {
-            if std::env::var_os("LOWTIER_DEBUG_DISABLE_PACKET_BATCH").is_some()
-                || std::env::var_os("LOWTIER_DEBUG_DISABLE_NIC_BATCH").is_some()
-            {
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(batch) => {
-                            for packet in batch {
-                                Self::do_forward_nic_to_peers(packet, mgr.as_ref()).await;
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(?error, "read from nic failed");
-                            break;
-                        }
-                    }
-                }
-                close_notifier.notify_one();
-                tracing::error!("nic closed when recving from it");
-                return;
-            }
-            let record_batch_stats = std::env::var_os("LOWTIER_DEBUG_BATCH_STATS").is_some();
-            let mut pending = stream.next().await;
-            while let Some(result) = pending {
-                let batch = match result {
-                    Ok(batch) => batch,
-                    Err(error) => {
-                        mgr.get_global_ctx()
-                            .set_tun_device_error(format!("TUN read failed: {error}"));
-                        tracing::error!(?error, "read from nic failed");
-                        break;
-                    }
-                };
-                if record_batch_stats {
-                    record_nic_batch_size(batch.len());
-                }
-                let (_, prefetched) = wait_for_delivery_with_one_prefetch(&mut stream, async {
-                    Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref()).await;
-                    Ok::<(), ()>(())
-                })
-                .await;
-                pending = match prefetched {
-                    Some(next) => next,
-                    None => stream.next().await,
-                };
-            }
-            mgr.get_global_ctx()
-                .set_tun_device_error("TUN input stream closed".to_owned());
-            close_notifier.notify_one();
-            tracing::error!("nic closed when recving from it");
-        });
+        if streams.is_empty() {
+            return Err(anyhow::anyhow!("virtual NIC has no ingress queues").into());
+        }
 
+        let cancellation = CancellationToken::new();
+        let reported = Arc::new(AtomicBool::new(false));
+        let close_notifier = self.close_notifier.clone();
+        for stream in streams {
+            self.tasks.spawn(Self::run_nic_ingress_worker(
+                stream,
+                mgr.clone(),
+                close_notifier.clone(),
+                cancellation.clone(),
+                reported.clone(),
+            ));
+        }
         Ok(())
     }
 
@@ -2099,7 +2226,7 @@ impl NicCtx {
         } else {
             None
         };
-        let (stream, sink) = tunnel.split();
+        let (streams, sink) = tunnel.split_ingress_queues();
 
         if !VirtualNic::uses_l2_tun(&flags) {
             let peer_mgr = self
@@ -2118,7 +2245,7 @@ impl NicCtx {
         } else {
             self.do_forward_peers_to_nic(sink);
         }
-        self.do_forward_nic_to_peers_task(stream)?;
+        self.do_forward_nic_to_peers_task(streams)?;
 
         // Assign IPv4 address if provided
         if let Some(ipv4_addr) = ipv4_addr {
@@ -2137,6 +2264,7 @@ impl NicCtx {
         // Keep the updater running so runtime config patches can enable auto mode
         // without recreating the NIC.
         self.run_public_ipv6_addr_updater().await?;
+        self.start_multicast_membership_expiry_task();
 
         Ok(())
     }
@@ -2158,9 +2286,9 @@ impl NicCtx {
             }
         };
 
-        let (stream, sink) = tunnel.split();
+        let (streams, sink) = tunnel.split_ingress_queues();
 
-        self.do_forward_nic_to_peers_task(stream)?;
+        self.do_forward_nic_to_peers_task(streams)?;
         if !VirtualNic::uses_l2_tun(&self.global_ctx.get_flags()) {
             let peer_mgr = self
                 .peer_mgr
@@ -2170,6 +2298,7 @@ impl NicCtx {
         } else {
             self.do_forward_peers_to_nic(sink);
         }
+        self.start_multicast_membership_expiry_task();
 
         Ok(())
     }
@@ -2177,6 +2306,8 @@ impl NicCtx {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use crate::common::{
         config::gen_default_flags, error::Error, global_ctx::tests::get_mock_global_ctx,
     };
@@ -2189,7 +2320,7 @@ mod tests {
     use futures::{StreamExt as _, stream};
 
     use super::{
-        TunZCPacketToBytes, VirtualNic, parse_interface_mac, read_ready_packet_batch,
+        NicCtx, TunZCPacketToBytes, VirtualNic, parse_interface_mac, read_ready_packet_batch,
         restore_compact_ip_for_tap,
     };
 
@@ -2369,6 +2500,13 @@ mod tests {
 
         assert_eq!(bytes.len(), 20);
         assert_eq!(bytes[0] >> 4, 4);
+    }
+
+    #[test]
+    fn nic_ingress_failure_is_claimed_once() {
+        let claimed = AtomicBool::new(false);
+        assert!(NicCtx::claim_nic_ingress_failure(&claimed));
+        assert!(!NicCtx::claim_nic_ingress_failure(&claimed));
     }
 
     async fn run_test_helper() -> Result<VirtualNic, Error> {

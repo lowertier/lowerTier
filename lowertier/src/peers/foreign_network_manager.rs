@@ -6,6 +6,7 @@ in the future, with the help wo peer center we can forward packets of peers that
 connected to any node in the local network.
 */
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -13,6 +14,7 @@ use std::{
     time::SystemTime,
 };
 
+use arc_swap::ArcSwap;
 use dashmap::{DashMap, DashSet};
 use guarden::{Guard, defer};
 use tokio::{
@@ -34,14 +36,17 @@ use crate::{
         token_bucket::TokenBucket,
     },
     peer_center::instance::{PeerCenterInstance, PeerMapWithPeerRpcManager},
-    peers::route_trait::{Route, RouteInterface},
+    peers::route_trait::{
+        ArcRoute, ForwardingDecisionSnapshotSource, ForwardingSnapshotSourceToken,
+        OriginAuthPublication, Route, RouteInterface,
+    },
     proto::{
         api::instance::{
             ForeignNetworkEntryPb, ListForeignNetworkResponse, PeerInfo, TrustedKeyInfoPb,
             TrustedKeySourcePb,
         },
         common::LimiterConfig,
-        peer_rpc::{DirectConnectorRpcServer, PeerIdentityType},
+        peer_rpc::{DirectConnectorRpcServer, PeerIdentityType, SecureAuthLevel},
     },
     tunnel::packet_def::{PacketType, ZCPacket},
     use_global_var,
@@ -56,7 +61,7 @@ use super::{
     peer_rpc_service::DirectConnectorManagerRpcServer,
     peer_session::PeerSessionStore,
     recv_packet_from_chan,
-    relay_peer_map::RelayPeerMap,
+    relay_peer_map::{ForeignRelayTransport, RelayPeerMap},
     route_trait::NextHopPolicy,
     traffic_metrics::{
         InstanceLabelKind, LogicalTrafficMetrics, TrafficKind, TrafficMetricRecorder,
@@ -67,7 +72,10 @@ use super::{
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(&, Box, Arc)]
 pub trait GlobalForeignNetworkAccessor: Send + Sync + 'static {
-    async fn list_global_foreign_peer(&self, network_identity: &NetworkIdentity) -> Vec<PeerId>;
+    async fn list_authenticated_global_foreign_peers(
+        &self,
+        network_identity: &NetworkIdentity,
+    ) -> Vec<(PeerId, Vec<u8>)>;
 }
 
 struct ForeignNetworkEntry {
@@ -126,6 +134,7 @@ impl ForeignNetworkEntry {
             foreign_global_ctx.clone(),
             my_peer_id,
         ));
+        peer_map.install_forwarding_snapshot_hook();
         let traffic_metrics = Arc::new(TrafficMetricRecorder::new(
             my_peer_id,
             Arc::new(LogicalTrafficMetrics::new(
@@ -185,6 +194,10 @@ impl ForeignNetworkEntry {
             foreign_global_ctx.clone(),
             my_peer_id,
             peer_session_store.clone(),
+            Some(ForeignRelayTransport {
+                network_name: network_name.clone(),
+                packet_sender: pm_packet_sender.clone(),
+            }),
         );
 
         let (peer_rpc, rpc_transport_sender) = Self::build_rpc_tspt(my_peer_id, peer_map.clone());
@@ -376,6 +389,8 @@ impl ForeignNetworkEntry {
             peer_map: Weak<PeerMap>,
             network_identity: NetworkIdentity,
             accessor: Box<dyn GlobalForeignNetworkAccessor>,
+            authenticated_global_peers: ArcSwap<HashMap<PeerId, Vec<u8>>>,
+            forwarding_snapshot_source: ForwardingDecisionSnapshotSource,
         }
 
         #[async_trait::async_trait]
@@ -385,14 +400,18 @@ impl ForeignNetworkEntry {
                     return vec![];
                 };
 
-                let mut global = self
+                let global = self
                     .accessor
-                    .list_global_foreign_peer(&self.network_identity)
+                    .list_authenticated_global_foreign_peers(&self.network_identity)
                     .await;
+                let authenticated_global_peers = global.iter().cloned().collect::<HashMap<_, _>>();
+                self.authenticated_global_peers
+                    .store(Arc::new(authenticated_global_peers));
                 let local = peer_map.list_peers_with_conn().await;
-                global.extend(local.iter().cloned());
                 global
                     .into_iter()
+                    .map(|(peer_id, _)| peer_id)
+                    .chain(local)
                     .filter(|x| *x != self.my_peer_id)
                     .collect()
             }
@@ -401,18 +420,77 @@ impl ForeignNetworkEntry {
                 self.my_peer_id
             }
 
+            fn forwarding_decision_snapshot_source(
+                &self,
+            ) -> Option<ForwardingDecisionSnapshotSource> {
+                Some(self.forwarding_snapshot_source.clone())
+            }
+
+            fn publish_origin_auth_batch(
+                &self,
+                source_token: ForwardingSnapshotSourceToken,
+                generation: u64,
+                publications: &[OriginAuthPublication],
+            ) -> Result<(), super::route_trait::RouteOriginAuthPublishError> {
+                if let Some(peer_map) = self.peer_map.upgrade() {
+                    return peer_map.publish_route_origin_auth_batch(
+                        source_token,
+                        generation,
+                        publications,
+                    );
+                }
+                Err(super::route_trait::RouteOriginAuthPublishError::SourceNotRegistered)
+            }
+
+            fn discard_origin_auth_batch(
+                &self,
+                source_token: ForwardingSnapshotSourceToken,
+                _generation: u64,
+            ) {
+                if let Some(peer_map) = self.peer_map.upgrade() {
+                    peer_map.discard_route_source(source_token);
+                }
+            }
+
             fn need_periodic_requery_peers(&self) -> bool {
                 true
             }
 
             async fn get_peer_identity_type(&self, peer_id: PeerId) -> Option<PeerIdentityType> {
                 let peer_map = self.peer_map.upgrade()?;
-                peer_map.get_peer_identity_type(peer_id)
+                if let Some(identity_type) = peer_map.get_peer_identity_type(peer_id) {
+                    return Some(identity_type);
+                }
+                self.authenticated_global_peers
+                    .load()
+                    .contains_key(&peer_id)
+                    .then_some(PeerIdentityType::ForeignRelay)
             }
 
             async fn get_peer_public_key(&self, peer_id: PeerId) -> Option<Vec<u8>> {
                 let peer_map = self.peer_map.upgrade()?;
-                peer_map.get_peer_public_key(peer_id)
+                if let Some(public_key) = peer_map.get_peer_public_key(peer_id) {
+                    return Some(public_key);
+                }
+                self.authenticated_global_peers
+                    .load()
+                    .get(&peer_id)
+                    .cloned()
+            }
+
+            async fn get_authenticated_peer_secure_auth_level(
+                &self,
+                peer_id: PeerId,
+            ) -> Option<SecureAuthLevel> {
+                if let Some(peer_map) = self.peer_map.upgrade()
+                    && let Some(level) = peer_map.get_peer_secure_auth_level(peer_id)
+                {
+                    return Some(level);
+                }
+                self.authenticated_global_peers
+                    .load()
+                    .contains_key(&peer_id)
+                    .then_some(SecureAuthLevel::PeerVerified)
             }
 
             async fn close_peer(&self, peer_id: PeerId) {
@@ -427,21 +505,44 @@ impl ForeignNetworkEntry {
             self.global_ctx.clone(),
             self.peer_rpc.clone(),
         );
-        route
+        let route_install_lock = self.peer_map.route_install_lock();
+        let _route_install_guard = route_install_lock.lock().await;
+        let Ok(forwarding_snapshot_registration) = self
+            .peer_map
+            .begin_forwarding_snapshot_source_registration()
+        else {
+            tracing::warn!("foreign route source token exhausted; route not installed");
+            return;
+        };
+        let forwarding_snapshot_source = forwarding_snapshot_registration.source();
+        let route_opened = route
             .open(Box::new(Interface {
                 my_peer_id: self.my_peer_id,
                 network_identity: self.network.clone(),
                 peer_map: Arc::downgrade(&self.peer_map),
                 accessor,
+                authenticated_global_peers: ArcSwap::from_pointee(HashMap::new()),
+                forwarding_snapshot_source,
             }))
-            .await
-            .unwrap();
+            .await;
+        if route_opened.is_err() {
+            tracing::warn!("foreign route open failed; source registration rolled back");
+            return;
+        }
 
         route
             .set_route_cost_fn(self.peer_center.get_cost_calculator())
             .await;
 
-        self.peer_map.add_route(Arc::new(Box::new(route))).await;
+        let arc_route: ArcRoute = Arc::new(Box::new(route));
+        self.peer_map.add_route_unlocked(arc_route.clone()).await;
+        if let Err(error) = forwarding_snapshot_registration.commit() {
+            self.peer_map.remove_route_unlocked(&arc_route).await;
+            tracing::warn!(
+                ?error,
+                "foreign route forwarding snapshot commit failed; route removed"
+            );
+        }
     }
 
     async fn start_packet_recv(&self) {
@@ -499,14 +600,15 @@ impl ForeignNetworkEntry {
                         .await;
                 }
                 if is_local_delivery {
-                    if packet_type == PacketType::RelayHandshake as u8
-                        || packet_type == PacketType::RelayHandshakeAck as u8
-                    {
-                        let _ = relay_peer_map.handle_handshake_packet(zc_packet).await;
+                    if RelayPeerMap::is_handshake_packet_type(packet_type) {
+                        if let Err(error) = relay_peer_map.handle_handshake_packet(zc_packet).await
+                        {
+                            tracing::warn!(?error, "foreign relay handshake failed");
+                        }
                         continue;
                     }
 
-                    if relay_peer_map.is_secure_mode_enabled() && hdr.is_encrypted() {
+                    if hdr.is_encrypted() {
                         match relay_peer_map.decrypt_if_needed(&mut zc_packet).await {
                             Ok(true) => {}
                             Ok(false) => {
@@ -518,6 +620,16 @@ impl ForeignNetworkEntry {
                                 continue;
                             }
                         }
+                    }
+
+                    if RelayPeerMap::is_handshake_confirmation_packet_type(packet_type) {
+                        if let Err(error) = relay_peer_map
+                            .handle_handshake_confirmation(zc_packet)
+                            .await
+                        {
+                            tracing::warn!(?error, "foreign relay confirmation failed");
+                        }
+                        continue;
                     }
 
                     if packet_type == PacketType::TaRpc as u8
@@ -570,10 +682,14 @@ impl ForeignNetworkEntry {
                     let gateway_peer_id = peer_map
                         .get_gateway_peer_id(to_peer_id, NextHopPolicy::LeastHop)
                         .await;
+                    let is_relay_handshake = RelayPeerMap::is_handshake_packet_type(packet_type);
 
                     match gateway_peer_id {
                         Some(peer_id) if peer_map.has_peer(peer_id) => {
-                            if peer_id != to_peer_id && hdr.from_peer_id.get() == my_node_id {
+                            if peer_id != to_peer_id
+                                && hdr.from_peer_id.get() == my_node_id
+                                && !is_relay_handshake
+                            {
                                 if let Err(e) = relay_peer_map
                                     .send_msg(zc_packet, to_peer_id, NextHopPolicy::LeastHop)
                                     .await
@@ -601,6 +717,30 @@ impl ForeignNetworkEntry {
                             }
                         }
                         _ => {
+                            if is_locally_originated && !is_relay_handshake {
+                                if let Err(e) = relay_peer_map
+                                    .send_msg(zc_packet, to_peer_id, NextHopPolicy::LeastHop)
+                                    .await
+                                {
+                                    tracing::error!(
+                                        ?e,
+                                        "send packet through the secure foreign relay failed"
+                                    );
+                                } else {
+                                    traffic_metrics
+                                        .record_tx(to_peer_id, packet_type, buf_len as u64)
+                                        .await;
+                                }
+                                continue;
+                            }
+                            if !is_relay_handshake && !hdr.is_encrypted() {
+                                tracing::warn!(
+                                    from_peer_id,
+                                    to_peer_id,
+                                    "drop plaintext foreign relay payload"
+                                );
+                                continue;
+                            }
                             let mut foreign_packet = ZCPacket::new_for_foreign_network(
                                 &network_name,
                                 to_peer_id,
@@ -950,7 +1090,14 @@ impl ForeignNetworkManager {
             .map(|v| v.my_peer_id)
     }
 
-    pub async fn add_peer_conn(&self, peer_conn: PeerConn) -> Result<(), Error> {
+    pub(crate) fn get_network_identity(&self, network_name: &str) -> Option<NetworkIdentity> {
+        self.data
+            .network_peer_maps
+            .get(network_name)
+            .map(|entry| entry.network.clone())
+    }
+
+    pub async fn add_peer_conn(&self, mut peer_conn: PeerConn) -> Result<(), Error> {
         let conn_info = peer_conn.get_conn_info();
         let peer_network = peer_conn.get_network_identity();
         tracing::info!(peer_conn = ?conn_info, network = ?peer_network, "add new peer conn in foreign network manager");
@@ -1070,6 +1217,9 @@ impl ForeignNetworkManager {
             }
         }
 
+        // A foreign-network owner is trusted only for that foreign scope.
+        // Keep it out of the local Admin authority domain.
+        peer_conn.set_peer_identity_type(PeerIdentityType::ForeignRelay);
         entry.peer_map.add_new_peer_conn(peer_conn).await?;
         let _ = rollback_new_entry.defuse();
         Ok(())
@@ -1192,7 +1342,7 @@ impl ForeignNetworkManager {
                 .unwrap_or(0);
             let msg_len = msg.buf_len() as u64;
             let send_result = entry
-                .peer_map
+                .relay_peer_map
                 .send_msg(msg, dst_peer_id, NextHopPolicy::LeastHop)
                 .await;
             if send_result.is_ok() {
@@ -1270,14 +1420,12 @@ pub mod tests {
         secret: &str,
     ) -> Arc<PeerManager> {
         let (s, _r) = create_packet_recv_chan();
-        let peer_mgr = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
-            get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-                network.to_string(),
-                secret.to_string(),
-            ))),
-            s,
-        ));
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            network.to_string(),
+            secret.to_string(),
+        )));
+        set_secure_mode_cfg(&global_ctx, true);
+        let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, s));
         replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
         peer_mgr.run().await.unwrap();
         peer_mgr
@@ -1347,8 +1495,51 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn foreign_network_forwarding_records_traffic_metrics() {
+    async fn foreign_network_owner_is_not_local_admin() {
         let pm_center = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let foreign_peer = create_mock_peer_manager_for_foreign_network("net1").await;
+        let foreign_peer_id = foreign_peer.my_peer_id();
+
+        connect_peer_manager(foreign_peer.clone(), pm_center.clone()).await;
+
+        wait_for_condition(
+            || {
+                let pm_center = pm_center.clone();
+                async move {
+                    pm_center
+                        .get_foreign_network_manager()
+                        .data
+                        .get_network_entry("net1")
+                        .is_some_and(|entry| {
+                            entry.peer_map.get_peer_identity_type(foreign_peer_id)
+                                == Some(PeerIdentityType::ForeignRelay)
+                        })
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let entry = pm_center
+            .get_foreign_network_manager()
+            .data
+            .get_network_entry("net1")
+            .expect("foreign network entry exists");
+        let peer_ids = entry.peer_map.list_peers();
+        assert_eq!(peer_ids.len(), 1);
+        assert_eq!(
+            entry.peer_map.get_peer_identity_type(peer_ids[0]),
+            Some(PeerIdentityType::ForeignRelay)
+        );
+        assert_ne!(
+            entry.peer_map.get_peer_identity_type(peer_ids[0]),
+            Some(PeerIdentityType::Admin)
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_network_forwarding_records_traffic_metrics() {
+        let pm_center = create_mock_peer_manager_for_secure_foreign_network("default").await;
         let pma_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
         let pmb_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
 
@@ -1436,7 +1627,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn foreign_network_transit_forwarding_only_records_forwarded_metrics() {
-        let pm_center = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let pm_center = create_mock_peer_manager_for_secure_foreign_network("default").await;
         let pma_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
         let pmb_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
 
@@ -1446,10 +1637,20 @@ pub mod tests {
             .await
             .unwrap();
 
-        let center_peer_id = pm_center
-            .get_foreign_network_manager()
-            .get_network_peer_id("net1")
-            .unwrap();
+        let relay_map = pma_net1.get_relay_peer_map();
+        let destination_peer_id = pmb_net1.my_peer_id();
+        let _ = relay_map
+            .ensure_session(destination_peer_id, NextHopPolicy::LeastHop)
+            .await;
+        wait_for_condition(
+            || {
+                let relay_map = relay_map.clone();
+                async move { relay_map.has_session(destination_peer_id) }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
         let network_labels =
             LabelSet::new().with_label_type(LabelType::NetworkName("net1".to_string()));
         let forwarded_bytes_before = metric_value(
@@ -1490,9 +1691,8 @@ pub mod tests {
             PacketType::Data as u8,
         );
         let transit_pkt_len = transit_pkt.buf_len() as u64;
-        pma_net1
-            .get_foreign_network_client()
-            .send_msg(transit_pkt, center_peer_id)
+        relay_map
+            .send_msg(transit_pkt, destination_peer_id, NextHopPolicy::LeastHop)
             .await
             .unwrap();
         wait_for_condition(
@@ -1548,7 +1748,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn disable_relay_data_blocks_foreign_network_transit_data() {
-        let pm_center = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let pm_center = create_mock_peer_manager_for_secure_foreign_network("default").await;
         let pma_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
         let pmb_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
 
@@ -1607,8 +1807,8 @@ pub mod tests {
             PacketType::Data as u8,
         );
         pma_net1
-            .get_foreign_network_client()
-            .send_msg(transit_pkt, center_peer_id)
+            .get_relay_peer_map()
+            .send_msg(transit_pkt, pmb_net1.my_peer_id(), NextHopPolicy::LeastHop)
             .await
             .unwrap();
 
@@ -1634,7 +1834,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn foreign_network_transit_control_forwarding_records_control_forwarded_metrics() {
-        let pm_center = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let pm_center = create_mock_peer_manager_for_secure_foreign_network("default").await;
         let pma_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
         let pmb_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
 
@@ -1648,10 +1848,6 @@ pub mod tests {
         flags.disable_relay_data = true;
         pm_center.get_global_ctx().set_flags(flags);
 
-        let center_peer_id = pm_center
-            .get_foreign_network_manager()
-            .get_network_peer_id("net1")
-            .unwrap();
         let network_labels =
             LabelSet::new().with_label_type(LabelType::NetworkName("net1".to_string()));
         let forwarded_bytes_before = metric_value(
@@ -1673,8 +1869,8 @@ pub mod tests {
         );
         let transit_pkt_len = transit_pkt.buf_len() as u64;
         pma_net1
-            .get_foreign_network_client()
-            .send_msg(transit_pkt, center_peer_id)
+            .get_relay_peer_map()
+            .send_msg(transit_pkt, pmb_net1.my_peer_id(), NextHopPolicy::LeastHop)
             .await
             .unwrap();
 
@@ -1785,8 +1981,8 @@ pub mod tests {
     async fn foreign_network_encapsulated_forwarding_records_tx_metrics() {
         set_global_var!(OSPF_UPDATE_MY_GLOBAL_FOREIGN_NETWORK_INTERVAL_SEC, 1);
 
-        let pm_center1 = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let pm_center2 = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let pm_center1 = create_mock_peer_manager_for_secure_foreign_network("default").await;
+        let pm_center2 = create_mock_peer_manager_for_secure_foreign_network("default").await;
 
         connect_peer_manager(pm_center1.clone(), pm_center2.clone()).await;
 
@@ -1809,9 +2005,9 @@ pub mod tests {
             pmb_net1.my_peer_id(),
             PacketType::Data as u8,
         );
-        pma_net1
-            .get_foreign_network_client()
-            .send_msg(encapsulated_tx_pkt, center_peer_id)
+        pm_center1
+            .get_foreign_network_manager()
+            .forward_foreign_network_packet("net1", pmb_net1.my_peer_id(), encapsulated_tx_pkt)
             .await
             .unwrap();
 
@@ -1896,15 +2092,15 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn secure_center_can_serve_legacy_and_secure_foreign_networks() {
+    async fn secure_center_serves_multiple_foreign_networks() {
         let pm_center = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
         set_secure_mode_cfg(&pm_center.get_global_ctx(), true);
 
-        let legacy_a = create_mock_peer_manager_for_foreign_network("legacy-net").await;
-        let legacy_b = create_mock_peer_manager_for_foreign_network("legacy-net").await;
-        connect_peer_manager(legacy_a.clone(), pm_center.clone()).await;
-        connect_peer_manager(legacy_b.clone(), pm_center.clone()).await;
-        wait_route_appear(legacy_a.clone(), legacy_b.clone())
+        let network_a = create_mock_peer_manager_for_foreign_network("network-a").await;
+        let network_b = create_mock_peer_manager_for_foreign_network("network-a").await;
+        connect_peer_manager(network_a.clone(), pm_center.clone()).await;
+        connect_peer_manager(network_b.clone(), pm_center.clone()).await;
+        wait_route_appear(network_a.clone(), network_b.clone())
             .await
             .unwrap();
 
@@ -1916,8 +2112,8 @@ pub mod tests {
             .await
             .unwrap();
 
-        assert_eq!(2, legacy_a.list_routes().await.len());
-        assert_eq!(2, legacy_b.list_routes().await.len());
+        assert_eq!(2, network_a.list_routes().await.len());
+        assert_eq!(2, network_b.list_routes().await.len());
         assert_eq!(2, secure_a.list_routes().await.len());
         assert_eq!(2, secure_b.list_routes().await.len());
 
@@ -1926,7 +2122,7 @@ pub mod tests {
             .list_foreign_networks()
             .await;
         assert_eq!(2, rpc_resp.foreign_networks.len());
-        assert_eq!(2, rpc_resp.foreign_networks["legacy-net"].peers.len());
+        assert_eq!(2, rpc_resp.foreign_networks["network-a"].peers.len());
         assert_eq!(2, rpc_resp.foreign_networks["secure-net"].peers.len());
     }
 
@@ -2062,6 +2258,9 @@ pub mod tests {
         ));
         assert!(!ForeignNetworkManager::should_reject_credential_trust_path(
             PeerIdentityType::SharedNode
+        ));
+        assert!(!ForeignNetworkManager::should_reject_credential_trust_path(
+            PeerIdentityType::ForeignRelay
         ));
     }
 

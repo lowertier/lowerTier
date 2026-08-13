@@ -9,9 +9,14 @@ use zstd::bulk;
 
 use zerocopy::{AsBytes as _, FromBytes as _};
 
-use crate::tunnel::packet_def::{COMPRESSOR_TAIL_SIZE, CompressorAlgo, CompressorTail, ZCPacket};
+use crate::tunnel::packet_def::{
+    COMPRESSOR_TAIL_SIZE, CompressorAlgo, CompressorTail, PEER_MANAGER_HEADER_SIZE, ZCPacket,
+};
 
 type Error = anyhow::Error;
+
+/// Bound the logical payload to the largest reliable frame accepted by QUIC.
+pub(crate) const MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES: usize = 64 * 1024 - PEER_MANAGER_HEADER_SIZE;
 
 pub trait Compressor {
     fn compress(&self, packet: &mut ZCPacket, compress_algo: CompressorAlgo) -> Result<(), Error>;
@@ -83,6 +88,50 @@ impl DefaultCompressor {
             CompressorAlgo::None => Ok(data.to_vec()),
         }
     }
+
+    /// Decompress one packet into the exact declared logical payload length.
+    pub fn decompress_raw_exact(
+        &self,
+        data: &[u8],
+        compress_algo: CompressorAlgo,
+        expected_len: usize,
+    ) -> Result<Vec<u8>, Error> {
+        if expected_len > MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES {
+            anyhow::bail!(
+                "declared logical payload exceeds limit: {} > {}",
+                expected_len,
+                MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES
+            );
+        }
+        match compress_algo {
+            #[cfg(feature = "zstd")]
+            CompressorAlgo::ZstdDefault => DCTX_MAP.with(|map_cell| {
+                let map = map_cell.borrow();
+                let mut ctx_entry = map.entry(compress_algo).or_default();
+                let buf = ctx_entry
+                    .decompress(data, expected_len)
+                    .with_context(|| "failed to decompress packet into declared length")?;
+                if buf.len() != expected_len {
+                    anyhow::bail!(
+                        "decompressed length mismatch: {} != {}",
+                        buf.len(),
+                        expected_len
+                    );
+                }
+                Ok(buf)
+            }),
+            CompressorAlgo::None => {
+                if data.len() != expected_len {
+                    anyhow::bail!(
+                        "uncompressed length mismatch: {} != {}",
+                        data.len(),
+                        expected_len
+                    );
+                }
+                Ok(data.to_vec())
+            }
+        }
+    }
 }
 
 impl Compressor for DefaultCompressor {
@@ -91,6 +140,14 @@ impl Compressor for DefaultCompressor {
         zc_packet: &mut ZCPacket,
         compress_algo: CompressorAlgo,
     ) -> Result<(), Error> {
+        let logical_len = zc_packet.payload_len();
+        if logical_len > MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES {
+            anyhow::bail!(
+                "logical payload exceeds the 64 KiB QUIC frame limit: {} > {}",
+                logical_len,
+                MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES
+            );
+        }
         if matches!(compress_algo, CompressorAlgo::None) {
             return Ok(());
         }
@@ -114,9 +171,15 @@ impl Compressor for DefaultCompressor {
             .set_compressed(true);
 
         let payload_offset = zc_packet.payload_offset();
-        zc_packet.mut_inner().truncate(payload_offset);
-        zc_packet.mut_inner().extend_from_slice(&buf);
-        zc_packet.mut_inner().extend_from_slice(tail.as_bytes());
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .truncate(payload_offset);
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .extend_from_slice(&buf);
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .extend_from_slice(tail.as_bytes());
 
         Ok(())
     }
@@ -127,12 +190,28 @@ impl Compressor for DefaultCompressor {
             return Ok(());
         }
 
+        let declared_len = pm_header.len.get() as usize;
+        if declared_len > MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES {
+            return Err(anyhow::anyhow!(
+                "declared logical payload exceeds limit: {} > {}",
+                declared_len,
+                MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES
+            ));
+        }
+
         let payload_len = zc_packet.payload().len();
         if payload_len < COMPRESSOR_TAIL_SIZE {
             return Err(anyhow::anyhow!("Packet too short: {}", payload_len));
         }
 
         let text_len = payload_len - COMPRESSOR_TAIL_SIZE;
+        if text_len > declared_len {
+            return Err(anyhow::anyhow!(
+                "compressed payload exceeds declared logical length: {} > {}",
+                text_len,
+                declared_len
+            ));
+        }
 
         let tail = CompressorTail::ref_from_suffix(zc_packet.payload())
             .unwrap()
@@ -142,13 +221,14 @@ impl Compressor for DefaultCompressor {
             .get_algo()
             .ok_or(anyhow::anyhow!("Unknown algo: {:?}", tail))?;
 
-        let buf = self.decompress_raw(&zc_packet.payload()[..text_len], algo)?;
+        let buf =
+            self.decompress_raw_exact(&zc_packet.payload()[..text_len], algo, declared_len)?;
 
-        if buf.len() != pm_header.len.get() as usize {
+        if buf.len() != declared_len {
             anyhow::bail!(
                 "Decompressed length mismatch: decompressed len {} != pm header len {}",
                 buf.len(),
-                pm_header.len.get()
+                declared_len
             );
         }
 
@@ -158,8 +238,12 @@ impl Compressor for DefaultCompressor {
             .set_compressed(false);
 
         let payload_offset = zc_packet.payload_offset();
-        zc_packet.mut_inner().truncate(payload_offset);
-        zc_packet.mut_inner().extend_from_slice(&buf);
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .truncate(payload_offset);
+        zc_packet
+            .mut_inner_preserving_flow_hash()
+            .extend_from_slice(&buf);
 
         Ok(())
     }
@@ -173,8 +257,8 @@ thread_local! {
 
 #[cfg(test)]
 mod synchronous_tests {
-    use super::{Compressor, DefaultCompressor};
-    use crate::tunnel::packet_def::ZCPacket;
+    use super::{Compressor, DefaultCompressor, MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES};
+    use crate::tunnel::packet_def::{CompressorAlgo, PacketType, ZCPacket};
 
     #[test]
     fn uncompressed_packet_check_is_synchronous() {
@@ -185,17 +269,35 @@ mod synchronous_tests {
 
         assert_result(DefaultCompressor::new().decompress(&mut packet));
     }
+
+    #[test]
+    fn compress_rejects_payload_above_quic_frame_limit() {
+        let payload = vec![0_u8; MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES + 1];
+        let mut packet = ZCPacket::new_with_payload(&payload);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+
+        let error = DefaultCompressor::new()
+            .compress(&mut packet, CompressorAlgo::None)
+            .expect_err("an oversized logical payload must fail before sending");
+        assert!(
+            error
+                .to_string()
+                .contains("logical payload exceeds the 64 KiB QUIC frame limit")
+        );
+    }
 }
 
 #[cfg(all(test, feature = "zstd"))]
 pub mod tests {
     use super::*;
+    use crate::peers::flow::stamp_packet_flow;
 
     #[tokio::test]
     async fn test_compress() {
         let text = b"12345670000000000000000000";
         let mut packet = ZCPacket::new_with_payload(text);
         packet.fill_peer_manager_hdr(0, 0, 0);
+        let flow = stamp_packet_flow(&mut packet);
 
         let compressor = DefaultCompressor {};
 
@@ -208,6 +310,7 @@ pub mod tests {
         compressor
             .compress(&mut packet, CompressorAlgo::ZstdDefault)
             .unwrap();
+        assert_eq!(packet.flow_hash(), Some(flow.hash));
         println!(
             "Compressed packet: {:?}, len: {}",
             packet,
@@ -217,6 +320,7 @@ pub mod tests {
 
         compressor.decompress(&mut packet).unwrap();
         assert_eq!(packet.payload(), text);
+        assert_eq!(packet.flow_hash(), Some(flow.hash));
         assert!(!packet.peer_manager_header().unwrap().is_compressed());
     }
 

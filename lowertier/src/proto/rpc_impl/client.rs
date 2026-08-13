@@ -3,10 +3,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use guarden::defer;
 use prost::Message;
 use quanta::Instant;
+use rand::{RngCore, rngs::OsRng};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -36,9 +37,6 @@ use crate::tunnel::{Tunnel, TunnelError, ZCPacketStream, batch::BatchToScalarStr
 use super::packet::PacketMerger;
 use super::{RpcTransactId, Transport};
 
-static CUR_TID: once_cell::sync::Lazy<atomic_shim::AtomicI64> =
-    once_cell::sync::Lazy::new(|| atomic_shim::AtomicI64::new(rand::random()));
-
 type RpcPacketSender = mpsc::UnboundedSender<RpcPacket>;
 type RpcPacketReceiver = mpsc::UnboundedReceiver<RpcPacket>;
 
@@ -53,6 +51,9 @@ struct InflightRequest {
     sender: RpcPacketSender,
     merger: PacketMerger,
     start_time: Instant,
+    expected_remote_peer: PeerId,
+    requester_peer: PeerId,
+    authenticated_session_id: Option<uuid::Uuid>,
 }
 
 impl std::fmt::Debug for InflightRequest {
@@ -60,6 +61,9 @@ impl std::fmt::Debug for InflightRequest {
         f.debug_struct("InflightRequest")
             .field("sender", &self.sender)
             .field("start_time", &self.start_time)
+            .field("expected_remote_peer", &self.expected_remote_peer)
+            .field("requester_peer", &self.requester_peer)
+            .field("authenticated_session_id", &self.authenticated_session_id)
             .finish()
     }
 }
@@ -73,6 +77,40 @@ pub(crate) struct PeerInfo {
 
 type InflightRequestTable = Arc<DashMap<InflightRequestKey, InflightRequest>>;
 pub(crate) type PeerInfoTable = Arc<DashMap<PeerId, PeerInfo>>;
+
+fn response_peer_binding_valid(
+    zc_packet: &ZCPacket,
+    response: &RpcPacket,
+    expected_remote_peer: PeerId,
+    requester_peer: PeerId,
+    logical_authenticated_peer_id: Option<PeerId>,
+) -> bool {
+    if response.from_peer != expected_remote_peer || response.to_peer != requester_peer {
+        return false;
+    }
+
+    if let Some(authenticated_peer_id) = logical_authenticated_peer_id {
+        return authenticated_peer_id == response.from_peer;
+    }
+
+    // Only local loopback may omit transport authentication metadata.
+    expected_remote_peer == requester_peer
+        && zc_packet.get_src_peer_id() == Some(response.from_peer)
+        && zc_packet.get_dst_peer_id() == Some(response.to_peer)
+}
+
+fn response_session_binding_valid(
+    authenticated_session_id: Option<uuid::Uuid>,
+    expected_session_id: Option<uuid::Uuid>,
+    remote_response: bool,
+) -> bool {
+    match (authenticated_session_id, expected_session_id) {
+        (Some(actual), Some(expected)) => actual == expected,
+        (Some(_), None) => true,
+        (None, None) => !remote_response,
+        (None, Some(_)) => false,
+    }
+}
 
 pub struct Client {
     mpsc: Mutex<MpscTunnel<Box<dyn Tunnel>>>,
@@ -145,7 +183,14 @@ impl Client {
                     tracing::error!(?err, "Failed to receive packet");
                     continue;
                 }
-                let packet = match RpcPacket::decode(packet.unwrap().payload()) {
+                let zc_packet = packet.unwrap();
+                let logical_authenticated_peer_id = zc_packet.logical_authenticated_peer_id();
+                let logical_authenticated_peer_identity_type =
+                    zc_packet.logical_authenticated_peer_identity_type();
+                let logical_authenticated_peer_secure_auth_level =
+                    zc_packet.logical_authenticated_peer_secure_auth_level();
+                let logical_authenticated_session_id = zc_packet.logical_authenticated_session_id();
+                let packet = match RpcPacket::decode(zc_packet.payload()) {
                     Err(err) => {
                         tracing::error!(?err, "Failed to decode packet");
                         continue;
@@ -173,12 +218,62 @@ impl Client {
                     continue;
                 };
 
+                if !response_peer_binding_valid(
+                    &zc_packet,
+                    &packet,
+                    inflight_request.expected_remote_peer,
+                    inflight_request.requester_peer,
+                    logical_authenticated_peer_id,
+                ) {
+                    tracing::warn!(
+                        ?key,
+                        response_from = packet.from_peer,
+                        response_to = packet.to_peer,
+                        expected_remote = inflight_request.expected_remote_peer,
+                        requester = inflight_request.requester_peer,
+                        "Dropping RPC response with a mismatched peer binding"
+                    );
+                    continue;
+                }
+
+                let self_rpc =
+                    inflight_request.expected_remote_peer == inflight_request.requester_peer;
+                if !self_rpc
+                    && (logical_authenticated_peer_identity_type.is_none()
+                        || logical_authenticated_peer_secure_auth_level.is_none())
+                {
+                    tracing::warn!(
+                        ?key,
+                        "Dropping remote RPC response with incomplete authenticated origin"
+                    );
+                    continue;
+                }
+                if !response_session_binding_valid(
+                    logical_authenticated_session_id,
+                    inflight_request.authenticated_session_id,
+                    !self_rpc,
+                ) {
+                    tracing::warn!(
+                        ?key,
+                        "Dropping remote RPC response without an authenticated session"
+                    );
+                    continue;
+                }
+                if inflight_request.authenticated_session_id.is_none() {
+                    inflight_request.authenticated_session_id = logical_authenticated_session_id;
+                }
+
                 tracing::trace!(?packet, "Received response packet");
 
                 let ret = inflight_request.merger.feed(packet);
                 match ret {
                     Ok(Some(rpc_packet)) => {
-                        inflight_request.sender.send(rpc_packet).unwrap();
+                        if inflight_request.sender.send(rpc_packet).is_err() {
+                            // The caller may have timed out while this response was in flight.
+                            // Remove the stale request after releasing the DashMap guard.
+                            drop(inflight_request);
+                            inflight_requests.remove(&key);
+                        }
                     }
                     Ok(None) => {}
                     Err(err) => {
@@ -233,13 +328,7 @@ impl Client {
                 input: bytes::Bytes,
             ) -> Result<bytes::Bytes> {
                 let start_time = Instant::now();
-                let transaction_id = CUR_TID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                let key = InflightRequestKey {
-                    from_peer_id: self.from_peer_id,
-                    to_peer_id: self.to_peer_id,
-                    transaction_id,
-                };
                 let desc = self.service_descriptor();
                 let labels = LabelSet::new()
                     .with_label_type(LabelType::NetworkName(self.domain_name.to_string()))
@@ -248,15 +337,29 @@ impl Client {
                     .with_label_type(LabelType::ServiceName(desc.name().to_string()))
                     .with_label_type(LabelType::MethodName(method.name().to_string()));
 
+                let (transaction_id, key) = loop {
+                    let transaction_id = OsRng.next_u64() as RpcTransactId;
+                    let key = InflightRequestKey {
+                        from_peer_id: self.from_peer_id,
+                        to_peer_id: self.to_peer_id,
+                        transaction_id,
+                    };
+                    match self.inflight_requests.entry(key.clone()) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(InflightRequest {
+                                sender: tx.clone(),
+                                merger: PacketMerger::new(),
+                                start_time,
+                                expected_remote_peer: self.to_peer_id,
+                                requester_peer: self.from_peer_id,
+                                authenticated_session_id: None,
+                            });
+                            break (transaction_id, key);
+                        }
+                        Entry::Occupied(_) => continue,
+                    }
+                };
                 defer!(self.inflight_requests.remove(&key); shrink_dashmap(&self.inflight_requests, Some(4)););
-                self.inflight_requests.insert(
-                    key.clone(),
-                    InflightRequest {
-                        sender: tx,
-                        merger: PacketMerger::new(),
-                        start_time,
-                    },
-                );
 
                 // Record RPC client TX stats
                 if let Some(ref stats_manager) = self.stats_manager {
@@ -389,5 +492,174 @@ impl Client {
 
     pub(crate) fn peer_info_table(&self) -> PeerInfoTable {
         self.peer_info.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::common::{CompressionAlgoPb, RpcCompressionInfo, RpcPacket, RpcResponse};
+    use crate::tunnel::packet_def::{PacketType, ZCPacket};
+
+    fn response(from_peer: PeerId, to_peer: PeerId) -> RpcPacket {
+        RpcPacket {
+            from_peer,
+            to_peer,
+            transaction_id: 17,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn authenticated_origin_cannot_complete_a_different_peer_response() {
+        let mut packet = ZCPacket::new_with_payload(b"response");
+        packet.fill_peer_manager_hdr(7, 1, PacketType::Data as u8);
+        assert!(packet.set_authenticated_peer_id(7));
+
+        assert!(!response_peer_binding_valid(
+            &packet,
+            &response(9, 1),
+            9,
+            1,
+            Some(7)
+        ));
+    }
+
+    #[test]
+    fn response_fragments_cannot_cross_authenticated_sessions() {
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+        assert!(response_session_binding_valid(Some(first), None, true));
+        assert!(!response_session_binding_valid(
+            Some(second),
+            Some(first),
+            true
+        ));
+        assert!(response_session_binding_valid(
+            Some(first),
+            Some(first),
+            true
+        ));
+    }
+
+    #[test]
+    fn loopback_response_requires_local_peer_headers() {
+        let mut packet = ZCPacket::new_with_payload(b"response");
+        packet.fill_peer_manager_hdr(4, 4, PacketType::Data as u8);
+        assert!(response_peer_binding_valid(
+            &packet,
+            &response(4, 4),
+            4,
+            4,
+            None
+        ));
+
+        packet.fill_peer_manager_hdr(4, 5, PacketType::Data as u8);
+        assert!(!response_peer_binding_valid(
+            &packet,
+            &response(4, 4),
+            4,
+            4,
+            None
+        ));
+    }
+
+    fn response_zc_packet(transaction_id: RpcTransactId) -> ZCPacket {
+        let body = RpcResponse::default().encode_to_vec();
+        let mut packets = build_rpc_packet(BuildRpcPacketArgs {
+            from_peer: 7,
+            to_peer: 1,
+            rpc_desc: RpcDescriptor::default(),
+            transaction_id,
+            is_req: false,
+            content: &body,
+            trace_id: 0,
+            compression_info: RpcCompressionInfo {
+                algo: CompressionAlgoPb::None.into(),
+                accepted_algo: CompressionAlgoPb::None.into(),
+            },
+        });
+        assert_eq!(packets.len(), 1);
+        packets.remove(0)
+    }
+
+    #[tokio::test]
+    async fn receive_loop_rejects_injection_and_survives_closed_request_receiver() {
+        let client = Client::new();
+        let transaction_id = 71;
+        let key = InflightRequestKey {
+            from_peer_id: 1,
+            to_peer_id: 7,
+            transaction_id,
+        };
+        let (closed_sender, closed_receiver) = mpsc::unbounded_channel();
+        drop(closed_receiver);
+        client.inflight_requests.insert(
+            key.clone(),
+            InflightRequest {
+                sender: closed_sender,
+                merger: PacketMerger::new(),
+                start_time: Instant::now(),
+                expected_remote_peer: 7,
+                requester_peer: 1,
+                authenticated_session_id: None,
+            },
+        );
+        client.run();
+
+        let mut injected = response_zc_packet(transaction_id);
+        assert!(injected.set_authenticated_peer_id(9));
+        assert!(injected.set_authenticated_session_id(uuid::Uuid::new_v4()));
+        client.get_transport_sink().send(injected).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(client.inflight_requests.contains_key(&key));
+
+        let mut closed_response = response_zc_packet(transaction_id);
+        assert!(closed_response.set_authenticated_peer_id(7));
+        assert!(
+            closed_response.set_authenticated_peer_identity_type(
+                crate::proto::peer_rpc::PeerIdentityType::Admin
+            )
+        );
+        assert!(closed_response.set_authenticated_peer_secure_auth_level(
+            crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed
+        ));
+        assert!(closed_response.set_authenticated_session_id(uuid::Uuid::new_v4()));
+        client
+            .get_transport_sink()
+            .send(closed_response)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!client.inflight_requests.contains_key(&key));
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        client.inflight_requests.insert(
+            InflightRequestKey {
+                transaction_id: transaction_id + 1,
+                ..key.clone()
+            },
+            InflightRequest {
+                sender,
+                merger: PacketMerger::new(),
+                start_time: Instant::now(),
+                expected_remote_peer: 7,
+                requester_peer: 1,
+                authenticated_session_id: None,
+            },
+        );
+        let mut valid = response_zc_packet(transaction_id + 1);
+        assert!(valid.set_verified_origin(
+            7,
+            crate::proto::peer_rpc::PeerIdentityType::ForeignRelay,
+            crate::proto::peer_rpc::SecureAuthLevel::PeerVerified,
+            uuid::Uuid::new_v4(),
+        ));
+        client.get_transport_sink().send(valid).await.unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.transaction_id, transaction_id + 1);
     }
 }

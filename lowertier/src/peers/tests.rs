@@ -31,6 +31,11 @@ use super::{
     route_trait::NextHopPolicy,
 };
 
+fn credential_private_key_from_secret(secret: &str) -> x25519_dalek::StaticSecret {
+    crate::peers::credential_manager::CredentialManager::private_key_from_bundle(secret)
+        .expect("credential bundle contains a valid private key")
+}
+
 pub async fn create_mock_peer_manager() -> Arc<PeerManager> {
     let (s, _r) = create_packet_recv_chan();
     let peer_mgr = Arc::new(PeerManager::new(
@@ -254,7 +259,7 @@ async fn foreign_mgr_stress_test() {
 }
 
 #[tokio::test]
-async fn relay_peer_map_secure_session_decrypt() {
+async fn relay_peer_map_rejects_session_without_authenticated_identity() {
     let (s, _r) = create_packet_recv_chan();
     let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
         "net1".to_string(),
@@ -263,7 +268,7 @@ async fn relay_peer_map_secure_session_decrypt() {
     set_secure_mode_cfg(&ctx, true);
     let peer_map = Arc::new(PeerMap::new(s, ctx.clone(), 10));
     let store = Arc::new(PeerSessionStore::new());
-    let relay_map = RelayPeerMap::new(peer_map, None, ctx.clone(), 10, store.clone());
+    let relay_map = RelayPeerMap::new(peer_map, None, ctx.clone(), 10, store.clone(), None);
 
     let algo = ctx.get_flags().encryption_algorithm.clone();
     let root_key = [7u8; 32];
@@ -287,9 +292,10 @@ async fn relay_peer_map_secure_session_decrypt() {
 
     let mut packet = ZCPacket::new_with_payload(b"relay-hello");
     packet.fill_peer_manager_hdr(20, 10, PacketType::Data as u8);
+    super::relay_peer_map::attach_relay_origin_proof(&mut packet).unwrap();
     session.encrypt_payload(20, 10, &mut packet).unwrap();
-    assert!(relay_map.decrypt_if_needed(&mut packet).await.unwrap());
-    assert_eq!(packet.payload(), b"relay-hello");
+    let error = relay_map.decrypt_if_needed(&mut packet).await.unwrap_err();
+    assert!(format!("{error:?}").contains("no authenticated identity"));
 }
 
 #[tokio::test]
@@ -343,14 +349,10 @@ async fn private_mode_allows_trusted_foreign_credential() {
     let (_cred_id, cred_secret) = admin
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], Duration::from_secs(3600));
-
-    let privkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
+        .generate_credential(vec![], false, vec![], Duration::from_secs(3600))
         .unwrap();
-    let private = x25519_dalek::StaticSecret::from(privkey_bytes);
+
+    let private = credential_private_key_from_secret(&cred_secret);
     let public = x25519_dalek::PublicKey::from(&private);
     let credential = create_mock_peer_manager_credential("tenant-a".to_string(), &private).await;
 
@@ -445,6 +447,7 @@ async fn relay_peer_map_retry_backoff_and_evict() {
         ctx_secure.clone(),
         10,
         Arc::new(PeerSessionStore::new()),
+        None,
     );
 
     let ret = relay_map
@@ -463,6 +466,7 @@ async fn relay_peer_map_retry_backoff_and_evict() {
         ctx_plain.clone(),
         30,
         Arc::new(PeerSessionStore::new()),
+        None,
     );
 
     let mut pkt = ZCPacket::new_with_payload(b"evict");
@@ -477,8 +481,6 @@ async fn relay_peer_map_retry_backoff_and_evict() {
 
 #[tokio::test]
 async fn relay_peer_map_pending_packet_buffer() {
-    // Verify that packets sent during handshake are buffered (not dropped),
-    // and flushed after handshake completes.
     let (s, _r) = create_packet_recv_chan();
     let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
         "net1".to_string(),
@@ -487,54 +489,109 @@ async fn relay_peer_map_pending_packet_buffer() {
     set_secure_mode_cfg(&ctx, true);
     let peer_map = Arc::new(PeerMap::new(s, ctx.clone(), 10));
     let store = Arc::new(PeerSessionStore::new());
-    let relay_map = RelayPeerMap::new(peer_map, None, ctx.clone(), 10, store.clone());
+    let relay_map = RelayPeerMap::new(peer_map, None, ctx.clone(), 10, store.clone(), None);
 
-    // Send multiple packets while no session exists (handshake will fail, but packets should be buffered)
-    for i in 0..5u8 {
+    for i in 0..32u8 {
         let mut pkt = ZCPacket::new_with_payload(&[i]);
         pkt.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        let _ = relay_map.send_msg(pkt, 20, NextHopPolicy::LeastHop).await;
-    }
-
-    // Verify packets were buffered
-    assert_eq!(
         relay_map
-            .pending_packets
-            .get(&20)
-            .map(|v| v.len())
-            .unwrap_or(0),
-        5,
-        "5 packets should be buffered during handshake"
-    );
-
-    // Verify buffer respects capacity limit
-    for i in 0..50u8 {
-        let mut pkt = ZCPacket::new_with_payload(&[i]);
-        pkt.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        let _ = relay_map.send_msg(pkt, 20, NextHopPolicy::LeastHop).await;
+            .buffer_pending_packet(20, pkt, NextHopPolicy::LeastHop)
+            .unwrap();
     }
-
-    let buffered = relay_map
-        .pending_packets
-        .get(&20)
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let mut overflow = ZCPacket::new_with_payload(b"overflow");
+    overflow.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
     assert!(
-        buffered <= 32,
-        "buffer should not exceed MAX_PENDING_PACKETS_PER_PEER, got {buffered}"
+        relay_map
+            .buffer_pending_packet(20, overflow, NextHopPolicy::LeastHop)
+            .is_err()
     );
 
-    // Verify remove_peer clears pending packets
+    let buffered = relay_map.pending_packet_count(20);
+    assert!(
+        buffered == 32,
+        "buffer must keep its fixed bound, got {buffered}"
+    );
+
     relay_map.remove_peer(20);
     assert_eq!(
-        relay_map
-            .pending_packets
-            .get(&20)
-            .map(|v| v.len())
-            .unwrap_or(0),
+        relay_map.pending_packet_count(20),
         0,
         "pending packets should be cleared on peer removal"
     );
+}
+
+#[tokio::test]
+async fn relay_peer_map_requeues_packets_after_flush_failure() {
+    let (sender, _receiver) = create_packet_recv_chan();
+    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+        "net1".to_string(),
+        "sec1".to_string(),
+    )));
+    set_secure_mode_cfg(&ctx, true);
+    let peer_map = Arc::new(PeerMap::new(sender, ctx.clone(), 10));
+    let relay_map = RelayPeerMap::new(
+        peer_map,
+        None,
+        ctx,
+        10,
+        Arc::new(PeerSessionStore::new()),
+        None,
+    );
+    let session = Arc::new(PeerSession::new(
+        20,
+        [1; 32],
+        1,
+        0,
+        "aes-256-gcm".to_string(),
+        "aes-256-gcm".to_string(),
+        None,
+    ));
+    session.invalidate();
+
+    let mut packet = ZCPacket::new_with_payload(b"retry");
+    packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+    relay_map
+        .buffer_pending_packet(20, packet, NextHopPolicy::LeastHop)
+        .unwrap();
+
+    relay_map.flush_pending_packets(20, session).await.unwrap();
+    assert_eq!(relay_map.pending_packet_count(20), 1);
+}
+
+#[tokio::test]
+async fn relay_retry_queue_keeps_its_bound_with_one_packet_in_flight() {
+    let (sender, _receiver) = create_packet_recv_chan();
+    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+        "net1".to_string(),
+        "sec1".to_string(),
+    )));
+    set_secure_mode_cfg(&ctx, true);
+    let peer_map = Arc::new(PeerMap::new(sender, ctx.clone(), 10));
+    let relay_map = RelayPeerMap::new(
+        peer_map,
+        None,
+        ctx,
+        10,
+        Arc::new(PeerSessionStore::new()),
+        None,
+    );
+
+    relay_map.set_pending_packet_in_flight_for_test(20, true);
+    for value in 0..31_u8 {
+        let mut packet = ZCPacket::new_with_payload(&[value]);
+        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+        relay_map
+            .buffer_pending_packet(20, packet, NextHopPolicy::LeastHop)
+            .unwrap();
+    }
+    let mut overflow = ZCPacket::new_with_payload(b"overflow");
+    overflow.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+    assert!(
+        relay_map
+            .buffer_pending_packet(20, overflow, NextHopPolicy::LeastHop)
+            .is_err()
+    );
+    assert_eq!(relay_map.pending_packet_count(20), 32);
 }
 
 #[tokio::test]
@@ -569,7 +626,23 @@ async fn relay_peer_map_pending_packets_flushed_on_handshake_success() {
             async move {
                 peer_a
                     .get_peer_map()
-                    .get_route_peer_info(peer_c_id)
+                    .get_authenticated_route_peer_info(peer_c_id)
+                    .await
+                    .map(|info| !info.noise_static_pubkey.is_empty())
+                    .unwrap_or(false)
+            }
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    wait_for_condition(
+        || {
+            let peer_c = peer_c.clone();
+            async move {
+                peer_c
+                    .get_peer_map()
+                    .get_authenticated_route_peer_info(peer_a_id)
                     .await
                     .map(|info| !info.noise_static_pubkey.is_empty())
                     .unwrap_or(false)
@@ -586,18 +659,12 @@ async fn relay_peer_map_pending_packets_flushed_on_handshake_success() {
         let mut pkt = ZCPacket::new_with_payload(&[i]);
         pkt.fill_peer_manager_hdr(peer_a_id, peer_c_id, PacketType::Data as u8);
         relay_a
-            .pending_packets
-            .entry(peer_c_id)
-            .or_default()
-            .push((pkt, NextHopPolicy::LeastHop));
+            .buffer_pending_packet(peer_c_id, pkt, NextHopPolicy::LeastHop)
+            .unwrap();
     }
 
     assert_eq!(
-        relay_a
-            .pending_packets
-            .get(&peer_c_id)
-            .map(|v| v.len())
-            .unwrap_or(0),
+        relay_a.pending_packet_count(peer_c_id),
         3,
         "3 packets should be in the buffer"
     );
@@ -611,11 +678,7 @@ async fn relay_peer_map_pending_packets_flushed_on_handshake_success() {
     // Verify session established and buffer cleared
     assert!(relay_a.has_session(peer_c_id));
     assert_eq!(
-        relay_a
-            .pending_packets
-            .get(&peer_c_id)
-            .map(|v| v.len())
-            .unwrap_or(0),
+        relay_a.pending_packet_count(peer_c_id),
         0,
         "pending packets should be flushed after successful handshake"
     );
@@ -669,7 +732,23 @@ async fn relay_peer_map_real_link_handshake_success() {
             async move {
                 peer_a
                     .get_peer_map()
-                    .get_route_peer_info(peer_c_id)
+                    .get_authenticated_route_peer_info(peer_c_id)
+                    .await
+                    .map(|info| !info.noise_static_pubkey.is_empty())
+                    .unwrap_or(false)
+            }
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    wait_for_condition(
+        || {
+            let peer_c = peer_c.clone();
+            async move {
+                peer_c
+                    .get_peer_map()
+                    .get_authenticated_route_peer_info(peer_a_id)
                     .await
                     .map(|info| !info.noise_static_pubkey.is_empty())
                     .unwrap_or(false)
@@ -700,6 +779,24 @@ async fn relay_peer_map_real_link_handshake_success() {
         || {
             let relay_c = relay_c.clone();
             async move { relay_c.has_session(peer_a_id) }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let a_self_rx_before = metric_value(&peer_a, MetricName::TrafficBytesSelfRx, "net1");
+    let mut first_responder_packet = ZCPacket::new_with_payload(b"first responder packet");
+    first_responder_packet.fill_peer_manager_hdr(peer_c_id, peer_a_id, PacketType::Data as u8);
+    relay_c
+        .send_msg(first_responder_packet, peer_a_id, NextHopPolicy::LeastHop)
+        .await
+        .unwrap();
+    wait_for_condition(
+        || {
+            let peer_a = peer_a.clone();
+            async move {
+                metric_value(&peer_a, MetricName::TrafficBytesSelfRx, "net1") > a_self_rx_before
+            }
         },
         Duration::from_secs(5),
     )
@@ -806,7 +903,7 @@ async fn relay_peer_map_remove_peer() {
     set_secure_mode_cfg(&ctx, true);
     let peer_map = Arc::new(PeerMap::new(s, ctx.clone(), 10));
     let store = Arc::new(PeerSessionStore::new());
-    let relay_map = RelayPeerMap::new(peer_map, None, ctx.clone(), 10, store.clone());
+    let relay_map = RelayPeerMap::new(peer_map, None, ctx.clone(), 10, store.clone(), None);
 
     let peer_1: PeerId = 100;
 
@@ -981,6 +1078,7 @@ pub async fn create_mock_peer_manager_credential(
         enabled: true,
         local_private_key: Some(BASE64_STANDARD.encode(private_key.as_bytes())),
         local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
+        ..Default::default()
     }));
 
     let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
@@ -1005,15 +1103,11 @@ async fn credential_node_joins_network() {
             false,
             vec![],
             std::time::Duration::from_secs(3600),
-        );
+        )
+        .unwrap();
 
     // Create credential node using the generated key
-    let privkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let private = x25519_dalek::StaticSecret::from(privkey_bytes);
+    let private = credential_private_key_from_secret(&cred_secret);
     let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
 
     // Connect admins first
@@ -1097,14 +1191,10 @@ async fn credential_revocation_removes_from_routes() {
     let (cred_id, cred_secret) = admin_a
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(3600));
-
-    let privkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
+        .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(3600))
         .unwrap();
-    let private = x25519_dalek::StaticSecret::from(privkey_bytes);
+
+    let private = credential_private_key_from_secret(&cred_secret);
     let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
 
     // Connect: A -- B, C -> A (credential node as client, admin as server)
@@ -1133,7 +1223,8 @@ async fn credential_revocation_removes_from_routes() {
         admin_a
             .get_global_ctx()
             .get_credential_manager()
-            .revoke_credential(&cred_id)
+            .try_revoke_credential(&cred_id)
+            .unwrap()
     );
     // Issue event to trigger OSPF sync
     admin_a
@@ -1170,18 +1261,14 @@ async fn credential_expiry_disconnects_from_all_admins() {
     let (_cred_id, cred_secret) = admin_a
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(2));
+        .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(2))
+        .unwrap();
 
     admin_a
         .get_global_ctx()
         .issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);
 
-    let privkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let private = x25519_dalek::StaticSecret::from(privkey_bytes);
+    let private = credential_private_key_from_secret(&cred_secret);
     let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
     let cred_c_id = cred_c.my_peer_id();
 
@@ -1267,14 +1354,10 @@ async fn credential_node_group_assignment() {
             false,
             vec![],
             std::time::Duration::from_secs(3600),
-        );
-
-    let privkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
+        )
         .unwrap();
-    let private = x25519_dalek::StaticSecret::from(privkey_bytes);
+
+    let private = credential_private_key_from_secret(&cred_secret);
     let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
 
     connect_peer_manager(admin_a.clone(), admin_b.clone()).await;
@@ -1350,17 +1433,13 @@ async fn credential_node_connected_via_admin_b_trusts_admin_a_groups() {
     let (_cred_id, cred_secret) = admin_a
         .get_global_ctx()
         .get_credential_manager()
-        .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(3600));
+        .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(3600))
+        .unwrap();
     admin_a
         .get_global_ctx()
         .issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);
 
-    let privkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let private = x25519_dalek::StaticSecret::from(privkey_bytes);
+    let private = credential_private_key_from_secret(&cred_secret);
     let credential_pubkey = x25519_dalek::PublicKey::from(&private).as_bytes().to_vec();
 
     wait_for_condition(
@@ -1454,7 +1533,8 @@ async fn multi_admin_multi_credential_route_and_revocation_isolation() {
             false,
             vec![],
             std::time::Duration::from_secs(3600),
-        );
+        )
+        .unwrap();
     let (_cred2_id, cred2_secret) = admin_b
         .get_global_ctx()
         .get_credential_manager()
@@ -1463,28 +1543,13 @@ async fn multi_admin_multi_credential_route_and_revocation_isolation() {
             false,
             vec![],
             std::time::Duration::from_secs(3600),
-        );
+        )
+        .unwrap();
 
-    let cred1_private: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred1_secret)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let cred2_private: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred2_secret)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let cred_1 = create_mock_peer_manager_credential(
-        "net1".to_string(),
-        &x25519_dalek::StaticSecret::from(cred1_private),
-    )
-    .await;
-    let cred_2 = create_mock_peer_manager_credential(
-        "net1".to_string(),
-        &x25519_dalek::StaticSecret::from(cred2_private),
-    )
-    .await;
+    let cred1_private = credential_private_key_from_secret(&cred1_secret);
+    let cred2_private = credential_private_key_from_secret(&cred2_secret);
+    let cred_1 = create_mock_peer_manager_credential("net1".to_string(), &cred1_private).await;
+    let cred_2 = create_mock_peer_manager_credential("net1".to_string(), &cred2_private).await;
 
     connect_peer_manager(cred_1.clone(), admin_a.clone()).await;
     connect_peer_manager(cred_2.clone(), admin_b.clone()).await;
@@ -1522,7 +1587,8 @@ async fn multi_admin_multi_credential_route_and_revocation_isolation() {
         admin_a
             .get_global_ctx()
             .get_credential_manager()
-            .revoke_credential(&cred1_id)
+            .try_revoke_credential(&cred1_id)
+            .unwrap()
     );
     admin_a
         .get_global_ctx()
@@ -1560,18 +1626,11 @@ async fn unknown_credential_rejected_while_valid_credential_survives() {
             false,
             vec![],
             std::time::Duration::from_secs(3600),
-        );
-
-    let valid_private: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&cred_secret)
-        .unwrap()
-        .try_into()
+        )
         .unwrap();
-    let valid_cred = create_mock_peer_manager_credential(
-        "net1".to_string(),
-        &x25519_dalek::StaticSecret::from(valid_private),
-    )
-    .await;
+
+    let valid_private = credential_private_key_from_secret(&cred_secret);
+    let valid_cred = create_mock_peer_manager_credential("net1".to_string(), &valid_private).await;
     let unknown_private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
     let unknown_cred =
         create_mock_peer_manager_credential("net1".to_string(), &unknown_private).await;
@@ -1725,7 +1784,7 @@ mod speed_first {
             .into_iter()
             .find(|route| route.peer_id == c_id)
             .unwrap();
-        assert_eq!(route.path_delivery_bps_speed_first, Some(20_000_000));
+        assert_eq!(route.path_delivery_bps_speed_first, Some(16_777_216));
 
         let pinned_flow = 10;
         assert_eq!(

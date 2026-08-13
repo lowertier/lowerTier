@@ -9,7 +9,8 @@ use crate::{
     peers::secure_datagram::{SecureDatagramDirection, SecureDatagramSession},
     proto::common::TunnelInfo,
     tunnel::{
-        PacketBatchSink, PacketBatchStream, SplitTunnel, StreamItem, Tunnel, TunnelError,
+        DatagramSizeBudget, PacketBatchSink, PacketBatchStream, SplitTunnel, StreamItem,
+        TransportBinding, Tunnel, TunnelError,
         batch::PacketBatch,
         filter::{TunnelFilter, TunnelWithFilter},
         packet_def::{PacketType, ZCPacket, ZCPacketType},
@@ -28,6 +29,9 @@ const WEB_SECURE_ACCEPT_TIMEOUT: Duration = WEB_SECURE_HANDSHAKE_TIMEOUT;
 struct RawSplitTunnel {
     info: Option<TunnelInfo>,
     split: Mutex<Option<SplitTunnel>>,
+    datagram_size_budget: Option<DatagramSizeBudget>,
+    transport_binding: Option<TransportBinding>,
+    transport_authenticated: bool,
 }
 
 impl RawSplitTunnel {
@@ -35,10 +39,16 @@ impl RawSplitTunnel {
         info: Option<TunnelInfo>,
         stream: std::pin::Pin<Box<dyn PacketBatchStream>>,
         sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
+        datagram_size_budget: Option<DatagramSizeBudget>,
+        transport_binding: Option<TransportBinding>,
+        transport_authenticated: bool,
     ) -> Self {
         Self {
             info,
             split: Mutex::new(Some((stream, sink))),
+            datagram_size_budget,
+            transport_binding,
+            transport_authenticated,
         }
     }
 }
@@ -54,6 +64,18 @@ impl Tunnel for RawSplitTunnel {
 
     fn info(&self) -> Option<TunnelInfo> {
         self.info.clone()
+    }
+
+    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
+        self.datagram_size_budget.clone()
+    }
+
+    fn transport_binding(&self) -> Option<TransportBinding> {
+        self.transport_binding
+    }
+
+    fn is_transport_authenticated(&self) -> bool {
+        self.transport_authenticated
     }
 }
 
@@ -189,10 +211,20 @@ fn wrap_secure_tunnel(
     info: Option<TunnelInfo>,
     stream: std::pin::Pin<Box<dyn PacketBatchStream>>,
     sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
+    datagram_size_budget: Option<DatagramSizeBudget>,
+    transport_binding: Option<TransportBinding>,
+    transport_authenticated: bool,
     session: Arc<SecureDatagramSession>,
     role: SecureTunnelRole,
 ) -> Box<dyn Tunnel> {
-    let raw = RawSplitTunnel::new(info, stream, sink);
+    let raw = RawSplitTunnel::new(
+        info,
+        stream,
+        sink,
+        datagram_size_budget,
+        transport_binding,
+        transport_authenticated,
+    );
     Box::new(TunnelWithFilter::new(
         raw,
         SecureDatagramTunnelFilter { session, role },
@@ -204,6 +236,9 @@ pub async fn upgrade_client_tunnel(
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let web_cipher_algorithm = web_secure_cipher_algorithm()?;
     let info = tunnel.info();
+    let datagram_size_budget = tunnel.datagram_size_budget();
+    let transport_binding = tunnel.transport_binding();
+    let transport_authenticated = tunnel.is_transport_authenticated();
     let (mut stream, mut sink) = tunnel.split();
 
     let params: NoiseParams = NOISE_PATTERN
@@ -250,6 +285,9 @@ pub async fn upgrade_client_tunnel(
         info,
         stream,
         sink,
+        datagram_size_budget,
+        transport_binding,
+        transport_authenticated,
         new_web_secure_session(root_key_buf, web_cipher_algorithm),
         SecureTunnelRole::Initiator,
     ))
@@ -259,6 +297,9 @@ pub async fn accept_or_upgrade_server_tunnel(
     tunnel: Box<dyn Tunnel>,
 ) -> Result<(Box<dyn Tunnel>, bool), TunnelError> {
     let info = tunnel.info();
+    let datagram_size_budget = tunnel.datagram_size_budget();
+    let transport_binding = tunnel.transport_binding();
+    let transport_authenticated = tunnel.is_transport_authenticated();
     let (stream, sink) = tunnel.split();
     let mut stream = stream;
     let mut sink = sink;
@@ -274,7 +315,14 @@ pub async fn accept_or_upgrade_server_tunnel(
         Ok(None) => return Err(TunnelError::Shutdown),
         Err(_) => {
             return Ok((
-                Box::new(RawSplitTunnel::new(info, stream, sink)) as Box<dyn Tunnel>,
+                Box::new(RawSplitTunnel::new(
+                    info,
+                    stream,
+                    sink,
+                    datagram_size_budget,
+                    transport_binding,
+                    transport_authenticated,
+                )) as Box<dyn Tunnel>,
                 false,
             ));
         }
@@ -286,7 +334,14 @@ pub async fn accept_or_upgrade_server_tunnel(
                 .chain(stream),
         );
         return Ok((
-            Box::new(RawSplitTunnel::new(info, stream, sink)) as Box<dyn Tunnel>,
+            Box::new(RawSplitTunnel::new(
+                info,
+                stream,
+                sink,
+                datagram_size_budget,
+                transport_binding,
+                transport_authenticated,
+            )) as Box<dyn Tunnel>,
             false,
         ));
     };
@@ -321,6 +376,9 @@ pub async fn accept_or_upgrade_server_tunnel(
             info,
             stream,
             sink,
+            datagram_size_budget,
+            transport_binding,
+            transport_authenticated,
             new_web_secure_session(root_key, web_cipher_algorithm),
             SecureTunnelRole::Responder,
         ),
@@ -357,6 +415,27 @@ mod tests {
         session
             .check_encrypt_algo_same(WEB_SECURE_CIPHER_ALGORITHM, WEB_SECURE_CIPHER_ALGORITHM)
             .unwrap();
+    }
+
+    #[test]
+    fn raw_split_tunnel_preserves_transport_metadata() {
+        let binding = Some(TransportBinding {
+            kind: crate::tunnel::TransportBindingKind::QuicTlsExporterV1,
+            bytes: [0x52_u8; 32],
+        });
+        let datagram_size_budget: DatagramSizeBudget = Arc::new(|| Some(1200));
+        let tunnel = RawSplitTunnel::new(
+            None,
+            Box::pin(futures::stream::empty::<crate::tunnel::BatchStreamItem>()),
+            Box::pin(futures::sink::drain::<PacketBatch>().sink_map_err(|error| match error {})),
+            Some(datagram_size_budget),
+            binding,
+            true,
+        );
+
+        assert_eq!(tunnel.transport_binding(), binding);
+        assert!(tunnel.is_transport_authenticated());
+        assert_eq!(tunnel.datagram_size_budget().expect("budget")(), Some(1200));
     }
 
     #[tokio::test]

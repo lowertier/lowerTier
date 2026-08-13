@@ -11,7 +11,10 @@ use url::Url;
 use crate::{
     VERSION,
     common::{error::Error, global_ctx::ArcGlobalCtx},
-    tunnel::{IpVersion, SplitTunnel, Tunnel, TunnelConnector, TunnelError},
+    tunnel::{
+        DatagramSizeBudget, IpVersion, SplitTunnel, TransportBinding, Tunnel, TunnelConnector,
+        TunnelError,
+    },
 };
 
 use crate::proto::common::TunnelInfo;
@@ -36,6 +39,18 @@ impl Tunnel for TunnelWithInfo {
 
     fn info(&self) -> Option<TunnelInfo> {
         Some(self.info.clone())
+    }
+
+    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
+        self.inner.datagram_size_budget()
+    }
+
+    fn transport_binding(&self) -> Option<TransportBinding> {
+        self.inner.transport_binding()
+    }
+
+    fn is_transport_authenticated(&self) -> bool {
+        self.inner.is_transport_authenticated()
     }
 }
 
