@@ -577,9 +577,53 @@ pub mod tests {
             RUN_TESTING, UdpHolePunchConnector, tests::create_mock_peer_manager_with_mock_stun,
         },
         peers::tests::{connect_peer_manager, wait_route_appear, wait_route_appear_with_cost},
-        proto::common::NatType,
+        proto::{
+            common::NatType,
+            peer_rpc::{SelectPunchListenerRequest, UdpHolePunchRpcClientFactory},
+            rpc_types::controller::BaseController,
+        },
         tunnel::common::tests::wait_for_condition,
     };
+
+    #[tokio::test]
+    #[serial_test::serial(hole_punch)]
+    async fn relayed_listener_rpc_survives_session_reuse() {
+        let p_a = create_mock_peer_manager_with_mock_stun(NatType::Symmetric).await;
+        let p_b = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let p_c = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        connect_peer_manager(p_a.clone(), p_b.clone()).await;
+        connect_peer_manager(p_b.clone(), p_c.clone()).await;
+        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
+
+        let mut hole_punching_c = UdpHolePunchConnector::new(p_c.clone());
+        hole_punching_c.run_as_server().await.unwrap();
+
+        let rpc_stub = p_a
+            .get_peer_rpc_mgr()
+            .rpc_client()
+            .scoped_client::<UdpHolePunchRpcClientFactory<BaseController>>(
+                p_a.my_peer_id(),
+                p_c.my_peer_id(),
+                p_a.get_global_ctx().get_network_name(),
+            );
+
+        for _ in 0..2 {
+            let response = rpc_stub
+                .select_punch_listener(
+                    BaseController {
+                        timeout_ms: 4000,
+                        ..Default::default()
+                    },
+                    SelectPunchListenerRequest {
+                        force_new: false,
+                        prefer_port_mapping: true,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(response.listener_mapped_addr.is_some());
+        }
+    }
 
     #[tokio::test]
     #[serial_test::serial]

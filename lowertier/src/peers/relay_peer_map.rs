@@ -11,6 +11,7 @@ use prost::Message;
 use quanta::Instant;
 use rayon::prelude::*;
 use snow::{TransportState, params::NoiseParams};
+use smallvec::SmallVec;
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, oneshot};
 use tokio::time::{Duration, timeout};
 
@@ -18,7 +19,7 @@ use crate::peers::{PacketRecvChan, foreign_network_client::ForeignNetworkClient}
 use crate::{
     common::error::Error,
     common::{PeerId, global_ctx::ArcGlobalCtx, shrink_dashmap},
-    peers::flow::classify_packet_flow,
+    peers::flow::{classify_packet_flow, stamp_critical_l2_control, stamp_packet_flow},
     peers::peer_manager::PeerManager,
     peers::peer_map::{
         OriginAuthCapability, OriginAuthEntry, OriginAuthGrant, OriginAuthSnapshot, PeerMap,
@@ -35,7 +36,7 @@ use crate::{
         RelayNoiseMsg2Pb, SecureAuthLevel,
     },
     tunnel::{
-        batch::{PacketBatch, parallel_crypto_enabled},
+        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, parallel_crypto_enabled},
         packet_def::{PEER_MANAGER_STABLE_AUTH_DATA_SIZE, PacketType, ZCPacket},
     },
 };
@@ -150,8 +151,8 @@ const HANDSHAKE_CONFIRM_RETRY_MAX_MS: u64 = 5_000;
 const HANDSHAKE_CONFIRM_MAX_ATTEMPTS: u32 = 8;
 const MAX_PENDING_PACKETS_PER_PEER: usize = 32;
 const RELAY_QUEUE_PACKET_OVERHEAD: usize = 128;
-const RELAY_QUEUE_MAX_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
-const RELAY_QUEUE_MAX_BYTES_GLOBAL: usize = 64 * 1024 * 1024;
+const RELAY_QUEUE_MAX_BYTES_PER_PEER: usize = 256 * 1024;
+const RELAY_QUEUE_MAX_BYTES_GLOBAL: usize = 1024 * 1024;
 const RELAY_QUEUE_MAX_PACKETS_GLOBAL: usize = 4096;
 static RELAY_QUEUE_GLOBAL_BYTES: AtomicUsize = AtomicUsize::new(0);
 static RELAY_QUEUE_GLOBAL_PACKETS: AtomicUsize = AtomicUsize::new(0);
@@ -270,6 +271,8 @@ fn decode_relay_ready_receipt(payload: &[u8]) -> Result<RelayReadyReceiptIdentit
 }
 
 pub(crate) fn attach_relay_origin_proof(packet: &mut ZCPacket) -> anyhow::Result<()> {
+    stamp_critical_l2_control(packet);
+    stamp_packet_flow(packet);
     let header = packet
         .peer_manager_header()
         .ok_or_else(|| anyhow::anyhow!("relay packet has no peer header"))?;
@@ -409,6 +412,7 @@ struct RelaySendState {
     retry_attempt: AtomicU32,
     confirmation: StdMutex<Option<RelayConfirmationIdentity>>,
     queued_bytes: AtomicUsize,
+    process_memory: Arc<crate::common::global_ctx::ProcessMemoryGovernor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,6 +434,20 @@ enum EnqueueBatchResult {
 
 impl RelaySendState {
     fn new(phase: RelaySendPhase) -> Self {
+        Self::new_with_governor(
+            phase,
+            Arc::new(
+                crate::common::global_ctx::ProcessMemoryGovernor::with_limit(
+                    RELAY_QUEUE_MAX_BYTES_GLOBAL,
+                ),
+            ),
+        )
+    }
+
+    fn new_with_governor(
+        phase: RelaySendPhase,
+        process_memory: Arc<crate::common::global_ctx::ProcessMemoryGovernor>,
+    ) -> Self {
         Self {
             phase: AtomicU8::new(phase as u8),
             closed: AtomicBool::new(false),
@@ -443,6 +461,7 @@ impl RelaySendState {
             retry_attempt: AtomicU32::new(0),
             confirmation: StdMutex::new(None),
             queued_bytes: AtomicUsize::new(0),
+            process_memory,
         }
     }
 
@@ -458,6 +477,10 @@ impl RelaySendState {
         else {
             return false;
         };
+        if !self.process_memory.reserve(bytes) {
+            self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            return false;
+        }
         let global_bytes =
             RELAY_QUEUE_GLOBAL_BYTES.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
@@ -465,6 +488,7 @@ impl RelaySendState {
                     .filter(|next| *next <= RELAY_QUEUE_MAX_BYTES_GLOBAL)
             });
         if global_bytes.is_err() {
+            self.process_memory.release(bytes);
             self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
             return false;
         }
@@ -475,6 +499,7 @@ impl RelaySendState {
                     .filter(|next| *next <= RELAY_QUEUE_MAX_PACKETS_GLOBAL)
             });
         if global_packets.is_err() {
+            self.process_memory.release(bytes);
             RELAY_QUEUE_GLOBAL_BYTES.fetch_sub(bytes, Ordering::AcqRel);
             self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
             return false;
@@ -483,6 +508,7 @@ impl RelaySendState {
     }
 
     fn release(&self, bytes: usize, packets: usize) {
+        self.process_memory.release(bytes);
         self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
         RELAY_QUEUE_GLOBAL_BYTES.fetch_sub(bytes, Ordering::AcqRel);
         RELAY_QUEUE_GLOBAL_PACKETS.fetch_sub(packets, Ordering::AcqRel);
@@ -735,6 +761,7 @@ struct PendingConfirmationAck {
     transition_id: [u8; RELAY_TRANSITION_ID_SIZE],
     expected_packet_type: u8,
     transition_identity: InitiatorTransitionIdentity,
+    previous_receipt_identity: Option<InitiatorTransitionIdentity>,
     expires_at: Instant,
     /// The staged initiator session remains private until READY-ACK.
     ///
@@ -847,7 +874,12 @@ impl RelayPeerMap {
     fn ensure_send_state(&self, peer_id: PeerId, phase: RelaySendPhase) -> Arc<RelaySendState> {
         self.send_states
             .entry(peer_id)
-            .or_insert_with(|| Arc::new(RelaySendState::new(phase)))
+            .or_insert_with(|| {
+                Arc::new(RelaySendState::new_with_governor(
+                    phase,
+                    self.global_ctx.process_memory_governor(),
+                ))
+            })
             .clone()
     }
 
@@ -947,6 +979,17 @@ impl RelayPeerMap {
         Ok(binding)
     }
 
+    fn bind_existing_relay_session_auth_if_missing(
+        &self,
+        peer_id: PeerId,
+        session: &PeerSession,
+    ) -> Result<(), Error> {
+        if self.relay_session_auth.contains_key(&peer_id) {
+            return Ok(());
+        }
+        self.bind_relay_session_auth(peer_id, session).map(|_| ())
+    }
+
     fn validate_relay_session_auth(
         &self,
         peer_id: PeerId,
@@ -962,7 +1005,7 @@ impl RelayPeerMap {
         )
     }
 
-    fn validate_relay_session_auth_from_snapshot(
+    fn validate_relay_session_identity_from_snapshot(
         &self,
         peer_id: PeerId,
         session: &PeerSession,
@@ -974,6 +1017,48 @@ impl RelayPeerMap {
                 "relay origin has no generic authenticated identity".to_string(),
             )));
         };
+        let static_key = session.peer_static_pubkey().ok_or_else(|| {
+            Error::RouteError(Some(
+                "relay session has no authenticated peer key".to_string(),
+            ))
+        })?;
+        if generic.noise_static_pubkey != static_key {
+            return Err(Error::RouteError(Some(
+                "relay session key does not match origin authority".to_string(),
+            )));
+        }
+        let bridge = snapshot
+            .lookup_grant(peer_id, OriginAuthCapability::FullEthernetBridge)
+            .filter(|grant| grant.is_live(Instant::now()));
+        if requires_bridge_grant {
+            let Some(grant) = bridge else {
+                return Err(Error::RouteError(Some(
+                    "complete Ethernet requires a live bridge grant".to_string(),
+                )));
+            };
+            if grant.noise_static_pubkey != static_key {
+                return Err(Error::RouteError(Some(
+                    "bridge grant does not match relay session key".to_string(),
+                )));
+            }
+            return Ok((generic, Some(grant)));
+        }
+        Ok((generic, bridge))
+    }
+
+    fn validate_relay_session_auth_from_snapshot(
+        &self,
+        peer_id: PeerId,
+        session: &PeerSession,
+        requires_bridge_grant: bool,
+        snapshot: &OriginAuthSnapshot,
+    ) -> Result<(OriginAuthEntry, Option<OriginAuthGrant>), Error> {
+        let (generic, bridge) = self.validate_relay_session_identity_from_snapshot(
+            peer_id,
+            session,
+            requires_bridge_grant,
+            snapshot,
+        )?;
         let binding = self.relay_session_auth.get(&peer_id).ok_or_else(|| {
             Error::RouteError(Some(
                 "relay session authority binding is missing".to_string(),
@@ -988,29 +1073,18 @@ impl RelayPeerMap {
             || binding.metadata_session_id != session.metadata_session_id()
             || binding.noise_static_pubkey != static_key
             || binding.generic_revision != Some(generic.revision)
-            || generic.noise_static_pubkey != static_key
         {
             return Err(Error::RouteError(Some(
                 "relay session authority binding changed".to_string(),
             )));
         }
-        let bridge = snapshot
-            .lookup_grant(peer_id, OriginAuthCapability::FullEthernetBridge)
-            .filter(|grant| grant.is_live(Instant::now()));
         if requires_bridge_grant {
-            let Some(grant) = bridge else {
-                return Err(Error::RouteError(Some(
-                    "complete Ethernet requires a live bridge grant".to_string(),
-                )));
-            };
-            if grant.noise_static_pubkey != static_key
-                || binding.bridge_revision != Some(grant.revision)
-            {
+            let grant = bridge.as_ref().expect("bridge grant was validated above");
+            if binding.bridge_revision != Some(grant.revision) {
                 return Err(Error::RouteError(Some(
                     "bridge grant does not match relay session authority".to_string(),
                 )));
             }
-            return Ok((generic, Some(grant)));
         }
         Ok((generic, bridge))
     }
@@ -1486,6 +1560,7 @@ impl RelayPeerMap {
                 transition_id,
                 expected_packet_type: PacketType::RelayHandshakeConfirmAck as u8,
                 transition_identity: transition_identity.clone(),
+                previous_receipt_identity: previous_receipt_identity.clone(),
                 expires_at,
                 session: session.clone(),
                 notify: notify.clone(),
@@ -1552,6 +1627,22 @@ impl RelayPeerMap {
             _ => false,
         };
         if confirm_accepted {
+            if let Err(error) = reservation.suspend_with_session_metadata(
+                responder_session_metadata_id,
+                INITIATOR_RECOVERY_LIFETIME,
+            ) {
+                self.pending_confirmation_acks
+                    .remove_if(&dst_peer_id, |_, pending| {
+                        pending.handshake_id == handshake_id
+                            && pending.session_id == session_id
+                            && pending.transition_id == transition_id
+                    });
+                self.reset_confirmation_state(dst_peer_id, identity);
+                return Err(Error::RouteError(Some(format!(
+                    "retain relay recovery reservation failed: {error}"
+                ))));
+            }
+
             let ready_notify = Arc::new(Notify::new());
             let ready_outcome = Arc::new(AtomicU8::new(0));
             self.pending_confirmation_acks.insert(
@@ -1562,6 +1653,7 @@ impl RelayPeerMap {
                     transition_id,
                     expected_packet_type: PacketType::RelayHandshakeReadyAck as u8,
                     transition_identity: transition_identity.clone(),
+                    previous_receipt_identity: previous_receipt_identity.clone(),
                     expires_at,
                     session: session.clone(),
                     notify: ready_notify.clone(),
@@ -1583,28 +1675,12 @@ impl RelayPeerMap {
                     tracing::debug!(?error, ?dst_peer_id, "relay ready send failed");
                 }
                 if ready_outcome.load(Ordering::Acquire) == 1 {
-                    return self
-                        .commit_initiator_after_ready(
-                            dst_peer_id,
-                            identity,
-                            reservation,
-                            responder_session_metadata_id,
-                            previous_receipt_identity.clone(),
-                        )
-                        .await;
+                    return Ok(());
                 }
                 if timeout(ready_delay, ready_notify.notified()).await.is_ok()
                     && ready_outcome.load(Ordering::Acquire) == 1
                 {
-                    return self
-                        .commit_initiator_after_ready(
-                            dst_peer_id,
-                            identity,
-                            reservation,
-                            responder_session_metadata_id,
-                            previous_receipt_identity.clone(),
-                        )
-                        .await;
+                    return Ok(());
                 }
                 if ready_outcome.load(Ordering::Acquire) == 2 {
                     self.pending_confirmation_acks
@@ -1635,30 +1711,7 @@ impl RelayPeerMap {
                 )));
             }
             if ready_outcome.load(Ordering::Acquire) == 1 {
-                return self
-                    .commit_initiator_after_ready(
-                        dst_peer_id,
-                        identity,
-                        reservation,
-                        responder_session_metadata_id,
-                        previous_receipt_identity.clone(),
-                    )
-                    .await;
-            }
-            if let Err(error) = reservation.suspend_with_session_metadata(
-                responder_session_metadata_id,
-                INITIATOR_RECOVERY_LIFETIME,
-            ) {
-                self.pending_confirmation_acks
-                    .remove_if(&dst_peer_id, |_, pending| {
-                        pending.handshake_id == handshake_id
-                            && pending.session_id == session_id
-                            && pending.transition_id == transition_id
-                    });
-                self.reset_confirmation_state(dst_peer_id, identity);
-                return Err(Error::RouteError(Some(format!(
-                    "retain relay recovery reservation failed: {error}"
-                ))));
+                return Ok(());
             }
             if ready_outcome.load(Ordering::Acquire) == 2 {
                 return Err(
@@ -2617,6 +2670,7 @@ impl RelayPeerMap {
                 .is_some_and(|state| state.phase() == RelaySendPhase::AwaitingSession);
             self.retry_pending_ready_receipt(dst_peer_id, session.clone());
             if !awaiting {
+                self.bind_existing_relay_session_auth_if_missing(dst_peer_id, &session)?;
                 return Ok(session);
             }
         }
@@ -2657,6 +2711,7 @@ impl RelayPeerMap {
                 .send_state(dst_peer_id)
                 .is_none_or(|state| state.phase() == RelaySendPhase::Ready)
         {
+            self.bind_existing_relay_session_auth_if_missing(dst_peer_id, &session)?;
             self.retry_pending_ready_receipt(dst_peer_id, session.clone());
             self.flush_pending_packets(dst_peer_id, session).await?;
             return Ok(());
@@ -2673,6 +2728,7 @@ impl RelayPeerMap {
         let mut last_err = None;
         for attempt in 0..HANDSHAKE_MAX_ATTEMPTS {
             if let Some(session) = self.peer_session_store.get(&key) {
+                self.bind_existing_relay_session_auth_if_missing(dst_peer_id, &session)?;
                 if let Some(state) = self.send_state(dst_peer_id)
                     && state.phase() == RelaySendPhase::AwaitingSession
                 {
@@ -3400,20 +3456,6 @@ impl RelayPeerMap {
                 "relay ready receipt ack used an unexpected session".to_string(),
             )));
         }
-        let pending = self
-            .pending_ready_receipts
-            .get(&remote_peer_id)
-            .map(|pending| pending.clone())
-            .ok_or_else(|| {
-                Error::RouteError(Some(
-                    "relay ready receipt acknowledgement owner is missing".to_string(),
-                ))
-            })?;
-        if pending.identity != identity {
-            return Err(Error::RouteError(Some(
-                "relay ready receipt acknowledgement mismatch".to_string(),
-            )));
-        }
         let receipt_identity = InitiatorTransitionIdentity::new(
             session_key.clone(),
             identity.session_metadata_id,
@@ -3423,9 +3465,35 @@ impl RelayPeerMap {
             identity.transition_id,
             session.root_key_digest(),
         );
+        let completed_ack = || {
+            self.peer_session_store
+                .initiator_receipt_identity(&session_key)
+                .is_none()
+                && self
+                    .peer_session_store
+                    .active_transition_matches(&receipt_identity)
+        };
+        let Some(pending) = self
+            .pending_ready_receipts
+            .get(&remote_peer_id)
+            .map(|pending| pending.clone())
+        else {
+            if completed_ack() {
+                return Ok(());
+            }
+            return Err(Error::RouteError(Some(
+                "relay ready receipt acknowledgement owner is missing".to_string(),
+            )));
+        };
+        if pending.identity != identity {
+            return Err(Error::RouteError(Some(
+                "relay ready receipt acknowledgement mismatch".to_string(),
+            )));
+        }
         if !self
             .peer_session_store
             .acknowledge_initiator_receipt_exact(&receipt_identity)
+            && !completed_ack()
         {
             return Err(Error::RouteError(Some(
                 "relay ready receipt was not pending".to_string(),
@@ -3510,6 +3578,7 @@ impl RelayPeerMap {
             if packet_type == PacketType::RelayHandshakeReadyAck as u8 {
                 let identity = pending.transition_identity.clone();
                 let receipt_session_metadata_id = pending.transition_identity.session_metadata_id;
+                let previous_receipt_identity = pending.previous_receipt_identity.clone();
                 let outcome = pending.outcome.clone();
                 let notify = pending.notify.clone();
                 drop(pending);
@@ -3521,13 +3590,6 @@ impl RelayPeerMap {
                             "resume relay initiator reservation failed: {error}"
                         )))
                     })?;
-                let session_key = SessionKey::new(
-                    self.global_ctx.get_network_identity().network_name.clone(),
-                    remote_peer_id,
-                );
-                let previous_receipt_identity = self
-                    .peer_session_store
-                    .initiator_receipt_identity(&session_key);
                 let relay_identity = RelayConfirmationIdentity {
                     handshake_id,
                     session_id: verified_session_id.expect("session id was checked"),
@@ -3749,6 +3811,9 @@ impl RelayPeerMap {
         remote_peer_id: PeerId,
         handshake_id: [u8; RELAY_HANDSHAKE_ID_SIZE],
     ) -> Result<(), Error> {
+        let expected_pubkey = self
+            .find_remote_static_pubkey(remote_peer_id)
+            .ok_or_else(|| Error::RouteError(Some("relay peer key is not ready".to_string())))?;
         let responder_lock = self
             .responder_handshake_locks
             .entry(remote_peer_id)
@@ -3791,11 +3856,6 @@ impl RelayPeerMap {
             .get_remote_static()
             .map(|x: &[u8]| x.to_vec())
             .unwrap_or_default();
-        let Some(expected_pubkey) = self.find_remote_static_pubkey(remote_peer_id) else {
-            return Err(Error::RouteError(Some(
-                "relay peer key is not ready".to_string(),
-            )));
-        };
         if remote_static != expected_pubkey {
             return Err(Error::RouteError(Some(format!(
                 "responder: initiator static pubkey mismatch for peer {}, expected {} bytes, got {} bytes",
@@ -4318,11 +4378,14 @@ impl RelayPeerMap {
                             .get(&from_peer_id)
                             .is_some_and(|binding| binding.bridge_revision == Some(grant.revision))
                 });
-            let mut selected = vec![false; batch.len()];
+            let batch_len = batch.len();
+            let mut selected = [false; MAX_PACKET_BATCH_SIZE];
+            let selected = &mut selected[..batch_len];
             for index in &indexes {
                 selected[*index] = true;
             }
-            let keep = vec![true; batch.len()];
+            let keep = [true; MAX_PACKET_BATCH_SIZE];
+            let keep = &keep[..batch_len];
             let process_result =
                 batch.process_selected_with_keep_flags(&selected, &keep, |packets| {
                     let decrypt_results =
@@ -4357,7 +4420,9 @@ impl RelayPeerMap {
                         }
                         outcomes[index] = RelayBatchDecryptOutcome::Decrypted;
                     }
-                    Ok::<Vec<bool>, Error>(vec![true; packets.len()])
+                    Ok::<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>, Error>(
+                        SmallVec::from_elem(true, packets.len()),
+                    )
                 });
             if process_result.is_err() {
                 for index in indexes {
@@ -4402,14 +4467,14 @@ impl RelayPeerMap {
         } else {
             None
         };
-        let session = active_session
+        let session = pending_responder_session
             .clone()
-            .or(pending_responder_session)
             .or_else(|| {
                 staged_confirmation
                     .as_ref()
                     .map(|(session, _, _, _)| session.clone())
-            });
+            })
+            .or_else(|| active_session.clone());
         let Some(session) = session else {
             tracing::debug!(
                 "relay session not found for peer {}, try handshake",
@@ -4431,10 +4496,10 @@ impl RelayPeerMap {
             expected_handshake_id,
             expected_session_id,
             expected_transition_id,
-        )) = staged_confirmation
+        )) = staged_confirmation.as_ref()
         {
-            if !Arc::ptr_eq(&session, &expected_session)
-                || expected_session.metadata_session_id() != expected_session_id
+            if !Arc::ptr_eq(&session, expected_session)
+                || expected_session.metadata_session_id() != *expected_session_id
             {
                 return Err(Error::RouteError(Some(
                     "relay confirmation used an unexpected staged session".to_string(),
@@ -4454,8 +4519,8 @@ impl RelayPeerMap {
                 [RELAY_HANDSHAKE_ID_SIZE..]
                 .try_into()
                 .expect("the staged confirmation transition id length was checked");
-            if received_handshake_id != expected_handshake_id
-                || received_transition_id != expected_transition_id
+            if received_handshake_id != *expected_handshake_id
+                || received_transition_id != *expected_transition_id
             {
                 return Err(Error::RouteError(Some(
                     "relay confirmation does not match the staged transition".to_string(),
@@ -4466,18 +4531,42 @@ impl RelayPeerMap {
             && packet
                 .peer_manager_header()
                 .is_none_or(|header| !header.is_hybrid_ip_ethernet());
-        let (origin_entry, bridge_grant) =
-            match self.validate_relay_session_auth(from_peer_id, &session, requires_bridge_grant) {
-                Ok(authority) => authority,
-                Err(error) => {
-                    session.invalidate();
-                    self.peer_session_store.remove_if_same(&key, &session);
-                    if let Some(state) = self.send_state(from_peer_id) {
-                        state.set_phase(RelaySendPhase::AwaitingSession);
-                    }
-                    return Err(error);
+        let transitional_session = pending_responder_session
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(&session, pending))
+            || staged_confirmation
+                .as_ref()
+                .is_some_and(|(staged, _, _, _)| Arc::ptr_eq(&session, staged));
+        if !transitional_session {
+            self.bind_existing_relay_session_auth_if_missing(from_peer_id, &session)?;
+        }
+        let auth_snapshot = self.peer_map.origin_auth_snapshot();
+        let authority = if transitional_session {
+            self.validate_relay_session_identity_from_snapshot(
+                from_peer_id,
+                &session,
+                requires_bridge_grant,
+                &auth_snapshot,
+            )
+        } else {
+            self.validate_relay_session_auth_from_snapshot(
+                from_peer_id,
+                &session,
+                requires_bridge_grant,
+                &auth_snapshot,
+            )
+        };
+        let (origin_entry, bridge_grant) = match authority {
+            Ok(authority) => authority,
+            Err(error) => {
+                session.invalidate();
+                self.peer_session_store.remove_if_same(&key, &session);
+                if let Some(state) = self.send_state(from_peer_id) {
+                    state.set_phase(RelaySendPhase::AwaitingSession);
                 }
-            };
+                return Err(error);
+            }
+        };
         let identity_type = origin_entry.identity_type;
         let session_public_key = session.peer_static_pubkey().ok_or_else(|| {
             Error::RouteError(Some(
@@ -4682,6 +4771,23 @@ mod relay_origin_proof_tests {
         let mut packet = ZCPacket::new_with_payload(&payload);
         packet.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
         packet
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_relay_handshake_does_not_retain_a_responder_lock() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "relay-admission".to_string(),
+            "relay-secret".to_string(),
+        )));
+        let peer_map = Arc::new(PeerMap::new(packet_send, ctx.clone(), 10));
+        let store = Arc::new(PeerSessionStore::new());
+        let relay_map = RelayPeerMap::new(peer_map, None, ctx, 10, store, None);
+        let mut packet = ZCPacket::new_with_payload(&[0; RELAY_HANDSHAKE_ID_SIZE + 1]);
+        packet.fill_peer_manager_hdr(999, 10, PacketType::RelayHandshake as u8);
+
+        assert!(relay_map.handle_handshake_packet(packet).await.is_err());
+        assert!(relay_map.responder_handshake_locks.is_empty());
     }
 
     #[test]
@@ -4969,6 +5075,7 @@ mod relay_origin_proof_tests {
                 transition_id,
                 expected_packet_type: PacketType::RelayHandshakeReadyAck as u8,
                 transition_identity: transition_identity.clone(),
+                previous_receipt_identity: None,
                 expires_at: Instant::now() + Duration::from_millis(HANDSHAKE_CONFIRM_RETRY_MS),
                 session,
                 notify: Arc::new(Notify::new()),
@@ -5054,12 +5161,13 @@ mod relay_origin_proof_tests {
     fn recovered_responder_ready_ack_allows_the_next_normal_transition() {
         let store = PeerSessionStore::new();
         let key = SessionKey::new("relay-recovery".to_string(), 23);
+        let peer_static_pubkey = [0x17_u8; 32];
         let prepared = store
             .prepare_responder_session(
                 &key,
                 "aes-256-gcm".to_string(),
                 "aes-256-gcm".to_string(),
-                None,
+                Some(peer_static_pubkey),
             )
             .unwrap();
         let transition_id = prepared.transition_id();
@@ -5075,7 +5183,7 @@ mod relay_origin_proof_tests {
                 &key,
                 "aes-256-gcm".to_string(),
                 "aes-256-gcm".to_string(),
-                None,
+                Some(peer_static_pubkey),
             )
             .expect("a recovered relay transition must permit the next normal transition");
         next.cancel();

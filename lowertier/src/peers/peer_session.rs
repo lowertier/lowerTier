@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::secure_datagram::{SecureDatagramDirection, SecureDatagramSession};
 use crate::{
-    common::{PeerId, shrink_dashmap},
+    common::{PeerId, shrink_dashmap, verify_slices_are_equal},
     tunnel::packet_def::ZCPacket,
 };
 
@@ -25,6 +25,7 @@ pub const INITIATOR_RECOVERY_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_IN_DOUBT_RESERVATIONS: usize = 256;
 const MAX_COMMITTED_TRANSITIONS_PER_SESSION: usize = 8;
 const MAX_RESPONDER_RECOVERY_RECORDS: usize = 256;
+const MAX_RESPONDER_RECOVERIES_PER_PRINCIPAL: usize = 2;
 const MAX_INITIATOR_RECEIPT_RECORDS: usize = 256;
 
 static IN_DOUBT_RESERVATION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -200,12 +201,12 @@ impl InitiatorTransitionIdentity {
             && self.action == other.action
             && self.session_generation == other.session_generation
             && self.initial_epoch == other.initial_epoch
-            && self.transition_id == other.transition_id
-            && self.root_key_digest == other.root_key_digest
+            && verify_slices_are_equal(&self.transition_id, &other.transition_id).is_ok()
+            && verify_slices_are_equal(&self.root_key_digest, &other.root_key_digest).is_ok()
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResponderTransitionRecovery {
     pub session: Arc<PeerSession>,
     pub action: PeerSessionAction,
@@ -214,6 +215,28 @@ pub struct ResponderTransitionRecovery {
     pub initial_epoch: u32,
     pub transition_id: [u8; 16],
     pub transition_revision: u64,
+}
+
+struct RedactedSecret;
+
+impl std::fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::fmt::Debug for ResponderTransitionRecovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponderTransitionRecovery")
+            .field("session", &self.session)
+            .field("action", &self.action)
+            .field("session_generation", &self.session_generation)
+            .field("root_key", &RedactedSecret)
+            .field("initial_epoch", &self.initial_epoch)
+            .field("transition_id", &self.transition_id)
+            .field("transition_revision", &self.transition_revision)
+            .finish()
+    }
 }
 
 const RESERVATION_PENDING: u8 = 0;
@@ -547,12 +570,14 @@ struct SuspendedInitiatorReservation {
 struct ResponderRecoveryRecord {
     identity: InitiatorTransitionIdentity,
     recovery: ResponderTransitionRecovery,
+    created_at: Instant,
     _quota: QuotaPermit,
 }
 
 struct ResponderRecoveryBackup {
     identity: InitiatorTransitionIdentity,
     recovery: ResponderTransitionRecovery,
+    created_at: Instant,
     _quota: QuotaPermit,
 }
 
@@ -653,9 +678,24 @@ impl PeerSessionStore {
     fn reserve_responder_recovery_quota_locked(
         &self,
         key: &SessionKey,
+        prepared: &UpsertResponderSessionReturn,
     ) -> Result<QuotaPermit, anyhow::Error> {
         if self.responder_recoveries.contains_key(key) {
             return Err(anyhow!("responder recovery proof is already pending"));
+        }
+        let principal = prepared
+            .session
+            .peer_static_pubkey_with_pending()
+            .ok_or_else(|| anyhow!("responder recovery requires an authenticated principal"))?;
+        let principal_records = self
+            .responder_recoveries
+            .iter()
+            .filter(|entry| {
+                entry.recovery.session.peer_static_pubkey_with_pending() == Some(principal)
+            })
+            .count();
+        if principal_records >= MAX_RESPONDER_RECOVERIES_PER_PRINCIPAL {
+            return Err(anyhow!("responder recovery principal capacity is full"));
         }
         if !try_reserve_global(
             &RESPONDER_RECOVERY_RECORD_COUNT,
@@ -703,12 +743,39 @@ impl PeerSessionStore {
                     transition_id: prepared.transition_id,
                     transition_revision: prepared.transition_token(),
                 },
+                created_at: Instant::now(),
                 _quota: quota,
             },
         );
     }
 
+    fn expire_responder_recoveries_locked(&self, lifetime: Duration) -> usize {
+        let now = Instant::now();
+        let expired = self
+            .responder_recoveries
+            .iter()
+            .filter_map(|entry| {
+                (now.saturating_duration_since(entry.created_at) >= lifetime)
+                    .then(|| entry.key().clone())
+            })
+            .collect::<Vec<_>>();
+        let mut removed = 0;
+        for key in expired {
+            if let Some((_, record)) = self.responder_recoveries.remove(&key) {
+                record.recovery.session.invalidate();
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    fn expire_responder_recoveries(&self) -> usize {
+        let _guard = self.creation_lock.lock().unwrap();
+        self.expire_responder_recoveries_locked(INITIATOR_RECOVERY_LIFETIME)
+    }
+
     pub fn consume_responder_recovery(&self, identity: &InitiatorTransitionIdentity) -> bool {
+        self.expire_responder_recoveries();
         let _guard = self.creation_lock.lock().unwrap();
         let Some(entry) = self.responder_recoveries.get(&identity.session_key) else {
             return false;
@@ -730,6 +797,7 @@ impl PeerSessionStore {
         key: &SessionKey,
         transition_id: [u8; 16],
     ) -> bool {
+        self.expire_responder_recoveries();
         let _guard = self.creation_lock.lock().unwrap();
         let Some(entry) = self.responder_recoveries.get(key) else {
             return false;
@@ -746,6 +814,7 @@ impl PeerSessionStore {
     }
 
     pub fn has_responder_recovery(&self, key: &SessionKey) -> bool {
+        self.expire_responder_recoveries();
         self.responder_recoveries.contains_key(key)
     }
 
@@ -754,6 +823,7 @@ impl PeerSessionStore {
     }
 
     pub fn responder_recovery_id(&self, key: &SessionKey) -> Option<[u8; 16]> {
+        self.expire_responder_recoveries();
         self.responder_recoveries
             .get(key)
             .map(|entry| entry.identity.transition_id)
@@ -855,6 +925,12 @@ impl PeerSessionStore {
             .get(key)
             .and_then(|entry| entry.session.last_committed_transition())
             .map(|transition| transition.transition_id)
+    }
+
+    pub fn active_transition_matches(&self, identity: &InitiatorTransitionIdentity) -> bool {
+        self.sessions
+            .get(&identity.session_key)
+            .is_some_and(|entry| entry.session.committed_transition(identity).is_some())
     }
 
     /// Resume one hidden initiator transition only after an exact identity match.
@@ -1360,41 +1436,69 @@ impl PeerSessionStore {
             return Ok(());
         };
 
-        if existing_identity.as_ref() != Some(&previous_receipt_identity) {
-            return Err(anyhow!(
-                "the expected initiator receipt is missing or changed"
-            ));
-        }
+        match existing_identity {
+            Some(existing_identity) if existing_identity == previous_receipt_identity => {
+                // Hold the previous record and its permit while commit runs. This
+                // keeps the global count bounded and restores the exact record on any
+                // commit error.
+                let (_, previous_receipt) = self
+                    .initiator_receipts
+                    .remove(&receipt_identity.session_key)
+                    .ok_or_else(|| anyhow!("initiator receipt disappeared before replacement"))?;
+                let receipt_quota = previous_receipt._quota;
+                if let Err(error) = self.commit_initiator_reservation_locked(reservation) {
+                    self.initiator_receipts.insert(
+                        previous_receipt.identity.session_key.clone(),
+                        InitiatorReceiptRecord {
+                            identity: previous_receipt.identity,
+                            session: previous_receipt.session,
+                            _quota: receipt_quota,
+                        },
+                    );
+                    return Err(error);
+                }
 
-        // Hold the previous record and its permit while commit runs. This
-        // keeps the global count bounded and restores the exact record on any
-        // commit error.
-        let (_, previous_receipt) = self
-            .initiator_receipts
-            .remove(&receipt_identity.session_key)
-            .ok_or_else(|| anyhow!("initiator receipt disappeared before replacement"))?;
-        let receipt_quota = previous_receipt._quota;
-        if let Err(error) = self.commit_initiator_reservation_locked(reservation) {
-            self.initiator_receipts.insert(
-                previous_receipt.identity.session_key.clone(),
-                InitiatorReceiptRecord {
-                    identity: previous_receipt.identity,
-                    session: previous_receipt.session,
-                    _quota: receipt_quota,
-                },
-            );
-            return Err(error);
+                self.initiator_receipts.insert(
+                    receipt_identity.session_key.clone(),
+                    InitiatorReceiptRecord {
+                        identity: receipt_identity,
+                        session: reservation.session.clone(),
+                        _quota: receipt_quota,
+                    },
+                );
+                Ok(())
+            }
+            None => {
+                // The exact prior receipt may be acknowledged by its original
+                // in-flight ReadyReceiptAck after this handshake snapshots it.
+                // Absence is unambiguous under creation_lock, so reserve a fresh
+                // permit and publish the new receipt atomically with the commit.
+                let receipt_quota = if !try_reserve_global(
+                    &INITIATOR_RECEIPT_RECORD_COUNT,
+                    MAX_INITIATOR_RECEIPT_RECORDS,
+                ) {
+                    return Err(anyhow!("initiator receipt capacity is full"));
+                } else {
+                    QuotaPermit {
+                        counter: &INITIATOR_RECEIPT_RECORD_COUNT,
+                    }
+                };
+                if let Err(error) = self.commit_initiator_reservation_locked(reservation) {
+                    drop(receipt_quota);
+                    return Err(error);
+                }
+                self.initiator_receipts.insert(
+                    receipt_identity.session_key.clone(),
+                    InitiatorReceiptRecord {
+                        identity: receipt_identity,
+                        session: reservation.session.clone(),
+                        _quota: receipt_quota,
+                    },
+                );
+                Ok(())
+            }
+            Some(_) => Err(anyhow!("the expected initiator receipt changed")),
         }
-
-        self.initiator_receipts.insert(
-            receipt_identity.session_key.clone(),
-            InitiatorReceiptRecord {
-                identity: receipt_identity,
-                session: reservation.session.clone(),
-                _quota: receipt_quota,
-            },
-        );
-        Ok(())
     }
 
     fn commit_initiator_reservation_locked(
@@ -1540,7 +1644,7 @@ impl PeerSessionStore {
         let fresh_proof_quota = if has_reused_proof_quota {
             None
         } else {
-            Some(self.reserve_responder_recovery_quota_locked(key)?)
+            Some(self.reserve_responder_recovery_quota_locked(key, prepared)?)
         };
         let result = (|| -> Result<(), anyhow::Error> {
             match prepared.action {
@@ -1653,6 +1757,7 @@ impl PeerSessionStore {
         identity: &InitiatorTransitionIdentity,
     ) -> Result<Option<ResponderTransitionRecovery>, anyhow::Error> {
         self.expire_in_doubt_sessions();
+        self.expire_responder_recoveries();
         let _guard = self.creation_lock.lock().unwrap();
         if let Some(entry) = self.responder_recoveries.get(&identity.session_key)
             && entry.identity.matches_authenticated_fields(identity)
@@ -1727,6 +1832,7 @@ impl PeerSessionStore {
         recv_algorithm: String,
         peer_static_pubkey: Option<[u8; 32]>,
     ) -> Result<UpsertResponderSessionReturn, anyhow::Error> {
+        self.expire_responder_recoveries();
         let _guard = self.creation_lock.lock().unwrap();
         let Some(proof) = self.responder_recoveries.get(key) else {
             return Err(anyhow!("no responder recovery proof is pending"));
@@ -1792,6 +1898,7 @@ impl PeerSessionStore {
         *prepared.proof_backup.lock().unwrap() = Some(ResponderRecoveryBackup {
             identity: proof.identity,
             recovery: proof.recovery,
+            created_at: proof.created_at,
             _quota: proof._quota,
         });
         prepared.proof_cleared.store(true, Ordering::Release);
@@ -1817,6 +1924,7 @@ impl PeerSessionStore {
             ResponderRecoveryRecord {
                 identity: backup.identity,
                 recovery: backup.recovery,
+                created_at: backup.created_at,
                 _quota: backup._quota,
             },
         );
@@ -1911,6 +2019,7 @@ impl PeerSessionStore {
     pub fn evict_unused_sessions_idle(&self, idle: Duration) {
         self.expire_in_doubt_sessions();
         let _guard = self.creation_lock.lock().unwrap();
+        self.expire_responder_recoveries_locked(INITIATOR_RECOVERY_LIFETIME);
         let now = Instant::now();
         self.sessions.retain(|_key, entry| {
             entry.session.is_valid()
@@ -2432,7 +2541,7 @@ impl PeerSession {
         sender_peer_id: PeerId,
         receiver_peer_id: PeerId,
         packets: &mut [ZCPacket],
-    ) -> Vec<Result<(), anyhow::Error>> {
+    ) -> smallvec::SmallVec<[Result<(), anyhow::Error>; 64]> {
         if !self.is_valid() {
             return packets
                 .iter()
@@ -2470,6 +2579,32 @@ mod tests {
     static RESPONDER_PROOF_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn responder_recovery_debug_output_redacts_the_root_key() {
+        let root_key = [0xa5; 32];
+        let recovery = ResponderTransitionRecovery {
+            session: Arc::new(PeerSession::new(
+                7,
+                root_key,
+                1,
+                0,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )),
+            action: PeerSessionAction::Create,
+            session_generation: 1,
+            root_key,
+            initial_epoch: 0,
+            transition_id: [1; 16],
+            transition_revision: 1,
+        };
+
+        let output = format!("{recovery:?}");
+        assert!(!output.contains("165"));
+        assert!(output.contains("root_key: <redacted>"));
+    }
+
+    #[test]
     fn concurrent_responder_creates_publish_only_one_session() {
         let store = PeerSessionStore::new();
         let key = SessionKey::new("test".to_string(), 7);
@@ -2492,6 +2627,14 @@ mod tests {
                 };
                 let root_key = prepared.session.root_key();
                 if !matches!(prepared.action, PeerSessionAction::Create) {
+                    prepared.cancel();
+                    return None;
+                }
+                if prepared
+                    .session
+                    .reserve_peer_static_pubkey(Some([0x13; 32]))
+                    .is_err()
+                {
                     prepared.cancel();
                     return None;
                 }
@@ -2883,6 +3026,10 @@ mod tests {
                 None,
             )
             .unwrap();
+        prepared
+            .session
+            .reserve_peer_static_pubkey(Some([0x11; 32]))
+            .unwrap();
         let identity = InitiatorTransitionIdentity::new(
             key.clone(),
             prepared.session.metadata_session_id(),
@@ -2908,6 +3055,58 @@ mod tests {
     }
 
     #[test]
+    fn responder_proof_does_not_expire_before_authenticated_acknowledgement() {
+        let _test_guard = RESPONDER_PROOF_TEST_LOCK.lock().unwrap();
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("expired-proof".to_string(), 151);
+        let prepared = store
+            .prepare_responder_session(
+                &key,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        prepared
+            .session
+            .reserve_peer_static_pubkey(Some([0x12; 32]))
+            .unwrap();
+        let identity = InitiatorTransitionIdentity::new(
+            key.clone(),
+            prepared.session.metadata_session_id(),
+            prepared.action,
+            prepared.session_generation,
+            prepared.initial_epoch,
+            prepared.transition_id(),
+            InitiatorTransitionIdentity::digest_root_key(&prepared.root_key.unwrap()),
+        );
+        store
+            .commit_prepared_responder_transition(&key, &prepared)
+            .unwrap();
+        let before = RESPONDER_RECOVERY_RECORD_COUNT.load(Ordering::Acquire);
+
+        {
+            let _guard = store.creation_lock.lock().unwrap();
+            assert_eq!(
+                store.expire_responder_recoveries_locked(INITIATOR_RECOVERY_LIFETIME),
+                0
+            );
+        }
+
+        assert_eq!(
+            RESPONDER_RECOVERY_RECORD_COUNT.load(Ordering::Acquire),
+            before
+        );
+        assert!(store.has_responder_recovery(&key));
+        assert!(
+            store
+                .reconcile_active_responder_transition(&identity)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn responder_recovery_proof_requires_exact_acknowledgement() {
         let store = PeerSessionStore::new();
         let key = SessionKey::new("proof".to_string(), 16);
@@ -2920,6 +3119,10 @@ mod tests {
             )
             .unwrap();
         let transition_id = prepared.transition_id();
+        prepared
+            .session
+            .reserve_peer_static_pubkey(Some([0x15; 32]))
+            .unwrap();
         store
             .commit_prepared_responder_transition(&key, &prepared)
             .unwrap();
@@ -2942,6 +3145,10 @@ mod tests {
             )
             .unwrap();
         let old_id = first.transition_id();
+        first
+            .session
+            .reserve_peer_static_pubkey(Some([0x16; 32]))
+            .unwrap();
         store
             .commit_prepared_responder_transition(&key, &first)
             .unwrap();
@@ -3015,6 +3222,7 @@ mod tests {
             .record_initiator_receipt(identity.clone(), session.clone())
             .unwrap();
         drop(session);
+        drop(reservation);
         store.evict_unused_sessions_idle(Duration::ZERO);
         assert!(store.peek(&key).is_some());
         assert_ne!(store.initiator_receipt_id(&key), Some([0; 16]));
@@ -3247,6 +3455,133 @@ mod tests {
     }
 
     #[test]
+    fn initiator_receipt_replacement_allows_prior_ack_race() {
+        let _test_guard = RECEIPT_TEST_LOCK.lock().unwrap();
+        let baseline = INITIATOR_RECEIPT_RECORD_COUNT.load(Ordering::Acquire);
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("receipt-ack-race".to_string(), 23);
+        let first = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Create,
+                1,
+                Some(PeerSession::new_root_key()),
+                0,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        let first_identity =
+            first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        let session = first.commit().unwrap();
+        store
+            .record_initiator_receipt(first_identity.clone(), session.clone())
+            .unwrap();
+        assert_eq!(
+            INITIATOR_RECEIPT_RECORD_COUNT.load(Ordering::Acquire),
+            baseline + 1
+        );
+
+        // Snapshot the prior receipt by preparing the next transition first,
+        // then model its original authenticated ReadyReceiptAck arriving before
+        // the new transition commits.
+        let second = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Sync,
+                1,
+                Some(PeerSession::new_root_key()),
+                session.next_sync_epoch(),
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        let second_identity =
+            second.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        assert!(store.acknowledge_initiator_receipt_exact(&first_identity));
+        assert_eq!(
+            INITIATOR_RECEIPT_RECORD_COUNT.load(Ordering::Acquire),
+            baseline
+        );
+
+        second
+            .commit_with_receipt_replacing(second_identity.clone(), Some(first_identity))
+            .unwrap();
+        assert_eq!(
+            store.initiator_receipt_identity(&key),
+            Some(second_identity.clone())
+        );
+        assert_eq!(
+            INITIATOR_RECEIPT_RECORD_COUNT.load(Ordering::Acquire),
+            baseline + 1
+        );
+        assert!(store.acknowledge_initiator_receipt_exact(&second_identity));
+        assert_eq!(
+            INITIATOR_RECEIPT_RECORD_COUNT.load(Ordering::Acquire),
+            baseline
+        );
+    }
+
+    #[test]
+    fn initiator_receipt_replacement_rejects_competing_receipt() {
+        let _test_guard = RECEIPT_TEST_LOCK.lock().unwrap();
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("receipt-competing-race".to_string(), 24);
+        let first = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Create,
+                1,
+                Some(PeerSession::new_root_key()),
+                0,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        let first_identity =
+            first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        let session = first.commit().unwrap();
+        store
+            .record_initiator_receipt(first_identity.clone(), session.clone())
+            .unwrap();
+
+        let second = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Sync,
+                1,
+                Some(PeerSession::new_root_key()),
+                session.next_sync_epoch(),
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        let second_identity =
+            second.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        assert!(store.acknowledge_initiator_receipt_exact(&first_identity));
+
+        let mut competing_identity = first_identity.clone();
+        competing_identity.transition_id = [0xA5; 16];
+        store
+            .record_initiator_receipt(competing_identity.clone(), session.clone())
+            .unwrap();
+        assert!(
+            second
+                .commit_with_receipt_replacing(second_identity, Some(first_identity))
+                .is_err()
+        );
+        assert_eq!(
+            store.initiator_receipt_identity(&key),
+            Some(competing_identity.clone())
+        );
+        assert!(store.acknowledge_initiator_receipt_exact(&competing_identity));
+    }
+
+    #[test]
     fn responder_proof_replacement_reuses_quota_at_global_limit() {
         let _test_guard = RESPONDER_PROOF_TEST_LOCK.lock().unwrap();
         let mut retained = Vec::with_capacity(MAX_RESPONDER_RECOVERY_RECORDS);
@@ -3265,6 +3600,10 @@ mod tests {
                 )
                 .unwrap();
             let transition_id = prepared.transition_id();
+            prepared
+                .session
+                .reserve_peer_static_pubkey(Some([0x14; 32]))
+                .unwrap();
             store
                 .commit_prepared_responder_transition(&key, &prepared)
                 .unwrap();
@@ -3298,6 +3637,7 @@ mod tests {
         );
         let replacement_id = target_store.responder_recovery_id(&target_key).unwrap();
         assert_ne!(replacement_id, old_id);
+        retained[0].2 = replacement_id;
 
         let failed = target_store
             .prepare_responder_session_with_recovery_proof(

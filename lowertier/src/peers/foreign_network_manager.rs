@@ -20,7 +20,7 @@ use guarden::{Guard, defer};
 use tokio::{
     sync::{
         Mutex,
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        mpsc::{self, Receiver, Sender},
     },
     task::JoinSet,
 };
@@ -53,7 +53,7 @@ use crate::{
 };
 
 use super::{
-    PUBLIC_SERVER_HOSTNAME_PREFIX, PacketRecvChan, PacketRecvChanReceiver, create_packet_recv_chan,
+    PUBLIC_SERVER_HOSTNAME_PREFIX, PacketRecvChan, PacketRecvChanReceiver,
     peer_conn::PeerConn,
     peer_map::PeerMap,
     peer_ospf_route::PeerRoute,
@@ -68,6 +68,9 @@ use super::{
         is_relay_data_packet_type, route_peer_info_instance_id, traffic_kind,
     },
 };
+
+#[cfg(test)]
+use super::create_packet_recv_chan;
 
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(&, Box, Arc)]
@@ -95,7 +98,7 @@ struct ForeignNetworkEntry {
     pm_packet_sender: Mutex<Option<PacketRecvChan>>,
 
     peer_rpc: Arc<PeerRpcManager>,
-    rpc_sender: UnboundedSender<ZCPacket>,
+    rpc_sender: Sender<ZCPacket>,
 
     packet_recv: Mutex<Option<PacketRecvChanReceiver>>,
 
@@ -127,7 +130,7 @@ impl ForeignNetworkEntry {
             Self::build_foreign_global_ctx(&network, global_ctx.clone(), relay_data);
         let network_name = network.network_name.clone();
 
-        let (packet_sender, packet_recv) = create_packet_recv_chan();
+        let (packet_sender, packet_recv) = pm_packet_sender.create_sibling_channel();
 
         let peer_map = Arc::new(PeerMap::new(
             packet_sender,
@@ -325,12 +328,12 @@ impl ForeignNetworkEntry {
     fn build_rpc_tspt(
         my_peer_id: PeerId,
         peer_map: Arc<PeerMap>,
-    ) -> (Arc<PeerRpcManager>, UnboundedSender<ZCPacket>) {
+    ) -> (Arc<PeerRpcManager>, Sender<ZCPacket>) {
         struct RpcTransport {
             my_peer_id: PeerId,
             peer_map: Weak<PeerMap>,
 
-            packet_recv: Mutex<UnboundedReceiver<ZCPacket>>,
+            packet_recv: Mutex<Receiver<ZCPacket>>,
         }
 
         #[async_trait::async_trait]
@@ -372,7 +375,8 @@ impl ForeignNetworkEntry {
             }
         }
 
-        let (rpc_transport_sender, peer_rpc_tspt_recv) = mpsc::unbounded_channel();
+        // Keep foreign RPC ingress small. Each foreign network has one queue.
+        let (rpc_transport_sender, peer_rpc_tspt_recv) = mpsc::channel(16);
         let tspt = RpcTransport {
             my_peer_id,
             peer_map: Arc::downgrade(&peer_map),
@@ -404,6 +408,7 @@ impl ForeignNetworkEntry {
                     .accessor
                     .list_authenticated_global_foreign_peers(&self.network_identity)
                     .await;
+                peer_map.replace_authenticated_foreign_owner_snapshot(&global);
                 let authenticated_global_peers = global.iter().cloned().collect::<HashMap<_, _>>();
                 self.authenticated_global_peers
                     .store(Arc::new(authenticated_global_peers));
@@ -638,7 +643,12 @@ impl ForeignNetworkEntry {
                     {
                         rx_bytes.add(buf_len as u64);
                         rx_packets.inc();
-                        rpc_sender.send(zc_packet).unwrap();
+                        if rpc_sender.try_send(zc_packet).is_err() {
+                            tracing::trace!(
+                                ?from_peer_id,
+                                "drop foreign RPC packet because ingress is unavailable"
+                            );
+                        }
                         continue;
                     }
                     tracing::trace!(
@@ -1217,9 +1227,10 @@ impl ForeignNetworkManager {
             }
         }
 
-        // A foreign-network owner is trusted only for that foreign scope.
-        // Keep it out of the local Admin authority domain.
-        peer_conn.set_peer_identity_type(PeerIdentityType::ForeignRelay);
+        // Incoming tenants are foreign members, not relay authorities. Keep
+        // their cross-network transport scoped as SharedNode; the client side
+        // explicitly promotes only its configured public server to ForeignRelay.
+        peer_conn.set_peer_identity_type(PeerIdentityType::SharedNode);
         entry.peer_map.add_new_peer_conn(peer_conn).await?;
         let _ = rollback_new_entry.defuse();
         Ok(())
@@ -1512,7 +1523,7 @@ pub mod tests {
                         .get_network_entry("net1")
                         .is_some_and(|entry| {
                             entry.peer_map.get_peer_identity_type(foreign_peer_id)
-                                == Some(PeerIdentityType::ForeignRelay)
+                                == Some(PeerIdentityType::SharedNode)
                         })
                 }
             },
@@ -1529,11 +1540,15 @@ pub mod tests {
         assert_eq!(peer_ids.len(), 1);
         assert_eq!(
             entry.peer_map.get_peer_identity_type(peer_ids[0]),
-            Some(PeerIdentityType::ForeignRelay)
+            Some(PeerIdentityType::SharedNode)
         );
         assert_ne!(
             entry.peer_map.get_peer_identity_type(peer_ids[0]),
             Some(PeerIdentityType::Admin)
+        );
+        assert_ne!(
+            entry.peer_map.get_peer_identity_type(peer_ids[0]),
+            Some(PeerIdentityType::ForeignRelay)
         );
     }
 
@@ -1990,6 +2005,83 @@ pub mod tests {
         let pmb_net1 = create_mock_peer_manager_for_foreign_network("net1").await;
         connect_peer_manager(pma_net1.clone(), pm_center1.clone()).await;
         connect_peer_manager(pmb_net1.clone(), pm_center2.clone()).await;
+
+        wait_for_condition(
+            || {
+                let pm_center1 = pm_center1.clone();
+                let pm_center2 = pm_center2.clone();
+                async move {
+                    let Some(network1) = pm_center1
+                        .get_foreign_network_manager()
+                        .get_network_identity("net1")
+                    else {
+                        return false;
+                    };
+                    let Some(network2) = pm_center2
+                        .get_foreign_network_manager()
+                        .get_network_identity("net1")
+                    else {
+                        return false;
+                    };
+                    !pm_center1
+                        .get_peer_map()
+                        .list_authenticated_foreign_network_peers(&network1)
+                        .await
+                        .is_empty()
+                        && !pm_center2
+                            .get_peer_map()
+                            .list_authenticated_foreign_network_peers(&network2)
+                            .await
+                            .is_empty()
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let center1_foreign_peer_id = pm_center1
+            .get_foreign_network_manager()
+            .get_network_peer_id("net1")
+            .expect("center1 foreign network exists");
+        let center2_foreign_peer_id = pm_center2
+            .get_foreign_network_manager()
+            .get_network_peer_id("net1")
+            .expect("center2 foreign network exists");
+        wait_for_condition(
+            || {
+                let pm_center1 = pm_center1.clone();
+                let pm_center2 = pm_center2.clone();
+                async move {
+                    let Some(entry1) = pm_center1
+                        .get_foreign_network_manager()
+                        .data
+                        .get_network_entry("net1")
+                    else {
+                        return false;
+                    };
+                    let Some(entry2) = pm_center2
+                        .get_foreign_network_manager()
+                        .data
+                        .get_network_entry("net1")
+                    else {
+                        return false;
+                    };
+                    entry1
+                        .peer_map
+                        .origin_auth_snapshot()
+                        .lookup(center2_foreign_peer_id)
+                        .is_some()
+                        && entry2
+                            .peer_map
+                            .origin_auth_snapshot()
+                            .lookup(center1_foreign_peer_id)
+                            .is_some()
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
         wait_route_appear(pma_net1.clone(), pmb_net1.clone())
             .await
             .unwrap();
@@ -2066,28 +2158,35 @@ pub mod tests {
         );
 
         let foreign_mgr = pm_center.get_foreign_network_manager();
-        wait_for_condition(
-            || {
-                let foreign_mgr = foreign_mgr.clone();
-                async move {
-                    foreign_mgr
-                        .list_foreign_networks_with_options(true)
-                        .await
-                        .foreign_networks
-                        .get("net1")
-                        .map(|entry| !entry.trusted_keys.is_empty())
-                        .unwrap_or(false)
-                }
-            },
-            Duration::from_secs(5),
-        )
-        .await;
+        let unverified_tenant_keys = foreign_mgr.list_foreign_networks_with_options(true).await;
+        assert!(
+            unverified_tenant_keys.foreign_networks["net1"]
+                .trusted_keys
+                .is_empty(),
+            "scoped SharedNode tenants must not become trusted keys at the public center"
+        );
+
+        let entry = foreign_mgr
+            .data
+            .get_network_entry("net1")
+            .expect("foreign network entry exists");
+        entry.global_ctx.update_trusted_keys(
+            HashMap::from([(
+                vec![7; 32],
+                crate::common::global_ctx::TrustedKeyMetadata {
+                    source: TrustedKeySource::OspfNode,
+                    expiry_unix: None,
+                },
+            )]),
+            "net1",
+        );
 
         let with_trusted_keys = foreign_mgr.list_foreign_networks_with_options(true).await;
-        assert!(
-            !with_trusted_keys.foreign_networks["net1"]
+        assert_eq!(
+            with_trusted_keys.foreign_networks["net1"]
                 .trusted_keys
-                .is_empty()
+                .len(),
+            1
         );
     }
 

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-
 use crate::{
     common::{
         PeerId,
@@ -279,23 +277,20 @@ async fn relay_peer_map_rejects_session_without_authenticated_identity() {
         1,
         algo.clone(),
         algo.clone(),
-        None,
+        Some([9u8; 32]),
     ));
     let key = SessionKey::new(ctx.get_network_identity().network_name, 20);
     store.insert_session(key.clone(), session.clone());
 
-    relay_map
+    let error = relay_map
         .ensure_session(20, NextHopPolicy::LeastHop)
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(relay_map.has_session(20));
-
-    let mut packet = ZCPacket::new_with_payload(b"relay-hello");
-    packet.fill_peer_manager_hdr(20, 10, PacketType::Data as u8);
-    super::relay_peer_map::attach_relay_origin_proof(&mut packet).unwrap();
-    session.encrypt_payload(20, 10, &mut packet).unwrap();
-    let error = relay_map.decrypt_if_needed(&mut packet).await.unwrap_err();
-    assert!(format!("{error:?}").contains("no authenticated identity"));
+    assert!(
+        format!("{error:?}").contains("does not match origin authority"),
+        "unexpected relay authorization error: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -354,7 +349,7 @@ async fn private_mode_allows_trusted_foreign_credential() {
 
     let private = credential_private_key_from_secret(&cred_secret);
     let public = x25519_dalek::PublicKey::from(&private);
-    let credential = create_mock_peer_manager_credential("tenant-a".to_string(), &private).await;
+    let credential = create_mock_peer_manager_credential("tenant-a".to_string(), &cred_secret).await;
 
     connect_peer_manager(admin.clone(), server.clone()).await;
     wait_for_condition(
@@ -401,9 +396,8 @@ async fn private_mode_rejects_untrusted_foreign_credential() {
     let admin = create_mock_peer_manager_secure("tenant-a".to_string(), "shared".to_string()).await;
     set_private_mode(&server, true);
 
-    let random_private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
     let unknown_credential =
-        create_mock_peer_manager_credential("tenant-a".to_string(), &random_private).await;
+        create_mock_peer_manager_unknown_credential("tenant-a".to_string()).await;
 
     connect_peer_manager(admin.clone(), server.clone()).await;
     wait_for_foreign_network(server.clone(), "tenant-a").await;
@@ -1059,28 +1053,57 @@ async fn relay_peer_map_bidirectional_handshake_race() {
     );
 }
 
-/// Helper: create a secure peer manager for a credential node.
-/// Uses the given X25519 private key as the Noise static key, with no network_secret.
+/// Helper: create a secure peer manager for a credential node from a signed
+/// credential bundle. A bare private key cannot authenticate; the signed
+/// certificate is mandatory.
 pub async fn create_mock_peer_manager_credential(
     network_name: String,
-    private_key: &x25519_dalek::StaticSecret,
+    encoded_bundle: &str,
 ) -> Arc<PeerManager> {
     use crate::common::config::NetworkIdentity;
+    use crate::peers::credential_manager::CredentialManager;
     use crate::proto::common::SecureModeConfig;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
-    let (s, _r) = create_packet_recv_chan();
-    let g = get_mock_global_ctx_with_network(Some(NetworkIdentity::new_credential(network_name)));
+    let bundle = CredentialManager::parse_credential_bundle(encoded_bundle)
+        .expect("credential bundle must be valid");
+    assert_eq!(bundle.network_name, network_name);
+    let private_key = credential_private_key_from_secret(encoded_bundle);
+    let public = x25519_dalek::PublicKey::from(&private_key);
 
-    let public = x25519_dalek::PublicKey::from(private_key);
+    let (s, _r) = create_packet_recv_chan();
+    let g = get_mock_global_ctx_with_network(Some(
+        NetworkIdentity::new_credential_with_root_fingerprint(
+            network_name,
+            &bundle.root_fingerprint,
+        )
+        .expect("credential root fingerprint must be valid"),
+    ));
     g.config.set_secure_mode(Some(SecureModeConfig {
         enabled: true,
         local_private_key: Some(BASE64_STANDARD.encode(private_key.as_bytes())),
         local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
-        ..Default::default()
+        credential_bundle: Some(encoded_bundle.to_owned()),
+        credential_root_fingerprint: bundle.root_fingerprint,
+        credential_certificate: bundle
+            .certificate
+            .map(|certificate| prost::Message::encode_to_vec(&certificate))
+            .unwrap_or_default(),
     }));
 
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    peer_mgr.run().await.unwrap();
+    peer_mgr
+}
+
+/// Helper: create a credential node whose bundle is signed by an unknown root,
+/// so no admin in the test network trusts it.
+pub async fn create_mock_peer_manager_unknown_credential(
+    network_name: String,
+) -> Arc<PeerManager> {
+    let (s, _r) = create_packet_recv_chan();
+    let g = crate::common::global_ctx::tests::get_mock_credential_global_ctx(network_name);
     let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
     peer_mgr.run().await.unwrap();
     peer_mgr
@@ -1107,8 +1130,7 @@ async fn credential_node_joins_network() {
         .unwrap();
 
     // Create credential node using the generated key
-    let private = credential_private_key_from_secret(&cred_secret);
-    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
+    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &cred_secret).await;
 
     // Connect admins first
     connect_peer_manager(admin_a.clone(), admin_b.clone()).await;
@@ -1163,8 +1185,7 @@ async fn unknown_credential_node_rejected() {
     let admin_a = create_mock_peer_manager_secure("net1".to_string(), "secret".to_string()).await;
 
     // Create a credential node with a random key (NOT generated by admin)
-    let random_private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let unknown_c = create_mock_peer_manager_credential("net1".to_string(), &random_private).await;
+    let unknown_c = create_mock_peer_manager_unknown_credential("net1".to_string()).await;
 
     // Try to connect: C -> A (unknown credential as client, admin as server)
     connect_peer_manager(unknown_c.clone(), admin_a.clone()).await;
@@ -1194,8 +1215,7 @@ async fn credential_revocation_removes_from_routes() {
         .generate_credential(vec![], false, vec![], std::time::Duration::from_secs(3600))
         .unwrap();
 
-    let private = credential_private_key_from_secret(&cred_secret);
-    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
+    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &cred_secret).await;
 
     // Connect: A -- B, C -> A (credential node as client, admin as server)
     connect_peer_manager(admin_a.clone(), admin_b.clone()).await;
@@ -1268,8 +1288,7 @@ async fn credential_expiry_disconnects_from_all_admins() {
         .get_global_ctx()
         .issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);
 
-    let private = credential_private_key_from_secret(&cred_secret);
-    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
+    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &cred_secret).await;
     let cred_c_id = cred_c.my_peer_id();
 
     connect_peer_manager(cred_c.clone(), admin_a.clone()).await;
@@ -1357,8 +1376,7 @@ async fn credential_node_group_assignment() {
         )
         .unwrap();
 
-    let private = credential_private_key_from_secret(&cred_secret);
-    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
+    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &cred_secret).await;
 
     connect_peer_manager(admin_a.clone(), admin_b.clone()).await;
     connect_peer_manager(cred_c.clone(), admin_a.clone()).await;
@@ -1458,7 +1476,7 @@ async fn credential_node_connected_via_admin_b_trusts_admin_a_groups() {
     )
     .await;
 
-    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &private).await;
+    let cred_c = create_mock_peer_manager_credential("net1".to_string(), &cred_secret).await;
     connect_peer_manager(cred_c.clone(), admin_b.clone()).await;
 
     let admin_a_id = admin_a.my_peer_id();
@@ -1546,10 +1564,8 @@ async fn multi_admin_multi_credential_route_and_revocation_isolation() {
         )
         .unwrap();
 
-    let cred1_private = credential_private_key_from_secret(&cred1_secret);
-    let cred2_private = credential_private_key_from_secret(&cred2_secret);
-    let cred_1 = create_mock_peer_manager_credential("net1".to_string(), &cred1_private).await;
-    let cred_2 = create_mock_peer_manager_credential("net1".to_string(), &cred2_private).await;
+    let cred_1 = create_mock_peer_manager_credential("net1".to_string(), &cred1_secret).await;
+    let cred_2 = create_mock_peer_manager_credential("net1".to_string(), &cred2_secret).await;
 
     connect_peer_manager(cred_1.clone(), admin_a.clone()).await;
     connect_peer_manager(cred_2.clone(), admin_b.clone()).await;
@@ -1629,11 +1645,8 @@ async fn unknown_credential_rejected_while_valid_credential_survives() {
         )
         .unwrap();
 
-    let valid_private = credential_private_key_from_secret(&cred_secret);
-    let valid_cred = create_mock_peer_manager_credential("net1".to_string(), &valid_private).await;
-    let unknown_private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let unknown_cred =
-        create_mock_peer_manager_credential("net1".to_string(), &unknown_private).await;
+    let valid_cred = create_mock_peer_manager_credential("net1".to_string(), &cred_secret).await;
+    let unknown_cred = create_mock_peer_manager_unknown_credential("net1".to_string()).await;
 
     connect_peer_manager(valid_cred.clone(), admin_a.clone()).await;
     let (unknown_ring_client, unknown_ring_server) = create_ring_tunnel_pair();
@@ -1784,7 +1797,7 @@ mod speed_first {
             .into_iter()
             .find(|route| route.peer_id == c_id)
             .unwrap();
-        assert_eq!(route.path_delivery_bps_speed_first, Some(16_777_216));
+        assert_eq!(route.path_delivery_bps_speed_first, Some(20_000_000));
 
         let pinned_flow = 10;
         assert_eq!(

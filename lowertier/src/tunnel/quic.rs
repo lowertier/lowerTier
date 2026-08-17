@@ -9,12 +9,11 @@ use super::{
 };
 use crate::common::{
     config::{Flags, gen_default_flags},
-    global_ctx::ArcGlobalCtx,
+    global_ctx::{ArcGlobalCtx, ProcessMemoryPermit},
     underlay_policy::UnderlayPolicy,
 };
 use crate::tunnel::common::{
     bind, eligible_bind_addrs, ensure_local_allowed, ensure_remote_allowed,
-    wait_for_connect_futures,
 };
 use crate::tunnel::{
     TunnelInfo,
@@ -61,12 +60,51 @@ use self::adaptive::{AdaptiveConfig, AdaptiveFactory};
 
 const QUIC_INITIAL_MTU: u16 = 1452;
 const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize;
+const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 512 * 1024;
+const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u64 = 512 * 1024;
+const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 1024 * 1024;
+const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 512 * 1024;
+const QUIC_PENDING_ACCEPT_BUFFER_BYTES: u64 = 256 * 1024;
+const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 1792 * 1024;
 const QUIC_RELIABLE_INITIAL_BUFFER_SIZE: usize = 4500;
 /// Bound reliable frame allocation even though the wire length field is 32-bit.
 const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 64 * 1024;
 const QUIC_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 const QUIC_TRANSPORT_BINDING_LABEL: &[u8] = b"EXPORTER-LowTier-PeerConn-v1";
 const QUIC_TRANSPORT_BINDING_CONTEXT: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256|peerconn-v3";
+
+struct QuicSourcePermit {
+    ip: IpAddr,
+}
+
+static QUIC_SOURCES: OnceLock<std::sync::Mutex<HashMap<IpAddr, usize>>> = OnceLock::new();
+
+fn try_acquire_quic_source(ip: IpAddr) -> Option<QuicSourcePermit> {
+    let mut sources = QUIC_SOURCES
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if sources.get(&ip).copied().unwrap_or_default() >= 1 {
+        return None;
+    }
+    *sources.entry(ip).or_default() += 1;
+    Some(QuicSourcePermit { ip })
+}
+
+impl Drop for QuicSourcePermit {
+    fn drop(&mut self) {
+        let Some(sources) = QUIC_SOURCES.get() else {
+            return;
+        };
+        let mut sources = sources.lock().unwrap();
+        if let Some(count) = sources.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                sources.remove(&self.ip);
+            }
+        }
+    }
+}
 
 fn derive_transport_binding(connection: &Connection) -> Result<TransportBinding, TunnelError> {
     let mut bytes = [0_u8; 32];
@@ -502,10 +540,19 @@ mod tls {
 pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelError> {
     let mut config = TransportConfig::default();
 
-    let stream_receive_window = VarInt::from_u64(flags.quic_initial_receive_window)
-        .map_err(|error| TunnelError::InternalError(error.to_string()))?;
-    let receive_window = VarInt::from_u64(flags.quic_receive_window)
-        .map_err(|error| TunnelError::InternalError(error.to_string()))?;
+    let stream_receive_window = VarInt::from_u64(
+        flags
+            .quic_initial_receive_window
+            .min(QUIC_STREAM_RECEIVE_WINDOW_BYTES),
+    )
+    .map_err(|error| TunnelError::InternalError(error.to_string()))?;
+    let receive_window = VarInt::from_u64(
+        flags
+            .quic_receive_window
+            .min(QUIC_CONNECTION_RECEIVE_WINDOW_BYTES)
+            .max(stream_receive_window.into_inner()),
+    )
+    .map_err(|error| TunnelError::InternalError(error.to_string()))?;
 
     config
         .max_concurrent_bidi_streams(1_u8.into())
@@ -514,8 +561,9 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .initial_mtu(QUIC_INITIAL_MTU)
         .min_mtu(1200)
         .enable_segmentation_offload(true)
-        .datagram_receive_buffer_size(Some(16 * 1024 * 1024))
+        .datagram_receive_buffer_size(Some(QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES))
         .datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_BYTES)
+        .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
         .receive_window(receive_window);
 
@@ -579,7 +627,8 @@ fn server_config_for_network(
 
 fn configure_server_admission(config: &mut ServerConfig) {
     config.max_incoming(MAX_PENDING_QUIC_ACCEPTS * 2);
-    config.incoming_buffer_size_total(8 * 1024 * 1024);
+    config.incoming_buffer_size_total(QUIC_PENDING_ACCEPT_BUFFER_BYTES);
+    config.migration(false);
 }
 
 fn client_config_for_network(
@@ -906,12 +955,9 @@ impl QuicEndpointManager {
         use dashmap::mapref::entry::Entry;
 
         let flags = global_ctx.flags_arc();
-        let capacity = flags
-            .multi_thread
-            .then(std::thread::available_parallelism)
-            .and_then(|r| r.ok())
-            .map(|n| n.get())
-            .unwrap_or(1);
+        // One endpoint per address family keeps socket ownership compact.
+        // Explicit source bindings retain their own endpoint when required.
+        let capacity = 1;
         let managers = QUIC_ENDPOINT_MANAGERS.get_or_init(dashmap::DashMap::new);
         managers.retain(|_, manager| manager.strong_count() > 0);
         let key = Self::manager_key_for_flags(global_ctx, &flags);
@@ -1122,17 +1168,20 @@ impl QuicEndpointManager {
                 .await;
         }
 
-        let futures = futures::stream::FuturesUnordered::new();
         for source in bind_addrs {
-            futures.push(manager.connect_with_source(
-                addr,
-                source,
-                socket_mark,
-                policy.clone(),
-                security,
-            ));
+            match manager
+                .connect_with_source(addr, source, socket_mark, policy.clone(), security)
+                .await
+            {
+                Ok(connection) => return Ok(connection),
+                Err(error) => {
+                    tracing::debug!(?source, ?error, "QUIC source connection failed");
+                }
+            }
         }
-        wait_for_connect_futures(futures).await
+        Err(TunnelError::InternalError(
+            "all eligible QUIC source addresses failed".to_owned(),
+        ))
     }
 
     async fn connect_with_source(
@@ -1279,6 +1328,8 @@ impl QuicEndpointManager {
 
 struct ConnWrapper {
     conn: Connection,
+    _memory_permit: Option<ProcessMemoryPermit>,
+    _source_permit: Option<QuicSourcePermit>,
     _endpoint_manager: Option<Arc<QuicEndpointManager>>,
     _endpoint_owner: Option<Endpoint>,
 }
@@ -2215,6 +2266,35 @@ fn build_quic_hybrid_tunnel(
         transport_authenticated,
         None,
         None,
+        None,
+        None,
+    )
+}
+
+fn build_quic_hybrid_tunnel_with_memory_permit(
+    connection: Connection,
+    reliable_send: SendStream,
+    reliable_recv: RecvStream,
+    reliable_role: ReliableLaneRole,
+    max_packet_size: usize,
+    info: TunnelInfo,
+    flags: &Flags,
+    transport_authenticated: bool,
+    memory_permit: ProcessMemoryPermit,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    build_quic_hybrid_tunnel_with_manager(
+        connection,
+        reliable_send,
+        reliable_recv,
+        reliable_role,
+        max_packet_size,
+        info,
+        flags,
+        transport_authenticated,
+        Some(memory_permit),
+        None,
+        None,
+        None,
     )
 }
 
@@ -2227,12 +2307,16 @@ fn build_quic_hybrid_tunnel_with_manager(
     info: TunnelInfo,
     _flags: &Flags,
     transport_authenticated: bool,
+    memory_permit: Option<ProcessMemoryPermit>,
+    source_permit: Option<QuicSourcePermit>,
     endpoint_manager: Option<Arc<QuicEndpointManager>>,
     endpoint_owner: Option<Endpoint>,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let transport_binding = derive_transport_binding(&connection)?;
     let connection = Arc::new(ConnWrapper {
         conn: connection,
+        _memory_permit: memory_permit,
+        _source_permit: source_permit,
         _endpoint_manager: endpoint_manager,
         _endpoint_owner: endpoint_owner,
     });
@@ -2290,8 +2374,8 @@ struct PendingQuicAcceptState {
 type PendingQuicAccept =
     Pin<Box<dyn Future<Output = (IpAddr, Result<Box<dyn Tunnel>, TunnelError>)> + Send + 'static>>;
 
-const MAX_PENDING_QUIC_ACCEPTS: usize = 32;
-const MAX_PENDING_QUIC_ACCEPTS_PER_IP: usize = 4;
+const MAX_PENDING_QUIC_ACCEPTS: usize = 4;
+const MAX_PENDING_QUIC_ACCEPTS_PER_IP: usize = 1;
 
 impl QuicTunnelListener {
     pub fn new(addr: url::Url, global_ctx: ArcGlobalCtx) -> Self {
@@ -2311,14 +2395,25 @@ impl QuicTunnelListener {
         incoming: Incoming,
         global_ctx: ArcGlobalCtx,
         local_url: url::Url,
+        memory_permit: ProcessMemoryPermit,
+        source_permit: QuicSourcePermit,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let initial_remote = incoming.remote_address();
+        ensure_remote_allowed(&global_ctx.get_underlay_policy(), initial_remote)?;
         let conn = tokio::time::timeout(Duration::from_secs(7), incoming)
             .await
             .context("accept QUIC connection timed out")?
             .with_context(|| "accept QUIC connection failed")?;
         let transport_authenticated =
             connection_has_network_identity(&conn, &global_ctx.get_network_identity());
+        if !transport_authenticated {
+            conn.close(VarInt::from_u32(1), b"network identity is required");
+            return Err(TunnelError::InternalError(
+                "QUIC network identity authentication failed".to_owned(),
+            ));
+        }
         let remote_addr = conn.remote_address();
+        ensure_remote_allowed(&global_ctx.get_underlay_policy(), remote_addr)?;
         let (w, r) = match accept_activated_reliable_lane(&conn).await {
             Ok(lane) => lane,
             Err(error) => {
@@ -2339,7 +2434,11 @@ impl QuicTunnelListener {
         };
 
         let flags = global_ctx.config.get_flags();
-        build_quic_hybrid_tunnel(
+        // The process-wide source permit protects handshake activation only.
+        // Keeping it on the live tunnel would allow one established peer to
+        // block every other peer behind the same NAT/source IP indefinitely.
+        drop(source_permit);
+        build_quic_hybrid_tunnel_with_memory_permit(
             conn,
             w,
             r,
@@ -2348,6 +2447,7 @@ impl QuicTunnelListener {
             info,
             &flags,
             transport_authenticated,
+            memory_permit,
         )
     }
 
@@ -2364,7 +2464,24 @@ impl QuicTunnelListener {
 
     fn start_pending_accept(&mut self, incoming: Incoming) {
         let ip = incoming.remote_address().ip();
+        let Some(source_permit) = try_acquire_quic_source(ip) else {
+            incoming.refuse();
+            tracing::trace!(?ip, "reject QUIC connection because the source is active");
+            return;
+        };
         let global_ctx = self.global_ctx.clone();
+        let Some(memory_permit) = self
+            .global_ctx
+            .process_memory_governor()
+            .try_reserve_owned(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
+        else {
+            incoming.refuse();
+            tracing::warn!(
+                ?ip,
+                "reject QUIC connection because the memory limit is full"
+            );
+            return;
+        };
         let local_url = self.local_url();
         let state = self.pending_state.get_mut().unwrap();
         let count = state.pending_by_ip.entry(ip).or_default();
@@ -2378,7 +2495,14 @@ impl QuicTunnelListener {
         }
         *count += 1;
         state.pending_accepts.push(Box::pin(async move {
-            let result = Self::finish_accept(incoming, global_ctx, local_url).await;
+            let result = Self::finish_accept(
+                incoming,
+                global_ctx,
+                local_url,
+                memory_permit,
+                source_permit,
+            )
+            .await;
             (ip, result)
         }));
     }
@@ -2454,7 +2578,14 @@ impl TunnelListener for QuicTunnelListener {
                         "QUIC endpoint stopped accepting connections".to_string(),
                     ));
                 };
-                if self.pending_state.get_mut().unwrap().pending_accepts.len()
+                if ensure_remote_allowed(
+                    &self.global_ctx.get_underlay_policy(),
+                    incoming.remote_address(),
+                )
+                .is_err()
+                {
+                    incoming.refuse();
+                } else if self.pending_state.get_mut().unwrap().pending_accepts.len()
                     >= MAX_PENDING_QUIC_ACCEPTS
                 {
                     tracing::warn!(
@@ -2501,6 +2632,13 @@ impl QuicTunnelConnector {
 #[async_trait::async_trait]
 impl TunnelConnector for QuicTunnelConnector {
     async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let memory_permit = self
+            .global_ctx
+            .process_memory_governor()
+            .try_reserve_owned(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
+            .ok_or_else(|| {
+                TunnelError::InternalError("QUIC connection memory limit is full".to_owned())
+            })?;
         let addr = match self.resolved_addr {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
@@ -2543,6 +2681,8 @@ impl TunnelConnector for QuicTunnelConnector {
             info,
             &flags,
             transport_authenticated,
+            Some(memory_permit),
+            None,
             self.endpoint_manager.clone(),
             Some(endpoint),
         )
@@ -2586,6 +2726,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quic_source_permit_is_reusable_after_pending_activation() {
+        let ip: IpAddr = "192.0.2.241".parse().unwrap();
+        let permit = try_acquire_quic_source(ip).expect("first pending source permit");
+        assert!(try_acquire_quic_source(ip).is_none());
+        drop(permit);
+        assert!(try_acquire_quic_source(ip).is_some());
+    }
+
+    #[test]
     fn quic_data_plane_implements_owned_batch_interfaces() {
         fn assert_reader<T: crate::tunnel::PacketBatchStream>() {}
         fn assert_writer<T: crate::tunnel::PacketBatchSink>() {}
@@ -2598,9 +2747,17 @@ mod tests {
     static RUNTIME: LazyLock<Runtime> =
         LazyLock::new(|| Builder::new_multi_thread().enable_all().build().unwrap());
 
+    fn test_identity() -> crate::common::config::NetworkIdentity {
+        // QUIC listeners require a verifiable network identity. Provision a
+        // shared secret so the tests exercise the authenticated path.
+        crate::common::config::NetworkIdentity::new(
+            "default".to_owned(),
+            "quic-test-secret".to_owned(),
+        )
+    }
+
     fn global_ctx() -> ArcGlobalCtx {
-        let identity = crate::common::config::NetworkIdentity::default();
-        get_mock_global_ctx_with_network(Some(identity))
+        get_mock_global_ctx_with_network(Some(test_identity()))
     }
 
     fn brutal_global_ctx() -> ArcGlobalCtx {
@@ -3467,8 +3624,10 @@ mod tests {
             let server_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
             let accepting = tokio::spawn(async move { listener.accept().await });
 
+            let identity = test_identity();
             let mut first_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            first_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            first_endpoint
+                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
             let first = first_endpoint
                 .connect(server_addr, &server_addr.ip().to_string())
                 .unwrap()
@@ -3477,15 +3636,36 @@ mod tests {
             let (_stalled_send, _stalled_recv) = first.open_bi().await.unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            let mut second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            second_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let second_connecting = second_endpoint
+            // The per-peer pending-activation bound refuses a second
+            // connection from the same address while the first one stalls.
+            let mut refused_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            refused_endpoint
+                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
+            let refused = refused_endpoint
                 .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap();
-            let second = tokio::time::timeout(Duration::from_secs(2), second_connecting)
-                .await
                 .unwrap()
-                .unwrap();
+                .await;
+            assert!(refused.is_err(), "a stalled pending peer must bound new ones");
+
+            // Once the stalled activation times out, a later connection from
+            // the same address activates and is accepted.
+            let mut second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            second_endpoint
+                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
+            let second = tokio::time::timeout(Duration::from_secs(12), async {
+                loop {
+                    if let Ok(conn) = second_endpoint
+                        .connect(server_addr, &server_addr.ip().to_string())
+                        .unwrap()
+                        .await
+                    {
+                        break conn;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .unwrap();
             let activated = tokio::time::timeout(
                 Duration::from_secs(2),
                 open_activated_reliable_lane(&second),
@@ -3946,6 +4126,8 @@ mod tests {
                 conn: client.clone(),
                 _endpoint_manager: None,
                 _endpoint_owner: None,
+                _memory_permit: None,
+                _source_permit: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let payload = vec![0x5a; maximum - PEER_MANAGER_HEADER_SIZE];
@@ -4005,6 +4187,8 @@ mod tests {
                 conn: client.clone(),
                 _endpoint_manager: None,
                 _endpoint_owner: None,
+                _memory_permit: None,
+                _source_permit: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let mut batch = PacketBatch::with_capacity(8);

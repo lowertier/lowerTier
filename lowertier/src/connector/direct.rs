@@ -1,11 +1,11 @@
 // try connect peers directly, with either its public ip or lan ip
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -45,7 +45,7 @@ use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
 use anyhow::Context;
 use rand::Rng;
 use socket2::Protocol;
-use tokio::{net::UdpSocket, task::JoinSet, time::timeout};
+use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet, time::timeout};
 use url::Host;
 
 pub const DIRECT_CONNECTOR_SERVICE_ID: u32 = 1;
@@ -301,6 +301,7 @@ struct DirectConnectorManagerData {
     peer_manager: Arc<PeerManager>,
     dst_listener_blacklist: timedmap::TimedMap<DstListenerUrlBlackListItem, ()>,
     peer_black_list: timedmap::TimedMap<PeerId, ()>,
+    direct_handshake_locks: Mutex<HashMap<PeerId, Weak<Mutex<()>>>>,
 }
 
 impl DirectConnectorManagerData {
@@ -310,7 +311,19 @@ impl DirectConnectorManagerData {
             peer_manager,
             dst_listener_blacklist: timedmap::TimedMap::new(),
             peer_black_list: timedmap::TimedMap::new(),
+            direct_handshake_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn direct_handshake_lock(&self, dst_peer_id: PeerId) -> Arc<Mutex<()>> {
+        let mut locks = self.direct_handshake_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = locks.get(&dst_peer_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(dst_peer_id, Arc::downgrade(&lock));
+        lock
     }
 
     async fn remote_send_udp_hole_punch_packet(
@@ -511,10 +524,20 @@ impl DirectConnectorManagerData {
                 }
             }
         } else {
+            let tunnel = timeout(
+                std::time::Duration::from_secs(3),
+                self.peer_manager.connect_tunnel(connector),
+            )
+            .await??;
+            let handshake_lock = self.direct_handshake_lock(dst_peer_id).await;
+            let _handshake_guard = handshake_lock.lock().await;
+            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+                return Ok(());
+            }
             timeout(
                 std::time::Duration::from_secs(3),
                 self.peer_manager
-                    .try_direct_connect_with_peer_id_hint(connector, Some(dst_peer_id)),
+                    .add_client_tunnel_with_peer_id_hint(tunnel, true, Some(dst_peer_id)),
             )
             .await??
         };

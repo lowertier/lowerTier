@@ -12,15 +12,16 @@ use std::collections::{BTreeSet, HashMap};
 use std::{
     fmt::Debug,
     future::Future,
+    hash::Hash,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
     sync::{Arc, OnceLock, Weak, atomic::AtomicBool},
     time::{Duration, SystemTime},
 };
 
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
 };
 
@@ -158,7 +159,6 @@ fn ordered_probe_indexes(candidates: &[(PeerId, PeerConnId, bool)], rotation: us
 
 use super::{
     BoxNicPacketFilter, BoxPeerPacketFilter, PacketRecvChan, PacketRecvChanReceiver,
-    create_packet_recv_chan,
     foreign_network_client::ForeignNetworkClient,
     foreign_network_manager::{ForeignNetworkManager, GlobalForeignNetworkAccessor},
     peer_conn::PeerConnId,
@@ -174,14 +174,123 @@ use super::{
     },
 };
 
+const RPC_INGRESS_PACKET_CAPACITY: usize = 128;
+const RPC_REMOTE_INGRESS_CAPACITY: usize = 96;
+const RPC_INGRESS_CAPACITY_PER_PEER: usize = 16;
+
+#[derive(Default)]
+struct RpcPeerIngressCounts {
+    peers: HashMap<PeerId, usize>,
+}
+
+struct RpcIngressAdmission {
+    remote: Arc<Semaphore>,
+    peers: std::sync::Mutex<RpcPeerIngressCounts>,
+}
+
+impl RpcIngressAdmission {
+    fn try_admit(self: &Arc<Self>, peer_id: PeerId) -> Option<RpcIngressPermits> {
+        let remote = self.remote.clone().try_acquire_owned().ok()?;
+        let mut counts = self.peers.lock().unwrap();
+        let count = counts.peers.entry(peer_id).or_default();
+        if *count >= RPC_INGRESS_CAPACITY_PER_PEER {
+            return None;
+        }
+        *count += 1;
+        Some(RpcIngressPermits {
+            peer_id,
+            admission: self.clone(),
+            _remote: remote,
+        })
+    }
+
+    fn release_peer(&self, peer_id: PeerId) {
+        let mut counts = self.peers.lock().unwrap();
+        let remove = if let Some(count) = counts.peers.get_mut(&peer_id) {
+            *count = count.saturating_sub(1);
+            *count == 0
+        } else {
+            false
+        };
+        if remove {
+            counts.peers.remove(&peer_id);
+        }
+    }
+}
+
+struct RpcIngressPermits {
+    peer_id: PeerId,
+    admission: Arc<RpcIngressAdmission>,
+    _remote: OwnedSemaphorePermit,
+}
+
+impl Drop for RpcIngressPermits {
+    fn drop(&mut self) {
+        self.admission.release_peer(self.peer_id);
+    }
+}
+
+struct RpcIngressEnvelope {
+    packet: ZCPacket,
+    _permits: Option<RpcIngressPermits>,
+}
+
+#[derive(Clone)]
+struct RpcIngressSender {
+    sender: Sender<RpcIngressEnvelope>,
+    admission: Arc<RpcIngressAdmission>,
+}
+
+impl RpcIngressSender {
+    fn try_send(
+        &self,
+        packet: ZCPacket,
+    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<ZCPacket>> {
+        let permits = if let Some(peer_id) = packet.logical_authenticated_peer_id() {
+            let Some(permits) = self.admission.try_admit(peer_id) else {
+                return Err(tokio::sync::mpsc::error::TrySendError::Full(packet));
+            };
+            Some(permits)
+        } else {
+            None
+        };
+        let envelope = RpcIngressEnvelope {
+            packet,
+            _permits: permits,
+        };
+        self.sender.try_send(envelope).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(envelope) => {
+                tokio::sync::mpsc::error::TrySendError::Full(envelope.packet)
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(envelope) => {
+                tokio::sync::mpsc::error::TrySendError::Closed(envelope.packet)
+            }
+        })
+    }
+}
+
+fn create_rpc_ingress_channel() -> (RpcIngressSender, Receiver<RpcIngressEnvelope>) {
+    let (sender, receiver) = mpsc::channel(RPC_INGRESS_PACKET_CAPACITY);
+    (
+        RpcIngressSender {
+            sender,
+            admission: Arc::new(RpcIngressAdmission {
+                remote: Arc::new(Semaphore::new(RPC_REMOTE_INGRESS_CAPACITY)),
+                peers: std::sync::Mutex::new(RpcPeerIngressCounts::default()),
+            }),
+        },
+        receiver,
+    )
+}
+
 struct RpcTransport {
     my_peer_id: PeerId,
     peers: Weak<PeerMap>,
     // TODO: this seems can be removed
     foreign_peers: Mutex<Option<Weak<ForeignNetworkClient>>>,
 
-    packet_recv: Mutex<UnboundedReceiver<ZCPacket>>,
-    peer_rpc_tspt_sender: UnboundedSender<ZCPacket>,
+    packet_recv: Mutex<Receiver<RpcIngressEnvelope>>,
+    peer_rpc_tspt_sender: RpcIngressSender,
 }
 
 #[async_trait::async_trait]
@@ -190,15 +299,27 @@ impl PeerRpcManagerTransport for RpcTransport {
         self.my_peer_id
     }
 
-    async fn send(&self, msg: ZCPacket, _dst_peer_id: PeerId) -> Result<(), Error> {
+    async fn send(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), Error> {
+        let foreign_peers = self
+            .foreign_peers
+            .lock()
+            .await
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(foreign_peers) = foreign_peers
+            && foreign_peers.has_next_hop(dst_peer_id)
+        {
+            return foreign_peers.send_msg(msg, dst_peer_id).await;
+        }
+
         let peers = self.peers.upgrade().ok_or(Error::Unknown)?;
-        // Send to self. The peer receive loop forwards this protected RPC packet.
+        // Local and routed peers still use the normal peer receive/forwarding path.
         peers.send_msg_directly(msg, self.my_peer_id).await
     }
 
     async fn recv(&self) -> Result<ZCPacket, Error> {
-        if let Some(o) = self.packet_recv.lock().await.recv().await {
-            Ok(o)
+        if let Some(envelope) = self.packet_recv.lock().await.recv().await {
+            Ok(envelope.packet)
         } else {
             Err(Error::Unknown)
         }
@@ -229,6 +350,10 @@ struct SelfTxCounters {
     self_tx_bytes: CounterHandle,
     compress_tx_bytes_before: CounterHandle,
     compress_tx_bytes_after: CounterHandle,
+    compact_l3_packets: CounterHandle,
+    compact_l3_bytes: CounterHandle,
+    full_ethernet_packets: CounterHandle,
+    full_ethernet_bytes: CounterHandle,
 }
 
 struct EthernetBatchInput {
@@ -258,6 +383,7 @@ struct OrderedSendCompletion {
     result: Result<(), Error>,
     peer_id: PeerId,
     packet_type: u8,
+    hybrid_ip_ethernet: bool,
     bytes: u64,
     packets: u64,
     record_metrics: bool,
@@ -289,6 +415,36 @@ fn direct_batch_group_key(
     )
 }
 
+fn lazy_batch_group_index<K>(
+    key: K,
+    next_index: usize,
+    inline: &mut SmallVec<[(K, usize); 4]>,
+    spill: &mut Option<HashMap<K, usize>>,
+) -> Option<usize>
+where
+    K: Copy + Eq + Hash,
+{
+    if let Some(indexes) = spill.as_mut() {
+        if let Some(index) = indexes.get(&key).copied() {
+            return Some(index);
+        }
+        indexes.insert(key, next_index);
+        return None;
+    }
+    if let Some((_, index)) = inline.iter().find(|(group_key, _)| *group_key == key) {
+        return Some(*index);
+    }
+    if inline.len() < 4 {
+        inline.push((key, next_index));
+        return None;
+    }
+    let mut indexes = HashMap::with_capacity(inline.len() + 1);
+    indexes.extend(inline.drain(..));
+    indexes.insert(key, next_index);
+    *spill = Some(indexes);
+    None
+}
+
 fn direct_selected_conn_allowed(
     final_peer: PeerId,
     next_hop: Option<PeerId>,
@@ -317,6 +473,20 @@ impl OrderedPeerBatches {
         next_hop: Option<PeerId>,
     ) {
         let key = (peer_id, next_hop);
+        if let Some(last) = self.batches.last_mut()
+            && (last.peer_id, last.next_hop) == key
+        {
+            last.mark_recent |= mark_recent;
+            last.packets
+                .try_push(packet)
+                .expect("a per-peer group cannot exceed its bounded ingress batch");
+            return;
+        }
+        if self.indexes.is_empty() && !self.batches.is_empty() {
+            for (index, batch) in self.batches.iter().enumerate() {
+                self.indexes.insert((batch.peer_id, batch.next_hop), index);
+            }
+        }
         if let Some(index) = self.indexes.get(&key).copied() {
             let peer_batch = &mut self.batches[index];
             peer_batch.mark_recent |= mark_recent;
@@ -331,7 +501,9 @@ impl OrderedPeerBatches {
         packets
             .try_push(packet)
             .expect("a new per-peer group accepts its first packet");
-        self.indexes.insert(key, self.batches.len());
+        if !self.indexes.is_empty() {
+            self.indexes.insert(key, self.batches.len());
+        }
         self.batches.push(OrderedPeerBatch {
             peer_id,
             next_hop,
@@ -1216,7 +1388,7 @@ impl PeerManager {
     ) -> Self {
         let my_peer_id = rand::random();
 
-        let (packet_send, packet_recv) = create_packet_recv_chan();
+        let (packet_send, packet_recv) = nic_channel.create_sibling_channel();
         let packet_ingress = packet_send.clone();
         let peers = Arc::new(PeerMap::new(
             packet_send.clone(),
@@ -1234,7 +1406,7 @@ impl PeerManager {
         }
 
         // TODO: remove these because we have impl pipeline processor.
-        let (peer_rpc_tspt_sender, peer_rpc_tspt_recv) = mpsc::unbounded_channel();
+        let (peer_rpc_tspt_sender, peer_rpc_tspt_recv) = create_rpc_ingress_channel();
         let rpc_tspt = Arc::new(RpcTransport {
             my_peer_id,
             peers: Arc::downgrade(&peers),
@@ -1327,6 +1499,22 @@ impl PeerManager {
             ),
             compress_tx_bytes_after: stats_manager.get_counter(
                 MetricName::CompressionBytesTxAfter,
+                LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
+            ),
+            compact_l3_packets: stats_manager.get_counter(
+                MetricName::HybridCompactL3PacketsTx,
+                LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
+            ),
+            compact_l3_bytes: stats_manager.get_counter(
+                MetricName::HybridCompactL3BytesTx,
+                LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
+            ),
+            full_ethernet_packets: stats_manager.get_counter(
+                MetricName::HybridFullEthernetPacketsTx,
+                LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
+            ),
+            full_ethernet_bytes: stats_manager.get_counter(
+                MetricName::HybridFullEthernetBytesTx,
                 LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
             ),
         };
@@ -2277,9 +2465,15 @@ impl PeerManager {
                                 authenticated_peer_id != from_peer_id && is_encrypted;
                             let relay_handshake = authenticated_peer_id != from_peer_id
                                 && RelayPeerMap::is_handshake_packet_type(packet_type);
+                            let verified_relay_origin = authenticated_peer_id != from_peer_id
+                                && ret.verified_origin_peer_id() == Some(from_peer_id)
+                                && ret.verified_origin_peer_identity_type().is_some()
+                                && ret.verified_origin_peer_secure_auth_level().is_some()
+                                && ret.verified_origin_session_id().is_some();
                             if authenticated_peer_id != from_peer_id
                                 && !authenticated_relay_payload
                                 && !relay_handshake
+                                && !verified_relay_origin
                             {
                                 tracing::warn!(
                                     authenticated_peer_id,
@@ -2292,7 +2486,11 @@ impl PeerManager {
                                 );
                                 continue;
                             }
-                            authenticated_peer_id
+                            if verified_relay_origin {
+                                from_peer_id
+                            } else {
+                                authenticated_peer_id
+                            }
                         };
                         let is_relay_data_packet = if is_foreign_network_packet_type(packet_type) {
                             Self::is_relay_data_zc_packet(&ret)
@@ -2430,7 +2628,13 @@ impl PeerManager {
                                         continue;
                                     }
                                     Err(e) => {
-                                        tracing::error!(?e, "secure decrypt failed");
+                                        tracing::error!(
+                                            ?e,
+                                            from_peer_id,
+                                            to_peer_id,
+                                            packet_type,
+                                            "secure decrypt failed"
+                                        );
                                         continue;
                                     }
                                 }
@@ -2463,7 +2667,7 @@ impl PeerManager {
                             }
 
                             let logical_origin_authenticated =
-                                authenticated_peer_id == Some(from_peer_id) || is_encrypted;
+                                ret.logical_authenticated_peer_id() == Some(from_peer_id);
                             if logical_origin_authenticated
                                 && !Self::credential_ethernet_peer_is_allowed(
                                     &peers,
@@ -2744,7 +2948,7 @@ impl PeerManager {
 
         // for peer rpc packet
         struct PeerRpcPacketProcessor {
-            peer_rpc_tspt_sender: UnboundedSender<ZCPacket>,
+            peer_rpc_tspt_sender: RpcIngressSender,
         }
 
         #[async_trait::async_trait]
@@ -2756,7 +2960,22 @@ impl PeerManager {
             async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
                 let hdr = packet.peer_manager_header().unwrap();
                 if is_peer_rpc_packet_type(hdr.packet_type) {
-                    self.peer_rpc_tspt_sender.send(packet).unwrap();
+                    let packet_type = hdr.packet_type;
+                    let from_peer = hdr.from_peer_id.get();
+                    let packet_bytes = packet.buf_len();
+                    if let Err(error) = self.peer_rpc_tspt_sender.try_send(packet) {
+                        let reason = match error {
+                            tokio::sync::mpsc::error::TrySendError::Full(_) => "full",
+                            tokio::sync::mpsc::error::TrySendError::Closed(_) => "closed",
+                        };
+                        tracing::trace!(
+                            reason,
+                            packet_type,
+                            from_peer,
+                            packet_bytes,
+                            "drop peer RPC packet because ingress is unavailable"
+                        );
+                    }
                     None
                 } else {
                     Some(packet)
@@ -2772,7 +2991,22 @@ impl PeerManager {
                 for packet in batch {
                     let header = packet.peer_manager_header().unwrap();
                     if is_peer_rpc_packet_type(header.packet_type) {
-                        self.peer_rpc_tspt_sender.send(packet).unwrap();
+                        let packet_type = header.packet_type;
+                        let from_peer = header.from_peer_id.get();
+                        let packet_bytes = packet.buf_len();
+                        if let Err(error) = self.peer_rpc_tspt_sender.try_send(packet) {
+                            let reason = match error {
+                                tokio::sync::mpsc::error::TrySendError::Full(_) => "full",
+                                tokio::sync::mpsc::error::TrySendError::Closed(_) => "closed",
+                            };
+                            tracing::trace!(
+                                reason,
+                                packet_type,
+                                from_peer,
+                                packet_bytes,
+                                "drop peer RPC packet because ingress is unavailable"
+                            );
+                        }
                     } else {
                         remaining
                             .try_push(packet)
@@ -2984,6 +3218,14 @@ impl PeerManager {
                 ?error,
                 "route forwarding snapshot commit failed; route removed"
             );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_ospf_route_impl(&self) -> Option<Arc<PeerRoute>> {
+        match &self.route_algo_inst {
+            RouteAlgoInst::Ospf(route) => Some(route.clone()),
+            RouteAlgoInst::None => None,
         }
     }
 
@@ -3569,6 +3811,19 @@ impl PeerManager {
         self.self_tx_counters
             .self_tx_packets
             .add(completion.packets);
+        if completion.packet_type == PacketType::Data as u8 {
+            self.self_tx_counters.compact_l3_bytes.add(completion.bytes);
+            self.self_tx_counters
+                .compact_l3_packets
+                .add(completion.packets);
+        } else if completion.hybrid_ip_ethernet {
+            self.self_tx_counters
+                .full_ethernet_bytes
+                .add(completion.bytes);
+            self.self_tx_counters
+                .full_ethernet_packets
+                .add(completion.packets);
+        }
         if completion.record_metrics
             && !self.traffic_metrics.try_record_tx_batch(
                 completion.peer_id,
@@ -3594,6 +3849,7 @@ impl PeerManager {
         errors: &mut Vec<Error>,
         full_ethernet_descriptor: Option<&PeerMapDataPlaneDescriptor>,
     ) -> Result<(), Error> {
+        let single_peer_batch = peer_batches.batches.len() == 1;
         let mut pending: FuturesUnordered<
             Pin<Box<dyn Future<Output = OrderedSendCompletion> + Send>>,
         > = FuturesUnordered::new();
@@ -3643,6 +3899,17 @@ impl PeerManager {
                     )));
                     continue;
                 }
+                if !Self::credential_ethernet_peer_is_allowed(
+                    &self.peers,
+                    PacketType::Ethernet as u8,
+                    peer_id,
+                )
+                .await
+                {
+                    tracing::warn!(peer_id, "block suppressed credential ethernet peer");
+                    errors.push(Error::RouteError(None));
+                    continue;
+                }
             }
             self.self_tx_counters
                 .compress_tx_bytes_before
@@ -3657,6 +3924,62 @@ impl PeerManager {
             self.self_tx_counters
                 .compress_tx_bytes_after
                 .add(peer_batch.buffer_byte_len() as u64);
+            let first_packet_type = peer_batch
+                .first()
+                .and_then(|packet| packet.peer_manager_header())
+                .map_or(0, |header| header.packet_type);
+            let first_is_hybrid_ip_ethernet = peer_batch
+                .first()
+                .and_then(|packet| packet.peer_manager_header())
+                .is_some_and(|header| header.is_hybrid_ip_ethernet());
+
+            if single_peer_batch && crate::tunnel::direct::batch_has_uniform_priority(&peer_batch) {
+                let first_header = peer_batch
+                    .first()
+                    .and_then(|packet| packet.peer_manager_header());
+                let transport_peer = next_hop.unwrap_or(peer_id);
+                let direct_conn = first_header
+                    .filter(|header| {
+                        direct_selected_conn_allowed(peer_id, next_hop, header.is_latency_first())
+                    })
+                    .and_then(|_| self.peers.only_direct_conn(transport_peer));
+                if let Some(conn) = direct_conn {
+                    if contains_ethernet {
+                        let Some(descriptor) = full_ethernet_descriptor else {
+                            errors.push(Error::RouteError(Some(
+                                "complete Ethernet snapshot is unavailable".to_string(),
+                            )));
+                            continue;
+                        };
+                        let current_descriptor = self.peers.dataplane_descriptor();
+                        if !self.full_ethernet_descriptor_is_current(
+                            descriptor,
+                            &current_descriptor,
+                            &[peer_id],
+                        ) {
+                            errors.push(Error::RouteError(Some(
+                                "complete Ethernet authority changed before dispatch".to_string(),
+                            )));
+                            continue;
+                        }
+                    }
+                    let completion = OrderedSendCompletion {
+                        bytes: peer_batch.buffer_byte_len() as u64,
+                        packets: peer_batch.len() as u64,
+                        result: self
+                            .peers
+                            .send_msg_batch_on_selected_conn(transport_peer, &conn, peer_batch)
+                            .await,
+                        peer_id,
+                        packet_type: first_packet_type,
+                        hybrid_ip_ethernet: first_is_hybrid_ip_ethernet,
+                        record_metrics: true,
+                    };
+                    self.record_ordered_send_completion(completion, errors)
+                        .await;
+                    continue;
+                }
+            }
 
             if batch_queue_disabled() {
                 if contains_ethernet {
@@ -3749,7 +4072,8 @@ impl PeerManager {
                     OrderedSendCompletion {
                         result: first_error.map_or(Ok(()), Err),
                         peer_id,
-                        packet_type: 0,
+                        packet_type: first_packet_type,
+                        hybrid_ip_ethernet: first_is_hybrid_ip_ethernet,
                         bytes,
                         packets,
                         record_metrics: false,
@@ -3765,9 +4089,13 @@ impl PeerManager {
             }
 
             let mut relay_batches = Vec::<(PeerId, Option<PeerId>, u8, PacketBatch)>::new();
-            let mut relay_indexes = HashMap::<(PeerId, Option<PeerId>, u8, u8, u8), usize>::new();
+            let mut relay_inline_indexes =
+                SmallVec::<[((PeerId, Option<PeerId>, u8, u8, u8), usize); 4]>::new();
+            let mut relay_indexes = None::<HashMap<(PeerId, Option<PeerId>, u8, u8, u8), usize>>;
             let mut selected_batches = Vec::<(PeerId, u8, Arc<PeerConn>, PacketBatch)>::new();
-            let mut selected_indexes = HashMap::<(PeerId, PeerConnId, u8, u8, u8), usize>::new();
+            let mut selected_inline_indexes =
+                SmallVec::<[((PeerId, PeerConnId, u8, u8, u8), usize); 4]>::new();
+            let mut selected_indexes = None::<HashMap<(PeerId, PeerConnId, u8, u8, u8), usize>>;
             for (flow, flow_batch) in partition_packet_batch_by_flow(peer_batch) {
                 let Some(first) = flow_batch.first() else {
                     continue;
@@ -3805,13 +4133,6 @@ impl PeerManager {
                         )));
                         continue;
                     }
-                    if !Self::credential_ethernet_peer_is_allowed(&self.peers, packet_type, peer_id)
-                        .await
-                    {
-                        tracing::warn!(peer_id, "block suppressed credential ethernet peer");
-                        errors.push(Error::RouteError(None));
-                        continue;
-                    }
                 }
 
                 let transport_peer = next_hop.unwrap_or(peer_id);
@@ -3827,7 +4148,12 @@ impl PeerManager {
                     };
                 if let Some(conn) = selected_conn {
                     let key = direct_batch_group_key(transport_peer, conn.get_conn_id(), header);
-                    if let Some(index) = selected_indexes.get(&key).copied() {
+                    if let Some(index) = lazy_batch_group_index(
+                        key,
+                        selected_batches.len(),
+                        &mut selected_inline_indexes,
+                        &mut selected_indexes,
+                    ) {
                         for packet in flow_batch {
                             selected_batches[index]
                                 .3
@@ -3835,8 +4161,6 @@ impl PeerManager {
                                 .expect("selected groups remain within the ingress batch bound");
                         }
                     } else {
-                        let index = selected_batches.len();
-                        selected_indexes.insert(key, index);
                         selected_batches.push((transport_peer, packet_type, conn, flow_batch));
                     }
                 } else {
@@ -3844,7 +4168,12 @@ impl PeerManager {
                         | (u8::from(header.is_latency_first()) << 1)
                         | (u8::from(header.is_critical_l2_control()) << 2);
                     let key = (peer_id, next_hop, packet_type, policy_bits, header.flags);
-                    if let Some(index) = relay_indexes.get(&key).copied() {
+                    if let Some(index) = lazy_batch_group_index(
+                        key,
+                        relay_batches.len(),
+                        &mut relay_inline_indexes,
+                        &mut relay_indexes,
+                    ) {
                         for packet in flow_batch {
                             relay_batches[index]
                                 .3
@@ -3852,14 +4181,16 @@ impl PeerManager {
                                 .expect("relay groups remain within the ingress batch bound");
                         }
                     } else {
-                        let index = relay_batches.len();
-                        relay_indexes.insert(key, index);
                         relay_batches.push((peer_id, next_hop, packet_type, flow_batch));
                     }
                 }
             }
 
             for (transport_peer, packet_type, conn, flow_batch) in selected_batches {
+                let hybrid_ip_ethernet = flow_batch
+                    .first()
+                    .and_then(|packet| packet.peer_manager_header())
+                    .is_some_and(|header| header.is_hybrid_ip_ethernet());
                 if packet_type == PacketType::Ethernet as u8 {
                     let Some(prepared_descriptor) = full_ethernet_descriptor else {
                         errors.push(Error::RouteError(Some(
@@ -3892,6 +4223,7 @@ impl PeerManager {
                                 ))),
                                 peer_id,
                                 packet_type,
+                                hybrid_ip_ethernet,
                                 bytes: 0,
                                 packets: 0,
                                 record_metrics: false,
@@ -3912,6 +4244,7 @@ impl PeerManager {
                                 ))),
                                 peer_id,
                                 packet_type,
+                                hybrid_ip_ethernet,
                                 bytes: 0,
                                 packets: 0,
                                 record_metrics: false,
@@ -3925,6 +4258,7 @@ impl PeerManager {
                         result,
                         peer_id,
                         packet_type,
+                        hybrid_ip_ethernet,
                         bytes,
                         packets,
                         record_metrics: true,
@@ -3939,6 +4273,10 @@ impl PeerManager {
             }
 
             for (peer_id, next_hop, packet_type, flow_batch) in relay_batches {
+                let hybrid_ip_ethernet = flow_batch
+                    .first()
+                    .and_then(|packet| packet.peer_manager_header())
+                    .is_some_and(|header| header.is_hybrid_ip_ethernet());
                 if packet_type == PacketType::Ethernet as u8 {
                     let Some(prepared_descriptor) = full_ethernet_descriptor else {
                         errors.push(Error::RouteError(Some(
@@ -3981,6 +4319,7 @@ impl PeerManager {
                                 ))),
                                 peer_id,
                                 packet_type,
+                                hybrid_ip_ethernet,
                                 bytes: 0,
                                 packets: 0,
                                 record_metrics: false,
@@ -4001,6 +4340,7 @@ impl PeerManager {
                                 ))),
                                 peer_id,
                                 packet_type,
+                                hybrid_ip_ethernet,
                                 bytes: 0,
                                 packets: 0,
                                 record_metrics: false,
@@ -4035,6 +4375,7 @@ impl PeerManager {
                         result,
                         peer_id,
                         packet_type,
+                        hybrid_ip_ethernet,
                         bytes,
                         packets,
                         record_metrics: false,
@@ -4700,8 +5041,8 @@ impl PeerManager {
         route.peer_id != my_peer_id
             && route.feature_flag.as_ref().is_some_and(|features| {
                 features.ethernet_input
-                    && features.hybrid_l3
                     && features.bridge_input
+                    && !features.hybrid_l3
                     && route.bridge_authorized
                     && route
                         .bridge_authorization_deadline
@@ -4804,13 +5145,13 @@ impl PeerManager {
         let routes = snapshot.capabilities();
         let mut candidate_peers = candidate_peers;
         let mut bridge_fallback = false;
+        let mut targeted_bridge = None;
         if candidate_peers.is_empty() && !is_multicast && !is_broadcast {
             if let Some(EthernetDestination::Known(peer_id)) = fdb_destination
-                && routes
-                    .get(peer_id)
-                    .is_some_and(|route| Self::route_requires_full_ethernet(route, self.my_peer_id))
+                && routes.is_authorized_bridge(peer_id)
             {
                 candidate_peers.push(peer_id);
+                targeted_bridge = Some(peer_id);
             } else if allow_bridge_fallback {
                 candidate_peers = routes.ethernet_peers();
                 bridge_fallback = true;
@@ -4825,6 +5166,8 @@ impl PeerManager {
                 .collect()
         } else if is_broadcast {
             routes.ethernet_peers()
+        } else if targeted_bridge.is_some() {
+            candidate_peers.clone()
         } else if bridge_fallback {
             routes
                 .ethernet_peers()
@@ -4846,11 +5189,12 @@ impl PeerManager {
             .iter()
             .copied()
             .filter(|peer_id| {
-                *peer_id == self.my_peer_id
-                    || routes.get(*peer_id).is_some_and(|route| {
-                        Self::route_accepts_compact_ip(route)
-                            && !Self::route_requires_full_ethernet(route, self.my_peer_id)
-                    })
+                full_peers.binary_search(peer_id).is_err()
+                    && targeted_bridge != Some(*peer_id)
+                    && (*peer_id == self.my_peer_id
+                        || routes
+                            .get(*peer_id)
+                            .is_some_and(|route| Self::route_accepts_compact_ip(route)))
             })
             .collect();
         HybridRecipientSets {
@@ -5682,13 +6026,13 @@ impl PeerManager {
         let routes = snapshot.capabilities();
 
         let mut bridge_fallback = false;
+        let mut targeted_bridge = None;
         if candidate_peers.is_empty() && !is_multicast && !is_broadcast {
             if let Some(EthernetDestination::Known(peer_id)) = fdb_destination
-                && routes
-                    .get(peer_id)
-                    .is_some_and(|route| Self::route_requires_full_ethernet(route, self.my_peer_id))
+                && routes.is_authorized_bridge(peer_id)
             {
                 candidate_peers.push(peer_id);
+                targeted_bridge = Some(peer_id);
             } else {
                 candidate_peers = routes.ethernet_peers();
                 bridge_fallback = true;
@@ -5704,6 +6048,8 @@ impl PeerManager {
                 .collect::<Vec<_>>()
         } else if is_broadcast {
             routes.ethernet_peers()
+        } else if targeted_bridge.is_some() {
+            candidate_peers.clone()
         } else if bridge_fallback {
             routes
                 .ethernet_peers()
@@ -5729,13 +6075,18 @@ impl PeerManager {
             .iter()
             .copied()
             .filter(|peer_id| {
+                if full_peers.binary_search(peer_id).is_ok() {
+                    return false;
+                }
+                if targeted_bridge == Some(*peer_id) {
+                    return false;
+                }
                 if *peer_id == self.my_peer_id {
                     return true;
                 }
-                routes.get(*peer_id).is_some_and(|route| {
-                    Self::route_accepts_compact_ip(route)
-                        && !Self::route_requires_full_ethernet(route, self.my_peer_id)
-                })
+                routes
+                    .get(*peer_id)
+                    .is_some_and(|route| Self::route_accepts_compact_ip(route))
             })
             .collect::<Vec<_>>();
         let full_frame_needed = !full_peers.is_empty();
@@ -6190,11 +6541,11 @@ impl PeerManager {
             .iter()
             .copied()
             .filter(|peer_id| {
-                *peer_id == self.my_peer_id
-                    || routes.get(*peer_id).is_some_and(|route| {
-                        Self::route_accepts_compact_ip(route)
-                            && !Self::route_requires_full_ethernet(route, self.my_peer_id)
-                    })
+                full_peers.binary_search(peer_id).is_err()
+                    && (*peer_id == self.my_peer_id
+                    || routes
+                        .get(*peer_id)
+                        .is_some_and(|route| Self::route_accepts_compact_ip(route)))
             })
             .collect::<Vec<_>>();
         let full_frame_needed = !full_peers.is_empty();
@@ -6797,6 +7148,7 @@ impl PeerManager {
                             "traffic metrics GC receiver lagged; clearing peer cache to avoid stale metric attribution"
                         );
                         traffic_metrics.clear_peer_cache();
+                        l2_fabric.clear();
                         event_receiver = event_receiver.resubscribe();
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -7219,12 +7571,55 @@ mod tests {
     use prefix_trie::PrefixMap;
     use quanta::Instant;
 
+    #[tokio::test]
+    async fn rpc_ingress_channel_is_bounded() {
+        let (sender, mut receiver) = super::create_rpc_ingress_channel();
+        for _ in 0..super::RPC_INGRESS_PACKET_CAPACITY {
+            sender
+                .try_send(ZCPacket::new_with_payload(&[1]))
+                .expect("the configured RPC ingress capacity accepts this packet");
+        }
+        assert!(matches!(
+            sender.try_send(ZCPacket::new_with_payload(&[2])),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        assert!(receiver.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn rpc_ingress_reserves_capacity_for_other_authenticated_peers() {
+        let (sender, mut receiver) = super::create_rpc_ingress_channel();
+        for _ in 0..super::RPC_INGRESS_CAPACITY_PER_PEER {
+            let mut packet = ZCPacket::new_with_payload(&[1]);
+            assert!(packet.set_authenticated_peer_id(7));
+            sender.try_send(packet).unwrap();
+        }
+        let mut blocked = ZCPacket::new_with_payload(&[2]);
+        assert!(blocked.set_authenticated_peer_id(7));
+        assert!(matches!(
+            sender.try_send(blocked),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        let mut other = ZCPacket::new_with_payload(&[3]);
+        assert!(other.set_authenticated_peer_id(8));
+        sender.try_send(other).unwrap();
+        let first = receiver.recv().await.unwrap();
+        drop(first);
+
+        let mut admitted = ZCPacket::new_with_payload(&[4]);
+        assert!(admitted.set_authenticated_peer_id(7));
+        sender.try_send(admitted).unwrap();
+    }
+
     use crate::{
         common::{
             PeerId,
             config::{ConfigLoader, Flags},
-            error::Error,
-            global_ctx::{NetworkIdentity, tests::get_mock_global_ctx},
+            global_ctx::{
+                NetworkIdentity,
+                tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
+            },
             stats_manager::{LabelSet, LabelType, MetricName},
         },
         connector::{
@@ -7244,8 +7639,8 @@ mod tests {
                 RouteInterfaceBox,
             },
             tests::{
-                connect_peer_manager, create_mock_peer_manager_with_name, wait_route_appear,
-                wait_route_appear_with_cost,
+                connect_peer_manager, create_mock_peer_manager, create_mock_peer_manager_secure,
+                wait_route_appear, wait_route_appear_with_cost,
             },
         },
         proto::{
@@ -7315,7 +7710,7 @@ mod tests {
             if let Some(source) = interface.forwarding_decision_snapshot_source() {
                 let snapshot = controlled_route_snapshot(self.peer_id);
                 if self.publish_authority {
-                    interface.publish_origin_auth_batch(
+                    let _ = interface.publish_origin_auth_batch(
                         source.source_token(),
                         snapshot.generation(),
                         &[],
@@ -8195,10 +8590,8 @@ mod tests {
         let _endpoint = peer_manager.install_direct_nic_sink(Box::pin(sink));
         let mut batch = PacketBatch::new();
         for marker in 0_u8..8 {
-            let mut frame = ethernet_frame([0xff; 6], [0x02, 0, 0, 0, 0, marker + 1]);
-            frame[14] = marker;
-            let mut packet = ZCPacket::new_with_payload(&frame);
-            packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Ethernet as u8);
+            let mut packet = ZCPacket::new_with_payload(&[marker]);
+            packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Data as u8);
             assert!(packet.set_authenticated_peer_id(42));
             assert!(packet.set_authenticated_peer_identity_type(PeerIdentityType::Admin));
             assert!(
@@ -8211,7 +8604,10 @@ mod tests {
         }
 
         peer_manager.packet_ingress.send_batch(batch).await.unwrap();
-        let received = direct_nic.next().await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), direct_nic.next())
+            .await
+            .expect("direct NIC delivery timed out")
+            .expect("direct NIC sink closed");
 
         assert_eq!(received.len(), 8);
         assert!(
@@ -8262,9 +8658,8 @@ mod tests {
         let (sink, mut direct_nic) = futures::channel::mpsc::unbounded::<PacketBatch>();
         let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
         let _endpoint = peer_manager.install_direct_nic_sink(Box::pin(sink));
-        let mut packet =
-            ZCPacket::new_with_payload(&ethernet_frame([0xff; 6], [0x02, 0, 0, 0, 0, 1]));
-        packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Ethernet as u8);
+        let mut packet = ZCPacket::new_with_payload(b"data");
+        packet.fill_peer_manager_hdr(42, peer_manager.my_peer_id(), PacketType::Data as u8);
         assert!(packet.set_authenticated_peer_id(42));
         assert!(packet.set_authenticated_peer_identity_type(PeerIdentityType::Admin));
         assert!(
@@ -9323,6 +9718,7 @@ mod tests {
     async fn direct_full_unicast_does_not_consume_fanout_budget() {
         let source_ip: Ipv4Addr = "10.161.161.1".parse().unwrap();
         let bridge_ip: Ipv4Addr = "10.161.161.2".parse().unwrap();
+        let unrouted_ip: Ipv4Addr = "203.0.113.77".parse().unwrap();
         let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
         frame[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
         frame[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
@@ -9331,7 +9727,9 @@ mod tests {
         ip[0] = 0x45;
         ip[2..4].copy_from_slice(&20_u16.to_be_bytes());
         ip[12..16].copy_from_slice(&source_ip.octets());
-        ip[16..20].copy_from_slice(&bridge_ip.octets());
+        // Keep L3 unrouted so this specifically exercises an FDB-targeted
+        // complete-Ethernet unicast rather than the compact hybrid-L3 path.
+        ip[16..20].copy_from_slice(&unrouted_ip.octets());
         let full_len = {
             let mut packet = ZCPacket::new_with_payload(&frame);
             packet.fill_peer_manager_hdr(1, 0, PacketType::Ethernet as u8);
@@ -9350,6 +9748,14 @@ mod tests {
         wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
             .await
             .unwrap();
+
+        let mut learned_frame = frame.clone();
+        learned_frame[6..12].copy_from_slice(&frame[..6]);
+        peer_mgr_a.l2_fabric.learn_source_at(
+            &learned_frame,
+            peer_mgr_b.my_peer_id(),
+            std::time::Instant::now(),
+        );
 
         peer_mgr_a
             .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
@@ -11701,11 +12107,11 @@ mod tests {
     #[tokio::test]
     async fn expired_credential_peer_conn_is_closed_without_ospf() {
         let (admin_ch, _admin_rx) = create_packet_recv_chan();
-        let admin_ctx = get_mock_global_ctx();
-        admin_ctx.config.set_network_identity(NetworkIdentity::new(
+        let admin_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&admin_ctx, true);
         let admin = Arc::new(PeerManager::new(
             RouteAlgoType::None,
@@ -11718,16 +12124,24 @@ mod tests {
             .get_credential_manager()
             .generate_credential(vec![], false, vec![], Duration::from_secs(1))
             .unwrap();
+        let bundle = crate::peers::credential_manager::CredentialManager::parse_credential_bundle(
+            &cred_secret,
+        )
+        .unwrap();
         let private = crate::peers::credential_manager::CredentialManager::private_key_from_bundle(
             &cred_secret,
         )
         .unwrap();
         let public = x25519_dalek::PublicKey::from(&private);
         let (credential_ch, _credential_rx) = create_packet_recv_chan();
-        let credential_ctx = get_mock_global_ctx();
-        credential_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new_credential("net1".to_string()));
+        let credential_ctx = get_mock_global_ctx_with_network(Some(
+            NetworkIdentity::new_credential_with_root_fingerprint(
+                "net1".to_string(),
+                &bundle.root_fingerprint,
+            )
+            .unwrap(),
+        ));
+
         credential_ctx
             .config
             .set_secure_mode(Some(SecureModeConfig {
@@ -11738,7 +12152,13 @@ mod tests {
                 local_public_key: Some(
                     base64::engine::general_purpose::STANDARD.encode(public.as_bytes()),
                 ),
-                ..Default::default()
+                credential_bundle: Some(cred_secret.clone()),
+                credential_root_fingerprint: bundle.root_fingerprint.clone(),
+                credential_certificate: bundle
+                    .certificate
+                    .as_ref()
+                    .map(prost::Message::encode_to_vec)
+                    .unwrap_or_default(),
             }));
         let credential = Arc::new(PeerManager::new(
             RouteAlgoType::None,
@@ -11783,8 +12203,9 @@ mod tests {
 
     #[tokio::test]
     async fn close_conn_in_foreign_network_client() {
-        let peer_mgr_server = create_mock_peer_manager_with_name("server".to_string()).await;
-        let peer_mgr_client = create_mock_peer_manager_with_name("client".to_string()).await;
+        let peer_mgr_server = create_mock_peer_manager().await;
+        let peer_mgr_client =
+            create_mock_peer_manager_secure("client".to_string(), "client".to_string()).await;
         connect_peer_manager(peer_mgr_client.clone(), peer_mgr_server.clone()).await;
         wait_for_condition(
             || async {
@@ -11830,8 +12251,9 @@ mod tests {
 
     #[tokio::test]
     async fn close_conn_in_foreign_network_manager() {
-        let peer_mgr_server = create_mock_peer_manager_with_name("server".to_string()).await;
-        let peer_mgr_client = create_mock_peer_manager_with_name("client".to_string()).await;
+        let peer_mgr_server = create_mock_peer_manager().await;
+        let peer_mgr_client =
+            create_mock_peer_manager_secure("client".to_string(), "client".to_string()).await;
         connect_peer_manager(peer_mgr_client.clone(), peer_mgr_server.clone()).await;
         wait_for_condition(
             || async {

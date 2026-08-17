@@ -8,7 +8,7 @@ use guarden::defer;
 use prost::Message;
 use quanta::Instant;
 use rand::{RngCore, rngs::OsRng};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
@@ -19,7 +19,7 @@ use crate::common::{
 };
 use crate::proto::common::{RpcCompressionInfo, RpcDescriptor, RpcPacket, RpcRequest, RpcResponse};
 use crate::proto::rpc_impl::packet::{
-    BuildRpcPacketArgs, build_rpc_packet, compress_packet, decompress_packet,
+    BuildRpcPacketArgs, MAX_RPC_BODY_BYTES, build_rpc_packet, compress_packet, decompress_packet,
     supported_rpc_compression,
 };
 use crate::proto::rpc_types::controller::Controller;
@@ -28,7 +28,7 @@ use crate::proto::rpc_types::{
     __rt::RpcClientFactory, descriptor::ServiceDescriptor, handler::Handler,
 };
 
-use crate::proto::rpc_types::error::Result;
+use crate::proto::rpc_types::error::{Error, Result};
 use crate::tunnel::mpsc::{MpscTunnel, MpscTunnelSender};
 use crate::tunnel::packet_def::ZCPacket;
 use crate::tunnel::ring::create_ring_tunnel_pair;
@@ -54,6 +54,34 @@ struct InflightRequest {
     expected_remote_peer: PeerId,
     requester_peer: PeerId,
     authenticated_session_id: Option<uuid::Uuid>,
+    process_memory: Arc<crate::common::global_ctx::ProcessMemoryGovernor>,
+    retained_bytes: usize,
+}
+
+impl InflightRequest {
+    fn new(
+        sender: RpcPacketSender,
+        start_time: Instant,
+        expected_remote_peer: PeerId,
+        requester_peer: PeerId,
+    ) -> Self {
+        Self {
+            sender,
+            merger: PacketMerger::new(),
+            start_time,
+            expected_remote_peer,
+            requester_peer,
+            authenticated_session_id: None,
+            process_memory: crate::common::global_ctx::global_process_memory_governor(),
+            retained_bytes: 0,
+        }
+    }
+}
+
+impl Drop for InflightRequest {
+    fn drop(&mut self) {
+        self.process_memory.release(self.retained_bytes);
+    }
 }
 
 impl std::fmt::Debug for InflightRequest {
@@ -119,6 +147,7 @@ pub struct Client {
     peer_info: PeerInfoTable,
     tasks: Mutex<JoinSet<()>>,
     stats_manager: Option<Arc<StatsManager>>,
+    inflight_admission: Arc<Semaphore>,
 }
 
 impl Default for Client {
@@ -137,6 +166,7 @@ impl Client {
             peer_info: Arc::new(DashMap::new()),
             tasks: Mutex::new(JoinSet::new()),
             stats_manager: None,
+            inflight_admission: Arc::new(Semaphore::new(256)),
         }
     }
 
@@ -199,7 +229,11 @@ impl Client {
                 };
 
                 if packet.is_request {
-                    tracing::warn!(?packet, "Received non-response packet");
+                    tracing::warn!(
+                        transaction_id = packet.transaction_id,
+                        body_len = packet.body.len(),
+                        "Received non-response RPC packet"
+                    );
                     continue;
                 }
 
@@ -263,9 +297,43 @@ impl Client {
                     inflight_request.authenticated_session_id = logical_authenticated_session_id;
                 }
 
-                tracing::trace!(?packet, "Received response packet");
+                tracing::trace!(
+                    transaction_id = packet.transaction_id,
+                    piece_idx = packet.piece_idx,
+                    total_pieces = packet.total_pieces,
+                    body_len = packet.body.len(),
+                    "Received response RPC packet"
+                );
 
+                let reservation_bytes = if inflight_request.merger.contains_piece(packet.piece_idx)
+                {
+                    0
+                } else {
+                    let Some(reservation_bytes) = PacketMerger::reservation_bytes(
+                        &packet,
+                        inflight_request.merger.is_empty(),
+                    ) else {
+                        tracing::warn!(?key, "drop malformed RPC response reservation");
+                        drop(inflight_request);
+                        inflight_requests.remove(&key);
+                        continue;
+                    };
+                    reservation_bytes
+                };
+                if reservation_bytes > 0
+                    && !inflight_request.process_memory.reserve(reservation_bytes)
+                {
+                    tracing::warn!(?key, "drop RPC response because the memory limit is full");
+                    drop(inflight_request);
+                    inflight_requests.remove(&key);
+                    continue;
+                }
                 let ret = inflight_request.merger.feed(packet);
+                if ret.is_ok() {
+                    inflight_request.retained_bytes += reservation_bytes;
+                } else if reservation_bytes > 0 {
+                    inflight_request.process_memory.release(reservation_bytes);
+                }
                 match ret {
                     Ok(Some(rpc_packet)) => {
                         if inflight_request.sender.send(rpc_packet).is_err() {
@@ -299,6 +367,7 @@ impl Client {
             inflight_requests: InflightRequestTable,
             peer_info: PeerInfoTable,
             stats_manager: Option<Arc<StatsManager>>,
+            inflight_admission: Arc<Semaphore>,
             _phan: PhantomData<F>,
         }
 
@@ -328,6 +397,12 @@ impl Client {
                 input: bytes::Bytes,
             ) -> Result<bytes::Bytes> {
                 let start_time = Instant::now();
+                let _inflight_permit = self
+                    .inflight_admission
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("RPC client admission remains open");
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let desc = self.service_descriptor();
                 let labels = LabelSet::new()
@@ -346,14 +421,12 @@ impl Client {
                     };
                     match self.inflight_requests.entry(key.clone()) {
                         Entry::Vacant(entry) => {
-                            entry.insert(InflightRequest {
-                                sender: tx.clone(),
-                                merger: PacketMerger::new(),
+                            entry.insert(InflightRequest::new(
+                                tx.clone(),
                                 start_time,
-                                expected_remote_peer: self.to_peer_id,
-                                requester_peer: self.from_peer_id,
-                                authenticated_session_id: None,
-                            });
+                                self.to_peer_id,
+                                self.from_peer_id,
+                            ));
                             break (transaction_id, key);
                         }
                         Entry::Occupied(_) => continue,
@@ -385,6 +458,14 @@ impl Client {
                     ..Default::default()
                 };
 
+                let rpc_req_bytes = rpc_req.encode_to_vec();
+                if rpc_req_bytes.len() > MAX_RPC_BODY_BYTES {
+                    return Err(Error::MalformatRpcPacket(format!(
+                        "RPC request is too large: {} bytes",
+                        rpc_req_bytes.len()
+                    )));
+                }
+
                 let peer_info = self
                     .peer_info
                     .get(&self.to_peer_id)
@@ -392,10 +473,9 @@ impl Client {
                     .unwrap_or_default();
                 let (buf, c_algo) = compress_packet(
                     peer_info.compression_info.accepted_algo(),
-                    &rpc_req.encode_to_vec(),
+                    &rpc_req_bytes,
                 )
-                .await
-                .unwrap();
+                .await?;
 
                 let packets = build_rpc_packet(BuildRpcPacketArgs {
                     from_peer: self.from_peer_id,
@@ -482,6 +562,7 @@ impl Client {
             inflight_requests: self.inflight_requests.clone(),
             peer_info: self.peer_info.clone(),
             stats_manager: self.stats_manager.clone(),
+            inflight_admission: self.inflight_admission.clone(),
             _phan: PhantomData,
         })
     }
@@ -596,14 +677,7 @@ mod tests {
         drop(closed_receiver);
         client.inflight_requests.insert(
             key.clone(),
-            InflightRequest {
-                sender: closed_sender,
-                merger: PacketMerger::new(),
-                start_time: Instant::now(),
-                expected_remote_peer: 7,
-                requester_peer: 1,
-                authenticated_session_id: None,
-            },
+            InflightRequest::new(closed_sender, Instant::now(), 7, 1),
         );
         client.run();
 
@@ -639,14 +713,7 @@ mod tests {
                 transaction_id: transaction_id + 1,
                 ..key.clone()
             },
-            InflightRequest {
-                sender,
-                merger: PacketMerger::new(),
-                start_time: Instant::now(),
-                expected_remote_peer: 7,
-                requester_peer: 1,
-                authenticated_session_id: None,
-            },
+            InflightRequest::new(sender, Instant::now(), 7, 1),
         );
         let mut valid = response_zc_packet(transaction_id + 1);
         assert!(valid.set_verified_origin(

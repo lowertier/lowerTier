@@ -58,9 +58,10 @@ impl AuthenticatedRoutePeerEvidence {
                 secure_auth_level,
                 SecureAuthLevel::EncryptedUnauthenticated | SecureAuthLevel::PeerVerified
             ),
-            PeerIdentityType::ForeignRelay => {
-                matches!(secure_auth_level, SecureAuthLevel::PeerVerified)
-            }
+            PeerIdentityType::ForeignRelay => matches!(
+                secure_auth_level,
+                SecureAuthLevel::EncryptedUnauthenticated | SecureAuthLevel::PeerVerified
+            ),
         }
     }
 }
@@ -921,6 +922,22 @@ pub trait RouteCostCalculatorInterface: Send + Sync {
         false
     }
 
+    fn cost_need_update(&self) -> bool {
+        self.need_update()
+    }
+
+    fn delivery_need_update(&self) -> bool {
+        self.need_update()
+    }
+
+    fn next_update_in(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    fn next_delivery_update_in(&self) -> Option<std::time::Duration> {
+        self.next_update_in()
+    }
+
     fn dump(&self) -> String {
         "All routes have cost 1".to_string()
     }
@@ -1198,6 +1215,22 @@ mod tests {
             Arc::new(PrefixMap::new()),
             Arc::new(PrefixMap::new()),
         )
+    }
+
+    #[test]
+    fn foreign_relay_accepts_scoped_encrypted_transport_identity() {
+        assert!(AuthenticatedRoutePeerEvidence::is_allowed_role_auth_pair(
+            PeerIdentityType::ForeignRelay,
+            SecureAuthLevel::EncryptedUnauthenticated,
+        ));
+        assert!(AuthenticatedRoutePeerEvidence::is_allowed_role_auth_pair(
+            PeerIdentityType::ForeignRelay,
+            SecureAuthLevel::PeerVerified,
+        ));
+        assert!(!AuthenticatedRoutePeerEvidence::is_allowed_role_auth_pair(
+            PeerIdentityType::ForeignRelay,
+            SecureAuthLevel::NetworkSecretConfirmed,
+        ));
     }
 
     #[test]

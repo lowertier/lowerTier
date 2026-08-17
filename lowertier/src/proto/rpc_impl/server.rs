@@ -43,8 +43,51 @@ fn foreign_relay_rpc_allowed(desc: &common::RpcDescriptor) -> bool {
 fn rpc_source_matches_authenticated_peer(
     authenticated_peer_id: Option<PeerId>,
     claimed_peer_id: PeerId,
+    claimed_destination_peer_id: PeerId,
+    transport_source_peer_id: Option<PeerId>,
+    transport_destination_peer_id: Option<PeerId>,
 ) -> bool {
-    authenticated_peer_id.is_none_or(|peer_id| peer_id == claimed_peer_id)
+    match authenticated_peer_id {
+        Some(peer_id) => peer_id == claimed_peer_id,
+        None => {
+            claimed_peer_id == claimed_destination_peer_id
+                && transport_source_peer_id == Some(claimed_peer_id)
+                && transport_destination_peer_id == Some(claimed_destination_peer_id)
+        }
+    }
+}
+
+fn rpc_authentication_tuple_valid(
+    authenticated_peer_id: Option<PeerId>,
+    authenticated_peer_identity_type: Option<crate::proto::peer_rpc::PeerIdentityType>,
+    authenticated_peer_secure_auth_level: Option<crate::proto::peer_rpc::SecureAuthLevel>,
+    authenticated_session_id: Option<uuid::Uuid>,
+) -> bool {
+    match (
+        authenticated_peer_id,
+        authenticated_peer_identity_type,
+        authenticated_peer_secure_auth_level,
+        authenticated_session_id,
+    ) {
+        (None, None, None, None) => true,
+        (
+            Some(_),
+            Some(
+                crate::proto::peer_rpc::PeerIdentityType::ForeignRelay
+                | crate::proto::peer_rpc::PeerIdentityType::SharedNode,
+            ),
+            Some(level),
+            Some(_),
+        ) => matches!(
+            level,
+            crate::proto::peer_rpc::SecureAuthLevel::EncryptedUnauthenticated
+                | crate::proto::peer_rpc::SecureAuthLevel::PeerVerified
+        ),
+        (Some(_), Some(_), Some(level), Some(_)) => {
+            level >= crate::proto::peer_rpc::SecureAuthLevel::PeerVerified
+        }
+        _ => false,
+    }
 }
 
 use super::{
@@ -72,26 +115,50 @@ struct MergerSessionKey {
     session_id: uuid::Uuid,
 }
 
+const LOCAL_RPC_BUDGET_PEER_ID: PeerId = 0;
+
+fn rpc_budget_session(
+    authenticated_peer_id: Option<PeerId>,
+    authenticated_session_id: Option<uuid::Uuid>,
+) -> Option<MergerSessionKey> {
+    match (authenticated_peer_id, authenticated_session_id) {
+        (Some(peer_id), Some(session_id)) => Some(MergerSessionKey {
+            peer_id,
+            session_id,
+        }),
+        (None, None) => Some(MergerSessionKey {
+            peer_id: LOCAL_RPC_BUDGET_PEER_ID,
+            session_id: uuid::Uuid::nil(),
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergerSessionUsage {
     transactions: usize,
     bytes: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct MergerBudget {
     transactions: usize,
     bytes: usize,
     sessions: HashMap<MergerSessionKey, MergerSessionUsage>,
+    peers: HashMap<PeerId, MergerSessionUsage>,
+    process_memory: Arc<crate::common::global_ctx::ProcessMemoryGovernor>,
 }
 
-const MAX_RPC_MERGER_TRANSACTIONS: usize = 1024;
-const MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION: usize = 64;
-const MAX_RPC_MERGER_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RPC_MERGER_BYTES_PER_SESSION: usize = 8 * 1024 * 1024;
+const MAX_RPC_MERGER_TRANSACTIONS: usize = 256;
+const MAX_RPC_MERGER_TRANSACTIONS_PER_PEER: usize = 64;
+const MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION: usize = 16;
+const MAX_RPC_MERGER_BYTES: usize = 512 * 1024;
+const MAX_RPC_MERGER_BYTES_PER_PEER: usize = 256 * 1024;
+const MAX_RPC_MERGER_BYTES_PER_SESSION: usize = 256 * 1024;
 const MAX_RPC_TIMEOUT_MS: u64 = 120_000;
-const MAX_RPC_TASKS: usize = 256;
-const MAX_RPC_TASKS_PER_SESSION: usize = 32;
+const MAX_RPC_TASKS: usize = 64;
+const MAX_RPC_TASKS_PER_PEER: usize = 16;
+const MAX_RPC_TASKS_PER_SESSION: usize = 8;
 
 impl MergerBudget {
     fn reserve(&mut self, session: &MergerSessionKey, new_transaction: bool, bytes: usize) -> bool {
@@ -106,8 +173,14 @@ impl MergerBudget {
             .get(session)
             .map(|usage| (usage.transactions, usage.bytes))
             .unwrap_or((0, 0));
+        let (current_peer_transactions, current_peer_bytes) = self
+            .peers
+            .get(&session.peer_id)
+            .map(|usage| (usage.transactions, usage.bytes))
+            .unwrap_or((0, 0));
         if new_transaction
             && (self.transactions >= MAX_RPC_MERGER_TRANSACTIONS
+                || current_peer_transactions >= MAX_RPC_MERGER_TRANSACTIONS_PER_PEER
                 || current_transactions >= MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION)
         {
             return false;
@@ -118,19 +191,33 @@ impl MergerBudget {
         if session_bytes > MAX_RPC_MERGER_BYTES_PER_SESSION {
             return false;
         }
-        let usage = self.sessions.entry(session.clone()).or_default();
+        let Some(peer_bytes) = current_peer_bytes.checked_add(bytes) else {
+            return false;
+        };
+        if peer_bytes > MAX_RPC_MERGER_BYTES_PER_PEER {
+            return false;
+        }
+        if !self.process_memory.reserve(bytes) {
+            return false;
+        }
         self.bytes = new_bytes;
-        usage.bytes = session_bytes;
+        let session_usage = self.sessions.entry(session.clone()).or_default();
+        session_usage.bytes = session_bytes;
+        let peer_usage = self.peers.entry(session.peer_id).or_default();
+        peer_usage.bytes = peer_bytes;
         if new_transaction {
             self.transactions += 1;
-            usage.transactions += 1;
+            session_usage.transactions += 1;
+            peer_usage.transactions += 1;
         }
         true
     }
 
     fn release(&mut self, session: &MergerSessionKey, transaction: bool, bytes: usize) {
+        self.process_memory.release(bytes);
         self.bytes = self.bytes.saturating_sub(bytes);
         let mut remove = false;
+        let mut remove_peer = false;
         if let Some(usage) = self.sessions.get_mut(session) {
             usage.bytes = usage.bytes.saturating_sub(bytes);
             if transaction {
@@ -141,6 +228,16 @@ impl MergerBudget {
         }
         if remove {
             self.sessions.remove(session);
+        }
+        if let Some(usage) = self.peers.get_mut(&session.peer_id) {
+            usage.bytes = usage.bytes.saturating_sub(bytes);
+            if transaction {
+                usage.transactions = usage.transactions.saturating_sub(1);
+            }
+            remove_peer = usage.transactions == 0 && usage.bytes == 0;
+        }
+        if remove_peer {
+            self.peers.remove(&session.peer_id);
         }
     }
 
@@ -156,15 +253,30 @@ impl MergerBudget {
             .get(session)
             .map(|usage| usage.bytes)
             .unwrap_or(0);
+        let current_peer_bytes = self
+            .peers
+            .get(&session.peer_id)
+            .map(|usage| usage.bytes)
+            .unwrap_or(0);
         let Some(new_session_bytes) = current_session_bytes.checked_add(bytes) else {
             return false;
         };
         if new_session_bytes > MAX_RPC_MERGER_BYTES_PER_SESSION {
             return false;
         }
+        let Some(new_peer_bytes) = current_peer_bytes.checked_add(bytes) else {
+            return false;
+        };
+        if new_peer_bytes > MAX_RPC_MERGER_BYTES_PER_PEER {
+            return false;
+        }
+        if !self.process_memory.reserve(bytes) {
+            return false;
+        }
         let usage = self.sessions.entry(session.clone()).or_default();
         self.bytes = new_bytes;
         usage.bytes = new_session_bytes;
+        self.peers.entry(session.peer_id).or_default().bytes = new_peer_bytes;
         true
     }
 
@@ -181,27 +293,58 @@ impl MergerBudget {
         let Some(usage) = self.sessions.get_mut(session) else {
             return false;
         };
+        let Some(peer_usage) = self.peers.get_mut(&session.peer_id) else {
+            return false;
+        };
         if usage.transactions == 0 || usage.bytes < retained_bytes || self.bytes < retained_bytes {
             return false;
         }
         let remaining_bytes = self.bytes - retained_bytes;
         let remaining_session_bytes = usage.bytes - retained_bytes;
+        let remaining_peer_bytes = peer_usage.bytes.saturating_sub(retained_bytes);
         let Some(new_bytes) = remaining_bytes.checked_add(logical_bytes) else {
             return false;
         };
         let Some(new_session_bytes) = remaining_session_bytes.checked_add(logical_bytes) else {
             return false;
         };
-        if new_bytes > MAX_RPC_MERGER_BYTES || new_session_bytes > MAX_RPC_MERGER_BYTES_PER_SESSION
+        let Some(new_peer_bytes) = remaining_peer_bytes.checked_add(logical_bytes) else {
+            return false;
+        };
+        if new_bytes > MAX_RPC_MERGER_BYTES
+            || new_peer_bytes > MAX_RPC_MERGER_BYTES_PER_PEER
+            || new_session_bytes > MAX_RPC_MERGER_BYTES_PER_SESSION
         {
+            return false;
+        }
+
+        let additional = logical_bytes.saturating_sub(retained_bytes);
+        if additional > 0 && !self.process_memory.reserve(additional) {
             return false;
         }
 
         self.bytes = new_bytes;
         usage.bytes = new_session_bytes;
         usage.transactions = usage.transactions.saturating_sub(1);
+        peer_usage.bytes = new_peer_bytes;
+        peer_usage.transactions = peer_usage.transactions.saturating_sub(1);
         self.transactions = self.transactions.saturating_sub(1);
+        if retained_bytes > logical_bytes {
+            self.process_memory.release(retained_bytes - logical_bytes);
+        }
         true
+    }
+}
+
+impl Default for MergerBudget {
+    fn default() -> Self {
+        Self {
+            transactions: 0,
+            bytes: 0,
+            sessions: HashMap::new(),
+            peers: HashMap::new(),
+            process_memory: crate::common::global_ctx::global_process_memory_governor(),
+        }
     }
 }
 
@@ -234,6 +377,18 @@ impl ExecutionBudgetPermit {
         self.bytes = self.bytes.saturating_add(bytes);
         true
     }
+
+    fn release_all(&mut self) {
+        let bytes = self.bytes;
+        self.bytes = 0;
+        if bytes == 0 {
+            return;
+        }
+        let (Some(budget), Some(session)) = (self.budget.as_ref(), self.session.as_ref()) else {
+            return;
+        };
+        budget.lock().unwrap().release_execution(session, bytes);
+    }
 }
 
 impl Drop for ExecutionBudgetPermit {
@@ -259,6 +414,7 @@ pub struct Server {
     packet_mergers: Arc<DashMap<PacketMergerKey, PacketMerger>>,
     merger_budget: Arc<Mutex<MergerBudget>>,
     rpc_task_semaphore: Arc<Semaphore>,
+    rpc_peer_task_semaphores: Arc<DashMap<PeerId, Arc<Semaphore>>>,
     rpc_session_task_semaphores: Arc<DashMap<MergerSessionKey, Arc<Semaphore>>>,
     stats_manager: Option<Arc<StatsManager>>,
 }
@@ -285,6 +441,7 @@ impl Server {
             packet_mergers: Arc::new(DashMap::new()),
             merger_budget: Arc::new(Mutex::new(MergerBudget::default())),
             rpc_task_semaphore: Arc::new(Semaphore::new(MAX_RPC_TASKS)),
+            rpc_peer_task_semaphores: Arc::new(DashMap::new()),
             rpc_session_task_semaphores: Arc::new(DashMap::new()),
             stats_manager: None,
         }
@@ -322,6 +479,7 @@ impl Server {
         let packet_merges = self.packet_mergers.clone();
         let merger_budget = self.merger_budget.clone();
         let rpc_task_semaphore = self.rpc_task_semaphore.clone();
+        let rpc_peer_task_semaphores = self.rpc_peer_task_semaphores.clone();
         let rpc_session_task_semaphores = self.rpc_session_task_semaphores.clone();
         let reg = self.registry.clone();
         let stats_manager = self.stats_manager.clone();
@@ -337,12 +495,23 @@ impl Server {
                     continue;
                 }
                 let packet = packet.unwrap();
+                let transport_source_peer_id = packet.get_src_peer_id();
+                let transport_destination_peer_id = packet.get_dst_peer_id();
                 let authenticated_peer_id = packet.logical_authenticated_peer_id();
                 let authenticated_peer_identity_type =
                     packet.logical_authenticated_peer_identity_type();
                 let authenticated_peer_secure_auth_level =
                     packet.logical_authenticated_peer_secure_auth_level();
                 let authenticated_session_id = packet.logical_authenticated_session_id();
+                if !rpc_authentication_tuple_valid(
+                    authenticated_peer_id,
+                    authenticated_peer_identity_type,
+                    authenticated_peer_secure_auth_level,
+                    authenticated_session_id,
+                ) {
+                    tracing::warn!("Dropping RPC packet with invalid authentication metadata");
+                    continue;
+                }
                 let packet = match common::RpcPacket::decode(packet.payload()) {
                     Err(err) => {
                         tracing::error!(?err, "Failed to decode packet");
@@ -351,7 +520,8 @@ impl Server {
                     Ok(packet) => packet,
                 };
 
-                if packet.total_pieces == 0 && packet.piece_idx != 0 {
+                let unfragmented = packet.total_pieces <= 1;
+                if unfragmented && packet.piece_idx != 0 {
                     tracing::warn!(
                         from_peer = packet.from_peer,
                         transaction_id = packet.transaction_id,
@@ -360,7 +530,7 @@ impl Server {
                     );
                     continue;
                 }
-                if packet.total_pieces == 0 && packet.body.len() > MAX_RPC_BODY_BYTES {
+                if unfragmented && packet.body.len() > MAX_RPC_BODY_BYTES {
                     tracing::warn!(
                         from_peer = packet.from_peer,
                         transaction_id = packet.transaction_id,
@@ -370,39 +540,34 @@ impl Server {
                     continue;
                 }
 
-                let merger_session = if packet.total_pieces != 0 {
-                    let (Some(peer_id), Some(session_id)) =
-                        (authenticated_peer_id, authenticated_session_id)
-                    else {
-                        tracing::warn!(
-                            from_peer = packet.from_peer,
-                            transaction_id = packet.transaction_id,
-                            "Dropping fragmented RPC packet without an authenticated session"
-                        );
-                        continue;
-                    };
-                    Some(MergerSessionKey {
-                        peer_id,
-                        session_id,
-                    })
-                } else {
-                    None
+                let Some(task_session) =
+                    rpc_budget_session(authenticated_peer_id, authenticated_session_id)
+                else {
+                    tracing::warn!(
+                        from_peer = packet.from_peer,
+                        transaction_id = packet.transaction_id,
+                        "Dropping RPC packet with incomplete authentication metadata"
+                    );
+                    continue;
                 };
-                let task_session = authenticated_peer_id.zip(authenticated_session_id).map(
-                    |(peer_id, session_id)| MergerSessionKey {
-                        peer_id,
-                        session_id,
-                    },
-                );
+                let merger_session = (!unfragmented).then_some(task_session.clone());
 
                 if !packet.is_request {
-                    tracing::warn!(?packet, "Received non-request packet");
+                    tracing::warn!(
+                        transaction_id = packet.transaction_id,
+                        body_len = packet.body.len(),
+                        "Received non-request RPC packet"
+                    );
                     continue;
                 }
 
-                if authenticated_peer_identity_type
-                    == Some(crate::proto::peer_rpc::PeerIdentityType::ForeignRelay)
-                {
+                if matches!(
+                    authenticated_peer_identity_type,
+                    Some(
+                        crate::proto::peer_rpc::PeerIdentityType::ForeignRelay
+                            | crate::proto::peer_rpc::PeerIdentityType::SharedNode
+                    )
+                ) {
                     let Some(desc) = packet.descriptor.as_ref() else {
                         tracing::warn!(
                             from_peer = packet.from_peer,
@@ -425,7 +590,13 @@ impl Server {
                     }
                 }
 
-                if !rpc_source_matches_authenticated_peer(authenticated_peer_id, packet.from_peer) {
+                if !rpc_source_matches_authenticated_peer(
+                    authenticated_peer_id,
+                    packet.from_peer,
+                    packet.to_peer,
+                    transport_source_peer_id,
+                    transport_destination_peer_id,
+                ) {
                     tracing::warn!(
                         authenticated_peer_id,
                         claimed_peer_id = packet.from_peer,
@@ -444,7 +615,13 @@ impl Server {
                     transaction_id: packet.transaction_id,
                 };
 
-                tracing::trace!(?key, ?packet, "Received request packet");
+                tracing::trace!(
+                    ?key,
+                    piece_idx = packet.piece_idx,
+                    total_pieces = packet.total_pieces,
+                    body_len = packet.body.len(),
+                    "Received request RPC packet"
+                );
 
                 let mut reserved_bytes = 0usize;
                 let actual_delta: usize;
@@ -453,7 +630,7 @@ impl Server {
                 let mut completed_packet = None;
                 let mut feed_error = None;
 
-                if packet.total_pieces == 0 {
+                if unfragmented {
                     // Reject a mode change while a fragmented transaction is
                     // active. The packet never removes that entry or budget.
                     if packet_merges.contains_key(&key) {
@@ -567,9 +744,15 @@ impl Server {
                                 0
                             }
                         };
+                        let decompressed_extra = packet
+                            .compression_info
+                            .as_ref()
+                            .is_some_and(|info| info.algo() != common::CompressionAlgoPb::None)
+                            .then_some(logical_bytes)
+                            .unwrap_or(0);
                         let execution_bytes = packet
                             .encoded_len()
-                            .checked_add(logical_bytes)
+                            .checked_add(decompressed_extra)
                             .unwrap_or(usize::MAX);
                         if feed_error.is_none()
                             && merger_budget.lock().unwrap().transfer_to_execution(
@@ -610,23 +793,21 @@ impl Server {
                         .checked_add(logical_bytes)
                         .unwrap_or(usize::MAX);
                     if feed_error.is_none() {
-                        if let Some(session) = task_session.as_ref() {
-                            if merger_budget
-                                .lock()
-                                .unwrap()
-                                .reserve_execution(session, execution_bytes)
-                            {
-                                execution_permit = Some(ExecutionBudgetPermit::new(
-                                    Some(merger_budget.clone()),
-                                    Some(session.clone()),
-                                    execution_bytes,
-                                ));
-                            } else {
-                                completed_packet = None;
-                                feed_error = Some(Error::MalformatRpcPacket(
-                                    "RPC execution memory budget is full".to_string(),
-                                ));
-                            }
+                        if merger_budget
+                            .lock()
+                            .unwrap()
+                            .reserve_execution(&task_session, execution_bytes)
+                        {
+                            execution_permit = Some(ExecutionBudgetPermit::new(
+                                Some(merger_budget.clone()),
+                                Some(task_session.clone()),
+                                execution_bytes,
+                            ));
+                        } else {
+                            completed_packet = None;
+                            feed_error = Some(Error::MalformatRpcPacket(
+                                "RPC execution memory budget is full".to_string(),
+                            ));
                         }
                     } else {
                         completed_packet = None;
@@ -646,30 +827,47 @@ impl Server {
                         );
                         continue;
                     };
-                    let session_permit = if let Some(session) = task_session.as_ref() {
-                        let entry = rpc_session_task_semaphores.entry(session.clone());
-                        let result = match entry {
-                            Entry::Occupied(entry) => entry.get().clone().try_acquire_owned(),
-                            Entry::Vacant(entry) => entry
-                                .insert(Arc::new(Semaphore::new(MAX_RPC_TASKS_PER_SESSION)))
-                                .clone()
-                                .try_acquire_owned(),
-                        };
-                        match result {
-                            Ok(permit) => Some(permit),
-                            Err(_) => {
-                                drop(permit);
-                                tracing::warn!(
-                                    ?session,
-                                    from_peer = packet.from_peer,
-                                    transaction_id = packet.transaction_id,
-                                    "Dropping RPC request because the session task limit is full"
-                                );
-                                continue;
-                            }
+                    let entry = rpc_peer_task_semaphores.entry(task_session.peer_id);
+                    let result = match entry {
+                        Entry::Occupied(entry) => entry.get().clone().try_acquire_owned(),
+                        Entry::Vacant(entry) => entry
+                            .insert(Arc::new(Semaphore::new(MAX_RPC_TASKS_PER_PEER)))
+                            .clone()
+                            .try_acquire_owned(),
+                    };
+                    let peer_permit = match result {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            drop(permit);
+                            tracing::warn!(
+                                peer_id = task_session.peer_id,
+                                transaction_id = packet.transaction_id,
+                                "Dropping RPC request because the peer task limit is full"
+                            );
+                            continue;
                         }
-                    } else {
-                        None
+                    };
+                    let entry = rpc_session_task_semaphores.entry(task_session.clone());
+                    let result = match entry {
+                        Entry::Occupied(entry) => entry.get().clone().try_acquire_owned(),
+                        Entry::Vacant(entry) => entry
+                            .insert(Arc::new(Semaphore::new(MAX_RPC_TASKS_PER_SESSION)))
+                            .clone()
+                            .try_acquire_owned(),
+                    };
+                    let session_permit = match result {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            drop(peer_permit);
+                            drop(permit);
+                            tracing::warn!(
+                                ?task_session,
+                                from_peer = packet.from_peer,
+                                transaction_id = packet.transaction_id,
+                                "Dropping RPC request because the session task limit is full"
+                            );
+                            continue;
+                        }
                     };
                     let sender = mpsc.get_sink();
                     let registry = reg.clone();
@@ -677,6 +875,7 @@ impl Server {
                     let task_stats_manager = stats_manager.clone();
                     t.lock().unwrap().spawn(async move {
                         let _permit = permit;
+                        let _peer_permit = peer_permit;
                         let _session_permit = session_permit;
                         Self::handle_rpc(
                             sender,
@@ -700,6 +899,7 @@ impl Server {
 
         let packet_mergers = self.packet_mergers.clone();
         let merger_budget = self.merger_budget.clone();
+        let rpc_peer_task_semaphores = self.rpc_peer_task_semaphores.clone();
         let rpc_session_task_semaphores = self.rpc_session_task_semaphores.clone();
         tasks.lock().unwrap().spawn(async move {
             loop {
@@ -708,16 +908,11 @@ impl Server {
                 packet_mergers.retain(|key, v| {
                     let keep = v.last_updated().elapsed().as_secs() < 10;
                     if !keep {
-                        if let (Some(peer_id), Some(session_id)) =
-                            (key.authenticated_peer_id, key.authenticated_session_id)
-                        {
-                            expired.push((
-                                MergerSessionKey {
-                                    peer_id,
-                                    session_id,
-                                },
-                                v.retained_bytes(),
-                            ));
+                        if let Some(session) = rpc_budget_session(
+                            key.authenticated_peer_id,
+                            key.authenticated_session_id,
+                        ) {
+                            expired.push((session, v.retained_bytes()));
                         }
                     }
                     keep
@@ -729,6 +924,10 @@ impl Server {
                     }
                 }
                 packet_mergers.shrink_to_fit();
+                rpc_peer_task_semaphores.retain(|_, semaphore| {
+                    semaphore.available_permits() < MAX_RPC_TASKS_PER_PEER
+                        || Arc::strong_count(semaphore) > 1
+                });
                 rpc_session_task_semaphores.retain(|_, semaphore| {
                     semaphore.available_permits() < MAX_RPC_TASKS_PER_SESSION
                         || Arc::strong_count(semaphore) > 1
@@ -745,9 +944,13 @@ impl Server {
         authenticated_peer_identity_type: Option<crate::proto::peer_rpc::PeerIdentityType>,
         authenticated_peer_secure_auth_level: Option<crate::proto::peer_rpc::SecureAuthLevel>,
     ) -> Result<Bytes> {
-        if authenticated_peer_identity_type
-            == Some(crate::proto::peer_rpc::PeerIdentityType::ForeignRelay)
-            && !foreign_relay_rpc_allowed(packet.descriptor.as_ref().ok_or_else(|| {
+        if matches!(
+            authenticated_peer_identity_type,
+            Some(
+                crate::proto::peer_rpc::PeerIdentityType::ForeignRelay
+                    | crate::proto::peer_rpc::PeerIdentityType::SharedNode
+            )
+        ) && !foreign_relay_rpc_allowed(packet.descriptor.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("foreign relay RPC request has no service descriptor")
             })?)
         {
@@ -829,12 +1032,23 @@ impl Server {
             );
             return;
         };
-        let method_name = reg.get_method_name(&desc).unwrap_or("<Nil>".to_owned());
+        let (metric_domain, metric_service, method_name) = match reg.get_method_name(&desc) {
+            Some(method_name) => (
+                desc.domain_name.to_string(),
+                desc.service_name.to_string(),
+                method_name,
+            ),
+            None => (
+                "__unknown__".to_string(),
+                "__unknown__".to_string(),
+                "__unknown__".to_string(),
+            ),
+        };
         let labels = LabelSet::new()
-            .with_label_type(LabelType::NetworkName(desc.domain_name.to_string()))
+            .with_label_type(LabelType::NetworkName(metric_domain))
             .with_label_type(LabelType::SrcPeerId(from_peer))
             .with_label_type(LabelType::DstPeerId(to_peer))
-            .with_label_type(LabelType::ServiceName(desc.service_name.to_string()))
+            .with_label_type(LabelType::ServiceName(metric_service))
             .with_label_type(LabelType::MethodName(method_name));
 
         // Record RPC server RX stats
@@ -857,6 +1071,14 @@ impl Server {
             authenticated_peer_secure_auth_level,
         )
         .await;
+
+        // The request packet and decoded request are no longer retained after the
+        // handler returns. Release their execution charge before admitting the
+        // response so sequential request/response memory is not counted as if it
+        // were permanently concurrent.
+        if let Some(permit) = execution_permit.as_mut() {
+            permit.release_all();
+        }
 
         match &resp_bytes {
             Ok(r) => {
@@ -956,16 +1178,17 @@ impl Server {
 mod tests {
     use crate::proto::{
         common::{CompressionAlgoPb, RpcCompressionInfo, RpcDescriptor, RpcPacket},
-        peer_rpc::PeerIdentityType,
+        peer_rpc::{PeerIdentityType, SecureAuthLevel},
         rpc_impl::packet::{BuildRpcPacketArgs, build_rpc_packet},
         rpc_impl::service_registry::ServiceRegistry,
         rpc_types::error::Error,
     };
 
     use super::{
-        ExecutionBudgetPermit, MAX_RPC_MERGER_BYTES_PER_SESSION,
-        MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION, MAX_RPC_TASKS_PER_SESSION, MergerBudget,
-        MergerSessionKey, PacketMergerKey, Server, foreign_relay_rpc_allowed,
+        ExecutionBudgetPermit, MAX_RPC_MERGER_BYTES, MAX_RPC_MERGER_BYTES_PER_PEER,
+        MAX_RPC_MERGER_BYTES_PER_SESSION, MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION,
+        MAX_RPC_TASKS_PER_SESSION, MergerBudget, MergerSessionKey, PacketMergerKey, Server,
+        foreign_relay_rpc_allowed, rpc_authentication_tuple_valid, rpc_budget_session,
         rpc_source_matches_authenticated_peer,
     };
 
@@ -976,6 +1199,59 @@ mod tests {
             service_name: service_name.to_owned(),
             method_index: 1,
         }
+    }
+
+    #[test]
+    fn foreign_relay_rpc_auth_tuple_accepts_scoped_encrypted_session_only() {
+        let session_id = uuid::Uuid::new_v4();
+        assert!(rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::ForeignRelay),
+            Some(SecureAuthLevel::EncryptedUnauthenticated),
+            Some(session_id),
+        ));
+        assert!(rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::ForeignRelay),
+            Some(SecureAuthLevel::PeerVerified),
+            Some(session_id),
+        ));
+        assert!(rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::SharedNode),
+            Some(SecureAuthLevel::EncryptedUnauthenticated),
+            Some(session_id),
+        ));
+        assert!(rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::SharedNode),
+            Some(SecureAuthLevel::PeerVerified),
+            Some(session_id),
+        ));
+        assert!(!rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::ForeignRelay),
+            Some(SecureAuthLevel::NetworkSecretConfirmed),
+            Some(session_id),
+        ));
+        assert!(!rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::SharedNode),
+            Some(SecureAuthLevel::NetworkSecretConfirmed),
+            Some(session_id),
+        ));
+        assert!(!rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::Admin),
+            Some(SecureAuthLevel::EncryptedUnauthenticated),
+            Some(session_id),
+        ));
+        assert!(!rpc_authentication_tuple_valid(
+            Some(42),
+            Some(PeerIdentityType::ForeignRelay),
+            Some(SecureAuthLevel::EncryptedUnauthenticated),
+            None,
+        ));
     }
 
     #[test]
@@ -1111,9 +1387,67 @@ mod tests {
 
     #[test]
     fn rpc_source_must_match_authenticated_peer() {
-        assert!(rpc_source_matches_authenticated_peer(None, 7));
-        assert!(rpc_source_matches_authenticated_peer(Some(7), 7));
-        assert!(!rpc_source_matches_authenticated_peer(Some(7), 8));
+        assert!(rpc_source_matches_authenticated_peer(
+            None,
+            7,
+            7,
+            Some(7),
+            Some(7)
+        ));
+        assert!(!rpc_source_matches_authenticated_peer(
+            None,
+            7,
+            8,
+            Some(7),
+            Some(8)
+        ));
+        assert!(rpc_source_matches_authenticated_peer(
+            Some(7),
+            7,
+            8,
+            Some(9),
+            Some(8)
+        ));
+        assert!(!rpc_source_matches_authenticated_peer(
+            Some(7),
+            8,
+            9,
+            Some(8),
+            Some(9)
+        ));
+    }
+
+    #[test]
+    fn remote_rpc_requires_complete_verified_authentication() {
+        let session = uuid::Uuid::new_v4();
+        assert!(rpc_authentication_tuple_valid(
+            Some(7),
+            Some(PeerIdentityType::Admin),
+            Some(SecureAuthLevel::PeerVerified),
+            Some(session)
+        ));
+        assert!(!rpc_authentication_tuple_valid(
+            Some(7),
+            Some(PeerIdentityType::Admin),
+            Some(SecureAuthLevel::EncryptedUnauthenticated),
+            Some(session)
+        ));
+        assert!(!rpc_authentication_tuple_valid(
+            Some(7),
+            Some(PeerIdentityType::Admin),
+            None,
+            Some(session)
+        ));
+        assert!(rpc_authentication_tuple_valid(None, None, None, None));
+    }
+
+    #[test]
+    fn local_rpc_uses_the_same_bounded_execution_accounting() {
+        let local = rpc_budget_session(None, None).unwrap();
+        assert_eq!(local.peer_id, 0);
+        assert_eq!(local.session_id, uuid::Uuid::nil());
+        assert!(rpc_budget_session(Some(7), None).is_none());
+        assert!(rpc_budget_session(None, Some(uuid::Uuid::new_v4())).is_none());
     }
 
     #[test]
@@ -1144,6 +1478,34 @@ mod tests {
         }
         budget.release(&second_session, true, 1);
         assert_eq!(budget.transactions, 0);
+    }
+
+    #[test]
+    fn merger_budget_limits_all_sessions_for_one_peer() {
+        let mut budget = MergerBudget::default();
+        let sessions = (0..5)
+            .map(|_| MergerSessionKey {
+                peer_id: 7,
+                session_id: uuid::Uuid::new_v4(),
+            })
+            .collect::<Vec<_>>();
+
+        for session in sessions.iter().take(4) {
+            for _ in 0..MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION {
+                assert!(budget.reserve(session, true, 1));
+            }
+        }
+        assert!(!budget.reserve(&sessions[4], true, 1));
+
+        for session in sessions.iter().take(4) {
+            for _ in 0..MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION {
+                budget.release(session, true, 1);
+            }
+        }
+        assert_eq!(budget.transactions, 0);
+        assert_eq!(budget.bytes, 0);
+        assert!(budget.sessions.is_empty());
+        assert!(budget.peers.is_empty());
     }
 
     #[test]
@@ -1291,17 +1653,27 @@ mod tests {
         assert!(!budget.reserve_execution(&session, 1));
         budget.release_execution(&session, MAX_RPC_MERGER_BYTES_PER_SESSION);
 
-        assert!(budget.reserve_execution(&session, 4 * 1024 * 1024));
-        assert!(budget.reserve_execution(&session, 4 * 1024 * 1024));
+        let second_session = MergerSessionKey {
+            peer_id: 12,
+            session_id: uuid::Uuid::new_v4(),
+        };
+        assert!(budget.reserve_execution(&session, MAX_RPC_MERGER_BYTES_PER_PEER));
+        assert!(budget.reserve_execution(
+            &second_session,
+            MAX_RPC_MERGER_BYTES - MAX_RPC_MERGER_BYTES_PER_PEER
+        ));
         assert!(!budget.reserve_execution(&session, 1));
-        budget.release_execution(&session, 4 * 1024 * 1024);
-        budget.release_execution(&session, 4 * 1024 * 1024);
+        budget.release_execution(&session, MAX_RPC_MERGER_BYTES_PER_PEER);
+        budget.release_execution(
+            &second_session,
+            MAX_RPC_MERGER_BYTES - MAX_RPC_MERGER_BYTES_PER_PEER,
+        );
         assert_eq!(budget.bytes, 0);
         assert!(budget.sessions.is_empty());
     }
 
     #[test]
-    fn execution_budget_permit_releases_request_and_response_bytes() {
+    fn execution_budget_permit_transitions_from_request_to_response_bytes() {
         let session = MergerSessionKey {
             peer_id: 13,
             session_id: uuid::Uuid::new_v4(),
@@ -1312,6 +1684,12 @@ mod tests {
             ExecutionBudgetPermit::new(Some(budget.clone()), Some(session.clone()), 1024);
         assert!(permit.reserve_extra(2048));
         assert_eq!(budget.lock().unwrap().bytes, 3072);
+
+        permit.release_all();
+        assert_eq!(budget.lock().unwrap().bytes, 0);
+        assert!(permit.reserve_extra(2048));
+        assert_eq!(budget.lock().unwrap().bytes, 2048);
+
         drop(permit);
         assert_eq!(budget.lock().unwrap().bytes, 0);
         assert!(budget.lock().unwrap().sessions.is_empty());

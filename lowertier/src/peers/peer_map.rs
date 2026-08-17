@@ -14,6 +14,7 @@ use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
 use quanta::Instant as QuantaInstant;
 use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     common::{
@@ -42,6 +43,57 @@ use super::{
         ForwardingSnapshotSourceToken, NextHopPolicy, OriginAuthPublication,
     },
 };
+
+const MAX_LIVE_PEER_CONNECTIONS: usize = 64;
+const MAX_LIVE_CONNECTIONS_PER_PEER: usize = 1;
+
+struct PeerConnectionAdmission {
+    global: Arc<Semaphore>,
+    per_peer: Mutex<HashMap<PeerId, usize>>,
+}
+
+pub(crate) struct PeerConnectionPermit {
+    peer_id: PeerId,
+    admission: Arc<PeerConnectionAdmission>,
+    _global: OwnedSemaphorePermit,
+}
+
+impl PeerConnectionAdmission {
+    fn new() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(MAX_LIVE_PEER_CONNECTIONS)),
+            per_peer: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>, peer_id: PeerId) -> Option<PeerConnectionPermit> {
+        let global = self.global.clone().try_acquire_owned().ok()?;
+        let mut per_peer = self.per_peer.lock();
+        let count = per_peer.entry(peer_id).or_default();
+        if *count >= MAX_LIVE_CONNECTIONS_PER_PEER {
+            return None;
+        }
+        *count += 1;
+        drop(per_peer);
+        Some(PeerConnectionPermit {
+            peer_id,
+            admission: self.clone(),
+            _global: global,
+        })
+    }
+}
+
+impl Drop for PeerConnectionPermit {
+    fn drop(&mut self) {
+        let mut per_peer = self.admission.per_peer.lock();
+        if let Some(count) = per_peer.get_mut(&self.peer_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                per_peer.remove(&self.peer_id);
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum OriginAuthSource {
@@ -255,7 +307,9 @@ pub struct PeerMap {
     next_peer_instance_epoch: Arc<AtomicU64>,
     peer_lifecycle_lock: Arc<Mutex<()>>,
     alive_client_urls: Arc<Mutex<multimap::MultiMap<url::Url, PeerConnId>>>,
-    flow_paths: FlowPathCache,
+    connection_flow_paths: Arc<FlowPathCache<PeerConnId>>,
+    route_flow_paths: Arc<FlowPathCache<PeerId>>,
+    connection_admission: Arc<PeerConnectionAdmission>,
 }
 
 impl PeerMap {
@@ -283,7 +337,9 @@ impl PeerMap {
             next_peer_instance_epoch: Arc::new(AtomicU64::new(0)),
             peer_lifecycle_lock: Arc::new(Mutex::new(())),
             alive_client_urls: Arc::new(Mutex::new(multimap::MultiMap::new())),
-            flow_paths: FlowPathCache::new(65_536, Duration::from_secs(120)),
+            connection_flow_paths: Arc::new(FlowPathCache::new(4096, Duration::from_secs(120))),
+            route_flow_paths: Arc::new(FlowPathCache::new(1024, Duration::from_secs(120))),
+            connection_admission: Arc::new(PeerConnectionAdmission::new()),
         }
     }
 
@@ -377,9 +433,14 @@ impl PeerMap {
             .issue_event(GlobalCtxEvent::PeerAdded(peer_id));
     }
 
-    pub async fn add_new_peer_conn(self: &Arc<Self>, peer_conn: PeerConn) -> Result<(), Error> {
+    pub async fn add_new_peer_conn(self: &Arc<Self>, mut peer_conn: PeerConn) -> Result<(), Error> {
         let _ = self.maintain_alive_client_urls(&peer_conn);
         let peer_id = peer_conn.get_peer_id();
+        let permit = self
+            .connection_admission
+            .try_acquire(peer_id)
+            .ok_or_else(|| Error::RouteError(Some("peer connection admission is full".into())))?;
+        peer_conn.attach_connection_permit(permit);
         let peer_conn_id = peer_conn.get_conn_id();
         let _lifecycle_guard = self.peer_lifecycle_lock.lock();
         let peer_epoch = if let Some(epoch) = self.peer_instance_epochs.get(&peer_id) {
@@ -423,7 +484,12 @@ impl PeerMap {
             });
         let no_entry = self.peer_map.get(&peer_id).is_none();
         let peer = if no_entry {
-            let new_peer = Peer::new(peer_id, self.packet_send.clone(), self.global_ctx.clone());
+            let new_peer = Peer::new_with_flow_cache(
+                peer_id,
+                self.packet_send.clone(),
+                self.global_ctx.clone(),
+                self.connection_flow_paths.clone(),
+            );
             new_peer.set_origin_auth_update(origin_auth_update.clone());
             self.add_new_peer(new_peer);
             self.peer_map.get(&peer_id).map(|entry| entry.clone())
@@ -1451,17 +1517,12 @@ impl PeerMap {
 
     pub async fn send_msg_directly(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), Error> {
         if dst_peer_id == self.my_peer_id {
-            let packet_send = self.packet_send.clone();
-            tokio::spawn(async move {
-                let ret = packet_send
-                    .send(msg)
-                    .await
-                    .with_context(|| "send msg to self failed");
-                if ret.is_err() {
-                    tracing::error!("send msg to self failed: {:?}", ret);
-                }
-            });
-            return Ok(());
+            return self
+                .packet_send
+                .send(msg)
+                .await
+                .with_context(|| "send msg to self failed")
+                .map_err(Error::from);
         }
 
         match self.get_peer_by_id(dst_peer_id) {
@@ -1485,6 +1546,11 @@ impl PeerMap {
     ) -> Option<ArcPeerConn> {
         self.get_peer_by_id(dst_peer_id)
             .and_then(|peer| peer.select_conn_for_flow(policy, flow_hash))
+    }
+
+    pub(crate) fn only_direct_conn(&self, dst_peer_id: PeerId) -> Option<ArcPeerConn> {
+        self.get_peer_by_id(dst_peer_id)
+            .and_then(|peer| peer.only_direct_conn())
     }
 
     pub(crate) async fn send_msg_on_selected_conn(
@@ -1569,21 +1635,12 @@ impl PeerMap {
         let (candidate, route_generation) = self
             .get_gateway_peer_id_with_generation(dst_peer_id, policy)
             .await?;
-        if let Some(path) = self.flow_paths.lookup_at_generation(
-            dst_peer_id,
-            policy_flow,
-            route_generation,
-            Some(candidate),
-            |path| self.has_peer(path),
-        ) {
-            return Some(path);
-        }
-        Some(self.flow_paths.select_at_generation(
+        Some(self.route_flow_paths.select_at_generation(
             dst_peer_id,
             policy_flow,
             candidate,
             route_generation,
-            |pinned| pinned == candidate || self.has_peer(pinned),
+            |next_hop| self.has_peer(next_hop),
         ))
     }
 
@@ -1620,14 +1677,99 @@ impl PeerMap {
             .await
     }
 
+    pub(crate) fn replace_authenticated_foreign_owner_snapshot(
+        &self,
+        bindings: &[(PeerId, Vec<u8>)],
+    ) {
+        let mut normalized = std::collections::BTreeMap::<PeerId, Option<[u8; 32]>>::new();
+        for (peer_id, key) in bindings {
+            if *peer_id == self.my_peer_id {
+                continue;
+            }
+            let Some(key) = <[u8; 32]>::try_from(key.as_slice()).ok() else {
+                normalized.insert(*peer_id, None);
+                continue;
+            };
+            match normalized.entry(*peer_id) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(Some(key));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    if slot.get().is_none_or(|existing| existing != key) {
+                        slot.insert(None);
+                    }
+                }
+            }
+        }
+
+        let desired = normalized
+            .into_iter()
+            .filter_map(|(peer_id, key)| key.map(|key| (peer_id, key)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let existing = self
+            .origin_auth_sources
+            .iter()
+            .filter_map(|entry| {
+                (entry.key().1 == OriginAuthSource::ForeignOwner
+                    && entry.value().source_token.is_none())
+                .then_some(entry.key().0)
+            })
+            .collect::<Vec<_>>();
+
+        for peer_id in existing {
+            if !desired.contains_key(&peer_id) {
+                self.publish_origin_auth_source(
+                    peer_id,
+                    OriginAuthSource::ForeignOwner,
+                    None,
+                    None,
+                    0,
+                    None,
+                );
+            }
+        }
+        for (peer_id, key) in desired {
+            self.publish_origin_auth_source(
+                peer_id,
+                OriginAuthSource::ForeignOwner,
+                Some((
+                    PeerIdentityType::ForeignRelay,
+                    key,
+                    SecureAuthLevel::PeerVerified,
+                )),
+                None,
+                0,
+                None,
+            );
+        }
+    }
+
     pub async fn list_authenticated_foreign_network_peers(
         &self,
         network_identity: &NetworkIdentity,
     ) -> Vec<(PeerId, Vec<u8>)> {
-        let _ = network_identity;
-        // Route advertisements are discovery data only. Foreign-owner keys
-        // require a locally verified admission in the coherent descriptor.
-        Vec::new()
+        let mut bindings = std::collections::BTreeMap::<PeerId, Option<Vec<u8>>>::new();
+        for route in self.routes.read().await.iter() {
+            for (peer_id, key) in route
+                .list_authenticated_foreign_network_peers(network_identity)
+                .await
+            {
+                match bindings.entry(peer_id) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(Some(key));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        if slot.get().as_ref().is_none_or(|existing| *existing != key) {
+                            slot.insert(None);
+                        }
+                    }
+                }
+            }
+        }
+        bindings
+            .into_iter()
+            .filter_map(|(peer_id, key)| key.map(|key| (peer_id, key)))
+            .collect()
     }
 
     pub async fn get_authenticated_foreign_origin_owner_key(
@@ -1635,9 +1777,21 @@ impl PeerMap {
         network_identity: &NetworkIdentity,
         origin_peer_id: PeerId,
     ) -> Option<Vec<u8>> {
-        let _ = (network_identity, origin_peer_id);
-        // Do not trust owner_noise_static_pubkey from route wire data.
-        None
+        let mut selected = None;
+        for route in self.routes.read().await.iter() {
+            let Some(key) = route
+                .get_authenticated_foreign_origin_owner_key(network_identity, origin_peer_id)
+                .await
+            else {
+                continue;
+            };
+            match selected.as_ref() {
+                None => selected = Some(key),
+                Some(existing) if *existing == key => {}
+                Some(_) => return None,
+            }
+        }
+        selected
     }
 
     pub async fn send_msg(
@@ -1956,7 +2110,6 @@ impl PeerMap {
             0,
             None,
         );
-        self.flow_paths.invalidate_path(peer_id);
         shrink_dashmap(&self.peer_map, None);
 
         self.global_ctx
@@ -2401,6 +2554,31 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn foreign_owner_snapshot_is_complete_and_conflicts_fail_closed() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let peer_map = PeerMap::new(packet_send, get_mock_global_ctx(), 1);
+        let key = vec![7_u8; 32];
+
+        peer_map.replace_authenticated_foreign_owner_snapshot(&[(7, key.clone())]);
+        let first = peer_map
+            .origin_auth_snapshot()
+            .lookup(7)
+            .expect("verified foreign owner is published");
+        assert_eq!(first.identity_type, PeerIdentityType::ForeignRelay);
+        assert_eq!(first.secure_auth_level, SecureAuthLevel::PeerVerified);
+        assert_eq!(first.noise_static_pubkey.as_slice(), key.as_slice());
+
+        peer_map
+            .replace_authenticated_foreign_owner_snapshot(&[(7, key.clone()), (7, vec![8_u8; 32])]);
+        assert!(peer_map.origin_auth_snapshot().lookup(7).is_none());
+
+        peer_map.replace_authenticated_foreign_owner_snapshot(&[(7, key)]);
+        assert!(peer_map.origin_auth_snapshot().lookup(7).is_some());
+        peer_map.replace_authenticated_foreign_owner_snapshot(&[]);
+        assert!(peer_map.origin_auth_snapshot().lookup(7).is_none());
     }
 
     #[test]

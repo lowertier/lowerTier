@@ -243,9 +243,9 @@ async fn rpc_basic_test() {
     let ret = out.say_goodbye(ctrl, input).await;
     assert_eq!(ret.unwrap().greeting, "Goodbye, world!");
 
-    // large size req and resp
+    // Large fragmented request and response that remain inside the bounded RPC protocol.
     let ctrl = RpcController::default();
-    let name = random_string(20 * 1024 * 1024);
+    let name = random_string(128 * 1024);
     let input = SayGoodbyeRequest { name: name.clone() };
     let ret = out.say_goodbye(ctrl, input).await;
     assert_eq!(ret.unwrap().greeting, format!("Goodbye, {}!", name));
@@ -261,6 +261,35 @@ async fn rpc_basic_test() {
             accepted_algo: supported_rpc_compression().into(),
         }
     );
+}
+
+#[tokio::test]
+async fn oversized_rpc_request_fails_locally() {
+    let ctx = TestContext::new();
+    let server = GreetingServer::new(GreetingService {
+        delay_ms: 0,
+        prefix: "Hello".to_string(),
+    });
+    ctx.server.registry().register(server, "");
+
+    let out = ctx
+        .client
+        .scoped_client::<GreetingClientFactory<RpcController>>(1, 1, "".to_string());
+    let ret = out
+        .say_goodbye(
+            RpcController::default(),
+            SayGoodbyeRequest {
+                name: random_string(512 * 1024),
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        ret.unwrap_err(),
+        crate::proto::rpc_types::error::Error::MalformatRpcPacket(_)
+    ));
+    assert_eq!(0, ctx.client.inflight_count());
+    assert_eq!(0, ctx.server.inflight_count());
 }
 
 #[tokio::test]

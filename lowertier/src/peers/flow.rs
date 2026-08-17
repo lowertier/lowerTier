@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use smallvec::SmallVec;
 
 use crate::{
@@ -296,6 +296,12 @@ pub(crate) fn is_critical_l2_control(frame: &[u8]) -> bool {
 }
 
 pub(crate) fn stamp_critical_l2_control(packet: &mut ZCPacket) -> bool {
+    if let Some(header) = packet.peer_manager_header()
+        && header.is_encrypted()
+    {
+        return header.is_critical_l2_control();
+    }
+
     let critical = packet
         .peer_manager_header()
         .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
@@ -356,10 +362,14 @@ pub(crate) fn stamp_packet_flow(packet: &mut ZCPacket) -> PacketFlow {
     if packet.flow_hash().is_none() {
         packet.set_flow_hash(flow.hash);
     }
-    if packet
+    let encrypted = packet
         .peer_manager_header()
-        .and_then(|header| header.flow_shard())
-        != Some(flow.shard)
+        .is_some_and(|header| header.is_encrypted());
+    if !encrypted
+        && packet
+            .peer_manager_header()
+            .and_then(|header| header.flow_shard())
+            != Some(flow.shard)
         && let Some(header) = packet.mut_peer_manager_header()
     {
         header.set_flow_shard(flow.shard);
@@ -384,7 +394,7 @@ pub(crate) fn split_packet_batch_by_flow_shard(
                 .expect("a contiguous shard group cannot exceed its source vector");
             continue;
         }
-        let mut group = PacketBatch::new();
+        let mut group = PacketBatch::with_capacity(1);
         group
             .try_push(packet)
             .expect("a new shard group accepts its first packet");
@@ -398,8 +408,9 @@ pub(crate) fn split_packet_batch_by_flow_shard(
 pub(crate) fn partition_packet_batch_by_flow(
     batch: PacketBatch,
 ) -> SmallVec<[(PacketFlow, PacketBatch); 4]> {
-    let mut groups = SmallVec::<[(PacketFlow, PacketBatch); 4]>::new();
-    let mut indexes = HashMap::<(u64, u8, u8, u8), usize>::new();
+    type FlowGroupKey = (u64, u8, u8, u8);
+    let mut groups = SmallVec::<[(FlowGroupKey, PacketFlow, PacketBatch); 4]>::new();
+    let mut indexes = None::<HashMap<FlowGroupKey, usize>>;
     for mut packet in batch {
         let flow = stamp_packet_flow(&mut packet);
         let (packet_type, policy_bits, flags) = packet
@@ -415,21 +426,48 @@ pub(crate) fn partition_packet_batch_by_flow(
             })
             .unwrap_or((0, 0, 0));
         let key = (flow.hash, packet_type, policy_bits, flags);
-        if let Some(index) = indexes.get(&key).copied() {
+        let existing_index = indexes
+            .as_ref()
+            .and_then(|map| map.get(&key).copied())
+            .or_else(|| {
+                indexes
+                    .is_none()
+                    .then(|| {
+                        groups
+                            .iter()
+                            .position(|(group_key, _, _)| *group_key == key)
+                    })
+                    .flatten()
+            });
+        if let Some(index) = existing_index {
             groups[index]
-                .1
+                .2
                 .try_push(packet)
                 .expect("a flow group cannot exceed its source vector");
             continue;
         }
-        let mut group = PacketBatch::new();
+        if indexes.is_none() && groups.len() == 4 {
+            indexes = Some(
+                groups
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (group_key, _, _))| (*group_key, index))
+                    .collect(),
+            );
+        }
+        let mut group = PacketBatch::with_capacity(1);
         group
             .try_push(packet)
             .expect("a new flow group accepts its first packet");
-        indexes.insert(key, groups.len());
-        groups.push((flow, group));
+        if let Some(indexes) = indexes.as_mut() {
+            indexes.insert(key, groups.len());
+        }
+        groups.push((key, flow, group));
     }
     groups
+        .into_iter()
+        .map(|(_, flow, group)| (flow, group))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -441,7 +479,7 @@ struct FlowPathKey {
 #[derive(Clone, Copy)]
 struct PinnedPath<P> {
     path: P,
-    last_used: Instant,
+    created_at: Instant,
     route_generation: u64,
 }
 
@@ -482,24 +520,74 @@ where
     where
         F: Fn(P) -> bool,
     {
+        self.select_with_candidate(
+            destination,
+            flow,
+            route_generation,
+            Some(candidate),
+            || Some(candidate),
+            eligible,
+        )
+        .expect("the fixed candidate exists")
+    }
+
+    pub(crate) fn select_with_candidate<F, C>(
+        &self,
+        destination: PeerId,
+        flow: u64,
+        route_generation: u64,
+        current_candidate: Option<P>,
+        candidate: C,
+        eligible: F,
+    ) -> Option<P>
+    where
+        F: Fn(P) -> bool,
+        C: FnOnce() -> Option<P>,
+    {
         let key = FlowPathKey { destination, flow };
         let now = Instant::now();
-        if let Some(path) = self.lookup_key(key, now, route_generation, Some(candidate), &eligible)
-        {
-            return path;
+        let mut candidate = Some(candidate);
+        loop {
+            match self.entries.entry(key) {
+                Entry::Occupied(mut occupied) => {
+                    let pinned = *occupied.get();
+                    let route_unchanged = pinned.route_generation == route_generation
+                        || current_candidate.is_some_and(|path| path == pinned.path);
+                    if now.duration_since(pinned.created_at) <= self.ttl
+                        && route_unchanged
+                        && eligible(pinned.path)
+                    {
+                        return Some(pinned.path);
+                    }
+                    let path = (candidate.take()?)()?;
+                    occupied.insert(PinnedPath {
+                        path,
+                        created_at: now,
+                        route_generation,
+                    });
+                    return Some(path);
+                }
+                Entry::Vacant(vacant) => {
+                    drop(vacant);
+                    if self.entries.len() >= self.capacity {
+                        self.prune(now);
+                        continue;
+                    }
+                    let path = (candidate.take()?)()?;
+                    match self.entries.entry(key) {
+                        Entry::Occupied(occupied) => return Some(occupied.get().path),
+                        Entry::Vacant(vacant) => {
+                            vacant.insert(PinnedPath {
+                                path,
+                                created_at: now,
+                                route_generation,
+                            });
+                            return Some(path);
+                        }
+                    }
+                }
+            }
         }
-        if self.entries.len() >= self.capacity {
-            self.prune(now);
-        }
-        self.entries.insert(
-            key,
-            PinnedPath {
-                path: candidate,
-                last_used: now,
-                route_generation,
-            },
-        );
-        candidate
     }
 
     pub(crate) fn lookup<F>(&self, destination: PeerId, flow: u64, eligible: F) -> Option<P>
@@ -540,19 +628,17 @@ where
     where
         F: Fn(P) -> bool,
     {
-        if let Some(mut pinned) = self.entries.get_mut(&key) {
+        if let Entry::Occupied(occupied) = self.entries.entry(key) {
+            let pinned = *occupied.get();
             let route_unchanged = pinned.route_generation == route_generation
                 || current_candidate.is_some_and(|candidate| candidate == pinned.path);
-            if now.duration_since(pinned.last_used) <= self.ttl
+            if now.duration_since(pinned.created_at) <= self.ttl
                 && route_unchanged
                 && eligible(pinned.path)
             {
-                pinned.last_used = now;
-                pinned.route_generation = route_generation;
                 return Some(pinned.path);
             }
-            drop(pinned);
-            self.entries.remove(&key);
+            occupied.remove();
         }
         None
     }
@@ -564,7 +650,7 @@ where
 
     fn prune(&self, now: Instant) {
         self.entries
-            .retain(|_, pinned| now.duration_since(pinned.last_used) <= self.ttl);
+            .retain(|_, pinned| now.duration_since(pinned.created_at) <= self.ttl);
         if self.entries.len() < self.capacity {
             return;
         }
@@ -578,6 +664,11 @@ where
         for key in keys {
             self.entries.remove(&key);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -653,6 +744,43 @@ mod tests {
 
         assert_eq!(relayed.shard, stamped.shard);
         assert_eq!(relayed.hash, stamped.hash);
+    }
+
+    #[test]
+    fn encrypted_packet_without_flow_shard_preserves_authenticated_header() {
+        let mut packet = ZCPacket::new_with_payload(b"ciphertext");
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_encrypted(true);
+        let before = packet.peer_manager_header().unwrap().stable_auth_data();
+
+        let flow = stamp_packet_flow(&mut packet);
+
+        let header = packet.peer_manager_header().unwrap();
+        assert_eq!(header.flow_shard(), None);
+        assert_eq!(header.stable_auth_data(), before);
+        assert_eq!(packet.flow_hash(), Some(flow.hash));
+    }
+
+    #[test]
+    fn encrypted_ethernet_does_not_reclassify_critical_control() {
+        let mut arp = vec![0_u8; 14 + 28];
+        arp[12..14].copy_from_slice(&0x0806_u16.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&arp);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_encrypted(true);
+        let before = packet.peer_manager_header().unwrap().stable_auth_data();
+
+        assert!(!stamp_critical_l2_control(&mut packet));
+
+        let header = packet.peer_manager_header().unwrap();
+        assert!(!header.is_critical_l2_control());
+        assert_eq!(header.stable_auth_data(), before);
     }
 
     #[test]
@@ -957,6 +1085,27 @@ mod tests {
 
         assert_eq!(cache.select(9, flow, 21, |_| true), 21);
         assert_eq!(cache.select(9, flow, 22, |path| path != 21), 22);
+    }
+
+    #[test]
+    fn concurrent_first_packets_select_one_path() {
+        let cache = std::sync::Arc::new(FlowPathCache::new(8, Duration::from_secs(60)));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = [31_u32, 32_u32].map(|candidate| {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                cache.select_with_candidate(12, 0x9911, 1, None, || Some(candidate), |_| true)
+            })
+        });
+        barrier.wait();
+        let mut selected = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        selected.sort_unstable();
+        assert_eq!(selected[0], selected[1]);
     }
 
     #[test]

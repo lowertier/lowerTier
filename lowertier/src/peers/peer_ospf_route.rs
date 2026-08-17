@@ -1,11 +1,10 @@
 use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -30,7 +29,7 @@ use quanta::Instant;
 use sha2::Sha256;
 use tokio::{
     select,
-    sync::Mutex,
+    sync::{Mutex, Notify},
     task::{JoinHandle, JoinSet},
 };
 
@@ -39,7 +38,7 @@ use crate::{
         PeerId,
         config::NetworkIdentity,
         constants::LOWTIER_VERSION,
-        global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
+        global_ctx::{ArcGlobalCtx, GlobalCtxEvent, ProcessMemoryGovernor},
         shrink_dashmap,
         stats_manager::{LabelSet, LabelType, MetricName},
         stun::StunInfoCollectorTrait,
@@ -70,7 +69,7 @@ use crate::{
 };
 
 use super::{
-    graph_algo::dijkstra_with_first_hop,
+    graph_algo::{dijkstra_with_first_hop, dijkstra_with_first_hop_filtered},
     peer_rpc::PeerRpcManager,
     public_ipv6::{
         PublicIpv6PeerRouteInfo, PublicIpv6RouteControl, PublicIpv6Service, PublicIpv6SyncTrigger,
@@ -101,7 +100,8 @@ static REMOVE_UNREACHABLE_PEER_INFO_AFTER: Duration = Duration::from_secs(90);
 
 // Bound decoded route state before graph construction and bitmap scanning.
 const MAX_ROUTE_SYNC_PEERS: usize = 4096;
-const MAX_ROUTE_SYNC_EDGES: usize = 262_144;
+// Keep dense topology rebuilds inside the process memory contract.
+const MAX_ROUTE_SYNC_EDGES: usize = 32_768;
 const MAX_ROUTE_SYNC_EDGES_PER_SOURCE: usize = 1024;
 // Bound repeated group proofs and foreign-network records in one sync request.
 const MAX_ROUTE_SYNC_GROUPS_PER_PEER: usize = 256;
@@ -112,6 +112,8 @@ const MAX_ROUTE_SYNC_CREDENTIAL_BYTES_PER_PROOF: usize = 16 * 1024;
 const MAX_ROUTE_SYNC_CREDENTIAL_BYTES_PER_REQUEST: usize = 1024 * 1024;
 const MAX_ROUTE_SYNC_RAW_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ROUTE_SYNC_RAW_PEER_INFO_BYTES: usize = 64 * 1024;
+const ROUTE_PEER_RETAINED_OVERHEAD_BYTES: usize = 512;
+const ROUTE_PEER_RETAINED_EXPANSION_FACTOR: usize = 4;
 const MAX_ROUTE_SYNC_PROXY_CIDRS_PER_PEER: usize = 256;
 const MAX_ROUTE_SYNC_TEXT_BYTES: usize = 256;
 const MAX_ROUTE_SYNC_CREDENTIAL_HMAC_BYTES: usize = 32;
@@ -253,13 +255,18 @@ fn bridge_attestation_time_valid(
         && now_unix_ms <= expiry_unix_ms.saturating_add(max_clock_skew)
 }
 
+fn route_info_admin_attestation_capable(info: &RoutePeerInfo) -> bool {
+    info.identity_type == PeerIdentityType::Admin as i32 && info.noise_static_pubkey.len() == 32
+}
+
+fn route_info_bridge_input(info: &RoutePeerInfo) -> bool {
+    info.feature_flag
+        .as_ref()
+        .is_some_and(|features| features.bridge_input)
+}
+
 fn route_info_bridge_capability(info: &RoutePeerInfo) -> bool {
-    info.identity_type == PeerIdentityType::Admin as i32
-        && info
-            .feature_flag
-            .as_ref()
-            .is_some_and(|features| features.bridge_input)
-        && info.noise_static_pubkey.len() == 32
+    route_info_admin_attestation_capable(info) && route_info_bridge_input(info)
 }
 
 fn clear_bridge_attestation(info: &mut RoutePeerInfo) {
@@ -273,7 +280,7 @@ fn refresh_local_bridge_attestation(
     info: &mut RoutePeerInfo,
     old: Option<&RoutePeerInfo>,
 ) {
-    if !route_info_bridge_capability(info) {
+    if !route_info_admin_attestation_capable(info) {
         clear_bridge_attestation(info);
         return;
     }
@@ -285,10 +292,12 @@ fn refresh_local_bridge_attestation(
         clear_bridge_attestation(info);
         return;
     };
+    let bridge_input = route_info_bridge_input(info);
     if let Some(old) = old.filter(|old| {
-        route_info_bridge_capability(old)
+        route_info_admin_attestation_capable(old)
             && old.peer_id == info.peer_id
             && old.noise_static_pubkey == info.noise_static_pubkey
+            && route_info_bridge_input(old) == bridge_input
             && old.bridge_attestation_hmac.len() == 32
             && old
                 .bridge_attestation_issued_unix_ms
@@ -304,7 +313,7 @@ fn refresh_local_bridge_attestation(
                 &global_ctx.get_network_identity().network_name,
                 old.peer_id,
                 &old.noise_static_pubkey,
-                true,
+                bridge_input,
                 old.bridge_attestation_issued_unix_ms,
                 old.bridge_attestation_expiry_unix_ms,
                 &old.bridge_attestation_hmac,
@@ -328,7 +337,7 @@ fn refresh_local_bridge_attestation(
         &network_name,
         info.peer_id,
         &info.noise_static_pubkey,
-        true,
+        bridge_input,
         now_unix_ms,
         expiry_unix_ms,
     ) else {
@@ -1159,6 +1168,36 @@ fn validate_route_foreign_network_info(
     Ok(())
 }
 
+fn validate_foreign_relay_conn_scope(
+    from_peer_id: PeerId,
+    conn_info: &ConnInfo,
+) -> rpc_types::error::Result<()> {
+    let ConnInfo::ConnPeerList(list) = conn_info else {
+        return Err(rpc_types::error::Error::MalformatRpcPacket(
+            "foreign relay connection topology must use the peer-list encoding".to_string(),
+        ));
+    };
+    if list.peer_conn_infos.len() != 1 {
+        return Err(rpc_types::error::Error::MalformatRpcPacket(
+            "foreign relay can assert exactly one connection source".to_string(),
+        ));
+    }
+    let Some(source) = list.peer_conn_infos.first() else {
+        unreachable!("length was checked above");
+    };
+    let Some(peer_id) = source.peer_id else {
+        return Err(rpc_types::error::Error::MalformatRpcPacket(
+            "foreign relay connection source is missing".to_string(),
+        ));
+    };
+    if peer_id.peer_id != from_peer_id {
+        return Err(rpc_types::error::Error::MalformatRpcPacket(
+            "foreign relay can assert only its own connection adjacency".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Enforce the authenticated sender role before expensive generic validation.
 ///
 /// Restricted roles cannot use a valid record to send a larger topology.
@@ -1168,7 +1207,6 @@ fn validate_route_sync_role_shape(
     peer_infos: Option<&[RoutePeerInfo]>,
     conn_info: Option<&ConnInfo>,
     foreign_network: Option<&RouteForeignNetworkInfos>,
-    credential_allow_relay: Option<bool>,
 ) -> rpc_types::error::Result<()> {
     if !matches!(identity_type, PeerIdentityType::Admin) && foreign_network.is_some() {
         return Err(rpc_types::error::Error::MalformatRpcPacket(
@@ -1176,8 +1214,10 @@ fn validate_route_sync_role_shape(
         ));
     }
 
-    if !matches!(identity_type, PeerIdentityType::Admin)
-        && let Some(peer_infos) = peer_infos
+    if matches!(
+        identity_type,
+        PeerIdentityType::SharedNode | PeerIdentityType::Credential
+    ) && let Some(peer_infos) = peer_infos
     {
         if peer_infos.len() != 1 {
             return Err(rpc_types::error::Error::MalformatRpcPacket(
@@ -1193,80 +1233,28 @@ fn validate_route_sync_role_shape(
 
     match identity_type {
         PeerIdentityType::Admin => {}
-        PeerIdentityType::SharedNode | PeerIdentityType::ForeignRelay => {
+        PeerIdentityType::ForeignRelay => {
+            if let Some(conn_info) = conn_info {
+                validate_foreign_relay_conn_scope(from_peer_id, conn_info)?;
+            }
+        }
+        PeerIdentityType::SharedNode => {
             if conn_info.is_some() {
                 return Err(rpc_types::error::Error::MalformatRpcPacket(
-                    "shared and foreign relay senders cannot send connection topology".to_string(),
+                    "shared-node senders cannot assert connection topology".to_string(),
                 ));
             }
         }
-        PeerIdentityType::Credential => match conn_info {
-            None => {}
-            Some(ConnInfo::ConnPeerList(list)) if credential_allow_relay == Some(true) => {
-                if list.peer_conn_infos.len() != 1
-                    || list.peer_conn_infos[0]
-                        .peer_id
-                        .is_none_or(|peer| peer.peer_id != from_peer_id)
-                {
-                    return Err(rpc_types::error::Error::MalformatRpcPacket(
-                        "relay credential must send one source-only connection row".to_string(),
-                    ));
-                }
-            }
-            Some(ConnInfo::ConnPeerList(_)) => {
+        PeerIdentityType::Credential => {
+            if conn_info.is_some() {
                 return Err(rpc_types::error::Error::MalformatRpcPacket(
-                    "credential without relay authority cannot send connection topology"
-                        .to_string(),
+                    "credential senders cannot assert connection topology".to_string(),
                 ));
             }
-            Some(ConnInfo::ConnBitmap(_)) => {
-                return Err(rpc_types::error::Error::MalformatRpcPacket(
-                    "credential senders cannot send connection bitmaps".to_string(),
-                ));
-            }
-        },
+        }
     }
 
     Ok(())
-}
-
-fn restrict_credential_conn_info(
-    list: RouteConnPeerList,
-    from_peer_id: PeerId,
-) -> rpc_types::error::Result<ConnInfo> {
-    let mut source = None;
-    for entry in list.peer_conn_infos {
-        let Some(peer_id) = entry.peer_id else {
-            return Err(rpc_types::error::Error::MalformatRpcPacket(
-                "credential connection list has a missing source peer".to_string(),
-            ));
-        };
-        if peer_id.peer_id != from_peer_id {
-            return Err(rpc_types::error::Error::MalformatRpcPacket(format!(
-                "credential connection list contains unauthenticated source peer {}",
-                peer_id.peer_id
-            )));
-        }
-        if source
-            .replace(PeerConnInfo {
-                peer_id: Some(peer_id),
-                connected_peer_ids: entry.connected_peer_ids,
-            })
-            .is_some()
-        {
-            return Err(rpc_types::error::Error::MalformatRpcPacket(
-                "credential connection list contains duplicate source peer".to_string(),
-            ));
-        }
-    }
-    let Some(source) = source else {
-        return Err(rpc_types::error::Error::MalformatRpcPacket(
-            "credential connection list has no authenticated source peer".to_string(),
-        ));
-    };
-    Ok(ConnInfo::ConnPeerList(RouteConnPeerList {
-        peer_conn_infos: vec![source],
-    }))
 }
 
 type Error = SyncRouteInfoError;
@@ -1312,6 +1300,9 @@ struct SyncedRouteInfo {
     credential_root_fingerprint: Vec<u8>,
     /// Serializes topology mutations with forwarding-input capture.
     topology_state_lock: std::sync::Mutex<()>,
+    process_memory: Arc<ProcessMemoryGovernor>,
+    retained_peer_bytes: std::sync::Mutex<HashMap<PeerId, usize>>,
+    retained_peer_bytes_total: AtomicUsize,
     peer_infos: RwLock<OrderedHashMap<PeerId, RoutePeerInfo>>,
     // prost doesn't support unknown fields, so we use DynamicMessage to store raw infos and propagate them to other peers.
     raw_peer_infos: DashMap<PeerId, DynamicMessage>,
@@ -1807,6 +1798,11 @@ impl SyncedRouteInfo {
 
         for peer_id in &peer_ids {
             self.raw_peer_infos.remove(peer_id);
+            if let Some(bytes) = self.retained_peer_bytes.lock().unwrap().remove(peer_id) {
+                self.retained_peer_bytes_total
+                    .fetch_sub(bytes, Ordering::AcqRel);
+                self.process_memory.release(bytes);
+            }
             self.group_trust_map.remove(peer_id);
             self.group_trust_map_cache.remove(peer_id);
         }
@@ -2025,11 +2021,16 @@ impl SyncedRouteInfo {
         }
         let mut need_inc_version = false;
         for (idx, route_info) in peer_infos.iter().enumerate() {
-            let mut route_info = route_info.clone();
-            route_info.normalize_multicast_groups();
             let Some(raw_route_info) = raw_peer_infos.get(idx) else {
                 return Err(Error::Stopped);
             };
+            let retained_bytes = route_info
+                .encoded_len()
+                .saturating_add(raw_route_info.encoded_len())
+                .saturating_mul(ROUTE_PEER_RETAINED_EXPANSION_FACTOR)
+                .saturating_add(ROUTE_PEER_RETAINED_OVERHEAD_BYTES);
+            let mut route_info = route_info.clone();
+            route_info.normalize_multicast_groups();
             self.check_duplicate_peer_id(
                 my_peer_id,
                 my_peer_route_id,
@@ -2059,13 +2060,35 @@ impl SyncedRouteInfo {
             // time between peers may not be synchronized, so update last_update to local now.
             // note only last_update with larger version will be updated to local saved peer info.
             route_info.last_update = Some(Timestamp::now());
-            if guard
-                .get_mut(&route_info.peer_id)
-                .is_none_or(|old| route_info.version > old.version)
-            {
+            if guard.get(&route_info.peer_id).is_none_or(|old| route_info.version > old.version) {
+                let old_bytes = self
+                    .retained_peer_bytes
+                    .lock()
+                    .unwrap()
+                    .get(&route_info.peer_id)
+                    .copied()
+                    .unwrap_or_default();
+                let added_bytes = retained_bytes.saturating_sub(old_bytes);
+                if added_bytes != 0 && !self.process_memory.reserve(added_bytes) {
+                    return Err(Error::Stopped);
+                }
                 self.raw_peer_infos
                     .insert(route_info.peer_id, raw_route_info.clone());
-                guard.insert(route_info.peer_id, route_info);
+                let peer_id = route_info.peer_id;
+                guard.insert(peer_id, route_info);
+                self.retained_peer_bytes
+                    .lock()
+                    .unwrap()
+                    .insert(peer_id, retained_bytes);
+                if retained_bytes >= old_bytes {
+                    self.retained_peer_bytes_total
+                        .fetch_add(retained_bytes - old_bytes, Ordering::AcqRel);
+                } else {
+                    let released = old_bytes - retained_bytes;
+                    self.retained_peer_bytes_total
+                        .fetch_sub(released, Ordering::AcqRel);
+                    self.process_memory.release(released);
+                }
                 need_inc_version = true;
             }
         }
@@ -2141,8 +2164,34 @@ impl SyncedRouteInfo {
         raw_peer_infos: &[DynamicMessage],
         conn_info: Option<&ConnInfo>,
     ) -> Result<(), Error> {
+        self.update_peer_infos_and_conn_info_with_authority(
+            my_peer_id,
+            my_peer_route_id,
+            dst_peer_id,
+            peer_infos,
+            raw_peer_infos,
+            conn_info,
+            true,
+        )?;
+        Ok(())
+    }
+
+    fn update_peer_infos_and_conn_info_with_authority(
+        &self,
+        my_peer_id: PeerId,
+        my_peer_route_id: u64,
+        dst_peer_id: PeerId,
+        peer_infos: &[RoutePeerInfo],
+        raw_peer_infos: &[DynamicMessage],
+        conn_info: Option<&ConnInfo>,
+        source_has_topology_authority: bool,
+    ) -> Result<bool, Error> {
         let _topology_guard = self.topology_state_lock();
         self.validate_merged_route_state_locked(peer_infos, conn_info)?;
+        let version_before = self.version.get();
+        if !source_has_topology_authority && self.conn_map.write().remove(&dst_peer_id).is_some() {
+            self.version.inc();
+        }
         self.update_peer_infos_locked(
             my_peer_id,
             my_peer_route_id,
@@ -2153,7 +2202,7 @@ impl SyncedRouteInfo {
         if let Some(conn_info) = conn_info {
             self.update_conn_info_locked(conn_info);
         }
-        Ok(())
+        Ok(self.version.get() != version_before)
     }
 
     fn update_conn_info(&self, conn_info: &ConnInfo) {
@@ -2609,6 +2658,7 @@ struct TopologyBuildInput {
     peer_infos: Arc<HashMap<PeerId, RoutePeerInfo>>,
     conn_map: Arc<HashMap<PeerId, RouteConnBuildInfo>>,
     suppressed_peer_ids: Arc<HashSet<PeerId>>,
+    relay_credential_peers: Arc<HashSet<PeerId>>,
     local_proxy_cidrs: Vec<IpCidr>,
 }
 
@@ -2618,14 +2668,12 @@ struct RouteBuildInput {
     version: Version,
     graph: PeerGraph,
     speed_graph: SpeedGraph,
-    policy_speed_graph: Option<SpeedGraph>,
     speed_preparation: Option<WidestPathPreparation>,
     start_node: NodeIndex,
     peer_infos: Arc<HashMap<PeerId, RoutePeerInfo>>,
     conn_map: Arc<HashMap<PeerId, RouteConnBuildInfo>>,
     suppressed_peer_ids: Arc<HashSet<PeerId>>,
     local_proxy_cidrs: Vec<IpCidr>,
-    avoid_relay_sources: Arc<HashSet<NodeIndex>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2643,6 +2691,44 @@ struct SharedRouteMaps {
     cidr_peer_id_map: Arc<PrefixMap<Ipv4Cidr, PeerId>>,
     cidr_v6_peer_id_map: Arc<PrefixMap<Ipv6Cidr, PeerId>>,
     next_hop_map_version: Version,
+}
+
+fn add_authorized_relay_reverse_edges(
+    graph: &mut PeerGraph,
+    peer_id_to_node_index: &HashMap<PeerId, NodeIndex>,
+    peer_infos: &HashMap<PeerId, RoutePeerInfo>,
+    conn_map: &HashMap<PeerId, RouteConnBuildInfo>,
+    relay_credential_peers: &HashSet<PeerId>,
+    suppressed_peer_ids: &HashSet<PeerId>,
+) {
+    for (source_peer_id, source_conn) in conn_map {
+        let source_is_admin = peer_infos
+            .get(source_peer_id)
+            .and_then(|info| PeerIdentityType::try_from(info.identity_type).ok())
+            .is_some_and(|identity| matches!(identity, PeerIdentityType::Admin));
+        if !source_is_admin {
+            continue;
+        }
+        let Some(source_node) = peer_id_to_node_index.get(source_peer_id) else {
+            continue;
+        };
+        for destination_peer_id in &source_conn.connected_peers {
+            if suppressed_peer_ids.contains(destination_peer_id)
+                || !relay_credential_peers.contains(destination_peer_id)
+            {
+                continue;
+            }
+            let Some(destination_node) = peer_id_to_node_index.get(destination_peer_id) else {
+                continue;
+            };
+            let has_explicit_reverse = conn_map
+                .get(destination_peer_id)
+                .is_some_and(|connection| connection.connected_peers.contains(source_peer_id));
+            if !has_explicit_reverse {
+                graph.add_edge(*destination_node, *source_node, 0);
+            }
+        }
+    }
 }
 
 impl TopologyBuildInput {
@@ -2679,6 +2765,17 @@ impl TopologyBuildInput {
             (version, peer_infos, conn_map, suppressed_peer_ids)
         };
 
+        let relay_credential_peers = peer_infos
+            .iter()
+            .filter_map(|(peer_id, info)| {
+                SyncedRouteInfo::is_credential_peer_info(info)
+                    .then(|| synced_info.get_credential_info_by_pubkey(&info.noise_static_pubkey))
+                    .flatten()
+                    .is_some_and(|credential| credential.allow_relay)
+                    .then_some(*peer_id)
+            })
+            .collect::<HashSet<_>>();
+        let relay_credential_peers = Arc::new(relay_credential_peers);
         let peer_infos = Arc::new(peer_infos);
         let conn_map = Arc::new(conn_map);
         let suppressed_peer_ids = Arc::new(suppressed_peer_ids);
@@ -2712,6 +2809,14 @@ impl TopologyBuildInput {
                     graph.add_edge(*src_node_idx, *dst_node_idx, 0);
                 }
             }
+            add_authorized_relay_reverse_edges(
+                &mut graph,
+                &peer_id_to_node_index,
+                &peer_infos,
+                &conn_map,
+                &relay_credential_peers,
+                &suppressed_peer_ids,
+            );
         }
 
         let local_proxy_cidrs = peer_infos
@@ -2728,6 +2833,7 @@ impl TopologyBuildInput {
             peer_infos,
             conn_map,
             suppressed_peer_ids,
+            relay_credential_peers,
             local_proxy_cidrs,
         }
     }
@@ -2744,30 +2850,33 @@ impl TopologyBuildInput {
         capture_cost: bool,
         capture_delivery: bool,
     ) -> RouteBuildInput {
-        let mut graph = self.graph.clone();
-        let mut speed_graph =
-            SpeedGraph::with_capacity(self.graph.node_count(), self.graph.edge_count());
-        for (node, peer_id) in self.graph.node_references() {
-            let speed_node = speed_graph.add_node(*peer_id);
-            debug_assert_eq!(speed_node, node);
+        let mut graph = if capture_cost {
+            self.graph.clone()
+        } else {
+            PeerGraph::new()
+        };
+        let mut speed_graph = if capture_delivery {
+            SpeedGraph::with_capacity(self.graph.node_count(), self.graph.edge_count())
+        } else {
+            SpeedGraph::new()
+        };
+        if capture_delivery {
+            for (node, peer_id) in self.graph.node_references() {
+                let speed_node = speed_graph.add_node(*peer_id);
+                debug_assert_eq!(speed_node, node);
+            }
         }
-        let mut avoid_relay_sources = HashSet::new();
-
-        for edge_id in graph.edge_indices() {
-            let (src, dst) = graph
-                .edge_endpoints(edge_id)
-                .expect("topology edge endpoints");
-            let src_peer_id = graph[src];
-            let dst_peer_id = graph[dst];
+        for edge in self.graph.edge_references() {
+            let edge_id = edge.id();
+            let src = edge.source();
+            let dst = edge.target();
+            let src_peer_id = self.graph[src];
+            let dst_peer_id = self.graph[dst];
             let peer_avoid_relay_data = self
                 .peer_infos
                 .get(&src_peer_id)
                 .and_then(|info| info.feature_flag)
                 .is_some_and(|flags| flags.avoid_relay_data);
-            if peer_avoid_relay_data {
-                avoid_relay_sources.insert(src);
-            }
-
             // Least-hop and least-cost rebuilds need an edge weight. A
             // delivery-only rebuild still captures cost for speed latency.
             let raw_cost = if capture_cost || capture_delivery {
@@ -2780,11 +2889,23 @@ impl TopologyBuildInput {
             } else {
                 raw_cost
             };
-            *graph
-                .edge_weight_mut(edge_id)
-                .expect("topology edge weight") = effective_cost;
+            if capture_cost {
+                *graph
+                    .edge_weight_mut(edge_id)
+                    .expect("topology edge weight") = effective_cost;
+            }
 
-            if capture_delivery {
+            let source_can_publish_delivery = src == self.start_node
+                || self
+                    .peer_infos
+                    .get(&src_peer_id)
+                    .and_then(|info| PeerIdentityType::try_from(info.identity_type).ok())
+                    .is_some_and(|identity| matches!(identity, PeerIdentityType::Admin))
+                || self.relay_credential_peers.contains(&src_peer_id);
+            if capture_delivery
+                && source_can_publish_delivery
+                && (src == self.start_node || !peer_avoid_relay_data)
+            {
                 let Some(delivery_bps) = cost_calc.calculate_delivery_bps(src_peer_id, dst_peer_id)
                 else {
                     continue;
@@ -2803,40 +2924,19 @@ impl TopologyBuildInput {
             }
         }
 
-        let policy_speed_graph = if avoid_relay_sources.is_empty() {
-            None
-        } else {
-            let mut filtered =
-                SpeedGraph::with_capacity(speed_graph.node_count(), speed_graph.edge_count());
-            for (node, peer_id) in speed_graph.node_references() {
-                let filtered_node = filtered.add_node(*peer_id);
-                debug_assert_eq!(filtered_node, node);
-            }
-            for edge in speed_graph.edge_references() {
-                if edge.source() != self.start_node && avoid_relay_sources.contains(&edge.source())
-                {
-                    continue;
-                }
-                filtered.add_edge(edge.source(), edge.target(), *edge.weight());
-            }
-            Some(filtered)
-        };
-        let policy_speed_graph_ref = policy_speed_graph.as_ref().unwrap_or(&speed_graph);
         let speed_preparation =
-            capture_delivery.then(|| prepare_widest_path(policy_speed_graph_ref, self.start_node));
+            capture_delivery.then(|| prepare_widest_path(&speed_graph, self.start_node));
 
         RouteBuildInput {
             version: self.version,
             graph,
             speed_graph,
-            policy_speed_graph,
             speed_preparation,
             start_node: self.start_node,
             peer_infos: self.peer_infos.clone(),
             conn_map: self.conn_map.clone(),
             suppressed_peer_ids: self.suppressed_peer_ids.clone(),
             local_proxy_cidrs: self.local_proxy_cidrs.clone(),
-            avoid_relay_sources: Arc::new(avoid_relay_sources),
         }
     }
 }
@@ -2968,7 +3068,10 @@ impl WidestPathWorkStats {
             + self.peak_active_inner_capacity * std::mem::size_of::<(NodeIndex, u64)>()
             + self.label_capacity.max(node_count)
                 * std::mem::size_of::<Option<(u64, usize, PeerId)>>()
-            + self.peak_queue_capacity * std::mem::size_of::<Reverse<(u64, usize, PeerId, usize)>>()
+            // B-tree entries also own links, parent metadata, and allocator padding.
+            + self.peak_queue_capacity
+                * (std::mem::size_of::<(u64, usize, PeerId, usize)>()
+                    + 4 * std::mem::size_of::<usize>())
             + self.finalized_capacity.max(node_count) * std::mem::size_of::<bool>()
             + self.widest_capacity_capacity.max(node_count) * std::mem::size_of::<u64>()
             + self.destination_capacity * std::mem::size_of::<(u64, NodeIndex)>()
@@ -3171,7 +3274,7 @@ fn widest_path_with_preparation(
         work_stats.finalized_capacity = finalized.capacity();
         work_stats.peak_label_count = label_count;
     }
-    let mut pending = BinaryHeap::new();
+    let mut pending = BTreeSet::new();
     let mut routes = HashMap::new();
     let mut edge_offset = 0_usize;
     let mut destination_offset = 0_usize;
@@ -3232,7 +3335,7 @@ fn widest_path_with_preparation(
             )?;
         }
 
-        while let Some(Reverse((latency_ms, hops, first_hop_peer_id, node_index))) = pending.pop() {
+        while let Some((latency_ms, hops, first_hop_peer_id, node_index)) = pending.pop_first() {
             budget.charge(1)?;
             let node = NodeIndex::new(node_index);
             if labels[node.index()] != Some((latency_ms, hops, first_hop_peer_id)) {
@@ -3315,11 +3418,11 @@ fn widest_capacities_checked(
     {
         work_stats.widest_capacity_capacity = capacities.capacity();
     }
-    let mut pending = BinaryHeap::new();
+    let mut pending = BTreeSet::new();
     capacities[start.index()] = u64::MAX;
-    pending.push((u64::MAX, Reverse(start.index())));
+    pending.insert((u64::MAX, start.index()));
 
-    while let Some((capacity, Reverse(node_index))) = pending.pop() {
+    while let Some((capacity, node_index)) = pending.pop_last() {
         budget.charge(1)?;
         *capacity_work = capacity_work.checked_add(1).ok_or(WidestPathWorkError)?;
         let node = NodeIndex::new(node_index);
@@ -3340,8 +3443,11 @@ fn widest_capacities_checked(
             if next_capacity == 0 || capacities[target.index()] >= next_capacity {
                 continue;
             }
+            if capacities[target.index()] != 0 {
+                pending.remove(&(capacities[target.index()], target.index()));
+            }
             capacities[target.index()] = next_capacity;
-            pending.push((next_capacity, Reverse(target.index())));
+            pending.insert((next_capacity, target.index()));
         }
     }
 
@@ -3369,7 +3475,7 @@ fn speed_path_label(
 
 fn relax_speed_path(
     labels: &mut [Option<(u64, usize, PeerId)>],
-    pending: &mut BinaryHeap<Reverse<(u64, usize, PeerId, usize)>>,
+    pending: &mut BTreeSet<(u64, usize, PeerId, usize)>,
     target: NodeIndex,
     candidate: (u64, usize, PeerId),
     work_stats: &mut WidestPathWorkStats,
@@ -3385,7 +3491,11 @@ fn relax_speed_path(
     if labels[target.index()].is_some_and(|current| current <= candidate) {
         return Ok(());
     }
-    let was_unreachable = labels[target.index()].is_none();
+    let previous = labels[target.index()];
+    let was_unreachable = previous.is_none();
+    if let Some((latency_ms, hops, first_hop_peer_id)) = previous {
+        pending.remove(&(latency_ms, hops, first_hop_peer_id, target.index()));
+    }
     labels[target.index()] = Some(candidate);
     if was_unreachable {
         #[cfg(test)]
@@ -3394,17 +3504,17 @@ fn relax_speed_path(
             *label_count += 1;
         }
     }
-    pending.push(Reverse((
+    pending.insert((
         candidate.0,
         candidate.1,
         candidate.2,
         target.index(),
-    )));
+    ));
     #[cfg(test)]
     {
         work_stats.label_relaxations += 1;
         work_stats.peak_queue_len = work_stats.peak_queue_len.max(pending.len());
-        work_stats.peak_queue_capacity = work_stats.peak_queue_capacity.max(pending.capacity());
+        work_stats.peak_queue_capacity = work_stats.peak_queue_capacity.max(pending.len());
         work_stats.peak_label_count = work_stats.peak_label_count.max(*label_count);
         work_stats.peak_newly_reachable = work_stats.peak_newly_reachable.max(*newly_reachable);
     }
@@ -3446,6 +3556,18 @@ impl RouteTable {
 
     fn shared_maps(&self) -> Option<Arc<SharedRouteMaps>> {
         self.shared_maps.lock().unwrap().clone()
+    }
+
+    fn clear_for_version(&self, version: Version) {
+        self.peer_infos.clear();
+        self.next_hop_map.clear();
+        self.suppressed_peer_ids.clear();
+        self.ipv4_peer_id_map.clear();
+        self.ipv6_peer_id_map.clear();
+        self.cidr_peer_id_map.store(Arc::new(PrefixMap::new()));
+        self.cidr_v6_peer_id_map.store(Arc::new(PrefixMap::new()));
+        *self.shared_maps.lock().unwrap() = None;
+        self.next_hop_map_version.set_if_larger(version);
     }
 
     fn get_next_hop(&self, dst_peer_id: PeerId) -> Option<NextHopInfo> {
@@ -3511,34 +3633,15 @@ impl RouteTable {
                 1
             }
         };
-        // Step 1: 第一次 Dijkstra - 计算最短跳数
+        // Calculate the permitted shortest-hop distance once.
         let path_len_map = dijkstra(&graph, *start_node, None, normalize_edge_cost);
-
-        // Step 2: 构建最短跳数子图（只保留属于最短路径和 AVOID RELAY 的边）
-        let mut subgraph: PeerGraph = PeerGraph::new();
-        let mut start_node_idx = None;
-        for (node_idx, peer_id) in graph.node_references() {
-            let new_node_idx = subgraph.add_node(*peer_id);
-            if node_idx == *start_node {
-                start_node_idx = Some(new_node_idx);
-            }
-        }
-
-        for edge in graph.edge_references() {
-            let (src, tgt) = graph.edge_endpoints(edge.id()).unwrap();
-            let Some(src_path_len) = path_len_map.get(&src) else {
-                continue;
-            };
-            let Some(tgt_path_len) = path_len_map.get(&tgt) else {
-                continue;
-            };
-            if *src_path_len + normalize_edge_cost(edge) == *tgt_path_len {
-                subgraph.add_edge(src, tgt, *edge.weight());
-            }
-        }
-
-        // Step 3: 第二次 Dijkstra - 在子图上找代价最小的路径
-        self.gen_next_hop_map_with_least_cost(&subgraph, &start_node_idx.unwrap(), version);
+        let (costs, next_hops) = dijkstra_with_first_hop_filtered(graph, *start_node, |edge| {
+            let source_distance = path_len_map.get(&edge.source())?;
+            let target_distance = path_len_map.get(&edge.target())?;
+            let hop_cost = normalize_edge_cost(edge);
+            (*source_distance + hop_cost == *target_distance).then_some(*edge.weight())
+        });
+        self.install_weighted_routes(graph, &costs, &next_hops, version);
     }
 
     fn gen_next_hop_map_with_least_cost(
@@ -3556,7 +3659,16 @@ impl RouteTable {
             return;
         }
         let (costs, next_hops) = dijkstra_with_first_hop(&graph, *start_node, |e| *e.weight());
+        self.install_weighted_routes(graph, &costs, &next_hops, version);
+    }
 
+    fn install_weighted_routes(
+        &self,
+        graph: &PeerGraph,
+        costs: &HashMap<NodeIndex, usize>,
+        next_hops: &HashMap<NodeIndex, (NodeIndex, usize)>,
+        version: Version,
+    ) {
         for (dst, (next_hop, path_len)) in next_hops.iter() {
             let info = NextHopInfo {
                 next_hop_peer_id: *graph.node_weight(*next_hop).unwrap(),
@@ -3634,23 +3746,33 @@ impl RouteTable {
     ) -> Result<HashMap<PeerId, NextHopInfo>, WidestPathWorkError> {
         let workspace = Self::new();
         workspace.next_hop_map_version.set(input.version);
-        if input.graph.node_count() != 0 && input.start_node != NodeIndex::end() {
+        if input.start_node != NodeIndex::end() {
             match policy {
-                NextHopPolicy::LeastHop => workspace.gen_next_hop_map_with_least_hop(
-                    &input.graph,
-                    &input.start_node,
-                    input.version,
-                ),
-                NextHopPolicy::LeastCost => workspace.gen_next_hop_map_with_least_cost(
-                    &input.graph,
-                    &input.start_node,
-                    input.version,
-                ),
+                NextHopPolicy::LeastHop => {
+                    if input.graph.node_count() == 0 {
+                        return Ok(HashMap::new());
+                    }
+                    workspace.gen_next_hop_map_with_least_hop(
+                        &input.graph,
+                        &input.start_node,
+                        input.version,
+                    )
+                }
+                NextHopPolicy::LeastCost => {
+                    if input.graph.node_count() == 0 {
+                        return Ok(HashMap::new());
+                    }
+                    workspace.gen_next_hop_map_with_least_cost(
+                        &input.graph,
+                        &input.start_node,
+                        input.version,
+                    )
+                }
                 NextHopPolicy::MaxGoodput => {
-                    let graph = input
-                        .policy_speed_graph
-                        .as_ref()
-                        .unwrap_or(&input.speed_graph);
+                    let graph = &input.speed_graph;
+                    if graph.node_count() == 0 {
+                        return Ok(HashMap::new());
+                    }
                     let preparation = input
                         .speed_preparation
                         .as_ref()
@@ -4380,7 +4502,6 @@ struct ForwardingSnapshot {
     forwarding_peers: Arc<super::route_trait::ForwardingPeerTable>,
     foreign_network_owner_map: Arc<HashMap<NetworkIdentity, Vec<PeerId>>>,
     foreign_network_my_peer_id_map: Arc<HashMap<(String, PeerId), PeerId>>,
-    cached_local_conn_map: Arc<RouteConnBitmap>,
     decision_snapshot: ForwardingDecisionSnapshotHandle,
 }
 
@@ -4416,6 +4537,20 @@ impl RouteRebuildDomains {
         }
     }
 
+    fn cost() -> Self {
+        Self {
+            cost: true,
+            ..Self::default()
+        }
+    }
+
+    fn delivery() -> Self {
+        Self {
+            delivery: true,
+            ..Self::default()
+        }
+    }
+
     fn bridge() -> Self {
         Self {
             bridge: true,
@@ -4437,6 +4572,24 @@ impl RouteRebuildDomains {
     fn needs_publication(self) -> bool {
         self.topology || self.cost || self.delivery || self.bridge || self.foreign
     }
+
+    fn bits(self) -> u8 {
+        u8::from(self.topology)
+            | u8::from(self.cost) << 1
+            | u8::from(self.delivery) << 2
+            | u8::from(self.bridge) << 3
+            | u8::from(self.foreign) << 4
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        Self {
+            topology: bits & 1 != 0,
+            cost: bits & (1 << 1) != 0,
+            delivery: bits & (1 << 2) != 0,
+            bridge: bits & (1 << 3) != 0,
+            foreign: bits & (1 << 4) != 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4445,7 +4598,6 @@ struct RouteRebuildWorkCounters {
     least_hop_rebuilds: AtomicU64,
     least_cost_rebuilds: AtomicU64,
     max_goodput_rebuilds: AtomicU64,
-    bitmap_rebuilds: AtomicU64,
     owner_map_rebuilds: AtomicU64,
     bridge_refreshes: AtomicU64,
     snapshot_publications: AtomicU64,
@@ -4470,6 +4622,8 @@ struct PeerRouteServiceImpl {
     forwarding_snapshot_source: std::sync::RwLock<Option<ForwardingDecisionSnapshotSource>>,
     next_forwarding_generation: AtomicU64,
     route_rebuild_lock: std::sync::Mutex<()>,
+    pending_route_rebuilds: AtomicU8,
+    route_rebuild_notify: Notify,
     authenticated_peers: DashMap<PeerId, AuthenticatedPeerInfo>,
     verified_bridge_attestations: DashMap<PeerId, VerifiedBridgeAttestation>,
     bridge_attestation_next_deadline: std::sync::Mutex<Option<Instant>>,
@@ -4478,12 +4632,10 @@ struct PeerRouteServiceImpl {
     synced_route_info: SyncedRouteInfo,
     public_ipv6_service: std::sync::Mutex<Weak<PublicIpv6Service>>,
     self_public_ipv6_addr_lease: std::sync::Mutex<Option<Ipv6Inet>>,
-    cached_local_conn_map: std::sync::Mutex<RouteConnBitmap>,
-    cached_local_conn_map_version: AtomicVersion,
     cached_interface_peer_snapshot: std::sync::Mutex<Arc<InterfacePeerSnapshot>>,
     interface_peers_generation: AtomicU64,
     applied_interface_peers_generation: AtomicU64,
-    route_rebuild_budget_exceeded: AtomicBool,
+    route_rebuild_failures: AtomicU8,
 
     rebuild_work: RouteRebuildWorkCounters,
 
@@ -4540,10 +4692,6 @@ impl Debug for PeerRouteServiceImpl {
                 "foreign_network_my_peer_id_map",
                 &self.foreign_network_my_peer_id_map,
             )
-            .field(
-                "cached_local_conn_map",
-                &self.cached_local_conn_map.lock().unwrap(),
-            )
             .finish()
     }
 }
@@ -4570,6 +4718,7 @@ impl PeerRouteServiceImpl {
         let credential_network_name = global_ctx.get_network_name();
         let credential_root_public_key = credential_manager.root_public_key().to_vec();
         let credential_root_fingerprint = credential_manager.root_fingerprint().to_vec();
+        let process_memory = global_ctx.process_memory_governor();
         PeerRouteServiceImpl {
             my_peer_id,
             my_peer_route_id: rand::random(),
@@ -4593,7 +4742,6 @@ impl PeerRouteServiceImpl {
                 forwarding_peers: Arc::new(super::route_trait::ForwardingPeerTable::default()),
                 foreign_network_owner_map: Arc::new(HashMap::new()),
                 foreign_network_my_peer_id_map: Arc::new(HashMap::new()),
-                cached_local_conn_map: Arc::new(RouteConnBitmap::default()),
                 decision_snapshot: ForwardingDecisionSnapshot::from_parts(
                     0,
                     Arc::new(super::route_trait::ForwardingPeerTable::default()),
@@ -4611,6 +4759,8 @@ impl PeerRouteServiceImpl {
             forwarding_snapshot_source: std::sync::RwLock::new(None),
             next_forwarding_generation: AtomicU64::new(0),
             route_rebuild_lock: std::sync::Mutex::new(()),
+            pending_route_rebuilds: AtomicU8::new(0),
+            route_rebuild_notify: Notify::new(),
             authenticated_peers: DashMap::new(),
             verified_bridge_attestations: DashMap::new(),
             bridge_attestation_next_deadline: std::sync::Mutex::new(None),
@@ -4623,6 +4773,9 @@ impl PeerRouteServiceImpl {
                 credential_root_public_key,
                 credential_root_fingerprint,
                 topology_state_lock: std::sync::Mutex::new(()),
+                process_memory,
+                retained_peer_bytes: std::sync::Mutex::new(HashMap::new()),
+                retained_peer_bytes_total: AtomicUsize::new(0),
                 peer_infos: RwLock::new(OrderedHashMap::new()),
                 raw_peer_infos: DashMap::new(),
                 conn_map: RwLock::new(OrderedHashMap::new()),
@@ -4637,14 +4790,12 @@ impl PeerRouteServiceImpl {
             },
             public_ipv6_service: std::sync::Mutex::new(Weak::new()),
             self_public_ipv6_addr_lease: std::sync::Mutex::new(None),
-            cached_local_conn_map: std::sync::Mutex::new(RouteConnBitmap::default()),
-            cached_local_conn_map_version: AtomicVersion::new(),
             cached_interface_peer_snapshot: std::sync::Mutex::new(Arc::new(
                 InterfacePeerSnapshot::default(),
             )),
             interface_peers_generation: AtomicU64::new(1),
             applied_interface_peers_generation: AtomicU64::new(0),
-            route_rebuild_budget_exceeded: AtomicBool::new(false),
+            route_rebuild_failures: AtomicU8::new(0),
 
             rebuild_work: RouteRebuildWorkCounters::default(),
 
@@ -5249,10 +5400,7 @@ impl PeerRouteServiceImpl {
             let Some(preparation) = build_input.speed_preparation.as_ref() else {
                 return false;
             };
-            let speed_graph = build_input
-                .policy_speed_graph
-                .as_ref()
-                .unwrap_or(&build_input.speed_graph);
+            let speed_graph = &build_input.speed_graph;
             // The checked widest-path builder accounts for threshold-round
             // work while it runs. Preflight charges the one-time scans and
             // destination preparation performed before that builder.
@@ -5321,9 +5469,11 @@ impl PeerRouteServiceImpl {
         let capture_delivery = domains.topology || domains.delivery;
         let build_input = topology.with_measurements(&**calculator, capture_cost, capture_delivery);
 
-        if !Self::route_build_work_within_budget(&build_input, domains) {
-            self.route_rebuild_budget_exceeded
-                .store(true, Ordering::Release);
+        self.route_rebuild_failures
+            .fetch_and(!domains.bits(), Ordering::AcqRel);
+        if domains.topology && !Self::route_build_work_within_budget(&build_input, domains) {
+            self.route_rebuild_failures
+                .fetch_or(RouteRebuildDomains::topology().bits(), Ordering::AcqRel);
             tracing::warn!(
                 version = build_input.version,
                 nodes = build_input.graph.node_count(),
@@ -5336,8 +5486,30 @@ impl PeerRouteServiceImpl {
             drop(calc_locked);
             return None;
         }
-        self.route_rebuild_budget_exceeded
-            .store(false, Ordering::Release);
+        if !domains.topology {
+            if domains.cost
+                && !Self::route_build_work_within_budget(&build_input, RouteRebuildDomains::cost())
+            {
+                domains.cost = false;
+                self.route_rebuild_failures
+                    .fetch_or(RouteRebuildDomains::cost().bits(), Ordering::AcqRel);
+            }
+            if domains.delivery
+                && !Self::route_build_work_within_budget(
+                    &build_input,
+                    RouteRebuildDomains::delivery(),
+                )
+            {
+                domains.delivery = false;
+                self.route_rebuild_failures
+                    .fetch_or(RouteRebuildDomains::delivery().bits(), Ordering::AcqRel);
+            }
+            if !domains.needs_route_input() {
+                calculator.end_update();
+                drop(calc_locked);
+                return None;
+            }
+        }
 
         // The committed topology remains immutable. If a topology mutation
         // occurred while the calculator ran, discard this derived input and
@@ -5345,7 +5517,7 @@ impl PeerRouteServiceImpl {
         if self.synced_route_info.version.get() != topology.version {
             calculator.end_update();
             drop(calc_locked);
-            return self.update_route_tables_for_domains(RouteRebuildDomains::topology());
+            return None;
         }
 
         if domains.topology {
@@ -5355,8 +5527,8 @@ impl PeerRouteServiceImpl {
             ) {
                 Ok(routes) => routes,
                 Err(_) => {
-                    self.route_rebuild_budget_exceeded
-                        .store(true, Ordering::Release);
+                    self.route_rebuild_failures
+                        .fetch_or(RouteRebuildDomains::topology().bits(), Ordering::AcqRel);
                     calculator.end_update();
                     drop(calc_locked);
                     return None;
@@ -5368,8 +5540,8 @@ impl PeerRouteServiceImpl {
             ) {
                 Ok(routes) => routes,
                 Err(_) => {
-                    self.route_rebuild_budget_exceeded
-                        .store(true, Ordering::Release);
+                    self.route_rebuild_failures
+                        .fetch_or(RouteRebuildDomains::topology().bits(), Ordering::AcqRel);
                     calculator.end_update();
                     drop(calc_locked);
                     return None;
@@ -5381,8 +5553,8 @@ impl PeerRouteServiceImpl {
             ) {
                 Ok(routes) => routes,
                 Err(_) => {
-                    self.route_rebuild_budget_exceeded
-                        .store(true, Ordering::Release);
+                    self.route_rebuild_failures
+                        .fetch_or(RouteRebuildDomains::topology().bits(), Ordering::AcqRel);
                     calculator.end_update();
                     drop(calc_locked);
                     return None;
@@ -5410,40 +5582,34 @@ impl PeerRouteServiceImpl {
                 .replace_policy(speed_next_hops, shared_maps);
         } else {
             let cost_next_hops = if domains.cost {
-                Some(
-                    match RouteTable::build_next_hop_map_from_input_checked(
-                        &build_input,
-                        NextHopPolicy::LeastCost,
-                    ) {
-                        Ok(routes) => routes,
-                        Err(_) => {
-                            self.route_rebuild_budget_exceeded
-                                .store(true, Ordering::Release);
-                            calculator.end_update();
-                            drop(calc_locked);
-                            return None;
-                        }
-                    },
-                )
+                match RouteTable::build_next_hop_map_from_input_checked(
+                    &build_input,
+                    NextHopPolicy::LeastCost,
+                ) {
+                    Ok(routes) => Some(routes),
+                    Err(_) => {
+                        domains.cost = false;
+                        self.route_rebuild_failures
+                            .fetch_or(RouteRebuildDomains::cost().bits(), Ordering::AcqRel);
+                        None
+                    }
+                }
             } else {
                 None
             };
             let speed_next_hops = if domains.delivery {
-                Some(
-                    match RouteTable::build_next_hop_map_from_input_checked(
-                        &build_input,
-                        NextHopPolicy::MaxGoodput,
-                    ) {
-                        Ok(routes) => routes,
-                        Err(_) => {
-                            self.route_rebuild_budget_exceeded
-                                .store(true, Ordering::Release);
-                            calculator.end_update();
-                            drop(calc_locked);
-                            return None;
-                        }
-                    },
-                )
+                match RouteTable::build_next_hop_map_from_input_checked(
+                    &build_input,
+                    NextHopPolicy::MaxGoodput,
+                ) {
+                    Ok(routes) => Some(routes),
+                    Err(_) => {
+                        domains.delivery = false;
+                        self.route_rebuild_failures
+                            .fetch_or(RouteRebuildDomains::delivery().bits(), Ordering::AcqRel);
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -5472,7 +5638,7 @@ impl PeerRouteServiceImpl {
         if self.synced_route_info.version.get() != topology.version {
             calculator.end_update();
             drop(calc_locked);
-            return self.update_route_tables_for_domains(RouteRebuildDomains::topology());
+            return None;
         }
 
         if domains.delivery || domains.topology {
@@ -5542,6 +5708,76 @@ impl PeerRouteServiceImpl {
         }
     }
 
+    fn authenticated_foreign_network_peers(
+        &self,
+        network_identity: &NetworkIdentity,
+    ) -> Vec<(PeerId, Vec<u8>)> {
+        let Some(expected_digest) = network_identity.network_secret_digest.as_ref() else {
+            return Vec::new();
+        };
+        if expected_digest.iter().all(|byte| *byte == 0) {
+            return Vec::new();
+        }
+
+        let snapshot = self.forwarding_snapshot();
+        let mut bindings = BTreeMap::<PeerId, Option<Vec<u8>>>::new();
+        for item in self.synced_route_info.foreign_network.iter() {
+            let key = item.key();
+            let entry = item.value();
+            if key.peer_id == self.my_peer_id
+                || key.network_name != network_identity.network_name
+                || entry.foreign_peer_ids.is_empty()
+                || entry.my_peer_id_for_this_network == 0
+                || entry.my_peer_id_for_this_network == self.my_peer_id
+                || entry.network_secret_digest.as_slice() != expected_digest.as_slice()
+                || entry.owner_noise_static_pubkey.len() != 32
+                || !snapshot.route_table.peer_reachable(key.peer_id)
+                || snapshot
+                    .foreign_network_my_peer_id_map
+                    .get(&(key.network_name.clone(), entry.my_peer_id_for_this_network))
+                    != Some(&key.peer_id)
+            {
+                continue;
+            }
+
+            let Some(authenticated_owner) = self.authenticated_peers.get(&key.peer_id) else {
+                continue;
+            };
+            if authenticated_owner.identity_type != PeerIdentityType::Admin
+                || !AuthenticatedRoutePeerEvidence::is_allowed_role_auth_pair(
+                    authenticated_owner.identity_type,
+                    authenticated_owner.secure_auth_level,
+                )
+                || authenticated_owner.public_key.len() != 32
+                || authenticated_owner.public_key != entry.owner_noise_static_pubkey
+            {
+                continue;
+            }
+
+            let foreign_peer_id = entry.my_peer_id_for_this_network;
+            let owner_key = authenticated_owner.public_key.clone();
+            match bindings.entry(foreign_peer_id) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(Some(owner_key));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    if slot
+                        .get()
+                        .as_ref()
+                        .is_none_or(|existing| *existing != owner_key)
+                    {
+                        slot.insert(None);
+                    }
+                }
+            }
+        }
+
+        bindings
+            .into_iter()
+            .filter_map(|(peer_id, key)| key.map(|key| (peer_id, key)))
+            .collect()
+    }
+
     fn refresh_verified_bridge_attestations(&self, peer_infos: &HashMap<PeerId, RoutePeerInfo>) {
         let now_unix_ms = unix_time_ms();
         let now = Instant::now();
@@ -5555,8 +5791,8 @@ impl PeerRouteServiceImpl {
             let Some(now_unix_ms) = now_unix_ms else {
                 return false;
             };
-            cached.bridge_input
-                && route_info_bridge_capability(info)
+            route_info_admin_attestation_capable(info)
+                && cached.bridge_input == route_info_bridge_input(info)
                 && info.peer_id == *peer_id
                 && info.noise_static_pubkey == cached.noise_static_pubkey
                 && cached.hmac == info.bridge_attestation_hmac
@@ -5575,6 +5811,7 @@ impl PeerRouteServiceImpl {
 
         if let (Some(now_unix_ms), Some(network_secret)) = (now_unix_ms, network_secret) {
             for (peer_id, info) in peer_infos {
+                let bridge_input = route_info_bridge_input(info);
                 let cache_is_current =
                     self.verified_bridge_attestations
                         .get(peer_id)
@@ -5582,7 +5819,7 @@ impl PeerRouteServiceImpl {
                             network_identity.network_secret_digest.is_some()
                                 && cached.network_secret_digest
                                     == network_identity.network_secret_digest
-                                && cached.bridge_input
+                                && cached.bridge_input == bridge_input
                                 && cached.noise_static_pubkey == info.noise_static_pubkey
                                 && cached.hmac == info.bridge_attestation_hmac
                                 && cached.issued_unix_ms == info.bridge_attestation_issued_unix_ms
@@ -5593,7 +5830,7 @@ impl PeerRouteServiceImpl {
                     continue;
                 }
                 if *peer_id == self.my_peer_id
-                    || !route_info_bridge_capability(info)
+                    || !route_info_admin_attestation_capable(info)
                     || info.peer_id != *peer_id
                     || info.bridge_attestation_hmac.len() != 32
                     || !bridge_attestation_time_valid(
@@ -5607,7 +5844,7 @@ impl PeerRouteServiceImpl {
                         &network_identity.network_name,
                         info.peer_id,
                         &info.noise_static_pubkey,
-                        true,
+                        bridge_input,
                         info.bridge_attestation_issued_unix_ms,
                         info.bridge_attestation_expiry_unix_ms,
                         &info.bridge_attestation_hmac,
@@ -5624,7 +5861,7 @@ impl PeerRouteServiceImpl {
                     *peer_id,
                     VerifiedBridgeAttestation {
                         noise_static_pubkey: info.noise_static_pubkey.clone(),
-                        bridge_input: true,
+                        bridge_input,
                         hmac: info.bridge_attestation_hmac.clone(),
                         issued_unix_ms: info.bridge_attestation_issued_unix_ms,
                         expiry_unix_ms: info.bridge_attestation_expiry_unix_ms,
@@ -5756,6 +5993,7 @@ impl PeerRouteServiceImpl {
                             secure_auth_level: SecureAuthLevel::PeerVerified,
                         })
                     })
+                    .or_else(|| self.attested_admin_identity_evidence(*peer_id, route_info))
             } else {
                 None
             };
@@ -5770,6 +6008,29 @@ impl PeerRouteServiceImpl {
                     foreign_owner: None,
                 },
             );
+        }
+
+        if topology_is_current {
+            // A virtual foreign relay is authenticated by the parent overlay before
+            // it can participate in this foreign OSPF topology. Publish that local
+            // PeerVerified identity so RelayPeerMap can run Noise IK and bootstrap
+            // the first OSPF exchange. Other unreachable identities remain absent.
+            for (peer_id, evidence) in &authenticated {
+                if *peer_id == self.my_peer_id
+                    || evidence.identity_type != PeerIdentityType::ForeignRelay
+                    || evidence.secure_auth_level != SecureAuthLevel::PeerVerified
+                {
+                    continue;
+                }
+                publications
+                    .entry(*peer_id)
+                    .or_insert_with(|| OriginAuthPublication {
+                        peer_id: *peer_id,
+                        generic: Some(evidence.clone()),
+                        bridge: None,
+                        foreign_owner: None,
+                    });
+            }
         }
         let publications = publications.into_values().collect::<Vec<_>>();
         let Some(interface) = self.publish_interface.read().unwrap().as_ref().cloned() else {
@@ -5866,11 +6127,6 @@ impl PeerRouteServiceImpl {
         } else {
             previous.foreign_network_my_peer_id_map.clone()
         };
-        let cached_local_conn_map = if domains.topology {
-            Arc::new(self.cached_local_conn_map.lock().unwrap().clone())
-        } else {
-            previous.cached_local_conn_map.clone()
-        };
         let public_ipv6_gateway_peer_id = self
             .public_ipv6_service()
             .and_then(|service| service.provider_peer_id_for_client())
@@ -5906,7 +6162,6 @@ impl PeerRouteServiceImpl {
             forwarding_peers,
             foreign_network_owner_map,
             foreign_network_my_peer_id_map,
-            cached_local_conn_map,
             decision_snapshot,
         });
         let source = self.forwarding_snapshot_source.read().unwrap().clone();
@@ -5965,6 +6220,28 @@ impl PeerRouteServiceImpl {
         route_info.noise_static_pubkey == authenticated.public_key
     }
 
+    fn attested_admin_identity_evidence(
+        &self,
+        peer_id: PeerId,
+        route_info: &RoutePeerInfo,
+    ) -> Option<AuthenticatedRoutePeerEvidence> {
+        if route_info.peer_id != peer_id || !route_info_admin_attestation_capable(route_info) {
+            return None;
+        }
+        self.verified_bridge_attestations
+            .get(&peer_id)
+            .and_then(|attestation| {
+                let live = attestation.noise_static_pubkey == route_info.noise_static_pubkey
+                    && attestation.deadline > Instant::now();
+                live.then(|| AuthenticatedRoutePeerEvidence {
+                    peer_id,
+                    identity_type: PeerIdentityType::Admin,
+                    noise_static_pubkey: route_info.noise_static_pubkey.clone(),
+                    secure_auth_level: SecureAuthLevel::NetworkSecretConfirmed,
+                })
+            })
+    }
+
     fn attested_bridge_deadline(
         &self,
         peer_id: PeerId,
@@ -6012,13 +6289,24 @@ impl PeerRouteServiceImpl {
         }
     }
 
-    fn cost_calculator_need_update(&self) -> bool {
+    fn cost_calculator_update_domains(&self) -> RouteRebuildDomains {
+        let calculator = self.cost_calculator.read().unwrap();
+        let Some(calculator) = calculator.as_ref() else {
+            return RouteRebuildDomains::default();
+        };
+        RouteRebuildDomains {
+            cost: calculator.cost_need_update(),
+            delivery: calculator.delivery_need_update(),
+            ..RouteRebuildDomains::default()
+        }
+    }
+
+    fn cost_calculator_next_update_in(&self) -> Option<Duration> {
         self.cost_calculator
             .read()
             .unwrap()
             .as_ref()
-            .map(|x| x.need_update())
-            .unwrap_or(false)
+            .and_then(|calculator| calculator.next_delivery_update_in())
     }
 
     fn handle_global_ctx_event(&self, event: &GlobalCtxEvent) {
@@ -6050,6 +6338,32 @@ impl PeerRouteServiceImpl {
         self.rebuild_domains_locked(domains);
     }
 
+    fn request_route_rebuild(&self, domains: RouteRebuildDomains) {
+        if !domains.needs_publication() {
+            return;
+        }
+        self.pending_route_rebuilds
+            .fetch_or(domains.bits(), Ordering::AcqRel);
+        self.route_rebuild_notify.notify_one();
+    }
+
+    async fn route_rebuild_worker(self: Arc<Self>) {
+        loop {
+            self.route_rebuild_notify.notified().await;
+            loop {
+                let bits = self.pending_route_rebuilds.swap(0, Ordering::AcqRel);
+                if bits == 0 {
+                    break;
+                }
+                let domains = RouteRebuildDomains::from_bits(bits);
+                self.rebuild_domains(domains);
+                if domains.topology {
+                    self.notify_public_ipv6_route_change();
+                }
+            }
+        }
+    }
+
     /// Recompute only the requested domains, then publish one coherent snapshot.
     ///
     /// The caller must hold `route_rebuild_lock` when it calls this method.
@@ -6060,13 +6374,14 @@ impl PeerRouteServiceImpl {
 
         let (mut effective_domains, mut build_input) =
             match self.update_route_tables_for_domains(domains) {
-                Some(result) => result,
+                Some(result) => {
+                    self.route_rebuild_failures.swap(0, Ordering::AcqRel);
+                    result
+                }
                 None => {
-                    if self
-                        .route_rebuild_budget_exceeded
-                        .swap(false, Ordering::AcqRel)
-                    {
-                        // Keep the previous complete forwarding snapshot.
+                    let failures = self.route_rebuild_failures.swap(0, Ordering::AcqRel);
+                    if failures & RouteRebuildDomains::topology().bits() != 0 {
+                        self.publish_conservative_forwarding_snapshot();
                         return;
                     }
                     let topology_is_current = self
@@ -6078,6 +6393,12 @@ impl PeerRouteServiceImpl {
                             topology.version == self.synced_route_info.version.get()
                         });
                     if topology_is_current {
+                        if domains.foreign {
+                            self.update_foreign_network_owner_map();
+                            self.rebuild_work
+                                .owner_map_rebuilds
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                         if let Err(error) = self.publish_forwarding_snapshot_for_domains(domains) {
                             tracing::warn!(?error, "forwarding snapshot publication rejected");
                         }
@@ -6086,91 +6407,26 @@ impl PeerRouteServiceImpl {
                     let Some(result) =
                         self.update_route_tables_for_domains(RouteRebuildDomains::topology())
                     else {
+                        self.route_rebuild_failures.swap(0, Ordering::AcqRel);
+                        self.publish_conservative_forwarding_snapshot();
                         return;
                     };
                     result
                 }
             };
 
-        // Sync handlers can update topology while this thread computes the
-        // bitmap or owner maps. Do not publish a policy from one topology with
-        // metadata from another topology.
+        // Sync handlers can update topology while this thread computes owner
+        // maps. Do not publish policy and metadata from different topologies.
         if self.synced_route_info.version.get() != build_input.version {
             let Some((fresh_domains, fresh_input)) =
                 self.update_route_tables_for_domains(RouteRebuildDomains::topology())
             else {
+                self.route_rebuild_failures.swap(0, Ordering::AcqRel);
+                self.publish_conservative_forwarding_snapshot();
                 return;
             };
             effective_domains = fresh_domains;
             build_input = fresh_input;
-        }
-
-        if effective_domains.topology {
-            let synced_version = build_input.version;
-
-            // The conn_bitmap should contain the complete list of directly
-            // connected peers. A union of destination peers preserves this.
-            let mut all_peer_ids: BTreeMap<PeerId, Version> = BTreeMap::new();
-            let mut add_to_all_peer_ids = |peer_id: PeerId, version: Version| {
-                all_peer_ids
-                    .entry(peer_id)
-                    .and_modify(|x| {
-                        if *x < version {
-                            *x = version;
-                        }
-                    })
-                    .or_insert(version);
-            };
-            for (src_peer_id, item) in build_input.conn_map.iter() {
-                let src_peer_id = *src_peer_id;
-                if !self.route_table.topology_peer_reachable(src_peer_id) {
-                    continue;
-                }
-                add_to_all_peer_ids(src_peer_id, item.version);
-                for dst_peer_id in item.connected_peers.iter() {
-                    add_to_all_peer_ids(*dst_peer_id, 0);
-                }
-            }
-
-            let mut conn_bitmap = RouteConnBitmap {
-                bitmap: vec![0; (all_peer_ids.len() * all_peer_ids.len()).div_ceil(8)],
-                peer_ids: all_peer_ids
-                    .iter()
-                    .map(|x| PeerIdVersion {
-                        peer_id: *x.0,
-                        version: *x.1,
-                    })
-                    .collect(),
-            };
-
-            let all_peer_ids = &conn_bitmap.peer_ids;
-            for (peer_idx, peer_id_version) in all_peer_ids.iter().enumerate() {
-                let Some(connected) = build_input.conn_map.get(&peer_id_version.peer_id) else {
-                    continue;
-                };
-
-                for (idx, other_peer_id_version) in all_peer_ids.iter().enumerate() {
-                    if connected
-                        .connected_peers
-                        .contains(&other_peer_id_version.peer_id)
-                    {
-                        let bit_idx = peer_idx * all_peer_ids.len() + idx;
-                        conn_bitmap.bitmap[bit_idx / 8] |= 1 << (bit_idx % 8);
-                    }
-                }
-            }
-
-            let mut locked = self.cached_local_conn_map.lock().unwrap();
-            if self
-                .cached_local_conn_map_version
-                .set_if_larger(synced_version)
-            {
-                *locked = conn_bitmap;
-            }
-            drop(locked);
-            self.rebuild_work
-                .bitmap_rebuilds
-                .fetch_add(1, Ordering::Relaxed);
         }
 
         if effective_domains.topology || effective_domains.foreign {
@@ -6181,11 +6437,32 @@ impl PeerRouteServiceImpl {
         }
 
         if self.synced_route_info.version.get() != build_input.version {
-            self.rebuild_domains_locked(RouteRebuildDomains::topology());
+            // Coalesce another topology rebuild into the periodic update loop.
+            self.mark_interface_peers_dirty();
             return;
         }
         if let Err(error) = self.publish_forwarding_snapshot_for_domains(effective_domains) {
             tracing::warn!(?error, "forwarding snapshot publication rejected");
+        }
+    }
+
+    fn publish_conservative_forwarding_snapshot(&self) {
+        let version = self.synced_route_info.version.get();
+        self.route_table.clear_for_version(version);
+        self.route_table_with_cost.clear_for_version(version);
+        self.route_table_with_speed.clear_for_version(version);
+        *self.committed_topology.lock().unwrap() = None;
+        self.foreign_network_owner_map.clear();
+        self.foreign_network_my_peer_id_map.clear();
+        self.verified_bridge_attestations.clear();
+        *self.bridge_attestation_next_deadline.lock().unwrap() = None;
+        if let Err(error) =
+            self.publish_forwarding_snapshot_for_domains(RouteRebuildDomains::topology())
+        {
+            tracing::warn!(
+                ?error,
+                "conservative forwarding snapshot publication rejected"
+            );
         }
     }
 
@@ -6315,16 +6592,6 @@ impl PeerRouteServiceImpl {
         }
 
         Some(RouteConnPeerList { peer_conn_infos })
-    }
-
-    fn build_conn_bitmap(&self) -> RouteConnBitmap {
-        self.cached_local_conn_map.lock().unwrap().clone()
-    }
-
-    fn estimate_conn_bitmap_size(&self) -> usize {
-        let cached_conn_map = self.cached_local_conn_map.lock().unwrap();
-        cached_conn_map.bitmap.len()
-            + (cached_conn_map.peer_ids.len() * std::mem::size_of::<PeerIdVersion>())
     }
 
     fn build_foreign_network_info(
@@ -6504,48 +6771,156 @@ impl PeerRouteServiceImpl {
         }
     }
 
+    /// The identity this node presents to any peer, mirrored from
+    /// `RoutePeerInfo::new_updated_self`.
+    fn local_route_identity_type(&self) -> PeerIdentityType {
+        if self
+            .global_ctx
+            .get_hostname()
+            .starts_with(PUBLIC_SERVER_HOSTNAME_PREFIX)
+        {
+            PeerIdentityType::ForeignRelay
+        } else if self
+            .global_ctx
+            .get_network_identity()
+            .network_secret
+            .is_some()
+        {
+            PeerIdentityType::Admin
+        } else {
+            PeerIdentityType::Credential
+        }
+    }
+
+    fn build_foreign_relay_conn_info(
+        &self,
+        session: &SyncRouteSession,
+    ) -> Option<crate::proto::peer_rpc::sync_route_info_request::ConnInfo> {
+        let conn_map = self.synced_route_info.conn_map.read();
+        let conn_info = conn_map.get(&self.my_peer_id)?;
+        let route_snapshot = self.forwarding_snapshot();
+
+        // A ForeignRelay owns exactly one advertised topology row. Its logical
+        // adjacency includes peers it can currently reach through other relays,
+        // allowing a downstream tenant to route A -> R1 -> R2 -> B while R1
+        // remains the sole next hop selected by that tenant. No third-party
+        // connection source is asserted by this record.
+        let mut connected_peer_ids = conn_info.connected_peers.clone();
+        for peer_id in route_snapshot.route_table.peer_infos.keys() {
+            if *peer_id != self.my_peer_id && route_snapshot.route_table.peer_reachable(*peer_id) {
+                connected_peer_ids.insert(*peer_id);
+            }
+        }
+
+        // Reachability can change without a direct connection mutation. Fold the
+        // route topology version into this relay-owned row so those changes are
+        // delivered to established synchronization sessions.
+        let version = conn_info
+            .version
+            .get()
+            .max(self.synced_route_info.version.get());
+        if session.check_saved_conn_version_update_to_date(self.my_peer_id, version) {
+            return None;
+        }
+        Some(
+            RouteConnPeerList {
+                peer_conn_infos: vec![PeerConnInfo {
+                    peer_id: Some(PeerIdVersion {
+                        peer_id: self.my_peer_id,
+                        version,
+                    }),
+                    connected_peer_ids: connected_peer_ids.into_iter().collect(),
+                }],
+            }
+            .into(),
+        )
+    }
+
+    fn restore_forwarded_admin_attestation(&self, info: &mut RoutePeerInfo) {
+        let Some(raw_info) = self.synced_route_info.raw_peer_infos.get(&info.peer_id) else {
+            return;
+        };
+        let raw_bytes = raw_info.encode_to_vec();
+        let Ok(advertised) = RoutePeerInfo::decode(raw_bytes.as_slice()) else {
+            return;
+        };
+        if advertised.peer_id != info.peer_id
+            || advertised.version != info.version
+            || advertised.identity_type != PeerIdentityType::Admin as i32
+            || advertised.noise_static_pubkey != info.noise_static_pubkey
+            || advertised.bridge_attestation_hmac.len() != 32
+        {
+            return;
+        }
+
+        // Restore only fields covered by, or required to verify, the shared-secret
+        // Admin identity attestation. Other capabilities stay sanitized in the
+        // relay's local typed view and in the forwarded typed record.
+        SyncedRouteInfo::set_peer_identity(info, PeerIdentityType::Admin);
+        info.feature_flag.get_or_insert_default().bridge_input =
+            route_info_bridge_input(&advertised);
+        info.bridge_attestation_hmac = advertised.bridge_attestation_hmac;
+        info.bridge_attestation_issued_unix_ms = advertised.bridge_attestation_issued_unix_ms;
+        info.bridge_attestation_expiry_unix_ms = advertised.bridge_attestation_expiry_unix_ms;
+    }
+
     fn build_sync_request(
         &self,
         session: &SyncRouteSession,
         dst_peer_id: PeerId,
+        destination_identity_type: Option<PeerIdentityType>,
     ) -> (
         Option<Vec<RoutePeerInfo>>,
         Option<crate::proto::peer_rpc::sync_route_info_request::ConnInfo>,
         Option<RouteForeignNetworkInfos>,
     ) {
         let route_infos = self.build_route_info(session);
-        let conn_info = self.build_conn_info(session, dst_peer_id);
-        let foreign_network = self.build_foreign_network_info(session);
-
-        (route_infos, conn_info, foreign_network)
+        let local_identity_type = self.local_route_identity_type();
+        if local_identity_type == PeerIdentityType::ForeignRelay {
+            let route_infos = route_infos.map(|mut infos| {
+                for info in &mut infos {
+                    if info.peer_id != self.my_peer_id {
+                        self.restore_forwarded_admin_attestation(info);
+                    }
+                }
+                infos
+            });
+            return (
+                route_infos,
+                self.build_foreign_relay_conn_info(session),
+                None,
+            );
+        }
+        // Receivers enforce the sender role shape from the authenticated link
+        // scope. An Admin tenant is presented as ForeignRelay/SharedNode on a
+        // cross-network link, so it must use the restricted self-only shape.
+        let destination_scopes_sender = matches!(
+            destination_identity_type,
+            Some(PeerIdentityType::ForeignRelay | PeerIdentityType::SharedNode)
+        );
+        if matches!(local_identity_type, PeerIdentityType::Admin) && !destination_scopes_sender {
+            let conn_info = self.build_conn_info(session, dst_peer_id);
+            let foreign_network = self.build_foreign_network_info(session);
+            return (route_infos, conn_info, foreign_network);
+        }
+        let route_infos = route_infos.and_then(|infos| {
+            let infos = infos
+                .into_iter()
+                .filter(|info| info.peer_id == self.my_peer_id)
+                .collect::<Vec<_>>();
+            (!infos.is_empty()).then_some(infos)
+        });
+        (route_infos, None, None)
     }
 
     fn build_conn_info(
         &self,
         session: &SyncRouteSession,
-        dst_peer_id: PeerId,
+        _dst_peer_id: PeerId,
     ) -> Option<crate::proto::peer_rpc::sync_route_info_request::ConnInfo> {
-        // Check if destination peer supports selective peer list sync
-        let dst_supports_peer_list = self
-            .synced_route_info
-            .peer_infos
-            .read()
-            .get(&dst_peer_id)
-            .and_then(|p| p.feature_flag)
-            .map(|x| x.support_conn_list_sync)
-            .unwrap_or(false)
-            || FORCE_USE_CONN_LIST.load(Ordering::Relaxed);
-
-        // Both formats are supported, choose the more efficient one
         let mut conn_list_estimated_size = 0;
-        let peer_list = self.build_conn_peer_list(session, &mut conn_list_estimated_size)?;
-        let bitmap_size = self.estimate_conn_bitmap_size();
-
-        if conn_list_estimated_size < bitmap_size && dst_supports_peer_list {
-            Some(peer_list.into())
-        } else {
-            Some(self.build_conn_bitmap().into())
-        }
+        self.build_conn_peer_list(session, &mut conn_list_estimated_size)
+            .map(Into::into)
     }
 
     async fn clear_expired_peer(&self) {
@@ -6639,6 +7014,13 @@ impl PeerRouteServiceImpl {
         peer_rpc: Arc<PeerRpcManager>,
         sync_as_initiator: bool,
     ) -> bool {
+        let destination_identity_type = {
+            let interface = self.interface.lock().await.as_ref().cloned();
+            match interface {
+                Some(interface) => interface.get_peer_identity_type(dst_peer_id).await,
+                None => None,
+            }
+        };
         let Some(session) = self.get_session(dst_peer_id) else {
             // if session not exist, exit the sync loop.
             return true;
@@ -6651,7 +7033,7 @@ impl PeerRouteServiceImpl {
         let next_last_sync_succ_timestamp =
             self.synced_route_info.get_next_last_sync_succ_timestamp();
         let (peer_infos, conn_info, foreign_network) =
-            self.build_sync_request(&session, dst_peer_id);
+            self.build_sync_request(&session, dst_peer_id, destination_identity_type);
         if peer_infos.is_none()
             && conn_info.is_none()
             && foreign_network.is_none()
@@ -6898,7 +7280,7 @@ fn skip_wire_value(
     Ok(())
 }
 
-fn validate_raw_route_request_budget(input: &[u8]) -> rpc_types::error::Result<()> {
+fn get_raw_peer_infos(input: &[u8]) -> rpc_types::error::Result<Vec<DynamicMessage>> {
     if input.len() > MAX_ROUTE_SYNC_RAW_REQUEST_BYTES {
         return Err(rpc_types::error::Error::MalformatRpcPacket(format!(
             "route synchronization raw request is too large: {}",
@@ -6908,6 +7290,7 @@ fn validate_raw_route_request_budget(input: &[u8]) -> rpc_types::error::Result<(
 
     let mut cursor = 0usize;
     let mut peer_info_bytes = 0usize;
+    let mut raw_peer_infos = Vec::new();
     while cursor < input.len() {
         let key = read_wire_varint(input, &mut cursor)?;
         let field_number = key >> 3;
@@ -6968,6 +7351,17 @@ fn validate_raw_route_request_budget(input: &[u8]) -> rpc_types::error::Result<(
                             "route synchronization raw peer info is truncated".to_string(),
                         ));
                     }
+                    let item_start = nested - item_length;
+                    let raw = DynamicMessage::decode(
+                        RoutePeerInfo::default().descriptor(),
+                        &input[item_start..nested],
+                    )
+                    .map_err(|error| {
+                        rpc_types::error::Error::MalformatRpcPacket(format!(
+                            "route synchronization raw peer info decode failed: {error}"
+                        ))
+                    })?;
+                    raw_peer_infos.push(raw);
                     continue;
                 }
                 skip_wire_value(input, &mut nested, nested_wire)?;
@@ -6982,57 +7376,7 @@ fn validate_raw_route_request_budget(input: &[u8]) -> rpc_types::error::Result<(
             skip_wire_value(input, &mut cursor, wire_type)?;
         }
     }
-    Ok(())
-}
-
-fn get_raw_peer_infos(
-    req_raw_input: &mut bytes::Bytes,
-) -> rpc_types::error::Result<Vec<DynamicMessage>> {
-    validate_raw_route_request_budget(req_raw_input.as_ref())?;
-    let sync_req_dynamic_msg =
-        DynamicMessage::decode(SyncRouteInfoRequest::default().descriptor(), req_raw_input)
-            .map_err(|error| {
-                rpc_types::error::Error::MalformatRpcPacket(format!(
-                    "route synchronization raw request decode failed: {error}"
-                ))
-            })?;
-
-    let peer_infos = sync_req_dynamic_msg
-        .get_field_by_name("peer_infos")
-        .ok_or_else(|| {
-            rpc_types::error::Error::MalformatRpcPacket(
-                "route synchronization request has no peer_infos field".to_string(),
-            )
-        })?;
-    let peer_infos = peer_infos.as_message().ok_or_else(|| {
-        rpc_types::error::Error::MalformatRpcPacket(
-            "route synchronization peer_infos is not a message".to_string(),
-        )
-    })?;
-    let infos: Vec<DynamicMessage> = peer_infos
-        .get_field_by_name("items")
-        .ok_or_else(|| {
-            rpc_types::error::Error::MalformatRpcPacket(
-                "route synchronization peer_infos has no items field".to_string(),
-            )
-        })?
-        .as_list()
-        .ok_or_else(|| {
-            rpc_types::error::Error::MalformatRpcPacket(
-                "route synchronization peer_infos items is not a list".to_string(),
-            )
-        })?
-        .iter()
-        .map(|item| {
-            item.as_message().cloned().ok_or_else(|| {
-                rpc_types::error::Error::MalformatRpcPacket(
-                    "route synchronization peer info is not a message".to_string(),
-                )
-            })
-        })
-        .collect::<rpc_types::error::Result<Vec<_>>>()?;
-
-    Ok(infos)
+    Ok(raw_peer_infos)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -7106,9 +7450,6 @@ impl OspfRouteRpc for RouteSessionManager {
             peer_infos.as_deref(),
             conn_info.as_ref(),
             foreign_network.as_ref(),
-            credential_info
-                .as_ref()
-                .map(|credential| credential.allow_relay),
         )?;
         if let Some(peer_infos) = peer_infos.as_deref() {
             validate_route_peer_infos(peer_infos)?;
@@ -7120,12 +7461,12 @@ impl OspfRouteRpc for RouteSessionManager {
             validate_route_foreign_network_info(foreign_network)?;
         }
         let raw_peer_infos = if let Some(peer_infos_ref) = &peer_infos {
-            let mut raw_input = ctrl.get_raw_input().ok_or_else(|| {
+            let raw_input = ctrl.get_raw_input().ok_or_else(|| {
                 rpc_types::error::Error::MalformatRpcPacket(
                     "route synchronization request has no raw input".to_string(),
                 )
             })?;
-            let r = get_raw_peer_infos(&mut raw_input)?;
+            let r = get_raw_peer_infos(raw_input.as_ref())?;
             if r.len() != peer_infos_ref.len() {
                 return Err(rpc_types::error::Error::MalformatRpcPacket(format!(
                     "route synchronization peer info count mismatch: decoded {}, request {}",
@@ -7152,13 +7493,6 @@ impl OspfRouteRpc for RouteSessionManager {
             Some(r)
         } else {
             None
-        };
-
-        let conn_info = match (authenticated_peer_identity_type, conn_info) {
-            (PeerIdentityType::Credential, Some(ConnInfo::ConnPeerList(list))) => {
-                Some(restrict_credential_conn_info(list, from_peer_id)?)
-            }
-            (_, conn_info) => conn_info,
         };
 
         let ret = self
@@ -7564,16 +7898,14 @@ impl RouteSessionManager {
             &mut info,
             PeerIdentityType::SharedNode,
         );
+        // Keep the advertised identity and feature flag in the raw carrier. The
+        // local typed view above remains scoped as SharedNode, while a public
+        // ForeignRelay can later forward the tenant's independently verifiable
+        // Admin attestation to peers that know this network's secret.
         patch_raw_from_info(
             &mut raw_info,
             &info,
-            &[
-                "proxy_cidrs",
-                "groups",
-                "trusted_credential_pubkeys",
-                "feature_flag",
-                "identity_type",
-            ],
+            &["proxy_cidrs", "groups", "trusted_credential_pubkeys"],
         );
         Some((info, raw_info))
     }
@@ -7588,28 +7920,29 @@ impl RouteSessionManager {
             .iter()
             .cloned()
             .zip(raw_peer_infos.iter().cloned())
-            .filter(|(info, _)| info.peer_id == from_peer_id)
             .map(|(mut info, mut raw_info)| {
-                info.proxy_cidrs.clear();
-                info.groups.clear();
-                info.trusted_credential_pubkeys.clear();
-                SyncedRouteInfo::set_peer_identity(&mut info, PeerIdentityType::ForeignRelay);
-                SyncedRouteInfo::sanitize_untrusted_role_capabilities(
-                    &mut info,
-                    PeerIdentityType::ForeignRelay,
-                );
-                patch_raw_from_info(
-                    &mut raw_info,
-                    &info,
-                    &[
-                        "proxy_cidrs",
-                        "groups",
-                        "trusted_credential_pubkeys",
-                        "feature_flag",
-                        "multicast_groups",
-                        "identity_type",
-                    ],
-                );
+                if info.peer_id == from_peer_id {
+                    info.proxy_cidrs.clear();
+                    info.groups.clear();
+                    info.trusted_credential_pubkeys.clear();
+                    SyncedRouteInfo::set_peer_identity(&mut info, PeerIdentityType::ForeignRelay);
+                    SyncedRouteInfo::sanitize_untrusted_role_capabilities(
+                        &mut info,
+                        PeerIdentityType::ForeignRelay,
+                    );
+                    patch_raw_from_info(
+                        &mut raw_info,
+                        &info,
+                        &[
+                            "proxy_cidrs",
+                            "groups",
+                            "trusted_credential_pubkeys",
+                            "feature_flag",
+                            "multicast_groups",
+                            "identity_type",
+                        ],
+                    );
+                }
                 (info, raw_info)
             })
             .unzip()
@@ -7732,41 +8065,43 @@ impl RouteSessionManager {
                 .map(|(infos, raw)| (infos.as_slice(), raw.as_slice()))
                 .unwrap_or((peer_infos.as_slice(), raw_peer_infos));
             let accept_conn_info = match from_identity_type {
-                PeerIdentityType::Admin => true,
-                PeerIdentityType::Credential => {
-                    credential_info.map(|tc| tc.allow_relay).unwrap_or(false)
-                }
-                PeerIdentityType::SharedNode => false,
-                PeerIdentityType::ForeignRelay => false,
+                PeerIdentityType::Admin | PeerIdentityType::ForeignRelay => true,
+                PeerIdentityType::Credential | PeerIdentityType::SharedNode => false,
             };
             let foreign_relay_overwrite =
                 matches!(from_identity_type, PeerIdentityType::ForeignRelay)
                     && pi.iter().any(|info| {
-                        service_impl
-                            .synced_route_info
-                            .peer_infos
-                            .read()
-                            .get(&info.peer_id)
-                            .is_some_and(|old| {
-                                SyncedRouteInfo::peer_identity_type(old)
-                                    != Some(PeerIdentityType::ForeignRelay)
-                            })
+                        info.peer_id == my_peer_id
+                            || (info.peer_id != from_peer_id
+                                && service_impl.authenticated_peers.contains_key(&info.peer_id))
                     });
             if foreign_relay_overwrite {
                 tracing::warn!(
                     from_peer_id,
                     "foreign relay attempted to overwrite an authenticated local peer"
                 );
-            } else if !pi.is_empty() || accept_conn_info {
-                service_impl
+                need_update_route_table |= service_impl
                     .synced_route_info
-                    .update_peer_infos_and_conn_info(
+                    .update_peer_infos_and_conn_info_with_authority(
+                        my_peer_id,
+                        service_impl.my_peer_route_id,
+                        from_peer_id,
+                        &[],
+                        &[],
+                        None,
+                        false,
+                    )?;
+            } else {
+                let topology_changed = service_impl
+                    .synced_route_info
+                    .update_peer_infos_and_conn_info_with_authority(
                         my_peer_id,
                         service_impl.my_peer_route_id,
                         from_peer_id,
                         pi,
                         rpi,
                         accept_conn_info.then_some(conn_info.as_ref()).flatten(),
+                        accept_conn_info,
                     )?;
                 if !pi.is_empty() {
                     let trust_admin_groups_without_proof = service_impl
@@ -7786,32 +8121,40 @@ impl RouteSessionManager {
                 if accept_conn_info && let Some(conn_info) = conn_info.as_ref() {
                     session.update_dst_saved_conn_info_version(conn_info, from_peer_id);
                 }
-                need_update_route_table = true;
+                need_update_route_table |= topology_changed;
             }
         } else if let Some(conn_info) = &conn_info {
-            // Restricted peers cannot publish topology for other peers.
             let accept_conn_info = match from_identity_type {
-                PeerIdentityType::Admin => true,
-                PeerIdentityType::Credential => {
-                    credential_info.map(|tc| tc.allow_relay).unwrap_or(false)
-                }
-                PeerIdentityType::SharedNode => false,
-                PeerIdentityType::ForeignRelay => false,
+                PeerIdentityType::Admin | PeerIdentityType::ForeignRelay => true,
+                PeerIdentityType::Credential | PeerIdentityType::SharedNode => false,
             };
+            let topology_changed = service_impl
+                .synced_route_info
+                .update_peer_infos_and_conn_info_with_authority(
+                    my_peer_id,
+                    service_impl.my_peer_route_id,
+                    from_peer_id,
+                    &[],
+                    &[],
+                    accept_conn_info.then_some(conn_info),
+                    accept_conn_info,
+                )?;
             if accept_conn_info {
-                service_impl
-                    .synced_route_info
-                    .update_peer_infos_and_conn_info(
-                        my_peer_id,
-                        service_impl.my_peer_route_id,
-                        from_peer_id,
-                        &[],
-                        &[],
-                        Some(conn_info),
-                    )?;
                 session.update_dst_saved_conn_info_version(conn_info, from_peer_id);
-                need_update_route_table = true;
             }
+            need_update_route_table |= topology_changed;
+        } else if !matches!(from_identity_type, PeerIdentityType::Admin) {
+            need_update_route_table |= service_impl
+                .synced_route_info
+                .update_peer_infos_and_conn_info_with_authority(
+                    my_peer_id,
+                    service_impl.my_peer_route_id,
+                    from_peer_id,
+                    &[],
+                    &[],
+                    None,
+                    false,
+                )?;
         }
 
         if need_update_route_table {
@@ -7828,29 +8171,17 @@ impl RouteSessionManager {
             }
         }
 
-        if need_update_route_table || foreign_network_changed {
-            let domains = if need_update_route_table {
-                RouteRebuildDomains::topology()
-            } else {
-                RouteRebuildDomains::foreign()
-            };
-            service_impl.rebuild_domains(domains);
-            if need_update_route_table
-                && let Some(public_ipv6_service) = service_impl.public_ipv6_service()
-            {
-                public_ipv6_service.handle_route_change();
-            }
+        if foreign_network_changed && !need_update_route_table {
+            service_impl.request_route_rebuild(RouteRebuildDomains::foreign());
         }
 
         tracing::debug!(
-            "handling sync_route_info rpc: from_peer_id: {:?}, is_initiator: {:?}, peer_infos: {:?}, conn_info: {:?}, synced_route_info: {:?} session: {:?}, new_route_table: {:?}",
             from_peer_id,
             is_initiator,
-            peer_infos,
-            conn_info,
-            service_impl.synced_route_info,
-            session,
-            service_impl.route_table
+            peer_info_count = peer_infos.as_ref().map_or(0, Vec::len),
+            has_connection_info = conn_info.is_some(),
+            route_version = service_impl.synced_route_info.version.get(),
+            "handled route synchronization"
         );
 
         session
@@ -8039,12 +8370,22 @@ impl PeerRoute {
                 session_mgr.sync_now("update_my_infos");
             }
 
-            if service_impl.cost_calculator_need_update() {
-                tracing::debug!("cost_calculator_need_update");
-                service_impl.rebuild_domains(RouteRebuildDomains::cost_and_delivery());
+            let measurement_domains = service_impl.cost_calculator_update_domains();
+            if measurement_domains.needs_publication() {
+                tracing::debug!(?measurement_domains, "route measurements need an update");
+                service_impl.rebuild_domains(measurement_domains);
             }
 
             let bridge_attestation_sleep = service_impl.bridge_attestation_sleep_duration();
+            let update_sleep = service_impl
+                .cost_calculator_next_update_in()
+                .map_or(bridge_attestation_sleep, |speed_expiry| {
+                    bridge_attestation_sleep.min(speed_expiry)
+                })
+                // Local configuration changes (ipv4, proxy cidrs, ...) have no
+                // global event. Keep the one-second resync cadence so
+                // update_my_infos observes them promptly.
+                .min(Duration::from_secs(1));
             select! {
                 ev = global_event_receiver.recv() => {
                     if let Ok(ev_ref) = &ev {
@@ -8055,7 +8396,7 @@ impl PeerRoute {
                     }
                     tracing::info!(?ev, "global event received in update_my_peer_info_routine");
                 }
-                _ = tokio::time::sleep(bridge_attestation_sleep) => {}
+                _ = tokio::time::sleep(update_sleep) => {}
             }
         }
     }
@@ -8085,6 +8426,11 @@ impl PeerRoute {
                 self.service_impl.clone(),
                 self.session_mgr.clone(),
             ));
+
+        self.tasks
+            .lock()
+            .unwrap()
+            .spawn(self.service_impl.clone().route_rebuild_worker());
 
         self.tasks
             .lock()
@@ -8479,9 +8825,8 @@ impl Route for PeerRoute {
         &self,
         network_identity: &NetworkIdentity,
     ) -> Vec<(PeerId, Vec<u8>)> {
-        let _ = network_identity;
-        // Route wire owner keys are discovery hints, not authentication.
-        Vec::new()
+        self.service_impl
+            .authenticated_foreign_network_peers(network_identity)
     }
 
     async fn get_authenticated_foreign_origin_owner_key(
@@ -8489,9 +8834,10 @@ impl Route for PeerRoute {
         network_identity: &NetworkIdentity,
         origin_peer_id: PeerId,
     ) -> Option<Vec<u8>> {
-        let _ = (network_identity, origin_peer_id);
-        // A signed or Noise-admitted owner must populate the descriptor first.
-        None
+        self.service_impl
+            .authenticated_foreign_network_peers(network_identity)
+            .into_iter()
+            .find_map(|(peer_id, key)| (peer_id == origin_peer_id).then_some(key))
     }
 
     async fn get_origin_my_peer_id(
@@ -8576,7 +8922,16 @@ impl Route for PeerRoute {
         {
             return None;
         }
-        let source = match SyncedRouteInfo::peer_identity_type(&info)? {
+        let identity_type = SyncedRouteInfo::peer_identity_type(&info)?;
+        if identity_type == PeerIdentityType::Admin
+            && self
+                .service_impl
+                .attested_admin_identity_evidence(peer_id, &info)
+                .is_some()
+        {
+            return Some(info);
+        }
+        let source = match identity_type {
             PeerIdentityType::Admin => crate::common::global_ctx::TrustedKeySource::OspfNode,
             PeerIdentityType::Credential => {
                 crate::common::global_ctx::TrustedKeySource::OspfCredential
@@ -8616,7 +8971,15 @@ impl Route for PeerRoute {
         {
             return None;
         }
-        let source = match SyncedRouteInfo::peer_identity_type(&info)? {
+        let identity_type = SyncedRouteInfo::peer_identity_type(&info)?;
+        if identity_type == PeerIdentityType::Admin
+            && let Some(evidence) = self
+                .service_impl
+                .attested_admin_identity_evidence(peer_id, &info)
+        {
+            return Some(evidence.secure_auth_level);
+        }
+        let source = match identity_type {
             PeerIdentityType::Admin => crate::common::global_ctx::TrustedKeySource::OspfNode,
             PeerIdentityType::Credential => {
                 crate::common::global_ctx::TrustedKeySource::OspfCredential
@@ -8653,7 +9016,7 @@ mod tests {
     use cidr::{Ipv4Cidr, Ipv4Inet, Ipv6Inet};
     use dashmap::DashMap;
     use parking_lot::Mutex;
-    use petgraph::visit::EdgeRef as _;
+    use petgraph::{graph::NodeIndex, visit::EdgeRef as _};
     use prefix_trie::PrefixMap;
     use prost::Message;
     use prost_reflect::{DynamicMessage, ReflectMessage};
@@ -8677,11 +9040,13 @@ mod tests {
         MAX_ROUTE_SYNC_EDGES_PER_SOURCE, MAX_ROUTE_SYNC_PEERS, NextHopInfo, PeerConnInfo,
         PeerRoute, REMOVE_DEAD_PEER_INFO_AFTER, RouteConnBitmap, RouteConnInfo, RouteConnPeerList,
         RouteQuality, RouteRebuildDomains, RouteTable, SpeedEdge, SpeedGraph, SyncRouteSession,
-        SyncedRouteInfo, TopologyBuildInput, WidestPathWorkBudget, get_raw_peer_infos,
-        prepare_widest_path, validate_route_conn_info, validate_route_foreign_network_info,
-        validate_route_peer_infos, validate_route_sync_role_shape, widest_path_with_first_hop,
-        widest_path_with_preparation, widest_path_with_work_stats, widest_path_work_limit,
+        SyncedRouteInfo, TopologyBuildInput, WidestPathWorkBudget,
+        add_authorized_relay_reverse_edges, get_raw_peer_infos, prepare_widest_path,
+        validate_route_conn_info, validate_route_foreign_network_info, validate_route_peer_infos,
+        validate_route_sync_role_shape, widest_path_with_first_hop, widest_path_with_preparation,
+        widest_path_with_work_stats, widest_path_work_limit,
     };
+
     use crate::proto::common::TimestampExt;
     use crate::{
         common::{
@@ -8701,8 +9066,9 @@ mod tests {
             peer_ospf_route::{FORCE_USE_CONN_LIST, PeerIdVersion, PeerRouteServiceImpl},
             route_trait::{
                 DefaultRouteCostCalculator, ForwardingDecisionSnapshot,
-                ForwardingDecisionSnapshotStoreInner, NextHopPolicy, Route,
-                RouteCostCalculatorInterface, RouteInterface, RouteInterfaceBox,
+                ForwardingDecisionSnapshotStoreInner, ForwardingSnapshotSourceToken, NextHopPolicy,
+                OriginAuthPublication, Route, RouteCostCalculatorInterface, RouteInterface,
+                RouteInterfaceBox,
             },
             tests::{connect_peer_manager, create_mock_peer_manager, wait_route_appear},
         },
@@ -8723,8 +9089,6 @@ mod tests {
         },
         tunnel::common::tests::wait_for_condition,
     };
-    use base64::Engine as _;
-    use base64::prelude::BASE64_STANDARD;
     use ordered_hash_map::OrderedHashMap;
 
     #[test]
@@ -8783,6 +9147,63 @@ mod tests {
 
         reader.join().unwrap();
         assert!(!failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn conservative_snapshot_revokes_all_forwarding_state() {
+        let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
+        let mut peer_info = RoutePeerInfo::new();
+        peer_info.peer_id = 2;
+        peer_info.version = 1;
+        service.route_table.peer_infos.insert(2, peer_info);
+        service.route_table.next_hop_map.insert(
+            2,
+            NextHopInfo {
+                next_hop_peer_id: 2,
+                path_delivery_bps: 1,
+                path_latency: 1,
+                path_len: 1,
+                version: 1,
+            },
+        );
+        service.route_table.next_hop_map_version.set(1);
+        service
+            .foreign_network_owner_map
+            .insert(service.global_ctx.get_network_identity(), vec![2]);
+        service
+            .foreign_network_my_peer_id_map
+            .insert(("foreign".to_owned(), 2), 9);
+        service.publish_forwarding_snapshot();
+
+        assert!(
+            service
+                .forwarding_snapshot()
+                .route_table
+                .get_next_hop(2)
+                .is_some()
+        );
+        assert!(
+            !service
+                .forwarding_snapshot()
+                .foreign_network_owner_map
+                .is_empty()
+        );
+
+        service.publish_conservative_forwarding_snapshot();
+
+        let snapshot = service.forwarding_snapshot();
+        assert!(snapshot.route_table.next_hop_map.is_empty());
+        assert!(snapshot.route_table_with_cost.next_hop_map.is_empty());
+        assert!(snapshot.route_table_with_speed.next_hop_map.is_empty());
+        assert!(snapshot.forwarding_peers.ethernet_peers().is_empty());
+        assert!(snapshot.foreign_network_owner_map.is_empty());
+        assert!(snapshot.foreign_network_my_peer_id_map.is_empty());
+        assert!(
+            snapshot
+                .decision_snapshot
+                .next_hop(2, NextHopPolicy::LeastHop)
+                .is_none()
+        );
     }
 
     fn bridge_route_info(peer_id: PeerId, static_key: Vec<u8>) -> RoutePeerInfo {
@@ -9170,7 +9591,7 @@ mod tests {
     }
 
     #[test]
-    fn cost_only_rebuild_reuses_topology_and_connection_bitmap() {
+    fn cost_only_rebuild_reuses_topology() {
         let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
         seed_snapshot_test_topology(&service, 1);
 
@@ -9181,7 +9602,6 @@ mod tests {
             .rebuild_work
             .least_hop_rebuilds
             .load(Ordering::Acquire);
-        let bitmap = service.rebuild_work.bitmap_rebuilds.load(Ordering::Acquire);
         let least_cost = service
             .rebuild_work
             .least_cost_rebuilds
@@ -9199,10 +9619,6 @@ mod tests {
                 .least_hop_rebuilds
                 .load(Ordering::Acquire),
             least_hop
-        );
-        assert_eq!(
-            service.rebuild_work.bitmap_rebuilds.load(Ordering::Acquire),
-            bitmap
         );
         assert_eq!(
             service
@@ -9245,7 +9661,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_only_rebuild_does_not_rebuild_route_policies_or_bitmap() {
+    fn bridge_only_rebuild_does_not_rebuild_route_policies() {
         let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
         seed_snapshot_test_topology(&service, 1);
 
@@ -9261,7 +9677,6 @@ mod tests {
             .rebuild_work
             .max_goodput_rebuilds
             .load(Ordering::Acquire);
-        let bitmap = service.rebuild_work.bitmap_rebuilds.load(Ordering::Acquire);
 
         service.rebuild_domains(RouteRebuildDomains::bridge());
 
@@ -9286,16 +9701,112 @@ mod tests {
                 .load(Ordering::Acquire),
             max_goodput
         );
-        assert_eq!(
-            service.rebuild_work.bitmap_rebuilds.load(Ordering::Acquire),
-            bitmap
-        );
         assert!(
             service
                 .rebuild_work
                 .bridge_refreshes
                 .load(Ordering::Acquire)
                 >= 1
+        );
+    }
+
+    #[test]
+    fn foreign_only_rebuild_publishes_the_current_owner_map() {
+        let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
+        seed_snapshot_test_topology(&service, 1);
+        let network_name = "foreign-net".to_string();
+        let network_secret_digest = [9_u8; 32];
+        service.synced_route_info.foreign_network.insert(
+            ForeignNetworkRouteInfoKey {
+                peer_id: 2,
+                network_name: network_name.clone(),
+            },
+            ForeignNetworkRouteInfoEntry {
+                foreign_peer_ids: vec![77],
+                version: 1,
+                network_secret_digest: network_secret_digest.to_vec(),
+                my_peer_id_for_this_network: 88,
+                ..Default::default()
+            },
+        );
+
+        service.rebuild_domains(RouteRebuildDomains::foreign());
+
+        let network = NetworkIdentity {
+            network_name,
+            network_secret: None,
+            network_secret_digest: Some(network_secret_digest),
+        };
+        assert_eq!(
+            service
+                .forwarding_snapshot()
+                .foreign_network_owner_map
+                .get(&network),
+            Some(&vec![88])
+        );
+    }
+
+    #[test]
+    fn foreign_owner_key_requires_matching_authenticated_main_owner() {
+        let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
+        seed_snapshot_test_topology(&service, 1);
+        let network_name = "foreign-net".to_string();
+        let network_secret_digest = [9_u8; 32];
+        let owner_key = vec![7_u8; 32];
+        service.synced_route_info.foreign_network.insert(
+            ForeignNetworkRouteInfoKey {
+                peer_id: 2,
+                network_name: network_name.clone(),
+            },
+            ForeignNetworkRouteInfoEntry {
+                foreign_peer_ids: vec![77],
+                version: 1,
+                network_secret_digest: network_secret_digest.to_vec(),
+                my_peer_id_for_this_network: 88,
+                owner_noise_static_pubkey: owner_key.clone(),
+                ..Default::default()
+            },
+        );
+        service.rebuild_domains(RouteRebuildDomains::foreign());
+        let network = NetworkIdentity {
+            network_name,
+            network_secret: None,
+            network_secret_digest: Some(network_secret_digest),
+        };
+
+        assert!(
+            service
+                .authenticated_foreign_network_peers(&network)
+                .is_empty()
+        );
+
+        service.authenticated_peers.insert(
+            2,
+            AuthenticatedPeerInfo {
+                peer_id: 2,
+                identity_type: PeerIdentityType::Admin,
+                public_key: vec![8_u8; 32],
+                secure_auth_level: SecureAuthLevel::NetworkSecretConfirmed,
+            },
+        );
+        assert!(
+            service
+                .authenticated_foreign_network_peers(&network)
+                .is_empty()
+        );
+
+        service.authenticated_peers.insert(
+            2,
+            AuthenticatedPeerInfo {
+                peer_id: 2,
+                identity_type: PeerIdentityType::Admin,
+                public_key: owner_key.clone(),
+                secure_auth_level: SecureAuthLevel::NetworkSecretConfirmed,
+            },
+        );
+        assert_eq!(
+            service.authenticated_foreign_network_peers(&network),
+            vec![(88, owner_key)]
         );
     }
 
@@ -9454,8 +9965,61 @@ mod tests {
             peer_infos: Arc::new(peer_infos),
             conn_map: Arc::new(HashMap::new()),
             suppressed_peer_ids: Arc::new(HashSet::new()),
+            relay_credential_peers: Arc::new(HashSet::new()),
             local_proxy_cidrs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn admin_adjacency_proves_authorized_credential_reverse_edge() {
+        let mut graph = super::PeerGraph::new();
+        let admin = graph.add_node(1);
+        let authorized = graph.add_node(2);
+        let unauthorized = graph.add_node(3);
+        let suppressed = graph.add_node(4);
+        graph.add_edge(admin, authorized, 0);
+        graph.add_edge(admin, unauthorized, 0);
+        graph.add_edge(admin, suppressed, 0);
+        let node_indices = HashMap::from([
+            (1, admin),
+            (2, authorized),
+            (3, unauthorized),
+            (4, suppressed),
+        ]);
+        let peer_infos = [
+            (1, PeerIdentityType::Admin),
+            (2, PeerIdentityType::Credential),
+            (3, PeerIdentityType::Credential),
+            (4, PeerIdentityType::Credential),
+        ]
+        .into_iter()
+        .map(|(peer_id, identity)| {
+            let mut info = RoutePeerInfo::new();
+            info.peer_id = peer_id;
+            info.identity_type = identity as i32;
+            (peer_id, info)
+        })
+        .collect::<HashMap<_, _>>();
+        let conn_map = HashMap::from([(
+            1,
+            super::RouteConnBuildInfo {
+                connected_peers: BTreeSet::from([2, 3, 4]),
+                version: 1,
+            },
+        )]);
+
+        add_authorized_relay_reverse_edges(
+            &mut graph,
+            &node_indices,
+            &peer_infos,
+            &conn_map,
+            &HashSet::from([2, 4]),
+            &HashSet::from([4]),
+        );
+
+        assert!(graph.find_edge(authorized, admin).is_some());
+        assert!(graph.find_edge(unauthorized, admin).is_none());
+        assert!(graph.find_edge(suppressed, admin).is_none());
     }
 
     struct CountingStatefulMeasurements {
@@ -9512,7 +10076,66 @@ mod tests {
         let delivery_only = topology.with_measurements(&calculator, false, true);
         assert_eq!(calculator.cost_calls.load(Ordering::Acquire), 3);
         assert_eq!(calculator.delivery_calls.load(Ordering::Acquire), 3);
+        assert_eq!(delivery_only.graph.node_count(), 0);
         assert_eq!(delivery_only.speed_graph.edge_count(), 3);
+    }
+
+    #[test]
+    fn remote_credential_measurements_cannot_select_speed_routes() {
+        let mut topology = measurement_test_topology(None);
+        let peer_infos = Arc::make_mut(&mut topology.peer_infos);
+        peer_infos.get_mut(&2).unwrap().identity_type = PeerIdentityType::Credential as i32;
+        let calculator = CountingStatefulMeasurements {
+            cost_calls: AtomicUsize::new(0),
+            delivery_calls: AtomicUsize::new(0),
+        };
+
+        let measured = topology.with_measurements(&calculator, false, true);
+
+        assert_eq!(calculator.cost_calls.load(Ordering::Acquire), 3);
+        assert_eq!(calculator.delivery_calls.load(Ordering::Acquire), 2);
+        assert!(
+            measured
+                .speed_graph
+                .find_edge(NodeIndex::new(1), NodeIndex::new(2))
+                .is_none()
+        );
+        assert!(
+            measured
+                .speed_graph
+                .find_edge(NodeIndex::new(0), NodeIndex::new(1))
+                .is_some()
+        );
+        assert!(
+            measured
+                .speed_graph
+                .find_edge(NodeIndex::new(0), NodeIndex::new(2))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn authorized_credential_relay_can_publish_speed_measurements() {
+        let mut topology = measurement_test_topology(None);
+        Arc::make_mut(&mut topology.peer_infos)
+            .get_mut(&2)
+            .unwrap()
+            .identity_type = PeerIdentityType::Credential as i32;
+        Arc::make_mut(&mut topology.relay_credential_peers).insert(2);
+        let calculator = CountingStatefulMeasurements {
+            cost_calls: AtomicUsize::new(0),
+            delivery_calls: AtomicUsize::new(0),
+        };
+
+        let measured = topology.with_measurements(&calculator, false, true);
+
+        assert_eq!(calculator.delivery_calls.load(Ordering::Acquire), 3);
+        assert!(
+            measured
+                .speed_graph
+                .find_edge(NodeIndex::new(1), NodeIndex::new(2))
+                .is_some()
+        );
     }
 
     struct FixedSpeedMeasurements;
@@ -9670,17 +10293,10 @@ mod tests {
         assert_eq!(snapshot.route_table.next_hop_map_version, 2);
         assert_eq!(snapshot.route_table_with_cost.next_hop_map_version, 2);
         assert_eq!(snapshot.route_table_with_speed.next_hop_map_version, 2);
-        assert!(
-            snapshot
-                .cached_local_conn_map
-                .peer_ids
-                .iter()
-                .any(|peer| peer.peer_id == 3)
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn captured_topology_input_keeps_route_and_cached_conn_map_coherent() {
+    async fn captured_topology_input_keeps_route_tables_coherent() {
         let service = Arc::new(PeerRouteServiceImpl::new(1, get_mock_global_ctx()));
         seed_snapshot_test_topology(&service, 1);
         *service.cost_calculator.write().unwrap() = Some(Box::new(InterleavingCostCalculator {
@@ -9690,28 +10306,57 @@ mod tests {
 
         service.update_route_table_and_cached_local_conn_bitmap();
 
+        // The interleaved mutation invalidates the in-flight build; one fresh
+        // coherent rebuild publishes the mutated topology instead.
         let snapshot = service.forwarding_snapshot();
         assert_eq!(service.synced_route_info.version.get(), 2);
-        assert_eq!(snapshot.route_table.next_hop_map_version, 1);
-        assert_eq!(snapshot.route_table_with_cost.next_hop_map_version, 1);
-        assert_eq!(snapshot.route_table_with_speed.next_hop_map_version, 1);
-        assert!(!snapshot.route_table.peer_infos.contains_key(&3));
-        assert_eq!(service.cached_local_conn_map_version.get(), 1);
-        assert!(
-            snapshot
-                .cached_local_conn_map
-                .peer_ids
-                .iter()
-                .all(|peer| peer.peer_id != 3)
-        );
+        assert_eq!(snapshot.route_table.next_hop_map_version, 2);
+        assert_eq!(snapshot.route_table_with_cost.next_hop_map_version, 2);
+        assert_eq!(snapshot.route_table_with_speed.next_hop_map_version, 2);
+        assert!(snapshot.route_table.peer_infos.contains_key(&3));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn peer_map_snapshot_source_receives_latest_generation_under_interface_contention() {
         let global_ctx = get_mock_global_ctx();
         let (packet_send, _packet_recv) = create_packet_recv_chan();
-        let peer_map = PeerMap::new(packet_send, global_ctx.clone(), 1);
+        let peer_map = Arc::new(PeerMap::new(packet_send, global_ctx.clone(), 1));
+        // The peer map only ingests publications through its publish hook.
+        peer_map.install_forwarding_snapshot_hook();
         let service = PeerRouteServiceImpl::new(1, global_ctx);
+        // Stage origin-authority publications into the peer map, like the
+        // peer manager interface does in production.
+        struct StagingInterface {
+            my_peer_id: PeerId,
+            peer_map: Arc<PeerMap>,
+        }
+        #[async_trait::async_trait]
+        impl RouteInterface for StagingInterface {
+            async fn list_peers(&self) -> Vec<PeerId> {
+                Vec::new()
+            }
+
+            fn my_peer_id(&self) -> PeerId {
+                self.my_peer_id
+            }
+
+            fn publish_origin_auth_batch(
+                &self,
+                source_token: ForwardingSnapshotSourceToken,
+                generation: u64,
+                publications: &[OriginAuthPublication],
+            ) -> Result<(), super::super::route_trait::RouteOriginAuthPublishError> {
+                self.peer_map.publish_route_origin_auth_batch(
+                    source_token,
+                    generation,
+                    publications,
+                )
+            }
+        }
+        *service.publish_interface.write().unwrap() = Some(Arc::new(StagingInterface {
+            my_peer_id: 1,
+            peer_map: peer_map.clone(),
+        }));
         *service.forwarding_snapshot_source.write().unwrap() =
             Some(peer_map.install_forwarding_snapshot_source().unwrap());
 
@@ -11171,6 +11816,10 @@ mod tests {
                 .flatten()
         }
 
+        async fn get_peer_public_key(&self, peer_id: PeerId) -> Option<Vec<u8>> {
+            Some(vec![peer_id as u8; 32])
+        }
+
         fn my_peer_id(&self) -> PeerId {
             self.my_peer_id
         }
@@ -11210,7 +11859,11 @@ mod tests {
     async fn update_my_conn_info_skips_interface_scan_when_topology_is_unchanged() {
         let service_impl = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
         let peers = Arc::new(Mutex::new(vec![2, 3]));
-        let peer_identity_types = Arc::new(Mutex::new(HashMap::new()));
+        let peer_identity_types = Arc::new(Mutex::new(HashMap::from([
+            (2, Some(PeerIdentityType::SharedNode)),
+            (3, Some(PeerIdentityType::SharedNode)),
+            (4, Some(PeerIdentityType::SharedNode)),
+        ])));
         let list_peers_calls = Arc::new(AtomicU32::new(0));
         let get_peer_identity_type_calls = Arc::new(AtomicU32::new(0));
         *service_impl.interface.lock().await = Some(Arc::new(CountingInterface {
@@ -11658,7 +12311,6 @@ mod tests {
                 Some(&peer_infos),
                 None,
                 None,
-                None,
             )
             .is_ok()
         );
@@ -11667,7 +12319,6 @@ mod tests {
                 42,
                 PeerIdentityType::SharedNode,
                 Some(&peer_infos),
-                None,
                 None,
                 None,
             )
@@ -11680,7 +12331,6 @@ mod tests {
                 Some(std::slice::from_ref(&self_info)),
                 None,
                 Some(&RouteForeignNetworkInfos::default()),
-                None,
             )
             .is_err()
         );
@@ -11704,9 +12354,8 @@ mod tests {
                 None,
                 Some(&source_only),
                 None,
-                Some(true),
             )
-            .is_ok()
+            .is_err()
         );
         assert!(
             validate_route_sync_role_shape(
@@ -11715,7 +12364,6 @@ mod tests {
                 None,
                 Some(&source_only),
                 None,
-                Some(false),
             )
             .is_err()
         );
@@ -11726,7 +12374,6 @@ mod tests {
                 None,
                 Some(&ConnInfo::ConnBitmap(RouteConnBitmap::default())),
                 None,
-                Some(true),
             )
             .is_err()
         );
@@ -11736,7 +12383,6 @@ mod tests {
                 PeerIdentityType::SharedNode,
                 None,
                 Some(&source_only),
-                None,
                 None,
             )
             .is_err()
@@ -12097,7 +12743,14 @@ mod tests {
             ..Default::default()
         });
         admin_info.trusted_credential_pubkeys = vec![TrustedCredentialPubkeyProof::new_signed(
-            signed_test_credential(manager, credential_key, Duration::from_secs(600)),
+            generated_test_credential(
+                manager,
+                Vec::new(),
+                true,
+                Vec::new(),
+                Duration::from_secs(600),
+                false,
+            ),
             network_secret,
         )];
         admin_info
@@ -12438,6 +13091,15 @@ mod tests {
             ),
             AuthenticatedPeerSeedResult::Inserted
         );
+        // The seeded evidence creates a placeholder record; the trust
+        // collector only reads peers with a synced route record.
+        service_impl
+            .synced_route_info
+            .peer_infos
+            .write()
+            .get_mut(&peer_id)
+            .expect("seeded peer record")
+            .version = 1;
         let peer_infos = service_impl.synced_route_info.peer_infos.read();
         let (_, trusted_keys) = service_impl.synced_route_info.collect_trusted_credentials(
             &peer_infos,
@@ -12539,6 +13201,78 @@ mod tests {
     }
 
     #[test]
+    fn topology_role_downgrade_removes_the_previous_authority_row() {
+        let service_impl = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
+        let source_peer = 77;
+        let conn_info = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![PeerConnInfo {
+                peer_id: Some(PeerIdVersion {
+                    peer_id: source_peer,
+                    version: 1,
+                }),
+                connected_peer_ids: vec![1],
+            }],
+        });
+        assert!(
+            service_impl
+                .synced_route_info
+                .update_peer_infos_and_conn_info_with_authority(
+                    service_impl.my_peer_id,
+                    service_impl.my_peer_route_id,
+                    source_peer,
+                    &[],
+                    &[],
+                    Some(&conn_info),
+                    true,
+                )
+                .unwrap()
+        );
+        assert!(
+            service_impl
+                .synced_route_info
+                .conn_map
+                .read()
+                .contains_key(&source_peer)
+        );
+
+        assert!(
+            service_impl
+                .synced_route_info
+                .update_peer_infos_and_conn_info_with_authority(
+                    service_impl.my_peer_id,
+                    service_impl.my_peer_route_id,
+                    source_peer,
+                    &[],
+                    &[],
+                    None,
+                    false,
+                )
+                .unwrap()
+        );
+        assert!(
+            !service_impl
+                .synced_route_info
+                .conn_map
+                .read()
+                .contains_key(&source_peer)
+        );
+        assert!(
+            !service_impl
+                .synced_route_info
+                .update_peer_infos_and_conn_info_with_authority(
+                    service_impl.my_peer_id,
+                    service_impl.my_peer_route_id,
+                    source_peer,
+                    &[],
+                    &[],
+                    None,
+                    false,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn local_admin_key_rotation_and_revoke_changes_route_trust() {
         let service_impl = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
         let peer_id = 92;
@@ -12553,6 +13287,15 @@ mod tests {
             ),
             AuthenticatedPeerSeedResult::Inserted
         );
+        // The seeded evidence creates a placeholder record; the trust
+        // collector only reads peers with a synced route record.
+        service_impl
+            .synced_route_info
+            .peer_infos
+            .write()
+            .get_mut(&peer_id)
+            .expect("seeded peer record")
+            .version = 1;
         let peer_infos = service_impl.synced_route_info.peer_infos.read();
         let (_, first_trusted) = service_impl.synced_route_info.collect_trusted_credentials(
             &peer_infos,
@@ -12571,6 +13314,13 @@ mod tests {
             ),
             AuthenticatedPeerSeedResult::Inserted
         );
+        service_impl
+            .synced_route_info
+            .peer_infos
+            .write()
+            .get_mut(&peer_id)
+            .expect("seeded peer record")
+            .version = 1;
         let peer_infos = service_impl.synced_route_info.peer_infos.read();
         let (_, rotated_trusted) = service_impl.synced_route_info.collect_trusted_credentials(
             &peer_infos,
@@ -13634,6 +14384,9 @@ mod tests {
             identity_type,
             peer_public_key,
         }));
+        // Publish the freshly generated credential from the local admin peer
+        // info; the sync-time trust refresh drops proofs no admin publishes.
+        route.service_impl.update_my_peer_info();
         route
             .service_impl
             .synced_route_info
@@ -14081,12 +14834,8 @@ mod tests {
         let service_impl = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
         let credential_peer_id: PeerId = 10061;
         let closed_peers = Arc::new(Mutex::new(Vec::new()));
-        let credential = signed_test_credential(
-            service_impl.global_ctx.get_credential_manager(),
-            &[8u8; 32],
-            Duration::from_secs(600),
-        );
-        let credential_pubkey = credential.pubkey.clone();
+        // A previously trusted key that no admin currently publishes.
+        let credential_pubkey = vec![8u8; 32];
 
         *service_impl.interface.lock().await = Some(Arc::new(TrackingInterface {
             my_peer_id: service_impl.my_peer_id,
@@ -14115,10 +14864,14 @@ mod tests {
             guard.insert(service_impl.my_peer_id, self_info);
             guard.insert(credential_peer_id, credential_info);
         }
-        service_impl
-            .synced_route_info
-            .trusted_credential_pubkeys
-            .insert(credential_pubkey.clone(), credential);
+        service_impl.synced_route_info.trusted_credential_pubkeys.insert(
+            credential_pubkey.clone(),
+            TrustedCredentialPubkey {
+                pubkey: credential_pubkey.clone(),
+                expiry_unix: i64::MAX,
+                ..Default::default()
+            },
+        );
 
         assert!(service_impl.refresh_acl_groups().await);
         assert!(closed_peers.lock().contains(&credential_peer_id));
@@ -14703,9 +15456,11 @@ mod tests {
         let r_d = create_mock_route(p_d.clone()).await;
 
         // in normal mode, packet from p_c should directly forward to p_a
+        // the routes are created after the connections, so the first sync
+        // attempts can back off before they succeed
         wait_for_condition(
             || async { (r_d.get_next_hop(p_a.my_peer_id()).await).is_some() },
-            Duration::from_secs(5),
+            Duration::from_secs(15),
         )
         .await;
 
@@ -14868,7 +15623,6 @@ mod tests {
 
         connect_peer_manager(p_a.clone(), p_b.clone()).await;
         connect_peer_manager(p_b.clone(), p_c.clone()).await;
-
         let ip: Ipv4Inet = "10.0.0.1/24".parse().unwrap();
         let ipv6: Ipv6Inet = "2001:db8::1/64".parse().unwrap();
         let proxy: Ipv4Cidr = "10.3.0.0/24".parse().unwrap();
@@ -15107,6 +15861,9 @@ mod tests {
             identity_type,
             peer_public_key,
         }));
+        // Publish the freshly generated credential from the local admin peer
+        // info; the sync-time trust refresh drops proofs no admin publishes.
+        route.service_impl.update_my_peer_info();
         route
             .service_impl
             .synced_route_info
