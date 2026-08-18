@@ -13,6 +13,7 @@ use crossbeam::queue::ArrayQueue;
 use futures::{Sink, Stream, StreamExt, ready};
 use pin_project_lite::pin_project;
 use rayon::prelude::*;
+use smallvec::SmallVec;
 
 use super::{TunnelError, packet_def::ZCPacket};
 
@@ -202,11 +203,16 @@ impl PacketBatch {
 
     pub fn with_capacity(capacity: usize) -> Self {
         debug_assert!(capacity <= MAX_PACKET_BATCH_SIZE);
-        Self::new()
+        if capacity >= MAX_PACKET_BATCH_SIZE {
+            return Self::new();
+        }
+        Self {
+            packets: Vec::with_capacity(capacity),
+        }
     }
 
     pub fn singleton(packet: ZCPacket) -> Self {
-        let mut batch = Self::new();
+        let mut batch = Self::with_capacity(1);
         batch
             .try_push(packet)
             .expect("a new packet batch accepts one packet");
@@ -237,6 +243,10 @@ impl PacketBatch {
         self.packets.is_empty()
     }
 
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.packets.truncate(len);
+    }
+
     /// Logical payload bytes in this batch, excluding reserved headroom.
     pub fn byte_len(&self) -> usize {
         self.packets.iter().map(ZCPacket::payload_len).sum()
@@ -245,6 +255,13 @@ impl PacketBatch {
     /// Backing-buffer bytes, including headers and reserved prefix space.
     pub fn buffer_byte_len(&self) -> usize {
         self.packets.iter().map(ZCPacket::buf_len).sum()
+    }
+
+    pub(crate) fn retained_buffer_capacity(&self) -> usize {
+        self.packets
+            .iter()
+            .map(ZCPacket::retained_buffer_capacity)
+            .sum()
     }
 
     pub fn iter(&self) -> slice::Iter<'_, ZCPacket> {
@@ -287,7 +304,7 @@ impl PacketBatch {
         process: F,
     ) -> Result<(), E>
     where
-        F: FnOnce(&mut [ZCPacket]) -> Result<Vec<bool>, E>,
+        F: FnOnce(&mut [ZCPacket]) -> Result<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>, E>,
     {
         assert_eq!(selected.len(), self.packets.len());
         assert_eq!(keep_unselected.len(), self.packets.len());
@@ -295,7 +312,7 @@ impl PacketBatch {
         let len = self.packets.len();
         let selected_len = selected.iter().filter(|selected| **selected).count();
         let ptr = self.packets.as_mut_ptr();
-        let mut selected_packets = Vec::with_capacity(selected_len);
+        let mut selected_packets = SmallVec::<[ZCPacket; MAX_PACKET_BATCH_SIZE]>::new();
         for (index, is_selected) in selected.iter().copied().enumerate() {
             if is_selected {
                 unsafe { selected_packets.push(ptr::read(ptr.add(index))) };
@@ -358,7 +375,7 @@ impl PacketBatch {
 unsafe fn restore_selected_packets(
     ptr: *mut ZCPacket,
     selected: &[bool],
-    selected_packets: Vec<ZCPacket>,
+    selected_packets: SmallVec<[ZCPacket; MAX_PACKET_BATCH_SIZE]>,
 ) {
     let mut selected_packets = selected_packets.into_iter();
     for (index, is_selected) in selected.iter().copied().enumerate() {
@@ -366,7 +383,10 @@ unsafe fn restore_selected_packets(
             let packet = selected_packets
                 .next()
                 .expect("selected packet count stays stable");
-            ptr::write(ptr.add(index), packet);
+            // The caller moved each selected slot out before this restore.
+            unsafe {
+                ptr::write(ptr.add(index), packet);
+            }
         }
     }
     debug_assert!(selected_packets.next().is_none());

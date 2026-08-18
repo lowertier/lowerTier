@@ -144,7 +144,7 @@ async fn send_alternate_parity(remote_peer_id: PeerId, work: AlternateFecParityW
     } = work;
     let block_id = block.block_id;
     let source_count = block.source_count;
-    let packets = parity_packets(local_peer_id, remote_peer_id, block);
+    let packets = parity_packets(local_peer_id, remote_peer_id, &block);
     let mut batch = PacketBatch::with_capacity(packets.len());
     for packet in packets {
         if !conn.alternate_fec_record_fits(packet.payload().len()) {
@@ -291,6 +291,23 @@ impl Peer {
         packet_recv_chan: PacketRecvChan,
         global_ctx: ArcGlobalCtx,
     ) -> Self {
+        Self::new_with_flow_cache(
+            peer_node_id,
+            packet_recv_chan,
+            global_ctx,
+            Arc::new(FlowPathCache::new(
+                4096,
+                std::time::Duration::from_secs(120),
+            )),
+        )
+    }
+
+    pub(crate) fn new_with_flow_cache(
+        peer_node_id: PeerId,
+        packet_recv_chan: PacketRecvChan,
+        global_ctx: ArcGlobalCtx,
+        connection_flow_paths: Arc<FlowPathCache<PeerConnId>>,
+    ) -> Self {
         let conns: ConnMap = Arc::new(DashMap::new());
         let (close_event_sender, mut close_event_receiver) = mpsc::channel(10);
         let shutdown_notifier = Arc::new(tokio::sync::Notify::new());
@@ -300,11 +317,6 @@ impl Peer {
         let peer_public_key_copy = peer_public_key.clone();
         let origin_auth_update = Arc::new(RwLock::new(Arc::new(|_, _| {}) as OriginAuthUpdate));
         let origin_auth_update_copy = origin_auth_update.clone();
-        let connection_flow_paths = Arc::new(FlowPathCache::new(
-            65_536,
-            std::time::Duration::from_secs(120),
-        ));
-
         let conns_copy = conns.clone();
         let shutdown_notifier_copy = shutdown_notifier.clone();
         let global_ctx_copy = global_ctx.clone();
@@ -391,9 +403,10 @@ impl Peer {
             {
                 (
                     Some(Arc::new(Mutex::new(
-                        AlternateFecEncoder::new(
+                        AlternateFecEncoder::new_with_budget(
                             flags.quic_datagram_fec_parity as usize,
                             FEC_FLUSH_DELAY,
+                            global_ctx.fec_resource_budget(),
                         )
                         .expect("validated alternate FEC configuration"),
                     ))),
@@ -611,43 +624,40 @@ impl Peer {
         policy: NextHopPolicy,
         flow_hash: u64,
     ) -> Option<ArcPeerConn> {
+        if let Some(conn) = self.only_direct_conn() {
+            self.default_conn_id.store(conn.get_conn_id());
+            return Some(conn);
+        }
         let policy_flow = match policy {
             NextHopPolicy::LeastHop => flow_hash,
             NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
             NextHopPolicy::MaxGoodput => flow_hash ^ (1_u64 << 62),
         };
-        if let Some(conn_id) =
-            self.connection_flow_paths
-                .lookup(self.peer_node_id, policy_flow, |conn_id| {
-                    self.conns
-                        .get(&conn_id)
-                        .is_some_and(|conn| !conn.is_closed())
-                })
-            && let Some(conn) = self.conns.get(&conn_id)
-        {
-            self.default_conn_id.store(conn_id);
-            return Some(conn.clone());
-        }
-
-        let candidate = self.best_connection(policy)?;
-        let candidate_id = candidate.get_conn_id();
-        let selected_id = self.connection_flow_paths.select(
+        let selected_id = self.connection_flow_paths.select_with_candidate(
             self.peer_node_id,
             policy_flow,
-            candidate_id,
+            0,
+            None,
+            || self.best_connection(policy).map(|conn| conn.get_conn_id()),
             |conn_id| {
                 self.conns
                     .get(&conn_id)
                     .is_some_and(|conn| !conn.is_closed())
             },
-        );
-        let selected = self
-            .conns
-            .get(&selected_id)
-            .map(|conn| conn.clone())
-            .unwrap_or(candidate);
+        )?;
+        let selected = self.conns.get(&selected_id)?.clone();
         self.default_conn_id.store(selected.get_conn_id());
         Some(selected)
+    }
+
+    pub(crate) fn only_direct_conn(&self) -> Option<ArcPeerConn> {
+        if self.conns.len() != 1 {
+            return None;
+        }
+        self.conns
+            .iter()
+            .find(|entry| !entry.value().is_closed())
+            .map(|entry| entry.value().clone())
     }
 
     fn packet_connection_policy(packet: &ZCPacket) -> NextHopPolicy {
@@ -996,7 +1006,10 @@ mod tests {
     use crate::{
         common::{
             config::{NetworkIdentity, PeerConfig},
-            global_ctx::{GlobalCtx, tests::get_mock_global_ctx},
+            global_ctx::{
+                GlobalCtx,
+                tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
+            },
             new_peer_id,
         },
         peers::{
@@ -1059,11 +1072,11 @@ mod tests {
         AlternateFecParityWork {
             conn,
             local_peer_id,
-            block: CompletedAlternateFecBlock {
+            block: CompletedAlternateFecBlock::for_test(
                 block_id,
-                source_count: 1,
-                parity: vec![bytes::Bytes::from_static(b"parity")],
-            },
+                1,
+                vec![bytes::Bytes::from_static(b"parity")],
+            ),
         }
     }
 
@@ -1266,6 +1279,28 @@ mod tests {
             .get_conn_id();
         peer.conns.clear();
         assert_eq!(selected_id, sampled_id);
+    }
+
+    #[tokio::test]
+    async fn one_connection_does_not_create_flow_pins() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let global_ctx = get_mock_global_ctx();
+        let peer = Peer::new(new_peer_id(), packet_send, global_ctx.clone());
+        let connection = Arc::new(unstarted_peer_conn(global_ctx));
+        let connection_id = connection.get_conn_id();
+        peer.conns.insert(connection_id, connection);
+
+        for flow in 0..1000 {
+            assert_eq!(
+                peer.select_conn_for_flow(NextHopPolicy::MaxGoodput, flow)
+                    .unwrap()
+                    .get_conn_id(),
+                connection_id
+            );
+        }
+
+        assert_eq!(peer.connection_flow_paths.len(), 0);
+        peer.conns.clear();
     }
 
     #[tokio::test]
@@ -1504,18 +1539,12 @@ mod tests {
         let ps = Arc::new(PeerSessionStore::new());
 
         let (shared_client_tunnel, shared_server_tunnel) = create_ring_tunnel_pair();
-        let shared_client_ctx = get_mock_global_ctx();
-        let shared_server_ctx = get_mock_global_ctx();
-        shared_client_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
-        shared_server_ctx
-            .config
-            .set_network_identity(NetworkIdentity {
+        let shared_client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
+        let shared_server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
                 network_name: "net2".to_string(),
                 network_secret: None,
                 network_secret_digest: None,
-            });
+            }));
         set_secure_mode_cfg(&shared_client_ctx, true);
         set_secure_mode_cfg(&shared_server_ctx, true);
         let remote_url: url::Url = shared_client_tunnel
@@ -1561,14 +1590,8 @@ mod tests {
         );
 
         let (admin_client_tunnel, admin_server_tunnel) = create_ring_tunnel_pair();
-        let admin_client_ctx = get_mock_global_ctx();
-        let admin_server_ctx = get_mock_global_ctx();
-        admin_client_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
-        admin_server_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
+        let admin_client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
+        let admin_server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
         set_secure_mode_cfg(&admin_client_ctx, true);
         set_secure_mode_cfg(&admin_server_ctx, true);
         let mut admin_client_conn = PeerConn::new(
@@ -1608,14 +1631,8 @@ mod tests {
         let ps = Arc::new(PeerSessionStore::new());
 
         let (client_tunnel_1, server_tunnel_1) = create_ring_tunnel_pair();
-        let client_ctx_1 = get_mock_global_ctx();
-        let server_ctx_1 = get_mock_global_ctx();
-        client_ctx_1
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
-        server_ctx_1
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        let client_ctx_1 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
+        let server_ctx_1 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
         set_secure_mode_cfg(&client_ctx_1, true);
         set_secure_mode_cfg(&server_ctx_1, true);
         let mut client_conn_1 = PeerConn::new(
@@ -1638,14 +1655,8 @@ mod tests {
         s1.unwrap();
 
         let (client_tunnel_2, server_tunnel_2) = create_ring_tunnel_pair();
-        let client_ctx_2 = get_mock_global_ctx();
-        let server_ctx_2 = get_mock_global_ctx();
-        client_ctx_2
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
-        server_ctx_2
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        let client_ctx_2 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
+        let server_ctx_2 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
         set_secure_mode_cfg(&client_ctx_2, true);
         set_secure_mode_cfg(&server_ctx_2, true);
         let mut client_conn_2 = PeerConn::new(

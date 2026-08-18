@@ -556,7 +556,7 @@ impl LinkEnvelopeSession {
     }
 }
 
-fn is_noise_handshake_packet_type(packet_type: u8) -> bool {
+pub(crate) fn is_noise_handshake_packet_type(packet_type: u8) -> bool {
     matches!(
         packet_type,
         value if value == PacketType::NoiseHandshakeMsg1 as u8

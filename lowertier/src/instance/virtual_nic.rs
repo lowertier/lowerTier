@@ -28,8 +28,8 @@ use crate::{
     tunnel::{
         PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, wait_for_delivery_with_one_prefetch},
-        common::{FramedWriter, TunnelWrapper, ZCPacketToBytes, reserve_buf},
-        packet_def::{TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
+        common::{FramedWriter, TunnelWrapper, ZCPacketToBytes},
+        packet_def::{ZCPacket, ZCPacketType},
     },
 };
 
@@ -155,23 +155,26 @@ fn nic_packet_batch_size() -> usize {
 fn linux_tun_offload_enabled() -> bool {
     linux_tun_offload_configured(
         std::env::var_os("LOWTIER_ENABLE_LINUX_TUN_OFFLOAD").is_some(),
-        std::env::var_os("LOWTIER_DEBUG_DISABLE_TUN_OFFLOAD").is_some(),
-        linux_vector_checksum_available(),
+        std::env::var_os("LOWTIER_DISABLE_LINUX_TUN_OFFLOAD").is_some(),
+        linux_tun_offload_auto_supported(),
     )
 }
 
 #[cfg(target_os = "linux")]
-const fn linux_vector_checksum_available() -> bool {
-    cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
+const fn linux_tun_offload_auto_supported() -> bool {
+    // Keep automatic virtio TUN offload on the well-covered x86_64 path.
+    // aarch64 remains explicit opt-in because Linux 5.15 accepted TSO/GRO
+    // setup in testing but produced sustained TCP retransmissions under load.
+    cfg!(target_arch = "x86_64")
 }
 
 #[cfg(target_os = "linux")]
 fn linux_tun_offload_configured(
     explicitly_enabled: bool,
     explicitly_disabled: bool,
-    vector_checksum_available: bool,
+    automatically_supported: bool,
 ) -> bool {
-    !explicitly_disabled && (explicitly_enabled || vector_checksum_available)
+    !explicitly_disabled && (explicitly_enabled || automatically_supported)
 }
 
 /// Maximum Linux TUN/TAP queues. Each queue is one character device FD with
@@ -277,34 +280,40 @@ impl TunStream {
     }
 }
 
+const TUN_READ_SPARE_BYTES: usize = 2500;
+
+fn prepare_tun_read_buffer(buf: &mut BytesMut, prefix_len: usize) {
+    if buf.is_empty() {
+        buf.resize(prefix_len, 0);
+    }
+    let spare = buf.capacity().saturating_sub(buf.len());
+    if spare < TUN_READ_SPARE_BYTES {
+        buf.reserve(TUN_READ_SPARE_BYTES);
+    }
+}
+
 impl Stream for TunStream {
     type Item = StreamItem;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<StreamItem>> {
         let self_mut = self.project();
         let mut g = ready!(self_mut.l.poll_lock(cx));
-        reserve_buf(self_mut.cur_buf, 2500, 4 * 1024);
-        if self_mut.cur_buf.is_empty() {
-            unsafe {
-                self_mut
-                    .cur_buf
-                    .set_len(*self_mut.payload_offset + *self_mut.payload_prefix_len);
-            }
-        }
-        let buf = self_mut.cur_buf.chunk_mut().as_mut_ptr();
-        let buf = unsafe { std::slice::from_raw_parts_mut(buf, 2500) };
-        let mut buf = ReadBuf::new(buf);
+        prepare_tun_read_buffer(
+            self_mut.cur_buf,
+            *self_mut.payload_offset + *self_mut.payload_prefix_len,
+        );
+        let spare = self_mut.cur_buf.spare_capacity_mut();
+        let mut buf = ReadBuf::uninit(spare);
 
         let ret = ready!(g.as_pin_mut().poll_read(cx, &mut buf));
         let len = buf.filled().len();
         if len == 0 {
             return Poll::Ready(None);
         }
-        unsafe { self_mut.cur_buf.advance_mut(len + TAIL_RESERVED_SIZE) };
+        // ReadBuf confirms that the device initialized these bytes.
+        unsafe { self_mut.cur_buf.advance_mut(len) };
 
-        let mut ret_buf = self_mut.cur_buf.split();
-        let cur_len = ret_buf.len();
-        ret_buf.truncate(cur_len - TAIL_RESERVED_SIZE);
+        let ret_buf = self_mut.cur_buf.split();
 
         match ret {
             Ok(_) => Poll::Ready(Some(Ok(ZCPacket::new_from_buf(ret_buf, ZCPacketType::NIC)))),
@@ -2320,9 +2329,21 @@ mod tests {
     use futures::{StreamExt as _, stream};
 
     use super::{
-        NicCtx, TunZCPacketToBytes, VirtualNic, parse_interface_mac, read_ready_packet_batch,
-        restore_compact_ip_for_tap,
+        NicCtx, TUN_READ_SPARE_BYTES, TunZCPacketToBytes, VirtualNic, parse_interface_mac,
+        prepare_tun_read_buffer, read_ready_packet_batch, restore_compact_ip_for_tap,
     };
+
+    #[test]
+    fn tun_read_buffer_restores_spare_capacity_after_split() {
+        let mut buffer = bytes::BytesMut::with_capacity(TUN_READ_SPARE_BYTES);
+        buffer.resize(TUN_READ_SPARE_BYTES, 0);
+        let _completed = buffer.split();
+
+        prepare_tun_read_buffer(&mut buffer, 96);
+
+        assert_eq!(buffer.len(), 96);
+        assert!(buffer.capacity() - buffer.len() >= TUN_READ_SPARE_BYTES);
+    }
 
     #[test]
     fn parses_interface_mac_address() {
@@ -2363,7 +2384,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_tun_offload_tracks_checksum_acceleration_and_explicit_overrides() {
+    fn linux_tun_offload_tracks_auto_support_and_explicit_overrides() {
         assert!(super::linux_tun_offload_configured(false, false, true));
         assert!(!super::linux_tun_offload_configured(false, false, false));
         assert!(super::linux_tun_offload_configured(true, false, false));
@@ -2372,8 +2393,14 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     #[test]
-    fn linux_tun_offload_uses_neon_by_default() {
-        assert!(super::linux_vector_checksum_available());
+    fn linux_tun_offload_requires_explicit_opt_in_on_aarch64() {
+        assert!(!super::linux_tun_offload_auto_supported());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linux_tun_offload_remains_automatic_on_x86_64() {
+        assert!(super::linux_tun_offload_auto_supported());
     }
 
     #[cfg(target_os = "linux")]

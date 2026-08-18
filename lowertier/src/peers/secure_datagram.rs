@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -12,6 +11,7 @@ use atomic_shim::AtomicU64;
 use hmac::{Hmac, Mac as _};
 use rand::RngCore as _;
 use sha2::Sha256;
+use smallvec::SmallVec;
 use zerocopy::FromBytes;
 
 use crate::{
@@ -237,10 +237,18 @@ pub struct SecureDatagramSession {
     fec_decrypt_fail_count: AtomicU32,
 }
 
+struct RedactedSecret;
+
+impl std::fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
 impl std::fmt::Debug for SecureDatagramSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecureDatagramSession")
-            .field("root_key", &self.root_key)
+            .field("root_key", &RedactedSecret)
             .field("session_generation", &self.session_generation)
             .field("send_epoch", &self.send_epoch)
             .field("send_seq", &self.send_seq)
@@ -326,10 +334,7 @@ impl SecureDatagramSession {
         !self.invalidated.load(Ordering::Relaxed)
     }
 
-    /// Record one failed authenticated decrypt operation.
-    ///
-    /// The atomic counter gives scalar and batch calls one ordered failure
-    /// streak. A batch contributes one failure, independent of its packet count.
+    /// Record one failed decrypt operation without changing authenticated state.
     fn record_decrypt_failure(&self) {
         let previous = self
             .decrypt_fail_count
@@ -338,12 +343,8 @@ impl SecureDatagramSession {
             })
             .unwrap_or(Self::DECRYPT_FAIL_THRESHOLD);
         let count = previous.saturating_add(1).min(Self::DECRYPT_FAIL_THRESHOLD);
-        if count >= Self::DECRYPT_FAIL_THRESHOLD {
-            self.invalidate();
-            tracing::warn!(
-                count,
-                "secure datagram session auto-invalidated after consecutive decrypt failures"
-            );
+        if previous < Self::DECRYPT_FAIL_THRESHOLD && count == Self::DECRYPT_FAIL_THRESHOLD {
+            tracing::warn!(count, "secure datagram decrypt failure threshold reached");
         }
     }
 
@@ -1479,25 +1480,27 @@ impl SecureDatagramSession {
         &self,
         dir: SecureDatagramDirection,
         packets: &mut [ZCPacket],
-    ) -> Vec<Result<(), anyhow::Error>> {
+    ) -> SmallVec<[Result<(), anyhow::Error>; 64]> {
         let _transition_guard = self.state_transition.read().unwrap();
         if !self.is_valid() {
             return packets
                 .iter()
                 .map(|_| Err(anyhow!("session invalidated")))
-                .collect();
+                .collect::<SmallVec<_>>();
         }
         if packets.is_empty() {
-            return Vec::new();
+            return SmallVec::new();
         }
 
         let dir_idx = dir.idx();
-        let mut nonces = Vec::with_capacity(packets.len());
-        let mut aads = Vec::with_capacity(packets.len());
-        let mut first_by_nonce = HashMap::with_capacity(packets.len());
-        let mut duplicate = vec![false; packets.len()];
-        let mut outcomes: Vec<Option<Result<(), anyhow::Error>>> =
-            (0..packets.len()).map(|_| None).collect();
+        let mut nonces = SmallVec::<[Option<(u32, u64)>; 64]>::new();
+        let mut aads = SmallVec::<
+            [Option<[u8; PEER_MANAGER_STABLE_AUTH_DATA_SIZE]>; 64],
+        >::new();
+        let mut nonce_slots = [None::<((u32, u64), usize)>; 128];
+        let mut duplicate = [false; 64];
+        let mut outcomes = SmallVec::<[Option<Result<(), anyhow::Error>>; 64]>::new();
+        outcomes.resize_with(packets.len(), || None);
         for (index, packet) in packets.iter().enumerate() {
             if !packet
                 .peer_manager_header()
@@ -1526,9 +1529,23 @@ impl SecureDatagramSession {
             let epoch = u32::from_be_bytes(nonce_bytes[..4].try_into().unwrap());
             let seq = u64::from_be_bytes(nonce_bytes[4..].try_into().unwrap());
             let nonce = (epoch, seq);
-            if let Some(first) = first_by_nonce.insert(nonce, index) {
-                duplicate[first] = true;
-                duplicate[index] = true;
+            let mut slot = ((epoch as usize).wrapping_mul(0x9e37_79b1)
+                ^ (seq as usize)
+                ^ ((seq >> 32) as usize))
+                & (nonce_slots.len() - 1);
+            loop {
+                match nonce_slots[slot] {
+                    Some((stored, first)) if stored == nonce => {
+                        duplicate[first] = true;
+                        duplicate[index] = true;
+                        break;
+                    }
+                    Some(_) => slot = (slot + 1) & (nonce_slots.len() - 1),
+                    None => {
+                        nonce_slots[slot] = Some((nonce, index));
+                        break;
+                    }
+                }
             }
             nonces.push(Some(nonce));
             aads.push(Some(aad));
@@ -1539,7 +1556,7 @@ impl SecureDatagramSession {
         let (rx_snapshot, grace_snapshot) = self.replay_state_snapshot(now_ms);
         let send_epoch = self.send_epoch.load(Ordering::Relaxed);
         let grace = grace_snapshot.valid.then_some(&grace_snapshot);
-        let mut candidates = Vec::with_capacity(packets.len());
+        let mut candidates = SmallVec::<[usize; 64]>::new();
         let mut saw_decrypt_failure = false;
         for (index, nonce) in nonces.iter().enumerate() {
             let Some((epoch, seq)) = nonce else {
@@ -1565,7 +1582,7 @@ impl SecureDatagramSession {
         }
 
         // Cache one decryptor per epoch. Most batches use one epoch.
-        let mut decryptors: Vec<(u32, Arc<dyn Encryptor>)> = Vec::with_capacity(2);
+        let mut decryptors = SmallVec::<[(u32, Arc<dyn Encryptor>); 2]>::new();
         for index in candidates.iter().copied() {
             let (epoch, _seq) = nonces[index].expect("candidate has a nonce");
             let aad = aads[index].as_ref().expect("candidate has AAD");
@@ -1590,10 +1607,10 @@ impl SecureDatagramSession {
 
         // Recheck and commit in epoch/sequence order. This makes concurrent
         // batch decryptions deterministic and publishes replay state once.
-        let mut commit_order: Vec<usize> = candidates
+        let mut commit_order = candidates
             .into_iter()
             .filter(|index| outcomes[*index].as_ref().is_some_and(Result::is_ok))
-            .collect();
+            .collect::<SmallVec<[usize; 64]>>();
         commit_order.sort_unstable_by_key(|index| {
             let (epoch, seq) = nonces[*index].expect("commit candidate has a nonce");
             (epoch, seq, *index)
@@ -1642,7 +1659,7 @@ impl SecureDatagramSession {
             .map(|outcome| {
                 outcome.unwrap_or_else(|| Err(anyhow!("secure datagram packet rejected")))
             })
-            .collect()
+            .collect::<SmallVec<_>>()
     }
 
     #[cfg(test)]
@@ -1667,6 +1684,22 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_redacts_the_root_key() {
+        let root_key = [0xa5; 32];
+        let session = SecureDatagramSession::new(
+            root_key,
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+        );
+
+        let output = format!("{session:?}");
+        assert!(!output.contains("165"));
+        assert!(output.contains("root_key: <redacted>"));
+    }
     use crate::tunnel::packet_def::PacketType;
 
     fn encrypted_packet_for_aad() -> (SecureDatagramSession, ZCPacket) {
@@ -2024,7 +2057,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_decrypt_failure_streak_invalidates_at_threshold() {
+    fn scalar_decrypt_failure_streak_saturates_without_invalidation() {
         let root_key = SecureDatagramSession::new_root_key();
         let sender = SecureDatagramSession::new(
             root_key,
@@ -2041,7 +2074,7 @@ mod tests {
             "aes-256-gcm".to_string(),
         );
 
-        for failure in 0..SecureDatagramSession::DECRYPT_FAIL_THRESHOLD {
+        for _ in 0..SecureDatagramSession::DECRYPT_FAIL_THRESHOLD {
             let mut packet = ZCPacket::new_with_payload(b"forged");
             packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
             sender
@@ -2053,11 +2086,12 @@ mod tests {
                     .decrypt_payload(SecureDatagramDirection::AToB, &mut packet)
                     .is_err()
             );
-            if failure + 1 < SecureDatagramSession::DECRYPT_FAIL_THRESHOLD {
-                assert!(receiver.is_valid());
-            }
+            assert!(receiver.is_valid());
         }
-        assert!(!receiver.is_valid());
+        assert_eq!(
+            receiver.decrypt_fail_count.load(Ordering::Relaxed),
+            SecureDatagramSession::DECRYPT_FAIL_THRESHOLD
+        );
     }
 
     #[test]
@@ -2175,7 +2209,7 @@ mod tests {
         assert_eq!(receiver.decrypt_fail_count.load(Ordering::Relaxed), 0);
         assert!(receiver.is_valid());
 
-        for failure in 0..SecureDatagramSession::DECRYPT_FAIL_THRESHOLD {
+        for _ in 0..SecureDatagramSession::DECRYPT_FAIL_THRESHOLD {
             let mut packet = ZCPacket::new_with_payload(b"forged-again");
             packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
             sender
@@ -2187,11 +2221,12 @@ mod tests {
                 std::slice::from_mut(&mut packet),
             );
             assert!(outcomes[0].is_err());
-            if failure + 1 < SecureDatagramSession::DECRYPT_FAIL_THRESHOLD {
-                assert!(receiver.is_valid());
-            }
+            assert!(receiver.is_valid());
         }
-        assert!(!receiver.is_valid());
+        assert_eq!(
+            receiver.decrypt_fail_count.load(Ordering::Relaxed),
+            SecureDatagramSession::DECRYPT_FAIL_THRESHOLD
+        );
     }
 
     #[test]

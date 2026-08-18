@@ -292,6 +292,41 @@ impl RingSink {
             .map_err(|item| item.batch)
     }
 
+    /// Admit as much of a lossy packet batch as the bounded ring can hold.
+    ///
+    /// This preserves the scalar overload behavior: available packet credits
+    /// are used before overflow is dropped, rather than rejecting an entire
+    /// vector batch because the whole batch does not fit at once.
+    pub fn try_send_batch_lossy(&mut self, mut batch: PacketBatch) -> usize {
+        if batch.is_empty() {
+            return 0;
+        }
+        let base = self.ring_prod_impl.base();
+        if base.occupied_len() >= base.capacity().get() - RING_TUNNEL_RESERVED_CAP {
+            return 0;
+        }
+        let admitted = batch.len().min(self.packet_permits.available_permits());
+        if admitted == 0 {
+            return 0;
+        }
+        batch.truncate(admitted);
+        let permit_count = u32::try_from(admitted).expect("packet batch length fits u32");
+        let Ok(packet_permits) = self
+            .packet_permits
+            .clone()
+            .try_acquire_many_owned(permit_count)
+        else {
+            return 0;
+        };
+        match self.ring_prod_impl.try_push(RingItem {
+            batch,
+            _packet_permits: packet_permits,
+        }) {
+            Ok(()) => admitted,
+            Err(_) => 0,
+        }
+    }
+
     pub fn force_send(&mut self, item: SinkItem) -> Result<(), SinkItem> {
         if self.try_commit_pending().is_err() {
             return Err(item);

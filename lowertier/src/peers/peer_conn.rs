@@ -18,8 +18,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use hmac::Mac;
 use prost::Message;
-use ring::constant_time::verify_slices_are_equal;
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 use tokio::{
     sync::broadcast,
     task::JoinSet,
@@ -34,19 +34,22 @@ use snow::{HandshakeState, TransportState, params::NoiseParams};
 use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet};
 use super::{
     PacketRecvChan,
-    link_envelope::{LINK_ENVELOPE_OVERHEAD, LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
+    link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
     peer_conn_ping::PeerConnPinger,
     peer_session::{
         INITIATOR_RECOVERY_LIFETIME, InitiatorTransitionIdentity, PeerSession, PeerSessionAction,
     },
     speed_probe::{
-        ProbeAck, ProbeReceiver, ProbeReservation, SpeedSample, build_probe_train_with_overhead,
-        speed_sample_ttl,
+        ProbeAck, ProbeData, ProbeReceiver, ProbeReservation, SpeedSample,
+        generate_receipt_challenge, probe_train_metadata, speed_sample_ttl,
     },
     traffic_metrics::{AggregateTrafficMetrics, SpeedProbeMetrics},
 };
 use crate::{
-    common::{PeerId, config::NetworkIdentity, error::Error, global_ctx::ArcGlobalCtx},
+    common::{
+        PeerId, config::NetworkIdentity, error::Error, global_ctx::ArcGlobalCtx,
+        verify_slices_are_equal,
+    },
     peers::credential_manager::CredentialManager,
     peers::peer_session::{
         InitiatorSessionReservation, PeerSessionStore, SessionKey, UpsertResponderSessionReturn,
@@ -64,8 +67,8 @@ use crate::{
         },
     },
     tunnel::{
-        BatchStreamItem, DatagramSizeBudget, PacketBatchStream, TransportBinding,
-        TransportBindingKind, Tunnel, TunnelError,
+        BatchStreamItem, PacketBatchStream, TransportBinding, TransportBindingKind, Tunnel,
+        TunnelError,
         batch::{
             MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES,
             wait_for_delivery_with_bounded_prefetch,
@@ -80,6 +83,11 @@ use crate::{
     },
     use_global_var,
 };
+
+#[cfg(feature = "quic")]
+use super::link_envelope::LINK_ENVELOPE_OVERHEAD;
+#[cfg(feature = "quic")]
+use crate::tunnel::DatagramSizeBudget;
 
 pub type PeerConnId = uuid::Uuid;
 
@@ -113,7 +121,7 @@ const NOISE_PROLOGUE_DOMAIN: &[u8] = b"lowertier peerconn noise prologue v1\0";
 const MAX_PENDING_HANDSHAKE_PACKETS: usize = MAX_PACKET_BATCH_SIZE;
 const MAX_PENDING_HANDSHAKE_BYTES: usize =
     MAX_PENDING_HANDSHAKE_PACKETS * (4096 + PEER_MANAGER_HEADER_SIZE);
-pub(crate) const SPEED_ROUTING_FEATURE: &str = "speed-routing-v1";
+pub(crate) const SPEED_ROUTING_FEATURE: &str = "speed-routing-v2";
 
 #[cfg(feature = "quic")]
 pub(crate) const ALTERNATE_FEC_RX_V1: u64 = 1 << 0;
@@ -227,32 +235,32 @@ fn recovery_identity_matches_wire(
                 && local.action == remote.action
                 && local.session_generation == remote.session_generation
                 && local.initial_epoch == remote.initial_epoch
-                && local.transition_id == remote.transition_id
-                && local.root_key_digest == remote.root_key_digest
+                && verify_slices_are_equal(&local.transition_id, &remote.transition_id).is_ok()
+                && verify_slices_are_equal(&local.root_key_digest, &remote.root_key_digest).is_ok()
         }
         _ => false,
     }
+}
+
+fn packet_batch_is_direct_control(packet_type: u8) -> bool {
+    packet_type == PacketType::Ping as u8
+        || packet_type == PacketType::Pong as u8
+        || packet_type == PacketType::SpeedProbe as u8
+        || packet_type == PacketType::SpeedProbeAck as u8
+        || packet_type == PacketType::AlternateFecSource as u8
+        || packet_type == PacketType::AlternateFecParity as u8
+        || crate::peers::link_envelope::is_noise_handshake_packet_type(packet_type)
 }
 
 fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
     !batch.is_empty()
         && batch.iter().all(|packet| {
             if let Some(metadata) = packet.parsed_metadata() {
-                return metadata.packet_type != PacketType::Ping as u8
-                    && metadata.packet_type != PacketType::Pong as u8
-                    && metadata.packet_type != PacketType::SpeedProbe as u8
-                    && metadata.packet_type != PacketType::SpeedProbeAck as u8
-                    && metadata.packet_type != PacketType::AlternateFecSource as u8
-                    && metadata.packet_type != PacketType::AlternateFecParity as u8;
+                return !packet_batch_is_direct_control(metadata.packet_type);
             }
-            packet.peer_manager_header().is_some_and(|header| {
-                header.packet_type != PacketType::Ping as u8
-                    && header.packet_type != PacketType::Pong as u8
-                    && header.packet_type != PacketType::SpeedProbe as u8
-                    && header.packet_type != PacketType::SpeedProbeAck as u8
-                    && header.packet_type != PacketType::AlternateFecSource as u8
-                    && header.packet_type != PacketType::AlternateFecParity as u8
-            })
+            packet
+                .peer_manager_header()
+                .is_some_and(|header| !packet_batch_is_direct_control(header.packet_type))
         })
 }
 
@@ -863,8 +871,11 @@ impl PeerSessionTunnelFilter {
         if batch.is_empty() {
             return Ok(());
         }
-        let mut selected = vec![false; batch.len()];
-        let mut keep_unselected = vec![true; batch.len()];
+        let batch_len = batch.len();
+        let mut selected = [false; MAX_PACKET_BATCH_SIZE];
+        let mut keep_unselected = [true; MAX_PACKET_BATCH_SIZE];
+        let selected = &mut selected[..batch_len];
+        let keep_unselected = &mut keep_unselected[..batch_len];
         let mut selected_count = 0;
         for (index, packet) in batch.iter().enumerate() {
             let Some(header) = packet.peer_manager_header() else {
@@ -901,7 +912,7 @@ impl PeerSessionTunnelFilter {
             self.batch_encrypt_calls.fetch_add(1, Ordering::Relaxed);
             session
                 .encrypt_payload_batch(my_peer_id, peer_id, packets)
-                .map(|()| vec![true; packets.len()])
+                .map(|()| SmallVec::from_elem(true, packets.len()))
         })
     }
 
@@ -919,7 +930,7 @@ impl PeerSessionTunnelFilter {
         let keep = outcomes
             .into_iter()
             .map(|outcome| outcome.is_ok())
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>>();
         if !session.is_valid() {
             tracing::error!("session invalidated, closing connection");
             return Err(TunnelError::InternalError(
@@ -939,8 +950,11 @@ impl PeerSessionTunnelFilter {
             return Ok(batch);
         };
         let my_peer_id = self.my_peer_id.load();
-        let mut selected = vec![false; batch.len()];
-        let mut keep_unselected = vec![true; batch.len()];
+        let batch_len = batch.len();
+        let mut selected = [false; MAX_PACKET_BATCH_SIZE];
+        let mut keep_unselected = [true; MAX_PACKET_BATCH_SIZE];
+        let selected = &mut selected[..batch_len];
+        let keep_unselected = &mut keep_unselected[..batch_len];
         let mut selected_count = 0;
         for (index, packet) in batch.iter().enumerate() {
             let Some(header) = packet.peer_manager_header() else {
@@ -967,11 +981,11 @@ impl PeerSessionTunnelFilter {
                 #[cfg(test)]
                 self.batch_decrypt_calls.fetch_add(1, Ordering::Relaxed);
                 let outcomes = session.decrypt_payload_batch(peer_id, my_peer_id, packets);
-                Ok::<Vec<bool>, anyhow::Error>(
+                Ok::<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>, anyhow::Error>(
                     outcomes
                         .into_iter()
                         .map(|outcome| outcome.is_ok())
-                        .collect::<Vec<_>>(),
+                        .collect(),
                 )
             });
         if result.is_err() || !session.is_valid() {
@@ -992,8 +1006,11 @@ impl PeerSessionTunnelFilter {
             return Ok(batch);
         };
         let my_peer_id = self.my_peer_id.load();
-        let mut selected = vec![false; batch.len()];
-        let mut keep = vec![true; batch.len()];
+        let batch_len = batch.len();
+        let mut selected = [false; MAX_PACKET_BATCH_SIZE];
+        let mut keep = [true; MAX_PACKET_BATCH_SIZE];
+        let selected = &mut selected[..batch_len];
+        let keep = &mut keep[..batch_len];
         let mut selected_count = 0;
         for (index, packet) in batch.iter().enumerate() {
             let Some(header) = packet.peer_manager_header() else {
@@ -1025,11 +1042,11 @@ impl PeerSessionTunnelFilter {
             #[cfg(test)]
             self.batch_decrypt_calls.fetch_add(1, Ordering::Relaxed);
             let outcomes = session.decrypt_payload_batch(peer_id, my_peer_id, packets);
-            Ok::<Vec<bool>, anyhow::Error>(
+            Ok::<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>, anyhow::Error>(
                 outcomes
                     .into_iter()
                     .map(|outcome| outcome.is_ok())
-                    .collect::<Vec<_>>(),
+                    .collect(),
             )
         });
         if result.is_err() || !session.is_valid() {
@@ -1260,6 +1277,7 @@ pub struct PeerConn {
     link_envelope_filter: LinkEnvelopeTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
     private_admission: PrivateAdmission,
+    connection_permit: Option<super::peer_map::PeerConnectionPermit>,
 
     tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
     sink: DirectTunnelSender,
@@ -1314,6 +1332,8 @@ impl Debug for PeerConn {
 }
 
 impl PeerConn {
+    const HANDSHAKE_METRIC_NETWORK: &'static str = "__handshake__";
+
     pub fn secure_auth_level(&self) -> Option<SecureAuthLevel> {
         self.noise_handshake_result
             .as_ref()
@@ -1368,7 +1388,11 @@ impl PeerConn {
         let filter_chain = TunnelFilterChain::new(session_filter.clone(), peer_conn_tunnel_filter)
             .chain(link_envelope_filter.clone());
         let peer_conn_tunnel = TunnelWithFilter::new(tunnel, filter_chain);
-        let mut direct_tunnel = DirectTunnel::new(peer_conn_tunnel, Some(Duration::from_secs(7)));
+        let mut direct_tunnel = DirectTunnel::new_with_process_memory(
+            peer_conn_tunnel,
+            Some(Duration::from_secs(7)),
+            Some(global_ctx.process_memory_governor()),
+        );
 
         let (recv, sink) = (direct_tunnel.get_stream(), direct_tunnel.get_sink());
 
@@ -1390,6 +1414,7 @@ impl PeerConn {
             link_envelope_filter,
             noise_handshake_result: None,
             private_admission: PrivateAdmission::None,
+            connection_permit: None,
 
             tunnel: Arc::new(Mutex::new(
                 Box::new(direct_tunnel) as Box<dyn Any + Send + 'static>
@@ -1437,6 +1462,13 @@ impl PeerConn {
 
     fn get_peer_session_store(&self) -> &Arc<PeerSessionStore> {
         &self.peer_session_store
+    }
+
+    pub(crate) fn attach_connection_permit(
+        &mut self,
+        permit: super::peer_map::PeerConnectionPermit,
+    ) {
+        self.connection_permit = Some(permit);
     }
 
     // pri, pub
@@ -1826,14 +1858,14 @@ impl PeerConn {
         metric_network_name: &str,
         hs: &mut snow::HandshakeState,
     ) -> Result<(), Error> {
-        tracing::info!(
-            "send noise msg: {:?}, packet_type: {:?}, from: {:?}, to: {:?}",
-            pb,
-            packet_type,
-            self.my_peer_id,
-            remote_peer_id
-        );
         let payload = pb.encode_to_vec();
+        tracing::info!(
+            ?packet_type,
+            from_peer_id = self.my_peer_id,
+            to_peer_id = remote_peer_id,
+            payload_len = payload.len(),
+            "send Noise handshake message"
+        );
         let mut msg = vec![0u8; 4096];
         let msg_len = hs
             .write_message(&payload, &mut msg)
@@ -1853,14 +1885,14 @@ impl PeerConn {
         remote_peer_id: PeerId,
         transport: &mut TransportState,
     ) -> Result<ZCPacket, Error> {
-        tracing::info!(
-            "send noise transport msg: {:?}, packet_type: {:?}, from: {:?}, to: {:?}",
-            pb,
-            packet_type,
-            self.my_peer_id,
-            remote_peer_id
-        );
         let payload = pb.encode_to_vec();
+        tracing::info!(
+            ?packet_type,
+            from_peer_id = self.my_peer_id,
+            to_peer_id = remote_peer_id,
+            payload_len = payload.len(),
+            "send Noise transport message"
+        );
         let mut msg = vec![0u8; 4096];
         let msg_len = transport
             .write_message(&payload, &mut msg)
@@ -2189,6 +2221,15 @@ impl PeerConn {
                     "Admin certificate id changed during verification".to_owned(),
                 ));
             }
+            if self
+                .global_ctx
+                .get_credential_manager()
+                .is_certificate_id_revoked(&responder_certificate_id)
+            {
+                return Err(Error::WaitRespError(
+                    "responder credential certificate is revoked".to_owned(),
+                ));
+            }
             responder_certificate_trusted = true;
             if !msg2_pb.responder_certificate_status.is_empty() {
                 let status = self.verify_remote_status(
@@ -2240,6 +2281,15 @@ impl PeerConn {
             if certificate.certificate_id != responder_certificate_id {
                 return Err(Error::WaitRespError(
                     "Admin certificate id changed during verification".to_owned(),
+                ));
+            }
+            if self
+                .global_ctx
+                .get_credential_manager()
+                .is_certificate_id_revoked(&responder_certificate_id)
+            {
+                return Err(Error::WaitRespError(
+                    "responder credential certificate is revoked".to_owned(),
                 ));
             }
             responder_certificate_trusted = true;
@@ -3205,6 +3255,16 @@ impl PeerConn {
             };
         let responder_certificate_digest = canonical_certificate_digest(&responder_certificate)?;
         let responder_certificate_id = canonical_certificate_id(&responder_certificate)?;
+        if !responder_certificate_id.is_empty()
+            && self
+                .global_ctx
+                .get_credential_manager()
+                .is_certificate_id_revoked(&responder_certificate_id)
+        {
+            return Err(Error::WaitRespError(
+                "local responder credential certificate is revoked".to_owned(),
+            ));
+        }
         let responder_certificate_identity_type = if responder_certificate.is_empty() {
             PeerIdentityType::SharedNode
         } else {
@@ -3407,10 +3467,13 @@ impl PeerConn {
         );
         let max_responder_auth = if transcript_secret_proof_valid {
             SecureAuthLevel::NetworkSecretConfirmed
-        } else if role_hint == 1 {
-            SecureAuthLevel::PeerVerified
         } else {
-            SecureAuthLevel::EncryptedUnauthenticated
+            // PeerVerified only asserts that the initiator checked the
+            // responder static key. Pinning or a trusted certificate is
+            // initiator-side evidence the responder cannot observe, so it
+            // must not be rejected here. Only NetworkSecretConfirmed claims
+            // secret possession, which the responder can verify itself.
+            SecureAuthLevel::PeerVerified
         };
         if echoed_responder_auth as i32 > max_responder_auth as i32 {
             return Err(Error::WaitRespError(
@@ -3830,9 +3893,17 @@ impl PeerConn {
         }
         // Send a short acknowledgement burst. This bounds one lost ACK
         // without adding a timer delay to the successful handshake path.
+        // A failed copy is tolerated here: the transition is already
+        // committed, and the initiator can finish from any single copy.
+        // The failure is reported after the receipt exchange completes.
+        let mut ready_ack_send_error = None;
         for _ in 0..3 {
-            self.sink.send(ready_ack_packet.clone()).await?;
-            self.record_control_tx(&remote_network_name, ready_ack_len);
+            match self.sink.send(ready_ack_packet.clone()).await {
+                Ok(()) => self.record_control_tx(&remote_network_name, ready_ack_len),
+                Err(error) => {
+                    ready_ack_send_error.get_or_insert(error);
+                }
+            }
         }
         let receipt_pkt = match timeout(
             Duration::from_secs(5),
@@ -3900,6 +3971,10 @@ impl PeerConn {
                 .acknowledge_responder_recovery(&session_key, transition_id);
         }
 
+        if let Some(error) = ready_ack_send_error {
+            return Err(error.into());
+        }
+
         Ok(NoiseHandshakeResult {
             peer_id: remote_peer_id,
             session,
@@ -3926,7 +4001,12 @@ impl PeerConn {
     }
 
     fn build_handshake_rsp(&self, noise: &NoiseHandshakeResult) -> HandshakeRequest {
-        tracing::info!("build_handshake_rsp: {:?}", noise);
+        tracing::debug!(
+            peer_id = noise.peer_id,
+            identity_type = ?noise.peer_identity_type,
+            secure_auth_level = ?noise.secure_auth_level,
+            "build authenticated handshake response"
+        );
         HandshakeRequest {
             magic: MAGIC,
             my_peer_id: noise.peer_id,
@@ -4066,10 +4146,20 @@ impl PeerConn {
     }
 
     fn record_control_tx(&self, network_name: &str, bytes: u64) {
+        let network_name = if self.handshake_done() {
+            network_name
+        } else {
+            Self::HANDSHAKE_METRIC_NETWORK
+        };
         self.control_metrics(network_name).record_tx(bytes);
     }
 
     fn record_control_rx(&self, network_name: &str, bytes: u64) {
+        let network_name = if self.handshake_done() {
+            network_name
+        } else {
+            Self::HANDSHAKE_METRIC_NETWORK
+        };
         self.control_metrics(network_name).record_rx(bytes);
     }
 
@@ -4119,7 +4209,6 @@ impl PeerConn {
             self.global_ctx.stats_manager().clone(),
             conn_info_for_instrument.network_name.clone(),
             probe_peer_id,
-            self.conn_id.to_string(),
         );
         #[cfg(feature = "quic")]
         let alternate_fec_decoder = self.alternate_fec_decoder.clone();
@@ -4195,6 +4284,8 @@ impl PeerConn {
             async move {
                 tracing::info!("start recving peer conn packet");
                 let mut task_ret = Ok(());
+                let mut receive_queue = VecDeque::with_capacity(RECEIVE_PREFETCH_BATCHES);
+                let mut stream_ended = false;
                 let mut next_result = stream.next().await;
                 while let Some(result) = next_result.take() {
                     let mut incoming = match result {
@@ -4238,11 +4329,11 @@ impl PeerConn {
 
                     let received_bytes = incoming.buffer_byte_len() as u64;
                     if packet_batch_is_direct_peer_data(&incoming) {
-                        let (delivery, mut prefetched, stream_ended) =
+                        let (delivery, mut prefetched, prefetch_reached_end) =
                             wait_for_delivery_with_bounded_prefetch(
                                 &mut stream,
                                 sender.send_batch(incoming),
-                                RECEIVE_PREFETCH_BATCHES,
+                                RECEIVE_PREFETCH_BATCHES.saturating_sub(receive_queue.len()),
                             )
                             .await;
                         if delivery.is_err() {
@@ -4253,10 +4344,9 @@ impl PeerConn {
                         {
                             limiter.consume(received_bytes).await;
                         }
-                        next_result = if let Some(first) = prefetched.pop_front() {
-                            if !prefetched.is_empty() {
-                                stream = Box::pin(futures::stream::iter(prefetched).chain(stream));
-                            }
+                        receive_queue.append(&mut prefetched);
+                        stream_ended |= prefetch_reached_end;
+                        next_result = if let Some(first) = receive_queue.pop_front() {
                             Some(first)
                         } else if stream_ended {
                             None
@@ -4437,7 +4527,13 @@ impl PeerConn {
                     {
                         limiter.consume(received_bytes).await;
                     }
-                    next_result = stream.next().await;
+                    next_result = if let Some(first) = receive_queue.pop_front() {
+                        Some(first)
+                    } else if stream_ended {
+                        None
+                    } else {
+                        stream.next().await
+                    };
                 }
 
                 tracing::info!("end recving peer conn packet");
@@ -4528,7 +4624,6 @@ impl PeerConn {
             self.global_ctx.stats_manager().clone(),
             connection_info.network_name.clone(),
             self.get_peer_id(),
-            self.conn_id.to_string(),
         );
         if let Some(sample) = self.fresh_speed_sample(std::time::Instant::now()) {
             speed_metrics.set_sample_age_ms(
@@ -4551,16 +4646,13 @@ impl PeerConn {
             return reserved_bytes;
         }
         let _active_guard = ActiveSpeedProbeGuard(&self.speed_probe_active);
-        let Ok(train) = build_probe_train_with_overhead(
-            generation,
-            reserved_bytes,
-            wire_packet_size,
-            PEER_MANAGER_HEADER_SIZE,
-        ) else {
+        let Ok((encoded_size, expected_packets, expected_bytes)) =
+            probe_train_metadata(reserved_bytes, wire_packet_size, PEER_MANAGER_HEADER_SIZE)
+        else {
             speed_metrics.record_failure("budget");
             return reserved_bytes;
         };
-        if train.is_empty() {
+        if expected_packets == 0 {
             speed_metrics.record_failure("budget");
             return reserved_bytes;
         }
@@ -4568,9 +4660,37 @@ impl PeerConn {
         let mut acknowledgements = self.speed_ack_sender.subscribe();
         let started_at = std::time::Instant::now();
         let send_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        let mut reservation = ProbeReservation::new(reserved_bytes, started_at);
+        let receipt_challenge = match generate_receipt_challenge() {
+            Ok(challenge) => challenge,
+            Err(_) => {
+                speed_metrics.record_failure("entropy");
+                return reserved_bytes;
+            }
+        };
+        let mut reservation = ProbeReservation::new(reserved_bytes, receipt_challenge, started_at);
         let network_name = self.get_conn_info().network_name;
-        for payload in train {
+        for sequence in 0..expected_packets {
+            let final_marker = sequence + 1 == expected_packets;
+            let payload = match (ProbeData {
+                generation,
+                sequence,
+                expected_packets,
+                expected_bytes,
+                final_marker,
+                receipt_challenge: if final_marker {
+                    receipt_challenge
+                } else {
+                    [0_u8; 16]
+                },
+            })
+            .encode_with_size(encoded_size)
+            {
+                Ok(payload) => payload,
+                Err(_) => {
+                    speed_metrics.record_failure("budget");
+                    break;
+                }
+            };
             let mut packet = ZCPacket::new_with_payload(&payload);
             packet.fill_peer_manager_hdr(
                 self.my_peer_id,
@@ -4583,21 +4703,28 @@ impl PeerConn {
                 .set_latency_first(true);
             let packet_len = packet.tunnel_payload().len() as u64;
             let metric_len = packet.buf_len() as u64;
+            if !reservation.reserve_send(packet_len, std::time::Instant::now()) {
+                speed_metrics.record_failure("budget");
+                break;
+            }
             let send = tokio::time::timeout_at(send_deadline, self.sink.send(packet)).await;
             match send {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    reservation.commit_send(std::time::Instant::now());
+                }
                 Ok(Err(_)) => {
+                    reservation.cancel_send();
                     speed_metrics.record_failure("send");
                     break;
                 }
                 Err(_) => {
+                    reservation.cancel_send();
                     speed_metrics.record_failure("timeout");
                     break;
                 }
             }
-            if !reservation.record_sent(packet_len, std::time::Instant::now()) {
-                speed_metrics.record_failure("budget");
-                break;
+            if final_marker {
+                reservation.mark_challenge_sent();
             }
             self.record_control_tx(&network_name, metric_len);
             speed_metrics.record_tx(metric_len);
@@ -4607,7 +4734,9 @@ impl PeerConn {
             let acknowledgement = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     match acknowledgements.recv().await {
-                        Ok(ack) if ack.generation == generation => return Some(ack),
+                        Ok(ack) if ack.generation == generation => {
+                            return Some((ack, std::time::Instant::now()));
+                        }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => return None,
                     }
@@ -4616,10 +4745,19 @@ impl PeerConn {
             .await
             .ok()
             .flatten();
-            if let Some(ack) = acknowledgement {
-                let ttl = speed_sample_ttl(interval);
-                self.store_speed_sample(SpeedSample::from_ack(ack, std::time::Instant::now(), ttl));
-                speed_metrics.set_sample_age_ms(0);
+            if let Some((ack, _completed_at)) = acknowledgement {
+                if reservation.matches_ack(&ack) {
+                    let ttl = speed_sample_ttl(interval);
+                    self.store_speed_sample(SpeedSample::from_ack(
+                        ack,
+                        reservation.send_duration(),
+                        std::time::Instant::now(),
+                        ttl,
+                    ));
+                    speed_metrics.set_sample_age_ms(0);
+                } else {
+                    speed_metrics.record_failure("invalid_ack");
+                }
             } else {
                 speed_metrics.record_failure("timeout");
             }
@@ -4843,6 +4981,7 @@ pub mod tests {
         time::Duration,
     };
 
+    #[cfg(feature = "quic")]
     use bytes::Bytes;
     use futures::Sink;
 
@@ -4852,7 +4991,7 @@ pub mod tests {
     use super::*;
     use crate::common::config::PeerConfig;
     use crate::common::global_ctx::GlobalCtx;
-    use crate::common::global_ctx::tests::get_mock_global_ctx;
+    use crate::common::global_ctx::tests::{get_mock_global_ctx, get_mock_global_ctx_with_network};
     use crate::common::new_peer_id;
     use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
 
@@ -4891,7 +5030,7 @@ pub mod tests {
 
     #[test]
     fn noise_prologue_binds_each_quic_exporter_bit() {
-        let mut first = [0_u8; 32];
+        let first = [0_u8; 32];
         let mut second = first;
         second[0] = 1;
         let first = noise_prologue_for_binding(
@@ -5034,7 +5173,7 @@ pub mod tests {
     #[cfg(feature = "quic")]
     #[test]
     fn alternate_fec_rechecks_a_pmtu_decrease_before_send() {
-        let record_len = 1000;
+        let record_len = ALTERNATE_FEC_CONSERVATIVE_DATAGRAM_BUDGET;
         let wire_len = alternate_fec_wire_len(record_len, false, false).unwrap();
         let current_budget = std::sync::atomic::AtomicUsize::new(1452);
         assert!(wire_len <= current_budget.load(Ordering::Relaxed));
@@ -5972,7 +6111,7 @@ pub mod tests {
 
     #[cfg(feature = "quic")]
     #[test]
-    fn peer_session_filter_invalidates_after_repeated_fec_ciphertext_forgery() {
+    fn peer_session_filter_tolerates_repeated_fec_ciphertext_forgery() {
         let my_peer_id = 10;
         let peer_id = 20;
         let root_key = PeerSession::new_root_key();
@@ -6001,7 +6140,8 @@ pub mod tests {
         receiver.set_peer_id(my_peer_id);
         receiver.set_session(receiver_session);
 
-        // SecureDatagramSession invalidates after ten consecutive failures.
+        // SecureDatagramSession bounds the forgery failure streak without
+        // invalidating standard traffic.
         for _ in 0..10 {
             let mut packet = ZCPacket::new_with_payload(b"forged fec source");
             packet.fill_peer_manager_hdr(my_peer_id, peer_id, PacketType::Data as u8);
@@ -6013,7 +6153,16 @@ pub mod tests {
                     .is_err()
             );
         }
-        assert!(receiver.alternate_fec_session_invalidated());
+        assert!(!receiver.alternate_fec_session_invalidated());
+
+        // The session still accepts an authentic packet afterwards.
+        let mut packet = ZCPacket::new_with_payload(b"authentic fec source");
+        packet.fill_peer_manager_hdr(my_peer_id, peer_id, PacketType::Data as u8);
+        sender.encrypt_alternate_fec_source(&mut packet).unwrap();
+        receiver
+            .decrypt_recovered_alternate_fec_packet(&mut packet)
+            .unwrap();
+        assert_eq!(packet.payload(), b"authentic fec source");
     }
 
     #[cfg(feature = "quic")]
@@ -6106,7 +6255,7 @@ pub mod tests {
             PeerSessionTunnelFilter::new_with_peer_and_link_active(peer_id, true, link_active);
         linked.set_peer_id(my_peer_id);
         let mut linked_plaintext = ZCPacket::new_with_payload(b"link plaintext");
-        linked_plaintext.fill_peer_manager_hdr(peer_id, my_peer_id, PacketType::Data as u8);
+        linked_plaintext.fill_peer_manager_hdr(my_peer_id, peer_id, PacketType::Data as u8);
         linked
             .decrypt_recovered_alternate_fec_packet(&mut linked_plaintext)
             .unwrap();
@@ -6162,11 +6311,8 @@ pub mod tests {
                 .unwrap();
             source_packets.push(wrap_source_packet(metadata, output.source));
         }
-        let parity = parity_packets(
-            my_peer_id,
-            peer_id,
-            encoder.flush_due(now + Duration::from_millis(40)).unwrap(),
-        )
+        let completed = encoder.flush_due(now + Duration::from_millis(40)).unwrap();
+        let parity = parity_packets(my_peer_id, peer_id, &completed)
         .pop()
         .unwrap();
 
@@ -6209,6 +6355,61 @@ pub mod tests {
         assert!(s_ret.is_err());
     }
 
+
+    /// Assert that all received handshake traffic is accounted, across the
+    /// handshake label (matched packets) and the network label (duplicate
+    /// acknowledgement copies drained by the receive loop).
+    async fn assert_control_rx_metrics(
+        c_peer: &mut PeerConn,
+        s_peer: &mut PeerConn,
+        c_ctx: &ArcGlobalCtx,
+        s_ctx: &ArcGlobalCtx,
+        c_recorder: &Arc<PacketRecorderTunnelFilter>,
+        s_recorder: &Arc<PacketRecorderTunnelFilter>,
+    ) {
+        c_peer.start_recv_loop(create_packet_recv_chan().0).await;
+        s_peer.start_recv_loop(create_packet_recv_chan().0).await;
+        // Wait for the received byte totals to stop changing; a trailing
+        // acknowledgement copy can still be in flight right after the
+        // handshake.
+        let mut previous = None;
+        let (c_expected, s_expected) = loop {
+            let c_sum = c_recorder
+                .received
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|pkt| pkt.buf_len() as u64)
+                .sum::<u64>();
+            let s_sum = s_recorder
+                .received
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|pkt| pkt.buf_len() as u64)
+                .sum::<u64>();
+            if previous == Some((c_sum, s_sum)) {
+                break (c_sum, s_sum);
+            }
+            previous = Some((c_sum, s_sum));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let c_ctx = c_ctx.clone();
+        let s_ctx = s_ctx.clone();
+        wait_for_condition(
+            || async {
+                metric_value(&c_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK)
+                    + metric_value(&c_ctx, MetricName::TrafficControlBytesRx, "default")
+                    == c_expected
+                    && metric_value(&s_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK)
+                        + metric_value(&s_ctx, MetricName::TrafficControlBytesRx, "default")
+                        == s_expected
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn peer_conn_handshake() {
         let (c, s) = create_ring_tunnel_pair();
@@ -6238,14 +6439,19 @@ pub mod tests {
         c_ret.unwrap();
         s_ret.unwrap();
 
-        assert_eq!(c_recorder.sent.lock().unwrap().len(), 4);
-        assert_eq!(c_recorder.received.lock().unwrap().len(), 6);
-
-        assert_eq!(s_recorder.sent.lock().unwrap().len(), 6);
-        assert_eq!(s_recorder.received.lock().unwrap().len(), 4);
+        // The initiator sends Msg1, Msg3, CommitAck, Ready and ReadyReceipt.
+        // The responder sends Msg2, Commit, CommitDone and a three-copy
+        // acknowledgement burst for Ready and ReadyReceipt.
+        assert_eq!(c_recorder.sent.lock().unwrap().len(), 5);
+        assert_eq!(s_recorder.received.lock().unwrap().len(), 5);
+        assert_eq!(s_recorder.sent.lock().unwrap().len(), 9);
+        // The initiator stops reading after the first acknowledgement copy,
+        // so trailing burst copies may or may not be observed.
+        let c_received = c_recorder.received.lock().unwrap().len();
+        assert!((6..=9).contains(&c_received), "c_received: {c_received}");
 
         assert_eq!(
-            metric_value(&c_ctx, MetricName::TrafficControlBytesTx, "default"),
+            metric_value(&c_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
             c_recorder
                 .sent
                 .lock()
@@ -6255,17 +6461,7 @@ pub mod tests {
                 .sum::<u64>()
         );
         assert_eq!(
-            metric_value(&c_ctx, MetricName::TrafficControlBytesRx, "default"),
-            c_recorder
-                .received
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|pkt| pkt.buf_len() as u64)
-                .sum::<u64>()
-        );
-        assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesTx, "default"),
+            metric_value(&s_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
             s_recorder
                 .sent
                 .lock()
@@ -6274,8 +6470,18 @@ pub mod tests {
                 .map(|pkt| pkt.buf_len() as u64)
                 .sum::<u64>()
         );
+
+        assert_control_rx_metrics(
+            &mut c_peer,
+            &mut s_peer,
+            &c_ctx,
+            &s_ctx,
+            &c_recorder,
+            &s_recorder,
+        )
+        .await;
         assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesRx, "default"),
+            metric_value(&s_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK),
             s_recorder
                 .received
                 .lock()
@@ -6295,7 +6501,8 @@ pub mod tests {
         assert_eq!(c_peer.get_network_identity().network_secret, None);
         assert_eq!(
             c_peer.get_network_identity().network_secret_digest,
-            NetworkIdentity::default().network_secret_digest
+            NetworkIdentity::new("default".to_owned(), "test-default-root".to_owned())
+                .network_secret_digest
         );
     }
 
@@ -6309,6 +6516,8 @@ pub mod tests {
         Arc<PeerSessionStore>,
         PeerId,
         PeerId,
+        ArcGlobalCtx,
+        ArcGlobalCtx,
     ) {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let client_tunnel: Box<dyn Tunnel> = if drop_client {
@@ -6330,15 +6539,19 @@ pub mod tests {
         let sessions = Arc::new(PeerSessionStore::new());
         let client_id = new_peer_id();
         let server_id = new_peer_id();
+        // A reconnecting node keeps its static key. Reuse one context per
+        // node so the retry handshake presents the same identity.
+        let client_ctx = get_mock_global_ctx();
+        let server_ctx = get_mock_global_ctx();
         let mut client = PeerConn::new(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx.clone(),
             client_tunnel,
             sessions.clone(),
         );
         let mut server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx.clone(),
             server_tunnel,
             sessions.clone(),
         );
@@ -6346,12 +6559,20 @@ pub mod tests {
             client.do_handshake_as_client(),
             server.do_handshake_as_server()
         );
-        (client_result, server_result, sessions, client_id, server_id)
+        (
+            client_result,
+            server_result,
+            sessions,
+            client_id,
+            server_id,
+            client_ctx,
+            server_ctx,
+        )
     }
 
     #[tokio::test]
     async fn direct_handshake_rejects_dropped_commit_ack() {
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, client_ctx, server_ctx) =
             direct_handshake_with_drop(true, 3, 4).await;
         assert!(client.is_err());
         assert!(server.is_err());
@@ -6369,13 +6590,13 @@ pub mod tests {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let mut client = PeerConn::new(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx,
             Box::new(client_tunnel),
             sessions.clone(),
         );
         let mut server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx,
             Box::new(server_tunnel),
             sessions.clone(),
         );
@@ -6395,7 +6616,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn direct_handshake_rejects_dropped_commit_done() {
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, ..) =
             direct_handshake_with_drop(false, 3, 4).await;
         assert!(client.is_err());
         assert!(server.is_err());
@@ -6413,21 +6634,21 @@ pub mod tests {
 
     #[tokio::test]
     async fn direct_handshake_retries_a_dropped_ready() {
-        let (client, server, _, _, _) = direct_handshake_with_drop(true, 4, 5).await;
+        let (client, server, ..) = direct_handshake_with_drop(true, 4, 5).await;
         assert!(client.is_ok());
         assert!(server.is_ok());
     }
 
     #[tokio::test]
     async fn direct_handshake_retries_a_dropped_ready_ack() {
-        let (client, server, _, _, _) = direct_handshake_with_drop(false, 4, 5).await;
+        let (client, server, ..) = direct_handshake_with_drop(false, 4, 5).await;
         assert!(client.is_ok());
         assert!(server.is_ok());
     }
 
     #[tokio::test]
     async fn direct_handshake_sync_ignores_different_local_revisions() {
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, client_ctx, server_ctx) =
             direct_handshake_with_drop(false, 0, 0).await;
         assert!(client.is_ok());
         assert!(server.is_ok());
@@ -6449,13 +6670,13 @@ pub mod tests {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let mut retry_client = PeerConn::new(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx,
             Box::new(client_tunnel),
             sessions.clone(),
         );
         let mut retry_server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx,
             Box::new(server_tunnel),
             sessions.clone(),
         );
@@ -6480,7 +6701,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn direct_handshake_normal_second_transition_has_no_fallback_state() {
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, client_ctx, server_ctx) =
             direct_handshake_with_drop(false, 0, 0).await;
         assert!(client.is_ok());
         assert!(server.is_ok());
@@ -6493,13 +6714,13 @@ pub mod tests {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let mut retry_client = PeerConn::new(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx,
             Box::new(client_tunnel),
             sessions.clone(),
         );
         let mut retry_server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx,
             Box::new(server_tunnel),
             sessions.clone(),
         );
@@ -6521,7 +6742,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn direct_handshake_rejects_wrong_transition_acknowledgement() {
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, client_ctx, server_ctx) =
             direct_handshake_with_drop(false, 4, 7).await;
         assert!(client.is_err());
         assert!(server.is_ok());
@@ -6553,14 +6774,14 @@ pub mod tests {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let mut retry_client = PeerConn::new_with_peer_id_hint(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx,
             Box::new(client_tunnel),
             Some(server_id),
             sessions.clone(),
         );
         let mut retry_server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx,
             Box::new(server_tunnel),
             sessions.clone(),
         );
@@ -6575,7 +6796,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn direct_handshake_recovers_after_all_ready_acks_drop() {
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, client_ctx, server_ctx) =
             direct_handshake_with_drop(false, 4, 7).await;
         assert!(client.is_err());
         assert!(server.is_ok());
@@ -6593,14 +6814,14 @@ pub mod tests {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let mut retry_client = PeerConn::new_with_peer_id_hint(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx,
             Box::new(client_tunnel),
             Some(server_id),
             sessions.clone(),
         );
         let mut retry_server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx,
             Box::new(server_tunnel),
             sessions.clone(),
         );
@@ -6621,7 +6842,7 @@ pub mod tests {
     async fn direct_handshake_recovers_after_all_ready_receipt_acks_drop() {
         // The server sends Msg2, Commit, CommitDone, three ReadyAck copies,
         // then three ReceiptAck copies. Drop only the ReceiptAck copies.
-        let (client, server, sessions, client_id, server_id) =
+        let (client, server, sessions, client_id, server_id, client_ctx, server_ctx) =
             direct_handshake_with_drop(false, 7, 10).await;
         assert!(client.is_err(), "the client must retain its receipt");
         assert!(server.is_ok(), "the server must process the receipt");
@@ -6642,14 +6863,14 @@ pub mod tests {
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
         let mut retry_client = PeerConn::new_with_peer_id_hint(
             client_id,
-            get_mock_global_ctx(),
+            client_ctx,
             Box::new(client_tunnel),
             Some(server_id),
             sessions.clone(),
         );
         let mut retry_server = PeerConn::new(
             server_id,
-            get_mock_global_ctx(),
+            server_ctx,
             Box::new(server_tunnel),
             sessions.clone(),
         );
@@ -6747,7 +6968,7 @@ pub mod tests {
         s_ret.unwrap();
 
         assert_eq!(
-            metric_value(&c_ctx, MetricName::TrafficControlBytesTx, "default"),
+            metric_value(&c_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
             c_recorder
                 .sent
                 .lock()
@@ -6757,17 +6978,7 @@ pub mod tests {
                 .sum::<u64>()
         );
         assert_eq!(
-            metric_value(&c_ctx, MetricName::TrafficControlBytesRx, "default"),
-            c_recorder
-                .received
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|pkt| pkt.buf_len() as u64)
-                .sum::<u64>()
-        );
-        assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesTx, "default"),
+            metric_value(&s_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
             s_recorder
                 .sent
                 .lock()
@@ -6776,8 +6987,18 @@ pub mod tests {
                 .map(|pkt| pkt.buf_len() as u64)
                 .sum::<u64>()
         );
+
+        assert_control_rx_metrics(
+            &mut c_peer,
+            &mut s_peer,
+            &c_ctx,
+            &s_ctx,
+            &c_recorder,
+            &s_recorder,
+        )
+        .await;
         assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesRx, "default"),
+            metric_value(&s_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK),
             s_recorder
                 .received
                 .lock()
@@ -6841,17 +7062,14 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("user".to_string(), "sec1".to_string())));
 
-        c_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("user".to_string(), "sec1".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity {
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
             network_name: "shared".to_string(),
             network_secret: None,
             network_secret_digest: None,
-        });
+        }));
+
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
@@ -6886,16 +7104,13 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("user".to_string(), "sec1".to_string())));
 
-        c_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("user".to_string(), "sec1".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "shared".to_string(),
             "sec2".to_string(),
-        ));
+        )));
+
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7076,15 +7291,10 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
 
-        c_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
-        s_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
+
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7123,20 +7333,16 @@ pub mod tests {
         let (c, s) = create_ring_tunnel_pair();
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
-        c_ctx
-            .config
-            .set_network_identity(crate::common::config::NetworkIdentity::new(
+        let c_ctx = get_mock_global_ctx_with_network(Some(crate::common::config::NetworkIdentity::new(
                 "net1".to_string(),
                 "sec1".to_string(),
-            ));
-        s_ctx
-            .config
-            .set_network_identity(crate::common::config::NetworkIdentity::new(
+            )));
+
+        let s_ctx = get_mock_global_ctx_with_network(Some(crate::common::config::NetworkIdentity::new(
                 "net1".to_string(),
                 "sec1".to_string(),
-            ));
+            )));
+
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
 
@@ -7183,17 +7389,14 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
 
-        c_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity {
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
             network_name: "net2".to_string(),
             network_secret: None,
             network_secret_digest: None,
-        });
+        }));
+
 
         let remote_url: url::Url = c.info().unwrap().remote_addr.unwrap().url.parse().unwrap();
 
@@ -7244,17 +7447,14 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
 
-        c_ctx
-            .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity {
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
             network_name: "net2".to_string(),
             network_secret: None,
             network_secret_digest: None,
-        });
+        }));
+
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7296,16 +7496,16 @@ pub mod tests {
         let client_tunnel = TunnelWithFilter::new(client_tunnel, client_recorder.clone());
         let server_tunnel = TunnelWithFilter::new(server_tunnel, server_recorder.clone());
 
-        let client_ctx = get_mock_global_ctx();
-        client_ctx.config.set_network_identity(NetworkIdentity::new(
+        let client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "foreign".to_string(),
             "foreign-secret".to_string(),
-        ));
-        let server_ctx = get_mock_global_ctx();
-        server_ctx.config.set_network_identity(NetworkIdentity::new(
+        )));
+
+        let server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "local".to_string(),
             "local-secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&client_ctx, true);
         set_secure_mode_cfg(&server_ctx, true);
 
@@ -7462,17 +7662,18 @@ pub mod tests {
 
     #[tokio::test]
     async fn peer_conn_pingpong_timeout_not_close() {
-        peer_conn_pingpong_test_common(3, 5, false, false).await;
+        // The handshake owns sends 1-5; the first two pings are 6 and 7.
+        peer_conn_pingpong_test_common(6, 8, false, false).await;
     }
 
     #[tokio::test]
     async fn peer_conn_pingpong_oneside_timeout() {
-        peer_conn_pingpong_test_common(4, 12, false, false).await;
+        peer_conn_pingpong_test_common(6, 14, false, false).await;
     }
 
     #[tokio::test]
     async fn peer_conn_pingpong_bothside_timeout() {
-        peer_conn_pingpong_test_common(3, 14, true, true).await;
+        peer_conn_pingpong_test_common(6, 17, true, true).await;
     }
 
     #[tokio::test]
@@ -7497,20 +7698,20 @@ pub mod tests {
     }
 
     /// Helper: set up a credential node from a signed credential bundle.
-    fn set_credential_mode_cfg(global_ctx: &GlobalCtx, network_name: &str, encoded_bundle: &str) {
+    fn credential_mode_global_ctx(network_name: &str, encoded_bundle: &str) -> ArcGlobalCtx {
         use crate::{common::config::NetworkIdentity, proto::common::SecureModeConfig};
         let bundle = CredentialManager::parse_credential_bundle(encoded_bundle)
             .expect("credential bundle must be valid");
         assert_eq!(bundle.network_name, network_name);
         let private_key = credential_private_key_from_secret(encoded_bundle);
         let public = x25519_dalek::PublicKey::from(&private_key);
-        global_ctx.config.set_network_identity(
+        let global_ctx = get_mock_global_ctx_with_network(Some(
             NetworkIdentity::new_credential_with_root_fingerprint(
                 network_name.to_string(),
                 &bundle.root_fingerprint,
             )
             .expect("credential root fingerprint must be valid"),
-        );
+        ));
         global_ctx.config.set_secure_mode(Some(SecureModeConfig {
             enabled: true,
             local_private_key: Some(BASE64_STANDARD.encode(private_key.as_bytes())),
@@ -7522,6 +7723,7 @@ pub mod tests {
                 .map(|certificate| prost::Message::encode_to_vec(&certificate))
                 .unwrap_or_default(),
         }));
+        global_ctx
     }
 
     fn credential_private_key_from_secret(secret: &str) -> x25519_dalek::StaticSecret {
@@ -7539,11 +7741,11 @@ pub mod tests {
         let s_peer_id = new_peer_id();
 
         // Admin node (server) has network_secret
-        let s_ctx = get_mock_global_ctx();
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&s_ctx, true);
 
         // Generate a credential on admin and get the private key for the client
@@ -7558,8 +7760,7 @@ pub mod tests {
             .unwrap();
 
         // Credential node (client) uses credential private key
-        let c_ctx = get_mock_global_ctx();
-        set_credential_mode_cfg(&c_ctx, "net1", &cred_secret);
+        let c_ctx = credential_mode_global_ctx("net1", &cred_secret);
 
         let ps = Arc::new(PeerSessionStore::new());
         let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
@@ -7622,10 +7823,8 @@ pub mod tests {
             .unwrap();
 
         let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
-        let client_ctx = get_mock_global_ctx();
-        let server_ctx = get_mock_global_ctx();
-        set_credential_mode_cfg(&client_ctx, "net1", &client_bundle);
-        set_credential_mode_cfg(&server_ctx, "net1", &server_bundle);
+        let client_ctx = credential_mode_global_ctx("net1", &client_bundle);
+        let server_ctx = credential_mode_global_ctx("net1", &server_bundle);
 
         let sessions = Arc::new(PeerSessionStore::new());
         let mut client = PeerConn::new(
@@ -7661,8 +7860,8 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn encrypted_unauthenticated_with_invalid_proof_is_not_admin() {
+    #[tokio::test]
+    async fn encrypted_unauthenticated_with_invalid_proof_is_not_admin() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
         let conn = PeerConn::new(
             new_peer_id(),
@@ -7683,14 +7882,14 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn invalid_secret_proof_does_not_escalate_server_authentication() {
+    #[tokio::test]
+    async fn invalid_secret_proof_does_not_escalate_server_authentication() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_network_identity(NetworkIdentity::new(
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&global_ctx, true);
         let conn = PeerConn::new(
             new_peer_id(),
@@ -7713,14 +7912,14 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn digest_only_client_does_not_pass_private_admission() {
+    #[tokio::test]
+    async fn digest_only_client_does_not_pass_private_admission() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_network_identity(NetworkIdentity::new(
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&global_ctx, true);
         let conn = PeerConn::new(
             new_peer_id(),
@@ -7746,14 +7945,14 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn replayed_digest_does_not_pass_private_admission() {
+    #[tokio::test]
+    async fn replayed_digest_does_not_pass_private_admission() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_network_identity(NetworkIdentity::new(
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&global_ctx, true);
         let conn = PeerConn::new(
             new_peer_id(),
@@ -7779,14 +7978,14 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn current_transcript_secret_proof_passes_private_admission() {
+    #[tokio::test]
+    async fn current_transcript_secret_proof_passes_private_admission() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_network_identity(NetworkIdentity::new(
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&global_ctx, true);
         let conn = PeerConn::new(
             new_peer_id(),
@@ -7813,14 +8012,14 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn trusted_static_credential_passes_private_admission() {
+    #[tokio::test]
+    async fn bare_credential_key_does_not_pass_private_admission() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_network_identity(NetworkIdentity::new(
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&global_ctx, true);
         let (_credential_id, credential_secret) = global_ctx
             .get_credential_manager()
@@ -7835,6 +8034,7 @@ pub mod tests {
             Arc::new(PeerSessionStore::new()),
         );
 
+        // A private key without its signed certificate cannot authenticate.
         assert_eq!(
             conn.classify_private_admission(
                 None,
@@ -7843,18 +8043,31 @@ pub mod tests {
                 "net1",
                 None,
             ),
+            PrivateAdmission::None,
+        );
+
+        // A key pinned by the operator still authenticates as a trusted
+        // static credential.
+        assert_eq!(
+            conn.classify_private_admission(
+                None,
+                b"credential-handshake",
+                public_key.as_bytes(),
+                "net1",
+                Some(public_key.as_bytes()),
+            ),
             PrivateAdmission::TrustedStaticCredential,
         );
     }
 
-    #[test]
-    fn trusted_credential_with_invalid_proof_stays_credential_or_shared_node() {
+    #[tokio::test]
+    async fn trusted_credential_with_invalid_proof_stays_credential_or_shared_node() {
         let (local_tunnel, _remote_tunnel) = create_ring_tunnel_pair();
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_network_identity(NetworkIdentity::new(
+        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&global_ctx, true);
 
         let (_credential_id, credential_secret) = global_ctx
@@ -7875,19 +8088,23 @@ pub mod tests {
             local_tunnel,
             Arc::new(PeerSessionStore::new()),
         );
-        let auth_level = conn
-            .verify_remote_auth(
-                Some(&[0_u8; 32]),
-                b"handshake-hash",
-                remote_public.as_bytes(),
-                None,
-                true,
-                false,
-                "net1",
-            )
-            .expect("trusted credential key should still authenticate as PeerVerified");
-        assert_eq!(auth_level, SecureAuthLevel::PeerVerified);
+        // A bare credential key with an invalid proof no longer
+        // authenticates; the signed certificate is mandatory.
+        assert!(
+            conn
+                .verify_remote_auth(
+                    Some(&[0_u8; 32]),
+                    b"handshake-hash",
+                    remote_public.as_bytes(),
+                    None,
+                    true,
+                    false,
+                    "net1",
+                )
+                .is_err()
+        );
 
+        let auth_level = SecureAuthLevel::PeerVerified;
         assert_eq!(
             conn.classify_remote_identity("net1", auth_level, true, true, false),
             PeerIdentityType::Credential,
@@ -7907,11 +8124,11 @@ pub mod tests {
         let s_peer_id = new_peer_id();
 
         // Admin node (server) with no credentials generated
-        let s_ctx = get_mock_global_ctx();
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&s_ctx, true);
 
         // Unknown credential node (client) with a valid bundle from another root.
@@ -7941,17 +8158,16 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        let s_ctx = get_mock_global_ctx();
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "secret".to_string(),
+        )));
 
-        c_ctx.config.set_network_identity(NetworkIdentity::new(
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
-            "net1".to_string(),
-            "secret".to_string(),
-        ));
+        )));
+
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7982,11 +8198,11 @@ pub mod tests {
     #[tokio::test]
     async fn peer_conn_revoked_credential_rejected() {
         // Admin generates credential, then revokes it
-        let admin_ctx = get_mock_global_ctx();
-        admin_ctx.config.set_network_identity(NetworkIdentity::new(
+        let admin_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "net1".to_string(),
             "secret".to_string(),
-        ));
+        )));
+
         set_secure_mode_cfg(&admin_ctx, true);
 
         let (cred_id, cred_secret) = admin_ctx
@@ -8007,8 +8223,7 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx();
-        set_credential_mode_cfg(&c_ctx, "net1", &cred_secret);
+        let c_ctx = credential_mode_global_ctx("net1", &cred_secret);
 
         let ps = Arc::new(PeerSessionStore::new());
         let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());

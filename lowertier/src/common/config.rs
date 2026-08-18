@@ -85,8 +85,8 @@ pub fn gen_default_flags() -> Flags {
         quic_congestion: "bbr".to_string(),
         quic_brutal_send_bps: 0,
         quic_brutal_loss_compensation: true,
-        quic_initial_receive_window: 1_250_000,
-        quic_receive_window: (1_u64 << 62) - 1,
+        quic_initial_receive_window: 512 * 1024,
+        quic_receive_window: 1024 * 1024,
         quic_datagram_fec_parity: 0,
         quic_datagram_alternate_path_parity: false,
         speed_first: false,
@@ -454,12 +454,29 @@ pub trait LoggingConfigLoader {
 pub type NetworkSecretDigest = [u8; 32];
 const CREDENTIAL_MODE_MARKER: NetworkSecretDigest = [0_u8; 32];
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct NetworkIdentity {
     pub network_name: String,
     pub network_secret: Option<String>,
     #[serde(skip)]
     pub network_secret_digest: Option<NetworkSecretDigest>,
+}
+
+impl std::fmt::Debug for NetworkIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NetworkIdentity")
+            .field("network_name", &self.network_name)
+            .field(
+                "network_secret",
+                &self.network_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "network_secret_digest",
+                &self.network_secret_digest.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -618,6 +635,16 @@ impl NetworkIdentity {
         } else {
             None
         }
+    }
+
+    /// True when this identity explicitly marks credential mode (no shared
+    /// secret, all-zero marker digest). A secret-less identity carrying a
+    /// real digest is not credential mode: it is either a credential
+    /// identity with a pinned root, or the digest-only view of a
+    /// shared-secret network as advertised to foreign peers.
+    pub(crate) fn is_credential_marker(&self) -> bool {
+        self.network_secret.is_none()
+            && self.network_secret_digest == Some(CREDENTIAL_MODE_MARKER)
     }
 }
 
@@ -1455,6 +1482,13 @@ impl ConfigLoader for TomlConfigLoader {
         let mut config = self.config.lock().unwrap().clone();
         Self::normalize_config_source(&mut config);
         config.flags = Some(flags_diff_from_default(&self.get_flags()));
+        if config.network_identity.as_ref().is_some_and(|identity| {
+            identity.network_secret.is_none()
+                && identity.credential_root_fingerprint().is_none()
+                && identity.network_name == NetworkIdentity::default().network_name
+        }) {
+            config.network_identity = None;
+        }
         if config.stun_servers == Some(StunInfoCollector::get_default_servers()) {
             config.stun_servers = None;
         }
@@ -1836,8 +1870,8 @@ socket_mark = 66
         assert_eq!(flags.quic_congestion, "bbr");
         assert_eq!(flags.quic_brutal_send_bps, 0);
         assert!(flags.quic_brutal_loss_compensation);
-        assert_eq!(flags.quic_initial_receive_window, 1_250_000);
-        assert_eq!(flags.quic_receive_window, (1_u64 << 62) - 1);
+        assert_eq!(flags.quic_initial_receive_window, 512 * 1024);
+        assert_eq!(flags.quic_receive_window, 1024 * 1024);
         assert_eq!(flags.quic_datagram_fec_parity, 0);
         assert!(!flags.quic_datagram_alternate_path_parity);
         assert!(!flags.speed_first);

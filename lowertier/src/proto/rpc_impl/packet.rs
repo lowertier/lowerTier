@@ -21,8 +21,8 @@ use super::RpcTransactId;
 const RPC_PACKET_UDP_PAYLOAD_BUDGET: usize = 1300;
 
 /// Maximum logical RPC body after fragment reassembly or decompression.
-pub(crate) const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RPC_PIECES: u32 = 32 * 1024;
+pub(crate) const MAX_RPC_BODY_BYTES: usize = 256 * 1024;
+const MAX_RPC_PIECES: u32 = 1024;
 // Account for the sparse map slot retained for each fragment.
 const RPC_MERGER_MAP_ENTRY_OVERHEAD: usize = 64;
 // Account for the immutable envelope retained once per fragmented transaction.
@@ -317,7 +317,15 @@ impl PacketMerger {
             }
         } else {
             self.first_envelope = Some(envelope);
-            tracing::trace!(?rpc_packet, "got first piece");
+            tracing::trace!(
+                from_peer = rpc_packet.from_peer,
+                to_peer = rpc_packet.to_peer,
+                transaction_id = rpc_packet.transaction_id,
+                is_request = rpc_packet.is_request,
+                total_pieces = rpc_packet.total_pieces,
+                body_len = rpc_packet.body.len(),
+                "got first RPC piece"
+            );
         }
 
         if rpc_packet.piece_idx == 0 {
@@ -401,6 +409,10 @@ impl PacketMerger {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.first_envelope.is_none()
+    }
+
+    pub(crate) fn contains_piece(&self, piece_idx: u32) -> bool {
+        self.pieces.contains_key(&piece_idx)
     }
 }
 

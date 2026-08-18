@@ -107,6 +107,19 @@ pub fn shrink_dashmap<K: Eq + std::hash::Hash, V>(
     }
 }
 
+pub(crate) fn verify_slices_are_equal(left: &[u8], right: &[u8]) -> Result<(), ()> {
+    use subtle::ConstantTimeEq as _;
+
+    if left.len() != right.len() {
+        return Err(());
+    }
+    if bool::from(left.ct_eq(right)) {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

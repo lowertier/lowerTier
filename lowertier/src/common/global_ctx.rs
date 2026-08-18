@@ -3,7 +3,7 @@ use std::{
     hash::Hasher,
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -42,17 +42,38 @@ use socket2::Protocol;
 
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
 
-pub(crate) const FEC_INSTANCE_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PROCESS_RETAINED_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const FEC_INSTANCE_MAX_RETAINED_BYTES: usize = 512 * 1024;
 
 #[derive(Debug)]
-pub(crate) struct FecResourceBudget {
+pub(crate) struct ProcessMemoryGovernor {
     limit: usize,
     retained: AtomicUsize,
 }
 
-impl FecResourceBudget {
+#[derive(Debug)]
+pub(crate) struct ProcessMemoryPermit {
+    governor: Arc<ProcessMemoryGovernor>,
+    bytes: usize,
+}
+
+impl Drop for ProcessMemoryPermit {
+    fn drop(&mut self) {
+        self.governor.release(self.bytes);
+    }
+}
+
+static PROCESS_MEMORY_GOVERNOR: OnceLock<Arc<ProcessMemoryGovernor>> = OnceLock::new();
+
+pub(crate) fn global_process_memory_governor() -> Arc<ProcessMemoryGovernor> {
+    PROCESS_MEMORY_GOVERNOR
+        .get_or_init(|| Arc::new(ProcessMemoryGovernor::new()))
+        .clone()
+}
+
+impl ProcessMemoryGovernor {
     pub(crate) fn new() -> Self {
-        Self::with_limit(FEC_INSTANCE_MAX_RETAINED_BYTES)
+        Self::with_limit(PROCESS_RETAINED_MEMORY_LIMIT_BYTES)
     }
 
     pub(crate) fn with_limit(limit: usize) -> Self {
@@ -64,12 +85,99 @@ impl FecResourceBudget {
 
     pub(crate) fn reserve(&self, bytes: usize) -> bool {
         self.retained
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
                     .checked_add(bytes)
                     .filter(|total| *total <= self.limit)
             })
             .is_ok()
+    }
+
+    pub(crate) fn try_reserve_owned(self: &Arc<Self>, bytes: usize) -> Option<ProcessMemoryPermit> {
+        self.reserve(bytes).then(|| ProcessMemoryPermit {
+            governor: self.clone(),
+            bytes,
+        })
+    }
+
+    pub(crate) fn release(&self, bytes: usize) {
+        let mut current = self.retained.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_sub(bytes) else {
+                tracing::error!(
+                    retained = current,
+                    release = bytes,
+                    "process memory governor underflow"
+                );
+                debug_assert!(false, "process memory governor ownership was lost");
+                return;
+            };
+            match self.retained.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> usize {
+        self.retained.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FecResourceBudget {
+    limit: usize,
+    retained: AtomicUsize,
+    process: Option<Arc<ProcessMemoryGovernor>>,
+}
+
+impl FecResourceBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limit(FEC_INSTANCE_MAX_RETAINED_BYTES)
+    }
+
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            retained: AtomicUsize::new(0),
+            process: None,
+        }
+    }
+
+    pub(crate) fn with_process(limit: usize, process: Arc<ProcessMemoryGovernor>) -> Self {
+        Self {
+            limit,
+            retained: AtomicUsize::new(0),
+            process: Some(process),
+        }
+    }
+
+    pub(crate) fn reserve(&self, bytes: usize) -> bool {
+        if self
+            .process
+            .as_ref()
+            .is_some_and(|process| !process.reserve(bytes))
+        {
+            return false;
+        }
+        let reserved = self
+            .retained
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|total| *total <= self.limit)
+            })
+            .is_ok();
+        if !reserved && let Some(process) = self.process.as_ref() {
+            process.release(bytes);
+        }
+        reserved
     }
 
     pub(crate) fn release(&self, bytes: usize) -> bool {
@@ -93,7 +201,12 @@ impl FecResourceBudget {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return true,
+                Ok(_) => {
+                    if let Some(process) = self.process.as_ref() {
+                        process.release(bytes);
+                    }
+                    return true;
+                }
                 Err(observed) => current = observed,
             }
         }
@@ -314,6 +427,7 @@ pub struct GlobalCtx {
     trusted_keys: Arc<TrustedKeyMapManager>,
 
     fec_resource_budget: Arc<FecResourceBudget>,
+    process_memory_governor: Arc<ProcessMemoryGovernor>,
 }
 
 impl std::fmt::Debug for GlobalCtx {
@@ -607,8 +721,7 @@ impl GlobalCtx {
         {
             panic!("network secret and credential bundle cannot be used together");
         }
-        if network_secret.is_none()
-            && network.network_secret_digest.is_some()
+        if network.is_credential_marker()
             && secure_mode
                 .as_ref()
                 .and_then(|secure_mode| secure_mode.credential_bundle.as_deref())
@@ -640,6 +753,7 @@ impl GlobalCtx {
             })
         };
         let credential_manager = Arc::new(credential_manager);
+        let process_memory_governor = global_process_memory_governor();
 
         GlobalCtx {
             inst_name: config_fs.get_inst_name(),
@@ -687,7 +801,11 @@ impl GlobalCtx {
 
             trusted_keys: Arc::new(TrustedKeyMapManager::new()),
 
-            fec_resource_budget: Arc::new(FecResourceBudget::new()),
+            fec_resource_budget: Arc::new(FecResourceBudget::with_process(
+                FEC_INSTANCE_MAX_RETAINED_BYTES,
+                process_memory_governor.clone(),
+            )),
+            process_memory_governor,
         }
     }
 
@@ -1017,6 +1135,10 @@ impl GlobalCtx {
 
     pub(crate) fn fec_resource_budget(&self) -> Arc<FecResourceBudget> {
         self.fec_resource_budget.clone()
+    }
+
+    pub(crate) fn process_memory_governor(&self) -> Arc<ProcessMemoryGovernor> {
+        self.process_memory_governor.clone()
     }
 
     pub fn set_flags(&self, flags: Flags) {

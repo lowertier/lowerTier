@@ -1,10 +1,16 @@
-use std::{io, net::SocketAddr, sync::OnceLock};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::OnceLock,
+    task::{Context, Poll, ready},
+};
 
 use bytes::{Bytes, BytesMut};
 use smallvec::{SmallVec, smallvec};
 use tokio::{io::Interest, net::UdpSocket};
 
 use super::batch::MAX_PACKET_BATCH_SIZE;
+use super::packet_def::ReusableBufferPool;
 
 const MAX_UDP_GSO_PAYLOAD: usize = u16::MAX as usize;
 static UDP_SEND_VECTOR_DISABLED: OnceLock<bool> = OnceLock::new();
@@ -76,6 +82,7 @@ fn split_gro_buffer(mut buffer: BytesMut, stride: usize) -> io::Result<Vec<Bytes
 pub(crate) struct ReceivedDatagram {
     pub(crate) buffer: BytesMut,
     pub(crate) source: SocketAddr,
+    pub(crate) reusable_pool: Option<ReusableBufferPool>,
 }
 
 pub(crate) type ReceivedDatagramBatch = SmallVec<[ReceivedDatagram; 4]>;
@@ -83,6 +90,8 @@ pub(crate) type ReceivedDatagramBatch = SmallVec<[ReceivedDatagram; 4]>;
 pub(crate) struct UdpBatchReceiver {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
     slots: ReceiveSlotPool,
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    reusable_pool: Option<(usize, ReusableBufferPool)>,
     #[cfg(target_os = "linux")]
     gro_enabled: Option<bool>,
 }
@@ -92,6 +101,8 @@ impl UdpBatchReceiver {
         Self {
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
             slots: ReceiveSlotPool::default(),
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+            reusable_pool: None,
             #[cfg(target_os = "linux")]
             gro_enabled: None,
         }
@@ -105,7 +116,11 @@ impl UdpBatchReceiver {
         if udp_recv_vector_disabled() {
             let mut buffer = BytesMut::with_capacity(max_datagram_size);
             let (_, source) = socket.recv_buf_from(&mut buffer).await?;
-            return Ok(smallvec![ReceivedDatagram { buffer, source }]);
+            return Ok(smallvec![ReceivedDatagram {
+                buffer,
+                source,
+                reusable_pool: None,
+            }]);
         }
 
         #[cfg(target_os = "linux")]
@@ -117,16 +132,27 @@ impl UdpBatchReceiver {
             enabled
         };
 
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let reusable_pool = self.receive_pool(max_datagram_size).clone();
+        #[cfg(target_os = "linux")]
+        let reusable_pool = (!gro_enabled).then(|| self.receive_pool(max_datagram_size).clone());
+
         loop {
             socket.readable().await?;
             match socket.try_io(Interest::READABLE, || {
                 #[cfg(target_os = "linux")]
                 {
-                    try_recv_batch(socket, max_datagram_size, gro_enabled, &mut self.slots)
+                    try_recv_batch(
+                        socket,
+                        max_datagram_size,
+                        gro_enabled,
+                        &mut self.slots,
+                        reusable_pool.as_ref(),
+                    )
                 }
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 {
-                    try_recv_batch(socket, max_datagram_size, &mut self.slots)
+                    try_recv_batch(socket, max_datagram_size, &mut self.slots, &reusable_pool)
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
                 {
@@ -139,6 +165,21 @@ impl UdpBatchReceiver {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    fn receive_pool(&mut self, slot_size: usize) -> &ReusableBufferPool {
+        let replace = self
+            .reusable_pool
+            .as_ref()
+            .is_none_or(|(existing_size, _)| *existing_size != slot_size);
+        if replace {
+            self.reusable_pool = Some((
+                slot_size,
+                ReusableBufferPool::new(slot_size, MAX_PACKET_BATCH_SIZE),
+            ));
+        }
+        &self.reusable_pool.as_ref().unwrap().1
     }
 }
 
@@ -167,38 +208,51 @@ pub(crate) async fn send_batch(
     destination: SocketAddr,
     buffers: &[Bytes],
 ) -> io::Result<()> {
-    if udp_send_vector_disabled() {
-        for buffer in buffers {
-            let sent = socket.send_to(buffer, destination).await?;
-            if sent != buffer.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "scalar UDP fallback sent a partial datagram",
-                ));
-            }
-        }
-        return Ok(());
-    }
-
     let mut completed = 0;
-    while completed < buffers.len() {
-        socket.writable().await?;
-        let remaining = &buffers[completed..];
+    std::future::poll_fn(|cx| poll_send_batch(socket, destination, buffers, &mut completed, cx))
+        .await
+}
+
+pub(crate) fn poll_send_batch(
+    socket: &UdpSocket,
+    destination: SocketAddr,
+    buffers: &[Bytes],
+    completed: &mut usize,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
+    while *completed < buffers.len() {
+        ready!(socket.poll_send_ready(cx))?;
+        if udp_send_vector_disabled() {
+            match socket.try_send_to(&buffers[*completed], destination) {
+                Ok(sent) if sent == buffers[*completed].len() => *completed += 1,
+                Ok(_) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "scalar UDP fallback sent a partial datagram",
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+            continue;
+        }
+
+        let remaining = &buffers[*completed..];
         match socket.try_io(Interest::WRITABLE, || {
             try_send_batch(socket, destination, remaining)
         }) {
             Ok(0) => {
-                return Err(io::Error::new(
+                return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "vector UDP send completed zero datagrams",
-                ));
+                )));
             }
-            Ok(sent) => completed += sent,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(error) => return Err(error),
+            Ok(sent) => *completed += sent,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
+            Err(error) => return Poll::Ready(Err(error)),
         }
     }
-    Ok(())
+    Poll::Ready(Ok(()))
 }
 
 pub(crate) async fn recv_batch(
@@ -208,7 +262,11 @@ pub(crate) async fn recv_batch(
     if udp_recv_vector_disabled() {
         let mut buffer = BytesMut::with_capacity(max_datagram_size);
         let (_, source) = socket.recv_buf_from(&mut buffer).await?;
-        return Ok(smallvec![ReceivedDatagram { buffer, source }]);
+        return Ok(smallvec![ReceivedDatagram {
+            buffer,
+            source,
+            reusable_pool: None,
+        }]);
     }
 
     UdpBatchReceiver::new()
@@ -231,11 +289,25 @@ impl ReceiveSlot {
         }
     }
 
+    fn from_pool(pool: &ReusableBufferPool) -> Self {
+        let mut buffer = pool.take_or_allocate();
+        buffer.clear();
+        Self {
+            buffer,
+            source: unsafe { std::mem::zeroed() },
+        }
+    }
+
     fn buffer_ptr(&mut self) -> *mut nix::libc::c_void {
         self.buffer.spare_capacity_mut().as_mut_ptr().cast()
     }
 
-    fn finish(mut self, received: usize, source_len: usize) -> io::Result<ReceivedDatagram> {
+    fn finish(
+        mut self,
+        received: usize,
+        source_len: usize,
+        reusable_pool: Option<ReusableBufferPool>,
+    ) -> io::Result<ReceivedDatagram> {
         if received > self.buffer.capacity() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -246,6 +318,7 @@ impl ReceiveSlot {
         Ok(ReceivedDatagram {
             buffer: self.buffer,
             source: sockaddr_to_socket_addr(&self.source, source_len)?,
+            reusable_pool,
         })
     }
 }
@@ -264,11 +337,16 @@ impl ReceiveSlotPool {
     #[cfg(test)]
     fn new(count: usize, slot_size: usize) -> Self {
         let mut pool = Self::default();
-        pool.prepare(count, slot_size);
+        pool.prepare(count, slot_size, None);
         pool
     }
 
-    fn prepare(&mut self, count: usize, slot_size: usize) {
+    fn prepare(
+        &mut self,
+        count: usize,
+        slot_size: usize,
+        reusable_pool: Option<&ReusableBufferPool>,
+    ) {
         assert!(count <= MAX_PACKET_BATCH_SIZE);
         if self.slots.len() < count {
             self.slots.resize_with(count, || None);
@@ -278,7 +356,11 @@ impl ReceiveSlotPool {
                 .as_ref()
                 .is_none_or(|slot| slot.buffer.capacity() < slot_size);
             if must_replace {
-                *slot = Some(ReceiveSlot::new(slot_size));
+                *slot = Some(
+                    reusable_pool
+                        .map(ReceiveSlot::from_pool)
+                        .unwrap_or_else(|| ReceiveSlot::new(slot_size)),
+                );
             }
         }
     }
@@ -298,7 +380,7 @@ impl ReceiveSlotPool {
     #[cfg(test)]
     fn refill(&mut self, slot_size: usize) {
         let count = self.slots.len();
-        self.prepare(count, slot_size);
+        self.prepare(count, slot_size, None);
     }
 
     #[cfg(test)]
@@ -356,6 +438,7 @@ fn try_recv_batch(
     socket: &UdpSocket,
     max_datagram_size: usize,
     slots: &mut ReceiveSlotPool,
+    reusable_pool: &ReusableBufferPool,
 ) -> io::Result<ReceivedDatagramBatch> {
     use std::{os::fd::AsRawFd, ptr};
 
@@ -382,7 +465,11 @@ fn try_recv_batch(
         ) -> libc::ssize_t;
     }
 
-    slots.prepare(MAX_PACKET_BATCH_SIZE, max_datagram_size);
+    slots.prepare(
+        MAX_PACKET_BATCH_SIZE,
+        max_datagram_size,
+        Some(reusable_pool),
+    );
     let mut iovecs: [libc::iovec; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| libc::iovec {
         iov_base: ptr::null_mut(),
         iov_len: 0,
@@ -428,9 +515,11 @@ fn try_recv_batch(
         .take(completed)
         .enumerate()
         .map(|(index, message)| {
-            slots
-                .take(index)
-                .finish(message.msg_datalen, message.msg_namelen as usize)
+            slots.take(index).finish(
+                message.msg_datalen,
+                message.msg_namelen as usize,
+                Some(reusable_pool.clone()),
+            )
         })
         .collect()
 }
@@ -441,6 +530,7 @@ fn try_recv_batch(
     max_datagram_size: usize,
     gro_enabled: bool,
     slots: &mut ReceiveSlotPool,
+    reusable_pool: Option<&ReusableBufferPool>,
 ) -> io::Result<ReceivedDatagramBatch> {
     use std::{mem, os::fd::AsRawFd, ptr};
 
@@ -458,7 +548,7 @@ fn try_recv_batch(
     } else {
         max_datagram_size
     };
-    slots.prepare(message_count, slot_size);
+    slots.prepare(message_count, slot_size, reusable_pool);
     let mut iovecs: [libc::iovec; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| libc::iovec {
         iov_base: ptr::null_mut(),
         iov_len: 0,
@@ -508,6 +598,7 @@ fn try_recv_batch(
         let datagram = slots.take(index).finish(
             message.msg_len as usize,
             message.msg_hdr.msg_namelen as usize,
+            reusable_pool.cloned(),
         )?;
         if let Some(stride) = gro_stride {
             let source = datagram.source;
@@ -518,7 +609,11 @@ fn try_recv_batch(
                         "UDP GRO returned more than the bounded packet batch",
                     ));
                 }
-                datagrams.push(ReceivedDatagram { buffer, source });
+                datagrams.push(ReceivedDatagram {
+                    buffer,
+                    source,
+                    reusable_pool: None,
+                });
             }
         } else {
             datagrams.push(datagram);
@@ -608,6 +703,7 @@ fn try_recv_batch(
     Ok(smallvec![ReceivedDatagram {
         buffer: BytesMut::from(buffer.as_slice()),
         source,
+        reusable_pool: None,
     }])
 }
 

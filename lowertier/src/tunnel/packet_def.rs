@@ -950,17 +950,16 @@ impl ZCPacket {
         let mut ret = Self::new_nic_packet();
         let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
         let total_len = payload_off + payload.len();
-        ret.inner.reserve(total_len);
-        unsafe { ret.inner.set_len(total_len) };
+        ret.inner.resize(total_len, 0);
         ret.mut_payload().copy_from_slice(payload);
         ret
     }
 
     pub fn new_for_tun(cap: usize, packet_info_len: usize) -> Self {
         let mut ret = Self::new_nic_packet();
-        ret.inner.reserve(cap);
         let total_len = ret.packet_type.get_packet_offsets().payload_offset - packet_info_len;
-        unsafe { ret.inner.set_len(total_len) };
+        ret.inner.reserve(cap.max(total_len));
+        ret.inner.resize(total_len, 0);
         ret
     }
 
@@ -975,8 +974,7 @@ impl ZCPacket {
 
         let mut ret = Self::new_nic_packet();
         let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
-        ret.inner.reserve(payload_off + total_payload_len);
-        unsafe { ret.inner.set_len(payload_off + total_payload_len) };
+        ret.inner.resize(payload_off + total_payload_len, 0);
 
         let fixed_hdr_len = std::mem::size_of::<ForeignNetworkPacketHeader>();
         ret.mut_payload()[..fixed_hdr_len].copy_from_slice(foreign_network_hdr.as_bytes());
@@ -1315,6 +1313,12 @@ impl ZCPacket {
         self.inner.len()
     }
 
+    pub(crate) fn retained_buffer_capacity(&self) -> usize {
+        self.inner
+            .capacity()
+            .saturating_add(self.reusable_prefix.as_ref().map_or(0, BytesMut::capacity))
+    }
+
     pub fn fill_peer_manager_hdr(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8) {
         self.flow_hash = None;
         let payload_len = self.payload_len();
@@ -1404,7 +1408,7 @@ impl ZCPacket {
                 .get_packet_offsets()
                 .peer_manager_header_offset;
             let mut buf = BytesMut::with_capacity(new_pm_offset + tunnel_payload.len());
-            unsafe { buf.set_len(new_pm_offset) };
+            buf.resize(new_pm_offset, 0);
             buf.extend_from_slice(tunnel_payload);
             let mut packet = Self::new_from_buf(buf, target_packet_type);
             packet.lossy_hint = self.lossy_hint;

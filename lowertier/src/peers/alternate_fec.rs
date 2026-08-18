@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,18 +24,20 @@ const SOURCE_TARGET: usize = 16;
 // The shard stores a two-byte source length and uses an even u16 shard size.
 const MAX_SOURCE_BYTES: usize = u16::MAX as usize - 3;
 const MAX_SHARD_BYTES: usize = MAX_SOURCE_BYTES + 2;
-const MAX_BLOCKS: usize = 4096;
+const MAX_BLOCKS: usize = 512;
 const MAX_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RECORDS_PER_BLOCK: usize = SOURCE_TARGET + 3;
 const MAX_RECOVERY_WORK_PER_SECOND: usize = 1024;
 const MAX_FEC_RECORD_BYTES: usize = PARITY_HEADER_LEN + MAX_SHARD_BYTES;
-const MAX_COMPLETED_BLOCKS: usize = 65_536;
-const COMPLETED_ID_RETAINED_BYTES: usize = 32;
+const MAX_COMPLETED_BLOCKS: usize = MAX_BLOCKS;
+const COMPLETED_ID_RETAINED_BYTES: usize = 64;
+const RECEIVE_BLOCK_RETAINED_BYTES: usize = 512;
 const BLOCK_TTL: Duration = Duration::from_secs(5);
 const COMPLETED_TTL: Duration = BLOCK_TTL;
 pub(crate) const FEC_FLUSH_DELAY: Duration = Duration::from_millis(40);
 
-struct GlobalBytesReservation {
+#[derive(Debug)]
+pub(crate) struct GlobalBytesReservation {
     budget: Arc<FecResourceBudget>,
     remaining: usize,
 }
@@ -79,6 +81,26 @@ pub(crate) struct CompletedAlternateFecBlock {
     pub block_id: u64,
     pub source_count: usize,
     pub parity: Vec<Bytes>,
+    pub(crate) reservation: GlobalBytesReservation,
+}
+
+#[cfg(test)]
+impl CompletedAlternateFecBlock {
+    pub(crate) fn for_test(block_id: u64, source_count: usize, parity: Vec<Bytes>) -> Self {
+        let retained = parity
+            .iter()
+            .map(|record| record.len().saturating_add(std::mem::size_of::<Bytes>()))
+            .sum::<usize>()
+            .saturating_add(std::mem::size_of::<Vec<Bytes>>());
+        let budget = Arc::new(FecResourceBudget::with_limit(retained.max(1)));
+        let reservation = GlobalBytesReservation::new(budget, retained).unwrap();
+        Self {
+            block_id,
+            source_count,
+            parity,
+            reservation,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,28 +110,55 @@ pub(crate) struct AlternateFecPushOutput {
 }
 
 pub(crate) struct AlternateFecEncoder {
+    budget: Arc<FecResourceBudget>,
+    metadata_reservation: GlobalBytesReservation,
     parity_count: usize,
     flush_delay: Duration,
     block_id: u64,
     stopped: bool,
     started_at: Option<Instant>,
     sources: Vec<Bytes>,
+    retained_source_bytes: usize,
+}
+
+impl Drop for AlternateFecEncoder {
+    fn drop(&mut self) {
+        release_budget(&self.budget, self.retained_source_bytes);
+    }
 }
 
 impl AlternateFecEncoder {
     pub fn new(parity_count: usize, flush_delay: Duration) -> anyhow::Result<Self> {
+        Self::new_with_budget(
+            parity_count,
+            flush_delay,
+            Arc::new(FecResourceBudget::new()),
+        )
+    }
+
+    pub(crate) fn new_with_budget(
+        parity_count: usize,
+        flush_delay: Duration,
+        budget: Arc<FecResourceBudget>,
+    ) -> anyhow::Result<Self> {
         ensure!(
             (1..=3).contains(&parity_count),
             "invalid alternate FEC parity count"
         );
         ensure!(!flush_delay.is_zero(), "alternate FEC flush delay is zero");
+        let metadata_bytes = std::mem::size_of::<Self>()
+            .saturating_add(SOURCE_TARGET.saturating_mul(std::mem::size_of::<Bytes>()));
+        let metadata_reservation = GlobalBytesReservation::new(budget.clone(), metadata_bytes)?;
         Ok(Self {
+            budget,
+            metadata_reservation,
             parity_count,
             flush_delay,
             block_id: 1,
             stopped: false,
             started_at: None,
             sources: Vec::with_capacity(SOURCE_TARGET),
+            retained_source_bytes: 0,
         })
     }
 
@@ -121,11 +170,28 @@ impl AlternateFecEncoder {
         );
         ensure!(!source.is_empty(), "alternate FEC source is empty");
         let source_index = self.sources.len();
-        let source_record = encode_source(self.block_id, source_index, source.clone())?;
+        ensure!(source_index < SOURCE_TARGET, "alternate FEC block is full");
+        ensure!(
+            source.len() <= MAX_SOURCE_BYTES,
+            "alternate FEC source symbol is too large"
+        );
+        let retained = source.len().saturating_add(std::mem::size_of::<Bytes>());
+        ensure!(
+            self.budget.reserve(retained),
+            "alternate FEC encoder byte limit reached"
+        );
+        let source_record = match encode_source(self.block_id, source_index, source.clone()) {
+            Ok(record) => record,
+            Err(error) => {
+                release_budget(&self.budget, retained);
+                return Err(error);
+            }
+        };
         if self.sources.is_empty() {
             self.started_at = Some(now);
         }
         self.sources.push(source);
+        self.retained_source_bytes = self.retained_source_bytes.saturating_add(retained);
         let completed = (self.sources.len() == SOURCE_TARGET)
             .then(|| self.flush())
             .transpose()?;
@@ -188,9 +254,25 @@ impl AlternateFecEncoder {
         let source_count = self.sources.len();
         let next_block_id = self.block_id.checked_add(1);
         let block_id_exhausted = next_block_id.is_none();
+        let parity_reservation = shard_bytes(&self.sources).and_then(|shard_bytes| {
+            let record_bytes = PARITY_HEADER_LEN
+                .checked_add(shard_bytes)
+                .context("alternate FEC parity record size overflow")?;
+            let retained_per_parity = record_bytes
+                .checked_mul(2)
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Bytes>()))
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ZCPacket>()))
+                .context("alternate FEC parity retention size overflow")?;
+            let retained = retained_per_parity
+                .checked_mul(self.parity_count)
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<Bytes>>()))
+                .context("alternate FEC parity retention size overflow")?;
+            GlobalBytesReservation::new(self.budget.clone(), retained)
+        });
         let result = next_block_id
             .ok_or_else(|| anyhow::anyhow!("alternate FEC block ID exhausted"))
             .and_then(|next_block_id| {
+                let reservation = parity_reservation?;
                 encode_block(&self.sources, self.parity_count).and_then(|parity| {
                     parity
                         .into_iter()
@@ -199,18 +281,21 @@ impl AlternateFecEncoder {
                             encode_parity(block_id, source_count, self.parity_count, index, shard)
                         })
                         .collect::<anyhow::Result<Vec<_>>>()
-                        .map(|parity| (next_block_id, parity))
+                        .map(|parity| (next_block_id, parity, reservation))
                 })
             });
         self.sources.clear();
+        release_budget(&self.budget, self.retained_source_bytes);
+        self.retained_source_bytes = 0;
         self.started_at = None;
         match result {
-            Ok((next_block_id, parity)) => {
+            Ok((next_block_id, parity, reservation)) => {
                 self.block_id = next_block_id;
                 Ok(CompletedAlternateFecBlock {
                     block_id,
                     source_count,
                     parity,
+                    reservation,
                 })
             }
             Err(error) => {
@@ -454,6 +539,7 @@ struct ReceiveBlock {
     parity_count: Option<usize>,
     records_seen: usize,
     retained_bytes: usize,
+    metadata_charged: bool,
     expires_at: Instant,
 }
 
@@ -466,6 +552,7 @@ impl ReceiveBlock {
             parity_count: None,
             records_seen: 0,
             retained_bytes: 0,
+            metadata_charged: false,
             expires_at: now.checked_add(BLOCK_TTL).unwrap_or(now),
         }
     }
@@ -484,7 +571,7 @@ pub(crate) struct AlternateFecDecoder {
     expiry_index: BTreeSet<(Instant, u64)>,
     retained_bytes: usize,
     completed: HashSet<u64>,
-    completed_order: BTreeSet<(Instant, u64)>,
+    completed_order: VecDeque<(Instant, u64)>,
     completed_retained_bytes: usize,
     cpu_window_started_at: Option<Instant>,
     cpu_work_used: usize,
@@ -498,7 +585,13 @@ impl Default for AlternateFecDecoder {
 
 impl Drop for AlternateFecDecoder {
     fn drop(&mut self) {
-        release_budget(&self.budget, self.retained_bytes);
+        let block_metadata_bytes = self
+            .blocks
+            .values()
+            .filter(|block| block.metadata_charged)
+            .count()
+            * RECEIVE_BLOCK_RETAINED_BYTES;
+        release_budget(&self.budget, self.retained_bytes + block_metadata_bytes);
         release_budget(&self.budget, self.completed_retained_bytes);
     }
 }
@@ -511,7 +604,7 @@ impl AlternateFecDecoder {
             expiry_index: BTreeSet::new(),
             retained_bytes: 0,
             completed: HashSet::new(),
-            completed_order: BTreeSet::new(),
+            completed_order: VecDeque::new(),
             completed_retained_bytes: 0,
             cpu_window_started_at: None,
             cpu_work_used: 0,
@@ -666,7 +759,12 @@ impl AlternateFecDecoder {
                 self.blocks.len() < MAX_BLOCKS,
                 "alternate FEC block limit reached"
             );
-            let block = ReceiveBlock::new(now);
+            ensure!(
+                self.budget.reserve(RECEIVE_BLOCK_RETAINED_BYTES),
+                "alternate FEC block metadata limit reached"
+            );
+            let mut block = ReceiveBlock::new(now);
+            block.metadata_charged = true;
             self.expiry_index.insert((block.expires_at, block_id));
             self.blocks.insert(block_id, block);
         }
@@ -724,7 +822,11 @@ impl AlternateFecDecoder {
                 .retained_bytes
                 .checked_sub(block.retained_bytes)
                 .expect("alternate FEC block bytes were released once");
-            release_budget(&self.budget, block.retained_bytes);
+            release_budget(
+                &self.budget,
+                block.retained_bytes
+                    + usize::from(block.metadata_charged) * RECEIVE_BLOCK_RETAINED_BYTES,
+            );
         }
         if !self.completed.contains(&block_id) && self.budget.reserve(COMPLETED_ID_RETAINED_BYTES) {
             let inserted = self.completed.insert(block_id);
@@ -734,7 +836,7 @@ impl AlternateFecDecoder {
                     .completed_retained_bytes
                     .checked_add(COMPLETED_ID_RETAINED_BYTES)
                     .expect("completed FEC ID bytes fit the decoder budget accounting");
-                self.completed_order.insert((now, block_id));
+                self.completed_order.push_back((now, block_id));
             } else {
                 release_budget(&self.budget, COMPLETED_ID_RETAINED_BYTES);
             }
@@ -742,7 +844,7 @@ impl AlternateFecDecoder {
         while self.completed.len() > MAX_COMPLETED_BLOCKS {
             let (_, oldest) = self
                 .completed_order
-                .pop_first()
+                .pop_front()
                 .expect("completed FEC ID index matches the set");
             let removed = self.completed.remove(&oldest);
             debug_assert!(removed);
@@ -769,17 +871,21 @@ impl AlternateFecDecoder {
                     .retained_bytes
                     .checked_sub(block.retained_bytes)
                     .expect("expired alternate FEC block bytes were released once");
-                release_budget(&self.budget, block.retained_bytes);
+                release_budget(
+                    &self.budget,
+                    block.retained_bytes
+                        + usize::from(block.metadata_charged) * RECEIVE_BLOCK_RETAINED_BYTES,
+                );
             }
         }
         while self
             .completed_order
-            .first()
+            .front()
             .is_some_and(|(at, _)| now.saturating_duration_since(*at) > COMPLETED_TTL)
         {
             let (_, block_id) = self
                 .completed_order
-                .pop_first()
+                .pop_front()
                 .expect("completed FEC ID index has a head");
             let removed = self.completed.remove(&block_id);
             debug_assert!(removed);
@@ -841,11 +947,11 @@ pub(crate) fn wrap_source_packet(
 pub(crate) fn parity_packets(
     from_peer_id: u32,
     immediate_peer_id: u32,
-    block: CompletedAlternateFecBlock,
+    block: &CompletedAlternateFecBlock,
 ) -> Vec<ZCPacket> {
     block
         .parity
-        .into_iter()
+        .iter()
         .map(|record| {
             let mut packet = ZCPacket::new_with_payload(&record);
             packet.fill_peer_manager_hdr(
@@ -969,8 +1075,8 @@ mod tests {
     use super::{
         AlternateFecDecoder, AlternateFecEncoder, BLOCK_TTL, COMPLETED_ID_RETAINED_BYTES,
         COMPLETED_TTL, MAX_BLOCKS, MAX_SHARD_BYTES, MAX_SOURCE_BYTES, PARITY_HEADER_LEN,
-        SOURCE_HEADER_LEN, SOURCE_KIND, decode_alternate_fec_packet, parity_packets,
-        source_metadata, wrap_source_packet,
+        RECEIVE_BLOCK_RETAINED_BYTES, SOURCE_HEADER_LEN, SOURCE_KIND, decode_alternate_fec_packet,
+        parity_packets, source_metadata, wrap_source_packet,
     };
     use crate::common::global_ctx::FecResourceBudget;
     use crate::common::global_ctx::tests::get_mock_global_ctx;
@@ -1175,16 +1281,17 @@ mod tests {
     #[test]
     fn separate_decoder_instances_have_isolated_resource_budgets() {
         let now = Instant::now();
-        let first_budget = Arc::new(FecResourceBudget::with_limit(32));
-        let second_budget = Arc::new(FecResourceBudget::with_limit(32));
+        let retained = RECEIVE_BLOCK_RETAINED_BYTES + 32;
+        let first_budget = Arc::new(FecResourceBudget::with_limit(retained));
+        let second_budget = Arc::new(FecResourceBudget::with_limit(retained));
         let mut first = AlternateFecDecoder::new(first_budget.clone());
         let mut second = AlternateFecDecoder::new(second_budget.clone());
         let record = super::encode_source(1, 0, Bytes::from(vec![0x5a; 32])).unwrap();
 
         first.ingest(record.clone(), now).unwrap();
         second.ingest(record, now).unwrap();
-        assert_eq!(first_budget.retained(), 32);
-        assert_eq!(second_budget.retained(), 32);
+        assert_eq!(first_budget.retained(), retained);
+        assert_eq!(second_budget.retained(), retained);
     }
 
     #[test]
@@ -1204,7 +1311,8 @@ mod tests {
     #[test]
     fn decoders_sharing_one_instance_budget_are_bounded_together() {
         let now = Instant::now();
-        let shared_budget = Arc::new(FecResourceBudget::with_limit(48));
+        let retained = RECEIVE_BLOCK_RETAINED_BYTES + 32;
+        let shared_budget = Arc::new(FecResourceBudget::with_limit(retained));
         let mut first = AlternateFecDecoder::new(shared_budget.clone());
         let mut second = AlternateFecDecoder::new(shared_budget.clone());
         let first_record = super::encode_source(1, 0, Bytes::from(vec![0x5a; 32])).unwrap();
@@ -1212,7 +1320,7 @@ mod tests {
 
         first.ingest(first_record, now).unwrap();
         assert!(second.ingest(second_record, now).is_err());
-        assert_eq!(shared_budget.retained(), 32);
+        assert_eq!(shared_budget.retained(), retained);
     }
 
     #[test]
@@ -1288,12 +1396,9 @@ mod tests {
             source_records.push(output.source);
             completed = output.completed.or(completed);
         }
-        let parity = parity_packets(
-            11,
-            22,
-            completed
-                .unwrap_or_else(|| encoder.flush_due(now + Duration::from_millis(40)).unwrap()),
-        )
+        let completed = completed
+            .unwrap_or_else(|| encoder.flush_due(now + Duration::from_millis(40)).unwrap());
+        let parity = parity_packets(11, 22, &completed)
         .pop()
         .unwrap();
         let mut decoder = AlternateFecDecoder::default();
@@ -1404,7 +1509,8 @@ mod tests {
         for source in sources(16) {
             completed = encoder.push(source, now).unwrap().completed.or(completed);
         }
-        let packets = parity_packets(31, 47, completed.unwrap());
+        let completed = completed.unwrap();
+        let packets = parity_packets(31, 47, &completed);
         assert_eq!(packets.len(), 2);
         for packet in packets {
             let header = packet.peer_manager_header().unwrap();

@@ -1284,6 +1284,11 @@ pub mod tests {
         assert_eq!(ret.payload(), Bytes::from(buf));
 
         send.close().await.unwrap();
+        // Half-closing the sink keeps a hybrid tunnel connection alive. Drop
+        // both halves so the peer observes the full close before we wait for
+        // the listener to finish.
+        drop(send);
+        drop(recv);
 
         if ["udp", "wg"].contains(&connector.remote_url().scheme()) {
             lis.abort();

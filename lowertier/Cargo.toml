@@ -201,6 +201,7 @@ boringtun = { package = "boringtun-lowertier", path = "../vendor/boringtun-lower
 
 # for encryption
 ring = "0.17"
+subtle = "2.6"
 bitflags = "2.5"
 aes-gcm = { version = "0.10.3", optional = true }
 openssl = { version = "0.10", optional = true, features = ["vendored"] }

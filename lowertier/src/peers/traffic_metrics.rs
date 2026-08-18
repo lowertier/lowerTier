@@ -98,12 +98,10 @@ impl SpeedProbeMetrics {
         stats_mgr: Arc<StatsManager>,
         network_name: String,
         dst_peer_id: PeerId,
-        connection_id: String,
     ) -> Self {
         let base_labels = LabelSet::new()
             .with_label_type(LabelType::NetworkName(network_name))
-            .with_label_type(LabelType::DstPeerId(dst_peer_id))
-            .with_label("connection_id", connection_id);
+            .with_label_type(LabelType::DstPeerId(dst_peer_id));
         Self {
             tx: TrafficCounters {
                 bytes: stats_mgr.get_counter(MetricName::SpeedProbeBytesTx, base_labels.clone()),
@@ -829,12 +827,7 @@ mod tests {
     #[tokio::test]
     async fn speed_probe_metrics_report_traffic_failures_and_sample_age() {
         let stats_mgr = Arc::new(StatsManager::new());
-        let metrics = SpeedProbeMetrics::new(
-            stats_mgr.clone(),
-            "default".to_string(),
-            42,
-            "00000000-0000-0000-0000-000000000001".to_string(),
-        );
+        let metrics = SpeedProbeMetrics::new(stats_mgr.clone(), "default".to_string(), 42);
 
         metrics.record_tx(1_200);
         metrics.record_rx(1_000);

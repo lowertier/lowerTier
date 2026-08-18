@@ -77,6 +77,14 @@ pub enum MetricName {
     TrafficControlPacketsForwarded,
     /// Traffic packets sent to self
     TrafficPacketsSelfTx,
+    /// Compact L3 bytes sent by the automatic data plane
+    HybridCompactL3BytesTx,
+    /// Compact L3 packets sent by the automatic data plane
+    HybridCompactL3PacketsTx,
+    /// Complete Ethernet bytes sent by the automatic data plane
+    HybridFullEthernetBytesTx,
+    /// Complete Ethernet packets sent by the automatic data plane
+    HybridFullEthernetPacketsTx,
     /// Traffic packets received from self
     TrafficPacketsSelfRx,
     /// Traffic packets forwarded for foreign network, rx to local
@@ -190,6 +198,14 @@ impl fmt::Display for MetricName {
                 write!(f, "traffic_control_packets_forwarded")
             }
             MetricName::TrafficPacketsSelfTx => write!(f, "traffic_packets_self_tx"),
+            MetricName::HybridCompactL3BytesTx => write!(f, "hybrid_compact_l3_bytes_tx"),
+            MetricName::HybridCompactL3PacketsTx => write!(f, "hybrid_compact_l3_packets_tx"),
+            MetricName::HybridFullEthernetBytesTx => {
+                write!(f, "hybrid_full_ethernet_bytes_tx")
+            }
+            MetricName::HybridFullEthernetPacketsTx => {
+                write!(f, "hybrid_full_ethernet_packets_tx")
+            }
             MetricName::TrafficPacketsSelfRx => write!(f, "traffic_packets_self_rx"),
             MetricName::TrafficPacketsForeignForwardRx => {
                 write!(f, "traffic_packets_foreign_forward_rx")

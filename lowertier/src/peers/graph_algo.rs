@@ -71,6 +71,20 @@ where
     F: FnMut(G::EdgeRef) -> K,
     K: Measure + Copy,
 {
+    dijkstra_with_first_hop_filtered(graph, start, |edge| Some(edge_cost(edge)))
+}
+
+pub fn dijkstra_with_first_hop_filtered<G, F, K>(
+    graph: G,
+    start: G::NodeId,
+    mut edge_cost: F,
+) -> DijkstraResult<K, G::NodeId>
+where
+    G: IntoEdges + Visitable,
+    G::NodeId: Eq + Hash + Clone,
+    F: FnMut(G::EdgeRef) -> Option<K>,
+    K: Measure + Copy,
+{
     let mut visited = graph.visit_map();
     let mut scores = HashMap::new();
     let mut first_hop = HashMap::new();
@@ -89,7 +103,10 @@ where
             if visited.is_visited(&next) {
                 continue;
             }
-            let next_score = node_score + edge_cost(edge);
+            let Some(cost) = edge_cost(edge) else {
+                continue;
+            };
+            let next_score = node_score + cost;
             match scores.entry(next) {
                 Occupied(mut ent) => {
                     if next_score < *ent.get() {
