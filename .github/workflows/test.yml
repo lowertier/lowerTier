@@ -8,6 +8,8 @@ on:
       - "Cargo.lock"
       - "lowertier/**"
       - "vendor/**"
+      - "script/colima-throughput/performance_gate.py"
+      - "script/tests/test_performance_gate.py"
       - ".github/actions/prepare-build/**"
       - ".github/workflows/test.yml"
   pull_request:
@@ -17,6 +19,8 @@ on:
       - "Cargo.lock"
       - "lowertier/**"
       - "vendor/**"
+      - "script/colima-throughput/performance_gate.py"
+      - "script/tests/test_performance_gate.py"
       - ".github/actions/prepare-build/**"
       - ".github/workflows/test.yml"
 
@@ -35,6 +39,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Test strict performance gate
+        run: python3 -m unittest script.tests.test_performance_gate -v
 
       - name: Prepare build environment
         uses: ./.github/actions/prepare-build

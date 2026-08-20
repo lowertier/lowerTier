@@ -104,6 +104,35 @@ and exact iperf error instead of emitting a malformed throughput row.
 `cpu-cores-per-gbit.tsv` reports each LowTier endpoint's process CPU divided by
 received payload throughput. Raw iperf JSON, unloaded and loaded ping samples,
 offload state, logs, and environment metadata remain alongside them.
+
+## Hard candidate gate
+
+Default-on dataplane changes must be faster than the last accepted baseline in
+every required workload. Equal, mixed, uncertain, and slower comparisons fail.
+The rationale and rejected architectural patterns are recorded in
+`docs/performance/performance-regression-policy.md`.
+
+Create matched result directories with at least five runs, one and eight TCP
+streams, and both directions. Then run:
+
+```bash
+python3 script/colima-throughput/performance_gate.py \
+  /path/to/baseline-p1-results \
+  /path/to/candidate-p1-results \
+  --baseline-extra-result-dir /path/to/baseline-p8-results \
+  --candidate-extra-result-dir /path/to/candidate-p8-results
+```
+
+Extra baseline and candidate directories are paired by option order and may be
+repeated for additional isolated runs.
+
+The default gate requires at least two percent median throughput gain in every
+matched workload, requires every paired candidate run to be faster, rejects a
+normalized TCP retransmission increase, rejects workload errors, verifies the
+comparable environment fields, and requires a valid raw substrate result. A
+smoke run may use `--min-samples 1`, `--allow-partial-matrix`, and
+`--allow-substrate-not-run`; that result cannot authorize a default-on merge.
+
 Absolute results are not directly comparable with Tailscale's published bare-metal 25GbE test.
 The comparable engineering question is whether LowTier preserves packets in batches, avoids
 avoidable syscalls and queue handoffs, and reduces CPU cores consumed per Gbit/s.
