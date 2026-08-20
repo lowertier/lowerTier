@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     str::FromStr,
@@ -7,6 +8,7 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::{
@@ -109,6 +111,7 @@ pub fn create_listener_by_url(
             IpScheme::Tcp => {
                 let mut l = TcpTunnelListener::new(l.clone());
                 l.set_socket_mark(socket_mark);
+                l.set_underlay_policy(global_ctx.get_underlay_policy());
                 l.boxed()
             }
             IpScheme::Udp => {
@@ -178,6 +181,83 @@ pub trait ListenerCreatorTrait: Fn() -> Box<dyn TunnelListener> + Send + Sync {}
 impl<T: Send + Sync> ListenerCreatorTrait for T where T: Fn() -> Box<dyn TunnelListener> + Send {}
 pub type ListenerCreator = Box<dyn ListenerCreatorTrait>;
 
+const MAX_CONCURRENT_EXTERNAL_HANDSHAKES: usize = 32;
+const MAX_CONCURRENT_HANDSHAKES_PER_LISTENER: usize = 16;
+const MAX_CONCURRENT_HANDSHAKES_PER_SOURCE: usize = 4;
+
+#[derive(Debug)]
+struct HandshakeAdmission {
+    global: Arc<Semaphore>,
+    sources: std::sync::Mutex<HashMap<String, usize>>,
+}
+
+impl HandshakeAdmission {
+    fn new() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(MAX_CONCURRENT_EXTERNAL_HANDSHAKES)),
+            sources: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn try_reserve(
+        self: &Arc<Self>,
+        listener: &Arc<Semaphore>,
+        source: String,
+    ) -> Option<HandshakePermit> {
+        let global = self.global.clone().try_acquire_owned().ok()?;
+        let listener = listener.clone().try_acquire_owned().ok()?;
+        let mut sources = self.sources.lock().unwrap();
+        let count = sources.entry(source.clone()).or_default();
+        if *count >= MAX_CONCURRENT_HANDSHAKES_PER_SOURCE {
+            return None;
+        }
+        *count += 1;
+        Some(HandshakePermit {
+            source,
+            admission: self.clone(),
+            _global: global,
+            _listener: listener,
+        })
+    }
+
+    fn release(&self, source: &str) {
+        let mut sources = self.sources.lock().unwrap();
+        let remove = if let Some(count) = sources.get_mut(source) {
+            *count = count.saturating_sub(1);
+            *count == 0
+        } else {
+            false
+        };
+        if remove {
+            sources.remove(source);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HandshakePermit {
+    source: String,
+    admission: Arc<HandshakeAdmission>,
+    _global: OwnedSemaphorePermit,
+    _listener: OwnedSemaphorePermit,
+}
+
+impl Drop for HandshakePermit {
+    fn drop(&mut self) {
+        self.admission.release(&self.source);
+    }
+}
+
+fn handshake_source(info: &crate::proto::common::TunnelInfo) -> String {
+    let Some(remote) = info.remote_addr.as_ref() else {
+        return "unknown".to_string();
+    };
+    url::Url::try_from(remote.clone())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| remote.to_string())
+}
+
 #[derive(Clone)]
 struct ListenerFactory {
     creator_fn: Arc<ListenerCreator>,
@@ -189,6 +269,7 @@ pub struct ListenerManager<H> {
     net_ns: NetNS,
     listeners: Vec<ListenerFactory>,
     peer_manager: Weak<H>,
+    handshake_admission: Arc<HandshakeAdmission>,
 
     tasks: JoinSet<()>,
 }
@@ -200,6 +281,7 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
             net_ns: global_ctx.net_ns.clone(),
             listeners: Vec::new(),
             peer_manager: Arc::downgrade(&peer_manager),
+            handshake_admission: Arc::new(HandshakeAdmission::new()),
             tasks: JoinSet::new(),
         }
     }
@@ -313,7 +395,9 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
         creator: Arc<ListenerCreator>,
         peer_manager: Weak<H>,
         global_ctx: ArcGlobalCtx,
+        handshake_admission: Arc<HandshakeAdmission>,
     ) {
+        let listener_admission = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES_PER_LISTENER));
         let mut err_count = 0;
         loop {
             let mut l = (creator)();
@@ -351,8 +435,24 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
                         break;
                     }
                 };
-
                 let tunnel_info = ret.info().unwrap();
+                let admission = if l.local_url().scheme() == "ring" {
+                    None
+                } else {
+                    match handshake_admission
+                        .try_reserve(&listener_admission, handshake_source(&tunnel_info))
+                    {
+                        Some(permit) => Some(permit),
+                        None => {
+                            tracing::warn!(
+                                ?l,
+                                "drop accepted tunnel because handshake admission is full"
+                            );
+                            continue;
+                        }
+                    }
+                };
+
                 global_ctx.issue_event(GlobalCtxEvent::ConnectionAccepted(
                     tunnel_info
                         .local_addr
@@ -369,6 +469,7 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
                 let peer_manager = peer_manager.clone();
                 let global_ctx = global_ctx.clone();
                 tokio::spawn(async move {
+                    let _admission = admission;
                     let Some(peer_manager) = peer_manager.upgrade() else {
                         tracing::error!("peer manager is gone, cannot handle tunnel");
                         return;
@@ -402,6 +503,7 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
                 listener.creator_fn.clone(),
                 self.peer_manager.clone(),
                 self.global_ctx.clone(),
+                self.handshake_admission.clone(),
             ));
         }
 
@@ -542,6 +644,42 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn external_handshake_admission_is_shared_and_bounded() {
+        let handler = Arc::new(MockListenerHandler {});
+        let listener_mgr = ListenerManager::new(get_mock_global_ctx(), handler);
+
+        assert_eq!(
+            listener_mgr.handshake_admission.global.available_permits(),
+            MAX_CONCURRENT_EXTERNAL_HANDSHAKES
+        );
+    }
+
+    #[test]
+    fn one_source_cannot_consume_all_handshake_capacity() {
+        let admission = Arc::new(HandshakeAdmission::new());
+        let listener = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES_PER_LISTENER));
+        let permits = (0..MAX_CONCURRENT_HANDSHAKES_PER_SOURCE)
+            .map(|_| {
+                admission
+                    .try_reserve(&listener, "192.0.2.1".to_string())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            admission
+                .try_reserve(&listener, "192.0.2.1".to_string())
+                .is_none()
+        );
+        assert!(
+            admission
+                .try_reserve(&listener, "192.0.2.2".to_string())
+                .is_some()
+        );
+        drop(permits);
     }
 
     #[tokio::test]

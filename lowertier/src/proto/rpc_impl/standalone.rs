@@ -4,10 +4,14 @@ use std::{
 };
 
 use anyhow::Context as _;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::{
-    common::join_joinset_background,
+    common::{
+        global_ctx::{ProcessMemoryPermit, global_process_memory_governor},
+        join_joinset_background,
+    },
     proto::{
         common::TunnelInfo,
         rpc_impl::bidirect::BidirectRpcManager,
@@ -15,6 +19,9 @@ use crate::{
     },
     tunnel::{Tunnel, TunnelConnector, TunnelListener},
 };
+
+const MAX_STANDALONE_RPC_CONNECTIONS: usize = 8;
+const STANDALONE_RPC_CONNECTION_CHARGE_BYTES: usize = 128 * 1024;
 
 use super::service_registry::ServiceRegistry;
 
@@ -75,10 +82,21 @@ impl<L: TunnelListener + 'static> StandAloneServer<L> {
         rx_timeout: Option<Duration>,
     ) -> Result<(), Error> {
         let tasks = Arc::new(Mutex::new(JoinSet::new()));
+        let admission = Arc::new(Semaphore::new(MAX_STANDALONE_RPC_CONNECTIONS));
         join_joinset_background(tasks.clone(), "standalone serve_loop".to_string());
 
         loop {
             let tunnel = listener.accept().await?;
+            let Ok(connection_slot) = admission.clone().try_acquire_owned() else {
+                tracing::trace!("drop standalone RPC connection because admission is full");
+                continue;
+            };
+            let Some(memory_permit): Option<ProcessMemoryPermit> = global_process_memory_governor()
+                .try_reserve_owned(STANDALONE_RPC_CONNECTION_CHARGE_BYTES)
+            else {
+                tracing::trace!("drop standalone RPC connection because memory is full");
+                continue;
+            };
             let tunnel_info = tunnel.info();
             let registry = registry.clone();
             let inflight_server = inflight.clone();
@@ -94,6 +112,8 @@ impl<L: TunnelListener + 'static> StandAloneServer<L> {
 
             inflight_server.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tasks.lock().unwrap().spawn(async move {
+                let _connection_slot = connection_slot;
+                let _memory_permit = memory_permit;
                 let server = BidirectRpcManager::new().set_rx_timeout(rx_timeout);
                 server.rpc_server().registry().replace_registry(&registry);
                 server.run_with_tunnel(tunnel);

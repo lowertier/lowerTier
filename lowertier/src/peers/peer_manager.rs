@@ -30,6 +30,7 @@ use crate::{
         PeerId,
         compressor::{Compressor as _, DefaultCompressor},
         constants::LOWTIER_VERSION,
+        dataplane_telemetry::{DataplaneQueueClass, DataplaneStage, DataplaneTelemetry},
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity},
         shrink_dashmap,
@@ -39,8 +40,8 @@ use crate::{
     peers::{
         PeerPacketFilter,
         flow::{
-            is_critical_l2_control, partition_packet_batch_by_flow, stamp_critical_l2_control,
-            stamp_packet_flow,
+            is_critical_l2_control, partition_packet_batch_by_flow, stamp_critical_control,
+            stamp_critical_l2_control, stamp_packet_flow,
         },
         l2_fabric::{
             EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch, MAX_FANOUT_RECIPIENTS,
@@ -68,7 +69,7 @@ use crate::{
     },
     tunnel::{
         self, PacketBatchSink, Tunnel, TunnelConnector, TunnelError,
-        batch::PacketBatch,
+        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         packet_def::{CompressorAlgo, PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
     },
 };
@@ -106,8 +107,9 @@ pub(crate) fn packet_supports_speed_first(packet: &ZCPacket) -> bool {
     let Some(header) = packet.peer_manager_header() else {
         return false;
     };
-    if header.packet_type == PacketType::Ethernet as u8
-        && (header.is_critical_l2_control() || is_critical_l2_control(packet.payload()))
+    if header.is_critical_l2_control()
+        || (header.packet_type == PacketType::Ethernet as u8
+            && is_critical_l2_control(packet.payload()))
     {
         return false;
     }
@@ -129,6 +131,9 @@ pub(crate) fn packet_supports_speed_first(packet: &ZCPacket) -> bool {
 }
 
 fn apply_local_route_policy(packet: &mut ZCPacket, speed_first: bool, latency_first: bool) {
+    // Authenticate routing-control classification before choosing a path. The
+    // later preparation pass observes the marker and avoids reparsing.
+    stamp_critical_control(packet);
     let use_speed = speed_first && packet_supports_speed_first(packet);
     let header = packet.mut_peer_manager_header().unwrap();
     header.set_speed_first(use_speed);
@@ -365,6 +370,12 @@ struct EthernetBatchInput {
 
 type EthernetBatchInputs = SmallVec<[EthernetBatchInput; 4]>;
 
+struct TapBatchMeta {
+    ethernet_header: [u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN],
+}
+
+type TapBatchMetadata = SmallVec<[Option<TapBatchMeta>; MAX_PACKET_BATCH_SIZE]>;
+
 struct OrderedPeerBatch {
     peer_id: PeerId,
     next_hop: Option<PeerId>,
@@ -465,6 +476,15 @@ impl OrderedPeerBatches {
         self.push_packet_with_next_hop(peer_id, packet, mark_recent, None);
     }
 
+    fn shape(&self) -> (usize, usize) {
+        self.batches.iter().fold((0, 0), |(packets, bytes), batch| {
+            (
+                packets + batch.packets.len(),
+                bytes + batch.packets.buffer_byte_len(),
+            )
+        })
+    }
+
     fn push_packet_with_next_hop(
         &mut self,
         peer_id: PeerId,
@@ -521,7 +541,25 @@ impl IntoIterator for OrderedPeerBatches {
         self.batches.into_iter()
     }
 }
-type IpRouteCache = SmallVec<[(IpAddr, Vec<PeerId>, bool); 4]>;
+type RoutedIpPeers = SmallVec<[PeerId; 2]>;
+
+struct RoutedIpRoute {
+    address: IpAddr,
+    peers: RoutedIpPeers,
+    is_exit_node: bool,
+}
+
+type RoutedIpRouteCache = SmallVec<[RoutedIpRoute; 4]>;
+
+struct ClassifiedRoutedBatch {
+    peer_batches: OrderedPeerBatches,
+}
+
+fn routed_single_peer(peer_id: PeerId) -> RoutedIpPeers {
+    let mut peers = RoutedIpPeers::new();
+    peers.push(peer_id);
+    peers
+}
 
 fn is_peer_rpc_packet_type(packet_type: u8) -> bool {
     packet_type == PacketType::TaRpc as u8
@@ -750,23 +788,382 @@ fn push_ordered_peer_batch(
     peer_batches.push_packet(peer_id, packet, mark_recent);
 }
 
+struct PreparedPacketBatch {
+    batch: PacketBatch,
+    bytes_before: u64,
+    bytes_after: u64,
+}
+
 fn prepare_packet_batch(
     compress_algo: CompressorAlgo,
     mut batch: PacketBatch,
-) -> Result<PacketBatch, Error> {
+) -> Result<PreparedPacketBatch, Error> {
+    if compress_algo == CompressorAlgo::None {
+        let mut bytes = 0_u64;
+        for packet in batch.iter_mut() {
+            bytes = bytes.saturating_add(packet.buf_len() as u64);
+            stamp_critical_l2_control(packet);
+            stamp_packet_flow(packet);
+        }
+        return Ok(PreparedPacketBatch {
+            batch,
+            bytes_before: bytes,
+            bytes_after: bytes,
+        });
+    }
+
     let compressor = DefaultCompressor {};
+    let mut bytes_before = 0_u64;
+    let mut bytes_after = 0_u64;
     for packet in batch.iter_mut() {
+        bytes_before = bytes_before.saturating_add(packet.buf_len() as u64);
         stamp_critical_l2_control(packet);
         stamp_packet_flow(packet);
         compressor
             .compress(packet, compress_algo)
             .with_context(|| "compress failed")?;
+        bytes_after = bytes_after.saturating_add(packet.buf_len() as u64);
     }
-    Ok(batch)
+    Ok(PreparedPacketBatch {
+        batch,
+        bytes_before,
+        bytes_after,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn benchmark_prepare_packet_batch(batch: PacketBatch) -> PacketBatch {
+    prepare_packet_batch(CompressorAlgo::None, batch)
+        .expect("uncompressed benchmark packet preparation is infallible")
+        .batch
+}
+
+const DIRECT_NIC_QUEUE_BATCH_CAPACITY: usize = 3;
+pub(crate) const DIRECT_NIC_QUEUE_PACKET_CAPACITY: usize =
+    MAX_PACKET_BATCH_SIZE * DIRECT_NIC_QUEUE_BATCH_CAPACITY;
+const DIRECT_NIC_QUEUE_SLOT_BYTES: usize = 4 * 1024;
+const DIRECT_NIC_QUEUE_CREDIT_BYTES: usize =
+    DIRECT_NIC_QUEUE_PACKET_CAPACITY * DIRECT_NIC_QUEUE_SLOT_BYTES;
+// Preserve the previous data-lane per-batch retained-memory ceiling while
+// sharing the aggregate control/data budget in one ordered queue.
+const DIRECT_NIC_BATCH_CREDIT_BYTES: usize =
+    MAX_PACKET_BATCH_SIZE * 2 * DIRECT_NIC_QUEUE_SLOT_BYTES;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectNicBatchPlan {
+    byte_count: u64,
+    packet_count: u64,
+    queue_credits: u32,
+}
+
+struct DirectNicDelivery {
+    batch: PacketBatch,
+    plan: DirectNicBatchPlan,
+    byte_count: u64,
+    packet_count: u64,
+}
+
+struct DirectNicQueueState {
+    packets: std::sync::atomic::AtomicUsize,
+    bytes: std::sync::atomic::AtomicUsize,
+    telemetry: Arc<DataplaneTelemetry>,
+}
+
+impl DirectNicQueueState {
+    fn new(telemetry: Arc<DataplaneTelemetry>) -> Self {
+        Self {
+            packets: std::sync::atomic::AtomicUsize::new(0),
+            bytes: std::sync::atomic::AtomicUsize::new(0),
+            telemetry,
+        }
+    }
+
+    fn acquire(self: &Arc<Self>, plan: DirectNicBatchPlan) -> DirectNicQueueGuard {
+        self.packets.fetch_add(
+            plan.packet_count as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.bytes.fetch_add(
+            plan.queue_credits as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.publish();
+        DirectNicQueueGuard {
+            state: self.clone(),
+            plan,
+        }
+    }
+
+    fn release(&self, plan: DirectNicBatchPlan) {
+        self.packets.fetch_sub(
+            plan.packet_count as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.bytes.fetch_sub(
+            plan.queue_credits as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.publish();
+    }
+
+    fn publish(&self) {
+        self.telemetry.set_queue_occupancy(
+            DataplaneQueueClass::DirectNic,
+            0,
+            self.packets.load(std::sync::atomic::Ordering::Relaxed),
+            self.bytes.load(std::sync::atomic::Ordering::Relaxed),
+        );
+    }
+}
+
+struct DirectNicQueueGuard {
+    state: Arc<DirectNicQueueState>,
+    plan: DirectNicBatchPlan,
+}
+
+impl Drop for DirectNicQueueGuard {
+    fn drop(&mut self) {
+        self.state.release(self.plan);
+    }
+}
+
+struct DirectNicWork {
+    batch: PacketBatch,
+    queue_guard: DirectNicQueueGuard,
+    queue_credits: OwnedSemaphorePermit,
+}
+
+struct DirectNicInFlight {
+    _queue_guard: DirectNicQueueGuard,
+    _queue_credits: OwnedSemaphorePermit,
 }
 
 pub(crate) struct DirectNicEndpoint {
-    sink: Mutex<std::pin::Pin<Box<dyn PacketBatchSink>>>,
+    sender: mpsc::Sender<DirectNicWork>,
+    queue_credits: Arc<Semaphore>,
+    queue_state: Arc<DirectNicQueueState>,
+    terminal_error: Arc<OnceLock<String>>,
+}
+
+impl DirectNicEndpoint {
+    fn terminal_error(&self) -> TunnelError {
+        self.terminal_error
+            .get()
+            .map_or(TunnelError::Shutdown, |error| {
+                TunnelError::InternalError(format!("direct NIC writer failed: {error}"))
+            })
+    }
+
+    async fn enqueue(
+        &self,
+        batch: PacketBatch,
+        plan: DirectNicBatchPlan,
+    ) -> Result<(), TunnelError> {
+        if self.terminal_error.get().is_some() {
+            return Err(self.terminal_error());
+        }
+        let _stage = self.queue_state.telemetry.sample_stage(
+            DataplaneStage::DirectNicAdmission,
+            plan.packet_count as usize,
+            plan.byte_count as usize,
+        );
+        let permit = match self
+            .queue_credits
+            .clone()
+            .try_acquire_many_owned(plan.queue_credits)
+        {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                let started = std::time::Instant::now();
+                let result = self
+                    .queue_credits
+                    .clone()
+                    .acquire_many_owned(plan.queue_credits)
+                    .await
+                    .map_err(|_| self.terminal_error());
+                self.queue_state.telemetry.record_queue_stall(
+                    DataplaneQueueClass::DirectNic,
+                    0,
+                    started.elapsed(),
+                );
+                result?
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => return Err(self.terminal_error()),
+        };
+        let work = DirectNicWork {
+            batch,
+            queue_guard: self.queue_state.acquire(plan),
+            queue_credits: permit,
+        };
+        match self.sender.try_send(work) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
+                let started = std::time::Instant::now();
+                let result = self
+                    .sender
+                    .send(work)
+                    .await
+                    .map_err(|_| self.terminal_error());
+                self.queue_state.telemetry.record_queue_stall(
+                    DataplaneQueueClass::DirectNic,
+                    0,
+                    started.elapsed(),
+                );
+                result
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(self.terminal_error()),
+        }
+    }
+}
+
+fn finish_direct_nic_batch(
+    mut batch: PacketBatch,
+    byte_count: usize,
+    mut retained_bytes: usize,
+) -> Result<DirectNicDelivery, TunnelError> {
+    if batch.len() > MAX_PACKET_BATCH_SIZE {
+        return Err(TunnelError::ExceedMaxPacketSize(
+            MAX_PACKET_BATCH_SIZE,
+            batch.len(),
+        ));
+    }
+    let packet_credits = batch
+        .len()
+        .checked_mul(DIRECT_NIC_QUEUE_SLOT_BYTES)
+        .ok_or_else(|| TunnelError::InternalError("direct NIC packet credits overflow".into()))?;
+    let mut queue_credits = retained_bytes.max(packet_credits);
+    if queue_credits > DIRECT_NIC_BATCH_CREDIT_BYTES
+        && byte_count.max(packet_credits) <= DIRECT_NIC_BATCH_CREDIT_BYTES
+    {
+        retained_bytes = 0;
+        for packet in batch.iter_mut() {
+            packet.compact_retained_buffer();
+            retained_bytes = retained_bytes.saturating_add(packet.retained_buffer_capacity());
+        }
+        queue_credits = retained_bytes.max(packet_credits);
+    }
+    if queue_credits > DIRECT_NIC_BATCH_CREDIT_BYTES {
+        return Err(TunnelError::ExceedMaxPacketSize(
+            DIRECT_NIC_BATCH_CREDIT_BYTES,
+            queue_credits,
+        ));
+    }
+    let plan = DirectNicBatchPlan {
+        byte_count: byte_count as u64,
+        packet_count: batch.len() as u64,
+        queue_credits: u32::try_from(queue_credits).expect("direct NIC credits fit u32"),
+    };
+    Ok(DirectNicDelivery {
+        batch,
+        plan,
+        byte_count: byte_count as u64,
+        packet_count: plan.packet_count,
+    })
+}
+
+fn plan_direct_nic_delivery(mut batch: PacketBatch) -> Result<DirectNicDelivery, TunnelError> {
+    debug_assert!(!batch.is_empty());
+    let mut byte_count = 0_usize;
+    let mut retained_bytes = 0_usize;
+    for packet in batch.iter_mut() {
+        stamp_packet_flow(packet);
+        byte_count = byte_count.saturating_add(packet.buf_len());
+        retained_bytes = retained_bytes.saturating_add(packet.retained_buffer_capacity());
+    }
+    finish_direct_nic_batch(batch, byte_count, retained_bytes)
+}
+
+async fn feed_direct_nic_work(
+    sink: &mut std::pin::Pin<Box<dyn PacketBatchSink>>,
+    work: DirectNicWork,
+    in_flight: &mut SmallVec<[DirectNicInFlight; DIRECT_NIC_QUEUE_BATCH_CAPACITY]>,
+) -> Result<(), TunnelError> {
+    let DirectNicWork {
+        batch,
+        queue_guard,
+        queue_credits,
+    } = work;
+    sink.feed(batch).await?;
+    in_flight.push(DirectNicInFlight {
+        _queue_guard: queue_guard,
+        _queue_credits: queue_credits,
+    });
+    Ok(())
+}
+
+fn record_direct_nic_writer_failure(
+    terminal_error: &OnceLock<String>,
+    global_ctx: &ArcGlobalCtx,
+    error: TunnelError,
+) {
+    let error = error.to_string();
+    let _ = terminal_error.set(error.clone());
+    global_ctx.set_tun_device_error(format!("TUN write failed: {error}"));
+    tracing::error!(%error, "direct NIC writer failed");
+}
+
+async fn run_direct_nic_writer(
+    mut sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
+    mut receiver: mpsc::Receiver<DirectNicWork>,
+    terminal_error: Arc<OnceLock<String>>,
+    global_ctx: ArcGlobalCtx,
+) {
+    let mut in_flight = SmallVec::<[DirectNicInFlight; DIRECT_NIC_QUEUE_BATCH_CAPACITY]>::new();
+
+    while let Some(work) = receiver.recv().await {
+        if let Err(error) = feed_direct_nic_work(&mut sink, work, &mut in_flight).await {
+            record_direct_nic_writer_failure(&terminal_error, &global_ctx, error);
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                next = receiver.recv() => {
+                    match next {
+                        Some(work) => {
+                            if let Err(error) =
+                                feed_direct_nic_work(&mut sink, work, &mut in_flight).await
+                            {
+                                record_direct_nic_writer_failure(
+                                    &terminal_error,
+                                    &global_ctx,
+                                    error,
+                                );
+                                return;
+                            }
+                        }
+                        None => {
+                            if let Err(error) = sink.flush().await {
+                                record_direct_nic_writer_failure(
+                                    &terminal_error,
+                                    &global_ctx,
+                                    error,
+                                );
+                            }
+                            return;
+                        }
+                    }
+                }
+                result = sink.flush() => {
+                    match result {
+                        Ok(()) => {
+                            in_flight.clear();
+                            break;
+                        }
+                        Err(error) => {
+                            record_direct_nic_writer_failure(
+                                &terminal_error,
+                                &global_ctx,
+                                error,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -775,11 +1172,29 @@ struct DirectNicBatchWriter {
 }
 
 impl DirectNicBatchWriter {
-    fn install(&self, sink: std::pin::Pin<Box<dyn PacketBatchSink>>) -> Arc<DirectNicEndpoint> {
+    fn install(
+        &self,
+        sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
+        global_ctx: ArcGlobalCtx,
+    ) -> Arc<DirectNicEndpoint> {
+        let (sender, receiver) = mpsc::channel(DIRECT_NIC_QUEUE_BATCH_CAPACITY);
+        let terminal_error = Arc::new(OnceLock::new());
+        let queue_state = Arc::new(DirectNicQueueState::new(
+            global_ctx.dataplane_telemetry().clone(),
+        ));
         let endpoint = Arc::new(DirectNicEndpoint {
-            sink: Mutex::new(sink),
+            sender,
+            queue_credits: Arc::new(Semaphore::new(DIRECT_NIC_QUEUE_CREDIT_BYTES)),
+            queue_state,
+            terminal_error: terminal_error.clone(),
         });
         *self.endpoint.write() = Arc::downgrade(&endpoint);
+        tokio::spawn(run_direct_nic_writer(
+            sink,
+            receiver,
+            terminal_error,
+            global_ctx,
+        ));
         endpoint
     }
 
@@ -789,13 +1204,11 @@ impl DirectNicBatchWriter {
 
     async fn send_to(
         endpoint: Arc<DirectNicEndpoint>,
-        batch: PacketBatch,
+        delivery: DirectNicDelivery,
     ) -> Result<(), TunnelError> {
-        let mut sink = endpoint.sink.lock().await;
-        sink.send(batch).await
+        endpoint.enqueue(delivery.batch, delivery.plan).await
     }
 }
-
 pub(crate) struct DirectNicIngress {
     my_peer_id: PeerId,
     peers: Weak<PeerMap>,
@@ -814,6 +1227,12 @@ pub(crate) struct DirectNicIngress {
 
 impl DirectNicIngress {
     pub(crate) async fn try_process(&self, mut batch: PacketBatch) -> Result<(), PacketBatch> {
+        let _stage = self
+            .global_ctx
+            .dataplane_telemetry()
+            .sample_stage_with_shape(DataplaneStage::DirectNicIngress, || {
+                (batch.len(), batch.buffer_byte_len())
+            });
         let Some(peers) = self.peers.upgrade() else {
             return Err(batch);
         };
@@ -902,26 +1321,36 @@ impl DirectNicIngress {
             self.l2_fabric
                 .learn_source_batch_at(source_batch, std::time::Instant::now());
         }
-        // Stamp flow shards once so multiqueue TUN writers fan out by flow.
-        for packet in batch.iter_mut() {
-            stamp_packet_flow(packet);
-        }
-        let bytes = batch.buffer_byte_len() as u64;
-        let packets = batch.len() as u64;
-        self.self_rx_bytes.add(bytes);
-        self.self_rx_packets.add(packets);
-        self.compress_rx_bytes_before.add(bytes);
-        self.compress_rx_bytes_after.add(bytes);
-        if !self
-            .traffic_metrics
-            .try_record_rx_batch(from_peer_id, packet_type, bytes, packets)
-        {
+        // Stamp flow shards, account bytes and size the bounded TUN admission
+        // in one pass while the cleartext tuple is still available.
+        let delivery = match plan_direct_nic_delivery(batch) {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                tracing::error!(?error, "prepare direct packet batch for NIC failed");
+                return Ok(());
+            }
+        };
+        self.self_rx_bytes.add(delivery.byte_count);
+        self.self_rx_packets.add(delivery.packet_count);
+        self.compress_rx_bytes_before.add(delivery.byte_count);
+        self.compress_rx_bytes_after.add(delivery.byte_count);
+        if !self.traffic_metrics.try_record_rx_batch(
+            from_peer_id,
+            packet_type,
+            delivery.byte_count,
+            delivery.packet_count,
+        ) {
             self.traffic_metrics
-                .record_rx_batch(from_peer_id, packet_type, bytes, packets)
+                .record_rx_batch(
+                    from_peer_id,
+                    packet_type,
+                    delivery.byte_count,
+                    delivery.packet_count,
+                )
                 .await;
         }
 
-        if let Err(error) = DirectNicBatchWriter::send_to(endpoint, batch).await {
+        if let Err(error) = DirectNicBatchWriter::send_to(endpoint, delivery).await {
             tracing::error!(?error, "send direct packet batch to NIC failed");
         }
         Ok(())
@@ -3911,19 +4340,21 @@ impl PeerManager {
                     continue;
                 }
             }
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(peer_batch.buffer_byte_len() as u64);
-            let peer_batch = match prepare_packet_batch(self.data_compress_algo, peer_batch) {
-                Ok(peer_batch) => peer_batch,
+            let prepared = match prepare_packet_batch(self.data_compress_algo, peer_batch) {
+                Ok(prepared) => prepared,
                 Err(error) => {
                     errors.push(error);
                     continue;
                 }
             };
             self.self_tx_counters
+                .compress_tx_bytes_before
+                .add(prepared.bytes_before);
+            self.self_tx_counters
                 .compress_tx_bytes_after
-                .add(peer_batch.buffer_byte_len() as u64);
+                .add(prepared.bytes_after);
+            let prepared_bytes = prepared.bytes_after;
+            let peer_batch = prepared.batch;
             let first_packet_type = peer_batch
                 .first()
                 .and_then(|packet| packet.peer_manager_header())
@@ -3964,11 +4395,15 @@ impl PeerManager {
                         }
                     }
                     let completion = OrderedSendCompletion {
-                        bytes: peer_batch.buffer_byte_len() as u64,
+                        bytes: prepared_bytes,
                         packets: peer_batch.len() as u64,
                         result: self
                             .peers
-                            .send_msg_batch_on_selected_conn(transport_peer, &conn, peer_batch)
+                            .send_prepared_msg_batch_on_selected_conn(
+                                transport_peer,
+                                &conn,
+                                peer_batch,
+                            )
                             .await,
                         peer_id,
                         packet_type: first_packet_type,
@@ -4252,7 +4687,7 @@ impl PeerManager {
                         }
                     }
                     let result = peers
-                        .send_msg_batch_on_selected_conn(transport_peer, &conn, flow_batch)
+                        .send_prepared_msg_batch_on_selected_conn(transport_peer, &conn, flow_batch)
                         .await;
                     OrderedSendCompletion {
                         result,
@@ -5128,6 +5563,34 @@ impl PeerManager {
             .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))
     }
 
+    fn hybrid_compact_unicast_peer(
+        &self,
+        candidate_peers: &[PeerId],
+        ip_addr: IpAddr,
+        snapshot: &ForwardingDecisionSnapshotHandle,
+    ) -> Option<PeerId> {
+        if candidate_peers.len() != 1 || ip_addr.is_multicast() {
+            return None;
+        }
+        let is_broadcast = match ip_addr {
+            IpAddr::V4(address) => self.is_all_peers_broadcast_ipv4(&address),
+            IpAddr::V6(address) => self.is_all_peers_broadcast_ipv6(&address),
+        };
+        if is_broadcast {
+            return None;
+        }
+
+        let peer_id = candidate_peers[0];
+        if peer_id == self.my_peer_id {
+            return Some(peer_id);
+        }
+        snapshot.capabilities().get(peer_id).and_then(|route| {
+            (Self::route_accepts_compact_ip(route)
+                && !Self::route_requires_full_ethernet(route, self.my_peer_id))
+            .then_some(peer_id)
+        })
+    }
+
     fn hybrid_recipient_sets(
         &self,
         candidate_peers: Vec<PeerId>,
@@ -5426,6 +5889,77 @@ impl PeerManager {
             || compact_recipient_count.saturating_add(full_recipient_count) > 1
     }
 
+    fn routed_destination_from_snapshot(
+        &self,
+        snapshot: &ForwardingDecisionSnapshotHandle,
+        ip_addr: IpAddr,
+        configured_exit_nodes: &[IpAddr],
+    ) -> (RoutedIpPeers, bool) {
+        let routes = snapshot.capabilities();
+        if ip_addr.is_multicast() {
+            return (
+                Self::select_ip_multicast_peers(routes, self.my_peer_id, ip_addr)
+                    .into_iter()
+                    .collect(),
+                false,
+            );
+        }
+        let is_broadcast = match ip_addr {
+            IpAddr::V4(address) => self.is_all_peers_broadcast_ipv4(&address),
+            IpAddr::V6(address) => self.is_all_peers_broadcast_ipv6(&address),
+        };
+        if is_broadcast {
+            return match ip_addr {
+                IpAddr::V4(_) => (
+                    Self::select_ipv4_broadcast_peers(routes, self.my_peer_id)
+                        .into_iter()
+                        .collect(),
+                    false,
+                ),
+                IpAddr::V6(_) => (routes.iter().map(|route| route.peer_id).collect(), false),
+            };
+        }
+
+        if let Some(peer_id) = snapshot.peer_id_by_ip(&ip_addr) {
+            return (routed_single_peer(peer_id), false);
+        }
+        let same_network = self.global_ctx.is_ip_in_same_network(&ip_addr);
+        if !same_network && let Some(peer_id) = snapshot.proxy_peer_id_by_ip(&ip_addr) {
+            return (routed_single_peer(peer_id), false);
+        }
+
+        if matches!(ip_addr, IpAddr::V6(address) if !address.is_unicast_link_local())
+            && let Some(peer_id) = snapshot.public_ipv6_gateway_peer_id()
+        {
+            return (routed_single_peer(peer_id), false);
+        }
+
+        let allow_configured_exit = match ip_addr {
+            IpAddr::V4(_) => !same_network,
+            IpAddr::V6(address) => !address.is_unicast_link_local(),
+        };
+        if !allow_configured_exit {
+            return (RoutedIpPeers::new(), false);
+        }
+        for exit_node in configured_exit_nodes {
+            if std::mem::discriminant(exit_node) != std::mem::discriminant(&ip_addr) {
+                continue;
+            }
+            if let Some(peer_id) = snapshot.peer_id_by_ip(exit_node) {
+                return (routed_single_peer(peer_id), true);
+            }
+            if let Some(peer_id) = snapshot.proxy_peer_id_by_ip(exit_node) {
+                return (routed_single_peer(peer_id), true);
+            }
+        }
+        #[cfg(target_env = "ohos")]
+        if matches!(ip_addr, IpAddr::V4(_)) && !same_network {
+            tracing::trace!("no peer id for ipv4: {ip_addr}, set exit_node for ohos");
+            return (routed_single_peer(self.my_peer_id), true);
+        }
+        (RoutedIpPeers::new(), false)
+    }
+
     fn hybrid_destination_from_snapshot(
         &self,
         snapshot: &ForwardingDecisionSnapshotHandle,
@@ -5656,71 +6190,77 @@ impl PeerManager {
         }
     }
 
-    async fn cached_ip_route(&self, address: IpAddr, cache: &mut IpRouteCache) -> usize {
-        if let Some(index) = cache
-            .iter()
-            .position(|(cached_address, _, _)| *cached_address == address)
-        {
-            return index;
-        }
-        let (peers, is_exit_node) = self.get_msg_dst_peer(&address).await;
-        cache.push((address, peers, is_exit_node));
-        cache.len() - 1
-    }
-
-    fn cached_ip_route_from_snapshot(
+    fn cached_routed_ip_route_from_snapshot(
         &self,
         address: IpAddr,
-        cache: &mut IpRouteCache,
+        cache: &mut RoutedIpRouteCache,
         snapshot: &ForwardingDecisionSnapshotHandle,
         configured_exit_nodes: &[IpAddr],
     ) -> Option<usize> {
-        if let Some(index) = cache
-            .iter()
-            .position(|(cached_address, _, _)| *cached_address == address)
-        {
+        if let Some(index) = cache.iter().position(|route| route.address == address) {
             return Some(index);
         }
         let (peers, is_exit_node) =
-            self.hybrid_destination_from_snapshot(snapshot, address, configured_exit_nodes);
+            self.routed_destination_from_snapshot(snapshot, address, configured_exit_nodes);
         if peers.is_empty() {
             return None;
         }
-        cache.push((address, peers, is_exit_node));
+        cache.push(RoutedIpRoute {
+            address,
+            peers,
+            is_exit_node,
+        });
         Some(cache.len() - 1)
     }
 
-    pub async fn send_msg_by_ip_batch(&self, batch: PacketBatch) -> Result<(), Error> {
-        self.send_msg_by_ip_batch_with_cache(batch, IpRouteCache::new(), None, false)
-            .await
+    async fn resolve_routed_ip_routes_without_snapshot(
+        &self,
+        batch: &PacketBatch,
+    ) -> RoutedIpRouteCache {
+        let mut cache = RoutedIpRouteCache::new();
+        for packet in batch {
+            let overridden_peer = packet.peer_manager_header().unwrap().to_peer_id.get();
+            if overridden_peer != 0 {
+                continue;
+            }
+            let Some((address, _)) = self.routed_packet_destination(packet) else {
+                continue;
+            };
+            if cache.iter().any(|route| route.address == address) {
+                continue;
+            }
+            let (peers, is_exit_node) = self.get_msg_dst_peer(&address).await;
+            cache.push(RoutedIpRoute {
+                address,
+                peers: peers.into_iter().collect(),
+                is_exit_node,
+            });
+        }
+        cache
     }
 
-    async fn send_msg_by_ip_batch_with_cache(
+    fn classify_routed_ip_batch(
         &self,
-        mut batch: PacketBatch,
-        mut route_cache: IpRouteCache,
+        batch: PacketBatch,
+        mut route_cache: RoutedIpRouteCache,
         forwarding_snapshot: Option<(&ForwardingDecisionSnapshotHandle, &[IpAddr])>,
-        pipeline_already_run: bool,
-    ) -> Result<(), Error> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        if !pipeline_already_run {
-            for packet in batch.iter_mut() {
-                packet.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Data as u8);
-            }
-            batch = self.run_nic_packet_process_pipeline_batch(batch).await;
-        }
-        if batch.is_empty() {
-            return Ok(());
-        }
-
+    ) -> Result<ClassifiedRoutedBatch, Error> {
+        let mut stage = self.global_ctx.dataplane_telemetry().sample_stage(
+            DataplaneStage::RoutedClassify,
+            0,
+            0,
+        );
         let latency_first = self.global_ctx.latency_first();
         let speed_first = self.global_ctx.speed_first();
         let mut peer_batches = OrderedPeerBatches::new();
+        let mut sampled_packets = 0_usize;
+        let mut sampled_bytes = 0_usize;
 
         for mut packet in batch {
+            if stage.is_some() {
+                sampled_packets += 1;
+                sampled_bytes = sampled_bytes.saturating_add(packet.buf_len());
+            }
             let overridden_peer = packet.peer_manager_header().unwrap().to_peer_id.get();
             apply_local_route_policy(&mut packet, speed_first, latency_first);
             if overridden_peer != 0 {
@@ -5761,33 +6301,36 @@ impl PeerManager {
                 continue;
             };
             let route_index = match forwarding_snapshot {
-                Some((snapshot, configured_exit_nodes)) => self.cached_ip_route_from_snapshot(
-                    ip_addr,
-                    &mut route_cache,
-                    snapshot,
-                    configured_exit_nodes,
-                ),
-                None => Some(self.cached_ip_route(ip_addr, &mut route_cache).await),
+                Some((snapshot, configured_exit_nodes)) => self
+                    .cached_routed_ip_route_from_snapshot(
+                        ip_addr,
+                        &mut route_cache,
+                        snapshot,
+                        configured_exit_nodes,
+                    ),
+                None => route_cache
+                    .iter()
+                    .position(|route| route.address == ip_addr),
             };
             let Some(route_index) = route_index else {
                 continue;
             };
-            let (_, destination_peers, is_exit_node) = &route_cache[route_index];
-            if destination_peers.is_empty() {
+            let route = &route_cache[route_index];
+            if route.peers.is_empty() {
                 continue;
             }
-            if destination_peers.len() > 1 {
-                self.reserve_fanout(packet.buf_len(), destination_peers.len())?;
+            if route.peers.len() > 1 {
+                self.reserve_fanout(packet.buf_len(), route.peers.len())?;
             }
 
             packet
                 .mut_peer_manager_header()
                 .unwrap()
-                .set_exit_node(*is_exit_node);
-            let mark_recent = Self::should_mark_recent_traffic_for_fanout(destination_peers.len());
-            let peer_count = destination_peers.len();
+                .set_exit_node(route.is_exit_node);
+            let mark_recent = Self::should_mark_recent_traffic_for_fanout(route.peers.len());
+            let peer_count = route.peers.len();
             let mut packet = Some(packet);
-            for (index, peer_id) in destination_peers.iter().copied().enumerate() {
+            for (index, peer_id) in route.peers.iter().copied().enumerate() {
                 let mut peer_packet = if index + 1 == peer_count {
                     packet.take().unwrap()
                 } else {
@@ -5833,14 +6376,59 @@ impl PeerManager {
             }
         }
 
+        if let Some(stage) = stage.as_mut() {
+            stage.set_shape(sampled_packets, sampled_bytes);
+        }
+        Ok(ClassifiedRoutedBatch { peer_batches })
+    }
+
+    async fn enqueue_classified_routed_batch(
+        &self,
+        classified: ClassifiedRoutedBatch,
+    ) -> Result<(), Error> {
+        let _stage = self
+            .global_ctx
+            .dataplane_telemetry()
+            .sample_stage_with_shape(DataplaneStage::RoutedEnqueue, || {
+                classified.peer_batches.shape()
+            });
         let mut errors = Vec::new();
-        self.send_ordered_peer_batches(peer_batches, &mut errors, None)
+        self.send_ordered_peer_batches(classified.peer_batches, &mut errors, None)
             .await?;
         if errors.is_empty() {
             Ok(())
         } else {
             Err(anyhow::anyhow!("routed packet batch delivery failed: {errors:?}").into())
         }
+    }
+
+    pub async fn send_msg_by_ip_batch(&self, mut batch: PacketBatch) -> Result<(), Error> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        for packet in batch.iter_mut() {
+            packet.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Data as u8);
+        }
+        batch = self.run_nic_packet_process_pipeline_batch(batch).await;
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let descriptor = self.peers.dataplane_descriptor();
+        let route_cache = if descriptor.forwarding_snapshot.is_some() {
+            RoutedIpRouteCache::new()
+        } else {
+            // Compatibility for startup and route-owner transitions. Established
+            // dataplanes use the immutable snapshot path and never enter here.
+            self.resolve_routed_ip_routes_without_snapshot(&batch).await
+        };
+        let configured_exit_nodes = self.exit_nodes.load_full();
+        let forwarding_snapshot = descriptor
+            .forwarding_snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot, configured_exit_nodes.as_slice()));
+        let classified = self.classify_routed_ip_batch(batch, route_cache, forwarding_snapshot)?;
+        self.enqueue_classified_routed_batch(classified).await
     }
 
     fn route_accepts_compact_ip(route: &ForwardingPeerInfo) -> bool {
@@ -6217,13 +6805,7 @@ impl PeerManager {
         let mut exceptional_inputs = EthernetBatchInputs::new();
         let mut errors = Vec::new();
         let mut nic_batch = PacketBatch::with_capacity(batch.len());
-        struct TapBatchMeta {
-            ethernet_header: [u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN],
-            fdb_destination: Option<EthernetDestination>,
-        }
-        let mut metadata: Vec<Option<TapBatchMeta>> = Vec::with_capacity(batch.len());
-        let fdb_batch_time = std::time::Instant::now();
-        let mut destination_batch = L2DestinationBatch::default();
+        let mut metadata = TapBatchMetadata::new();
         for packet in batch {
             let frame = packet.payload();
             let Some(ethernet_header) = frame
@@ -6263,14 +6845,8 @@ impl PeerManager {
                     continue;
                 }
             }
-            let fdb_destination = destination_batch
-                .resolve_at(&self.l2_fabric, frame, fdb_batch_time)
-                .ok();
             let metadata_index = metadata.len();
-            metadata.push(Some(TapBatchMeta {
-                ethernet_header,
-                fdb_destination,
-            }));
+            metadata.push(Some(TapBatchMeta { ethernet_header }));
             let mut ip_packet = packet;
             ip_packet
                 .remove_payload_prefix_preserving_flow_hash(
@@ -6292,6 +6868,8 @@ impl PeerManager {
         let accepted_batch = self.run_nic_packet_process_pipeline_batch(nic_batch).await;
         let mut compact_batches = OrderedPeerBatches::new();
         let mut full_batches = OrderedPeerBatches::new();
+        let fdb_batch_time = std::time::Instant::now();
+        let mut destination_batch = L2DestinationBatch::default();
         for mut ip_packet in accepted_batch {
             let metadata_index = ip_packet.batch_key().ok_or_else(|| {
                 Error::InvalidEthernetFrame("TAP pipeline removed packet identity".to_string())
@@ -6318,12 +6896,37 @@ impl PeerManager {
                 ip_addr,
                 &configured_exit_nodes,
             );
+            if let Some(peer_id) =
+                self.hybrid_compact_unicast_peer(&candidate_peers, ip_addr, snapshot)
+            {
+                let suppress_local_delivery =
+                    source_is_local && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr);
+                if let Err(error) = self.append_hybrid_ordered_peer_packets(
+                    &mut compact_batches,
+                    ip_packet,
+                    &[peer_id],
+                    is_exit_node,
+                    suppress_local_delivery,
+                    snapshot,
+                    true,
+                ) {
+                    errors.push(error);
+                }
+                continue;
+            }
+            let fdb_destination = if candidate_peers.is_empty() {
+                destination_batch
+                    .resolve_at(&self.l2_fabric, &metadata.ethernet_header, fdb_batch_time)
+                    .ok()
+            } else {
+                None
+            };
             let sets = self.hybrid_recipient_sets(
                 candidate_peers,
                 is_exit_node,
                 ip_addr,
                 snapshot,
-                metadata.fdb_destination,
+                fdb_destination,
                 true,
             );
             let mut full_peers = Vec::with_capacity(sets.full_peers.len());
@@ -6543,9 +7146,9 @@ impl PeerManager {
             .filter(|peer_id| {
                 full_peers.binary_search(peer_id).is_err()
                     && (*peer_id == self.my_peer_id
-                    || routes
-                        .get(*peer_id)
-                        .is_some_and(|route| Self::route_accepts_compact_ip(route)))
+                        || routes
+                            .get(*peer_id)
+                            .is_some_and(|route| Self::route_accepts_compact_ip(route)))
             })
             .collect::<Vec<_>>();
         let full_frame_needed = !full_peers.is_empty();
@@ -6696,7 +7299,7 @@ impl PeerManager {
         })?;
         let configured_exit_nodes = self.exit_nodes.load_full();
         let origin_auth_snapshot = descriptor.origin_auth_snapshot.as_ref();
-        let mut route_cache = IpRouteCache::new();
+        let mut route_cache = RoutedIpRouteCache::new();
         let mut compact_batches = OrderedPeerBatches::new();
         let mut full_batches = OrderedPeerBatches::new();
         let mut errors = Vec::new();
@@ -6709,14 +7312,12 @@ impl PeerManager {
                 .map(|header| header.to_peer_id.get())
                 .unwrap_or_default();
             let (candidate_peers, is_exit_node) = if overridden_peer != 0 {
-                self.hybrid_destination_from_packet_snapshot(
-                    &packet,
-                    snapshot,
-                    ip_addr,
-                    &configured_exit_nodes,
-                )
+                let is_exit_node = packet
+                    .peer_manager_header()
+                    .is_some_and(|header| header.is_exit_node());
+                (routed_single_peer(overridden_peer), is_exit_node)
             } else {
-                let Some(route_index) = self.cached_ip_route_from_snapshot(
+                let Some(route_index) = self.cached_routed_ip_route_from_snapshot(
                     ip_addr,
                     &mut route_cache,
                     snapshot,
@@ -6724,13 +7325,27 @@ impl PeerManager {
                 ) else {
                     continue;
                 };
-                (
-                    route_cache[route_index].1.clone(),
-                    route_cache[route_index].2,
-                )
+                let route = &route_cache[route_index];
+                (route.peers.clone(), route.is_exit_node)
             };
+            if let Some(peer_id) =
+                self.hybrid_compact_unicast_peer(&candidate_peers, ip_addr, snapshot)
+            {
+                if let Err(error) = self.append_hybrid_ordered_peer_packets(
+                    &mut compact_batches,
+                    packet,
+                    &[peer_id],
+                    is_exit_node,
+                    not_send_to_self && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr),
+                    snapshot,
+                    true,
+                ) {
+                    errors.push(error);
+                }
+                continue;
+            }
             let sets = self.hybrid_recipient_sets(
-                candidate_peers,
+                candidate_peers.into_iter().collect(),
                 is_exit_node,
                 ip_addr,
                 snapshot,
@@ -7345,15 +7960,21 @@ impl PeerManager {
                 compress_rx_bytes_after: stats
                     .get_counter(MetricName::CompressionBytesRxAfter, label_set),
             }));
-        self.direct_nic_writer.install(sink)
+        self.direct_nic_writer
+            .install(sink, self.global_ctx.clone())
     }
 
-    pub(crate) async fn inject_packet_to_nic(&self, packet: ZCPacket) -> Result<(), TunnelError> {
+    pub(crate) async fn inject_packet_to_nic(
+        &self,
+        mut packet: ZCPacket,
+    ) -> Result<(), TunnelError> {
         let endpoint = self
             .direct_nic_writer
             .current_endpoint()
             .ok_or(TunnelError::Shutdown)?;
-        DirectNicBatchWriter::send_to(endpoint, PacketBatch::singleton(packet)).await
+        stamp_critical_l2_control(&mut packet);
+        let delivery = plan_direct_nic_delivery(PacketBatch::singleton(packet))?;
+        DirectNicBatchWriter::send_to(endpoint, delivery).await
     }
 
     pub fn get_foreign_network_manager(&self) -> Arc<ForeignNetworkManager> {
@@ -7665,11 +8286,12 @@ mod tests {
     use crate::tunnel::packet_def::CompressorAlgo;
 
     use super::{
-        DirectNicBatchWriter, EthernetBatchInput, OriginAuthCapability, PeerManager,
+        DIRECT_NIC_BATCH_CREDIT_BYTES, DIRECT_NIC_QUEUE_CREDIT_BYTES, DirectNicBatchWriter,
+        DirectNicDelivery, EthernetBatchInput, OriginAuthCapability, PeerManager,
         apply_local_route_policy, check_tunnel_info_underlay, decoded_local_nic_batch_source,
         direct_batch_group_key, direct_selected_conn_allowed, is_foreign_network_packet_type,
         ordered_probe_indexes, packet_batch_contains_peer_rpc, packet_supports_speed_first,
-        prepare_direct_nic_batch, prepare_packet_batch,
+        plan_direct_nic_delivery, prepare_direct_nic_batch, prepare_packet_batch,
     };
 
     struct CountingNicFilter(Arc<AtomicUsize>);
@@ -8003,6 +8625,27 @@ mod tests {
     }
 
     #[test]
+    fn critical_l3_is_classified_before_speed_first_policy() {
+        let mut payload = vec![0_u8; 40];
+        payload[0] = 0x45;
+        payload[2..4].copy_from_slice(&(40_u16).to_be_bytes());
+        payload[9] = 6;
+        payload[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        payload[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        payload[20..22].copy_from_slice(&50_000_u16.to_be_bytes());
+        payload[22..24].copy_from_slice(&179_u16.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&payload);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+
+        apply_local_route_policy(&mut packet, true, false);
+
+        let header = packet.peer_manager_header().unwrap();
+        assert!(header.is_critical_l2_control());
+        assert!(!header.is_speed_first());
+        assert!(header.is_latency_first());
+    }
+
+    #[test]
     fn critical_ethernet_does_not_use_speed_first() {
         let mut packet = ZCPacket::new_with_payload(b"control");
         packet.fill_peer_manager_hdr(1, 2, PacketType::Ethernet as u8);
@@ -8012,6 +8655,28 @@ mod tests {
             .set_critical_l2_control(true);
 
         assert!(!packet_supports_speed_first(&packet));
+    }
+
+    #[test]
+    fn speed_mode_marks_bgp_before_path_selection() {
+        let mut ipv4 = vec![0_u8; 20 + 20];
+        let ipv4_len = ipv4.len() as u16;
+        ipv4[0] = 0x45;
+        ipv4[2..4].copy_from_slice(&ipv4_len.to_be_bytes());
+        ipv4[9] = 6;
+        ipv4[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        ipv4[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        ipv4[20..22].copy_from_slice(&50_000_u16.to_be_bytes());
+        ipv4[22..24].copy_from_slice(&179_u16.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&ipv4);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+
+        apply_local_route_policy(&mut packet, true, false);
+
+        let header = packet.peer_manager_header().unwrap();
+        assert!(header.is_critical_l2_control());
+        assert!(!header.is_speed_first());
+        assert!(header.is_latency_first());
     }
 
     #[test]
@@ -8049,24 +8714,322 @@ mod tests {
     }
 
     #[test]
-    fn direct_nic_writer_exposes_the_installed_endpoint() {
+    fn speed_mode_authenticates_bgp_before_path_selection() {
+        let mut ipv4 = vec![0_u8; 40];
+        ipv4[0] = 0x45;
+        ipv4[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        ipv4[8] = 64;
+        ipv4[9] = 6;
+        ipv4[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        ipv4[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        ipv4[20..22].copy_from_slice(&50_000_u16.to_be_bytes());
+        ipv4[22..24].copy_from_slice(&179_u16.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&ipv4);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+
+        apply_local_route_policy(&mut packet, true, false);
+
+        let header = packet.peer_manager_header().unwrap();
+        assert!(header.is_critical_l2_control());
+        assert!(!header.is_speed_first());
+        assert!(header.is_latency_first());
+        assert_eq!(
+            PeerManager::get_next_hop_policy(header),
+            NextHopPolicy::LeastCost
+        );
+    }
+
+    struct GatedDirectNicSink {
+        sent: futures::channel::mpsc::UnboundedSender<PacketBatch>,
+        released: Arc<AtomicBool>,
+        flush_waker: Arc<futures::task::AtomicWaker>,
+        fail_flush: bool,
+    }
+
+    impl futures::Sink<PacketBatch> for GatedDirectNicSink {
+        type Error = crate::tunnel::TunnelError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+            self.get_mut()
+                .sent
+                .unbounded_send(batch)
+                .map_err(|_| crate::tunnel::TunnelError::Shutdown)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let this = self.get_mut();
+            if this.fail_flush {
+                return Poll::Ready(Err(crate::tunnel::TunnelError::InternalError(
+                    "forced direct NIC flush failure".into(),
+                )));
+            }
+            if this.released.load(Ordering::Acquire) {
+                return Poll::Ready(Ok(()));
+            }
+            this.flush_waker.register(cx.waker());
+            if this.released.load(Ordering::Acquire) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_close(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.as_mut().poll_flush(cx)
+        }
+    }
+
+    fn direct_nic_writer_batch(marker: u8, packet_count: usize) -> DirectNicDelivery {
+        let mut batch = PacketBatch::new();
+        for sequence in 0..packet_count {
+            batch
+                .try_push(ZCPacket::new_with_payload(&[marker, sequence as u8]))
+                .unwrap();
+        }
+        plan_direct_nic_delivery(batch).unwrap()
+    }
+
+    fn direct_nic_control_delivery(marker: u8) -> DirectNicDelivery {
+        let mut packet = ZCPacket::new_with_payload(&[marker, 0]);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_critical_l2_control(true);
+        plan_direct_nic_delivery(PacketBatch::singleton(packet)).unwrap()
+    }
+
+    #[test]
+    fn direct_nic_delivery_preserves_mixed_batch_order() {
+        let mut control = ZCPacket::new_with_payload(&[1, 0]);
+        control.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        control
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_critical_l2_control(true);
+        let data = ZCPacket::new_with_payload(&[2, 0]);
+        let mut batch = PacketBatch::new();
+        batch.try_push(data).unwrap();
+        batch.try_push(control).unwrap();
+
+        let delivery = plan_direct_nic_delivery(batch).unwrap();
+
+        assert_eq!(delivery.packet_count, 2);
+        assert_eq!(delivery.batch.len(), 2);
+        assert_eq!(delivery.batch[0].payload()[0], 2);
+        assert_eq!(delivery.batch[1].payload()[0], 1);
+        assert!(
+            delivery.batch[1]
+                .peer_manager_header()
+                .unwrap()
+                .is_critical_l2_control()
+        );
+    }
+
+    #[test]
+    fn direct_nic_delivery_plan_compacts_retained_receive_slabs() {
+        let mut batch = PacketBatch::new();
+        for marker in 0_u8..9 {
+            let mut packet = ZCPacket::new_with_payload(&[marker]);
+            packet.mut_inner().reserve(64 * 1024);
+            batch.try_push(packet).unwrap();
+        }
+        assert!(batch.retained_buffer_capacity() > DIRECT_NIC_BATCH_CREDIT_BYTES);
+
+        let delivery = plan_direct_nic_delivery(batch).unwrap();
+
+        assert_eq!(delivery.packet_count, 9);
+        assert_eq!(delivery.plan.packet_count, 9);
+        assert!(
+            usize::try_from(delivery.plan.queue_credits).unwrap() <= DIRECT_NIC_BATCH_CREDIT_BYTES
+        );
+        assert!(delivery.batch.retained_buffer_capacity() <= DIRECT_NIC_BATCH_CREDIT_BYTES);
+    }
+
+    #[test]
+    fn direct_nic_delivery_plan_rejects_genuinely_oversized_payload() {
+        let payload = vec![0_u8; DIRECT_NIC_BATCH_CREDIT_BYTES + 1];
+        let batch = PacketBatch::singleton(ZCPacket::new_with_payload(&payload));
+
+        assert!(matches!(
+            plan_direct_nic_delivery(batch),
+            Err(crate::tunnel::TunnelError::ExceedMaxPacketSize(_, _))
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_nic_writer_overlaps_three_batches_and_bounds_the_fourth() {
+        let (sent, mut received) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let released = Arc::new(AtomicBool::new(false));
+        let flush_waker = Arc::new(futures::task::AtomicWaker::new());
+        let writer = DirectNicBatchWriter::default();
+        let endpoint = writer.install(
+            Box::pin(GatedDirectNicSink {
+                sent,
+                released: released.clone(),
+                flush_waker: flush_waker.clone(),
+                fail_flush: false,
+            }),
+            get_mock_global_ctx(),
+        );
+        let first = direct_nic_writer_batch(1, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        let second = direct_nic_writer_batch(2, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        let third = direct_nic_writer_batch(3, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        assert_eq!(
+            usize::try_from(first.plan.queue_credits).unwrap(),
+            DIRECT_NIC_QUEUE_CREDIT_BYTES / 3
+        );
+        assert_eq!(first.plan.queue_credits, second.plan.queue_credits);
+        assert_eq!(first.plan.queue_credits, third.plan.queue_credits);
+
+        for delivery in [first, second, third] {
+            DirectNicBatchWriter::send_to(endpoint.clone(), delivery)
+                .await
+                .unwrap();
+        }
+        for expected in [1_u8, 2, 3] {
+            let batch = tokio::time::timeout(Duration::from_secs(1), received.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch[0].payload()[0], expected);
+        }
+
+        let fourth_endpoint = endpoint.clone();
+        let fourth_send = tokio::spawn(async move {
+            DirectNicBatchWriter::send_to(
+                fourth_endpoint,
+                direct_nic_writer_batch(4, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!fourth_send.is_finished());
+
+        released.store(true, Ordering::Release);
+        flush_waker.wake();
+        tokio::time::timeout(Duration::from_secs(1), fourth_send)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let fourth = tokio::time::timeout(Duration::from_secs(1), received.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fourth[0].payload()[0], 4);
+    }
+
+    #[tokio::test]
+    async fn direct_nic_writer_preserves_fifo_across_control_and_bulk_batches() {
+        let (sent, mut received) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let released = Arc::new(AtomicBool::new(false));
+        let flush_waker = Arc::new(futures::task::AtomicWaker::new());
+        let writer = DirectNicBatchWriter::default();
+        let endpoint = writer.install(
+            Box::pin(GatedDirectNicSink {
+                sent,
+                released: released.clone(),
+                flush_waker: flush_waker.clone(),
+                fail_flush: false,
+            }),
+            get_mock_global_ctx(),
+        );
+
+        for delivery in [
+            direct_nic_writer_batch(1, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE),
+            direct_nic_control_delivery(9),
+            direct_nic_writer_batch(2, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE),
+        ] {
+            DirectNicBatchWriter::send_to(endpoint.clone(), delivery)
+                .await
+                .unwrap();
+        }
+        for expected in [1_u8, 9, 2] {
+            let batch = tokio::time::timeout(Duration::from_secs(1), received.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch[0].payload()[0], expected);
+        }
+
+        released.store(true, Ordering::Release);
+        flush_waker.wake();
+    }
+
+    #[tokio::test]
+    async fn direct_nic_writer_publishes_terminal_flush_failure() {
+        let (sent, _received) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let global_ctx = get_mock_global_ctx();
+        let mut events = global_ctx.subscribe();
+        let writer = DirectNicBatchWriter::default();
+        let endpoint = writer.install(
+            Box::pin(GatedDirectNicSink {
+                sent,
+                released: Arc::new(AtomicBool::new(false)),
+                flush_waker: Arc::new(futures::task::AtomicWaker::new()),
+                fail_flush: true,
+            }),
+            global_ctx,
+        );
+        let first = direct_nic_writer_batch(1, 1);
+        DirectNicBatchWriter::send_to(endpoint.clone(), first)
+            .await
+            .unwrap();
+
+        let failure = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let crate::common::global_ctx::GlobalCtxEvent::TunDeviceError(error) =
+                    events.recv().await.unwrap()
+                {
+                    break error;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(failure.contains("forced direct NIC flush failure"));
+
+        let second = direct_nic_writer_batch(2, 1);
+        let error = DirectNicBatchWriter::send_to(endpoint, second)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("forced direct NIC flush failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_nic_writer_exposes_the_installed_endpoint() {
         let writer = DirectNicBatchWriter::default();
         let (sink, _receiver) = futures::channel::mpsc::unbounded::<PacketBatch>();
         let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
-        let installed = writer.install(Box::pin(sink));
+        let installed = writer.install(Box::pin(sink), get_mock_global_ctx());
         let observed = writer.current_endpoint().unwrap();
 
         assert!(Arc::ptr_eq(&installed, &observed));
     }
 
-    #[test]
-    fn direct_nic_writer_reports_endpoint_removal() {
+    #[tokio::test]
+    async fn direct_nic_writer_reports_endpoint_removal() {
         let writer = DirectNicBatchWriter::default();
         assert!(writer.current_endpoint().is_none());
 
         let (sink, _receiver) = futures::channel::mpsc::unbounded::<PacketBatch>();
         let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
-        let installed = writer.install(Box::pin(sink));
+        let installed = writer.install(Box::pin(sink), get_mock_global_ctx());
         assert!(writer.current_endpoint().is_some());
 
         drop(installed);
@@ -8342,11 +9305,15 @@ mod tests {
             batch.try_push(packet).unwrap();
         }
 
-        let batch =
+        let expected_bytes = batch.buffer_byte_len() as u64;
+        let prepared =
             prepare_packet_batch(crate::tunnel::packet_def::CompressorAlgo::None, batch).unwrap();
 
-        for (sequence, packet) in batch.into_iter().enumerate() {
+        assert_eq!(prepared.bytes_before, expected_bytes);
+        assert_eq!(prepared.bytes_after, expected_bytes);
+        for (sequence, packet) in prepared.batch.into_iter().enumerate() {
             assert!(!packet.peer_manager_header().unwrap().is_encrypted());
+            assert!(packet.flow_hash().is_some());
             assert_eq!(packet.payload(), &[sequence as u8; 64]);
         }
     }
@@ -8440,6 +9407,14 @@ mod tests {
         (peer_manager, packet_recv)
     }
 
+    #[test]
+    fn routed_unicast_route_keeps_its_peer_inline() {
+        let peers = super::routed_single_peer(42);
+
+        assert_eq!(peers.as_slice(), &[42]);
+        assert!(!peers.spilled());
+    }
+
     fn routed_ipv4_packet(
         source: std::net::Ipv4Addr,
         destination: std::net::Ipv4Addr,
@@ -8456,6 +9431,33 @@ mod tests {
         bytes[22..24].copy_from_slice(&2000_u16.to_be_bytes());
         bytes[24] = marker;
         ZCPacket::new_with_payload(&bytes)
+    }
+
+    #[tokio::test]
+    async fn routed_l3_batch_without_snapshot_keeps_legacy_drop_behavior() {
+        let address_a = "10.144.143.2".parse().unwrap();
+        let address_b = "10.144.143.3".parse().unwrap();
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(address_a, 24).unwrap()));
+        let mut flags = global_ctx.get_flags();
+        flags.port_mode = "routed".to_string();
+        global_ctx.set_flags(flags);
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let peer_manager = PeerManager::new(RouteAlgoType::None, global_ctx, packet_send);
+
+        assert!(
+            peer_manager
+                .peers
+                .dataplane_descriptor()
+                .forwarding_snapshot
+                .is_none()
+        );
+        peer_manager
+            .send_msg_by_ip_batch(PacketBatch::singleton(routed_ipv4_packet(
+                address_a, address_b, 1,
+            )))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -8512,7 +9514,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routed_l3_batch_groups_destinations_and_preserves_order() {
+    async fn routed_l3_batch_classifies_after_nic_pipeline_rewrite() {
+        let address_a = "10.144.144.21".parse().unwrap();
+        let address_b = "10.144.144.22".parse().unwrap();
+        let address_c = "10.144.144.23".parse().unwrap();
+        let peer_mgr_a = create_routed_peer_manager_with_ipv4(address_a).await;
+        let peer_mgr_b = create_routed_peer_manager_with_ipv4(address_b).await;
+        let peer_mgr_c = create_routed_peer_manager_with_ipv4(address_c).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_c.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
+            .await
+            .unwrap();
+        peer_mgr_a
+            .add_nic_packet_process_pipeline(Box::new(RewriteIpv4Destination(address_c)))
+            .await;
+
+        let (sink_b, mut nic_b) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink_b = sink_b.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint_b = peer_mgr_b.install_direct_nic_sink(Box::pin(sink_b));
+        let (sink_c, mut nic_c) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let sink_c = sink_c.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
+        let _endpoint_c = peer_mgr_c.install_direct_nic_sink(Box::pin(sink_c));
+
+        let mut batch = PacketBatch::new();
+        for marker in 1_u8..=4 {
+            batch
+                .try_push(routed_ipv4_packet(address_a, address_b, marker))
+                .unwrap();
+        }
+        peer_mgr_a.send_msg_by_ip_batch(batch).await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(5), nic_c.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.len(), 4);
+        assert_eq!(
+            received
+                .iter()
+                .map(|packet| packet.payload()[24])
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(
+            received
+                .iter()
+                .all(|packet| { packet.payload()[16..20] == address_c.octets() })
+        );
+        assert!(nic_b.try_next().is_err());
+    }
+
+    #[tokio::test]
+    async fn routed_l3_classification_groups_before_batched_enqueue() {
         let address_a = "10.144.144.11".parse().unwrap();
         let address_b = "10.144.144.12".parse().unwrap();
         let address_c = "10.144.144.13".parse().unwrap();
@@ -8546,7 +9603,50 @@ mod tests {
                 .try_push(routed_ipv4_packet(address_a, destination, marker))
                 .unwrap();
         }
-        peer_mgr_a.send_msg_by_ip_batch(batch).await.unwrap();
+        for packet in batch.iter_mut() {
+            packet.fill_peer_manager_hdr(peer_mgr_a.my_peer_id(), 0, PacketType::Data as u8);
+        }
+        let descriptor = peer_mgr_a.peers.dataplane_descriptor();
+        let snapshot = descriptor
+            .forwarding_snapshot
+            .as_ref()
+            .expect("the established route publishes one forwarding snapshot");
+        let configured_exit_nodes = peer_mgr_a.exit_nodes.load_full();
+        let classified = peer_mgr_a
+            .classify_routed_ip_batch(
+                batch,
+                super::RoutedIpRouteCache::new(),
+                Some((snapshot, configured_exit_nodes.as_slice())),
+            )
+            .unwrap();
+
+        assert_eq!(classified.peer_batches.batches.len(), 2);
+        for (peer_id, expected_markers) in [
+            (peer_mgr_b.my_peer_id(), vec![1_u8, 3]),
+            (peer_mgr_c.my_peer_id(), vec![2_u8, 4]),
+        ] {
+            let planned = classified
+                .peer_batches
+                .batches
+                .iter()
+                .find(|batch| batch.peer_id == peer_id)
+                .expect("each routed destination has one classified peer batch");
+            assert_eq!(planned.next_hop, Some(peer_id));
+            assert!(planned.mark_recent);
+            assert_eq!(
+                planned
+                    .packets
+                    .iter()
+                    .map(|packet| packet.payload()[24])
+                    .collect::<Vec<_>>(),
+                expected_markers
+            );
+        }
+
+        peer_mgr_a
+            .enqueue_classified_routed_batch(classified)
+            .await
+            .unwrap();
 
         let batch_b = tokio::time::timeout(Duration::from_secs(5), nic_b.next())
             .await
@@ -10409,6 +11509,71 @@ mod tests {
             bridge_authorized: bridge_input && !is_credential_peer,
             ..Default::default()
         }
+    }
+
+    fn forwarding_snapshot_with_routes(
+        routes: Vec<ForwardingPeerInfo>,
+    ) -> Arc<ForwardingDecisionSnapshot> {
+        ForwardingDecisionSnapshot::from_parts(
+            1,
+            Arc::new(ForwardingPeerTable::new(routes)),
+            Arc::new(HashSet::new()),
+            None,
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(PrefixMap::new()),
+            Arc::new(PrefixMap::new()),
+        )
+    }
+
+    #[test]
+    fn tap_batch_metadata_stays_inline_at_maximum_batch_size() {
+        let mut metadata = super::TapBatchMetadata::new();
+        for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+            metadata.push(Some(super::TapBatchMeta {
+                ethernet_header: [0; crate::instance::l2_tun::ETHERNET_HEADER_LEN],
+            }));
+        }
+
+        assert_eq!(metadata.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        assert!(!metadata.spilled());
+    }
+
+    #[tokio::test]
+    async fn hybrid_compact_unicast_fast_path_excludes_full_ethernet_and_fanout() {
+        let global_ctx = get_mock_global_ctx();
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let manager = PeerManager::new(RouteAlgoType::None, global_ctx, packet_send);
+        let destination = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 7));
+
+        let compact =
+            forwarding_snapshot_with_routes(vec![ethernet_route(7, true, true, false, false)]);
+        assert_eq!(
+            manager.hybrid_compact_unicast_peer(&[7], destination, &compact),
+            Some(7)
+        );
+
+        let full =
+            forwarding_snapshot_with_routes(vec![ethernet_route(8, true, false, true, false)]);
+        assert_eq!(
+            manager.hybrid_compact_unicast_peer(&[8], destination, &full),
+            None
+        );
+        assert_eq!(
+            manager.hybrid_compact_unicast_peer(
+                &[7],
+                IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)),
+                &compact,
+            ),
+            None
+        );
+        assert_eq!(
+            manager.hybrid_compact_unicast_peer(&[7, 8], destination, &compact),
+            None
+        );
     }
 
     #[test]

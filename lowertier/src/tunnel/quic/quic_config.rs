@@ -8,7 +8,7 @@ use super::adaptive::{AdaptiveConfig, AdaptiveFactory, ConfigError};
 use super::wire_profile::WireProfile;
 
 const MIB: u64 = 1024 * 1024;
-const MIN_MEMORY_BYTES: u64 = 32 * MIB;
+const MIN_MEMORY_BYTES: u64 = 2 * MIB;
 const MAX_STREAM_WINDOW_BYTES: u64 = 64 * MIB;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,7 +36,7 @@ impl fmt::Display for QuicConfigError {
             Self::ZeroTargetRate => write!(f, "target wire rate must be greater than zero"),
             Self::ZeroRtt => write!(f, "maximum expected RTT must be greater than zero"),
             Self::MemoryCapTooSmall => {
-                write!(f, "QUIC memory cap must be at least 32 MiB")
+                write!(f, "QUIC memory cap must be at least 2 MiB")
             }
             Self::VarIntWindow => write!(f, "QUIC flow-control window exceeds VarInt"),
             Self::Adaptive(error) => write!(f, "invalid adaptive configuration: {error}"),
@@ -116,7 +116,7 @@ pub fn build_transport_config(
 
     let mut config = TransportConfig::default();
     config
-        .max_concurrent_bidi_streams(u8::MAX.into())
+        .max_concurrent_bidi_streams(8_u8.into())
         .max_concurrent_uni_streams(0_u8.into())
         // Remove the current deterministic five-second QUIC keepalive. The
         // application pinger can use WireProfile's bounded idle-only interval.
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn low_memory_budget_is_rejected() {
         assert_eq!(
-            QuicTuning::for_target_wire_rate(500_000_000, Duration::from_millis(300), 8 * MIB,),
+            QuicTuning::for_target_wire_rate(500_000_000, Duration::from_millis(300), MIB),
             Err(QuicConfigError::MemoryCapTooSmall)
         );
     }

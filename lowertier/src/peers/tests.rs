@@ -349,7 +349,8 @@ async fn private_mode_allows_trusted_foreign_credential() {
 
     let private = credential_private_key_from_secret(&cred_secret);
     let public = x25519_dalek::PublicKey::from(&private);
-    let credential = create_mock_peer_manager_credential("tenant-a".to_string(), &cred_secret).await;
+    let credential =
+        create_mock_peer_manager_credential("tenant-a".to_string(), &cred_secret).await;
 
     connect_peer_manager(admin.clone(), server.clone()).await;
     wait_for_condition(
@@ -1099,9 +1100,7 @@ pub async fn create_mock_peer_manager_credential(
 
 /// Helper: create a credential node whose bundle is signed by an unknown root,
 /// so no admin in the test network trusts it.
-pub async fn create_mock_peer_manager_unknown_credential(
-    network_name: String,
-) -> Arc<PeerManager> {
+pub async fn create_mock_peer_manager_unknown_credential(network_name: String) -> Arc<PeerManager> {
     let (s, _r) = create_packet_recv_chan();
     let g = crate::common::global_ctx::tests::get_mock_credential_global_ctx(network_name);
     let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));

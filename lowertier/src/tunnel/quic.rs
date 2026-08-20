@@ -9,6 +9,7 @@ use super::{
 };
 use crate::common::{
     config::{Flags, gen_default_flags},
+    dataplane_telemetry::{DataplaneIo, DataplaneStage, DataplaneTelemetry},
     global_ctx::{ArcGlobalCtx, ProcessMemoryPermit},
     underlay_policy::UnderlayPolicy,
 };
@@ -17,7 +18,7 @@ use crate::tunnel::common::{
 };
 use crate::tunnel::{
     TunnelInfo,
-    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, packet_batch_limit},
     common::{BatchTunnelWrapper, FramedReader},
 };
 use anyhow::Context;
@@ -32,7 +33,10 @@ use quinn::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::{OnceLock, Weak};
+use std::sync::{
+    OnceLock, Weak,
+    atomic::{AtomicU64, Ordering},
+};
 use std::{
     net::SocketAddr,
     pin::Pin,
@@ -127,21 +131,159 @@ const fn quic_socket_buffer_bytes() -> usize {
     QUIC_SOCKET_BUFFER_BYTES
 }
 
+const fn quic_socket_buffer_reported_target(target: usize, linux_accounting: bool) -> usize {
+    if linux_accounting {
+        // Linux doubles SO_RCVBUF/SO_SNDBUF for bookkeeping and reports the
+        // doubled value through getsockopt.
+        target.saturating_mul(2)
+    } else {
+        target
+    }
+}
+
+fn quic_socket_buffer_target_is_met(
+    reported: Option<usize>,
+    target: usize,
+    linux_accounting: bool,
+) -> bool {
+    reported.is_some_and(|reported| {
+        reported >= quic_socket_buffer_reported_target(target, linux_accounting)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn force_linux_quic_socket_buffer(
+    socket: &UdpSocket,
+    option: nix::libc::c_int,
+    target: usize,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let target = nix::libc::c_int::try_from(target).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "QUIC socket buffer target exceeds Linux c_int",
+        )
+    })?;
+    let result = unsafe {
+        nix::libc::setsockopt(
+            socket.as_raw_fd(),
+            nix::libc::SOL_SOCKET,
+            option,
+            (&target as *const nix::libc::c_int).cast(),
+            std::mem::size_of_val(&target) as nix::libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 fn configure_quic_socket_buffers(socket: &UdpSocket) {
-    let socket = socket2::SockRef::from(socket);
+    let socket_ref = socket2::SockRef::from(socket);
     let target = quic_socket_buffer_bytes();
-    if let Err(error) = socket.set_recv_buffer_size(target) {
+    if let Err(error) = socket_ref.set_recv_buffer_size(target) {
         tracing::warn!(
             ?error,
             target,
             "failed to increase the QUIC UDP receive buffer"
         );
     }
-    if let Err(error) = socket.set_send_buffer_size(target) {
+    if let Err(error) = socket_ref.set_send_buffer_size(target) {
         tracing::warn!(
             ?error,
             target,
             "failed to increase the QUIC UDP send buffer"
+        );
+    }
+
+    let recv_reported = socket_ref.recv_buffer_size().ok();
+    let send_reported = socket_ref.send_buffer_size().ok();
+
+    #[cfg(target_os = "linux")]
+    let (recv_reported, send_reported, recv_forced, send_forced) = {
+        let mut recv_reported = recv_reported;
+        let mut send_reported = send_reported;
+        let recv_forced = if quic_socket_buffer_target_is_met(recv_reported, target, true) {
+            false
+        } else {
+            match force_linux_quic_socket_buffer(socket, nix::libc::SO_RCVBUFFORCE, target) {
+                Ok(()) => {
+                    recv_reported = socket_ref.recv_buffer_size().ok();
+                    true
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        ?error,
+                        target,
+                        ?recv_reported,
+                        "SO_RCVBUFFORCE is unavailable for the QUIC UDP socket"
+                    );
+                    false
+                }
+            }
+        };
+        let send_forced = if quic_socket_buffer_target_is_met(send_reported, target, true) {
+            false
+        } else {
+            match force_linux_quic_socket_buffer(socket, nix::libc::SO_SNDBUFFORCE, target) {
+                Ok(()) => {
+                    send_reported = socket_ref.send_buffer_size().ok();
+                    true
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        ?error,
+                        target,
+                        ?send_reported,
+                        "SO_SNDBUFFORCE is unavailable for the QUIC UDP socket"
+                    );
+                    false
+                }
+            }
+        };
+        (recv_reported, send_reported, recv_forced, send_forced)
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (recv_reported, send_reported, recv_forced, send_forced) =
+        (recv_reported, send_reported, false, false);
+
+    let linux_accounting = cfg!(target_os = "linux");
+    let recv_sufficient = quic_socket_buffer_target_is_met(recv_reported, target, linux_accounting);
+    let send_sufficient = quic_socket_buffer_target_is_met(send_reported, target, linux_accounting);
+    let expected_reported = quic_socket_buffer_reported_target(target, linux_accounting);
+    if recv_sufficient && send_sufficient {
+        if recv_forced || send_forced {
+            tracing::info!(
+                requested_bytes = target,
+                expected_reported_bytes = expected_reported,
+                ?recv_reported,
+                ?send_reported,
+                recv_forced,
+                send_forced,
+                "raised QUIC UDP socket buffers above the Linux kernel defaults"
+            );
+        } else {
+            tracing::debug!(
+                requested_bytes = target,
+                expected_reported_bytes = expected_reported,
+                ?recv_reported,
+                ?send_reported,
+                "configured QUIC UDP socket buffers"
+            );
+        }
+    } else {
+        tracing::warn!(
+            requested_bytes = target,
+            expected_reported_bytes = expected_reported,
+            ?recv_reported,
+            ?send_reported,
+            recv_forced,
+            send_forced,
+            "QUIC UDP socket buffers remain below target; high-rate or high-RTT traffic may incur kernel queue drops"
         );
     }
 }
@@ -1326,16 +1468,74 @@ impl QuicEndpointManager {
 }
 //endregion
 
+#[derive(Default)]
+struct QuicIoObserved {
+    tx_ios: AtomicU64,
+    tx_datagrams: AtomicU64,
+    tx_bytes: AtomicU64,
+    rx_ios: AtomicU64,
+    rx_datagrams: AtomicU64,
+    rx_bytes: AtomicU64,
+}
+
+impl QuicIoObserved {
+    fn record(
+        &self,
+        telemetry: &DataplaneTelemetry,
+        tx_ios: u64,
+        tx_datagrams: u64,
+        tx_bytes: u64,
+        rx_ios: u64,
+        rx_datagrams: u64,
+        rx_bytes: u64,
+    ) {
+        telemetry.record_io(
+            DataplaneIo::QuicUdpSend,
+            counter_delta(&self.tx_ios, tx_ios),
+            counter_delta(&self.tx_datagrams, tx_datagrams),
+            counter_delta(&self.tx_bytes, tx_bytes),
+        );
+        telemetry.record_io(
+            DataplaneIo::QuicUdpReceive,
+            counter_delta(&self.rx_ios, rx_ios),
+            counter_delta(&self.rx_datagrams, rx_datagrams),
+            counter_delta(&self.rx_bytes, rx_bytes),
+        );
+    }
+}
+
+fn counter_delta(counter: &AtomicU64, current: u64) -> usize {
+    let previous = counter.swap(current, Ordering::Relaxed);
+    usize::try_from(current.saturating_sub(previous)).unwrap_or(usize::MAX)
+}
+
 struct ConnWrapper {
     conn: Connection,
+    telemetry: Arc<DataplaneTelemetry>,
+    io_observed: QuicIoObserved,
     _memory_permit: Option<ProcessMemoryPermit>,
     _source_permit: Option<QuicSourcePermit>,
     _endpoint_manager: Option<Arc<QuicEndpointManager>>,
     _endpoint_owner: Option<Endpoint>,
 }
 
+impl ConnWrapper {
+    fn record_io_stats(&self, stats: &quinn::ConnectionStats) {
+        self.io_observed.record(
+            self.telemetry.as_ref(),
+            stats.udp_tx.ios,
+            stats.udp_tx.datagrams,
+            stats.udp_tx.bytes,
+            stats.udp_rx.ios,
+            stats.udp_rx.datagrams,
+            stats.udp_rx.bytes,
+        );
+    }
+}
+
 impl Drop for ConnWrapper {
     fn drop(&mut self) {
+        self.record_io_stats(&self.conn.stats());
         self.conn.close(0u32.into(), b"done");
     }
 }
@@ -1357,13 +1557,15 @@ fn quic_stats_interval() -> Option<Duration> {
 }
 
 fn observe_quic_path(connection: &Arc<ConnWrapper>) {
-    let Some(period) = quic_stats_interval() else {
-        return;
-    };
+    let log_period = quic_stats_interval();
+    let tick_period = log_period
+        .map(|period| period.min(Duration::from_secs(1)))
+        .unwrap_or(Duration::from_secs(1));
     let connection = Arc::downgrade(connection);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(period);
+        let mut interval = tokio::time::interval(tick_period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut next_log = log_period.map(|period| Instant::now() + period);
         interval.tick().await;
         loop {
             interval.tick().await;
@@ -1371,28 +1573,37 @@ fn observe_quic_path(connection: &Arc<ConnWrapper>) {
                 break;
             };
             let stats = connection.conn.stats();
-            tracing::info!(
-                target: "CORE::TUNNEL::QUIC_PATH",
-                connection = connection.conn.stable_id(),
-                remote = %connection.conn.remote_address(),
-                tx_datagrams = stats.udp_tx.datagrams,
-                tx_bytes = stats.udp_tx.bytes,
-                tx_ios = stats.udp_tx.ios,
-                rx_datagrams = stats.udp_rx.datagrams,
-                rx_bytes = stats.udp_rx.bytes,
-                rx_ios = stats.udp_rx.ios,
-                tx_frames = stats.frame_tx.datagram,
-                rx_frames = stats.frame_rx.datagram,
-                rtt_us = stats.path.rtt.as_micros(),
-                cwnd = stats.path.cwnd,
-                congestion_events = stats.path.congestion_events,
-                lost_packets = stats.path.lost_packets,
-                lost_bytes = stats.path.lost_bytes,
-                sent_packets = stats.path.sent_packets,
-                mtu = stats.path.current_mtu,
-                send_buffer_space = connection.conn.datagram_send_buffer_space(),
-                "QUIC path statistics"
-            );
+            connection.record_io_stats(&stats);
+
+            let now = Instant::now();
+            let should_log = next_log.is_some_and(|deadline| now >= deadline);
+            if should_log {
+                tracing::info!(
+                    target: "CORE::TUNNEL::QUIC_PATH",
+                    connection = connection.conn.stable_id(),
+                    remote = %connection.conn.remote_address(),
+                    tx_datagrams = stats.udp_tx.datagrams,
+                    tx_bytes = stats.udp_tx.bytes,
+                    tx_ios = stats.udp_tx.ios,
+                    rx_datagrams = stats.udp_rx.datagrams,
+                    rx_bytes = stats.udp_rx.bytes,
+                    rx_ios = stats.udp_rx.ios,
+                    tx_frames = stats.frame_tx.datagram,
+                    rx_frames = stats.frame_rx.datagram,
+                    rtt_us = stats.path.rtt.as_micros(),
+                    cwnd = stats.path.cwnd,
+                    congestion_events = stats.path.congestion_events,
+                    lost_packets = stats.path.lost_packets,
+                    lost_bytes = stats.path.lost_bytes,
+                    sent_packets = stats.path.sent_packets,
+                    mtu = stats.path.current_mtu,
+                    send_buffer_space = connection.conn.datagram_send_buffer_space(),
+                    "QUIC path statistics"
+                );
+                if let Some(period) = log_period {
+                    next_log = Some(now + period);
+                }
+            }
         }
     });
 }
@@ -1458,10 +1669,12 @@ struct QuicHybridReader {
 
 impl QuicHybridReader {
     fn new(reliable: mpsc::Receiver<BatchStreamItem>, connection: Arc<ConnWrapper>) -> Self {
-        let datagrams = Box::pin(connection.conn.read_datagrams(
-            Vec::with_capacity(MAX_PACKET_BATCH_SIZE),
-            MAX_PACKET_BATCH_SIZE,
-        ));
+        let batch_limit = packet_batch_limit();
+        let datagrams = Box::pin(
+            connection
+                .conn
+                .read_datagrams(Vec::with_capacity(batch_limit), batch_limit),
+        );
         Self {
             reliable,
             connection,
@@ -1470,7 +1683,16 @@ impl QuicHybridReader {
         }
     }
 
-    fn decode_datagram_batch(datagrams: &mut Vec<Bytes>) -> Option<PacketBatch> {
+    fn decode_datagram_batch(&self, datagrams: &mut Vec<Bytes>) -> Option<PacketBatch> {
+        let _stage =
+            self.connection
+                .telemetry
+                .sample_stage_with_shape(DataplaneStage::QuicReceive, || {
+                    (
+                        datagrams.len(),
+                        datagrams.iter().map(|bytes| bytes.len()).sum::<usize>(),
+                    )
+                });
         let mut batch = PacketBatch::with_capacity(datagrams.len());
         for bytes in datagrams.drain(..) {
             if let Some(packet) = decode_received_quic_datagram(bytes) {
@@ -1488,11 +1710,11 @@ impl QuicHybridReader {
             match self.datagrams.as_mut().poll(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(mut datagrams)) => {
-                    let batch = Self::decode_datagram_batch(&mut datagrams);
+                    let batch = self.decode_datagram_batch(&mut datagrams);
                     self.datagrams = Box::pin(
                         self.connection
                             .conn
-                            .read_datagrams(datagrams, MAX_PACKET_BATCH_SIZE),
+                            .read_datagrams(datagrams, packet_batch_limit()),
                     );
                     if let Some(batch) = batch {
                         return Poll::Ready(Some(Ok(batch)));
@@ -1626,8 +1848,19 @@ type ReliableReserve = Pin<
             > + Send,
     >,
 >;
-type DatagramBatchSend =
-    Pin<Box<dyn Future<Output = (Result<(), quinn::SendDatagramError>, VecDeque<Bytes>)> + Send>>;
+type DatagramBatchSend = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    Result<(), quinn::SendDatagramError>,
+                    VecDeque<Bytes>,
+                    Option<Instant>,
+                    usize,
+                    usize,
+                ),
+            > + Send,
+    >,
+>;
 
 const RELIABLE_LANE_QUEUE_BATCHES: usize = 1;
 #[derive(Clone, Copy, Debug)]
@@ -1965,14 +2198,26 @@ impl QuicHybridWriter {
         {
             return;
         }
-        let datagrams = self
+        let mut queued = self
             .pending_datagrams
             .take()
             .expect("the pending QUIC batch is available before a flush");
-        self.pending_datagrams = Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE));
+        let batch_limit = packet_batch_limit();
+        let datagrams = if queued.len() <= batch_limit {
+            self.pending_datagrams = Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE));
+            queued
+        } else {
+            let datagrams = queued.drain(..batch_limit).collect::<VecDeque<_>>();
+            self.pending_datagrams = Some(queued);
+            datagrams
+        };
+        let packet_count = datagrams.len();
+        let byte_count = datagrams.iter().map(|bytes| bytes.len()).sum::<usize>();
+        let started = DataplaneTelemetry::sample_start();
         let connection = self.connection.conn.clone();
         self.pending_datagram_send = Some(Box::pin(async move {
-            connection.send_datagrams_wait(datagrams).await
+            let (result, datagrams) = connection.send_datagrams_wait(datagrams).await;
+            (result, datagrams, started, packet_count, byte_count)
         }));
     }
 
@@ -2000,7 +2245,13 @@ impl QuicHybridWriter {
         };
         match send.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready((result, datagrams)) => {
+            Poll::Ready((result, datagrams, started, packet_count, byte_count)) => {
+                self.connection.telemetry.record_stage_sample(
+                    DataplaneStage::QuicSend,
+                    started,
+                    packet_count,
+                    byte_count,
+                );
                 let queued = self.pending_datagrams.take().unwrap_or_default();
                 let (result, datagrams) =
                     Self::requeue_datagrams_after_send(result, datagrams, queued);
@@ -2268,6 +2519,7 @@ fn build_quic_hybrid_tunnel(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -2281,6 +2533,7 @@ fn build_quic_hybrid_tunnel_with_memory_permit(
     flags: &Flags,
     transport_authenticated: bool,
     memory_permit: ProcessMemoryPermit,
+    telemetry: Arc<DataplaneTelemetry>,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     build_quic_hybrid_tunnel_with_manager(
         connection,
@@ -2295,6 +2548,7 @@ fn build_quic_hybrid_tunnel_with_memory_permit(
         None,
         None,
         None,
+        Some(telemetry),
     )
 }
 
@@ -2311,10 +2565,13 @@ fn build_quic_hybrid_tunnel_with_manager(
     source_permit: Option<QuicSourcePermit>,
     endpoint_manager: Option<Arc<QuicEndpointManager>>,
     endpoint_owner: Option<Endpoint>,
+    telemetry: Option<Arc<DataplaneTelemetry>>,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let transport_binding = derive_transport_binding(&connection)?;
     let connection = Arc::new(ConnWrapper {
         conn: connection,
+        telemetry: telemetry.unwrap_or_else(|| Arc::new(DataplaneTelemetry::new())),
+        io_observed: QuicIoObserved::default(),
         _memory_permit: memory_permit,
         _source_permit: source_permit,
         _endpoint_manager: endpoint_manager,
@@ -2448,6 +2705,7 @@ impl QuicTunnelListener {
             &flags,
             transport_authenticated,
             memory_permit,
+            global_ctx.dataplane_telemetry().clone(),
         )
     }
 
@@ -2685,6 +2943,7 @@ impl TunnelConnector for QuicTunnelConnector {
             None,
             self.endpoint_manager.clone(),
             Some(endpoint),
+            Some(self.global_ctx.dataplane_telemetry().clone()),
         )
     }
 
@@ -2792,6 +3051,33 @@ mod tests {
     #[test]
     fn quic_socket_buffer_matches_the_high_rate_datagram_path() {
         assert_eq!(quic_socket_buffer_bytes(), 7 * 1024 * 1024);
+    }
+
+    #[test]
+    fn quic_socket_buffer_accounting_detects_linux_kernel_clamping() {
+        let target = 7 * 1024 * 1024;
+        assert_eq!(
+            quic_socket_buffer_reported_target(target, true),
+            14 * 1024 * 1024
+        );
+        assert_eq!(quic_socket_buffer_reported_target(target, false), target);
+
+        assert!(!quic_socket_buffer_target_is_met(
+            Some(425_984),
+            target,
+            true
+        ));
+        assert!(quic_socket_buffer_target_is_met(
+            Some(14 * 1024 * 1024),
+            target,
+            true
+        ));
+        assert!(quic_socket_buffer_target_is_met(
+            Some(target),
+            target,
+            false
+        ));
+        assert!(!quic_socket_buffer_target_is_met(None, target, true));
     }
 
     #[test]
@@ -3075,8 +3361,8 @@ mod tests {
                 );
             }
 
-            received_tx.send(()).unwrap();
             send.close().await.unwrap();
+            received_tx.send(()).unwrap();
             server.await.unwrap();
         });
     }
@@ -3645,7 +3931,10 @@ mod tests {
                 .connect(server_addr, &server_addr.ip().to_string())
                 .unwrap()
                 .await;
-            assert!(refused.is_err(), "a stalled pending peer must bound new ones");
+            assert!(
+                refused.is_err(),
+                "a stalled pending peer must bound new ones"
+            );
 
             // Once the stalled activation times out, a later connection from
             // the same address activates and is accepted.
@@ -4124,6 +4413,8 @@ mod tests {
 
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
+                telemetry: Arc::new(DataplaneTelemetry::new()),
+                io_observed: QuicIoObserved::default(),
                 _endpoint_manager: None,
                 _endpoint_owner: None,
                 _memory_permit: None,
@@ -4185,6 +4476,8 @@ mod tests {
             let server = server_task.await.unwrap();
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
+                telemetry: Arc::new(DataplaneTelemetry::new()),
+                io_observed: QuicIoObserved::default(),
                 _endpoint_manager: None,
                 _endpoint_owner: None,
                 _memory_permit: None,

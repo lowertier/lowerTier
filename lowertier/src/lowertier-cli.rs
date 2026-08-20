@@ -93,6 +93,14 @@ struct Cli {
     )]
     rpc_portal: SocketAddr,
 
+    #[arg(
+        long,
+        env = "LOWTIER_ADMIN_TOKEN",
+        hide_env_values = true,
+        help = "administrator token for credential management"
+    )]
+    admin_token: Option<String>,
+
     #[arg(short, long, default_value = "false", help = "verbose output")]
     verbose: bool,
 
@@ -533,6 +541,7 @@ struct CommandHandler<'a> {
     instance_select: &'a InstanceSelectArgs,
     instance_selector: InstanceIdentifier,
     resolved_target: Option<InstanceTarget>,
+    admin_token: Option<String>,
 }
 
 type RpcClient = StandAloneClient<TcpTunnelConnector>;
@@ -651,6 +660,7 @@ impl<'a> CommandHandler<'a> {
             instance_select: self.instance_select,
             instance_selector: target.identifier.clone(),
             resolved_target: Some(target.clone()),
+            admin_token: self.admin_token.clone(),
         }
     }
 
@@ -1151,6 +1161,7 @@ impl<'a> CommandHandler<'a> {
                 BaseController::default(),
                 ListCredentialsRequest {
                     instance: Some(self.instance_selector.clone()),
+                    admin_token: self.admin_token.clone(),
                 },
             )
             .await?)
@@ -2358,6 +2369,7 @@ impl<'a> CommandHandler<'a> {
                                 ttl_seconds: ttl,
                                 instance: Some(handler.instance_selector.clone()),
                                 reusable: Some(reusable),
+                                admin_token: handler.admin_token.clone(),
                             },
                         )
                         .await
@@ -2398,6 +2410,7 @@ impl<'a> CommandHandler<'a> {
                             RevokeCredentialRequest {
                                 credential_id,
                                 instance: Some(handler.instance_selector.clone()),
+                                admin_token: handler.admin_token.clone(),
                             },
                         )
                         .await
@@ -2966,6 +2979,7 @@ async fn main() -> Result<(), Error> {
         instance_select: &cli.instance_select,
         instance_selector: (&cli.instance_select).into(),
         resolved_target: None,
+        admin_token: cli.admin_token,
     };
 
     match cli.sub_command {

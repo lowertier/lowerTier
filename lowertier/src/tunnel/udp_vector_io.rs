@@ -1026,7 +1026,7 @@ mod tests {
         super::try_send_gso(&sender, destination, &payloads).unwrap();
         receiver.readable().await.unwrap();
         let mut slots = super::ReceiveSlotPool::default();
-        let datagrams = super::try_recv_batch(&receiver, 2048, true, &mut slots).unwrap();
+        let datagrams = super::try_recv_batch(&receiver, 2048, true, &mut slots, None).unwrap();
 
         assert_eq!(datagrams.len(), payloads.len());
         for (index, (datagram, payload)) in datagrams.iter().zip(payloads).enumerate() {

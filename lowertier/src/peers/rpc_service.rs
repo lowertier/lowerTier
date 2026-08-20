@@ -17,7 +17,10 @@ use crate::{
             ListRouteRequest, ListRouteResponse, PeerInfo, PeerManageRpc, RevokeCredentialRequest,
             RevokeCredentialResponse, ShowNodeInfoRequest, ShowNodeInfoResponse,
         },
-        rpc_types::{self, controller::BaseController},
+        rpc_types::{
+            self,
+            controller::{BaseController, Controller},
+        },
     },
     utils::weak_upgrade,
 };
@@ -77,6 +80,32 @@ impl PeerManagerRpcService {
         }
 
         peer_infos
+    }
+
+    fn authorize_credential_management(
+        controller: &BaseController,
+        global_ctx: &crate::common::global_ctx::GlobalCtx,
+        admin_token: Option<&str>,
+    ) -> Result<(), rpc_types::error::Error> {
+        let remote_is_loopback = controller
+            .get_tunnel_info()
+            .and_then(|info| info.remote_addr.as_ref())
+            .and_then(|address| url::Url::parse(&address.url).ok())
+            .and_then(|address| address.host_str()?.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback());
+        let expected = global_ctx
+            .get_network_identity()
+            .network_secret
+            .unwrap_or_default();
+        let token_valid = admin_token.is_some_and(|token| {
+            crate::common::verify_slices_are_equal(token.as_bytes(), expected.as_bytes()).is_ok()
+        });
+        if remote_is_loopback && !expected.is_empty() && token_valid {
+            return Ok(());
+        }
+        Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+            "credential management requires a loopback channel and a valid administrator token"
+        )))
     }
 }
 
@@ -222,11 +251,16 @@ impl CredentialManageRpc for PeerManagerRpcService {
 
     async fn generate_credential(
         &self,
-        _: BaseController,
+        controller: BaseController,
         request: GenerateCredentialRequest,
     ) -> Result<GenerateCredentialResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
+        Self::authorize_credential_management(
+            &controller,
+            &global_ctx,
+            request.admin_token.as_deref(),
+        )?;
 
         if global_ctx
             .get_network_identity()
@@ -277,11 +311,16 @@ impl CredentialManageRpc for PeerManagerRpcService {
 
     async fn revoke_credential(
         &self,
-        _: BaseController,
+        controller: BaseController,
         request: RevokeCredentialRequest,
     ) -> Result<RevokeCredentialResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
+        Self::authorize_credential_management(
+            &controller,
+            &global_ctx,
+            request.admin_token.as_deref(),
+        )?;
         if global_ctx
             .get_network_identity()
             .network_secret
@@ -311,11 +350,16 @@ impl CredentialManageRpc for PeerManagerRpcService {
 
     async fn list_credentials(
         &self,
-        _: BaseController,
-        _request: ListCredentialsRequest,
+        controller: BaseController,
+        request: ListCredentialsRequest,
     ) -> Result<ListCredentialsResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
+        Self::authorize_credential_management(
+            &controller,
+            &global_ctx,
+            request.admin_token.as_deref(),
+        )?;
 
         Ok(ListCredentialsResponse {
             credentials: global_ctx.get_credential_manager().list_credentials(),

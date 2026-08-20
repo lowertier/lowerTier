@@ -52,6 +52,13 @@ struct DirectSendWork {
     deadline: Option<Instant>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectBatchPlan {
+    control: bool,
+    packet_count: usize,
+    byte_count: usize,
+}
+
 struct SendBudget {
     _permit: AdmissionPermit,
 }
@@ -368,19 +375,16 @@ impl DirectTunnelSender {
 
     pub fn send_batch(
         &self,
-        batch: PacketBatch,
+        mut batch: PacketBatch,
     ) -> impl Future<Output = Result<(), TunnelError>> + '_ {
         async move {
             if batch.is_empty() {
                 return Ok(());
             }
+            let plan = plan_direct_batch(&mut batch)?;
             let deadline = self.send_timeout.map(|duration| Instant::now() + duration);
-            let ownership = run_until(
-                acquire_batch_ownership(&self.state, &batch),
-                deadline,
-            )
-            .await?;
-            self.send_segment(batch, ownership).await
+            let ownership = run_until(acquire_batch_ownership(&self.state, plan), deadline).await?;
+            self.send_segment(batch, ownership, plan.control).await
         }
     }
 
@@ -388,10 +392,10 @@ impl DirectTunnelSender {
         &self,
         batch: PacketBatch,
         ownership: AdmissionPermit,
+        control: bool,
     ) -> Result<(), TunnelError> {
         debug_assert!(!batch.is_empty());
 
-        let control = is_control_batch(&batch);
         let mut terminal = self.state.terminal_tx.subscribe();
         if self.state.terminal_error.get().is_some() {
             return Err(self.terminal_error());
@@ -597,46 +601,17 @@ async fn run_direct_sink_owner(
 
 async fn acquire_batch_ownership(
     state: &DirectSinkState,
-    batch: &PacketBatch,
+    plan: DirectBatchPlan,
 ) -> Result<AdmissionPermit, TunnelError> {
     if state.terminal_error.get().is_some() {
         return Err(state.terminal_error_value());
     }
-    let packet_count = batch.len();
-    let byte_count = if batch.is_empty() {
-        0
-    } else {
-        batch_budget_bytes(batch)
-    };
-    let control = is_control_batch(batch);
-    let packet_limit = if control {
-        DIRECT_CONTROL_PACKET_BUDGET
-    } else {
-        DIRECT_DATA_PACKET_BUDGET
-    };
-    let byte_limit = if control {
-        DIRECT_CONTROL_BYTE_BUDGET
-    } else {
-        DIRECT_DATA_BYTE_BUDGET
-    };
-    if packet_count > packet_limit {
-        return Err(TunnelError::ExceedMaxPacketSize(
-            packet_limit,
-            packet_count,
-        ));
-    }
-    if byte_count > byte_limit {
-        return Err(TunnelError::ExceedMaxPacketSize(
-            byte_limit,
-            byte_count,
-        ));
-    }
-    let budget = if control {
+    let budget = if plan.control {
         &state.control_budget
     } else {
         &state.ownership_budget
     };
-    acquire_budget_or_terminal(state, budget.clone(), packet_count, byte_count).await
+    acquire_budget_or_terminal(state, budget.clone(), plan.packet_count, plan.byte_count).await
 }
 
 pub struct DirectTunnel<T> {
@@ -731,6 +706,52 @@ fn batch_budget_bytes(batch: &PacketBatch) -> usize {
         .retained_buffer_capacity()
         .saturating_add(batch.len().saturating_mul(DIRECT_PACKET_OVERHEAD))
         .max(1)
+}
+
+fn batch_compacted_budget_bytes(batch: &PacketBatch) -> usize {
+    batch
+        .buffer_byte_len()
+        .saturating_add(batch.len().saturating_mul(DIRECT_PACKET_OVERHEAD))
+        .max(1)
+}
+
+fn plan_direct_batch(batch: &mut PacketBatch) -> Result<DirectBatchPlan, TunnelError> {
+    debug_assert!(!batch.is_empty());
+    let packet_count = batch.len();
+    let mut control = true;
+    let mut byte_count = packet_count.saturating_mul(DIRECT_PACKET_OVERHEAD);
+    for packet in batch.iter() {
+        control &= !is_data_packet(packet);
+        byte_count = byte_count.saturating_add(packet.retained_buffer_capacity());
+    }
+    byte_count = byte_count.max(1);
+
+    let (packet_limit, byte_limit) = if control {
+        (DIRECT_CONTROL_PACKET_BUDGET, DIRECT_CONTROL_BYTE_BUDGET)
+    } else {
+        (DIRECT_DATA_PACKET_BUDGET, DIRECT_DATA_BYTE_BUDGET)
+    };
+    if packet_count > packet_limit {
+        return Err(TunnelError::ExceedMaxPacketSize(packet_limit, packet_count));
+    }
+
+    if byte_count > byte_limit && batch_compacted_budget_bytes(batch) <= byte_limit {
+        byte_count = packet_count.saturating_mul(DIRECT_PACKET_OVERHEAD);
+        for packet in batch.iter_mut() {
+            packet.compact_retained_buffer();
+            byte_count = byte_count.saturating_add(packet.retained_buffer_capacity());
+        }
+        byte_count = byte_count.max(1);
+    }
+    if byte_count > byte_limit {
+        return Err(TunnelError::ExceedMaxPacketSize(byte_limit, byte_count));
+    }
+
+    Ok(DirectBatchPlan {
+        control,
+        packet_count,
+        byte_count,
+    })
 }
 
 async fn acquire_send_budget(
@@ -884,6 +905,30 @@ mod tests {
 
     use super::{DirectTunnel, MAX_PACKET_BATCH_SIZE, is_data_packet};
 
+    #[test]
+    fn direct_batch_plan_preserves_lane_and_exact_accounting() {
+        let mut data = sized_batch(PacketType::Data, 4, 128);
+        let expected_data_bytes = super::batch_budget_bytes(&data);
+        let data_plan = super::plan_direct_batch(&mut data).unwrap();
+        assert!(!data_plan.control);
+        assert_eq!(data_plan.packet_count, 4);
+        assert_eq!(data_plan.byte_count, expected_data_bytes);
+
+        let mut control = sized_batch(PacketType::Ping, 2, 128);
+        let expected_control_bytes = super::batch_budget_bytes(&control);
+        let control_plan = super::plan_direct_batch(&mut control).unwrap();
+        assert!(control_plan.control);
+        assert_eq!(control_plan.packet_count, 2);
+        assert_eq!(control_plan.byte_count, expected_control_bytes);
+
+        let mut mixed = PacketBatch::new();
+        mixed.try_push(control_packet(1)).unwrap();
+        mixed
+            .try_push(sized_batch(PacketType::Data, 1, 1).pop_singleton().unwrap())
+            .unwrap();
+        assert!(!super::plan_direct_batch(&mut mixed).unwrap().control);
+    }
+
     #[tokio::test]
     async fn direct_batch_send_preserves_order() {
         let (tunnel, peer) = create_ring_tunnel_pair();
@@ -909,6 +954,57 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(received, vec![1, 2, 3, 4]);
         let _stream = direct.get_stream();
+    }
+
+    #[tokio::test]
+    async fn direct_control_send_compacts_oversized_receive_slab() {
+        let (tunnel, peer) = create_ring_tunnel_pair();
+        let mut direct = DirectTunnel::new(tunnel, None);
+        let sender = direct.get_sink();
+        let mut receiver = peer.split().0;
+        let mut packet = control_packet(7);
+        packet.mut_inner().reserve(64 * 1024);
+        assert!(
+            packet.retained_buffer_capacity() + super::DIRECT_PACKET_OVERHEAD
+                > super::DIRECT_CONTROL_BYTE_BUDGET
+        );
+        assert!(
+            packet.buf_len() + super::DIRECT_PACKET_OVERHEAD <= super::DIRECT_CONTROL_BYTE_BUDGET
+        );
+
+        sender.send(packet).await.unwrap();
+
+        let received = receiver
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .pop_singleton()
+            .unwrap();
+        assert_eq!(received.payload(), &[7]);
+        assert!(
+            received.retained_buffer_capacity() + super::DIRECT_PACKET_OVERHEAD
+                <= super::DIRECT_CONTROL_BYTE_BUDGET
+        );
+        let _stream = direct.get_stream();
+    }
+
+    #[tokio::test]
+    async fn direct_control_send_still_rejects_genuinely_oversized_packet() {
+        let (tunnel, _peer) = create_ring_tunnel_pair();
+        let direct = DirectTunnel::new(tunnel, None);
+        let sender = direct.get_sink();
+        let payload_len = super::DIRECT_CONTROL_BYTE_BUDGET;
+        let error = sender
+            .send_batch(sized_batch(PacketType::Ping, 1, payload_len))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::tunnel::TunnelError::ExceedMaxPacketSize(limit, actual)
+                if limit == super::DIRECT_CONTROL_BYTE_BUDGET && actual > limit
+        ));
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1197,7 +1293,11 @@ mod tests {
         // One full in-flight data batch saturates the data packet budget.
         let first = tokio::spawn({
             let sender = sender.clone();
-            async move { sender.send_batch(sized_batch(PacketType::Data, MAX_PACKET_BATCH_SIZE, 1)).await }
+            async move {
+                sender
+                    .send_batch(sized_batch(PacketType::Data, MAX_PACKET_BATCH_SIZE, 1))
+                    .await
+            }
         });
         assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
 

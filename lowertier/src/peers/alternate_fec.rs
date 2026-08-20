@@ -964,11 +964,17 @@ pub(crate) fn parity_packets(
         .collect()
 }
 
-pub(crate) fn decode_alternate_fec_packet(
+pub(crate) struct DecodedAlternateFecPackets {
+    pub(crate) packets: Vec<ZCPacket>,
+    pub(crate) recovered_packets: usize,
+    pub(crate) recovered_bytes: usize,
+}
+
+pub(crate) fn decode_alternate_fec_packet_with_stats(
     packet: ZCPacket,
     decoder: &mut AlternateFecDecoder,
     now: Instant,
-) -> anyhow::Result<Vec<ZCPacket>> {
+) -> anyhow::Result<DecodedAlternateFecPackets> {
     let outer_header = packet
         .peer_manager_header()
         .context("alternate FEC packet has no peer header")?;
@@ -987,7 +993,18 @@ pub(crate) fn decode_alternate_fec_packet(
     );
     let decoded = decoder.ingest(packet.payload_bytes().freeze(), now)?;
     let direct_source_index = decoded.direct_source_index;
-    decoded
+    let recovered_packets = decoded
+        .datagrams
+        .len()
+        .saturating_sub(usize::from(direct_source_index.is_some()));
+    let recovered_bytes = decoded
+        .datagrams
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| direct_source_index != Some(*index))
+        .map(|(_, datagram)| datagram.len())
+        .sum();
+    let packets = decoded
         .datagrams
         .into_iter()
         .enumerate()
@@ -1044,7 +1061,20 @@ pub(crate) fn decode_alternate_fec_packet(
             }
             Ok(packet)
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(DecodedAlternateFecPackets {
+        packets,
+        recovered_packets,
+        recovered_bytes,
+    })
+}
+
+pub(crate) fn decode_alternate_fec_packet(
+    packet: ZCPacket,
+    decoder: &mut AlternateFecDecoder,
+    now: Instant,
+) -> anyhow::Result<Vec<ZCPacket>> {
+    Ok(decode_alternate_fec_packet_with_stats(packet, decoder, now)?.packets)
 }
 
 fn encoded_payload_len_matches_header(
@@ -1398,9 +1428,7 @@ mod tests {
         }
         let completed = completed
             .unwrap_or_else(|| encoder.flush_due(now + Duration::from_millis(40)).unwrap());
-        let parity = parity_packets(11, 22, &completed)
-        .pop()
-        .unwrap();
+        let parity = parity_packets(11, 22, &completed).pop().unwrap();
         let mut decoder = AlternateFecDecoder::default();
         decoder.ingest(source_records.remove(0), now).unwrap();
         decoder

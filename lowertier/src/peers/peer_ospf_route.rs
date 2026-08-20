@@ -2060,7 +2060,10 @@ impl SyncedRouteInfo {
             // time between peers may not be synchronized, so update last_update to local now.
             // note only last_update with larger version will be updated to local saved peer info.
             route_info.last_update = Some(Timestamp::now());
-            if guard.get(&route_info.peer_id).is_none_or(|old| route_info.version > old.version) {
+            if guard
+                .get(&route_info.peer_id)
+                .is_none_or(|old| route_info.version > old.version)
+            {
                 let old_bytes = self
                     .retained_peer_bytes
                     .lock()
@@ -3504,12 +3507,7 @@ fn relax_speed_path(
             *label_count += 1;
         }
     }
-    pending.insert((
-        candidate.0,
-        candidate.1,
-        candidate.2,
-        target.index(),
-    ));
+    pending.insert((candidate.0, candidate.1, candidate.2, target.index()));
     #[cfg(test)]
     {
         work_stats.label_relaxations += 1;
@@ -14864,14 +14862,17 @@ mod tests {
             guard.insert(service_impl.my_peer_id, self_info);
             guard.insert(credential_peer_id, credential_info);
         }
-        service_impl.synced_route_info.trusted_credential_pubkeys.insert(
-            credential_pubkey.clone(),
-            TrustedCredentialPubkey {
-                pubkey: credential_pubkey.clone(),
-                expiry_unix: i64::MAX,
-                ..Default::default()
-            },
-        );
+        service_impl
+            .synced_route_info
+            .trusted_credential_pubkeys
+            .insert(
+                credential_pubkey.clone(),
+                TrustedCredentialPubkey {
+                    pubkey: credential_pubkey.clone(),
+                    expiry_unix: i64::MAX,
+                    ..Default::default()
+                },
+            );
 
         assert!(service_impl.refresh_acl_groups().await);
         assert!(closed_peers.lock().contains(&credential_peer_id));

@@ -67,10 +67,6 @@ const UDP_SYN_COOKIE_BUCKET_SECONDS: u64 = 30;
 type UdpCloseEventSender = UnboundedSender<(SocketAddr, u32, Option<TunnelError>)>;
 type UdpCloseEventReceiver = UnboundedReceiver<(SocketAddr, u32, Option<TunnelError>)>;
 
-fn udp_ring_packet_capacity() -> usize {
-    UDP_RING_PACKET_CAPACITY
-}
-
 struct UdpConnectionAdmission {
     _permit: OwnedSemaphorePermit,
 }
@@ -843,8 +839,8 @@ impl UdpTunnelListenerData {
             });
         }
 
-        let ring_for_send_udp = Arc::new(RingTunnel::new(udp_ring_packet_capacity()));
-        let ring_for_recv_udp = Arc::new(RingTunnel::new(udp_ring_packet_capacity()));
+        let ring_for_send_udp = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
+        let ring_for_recv_udp = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
         tracing::debug!(
             ?ring_for_send_udp,
             ?ring_for_recv_udp,
@@ -1469,8 +1465,8 @@ impl UdpTunnelConnector {
         dst_addr: SocketAddr,
         conn_id: u32,
     ) -> Result<Box<dyn super::Tunnel>, super::TunnelError> {
-        let ring_for_send_udp = Arc::new(RingTunnel::new(udp_ring_packet_capacity()));
-        let ring_for_recv_udp = Arc::new(RingTunnel::new(udp_ring_packet_capacity()));
+        let ring_for_send_udp = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
+        let ring_for_recv_udp = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
         tracing::debug!(
             ?ring_for_send_udp,
             ?ring_for_recv_udp,
@@ -1792,6 +1788,38 @@ mod tests {
     }
 
     #[test]
+    fn protected_udp_wire_round_trip_preserves_the_complete_envelope() {
+        use crate::peers::link_envelope::LinkEnvelopeSession;
+
+        let root_key = [0x5a; 32];
+        let handshake_hash = [0xa5; 32];
+        let client = LinkEnvelopeSession::new(root_key, &handshake_hash, true, 1, 2);
+        let server = LinkEnvelopeSession::new(root_key, &handshake_hash, false, 2, 1);
+
+        for packet_type in [PacketType::RpcReq, PacketType::Ethernet] {
+            let mut packet = ZCPacket::new_with_payload(b"protected UDP payload");
+            packet.fill_peer_manager_hdr(1, 2, packet_type as u8);
+            let original = packet.tunnel_payload().to_vec();
+            let expected_lossy = packet.is_lossy();
+
+            let sealed = client.seal(packet).unwrap();
+            let framed = prepare_udp_data_packet(sealed, 0x1234_5678);
+            assert_eq!(
+                framed.udp_tunnel_header().unwrap().conn_id.get(),
+                0x1234_5678
+            );
+
+            let wire = framed.into_bytes();
+            let received =
+                get_zcpacket_from_buf(BytesMut::from(wire.as_ref()), None, false).unwrap();
+            assert_eq!(received.is_lossy(), expected_lossy);
+
+            let opened = server.open(received).unwrap();
+            assert_eq!(opened.tunnel_payload(), original);
+        }
+    }
+
+    #[test]
     fn plain_udp_data_clears_reused_padding() {
         let mut packet = ZCPacket::new_with_payload(b"plain-data").convert_type(ZCPacketType::UDP);
         packet.mut_udp_tunnel_header().unwrap().padding = 0xfe;
@@ -1856,30 +1884,23 @@ mod tests {
 
     #[test]
     fn udp_connection_accepts_full_non_lossy_vector_batch() {
-        let tunnel = Arc::new(RingTunnel::new(udp_ring_packet_capacity()));
+        let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
         let ring_sender = crate::tunnel::ring::RingSink::new(tunnel.clone());
         let mut ring_stream = crate::tunnel::ring::RingStream::new(tunnel);
-        let mut connection = UdpConnection::new(
-            77,
-            ring_sender,
-            None,
-            Arc::new(UdpConnectionState::new()),
-        );
+        let mut connection =
+            UdpConnection::new(77, ring_sender, None, Arc::new(UdpConnectionState::new()));
         let mut batch = PacketBatch::new();
         for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
-            batch
-                .try_push(new_udp_data_packet(77, PacketType::Ping))
-                .unwrap();
+            let packet = new_udp_data_packet(77, PacketType::RpcReq);
+            assert!(!packet.is_lossy());
+            batch.try_push(packet).unwrap();
         }
 
         connection.handle_packet_batch_from_remote(batch).unwrap();
         let received = ring_stream
             .try_recv_batch()
             .expect("the full UDP vector batch is queued");
-        assert_eq!(
-            received.len(),
-            crate::tunnel::batch::MAX_PACKET_BATCH_SIZE
-        );
+        assert_eq!(received.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
     }
 
     #[test]
@@ -1887,12 +1908,8 @@ mod tests {
         let tunnel = Arc::new(RingTunnel::new(8));
         let ring_sender = crate::tunnel::ring::RingSink::new(tunnel.clone());
         let mut ring_stream = crate::tunnel::ring::RingStream::new(tunnel);
-        let mut connection = UdpConnection::new(
-            77,
-            ring_sender,
-            None,
-            Arc::new(UdpConnectionState::new()),
-        );
+        let mut connection =
+            UdpConnection::new(77, ring_sender, None, Arc::new(UdpConnectionState::new()));
         let mut batch = PacketBatch::new();
         for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
             batch

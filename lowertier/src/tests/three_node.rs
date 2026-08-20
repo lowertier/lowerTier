@@ -4146,6 +4146,9 @@ pub fn generate_secure_mode_config_with_key(
         enabled: true,
         local_private_key: Some(BASE64_STANDARD.encode(private_key.as_bytes())),
         local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
+        credential_bundle: None,
+        credential_root_fingerprint: Vec::new(),
+        credential_certificate: Vec::new(),
     }
 }
 

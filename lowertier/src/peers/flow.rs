@@ -208,19 +208,54 @@ fn udp_ports_are(payload: &[u8], first: u16, second: u16) -> bool {
     (source == first && destination == second) || (source == second && destination == first)
 }
 
+fn transport_port_is(payload: &[u8], expected: u16) -> bool {
+    if payload.len() < 4 {
+        return false;
+    }
+    let source = u16::from_be_bytes([payload[0], payload[1]]);
+    let destination = u16::from_be_bytes([payload[2], payload[3]]);
+    source == expected || destination == expected
+}
+
+fn transport_port_is_bfd(payload: &[u8]) -> bool {
+    [3784, 3785, 4784]
+        .into_iter()
+        .any(|port| transport_port_is(payload, port))
+}
+
+fn high_priority_dscp(dscp: u8) -> bool {
+    dscp >= 48
+}
+
+fn critical_transport_control(protocol: u8, payload: &[u8]) -> bool {
+    match protocol {
+        1 | 58 | 89 => true,
+        6 => transport_port_is(payload, 179),
+        17 => transport_port_is_bfd(payload),
+        _ => false,
+    }
+}
+
 fn critical_ipv4_control(packet: &[u8]) -> bool {
     if packet.len() < 20 || packet[0] >> 4 != 4 {
         return false;
     }
     let header_len = usize::from(packet[0] & 0x0f) * 4;
-    if header_len < 20 || packet.len() < header_len || packet[9] != 17 {
+    if header_len < 20 || packet.len() < header_len {
         return false;
     }
+    if high_priority_dscp(packet[1] >> 2) {
+        return true;
+    }
+    let protocol = packet[9];
     let fragment = u16::from_be_bytes([packet[6], packet[7]]);
-    if fragment & 0x1fff != 0 {
-        return false;
-    }
-    udp_ports_are(&packet[header_len..], 67, 68)
+    let payload = if fragment & 0x1fff == 0 {
+        &packet[header_len..]
+    } else {
+        &[]
+    };
+    critical_transport_control(protocol, payload)
+        || (protocol == 17 && udp_ports_are(payload, 67, 68))
 }
 
 fn ipv6_upper_layer(mut packet: &[u8]) -> Option<(u8, &[u8])> {
@@ -271,16 +306,18 @@ fn ipv6_upper_layer(mut packet: &[u8]) -> Option<(u8, &[u8])> {
 }
 
 fn critical_ipv6_control(packet: &[u8]) -> bool {
+    if packet.len() < 40 {
+        return false;
+    }
+    let traffic_class = ((packet[0] & 0x0f) << 4) | (packet[1] >> 4);
+    if high_priority_dscp(traffic_class >> 2) {
+        return true;
+    }
     let Some((next_header, payload)) = ipv6_upper_layer(packet) else {
         return false;
     };
-    match next_header {
-        17 => udp_ports_are(payload, 546, 547),
-        58 => payload
-            .first()
-            .is_some_and(|kind| matches!(kind, 135 | 136)),
-        _ => false,
-    }
+    critical_transport_control(next_header, payload)
+        || (next_header == 17 && udp_ports_are(payload, 546, 547))
 }
 
 pub(crate) fn is_critical_l2_control(frame: &[u8]) -> bool {
@@ -295,21 +332,42 @@ pub(crate) fn is_critical_l2_control(frame: &[u8]) -> bool {
     }
 }
 
-pub(crate) fn stamp_critical_l2_control(packet: &mut ZCPacket) -> bool {
-    if let Some(header) = packet.peer_manager_header()
-        && header.is_encrypted()
-    {
-        return header.is_critical_l2_control();
+pub(crate) fn is_critical_l3_control(packet: &[u8]) -> bool {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) => critical_ipv4_control(packet),
+        Some(6) => critical_ipv6_control(packet),
+        _ => false,
+    }
+}
+
+pub(crate) fn stamp_critical_control(packet: &mut ZCPacket) -> bool {
+    let Some(header) = packet.peer_manager_header() else {
+        return false;
+    };
+    if header.is_critical_l2_control() {
+        return true;
+    }
+    if header.is_encrypted() {
+        return false;
     }
 
-    let critical = packet
-        .peer_manager_header()
-        .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
-        && is_critical_l2_control(packet.payload());
+    let critical = match header.packet_type {
+        packet_type if packet_type == PacketType::Ethernet as u8 => {
+            is_critical_l2_control(packet.payload())
+        }
+        packet_type if packet_type == PacketType::Data as u8 => {
+            is_critical_l3_control(packet.payload())
+        }
+        _ => false,
+    };
     if critical && let Some(header) = packet.mut_peer_manager_header() {
         header.set_critical_l2_control(true);
     }
     critical
+}
+
+pub(crate) fn stamp_critical_l2_control(packet: &mut ZCPacket) -> bool {
+    stamp_critical_control(packet)
 }
 
 pub(crate) fn classify_packet_flow(packet: &ZCPacket) -> PacketFlow {
@@ -679,10 +737,25 @@ mod tests {
     use crate::tunnel::packet_def::{PacketType, ZCPacket};
 
     use super::{
-        FlowPathCache, classify_packet_flow, is_critical_l2_control,
-        partition_packet_batch_by_flow, split_packet_batch_by_flow_shard,
+        FlowPathCache, classify_packet_flow, is_critical_l2_control, is_critical_l3_control,
+        partition_packet_batch_by_flow, split_packet_batch_by_flow_shard, stamp_critical_control,
         stamp_critical_l2_control, stamp_packet_flow,
     };
+
+    fn ipv4_transport(protocol: u8, source_port: u16, destination_port: u16, dscp: u8) -> ZCPacket {
+        let mut ip = vec![0_u8; 20 + 8];
+        ip[0] = 0x45;
+        ip[1] = dscp << 2;
+        ip[2..4].copy_from_slice(&(28_u16).to_be_bytes());
+        ip[9] = protocol;
+        ip[12..16].copy_from_slice(&Ipv4Addr::new(10, 0, 0, 1).octets());
+        ip[16..20].copy_from_slice(&Ipv4Addr::new(10, 0, 0, 2).octets());
+        ip[20..22].copy_from_slice(&source_port.to_be_bytes());
+        ip[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&ip);
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        packet
+    }
 
     fn ethernet_ipv4_udp(
         source: Ipv4Addr,
@@ -1149,6 +1222,42 @@ mod tests {
         nd[14 + 41] = 0;
         nd[14 + 48] = 136;
         assert!(is_critical_l2_control(&nd));
+    }
+
+    #[test]
+    fn classifies_routing_protocols_and_cs6_as_critical_l3() {
+        for packet in [
+            ipv4_transport(1, 0, 0, 0),
+            ipv4_transport(6, 50_000, 179, 0),
+            ipv4_transport(17, 50_000, 3784, 0),
+            ipv4_transport(17, 50_000, 4784, 0),
+            ipv4_transport(89, 0, 0, 0),
+            ipv4_transport(6, 50_000, 443, 48),
+        ] {
+            assert!(is_critical_l3_control(packet.payload()));
+        }
+
+        let ordinary = ipv4_transport(6, 50_000, 443, 0);
+        assert!(!is_critical_l3_control(ordinary.payload()));
+    }
+
+    #[test]
+    fn critical_l3_marker_is_authenticated_before_encryption() {
+        let mut packet = ipv4_transport(6, 50_000, 179, 0);
+
+        assert!(stamp_critical_control(&mut packet));
+        assert!(
+            packet
+                .peer_manager_header()
+                .unwrap()
+                .is_critical_l2_control()
+        );
+        packet.mut_payload_preserving_flow_hash().fill(0xa5);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_encrypted(true);
+        assert!(stamp_critical_control(&mut packet));
     }
 
     #[test]

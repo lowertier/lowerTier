@@ -26,13 +26,11 @@ use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
 use crate::connector::udp_hole_punch::UdpHolePunchConnector;
-use crate::gateway::icmp_proxy::IcmpProxy;
 #[cfg(feature = "kcp")]
 use crate::gateway::kcp_proxy::{KcpProxyDst, KcpProxyDstRpcService, KcpProxySrc};
 #[cfg(feature = "quic")]
 use crate::gateway::quic_proxy::{QuicProxy, QuicProxyDstRpcService};
-use crate::gateway::tcp_proxy::{NatDstTcpConnector, TcpProxy, TcpProxyRpcService};
-use crate::gateway::udp_proxy::UdpProxy;
+use crate::gateway::tcp_proxy::TcpProxyRpcService;
 use crate::peer_center::instance::{PeerCenterInstance, PeerCenterInstanceService};
 use crate::peers::peer_conn::PeerConnId;
 use crate::peers::peer_manager::{PeerManager, RouteAlgoType};
@@ -63,6 +61,7 @@ use crate::vpn_portal::{self, VpnPortal};
 
 #[cfg(feature = "magic-dns")]
 use super::dns_server::{MAGIC_DNS_FAKE_IP, runner::DnsRunner};
+use super::ip_proxy::IpProxy;
 use super::listeners::ListenerManager;
 use super::public_ipv6_provider::{
     PublicIpv6ProviderReconcileTask, reconcile_public_ipv6_provider_runtime,
@@ -72,67 +71,6 @@ use super::public_ipv6_provider::{
 
 #[cfg(feature = "socks5")]
 use crate::gateway::socks5::Socks5Server;
-
-#[derive(Clone)]
-struct IpProxy {
-    tcp_proxy: Arc<TcpProxy<NatDstTcpConnector>>,
-    icmp_proxy: Arc<IcmpProxy>,
-    udp_proxy: Arc<UdpProxy>,
-    global_ctx: ArcGlobalCtx,
-    started: Arc<AtomicBool>,
-}
-
-impl IpProxy {
-    fn new(global_ctx: ArcGlobalCtx, peer_manager: Arc<PeerManager>) -> Result<Self, Error> {
-        let tcp_proxy = TcpProxy::new(peer_manager.clone(), NatDstTcpConnector {});
-        let icmp_proxy = IcmpProxy::new(global_ctx.clone(), peer_manager.clone())
-            .with_context(|| "create icmp proxy failed")?;
-        let udp_proxy = UdpProxy::new(global_ctx.clone(), peer_manager)
-            .with_context(|| "create udp proxy failed")?;
-        Ok(IpProxy {
-            tcp_proxy,
-            icmp_proxy,
-            udp_proxy,
-            global_ctx,
-            started: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    async fn start(&self) -> Result<(), Error> {
-        if (self.global_ctx.config.get_proxy_cidrs().is_empty()
-            || self.started.load(Ordering::Relaxed))
-            && !self.global_ctx.enable_exit_node()
-            && !self.global_ctx.no_tun()
-        {
-            return Ok(());
-        }
-
-        // Actually, if this node is enabled as an exit node,
-        // we still can use the system stack to forward packets.
-        if self.global_ctx.proxy_forward_by_system() && !self.global_ctx.no_tun() {
-            return Ok(());
-        }
-
-        self.started.store(true, Ordering::Relaxed);
-        self.tcp_proxy.start(true).await?;
-        if let Err(e) = self.icmp_proxy.start().await {
-            tracing::error!("start icmp proxy failed: {:?}", e);
-            if cfg!(not(any(
-                target_os = "android",
-                any(
-                    target_os = "ios",
-                    all(target_os = "macos", feature = "macos-ne")
-                ),
-                target_env = "ohos"
-            ))) {
-                // android, ios and ohos not support icmp proxy
-                return Err(e);
-            }
-        }
-        self.udp_proxy.start().await?;
-        Ok(())
-    }
-}
 
 #[cfg(feature = "tun")]
 type NicCtx = super::virtual_nic::NicCtx;
@@ -1373,9 +1311,9 @@ impl Instance {
                 _: BaseController,
                 _request: GetPrometheusStatsRequest,
             ) -> Result<GetPrometheusStatsResponse, rpc_types::error::Error> {
-                let prometheus_text = weak_upgrade(&self.global_ctx)?
-                    .stats_manager()
-                    .export_prometheus();
+                let global_ctx = weak_upgrade(&self.global_ctx)?;
+                let mut prometheus_text = global_ctx.stats_manager().export_prometheus();
+                prometheus_text.push_str(&global_ctx.dataplane_telemetry().export_prometheus());
 
                 Ok(GetPrometheusStatsResponse { prometheus_text })
             }
@@ -1550,7 +1488,7 @@ impl Instance {
                 if let Some(ip_proxy) = self.ip_proxy.as_ref() {
                     tcp_proxy_rpc_services.insert(
                         "tcp".to_string(),
-                        Arc::new(TcpProxyRpcService::new(ip_proxy.tcp_proxy.clone())),
+                        Arc::new(TcpProxyRpcService::new(ip_proxy.tcp_proxy())),
                     );
                 }
                 #[cfg(feature = "kcp")]

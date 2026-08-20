@@ -1494,9 +1494,7 @@ impl SecureDatagramSession {
 
         let dir_idx = dir.idx();
         let mut nonces = SmallVec::<[Option<(u32, u64)>; 64]>::new();
-        let mut aads = SmallVec::<
-            [Option<[u8; PEER_MANAGER_STABLE_AUTH_DATA_SIZE]>; 64],
-        >::new();
+        let mut aads = SmallVec::<[Option<[u8; PEER_MANAGER_STABLE_AUTH_DATA_SIZE]>; 64]>::new();
         let mut nonce_slots = [None::<((u32, u64), usize)>; 128];
         let mut duplicate = [false; 64];
         let mut outcomes = SmallVec::<[Option<Result<(), anyhow::Error>>; 64]>::new();

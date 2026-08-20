@@ -10,8 +10,8 @@ use dashmap::DashMap;
 use prost::Message;
 use quanta::Instant;
 use rayon::prelude::*;
-use snow::{TransportState, params::NoiseParams};
 use smallvec::SmallVec;
+use snow::{TransportState, params::NoiseParams};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, oneshot};
 use tokio::time::{Duration, timeout};
 
@@ -4420,9 +4420,10 @@ impl RelayPeerMap {
                         }
                         outcomes[index] = RelayBatchDecryptOutcome::Decrypted;
                     }
-                    Ok::<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>, Error>(
-                        SmallVec::from_elem(true, packets.len()),
-                    )
+                    Ok::<SmallVec<[bool; MAX_PACKET_BATCH_SIZE]>, Error>(SmallVec::from_elem(
+                        true,
+                        packets.len(),
+                    ))
                 });
             if process_result.is_err() {
                 for index in indexes {

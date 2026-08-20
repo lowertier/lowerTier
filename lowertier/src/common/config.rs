@@ -211,6 +211,10 @@ pub enum PortMode {
 }
 
 impl PortMode {
+    pub fn from_flags(flags: &Flags) -> Self {
+        flags.port_mode.parse().expect("port mode was validated")
+    }
+
     pub fn uses_ethernet_overlay(self) -> bool {
         match self {
             Self::L3 => false,
@@ -224,6 +228,22 @@ impl PortMode {
             Self::Tap => true,
             Self::Auto => cfg!(any(target_os = "linux", target_os = "freebsd")),
             Self::L3 | Self::L2Tun => false,
+        }
+    }
+
+    pub fn is_l2_tun(self) -> bool {
+        self == Self::L2Tun
+    }
+
+    pub fn is_auto(self) -> bool {
+        self == Self::Auto
+    }
+
+    pub fn allows_bridge_input(self, enable_bridge: bool) -> bool {
+        match self {
+            Self::Tap | Self::L2Tun => true,
+            Self::Auto => self.uses_native_ethernet() && enable_bridge,
+            Self::L3 => false,
         }
     }
 
@@ -643,8 +663,7 @@ impl NetworkIdentity {
     /// identity with a pinned root, or the digest-only view of a
     /// shared-secret network as advertised to foreign peers.
     pub(crate) fn is_credential_marker(&self) -> bool {
-        self.network_secret.is_none()
-            && self.network_secret_digest == Some(CREDENTIAL_MODE_MARKER)
+        self.network_secret.is_none() && self.network_secret_digest == Some(CREDENTIAL_MODE_MARKER)
     }
 }
 

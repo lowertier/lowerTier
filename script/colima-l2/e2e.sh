@@ -299,7 +299,13 @@ trap cleanup EXIT INT TERM
 
 "${docker_cmd[@]}" info >/dev/null
 if [[ "${SKIP_IMAGE_BUILD:-0}" != "1" ]]; then
-    "${docker_cmd[@]}" build -f "${repo_root}/script/colima-l2/Dockerfile" -t "${image_name}" "${repo_root}"
+    source_revision=$(git -C "$repo_root" rev-parse HEAD)
+    source_digest=$(python3 "$repo_root/script/colima-l2/source_digest.py" "$repo_root")
+    "${docker_cmd[@]}" build \
+        --build-arg "LOWTIER_SOURCE_REVISION=$source_revision" \
+        --build-arg "LOWTIER_SOURCE_DIGEST=$source_digest" \
+        -f "${repo_root}/script/colima-l2/Dockerfile" \
+        -t "${image_name}" "$repo_root"
 fi
 
 case "${LOWTIER_L2_TEST_SCOPE:-all}" in

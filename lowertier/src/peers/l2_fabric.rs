@@ -192,7 +192,11 @@ impl L2Fabric {
     }
 
     pub fn clear(&self) {
-        let keys = self.fdb.iter().map(|entry| *entry.key()).collect::<Vec<_>>();
+        let keys = self
+            .fdb
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>();
         for key in keys {
             if self.fdb.remove(&key).is_some() {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);

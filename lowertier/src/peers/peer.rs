@@ -25,7 +25,10 @@ use super::{
     route_trait::NextHopPolicy,
 };
 #[cfg(feature = "quic")]
-use crate::tunnel::packet_def::PacketType;
+use crate::{
+    common::dataplane_telemetry::{DataplaneFec, DataplaneTelemetry},
+    tunnel::packet_def::PacketType,
+};
 use crate::{common::shrink_dashmap, proto::api::instance::PeerConnInfo};
 use crate::{
     common::{
@@ -136,7 +139,11 @@ fn alternate_fec_capture_allowed(
 }
 
 #[cfg(feature = "quic")]
-async fn send_alternate_parity(remote_peer_id: PeerId, work: AlternateFecParityWork) {
+async fn send_alternate_parity(
+    remote_peer_id: PeerId,
+    work: AlternateFecParityWork,
+    telemetry: &DataplaneTelemetry,
+) {
     let AlternateFecParityWork {
         conn,
         local_peer_id,
@@ -163,6 +170,8 @@ async fn send_alternate_parity(remote_peer_id: PeerId, work: AlternateFecParityW
     if batch.is_empty() {
         return;
     }
+    let packets = batch.len();
+    let bytes = batch.buffer_byte_len();
     if let Err(error) = conn.send_msg_batch(batch).await {
         tracing::warn!(
             ?error,
@@ -170,6 +179,8 @@ async fn send_alternate_parity(remote_peer_id: PeerId, work: AlternateFecParityW
             source_count,
             "alternate-path parity send failed"
         );
+    } else {
+        telemetry.record_fec(DataplaneFec::ParityTx, packets, bytes);
     }
 }
 
@@ -222,6 +233,7 @@ async fn run_alternate_fec_owner(
     primary_id: Arc<AtomicCell<PeerConnId>>,
     local_peer_id: Arc<AtomicU32>,
     remote_peer_id: PeerId,
+    telemetry: Arc<DataplaneTelemetry>,
 ) {
     loop {
         let deadline = encoder.lock().next_flush_at();
@@ -233,7 +245,7 @@ async fn run_alternate_fec_owner(
                     biased;
                     work = parity_receiver.recv() => {
                         let Some(work) = work else { break };
-                        send_alternate_parity(remote_peer_id, work).await;
+                        send_alternate_parity(remote_peer_id, work, &telemetry).await;
                     }
                     _ = shutdown.notified() => break,
                     _ = &mut sleep => {
@@ -251,7 +263,7 @@ async fn run_alternate_fec_owner(
                             &local_peer_id,
                             block,
                         ) {
-                            send_alternate_parity(remote_peer_id, work).await;
+                            send_alternate_parity(remote_peer_id, work, &telemetry).await;
                         }
                     }
                 }
@@ -261,7 +273,7 @@ async fn run_alternate_fec_owner(
                     biased;
                     work = parity_receiver.recv() => {
                         let Some(work) = work else { break };
-                        send_alternate_parity(remote_peer_id, work).await;
+                        send_alternate_parity(remote_peer_id, work, &telemetry).await;
                     }
                     _ = shutdown.notified() => break,
                     _ = notify.notified() => {}
@@ -446,6 +458,7 @@ impl Peer {
                 let primary_id = alternate_fec_primary.clone();
                 let local_peer_id = alternate_fec_local_peer_id.clone();
                 let shutdown = shutdown_notifier.clone();
+                let telemetry = global_ctx.dataplane_telemetry().clone();
                 Some(AbortOnDropHandle::new(tokio::spawn(
                     run_alternate_fec_owner(
                         encoder,
@@ -456,6 +469,7 @@ impl Peer {
                         primary_id,
                         local_peer_id,
                         peer_node_id,
+                        telemetry,
                     ),
                 )))
             }
@@ -724,7 +738,13 @@ impl Peer {
                     notify.notify_one();
                 }
                 let wrapped = wrap_source_packet(metadata, source);
+                let source_bytes = wrapped.buf_len();
                 conn.send_msg(wrapped).await?;
+                self.global_ctx.dataplane_telemetry().record_fec(
+                    DataplaneFec::SourceTx,
+                    1,
+                    source_bytes,
+                );
                 return Ok(());
             }
         }
@@ -767,10 +787,11 @@ impl Peer {
             && alternate.alternate_fec_remote_receive_ready()
         {
             let parity_sender = self.alternate_fec_parity_sender.as_ref();
-            let (primary_batch, local_peer_id, source_records) = {
+            let (primary_batch, local_peer_id, source_records, source_bytes) = {
                 let mut primary_batch = PacketBatch::with_capacity(batch.len());
                 let mut local_peer_id = 0;
                 let mut source_records = 0;
+                let mut source_bytes = 0;
                 let mut encoder = encoder.lock();
                 for mut packet in batch {
                     if is_alternate_fec_source(&packet, self.peer_node_id)
@@ -785,8 +806,10 @@ impl Peer {
                             std::time::Instant::now(),
                         )?;
                         let completed = output.completed;
+                        let wrapped = wrap_source_packet(metadata, output.source);
+                        source_bytes += wrapped.buf_len();
                         primary_batch
-                            .try_push(wrap_source_packet(metadata, output.source))
+                            .try_push(wrapped)
                             .expect("alternate FEC source preserves the input batch bound");
                         if let Some(block) = completed
                             && let Some(sender) = parity_sender
@@ -806,7 +829,7 @@ impl Peer {
                             .expect("alternate FEC preserves the input batch bound");
                     }
                 }
-                (primary_batch, local_peer_id, source_records)
+                (primary_batch, local_peer_id, source_records, source_bytes)
             };
             self.alternate_fec_primary.store(conn.get_conn_id());
             self.alternate_fec_local_peer_id
@@ -817,6 +840,13 @@ impl Peer {
                 notify.notify_one();
             }
             conn.send_msg_batch(primary_batch).await?;
+            if source_records != 0 {
+                self.global_ctx.dataplane_telemetry().record_fec(
+                    DataplaneFec::SourceTx,
+                    source_records,
+                    source_bytes,
+                );
+            }
             return Ok(());
         }
 
@@ -844,6 +874,17 @@ impl Peer {
             stamp_critical_l2_control(packet);
             stamp_packet_flow(packet);
         }
+        self.send_msg_batch_to_conn(conn.clone(), batch).await
+    }
+
+    /// Sends a batch whose control and flow metadata was already stamped by
+    /// `PeerManager::prepare_packet_batch`.
+    pub(crate) async fn send_prepared_msg_batch_on_conn(
+        &self,
+        conn: &ArcPeerConn,
+        batch: PacketBatch,
+    ) -> Result<(), Error> {
+        debug_assert!(batch.iter().all(|packet| packet.flow_hash().is_some()));
         self.send_msg_batch_to_conn(conn.clone(), batch).await
     }
 
@@ -1539,12 +1580,15 @@ mod tests {
         let ps = Arc::new(PeerSessionStore::new());
 
         let (shared_client_tunnel, shared_server_tunnel) = create_ring_tunnel_pair();
-        let shared_client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
+        let shared_client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec2".to_string(),
+        )));
         let shared_server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
-                network_name: "net2".to_string(),
-                network_secret: None,
-                network_secret_digest: None,
-            }));
+            network_name: "net2".to_string(),
+            network_secret: None,
+            network_secret_digest: None,
+        }));
         set_secure_mode_cfg(&shared_client_ctx, true);
         set_secure_mode_cfg(&shared_server_ctx, true);
         let remote_url: url::Url = shared_client_tunnel
@@ -1590,8 +1634,14 @@ mod tests {
         );
 
         let (admin_client_tunnel, admin_server_tunnel) = create_ring_tunnel_pair();
-        let admin_client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
-        let admin_server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
+        let admin_client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec2".to_string(),
+        )));
+        let admin_server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec2".to_string(),
+        )));
         set_secure_mode_cfg(&admin_client_ctx, true);
         set_secure_mode_cfg(&admin_server_ctx, true);
         let mut admin_client_conn = PeerConn::new(
@@ -1631,8 +1681,14 @@ mod tests {
         let ps = Arc::new(PeerSessionStore::new());
 
         let (client_tunnel_1, server_tunnel_1) = create_ring_tunnel_pair();
-        let client_ctx_1 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
-        let server_ctx_1 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
+        let client_ctx_1 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec1".to_string(),
+        )));
+        let server_ctx_1 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec1".to_string(),
+        )));
         set_secure_mode_cfg(&client_ctx_1, true);
         set_secure_mode_cfg(&server_ctx_1, true);
         let mut client_conn_1 = PeerConn::new(
@@ -1655,8 +1711,14 @@ mod tests {
         s1.unwrap();
 
         let (client_tunnel_2, server_tunnel_2) = create_ring_tunnel_pair();
-        let client_ctx_2 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
-        let server_ctx_2 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
+        let client_ctx_2 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec1".to_string(),
+        )));
+        let server_ctx_2 = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec1".to_string(),
+        )));
         set_secure_mode_cfg(&client_ctx_2, true);
         set_secure_mode_cfg(&server_ctx_2, true);
         let mut client_conn_2 = PeerConn::new(

@@ -22,10 +22,30 @@ use super::{TunnelError, packet_def::ZCPacket};
 /// This matches the existing Darwin utun vector width. A batch never waits to
 /// reach this size; producers append only packets that are already available.
 pub const MAX_PACKET_BATCH_SIZE: usize = 64;
+
 pub const PARALLEL_CRYPTO_MIN_BATCH_SIZE: usize = 32;
 const RETAINED_PACKET_BATCH_CONTAINERS: usize = 32;
 
 static PARALLEL_CRYPTO_ENABLED: OnceLock<bool> = OnceLock::new();
+static PACKET_BATCH_LIMIT: OnceLock<usize> = OnceLock::new();
+
+fn packet_batch_limit_from(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|limit| (1..=MAX_PACKET_BATCH_SIZE).contains(limit))
+        .unwrap_or(MAX_PACKET_BATCH_SIZE)
+}
+
+/// Runtime batch cap used by controlled performance-model sweeps.
+///
+/// Production defaults to the compile-time maximum. Producers never wait to
+/// reach this cap; it only limits how many already-ready packets are grouped.
+pub(crate) fn packet_batch_limit() -> usize {
+    *PACKET_BATCH_LIMIT.get_or_init(|| {
+        let value = std::env::var("LOWTIER_PACKET_BATCH_LIMIT").ok();
+        packet_batch_limit_from(value.as_deref())
+    })
+}
 
 pub(crate) fn drain_ready_count<F>(
     mut count: usize,
@@ -241,6 +261,13 @@ impl PacketBatch {
 
     pub fn is_empty(&self) -> bool {
         self.packets.is_empty()
+    }
+
+    pub(crate) fn split_off(&mut self, at: usize) -> Self {
+        debug_assert!(at <= self.packets.len());
+        Self {
+            packets: self.packets.split_off(at),
+        }
     }
 
     pub(crate) fn truncate(&mut self, len: usize) {
@@ -531,7 +558,7 @@ where
         batch
             .try_push(first)
             .expect("a new packet batch accepts its first packet");
-        while batch.len() < MAX_PACKET_BATCH_SIZE {
+        while batch.len() < packet_batch_limit() {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(packet))) => batch
                     .try_push(packet)
@@ -754,8 +781,50 @@ mod tests {
 
     use super::{
         MAX_PACKET_BATCH_SIZE, PARALLEL_CRYPTO_MIN_BATCH_SIZE, PacketBatchPool,
-        ordered_parallel_try_for_each, parallel_crypto_configured,
+        ordered_parallel_try_for_each, packet_batch_limit_from, parallel_crypto_configured,
     };
+
+    #[test]
+    fn packet_batch_limit_is_strict_and_fails_safe() {
+        assert_eq!(packet_batch_limit_from(None), MAX_PACKET_BATCH_SIZE);
+        assert_eq!(packet_batch_limit_from(Some("1")), 1);
+        assert_eq!(packet_batch_limit_from(Some("16")), 16);
+        assert_eq!(packet_batch_limit_from(Some("64")), 64);
+        assert_eq!(packet_batch_limit_from(Some("0")), MAX_PACKET_BATCH_SIZE);
+        assert_eq!(packet_batch_limit_from(Some("65")), MAX_PACKET_BATCH_SIZE);
+        assert_eq!(
+            packet_batch_limit_from(Some("invalid")),
+            MAX_PACKET_BATCH_SIZE
+        );
+    }
+
+    #[test]
+    fn packet_batch_split_preserves_order() {
+        let mut batch = super::PacketBatch::new();
+        for value in 0_u8..6 {
+            batch
+                .try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&[
+                    value,
+                ]))
+                .unwrap();
+        }
+
+        let tail = batch.split_off(2);
+
+        assert_eq!(
+            batch
+                .iter()
+                .map(|packet| packet.payload()[0])
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            tail.iter()
+                .map(|packet| packet.payload()[0])
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 5]
+        );
+    }
 
     #[test]
     fn ready_drain_fills_one_bounded_batch() {

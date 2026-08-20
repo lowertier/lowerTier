@@ -31,7 +31,7 @@ use tracing::Instrument;
 use snow::{HandshakeState, TransportState, params::NoiseParams};
 
 #[cfg(feature = "quic")]
-use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet};
+use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet_with_stats};
 use super::{
     PacketRecvChan,
     link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
@@ -39,16 +39,23 @@ use super::{
     peer_session::{
         INITIATOR_RECOVERY_LIFETIME, InitiatorTransitionIdentity, PeerSession, PeerSessionAction,
     },
+    receiver_pacing::{
+        RECEIVER_PACING_FEATURE, RECEIVER_PRESSURE_REPORT_INTERVAL, ReceiverPacer,
+        ReceiverPressureReport, paced_batch_bytes, paced_packet_bytes, receiver_pacing_enabled,
+        shared_receiver_pacer,
+    },
     speed_probe::{
         ProbeAck, ProbeData, ProbeReceiver, ProbeReservation, SpeedSample,
         generate_receipt_challenge, probe_train_metadata, speed_sample_ttl,
     },
     traffic_metrics::{AggregateTrafficMetrics, SpeedProbeMetrics},
 };
+#[cfg(feature = "quic")]
+use crate::common::dataplane_telemetry::DataplaneFec;
 use crate::{
     common::{
-        PeerId, config::NetworkIdentity, error::Error, global_ctx::ArcGlobalCtx,
-        verify_slices_are_equal,
+        PeerId, config::NetworkIdentity, dataplane_telemetry::DataplaneStage, error::Error,
+        global_ctx::ArcGlobalCtx, verify_slices_are_equal,
     },
     peers::credential_manager::CredentialManager,
     peers::peer_session::{
@@ -135,7 +142,10 @@ fn alternate_fec_negotiated(
 }
 
 fn handshake_features() -> Vec<String> {
-    vec![SPEED_ROUTING_FEATURE.to_string()]
+    vec![
+        SPEED_ROUTING_FEATURE.to_string(),
+        RECEIVER_PACING_FEATURE.to_string(),
+    ]
 }
 
 fn validate_protocol_version(version: u32) -> Result<(), Error> {
@@ -247,6 +257,7 @@ fn packet_batch_is_direct_control(packet_type: u8) -> bool {
         || packet_type == PacketType::Pong as u8
         || packet_type == PacketType::SpeedProbe as u8
         || packet_type == PacketType::SpeedProbeAck as u8
+        || packet_type == PacketType::ReceiverPressure as u8
         || packet_type == PacketType::AlternateFecSource as u8
         || packet_type == PacketType::AlternateFecParity as u8
         || crate::peers::link_envelope::is_noise_handshake_packet_type(packet_type)
@@ -267,6 +278,21 @@ fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
 fn speed_probe_ack_packet(my_peer_id: PeerId, peer_id: PeerId, ack: ProbeAck) -> ZCPacket {
     let mut packet = ZCPacket::new_with_payload(&ack.encode());
     packet.fill_peer_manager_hdr(my_peer_id, peer_id, PacketType::SpeedProbeAck as u8);
+    packet
+}
+
+fn receiver_pressure_packet(
+    my_peer_id: PeerId,
+    peer_id: PeerId,
+    report: ReceiverPressureReport,
+) -> ZCPacket {
+    let mut packet = ZCPacket::new_with_payload(&report.encode());
+    packet.fill_peer_manager_hdr(my_peer_id, peer_id, PacketType::ReceiverPressure as u8);
+    let header = packet
+        .mut_peer_manager_header()
+        .expect("the receiver-pressure packet owns a peer header");
+    header.set_critical_l2_control(true);
+    header.set_latency_first(true);
     packet
 }
 
@@ -1305,6 +1331,7 @@ pub struct PeerConn {
     speed_probe_receiver: Arc<parking_lot::Mutex<ProbeReceiver>>,
     speed_ack_sender: broadcast::Sender<ProbeAck>,
     speed_probe_active: AtomicBool,
+    receiver_pacer: Option<Arc<ReceiverPacer>>,
 
     peer_session_store: Arc<PeerSessionStore>,
     my_encrypt_algo: String,
@@ -1443,6 +1470,7 @@ impl PeerConn {
             speed_probe_receiver: Arc::new(parking_lot::Mutex::new(ProbeReceiver::default())),
             speed_ack_sender,
             speed_probe_active: AtomicBool::new(false),
+            receiver_pacer: None,
 
             peer_session_store,
             my_encrypt_algo,
@@ -4192,6 +4220,12 @@ impl PeerConn {
         let speed_probe_receiver = self.speed_probe_receiver.clone();
         let probe_my_peer_id = self.my_peer_id;
         let probe_peer_id = self.get_peer_id();
+        let receiver_pacing_supported = self.supports_receiver_pacing();
+        let receiver_pacer = shared_receiver_pacer(probe_my_peer_id, probe_peer_id);
+        self.receiver_pacer = Some(receiver_pacer.clone());
+        let receiver_pressure_reports_enabled =
+            receiver_pacing_enabled() && receiver_pacing_supported;
+        let receiver_pressure_telemetry = self.global_ctx.dataplane_telemetry().clone();
         let authenticated_session_id = self.conn_id;
         let authenticated_peer_identity_type = self
             .noise_handshake_result
@@ -4212,6 +4246,8 @@ impl PeerConn {
         );
         #[cfg(feature = "quic")]
         let alternate_fec_decoder = self.alternate_fec_decoder.clone();
+        #[cfg(feature = "quic")]
+        let alternate_fec_telemetry = self.global_ctx.dataplane_telemetry().clone();
         #[cfg(feature = "quic")]
         let alternate_fec_session_filter = self.session_filter.clone();
         #[cfg(feature = "quic")]
@@ -4251,8 +4287,9 @@ impl PeerConn {
         let poll_sink = sink.clone();
         let poll_close_notifier = self.close_event_notifier.clone();
         let poll_metrics = control_metrics.clone();
+        let poll_pressure_telemetry = receiver_pressure_telemetry.clone();
         self.tasks.spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            let mut interval = tokio::time::interval(RECEIVER_PRESSURE_REPORT_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut close_waiter = poll_close_notifier.get_waiter().await;
             loop {
@@ -4261,6 +4298,29 @@ impl PeerConn {
                         let ack = poll_receiver.lock().poll(std::time::Instant::now());
                         if let Some(ack) = ack {
                             let packet = speed_probe_ack_packet(probe_my_peer_id, probe_peer_id, ack);
+                            let packet_len = packet.buf_len() as u64;
+                            if poll_sink.send(packet).await.is_err() {
+                                break;
+                            }
+                            poll_metrics.record_tx(packet_len);
+                        }
+                        if receiver_pressure_reports_enabled {
+                            let snapshot = poll_pressure_telemetry.receiver_pressure_snapshot();
+                            let report = ReceiverPressureReport {
+                                sample_micros: snapshot.sample_micros,
+                                delivered_bytes: snapshot.delivered_bytes,
+                                occupancy_packets: snapshot
+                                    .occupancy_packets
+                                    .min(u64::from(u32::MAX)) as u32,
+                                capacity_packets: super::peer_manager::DIRECT_NIC_QUEUE_PACKET_CAPACITY
+                                    .min(u32::MAX as usize) as u32,
+                                stall_ns: snapshot.stall_ns,
+                            };
+                            let packet = receiver_pressure_packet(
+                                probe_my_peer_id,
+                                probe_peer_id,
+                                report,
+                            );
                             let packet_len = packet.buf_len() as u64;
                             if poll_sink.send(packet).await.is_err() {
                                 break;
@@ -4280,6 +4340,7 @@ impl PeerConn {
             Ok(())
         });
 
+        let receiver_pacer_for_recv = receiver_pacer.clone();
         self.tasks.spawn(
             async move {
                 tracing::info!("start recving peer conn packet");
@@ -4296,7 +4357,6 @@ impl PeerConn {
                             break;
                         }
                     };
-
                     let mut identity_valid = true;
                     for packet in incoming.iter_mut() {
                         identity_valid &= packet.set_authenticated_peer_id(probe_peer_id);
@@ -4375,20 +4435,39 @@ impl PeerConn {
                         if peer_mgr_hdr.packet_type == PacketType::AlternateFecSource as u8
                             || peer_mgr_hdr.packet_type == PacketType::AlternateFecParity as u8
                         {
+                            let fec_rx_operation = if peer_mgr_hdr.packet_type
+                                == PacketType::AlternateFecSource as u8
+                            {
+                                DataplaneFec::SourceRx
+                            } else {
+                                DataplaneFec::ParityRx
+                            };
                             if alternate_fec_enabled
                                 && let Some(decoder) = alternate_fec_decoder.as_ref()
                             {
                                 let decoded = {
                                     let mut decoder = decoder.lock();
-                                    decode_alternate_fec_packet(
+                                    decode_alternate_fec_packet_with_stats(
                                         zc_packet,
                                         &mut decoder,
                                         std::time::Instant::now(),
                                     )
                                 };
                                 match decoded {
-                                    Ok(recovered) => {
-                                        for mut packet in recovered {
+                                    Ok(decoded) => {
+                                        alternate_fec_telemetry.record_fec(
+                                            fec_rx_operation,
+                                            1,
+                                            usize::try_from(buf_len).unwrap_or(usize::MAX),
+                                        );
+                                        if decoded.recovered_packets != 0 {
+                                            alternate_fec_telemetry.record_fec(
+                                                DataplaneFec::Recovered,
+                                                decoded.recovered_packets,
+                                                decoded.recovered_bytes,
+                                            );
+                                        }
+                                        for mut packet in decoded.packets {
                                             if let Err(error) = alternate_fec_session_filter
                                                 .decrypt_recovered_alternate_fec_packet(&mut packet)
                                             {
@@ -4432,7 +4511,42 @@ impl PeerConn {
                             continue;
                         }
 
-                        if peer_mgr_hdr.packet_type == PacketType::SpeedProbe as u8 {
+                        if peer_mgr_hdr.packet_type == PacketType::ReceiverPressure as u8 {
+                            control_metrics.record_rx(buf_len);
+                            match ReceiverPressureReport::decode(zc_packet.payload()) {
+                                Ok(report) => {
+                                    let update = receiver_pacer_for_recv
+                                        .update_report(report, std::time::Instant::now());
+                                    if update.active_changed {
+                                        tracing::info!(
+                                            active = update.active,
+                                            pressured = update.pressured,
+                                            service_bytes_per_second =
+                                                update.service_bytes_per_second,
+                                            target_bytes_per_second =
+                                                update.target_bytes_per_second,
+                                            remote_peer_id = probe_peer_id,
+                                            "receiver-clocked pacing state changed"
+                                        );
+                                    } else if update.active {
+                                        tracing::trace!(
+                                            pressured = update.pressured,
+                                            service_bytes_per_second =
+                                                update.service_bytes_per_second,
+                                            target_bytes_per_second =
+                                                update.target_bytes_per_second,
+                                            remote_peer_id = probe_peer_id,
+                                            "receiver-clocked pacing updated"
+                                        );
+                                    }
+                                }
+                                Err(error) => tracing::warn!(
+                                    error,
+                                    remote_peer_id = probe_peer_id,
+                                    "invalid authenticated receiver-pressure report"
+                                ),
+                            }
+                        } else if peer_mgr_hdr.packet_type == PacketType::SpeedProbe as u8 {
                             control_metrics.record_rx(buf_len);
                             speed_metrics.record_rx(buf_len);
                             let probe_result = {
@@ -4574,8 +4688,33 @@ impl PeerConn {
         });
     }
 
+    async fn pace_outbound_bulk(&self, packets: usize, bytes: usize) {
+        let Some(pacer) = self.receiver_pacer.as_ref() else {
+            return;
+        };
+        let started = crate::common::dataplane_telemetry::DataplaneTelemetry::sample_start();
+        pacer.pace_bytes(bytes).await;
+        self.global_ctx.dataplane_telemetry().record_stage_sample(
+            DataplaneStage::ReceiverPacing,
+            started,
+            packets,
+            bytes,
+        );
+    }
+
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
+        let paced_bytes = paced_packet_bytes(&msg);
+        self.pace_outbound_bulk(usize::from(paced_bytes != 0), paced_bytes)
+            .await;
         Ok(self.sink.send(msg).await?)
+    }
+
+    pub(crate) fn supports_receiver_pacing(&self) -> bool {
+        self.info.as_ref().is_some_and(|info| {
+            info.features
+                .iter()
+                .any(|feature| feature == RECEIVER_PACING_FEATURE)
+        })
     }
 
     pub(crate) fn supports_speed_routing(&self) -> bool {
@@ -4770,9 +4909,11 @@ impl PeerConn {
 
     pub async fn send_msg_batch(&self, batch: PacketBatch) -> Result<(), Error> {
         let batch = match batch.pop_singleton() {
-            Ok(packet) => return Ok(self.sink.send(packet).await?),
+            Ok(packet) => return self.send_msg(packet).await,
             Err(batch) => batch,
         };
+        let paced_bytes = paced_batch_bytes(&batch);
+        self.pace_outbound_bulk(batch.len(), paced_bytes).await;
         Ok(self.sink.send_batch(batch).await?)
     }
 
@@ -5020,6 +5161,28 @@ pub mod tests {
 
         assert!(client.supports_speed_routing());
         assert!(server.supports_speed_routing());
+        assert!(client.supports_receiver_pacing());
+        assert!(server.supports_receiver_pacing());
+    }
+
+    #[test]
+    fn receiver_pressure_is_authenticated_direct_control() {
+        assert!(packet_batch_is_direct_control(
+            PacketType::ReceiverPressure as u8
+        ));
+        let report = ReceiverPressureReport {
+            sample_micros: 100_000,
+            delivered_bytes: 1_000_000,
+            occupancy_packets: 64,
+            capacity_packets: 192,
+            stall_ns: 2_000_000,
+        };
+        let packet = receiver_pressure_packet(1, 2, report);
+        let header = packet.peer_manager_header().unwrap();
+        assert_eq!(header.packet_type, PacketType::ReceiverPressure as u8);
+        assert!(header.is_critical_l2_control());
+        assert!(header.is_latency_first());
+        assert_eq!(ReceiverPressureReport::decode(packet.payload()), Ok(report));
     }
 
     #[test]
@@ -6266,8 +6429,8 @@ pub mod tests {
     #[test]
     fn alternate_fec_recovers_source_and_parity_ciphertext_before_decrypt() {
         use crate::peers::alternate_fec::{
-            AlternateFecDecoder, AlternateFecEncoder, decode_alternate_fec_packet, parity_packets,
-            source_metadata, wrap_source_packet,
+            AlternateFecDecoder, AlternateFecEncoder, parity_packets, source_metadata,
+            wrap_source_packet,
         };
 
         let my_peer_id = 10;
@@ -6313,22 +6476,26 @@ pub mod tests {
         }
         let completed = encoder.flush_due(now + Duration::from_millis(40)).unwrap();
         let parity = parity_packets(my_peer_id, peer_id, &completed)
-        .pop()
-        .unwrap();
+            .pop()
+            .unwrap();
 
         let mut decoder = AlternateFecDecoder::default();
         let source =
-            decode_alternate_fec_packet(source_packets.remove(0), &mut decoder, now).unwrap();
-        assert_eq!(source.len(), 1);
-        let mut source = source.into_iter().next().unwrap();
+            decode_alternate_fec_packet_with_stats(source_packets.remove(0), &mut decoder, now)
+                .unwrap();
+        assert_eq!(source.recovered_packets, 0);
+        assert_eq!(source.packets.len(), 1);
+        let mut source = source.packets.into_iter().next().unwrap();
         receiver
             .decrypt_recovered_alternate_fec_packet(&mut source)
             .unwrap();
         assert_eq!(source.payload(), b"source-0");
 
-        let recovered = decode_alternate_fec_packet(parity, &mut decoder, now).unwrap();
-        assert_eq!(recovered.len(), 1);
-        let mut recovered = recovered.into_iter().next().unwrap();
+        let recovered = decode_alternate_fec_packet_with_stats(parity, &mut decoder, now).unwrap();
+        assert_eq!(recovered.recovered_packets, 1);
+        assert!(recovered.recovered_bytes > 0);
+        assert_eq!(recovered.packets.len(), 1);
+        let mut recovered = recovered.packets.into_iter().next().unwrap();
         assert!(recovered.peer_manager_header().unwrap().is_encrypted());
         receiver
             .decrypt_recovered_alternate_fec_packet(&mut recovered)
@@ -6354,7 +6521,6 @@ pub mod tests {
         assert!(c_ret.is_err());
         assert!(s_ret.is_err());
     }
-
 
     /// Assert that all received handshake traffic is accounted, across the
     /// handshake label (matched packets) and the network label (duplicate
@@ -6398,11 +6564,17 @@ pub mod tests {
         let s_ctx = s_ctx.clone();
         wait_for_condition(
             || async {
-                metric_value(&c_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK)
-                    + metric_value(&c_ctx, MetricName::TrafficControlBytesRx, "default")
+                metric_value(
+                    &c_ctx,
+                    MetricName::TrafficControlBytesRx,
+                    PeerConn::HANDSHAKE_METRIC_NETWORK,
+                ) + metric_value(&c_ctx, MetricName::TrafficControlBytesRx, "default")
                     == c_expected
-                    && metric_value(&s_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK)
-                        + metric_value(&s_ctx, MetricName::TrafficControlBytesRx, "default")
+                    && metric_value(
+                        &s_ctx,
+                        MetricName::TrafficControlBytesRx,
+                        PeerConn::HANDSHAKE_METRIC_NETWORK,
+                    ) + metric_value(&s_ctx, MetricName::TrafficControlBytesRx, "default")
                         == s_expected
             },
             Duration::from_secs(5),
@@ -6451,7 +6623,11 @@ pub mod tests {
         assert!((6..=9).contains(&c_received), "c_received: {c_received}");
 
         assert_eq!(
-            metric_value(&c_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
+            metric_value(
+                &c_ctx,
+                MetricName::TrafficControlBytesTx,
+                PeerConn::HANDSHAKE_METRIC_NETWORK
+            ),
             c_recorder
                 .sent
                 .lock()
@@ -6461,7 +6637,11 @@ pub mod tests {
                 .sum::<u64>()
         );
         assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
+            metric_value(
+                &s_ctx,
+                MetricName::TrafficControlBytesTx,
+                PeerConn::HANDSHAKE_METRIC_NETWORK
+            ),
             s_recorder
                 .sent
                 .lock()
@@ -6481,7 +6661,11 @@ pub mod tests {
         )
         .await;
         assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK),
+            metric_value(
+                &s_ctx,
+                MetricName::TrafficControlBytesRx,
+                PeerConn::HANDSHAKE_METRIC_NETWORK
+            ),
             s_recorder
                 .received
                 .lock()
@@ -6968,7 +7152,11 @@ pub mod tests {
         s_ret.unwrap();
 
         assert_eq!(
-            metric_value(&c_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
+            metric_value(
+                &c_ctx,
+                MetricName::TrafficControlBytesTx,
+                PeerConn::HANDSHAKE_METRIC_NETWORK
+            ),
             c_recorder
                 .sent
                 .lock()
@@ -6978,7 +7166,11 @@ pub mod tests {
                 .sum::<u64>()
         );
         assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesTx, PeerConn::HANDSHAKE_METRIC_NETWORK),
+            metric_value(
+                &s_ctx,
+                MetricName::TrafficControlBytesTx,
+                PeerConn::HANDSHAKE_METRIC_NETWORK
+            ),
             s_recorder
                 .sent
                 .lock()
@@ -6998,7 +7190,11 @@ pub mod tests {
         )
         .await;
         assert_eq!(
-            metric_value(&s_ctx, MetricName::TrafficControlBytesRx, PeerConn::HANDSHAKE_METRIC_NETWORK),
+            metric_value(
+                &s_ctx,
+                MetricName::TrafficControlBytesRx,
+                PeerConn::HANDSHAKE_METRIC_NETWORK
+            ),
             s_recorder
                 .received
                 .lock()
@@ -7062,7 +7258,10 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("user".to_string(), "sec1".to_string())));
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "user".to_string(),
+            "sec1".to_string(),
+        )));
 
         let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
             network_name: "shared".to_string(),
@@ -7104,13 +7303,15 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("user".to_string(), "sec1".to_string())));
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "user".to_string(),
+            "sec1".to_string(),
+        )));
 
         let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
             "shared".to_string(),
             "sec2".to_string(),
         )));
-
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7291,10 +7492,15 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec1".to_string(),
+        )));
 
-        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec1".to_string())));
-
+        let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec1".to_string(),
+        )));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7333,15 +7539,13 @@ pub mod tests {
         let (c, s) = create_ring_tunnel_pair();
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
-        let c_ctx = get_mock_global_ctx_with_network(Some(crate::common::config::NetworkIdentity::new(
-                "net1".to_string(),
-                "sec1".to_string(),
-            )));
+        let c_ctx = get_mock_global_ctx_with_network(Some(
+            crate::common::config::NetworkIdentity::new("net1".to_string(), "sec1".to_string()),
+        ));
 
-        let s_ctx = get_mock_global_ctx_with_network(Some(crate::common::config::NetworkIdentity::new(
-                "net1".to_string(),
-                "sec1".to_string(),
-            )));
+        let s_ctx = get_mock_global_ctx_with_network(Some(
+            crate::common::config::NetworkIdentity::new("net1".to_string(), "sec1".to_string()),
+        ));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -7389,14 +7593,16 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec2".to_string(),
+        )));
 
         let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
             network_name: "net2".to_string(),
             network_secret: None,
             network_secret_digest: None,
         }));
-
 
         let remote_url: url::Url = c.info().unwrap().remote_addr.unwrap().url.parse().unwrap();
 
@@ -7447,14 +7653,16 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = new_peer_id();
 
-        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string(), "sec2".to_string())));
+        let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "net1".to_string(),
+            "sec2".to_string(),
+        )));
 
         let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
             network_name: "net2".to_string(),
             network_secret: None,
             network_secret_digest: None,
         }));
-
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -8091,17 +8299,16 @@ pub mod tests {
         // A bare credential key with an invalid proof no longer
         // authenticates; the signed certificate is mandatory.
         assert!(
-            conn
-                .verify_remote_auth(
-                    Some(&[0_u8; 32]),
-                    b"handshake-hash",
-                    remote_public.as_bytes(),
-                    None,
-                    true,
-                    false,
-                    "net1",
-                )
-                .is_err()
+            conn.verify_remote_auth(
+                Some(&[0_u8; 32]),
+                b"handshake-hash",
+                remote_public.as_bytes(),
+                None,
+                true,
+                false,
+                "net1",
+            )
+            .is_err()
         );
 
         let auth_level = SecureAuthLevel::PeerVerified;
@@ -8167,7 +8374,6 @@ pub mod tests {
             "net1".to_string(),
             "secret".to_string(),
         )));
-
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);

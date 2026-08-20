@@ -14,7 +14,7 @@ use dashmap::DashMap;
 
 use super::{
     PeerId,
-    config::{ConfigLoader, Flags, process_secure_mode_cfg, validate_flags},
+    config::{ConfigLoader, Flags, PortMode, process_secure_mode_cfg, validate_flags},
     netns::NetNS,
     network::IPCollector,
     stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -22,8 +22,8 @@ use super::{
 };
 use crate::{
     common::{
-        config::ProxyNetworkConfig, shrink_dashmap, stats_manager::StatsManager,
-        token_bucket::TokenBucketManager,
+        config::ProxyNetworkConfig, dataplane_telemetry::DataplaneTelemetry, shrink_dashmap,
+        stats_manager::StatsManager, token_bucket::TokenBucketManager,
     },
     peers::{acl_filter::AclFilter, credential_manager::CredentialManager},
     proto::{
@@ -417,6 +417,7 @@ pub struct GlobalCtx {
     token_bucket_manager: TokenBucketManager,
 
     stats_manager: Arc<StatsManager>,
+    dataplane_telemetry: Arc<DataplaneTelemetry>,
 
     acl_filter: Arc<AclFilter>,
 
@@ -643,14 +644,10 @@ impl GlobalCtx {
         feature_flags.no_relay_quic = flags.disable_relay_quic;
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
-        let port_mode = flags
-            .port_mode
-            .parse::<crate::common::config::PortMode>()
-            .expect("port mode was validated");
+        let port_mode = PortMode::from_flags(flags);
         feature_flags.ethernet_input = port_mode.uses_ethernet_overlay();
         feature_flags.hybrid_l3 = true;
-        feature_flags.bridge_input =
-            feature_flags.hybrid_l3 && port_mode.uses_native_ethernet() && flags.enable_bridge;
+        feature_flags.bridge_input = port_mode.allows_bridge_input(flags.enable_bridge);
         feature_flags.multicast_membership = true;
         Self::apply_required_feature_flags(flags, feature_flags)
     }
@@ -794,6 +791,7 @@ impl GlobalCtx {
             token_bucket_manager: TokenBucketManager::new(),
 
             stats_manager: Arc::new(StatsManager::new()),
+            dataplane_telemetry: Arc::new(DataplaneTelemetry::new()),
 
             acl_filter: Arc::new(AclFilter::new()),
 
@@ -1276,6 +1274,10 @@ impl GlobalCtx {
 
     pub fn stats_manager(&self) -> &Arc<StatsManager> {
         &self.stats_manager
+    }
+
+    pub fn dataplane_telemetry(&self) -> &Arc<DataplaneTelemetry> {
+        &self.dataplane_telemetry
     }
 
     pub fn get_acl_filter(&self) -> &Arc<AclFilter> {
@@ -1812,7 +1814,7 @@ pub mod tests {
         assert!(feature_flags.disable_p2p);
         assert!(feature_flags.ethernet_input);
         assert!(feature_flags.hybrid_l3);
-        assert!(!feature_flags.bridge_input);
+        assert!(feature_flags.bridge_input);
         assert!(feature_flags.support_conn_list_sync);
         assert!(feature_flags.avoid_relay_data);
         assert!(feature_flags.is_public_server);
@@ -1824,15 +1826,24 @@ pub mod tests {
         let feature_flags = global_ctx.get_feature_flags();
         assert!(!feature_flags.ethernet_input);
         assert!(feature_flags.hybrid_l3);
+        assert!(!feature_flags.bridge_input);
         assert!(feature_flags.multicast_membership);
 
         let mut flags = global_ctx.get_flags();
         flags.port_mode = "compatible-ethernet".to_string();
         global_ctx.set_flags(flags);
-        assert!(global_ctx.get_feature_flags().ethernet_input);
+        let feature_flags = global_ctx.get_feature_flags();
+        assert!(feature_flags.ethernet_input);
+        assert!(feature_flags.hybrid_l3);
+        assert!(feature_flags.bridge_input);
 
         let mut flags = global_ctx.get_flags();
         flags.port_mode = "auto".to_string();
+        flags.enable_bridge = false;
+        global_ctx.set_flags(flags);
+        assert!(!global_ctx.get_feature_flags().bridge_input);
+
+        let mut flags = global_ctx.get_flags();
         flags.enable_bridge = true;
         global_ctx.set_flags(flags);
         let feature_flags = global_ctx.get_feature_flags();

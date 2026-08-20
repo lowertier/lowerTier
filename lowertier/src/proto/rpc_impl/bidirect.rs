@@ -101,11 +101,17 @@ impl BidirectRpcManager {
             loop {
                 let packet = tokio::select! {
                     Some(Ok(packet)) = server_rx.next() => {
-                        tracing::trace!(?packet, "recv rpc packet from server");
+                        tracing::trace!(
+                            packet_len = packet.buf_len(),
+                            "receive RPC packet from server"
+                        );
                         packet
                     }
                     Some(Ok(packet)) = client_rx.next() => {
-                        tracing::trace!(?packet, "recv rpc packet from client");
+                        tracing::trace!(
+                            packet_len = packet.buf_len(),
+                            "receive RPC packet from client"
+                        );
                         packet
                     }
                     else => {

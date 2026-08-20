@@ -177,7 +177,7 @@ pub fn register_api_rpc_service(
 
 fn parse_rpc_portal(rpc_portal: Option<String>) -> anyhow::Result<SocketAddr> {
     if let Some(Ok(port)) = rpc_portal.as_ref().map(|s| s.parse::<u16>()) {
-        Ok(SocketAddr::from(([0, 0, 0, 0], port)))
+        Ok(SocketAddr::from(([127, 0, 0, 1], port)))
     } else {
         let mut rpc_addr = rpc_portal
             .map(|addr| {
@@ -186,14 +186,21 @@ fn parse_rpc_portal(rpc_portal: Option<String>) -> anyhow::Result<SocketAddr> {
             })
             .transpose()?;
         select_proper_rpc_port(&mut rpc_addr)?;
-        rpc_addr.ok_or_else(|| anyhow::anyhow!("failed to parse rpc portal address"))
+        let rpc_addr =
+            rpc_addr.ok_or_else(|| anyhow::anyhow!("failed to parse rpc portal address"))?;
+        if !rpc_addr.ip().is_loopback() {
+            return Err(anyhow::anyhow!(
+                "the management RPC portal requires a loopback address"
+            ));
+        }
+        Ok(rpc_addr)
     }
 }
 
 fn select_proper_rpc_port(addr: &mut Option<SocketAddr>) -> anyhow::Result<()> {
     match addr {
         None => {
-            *addr = Some(SocketAddr::from(([0, 0, 0, 0], 0)));
+            *addr = Some(SocketAddr::from(([127, 0, 0, 1], 0)));
             select_proper_rpc_port(addr)?;
             Ok(())
         }

@@ -23,6 +23,7 @@ pub struct TcpTunnelListener {
     addr: url::Url,
     listener: Option<TcpListener>,
     socket_mark: Option<u32>,
+    underlay_policy: Arc<UnderlayPolicy>,
 }
 
 impl TcpTunnelListener {
@@ -31,6 +32,7 @@ impl TcpTunnelListener {
             addr,
             listener: None,
             socket_mark: None,
+            underlay_policy: Arc::new(UnderlayPolicy::default()),
         }
     }
 
@@ -38,9 +40,15 @@ impl TcpTunnelListener {
         self.socket_mark = socket_mark;
     }
 
+    pub fn set_underlay_policy(&mut self, underlay_policy: Arc<UnderlayPolicy>) {
+        self.underlay_policy = underlay_policy;
+    }
+
     async fn do_accept(&self) -> Result<Box<dyn Tunnel>, std::io::Error> {
         let listener = self.listener.as_ref().unwrap();
         let (stream, _) = listener.accept().await?;
+        ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)
+            .map_err(std::io::Error::other)?;
 
         if let Err(e) = stream.set_nodelay(true) {
             tracing::warn!(?e, "set_nodelay fail in accept");

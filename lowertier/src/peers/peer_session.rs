@@ -3472,8 +3472,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let first_identity =
-            first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        let first_identity = first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
         let session = first.commit().unwrap();
         store
             .record_initiator_receipt(first_identity.clone(), session.clone())
@@ -3541,8 +3540,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let first_identity =
-            first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        let first_identity = first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
         let session = first.commit().unwrap();
         store
             .record_initiator_receipt(first_identity.clone(), session.clone())

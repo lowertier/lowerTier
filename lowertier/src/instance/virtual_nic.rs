@@ -156,19 +156,26 @@ fn linux_tun_offload_enabled() -> bool {
     linux_tun_offload_configured(
         std::env::var_os("LOWTIER_ENABLE_LINUX_TUN_OFFLOAD").is_some(),
         std::env::var_os("LOWTIER_DISABLE_LINUX_TUN_OFFLOAD").is_some(),
-        linux_tun_offload_auto_supported(),
+        linux_tun_offload_auto_supported_for(std::env::consts::ARCH),
     )
 }
 
-#[cfg(target_os = "linux")]
-const fn linux_tun_offload_auto_supported() -> bool {
-    // Keep automatic virtio TUN offload on the well-covered x86_64 path.
-    // aarch64 remains explicit opt-in because Linux 5.15 accepted TSO/GRO
-    // setup in testing but produced sustained TCP retransmissions under load.
-    cfg!(target_arch = "x86_64")
+#[cfg(any(target_os = "linux", test))]
+fn linux_tun_offload_auto_supported_for(arch: &str) -> bool {
+    match arch {
+        // Keep the existing well-covered x86_64 behavior.
+        "x86_64" => true,
+        // ARM64 Linux 5.15 on the physical VM produced sustained TCP
+        // retransmissions, and controlled Linux 6.8 showed severe throughput
+        // collapse plus intermittent loss of reachability. Keep ARM64 on the
+        // portable backend until a specific platform is validated; the
+        // explicit enable override remains available for controlled testing.
+        "aarch64" => false,
+        _ => false,
+    }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn linux_tun_offload_configured(
     explicitly_enabled: bool,
     explicitly_disabled: bool,
@@ -497,28 +504,8 @@ impl Drop for VirtualNic {
 }
 
 impl VirtualNic {
-    fn uses_ethernet_frames(flags: &Flags) -> bool {
-        flags
-            .port_mode
-            .parse::<PortMode>()
-            .map(PortMode::uses_ethernet_overlay)
-            .unwrap_or(false)
-    }
-
-    fn uses_native_ethernet_frames(flags: &Flags) -> bool {
-        flags
-            .port_mode
-            .parse::<PortMode>()
-            .map(PortMode::uses_native_ethernet)
-            .unwrap_or(false)
-    }
-
-    fn uses_l2_tun(flags: &Flags) -> bool {
-        matches!(flags.port_mode.parse::<PortMode>(), Ok(PortMode::L2Tun))
-    }
-
-    fn uses_hybrid_mode(flags: &Flags) -> bool {
-        matches!(flags.port_mode.parse::<PortMode>(), Ok(PortMode::Auto))
+    fn port_mode(flags: &Flags) -> PortMode {
+        PortMode::from_flags(flags)
     }
 
     fn wrap_tun_device(
@@ -796,7 +783,8 @@ impl VirtualNic {
     async fn create_tun(&self) -> Result<tun::platform::Device, Error> {
         let mut config = Configuration::default();
         let flags = self.global_ctx.get_flags();
-        if Self::uses_native_ethernet_frames(&flags) {
+        let port_mode = Self::port_mode(&flags);
+        if port_mode.uses_native_ethernet() {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             config.layer(Layer::L2);
 
@@ -897,7 +885,9 @@ impl VirtualNic {
         &mut self,
         tun_fd: std::os::fd::RawFd,
     ) -> Result<Box<dyn Tunnel>, Error> {
-        if Self::uses_native_ethernet_frames(&self.global_ctx.get_flags()) {
+        let flags = self.global_ctx.get_flags();
+        let port_mode = Self::port_mode(&flags);
+        if port_mode.uses_native_ethernet() {
             return Err(
                 anyhow::anyhow!("port_mode=tap is not supported by mobile virtual NICs").into(),
             );
@@ -921,8 +911,8 @@ impl VirtualNic {
             all(target_os = "macos", feature = "macos-ne")
         ));
         let dev = tun::create(&config)?;
-        let l2_tun = Self::uses_l2_tun(&self.global_ctx.get_flags());
-        let mtu = self.global_ctx.get_flags().mtu as usize;
+        let l2_tun = port_mode.is_l2_tun();
+        let mtu = flags.mtu as usize;
         let ft = Self::wrap_tun_device(dev, has_packet_info, l2_tun, mtu)?;
 
         self.ifname = Some(format!("tunfd_{}", tun_fd));
@@ -931,7 +921,7 @@ impl VirtualNic {
     }
 
     #[cfg(target_os = "linux")]
-    async fn create_linux_offload_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
+    async fn create_linux_dev(&mut self, offload: bool) -> Result<Box<dyn Tunnel>, Error> {
         Self::ensure_tun_device_node().await;
         let flags = self.global_ctx.config.get_flags();
         let mut effective_mtu = flags.mtu;
@@ -941,7 +931,7 @@ impl VirtualNic {
         let kernel_mtu = u16::try_from(effective_mtu)
             .map_err(|_| anyhow::anyhow!("TUN MTU {effective_mtu} exceeds Linux u16 limits"))?;
 
-        let native_ethernet = Self::uses_native_ethernet_frames(&flags);
+        let native_ethernet = Self::port_mode(&flags).uses_native_ethernet();
         let parallelism = std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(1);
@@ -955,13 +945,14 @@ impl VirtualNic {
             tracing::info!(
                 queue_count,
                 native_ethernet,
+                offload,
                 "Linux virtual NIC uses multiqueue"
             );
         }
         let mut builder = quincy_tun::DeviceBuilder::new()
             .mtu(kernel_mtu)
             .packet_information(false)
-            .offload(true)
+            .offload(offload)
             .layer(if native_ethernet {
                 quincy_tun::Layer::L2
             } else {
@@ -975,7 +966,7 @@ impl VirtualNic {
             let _guard = self.global_ctx.net_ns.guard();
             builder.build_async_queues()?
         };
-        if devices.iter().any(|device| !device.tcp_gso()) {
+        if offload && devices.iter().any(|device| !device.tcp_gso()) {
             return Err(anyhow::anyhow!(
                 "Linux TUN virtio offload was requested but the kernel rejected TSO/GRO"
             )
@@ -991,23 +982,46 @@ impl VirtualNic {
             let _guard = self.global_ctx.net_ns.guard();
             self.ifcfg.set_mtu(ifname.as_str(), effective_mtu).await?;
         }
-        let l2_tun = Self::uses_l2_tun(&flags);
-        let tunnel =
-            crate::instance::linux_tun::wrap_devices(devices, l2_tun, effective_mtu as usize);
+        let l2_tun = Self::port_mode(&flags).is_l2_tun();
+        let tunnel = crate::instance::linux_tun::wrap_devices(
+            devices,
+            l2_tun,
+            effective_mtu as usize,
+            self.global_ctx.dataplane_telemetry().clone(),
+            offload,
+        );
         self.ifname = Some(ifname);
         Ok(tunnel)
     }
 
     pub async fn create_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
         #[cfg(target_os = "linux")]
-        if linux_tun_offload_enabled() {
-            match self.create_linux_offload_dev().await {
+        {
+            let offload = linux_tun_offload_enabled();
+            match self.create_linux_dev(offload).await {
                 Ok(tunnel) => return Ok(tunnel),
+                Err(error) if offload => {
+                    tracing::warn!(
+                        ?error,
+                        "Linux TUN offload is unavailable; retrying portable multiqueue"
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         ?error,
-                        "Linux TUN offload is unavailable; falling back to the portable TUN backend"
+                        "portable Linux TUN multiqueue is unavailable; falling back to rust-tun"
                     );
+                }
+            }
+            if offload {
+                match self.create_linux_dev(false).await {
+                    Ok(tunnel) => return Ok(tunnel),
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            "portable Linux TUN multiqueue is unavailable; falling back to rust-tun"
+                        );
+                    }
                 }
             }
         }
@@ -1070,7 +1084,7 @@ impl VirtualNic {
         }
 
         let has_packet_info = cfg!(all(target_os = "macos", not(feature = "macos-ne")));
-        let l2_tun = Self::uses_l2_tun(&flags);
+        let l2_tun = Self::port_mode(&flags).is_l2_tun();
         let ft = Self::wrap_tun_device(dev, has_packet_info, l2_tun, mtu_in_config as usize)?;
 
         self.ifname = Some(ifname.to_owned());
@@ -1427,16 +1441,15 @@ impl NicCtx {
         }
     }
 
-    async fn do_forward_nic_to_peers(ret: ZCPacket, mgr: &PeerManager) {
-        let flags = mgr.get_global_ctx().get_flags();
-        if VirtualNic::uses_native_ethernet_frames(&flags) {
-            if VirtualNic::uses_hybrid_mode(&flags) {
+    async fn do_forward_nic_to_peers(ret: ZCPacket, mgr: &PeerManager, port_mode: PortMode) {
+        if port_mode.uses_native_ethernet() {
+            if port_mode.is_auto() {
                 Self::learn_hybrid_multicast_membership(ret.payload(), mgr);
                 if Self::handle_hybrid_control_frame(&ret, mgr).await {
                     return;
                 }
             }
-            let send_ret = if VirtualNic::uses_hybrid_mode(&flags) {
+            let send_ret = if port_mode.is_auto() {
                 mgr.send_msg_by_hybrid_ethernet(ret).await
             } else {
                 mgr.send_msg_by_ethernet(ret).await
@@ -1446,12 +1459,12 @@ impl NicCtx {
             }
             return;
         }
-        if VirtualNic::uses_l2_tun(&flags) {
+        if port_mode.is_l2_tun() {
             Self::do_forward_l2_tun_to_peers(ret, mgr).await;
             return;
         }
 
-        if VirtualNic::uses_hybrid_mode(&flags) {
+        if port_mode.is_auto() {
             Self::learn_hybrid_ip_multicast_membership(ret.payload(), mgr);
             let Some((destination, local_source)) = mgr.routed_packet_destination(&ret) else {
                 tracing::warn!(?ret, "[USER_PACKET] invalid automatic IP packet");
@@ -1480,16 +1493,19 @@ impl NicCtx {
         }
     }
 
-    async fn do_forward_nic_batch_to_peers(batch: PacketBatch, mgr: &PeerManager) {
+    async fn do_forward_nic_batch_to_peers(
+        batch: PacketBatch,
+        mgr: &PeerManager,
+        port_mode: PortMode,
+    ) {
         if peer_batch_disabled() {
             for packet in batch {
-                Self::do_forward_nic_to_peers(packet, mgr).await;
+                Self::do_forward_nic_to_peers(packet, mgr, port_mode).await;
             }
             return;
         }
-        let flags = mgr.get_global_ctx().get_flags();
-        if VirtualNic::uses_native_ethernet_frames(&flags) {
-            if VirtualNic::uses_hybrid_mode(&flags) {
+        if port_mode.uses_native_ethernet() {
+            if port_mode.is_auto() {
                 let mut data = PacketBatch::new();
                 for packet in batch {
                     Self::learn_hybrid_multicast_membership(packet.payload(), mgr);
@@ -1518,9 +1534,9 @@ impl NicCtx {
             }
             return;
         }
-        if VirtualNic::uses_l2_tun(&flags) {
+        if port_mode.is_l2_tun() {
             match batch.pop_singleton() {
-                Ok(packet) => Self::do_forward_nic_to_peers(packet, mgr).await,
+                Ok(packet) => Self::do_forward_nic_to_peers(packet, mgr, port_mode).await,
                 Err(batch) => {
                     if let Err(error) = mgr.send_msg_by_l2_tun_batch(batch).await {
                         tracing::trace!(
@@ -1533,7 +1549,7 @@ impl NicCtx {
             return;
         }
 
-        let result = if VirtualNic::uses_hybrid_mode(&flags) {
+        let result = if port_mode.is_auto() {
             for packet in &batch {
                 Self::learn_hybrid_ip_multicast_membership(packet.payload(), mgr);
             }
@@ -1642,6 +1658,7 @@ impl NicCtx {
     async fn run_nic_ingress_worker(
         mut stream: Pin<Box<dyn PacketBatchStream>>,
         mgr: Arc<PeerManager>,
+        port_mode: PortMode,
         close_notifier: Arc<Notify>,
         cancellation: CancellationToken,
         reported: Arc<AtomicBool>,
@@ -1674,7 +1691,7 @@ impl NicCtx {
                             tokio::select! {
                                 biased;
                                 _ = cancellation.cancelled() => return,
-                                _ = Self::do_forward_nic_to_peers(packet, mgr.as_ref()) => {}
+                                _ = Self::do_forward_nic_to_peers(packet, mgr.as_ref(), port_mode) => {}
                             }
                         }
                     }
@@ -1723,7 +1740,7 @@ impl NicCtx {
                 biased;
                 _ = cancellation.cancelled() => return,
                 result = wait_for_delivery_with_one_prefetch(&mut stream, async {
-                    Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref()).await;
+                    Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref(), port_mode).await;
                     Ok::<(), ()>(())
                 }) => result,
             };
@@ -1759,6 +1776,7 @@ impl NicCtx {
             return Err(anyhow::anyhow!("virtual NIC has no ingress queues").into());
         }
 
+        let port_mode = VirtualNic::port_mode(&self.global_ctx.get_flags());
         let cancellation = CancellationToken::new();
         let reported = Arc::new(AtomicBool::new(false));
         let close_notifier = self.close_notifier.clone();
@@ -1766,6 +1784,7 @@ impl NicCtx {
             self.tasks.spawn(Self::run_nic_ingress_worker(
                 stream,
                 mgr.clone(),
+                port_mode,
                 close_notifier.clone(),
                 cancellation.clone(),
                 reported.clone(),
@@ -1819,7 +1838,7 @@ impl NicCtx {
     fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn PacketBatchSink>>) {
         let channel = self.peer_packet_receiver.clone();
         let close_notifier = self.close_notifier.clone();
-        let l2_tun = VirtualNic::uses_l2_tun(&self.global_ctx.get_flags());
+        let l2_tun = VirtualNic::port_mode(&self.global_ctx.get_flags()).is_l2_tun();
         let peer_mgr = self.peer_mgr.upgrade();
         self.tasks.spawn(async move {
             // unlock until coroutine finished
@@ -2223,9 +2242,8 @@ impl NicCtx {
         };
 
         let flags = self.global_ctx.get_flags();
-        let hybrid_tap_mac = if VirtualNic::uses_hybrid_mode(&flags)
-            && VirtualNic::uses_native_ethernet_frames(&flags)
-        {
+        let port_mode = VirtualNic::port_mode(&flags);
+        let hybrid_tap_mac = if port_mode.is_auto() && port_mode.uses_native_ethernet() {
             let ifname = self
                 .ifname()
                 .await
@@ -2237,7 +2255,7 @@ impl NicCtx {
         };
         let (streams, sink) = tunnel.split_ingress_queues();
 
-        if !VirtualNic::uses_l2_tun(&flags) {
+        if !port_mode.is_l2_tun() {
             let peer_mgr = self
                 .peer_mgr
                 .upgrade()
@@ -2298,7 +2316,8 @@ impl NicCtx {
         let (streams, sink) = tunnel.split_ingress_queues();
 
         self.do_forward_nic_to_peers_task(streams)?;
-        if !VirtualNic::uses_l2_tun(&self.global_ctx.get_flags()) {
+        let port_mode = VirtualNic::port_mode(&self.global_ctx.get_flags());
+        if !port_mode.is_l2_tun() {
             let peer_mgr = self
                 .peer_mgr
                 .upgrade()
@@ -2382,7 +2401,6 @@ mod tests {
         assert_eq!(packet.payload(), frame);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn linux_tun_offload_tracks_auto_support_and_explicit_overrides() {
         assert!(super::linux_tun_offload_configured(false, false, true));
@@ -2391,16 +2409,11 @@ mod tests {
         assert!(!super::linux_tun_offload_configured(true, true, true));
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     #[test]
-    fn linux_tun_offload_requires_explicit_opt_in_on_aarch64() {
-        assert!(!super::linux_tun_offload_auto_supported());
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    #[test]
-    fn linux_tun_offload_remains_automatic_on_x86_64() {
-        assert!(super::linux_tun_offload_auto_supported());
+    fn linux_tun_offload_auto_support_is_conservative_by_arch() {
+        assert!(super::linux_tun_offload_auto_supported_for("x86_64"));
+        assert!(!super::linux_tun_offload_auto_supported_for("aarch64"));
+        assert!(!super::linux_tun_offload_auto_supported_for("riscv64"));
     }
 
     #[cfg(target_os = "linux")]
@@ -2494,7 +2507,7 @@ mod tests {
         let mut flags = gen_default_flags();
         flags.port_mode = "ethernet".to_string();
 
-        assert!(VirtualNic::uses_ethernet_frames(&flags));
+        assert!(VirtualNic::port_mode(&flags).uses_ethernet_overlay());
     }
 
     #[test]
@@ -2502,7 +2515,7 @@ mod tests {
         let mut flags = gen_default_flags();
         flags.port_mode = "routed".to_string();
 
-        assert!(!VirtualNic::uses_ethernet_frames(&flags));
+        assert!(!VirtualNic::port_mode(&flags).uses_ethernet_overlay());
     }
 
     #[test]
@@ -2510,8 +2523,9 @@ mod tests {
         let mut flags = gen_default_flags();
         flags.port_mode = "compatible-ethernet".to_string();
 
-        assert!(VirtualNic::uses_ethernet_frames(&flags));
-        assert!(!VirtualNic::uses_native_ethernet_frames(&flags));
+        let port_mode = VirtualNic::port_mode(&flags);
+        assert!(port_mode.uses_ethernet_overlay());
+        assert!(!port_mode.uses_native_ethernet());
     }
 
     #[test]

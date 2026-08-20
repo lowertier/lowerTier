@@ -117,6 +117,7 @@ pub enum PacketType {
     NoiseHandshakeReadyReceiptAck = 39,
     RelayHandshakeReset = 40,
     RelayHandshakeResetAck = 41,
+    ReceiverPressure = 42,
 
     // used internally,
     DataWithKcpSrcModified = 18,
@@ -1317,6 +1318,27 @@ impl ZCPacket {
         self.inner
             .capacity()
             .saturating_add(self.reusable_prefix.as_ref().map_or(0, BytesMut::capacity))
+    }
+
+    /// Copy the active packet bytes into a tight allocation and release any
+    /// oversized receive slab retained behind this packet.
+    ///
+    /// Metadata remains local to the packet object. Reusable input storage is
+    /// returned to its pool before this method returns.
+    pub(crate) fn compact_retained_buffer(&mut self) {
+        if self.retained_buffer_capacity() <= self.inner.len() {
+            return;
+        }
+
+        let mut compact = BytesMut::with_capacity(self.inner.len());
+        compact.extend_from_slice(&self.inner);
+        if self.reusable_pool.is_some() {
+            self.recycle_reusable_buffer();
+        }
+        self.inner = compact;
+        debug_assert!(self.reusable_pool.is_none());
+        debug_assert!(self.reusable_prefix.is_none());
+        debug_assert!(self.reusable_allocation_start.is_none());
     }
 
     pub fn fill_peer_manager_hdr(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8) {

@@ -353,6 +353,7 @@ message GenerateCredentialRequest {
   optional string credential_id = 5; // optional: user-specified credential id, reused if already exists
   InstanceIdentifier instance = 6;   // target network instance
   optional bool reusable = 7;   // default true: allow multiple peers to reuse this credential
+  optional string admin_token = 8; // required administrator authentication token
 }
 
 message GenerateCredentialResponse {
@@ -364,6 +365,7 @@ message GenerateCredentialResponse {
 message RevokeCredentialRequest {
   string credential_id = 1;
   InstanceIdentifier instance = 2;   // target network instance
+  optional string admin_token = 3;
 }
 
 message RevokeCredentialResponse {
@@ -372,6 +374,7 @@ message RevokeCredentialResponse {
 
 message ListCredentialsRequest {
   InstanceIdentifier instance = 1;   // target network instance
+  optional string admin_token = 2;
 }
 
 message CredentialInfo {

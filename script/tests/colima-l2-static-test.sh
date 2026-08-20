@@ -5,10 +5,12 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 harness="$repo_root/script/colima-l2/e2e.sh"
 dockerfile="$repo_root/script/colima-l2/Dockerfile"
 probe="$repo_root/script/colima-l2/frame_probe.py"
+source_digest="$repo_root/script/colima-l2/source_digest.py"
 
 test -f "$harness"
 test -f "$dockerfile"
 test -f "$probe"
+test -f "$source_digest"
 
 grep -q '^set -euo pipefail$' "$harness"
 grep -q 'trap cleanup EXIT INT TERM' "$harness"
@@ -33,6 +35,8 @@ grep -q 'python3' "$dockerfile"
 grep -q 'traffic_signature_scan.py' "$dockerfile"
 
 python3 -m py_compile "$probe"
+python3 -m py_compile "$source_digest"
+test -n "$(python3 "$source_digest" "$repo_root")"
 python3 "$repo_root/script/tests/frame_probe_test.py"
 python3 "$repo_root/script/tests/traffic_signature_scan_test.py"
 bash -n "$harness"

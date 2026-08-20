@@ -384,7 +384,7 @@ pub struct TcpFlowKey {
 /// # Performance Considerations
 ///
 /// - Maintains a hash map of active flows
-/// - Preallocates buffers for [`IDEAL_BATCH_SIZE`] flows
+/// - Reuses buffers for flows that appeared in earlier batches
 /// - Memory pooling reduces allocations
 /// - State is maintained across multiple recv_multiple calls
 pub struct TcpGROTable {
@@ -400,13 +400,9 @@ impl Default for TcpGROTable {
 
 impl TcpGROTable {
     fn new() -> Self {
-        let mut items_pool = Vec::with_capacity(IDEAL_BATCH_SIZE);
-        for _ in 0..IDEAL_BATCH_SIZE {
-            items_pool.push(Vec::with_capacity(IDEAL_BATCH_SIZE));
-        }
         TcpGROTable {
             items_by_flow: HashMap::with_capacity(IDEAL_BATCH_SIZE),
-            items_pool,
+            items_pool: Vec::new(),
         }
     }
 }
@@ -546,13 +542,9 @@ impl Default for UdpGROTable {
 
 impl UdpGROTable {
     pub fn new() -> Self {
-        let mut items_pool = Vec::with_capacity(IDEAL_BATCH_SIZE);
-        for _ in 0..IDEAL_BATCH_SIZE {
-            items_pool.push(Vec::with_capacity(IDEAL_BATCH_SIZE));
-        }
         UdpGROTable {
             items_by_flow: HashMap::with_capacity(IDEAL_BATCH_SIZE),
-            items_pool,
+            items_pool: Vec::new(),
         }
     }
 }
@@ -2205,7 +2197,7 @@ pub fn gso_none_checksum(in_buf: &mut [u8], csum_start: u16, csum_offset: u16) -
 /// # Performance
 ///
 /// The GRO table maintains internal state across calls, including:
-/// - Hash map of active flows (preallocated for [`IDEAL_BATCH_SIZE`] flows)
+/// - Hash map of active flows with buffers retained after first use
 /// - Memory pools to reduce allocations
 /// - Per-flow coalescing state
 ///
@@ -2225,7 +2217,7 @@ pub struct GROTable {
 }
 
 impl GROTable {
-    /// Creates a new, empty `GROTable` with preallocated flow storage.
+    /// Creates an empty `GROTable` that grows with observed traffic.
     pub fn new() -> GROTable {
         GROTable {
             to_write: Vec::with_capacity(IDEAL_BATCH_SIZE),
@@ -2387,6 +2379,14 @@ impl ExpandBuffer for &mut Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gro_tables_do_not_allocate_unused_flow_item_buffers() {
+        let table = GROTable::new();
+
+        assert!(table.tcp_gro_table.items_pool.is_empty());
+        assert!(table.udp_gro_table.items_pool.is_empty());
+    }
 
     fn make_ipv4_tcp_packet(seq: u32, payload_len: usize) -> Vec<u8> {
         const IPH_LEN: usize = 20;

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    io::Write,
     path::PathBuf,
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1123,17 +1124,69 @@ impl CredentialManager {
             return;
         };
         let store = self.credentials.lock().unwrap();
-        if let Ok(json) = serde_json::to_string_pretty(&*store)
-            && let Err(error) = std::fs::write(path, json)
-        {
+        let Ok(json) = serde_json::to_string_pretty(&*store) else {
+            return;
+        };
+        if let Err(error) = Self::write_private_file(path, json.as_bytes()) {
             tracing::warn!(?error, "failed to save credentials to disk");
         }
+    }
+
+    fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "credential path must not be a symbolic link",
+            ));
+        }
+
+        let mut temporary = path.as_os_str().to_os_string();
+        temporary.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
+        let temporary = std::path::PathBuf::from(temporary);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| {
+            let mut file = options.open(&temporary)?;
+            file.write_all(contents)?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            std::fs::set_permissions(&temporary, {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::Permissions::from_mode(0o600)
+            })?;
+            std::fs::rename(&temporary, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 
     fn load_from_disk(&self) {
         let Some(path) = &self.storage_path else {
             return;
         };
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(path = %path.display(), "refuse symbolic-link credential file");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                tracing::warn!(path = %path.display(), "refuse credential file with broad permissions");
+                return;
+            }
+        }
         let Ok(data) = std::fs::read_to_string(path) else {
             return;
         };

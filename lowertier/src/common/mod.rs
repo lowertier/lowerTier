@@ -11,6 +11,7 @@ pub mod acl_processor;
 pub mod compressor;
 pub mod config;
 pub mod constants;
+pub mod dataplane_telemetry;
 pub mod dns;
 pub mod env_parser;
 pub mod error;

@@ -16,6 +16,7 @@ pub mod peer_rpc;
 pub mod peer_rpc_service;
 pub mod peer_session;
 pub(crate) mod public_ipv6;
+pub(crate) mod receiver_pacing;
 pub mod relay_peer_map;
 pub mod route_trait;
 pub mod rpc_service;
@@ -26,6 +27,8 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
+#[cfg(test)]
+mod dataplane_cost;
 pub(crate) mod flow;
 pub mod foreign_network_client;
 pub mod foreign_network_manager;

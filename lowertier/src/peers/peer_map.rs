@@ -45,7 +45,7 @@ use super::{
 };
 
 const MAX_LIVE_PEER_CONNECTIONS: usize = 64;
-const MAX_LIVE_CONNECTIONS_PER_PEER: usize = 1;
+const MAX_LIVE_CONNECTIONS_PER_PEER: usize = 2;
 
 struct PeerConnectionAdmission {
     global: Arc<Semaphore>,
@@ -1565,7 +1565,7 @@ impl PeerMap {
         peer.send_msg_on_conn(conn, msg).await
     }
 
-    pub(crate) async fn send_msg_batch_on_selected_conn(
+    pub(crate) async fn send_prepared_msg_batch_on_selected_conn(
         &self,
         dst_peer_id: PeerId,
         conn: &ArcPeerConn,
@@ -1574,7 +1574,7 @@ impl PeerMap {
         let peer = self
             .get_peer_by_id(dst_peer_id)
             .ok_or_else(|| Error::RouteError(Some("peer is not connected".to_owned())))?;
-        peer.send_msg_batch_on_conn(conn, batch).await
+        peer.send_prepared_msg_batch_on_conn(conn, batch).await
     }
 
     pub async fn send_msg_batch_directly(
@@ -2320,7 +2320,8 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        OriginAuthCapability, OriginAuthSource, PeerMap, merge_authenticated_route_peer_evidence,
+        MAX_LIVE_CONNECTIONS_PER_PEER, OriginAuthCapability, OriginAuthSource,
+        PeerConnectionAdmission, PeerMap, merge_authenticated_route_peer_evidence,
     };
     use crate::{
         common::global_ctx::tests::get_mock_global_ctx,
@@ -2336,6 +2337,23 @@ mod tests {
         proto::peer_rpc::{PeerIdentityType, SecureAuthLevel},
         tunnel::{batch::PacketBatch, packet_def::ZCPacket},
     };
+
+    #[test]
+    fn connection_admission_allows_two_paths_per_peer_and_releases_permits() {
+        let admission = Arc::new(PeerConnectionAdmission::new());
+        let peer_id = 7;
+
+        let first = admission.try_acquire(peer_id).unwrap();
+        let second = admission.try_acquire(peer_id).unwrap();
+        assert_eq!(MAX_LIVE_CONNECTIONS_PER_PEER, 2);
+        assert!(admission.try_acquire(peer_id).is_none());
+        assert!(admission.try_acquire(peer_id + 1).is_some());
+
+        drop(first);
+        let replacement = admission.try_acquire(peer_id).unwrap();
+        drop((second, replacement));
+        assert!(admission.try_acquire(peer_id).is_some());
+    }
 
     fn forwarding_snapshot(
         generation: u64,

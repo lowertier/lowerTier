@@ -34,6 +34,12 @@ iperf_busy_retries=${IPERF_BUSY_RETRIES:-3}
 run_tcp=${RUN_TCP:-1}
 run_udp=${RUN_UDP:-1}
 run_cpu_probe=${RUN_CPU_PROBE:-1}
+cpu_protocol=${CPU_PROTOCOL:-tcp}
+cpu_udp_rate=${CPU_UDP_RATE:-10000M}
+cpu_udp_length=${CPU_UDP_LENGTH:-1352}
+capture_dataplane_stats=${CAPTURE_DATAPLANE_STATS:-1}
+directions_text=${DIRECTIONS:-"forward reverse"}
+run_raw_gate=${RUN_RAW_GATE:-1}
 
 docker_cmd=(docker --context "$docker_context")
 containers=("$node_a" "$node_b")
@@ -58,6 +64,7 @@ fi
 
 read -r -a modes <<<"$modes_text"
 read -r -a udp_rates <<<"$udp_rates_text"
+read -r -a directions <<<"$directions_text"
 
 mkdir -p "$result_dir/raw" "$result_dir/overlay" "$result_dir/cpu" "$result_dir/latency" "$result_dir/logs"
 perf_write_metadata "$result_dir" "colima-throughput:$docker_context"
@@ -67,6 +74,11 @@ printf 'docker_context=%s\nraw_gate_bps=%s\nmodes=%s\nudp_rates=%s\nencryption_a
 printf 'runtime_env=%s\n' "$runtime_env" >>"$result_dir/environment.txt"
 printf 'run_tcp=%s\nrun_udp=%s\nrun_cpu_probe=%s\n' \
     "$run_tcp" "$run_udp" "$run_cpu_probe" >>"$result_dir/environment.txt"
+printf 'cpu_protocol=%s\ncpu_udp_rate=%s\ncpu_udp_length=%s\ncapture_dataplane_stats=%s\n' \
+    "$cpu_protocol" "$cpu_udp_rate" "$cpu_udp_length" "$capture_dataplane_stats" \
+    >>"$result_dir/environment.txt"
+printf 'directions=%s\nrun_raw_gate=%s\n' "$directions_text" "$run_raw_gate" \
+    >>"$result_dir/environment.txt"
 printf 'underlay_protocol=%s\ncore_args=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
     "$underlay_protocol" "$core_args" "$netem_delay" "$netem_jitter" "$netem_loss" \
     "$netem_loss_correlation" "$netem_limit" \
@@ -76,6 +88,16 @@ case "$underlay_protocol" in
     udp|quic) ;;
     *) echo "unsupported underlay protocol: $underlay_protocol" >&2; exit 64 ;;
 esac
+case "$cpu_protocol" in
+    tcp|udp) ;;
+    *) echo "unsupported CPU probe protocol: $cpu_protocol" >&2; exit 64 ;;
+esac
+if [[ "$cpu_protocol" == udp ]]; then
+    if ! [[ "$cpu_udp_length" =~ ^[0-9]+$ ]] || (( cpu_udp_length < 1 )); then
+        echo "CPU_UDP_LENGTH must be a positive integer" >&2
+        exit 64
+    fi
+fi
 
 "${docker_cmd[@]}" info >/dev/null
 if [[ "$build_image" == 1 ]]; then
@@ -185,6 +207,32 @@ sample_cpu() {
         >"$output"
 }
 
+capture_dataplane_snapshot() {
+    local node=$1
+    local portal=$2
+    local output=$3
+    if [[ "$capture_dataplane_stats" != 1 ]]; then
+        : >"$output"
+        return
+    fi
+    local temporary="${output}.tmp"
+    if ! "${docker_cmd[@]}" exec "$node" \
+        lowertier-cli --rpc-portal "127.0.0.1:$portal" stats prometheus \
+        >"$temporary" 2>"${output}.stderr"; then
+        cat "$temporary" >"$output" 2>/dev/null || true
+        rm -f "$temporary"
+        echo "failed to capture dataplane Prometheus metrics from $node" >&2
+        return 1
+    fi
+    if ! grep -q '^lowertier_dataplane_' "$temporary"; then
+        cat "$temporary" >"$output"
+        rm -f "$temporary"
+        echo "dataplane Prometheus metrics were absent for $node" >&2
+        return 1
+    fi
+    mv "$temporary" "$output"
+}
+
 record_cpu_probe() {
     local mode=$1
     local direction=$2
@@ -197,7 +245,15 @@ record_cpu_probe() {
     local iperf_args=(-c "$destination" -p "$port" -t "$cpu_duration" -O "$omit" -P "$parallel_streams" -J)
     local samples=$((cpu_duration + 1))
     local ping_count=$((cpu_duration * 20))
+    local inner_packet_length=0
+    local offered_rate=0
     local pid_a pid_b ping_pid received cpu_avg cpu_max cores rss_avg rss_max
+
+    if [[ "$cpu_protocol" == udp ]]; then
+        iperf_args+=(-u -b "$cpu_udp_rate" -l "$cpu_udp_length")
+        inner_packet_length=$((cpu_udp_length + 28))
+        offered_rate="$cpu_udp_rate"
+    fi
 
     # A heavily delayed UDP test can leave iperf's single-test server occupied
     # after the client has returned. Start a fresh server so the CPU probe is
@@ -207,6 +263,11 @@ record_cpu_probe() {
     if [[ "$direction" == reverse ]]; then
         iperf_args+=(-R)
     fi
+
+    capture_dataplane_snapshot "$node_a" 15991 \
+        "$result_dir/cpu/${mode}-${direction}-${node_a}-prometheus-before.txt"
+    capture_dataplane_snapshot "$node_b" 15992 \
+        "$result_dir/cpu/${mode}-${direction}-${node_b}-prometheus-before.txt"
 
     sample_cpu "$node_a" "$cpu_a" "$samples" &
     pid_a=$!
@@ -219,7 +280,20 @@ record_cpu_probe() {
     "${docker_cmd[@]}" exec "$node_a" iperf3 "${iperf_args[@]}" >"$json"
     wait "$pid_a" "$pid_b" "$ping_pid"
 
+    capture_dataplane_snapshot "$node_a" 15991 \
+        "$result_dir/cpu/${mode}-${direction}-${node_a}-prometheus-after.txt"
+    capture_dataplane_snapshot "$node_b" 15992 \
+        "$result_dir/cpu/${mode}-${direction}-${node_b}-prometheus-after.txt"
+
     received=$(jq -er '.end.sum_received.bits_per_second | numbers' "$json")
+    if ! awk -v received="$received" 'BEGIN { exit !(received > 0) }'; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$mode" "$direction" 0 "$cpu_protocol" "$parallel_streams" "$offered_rate" \
+            'CPU probe delivered zero payload bytes' \
+            >>"$result_dir/workload-errors.tsv"
+        echo "CPU probe delivered zero payload bytes for $mode/$direction" >&2
+        return 1
+    fi
     for node in "$node_a" "$node_b"; do
         local cpu_file="$result_dir/cpu/${mode}-${direction}-${node}.txt"
         cpu_avg=$(awk 'NF {sum += $1; count++} END {if (count) printf "%.6f", sum/count; else print "0.000000"}' "$cpu_file")
@@ -230,6 +304,10 @@ record_cpu_probe() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$mode" "$direction" "$node" "$received" "$cpu_avg" "$cpu_max" "$cores" \
             >>"$result_dir/cpu-cores-per-gbit.tsv"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$mode" "$direction" "$cpu_protocol" "$parallel_streams" \
+            "$cpu_udp_length" "$inner_packet_length" "$node" "$received" "$cpu_avg" "$cores" \
+            >>"$result_dir/work-model.tsv"
         printf '%s\t%s\t%s\t%s\t%s\n' \
             "$mode" "$direction" "$node" "$rss_avg" "$rss_max" \
             >>"$result_dir/memory.tsv"
@@ -242,25 +320,31 @@ printf 'mode\tdirection\trun\tprotocol\tstreams\toffered_bps\terror\n' \
 printf 'mode\tdirection\tnode\treceived_bps\taverage_cpu_percent\tmax_cpu_percent\tcpu_cores_per_gbit\n' \
     >"$result_dir/cpu-cores-per-gbit.tsv"
 printf 'mode\tdirection\tnode\taverage_rss_kib\tpeak_rss_kib\n' >"$result_dir/memory.tsv"
-start_containers
-apply_network_noise
-"${docker_cmd[@]}" exec "$node_a" ethtool -k eth0 >"$result_dir/raw/${node_a}-offloads.txt" || true
-"${docker_cmd[@]}" exec "$node_b" ethtool -k eth0 >"$result_dir/raw/${node_b}-offloads.txt" || true
-start_iperf_server 5200
-for streams in 1 "$parallel_streams"; do
-    raw_json="$result_dir/raw/tcp-p${streams}.json"
-    run_iperf raw forward tcp "$streams" 0 172.30.10.3 5200 1 "$raw_json"
-done
+printf 'mode\tdirection\tprotocol\tflows\tudp_payload_bytes\tinner_packet_bytes\tnode\treceived_bps\taverage_cpu_percent\tcpu_cores_per_gbit\n' \
+    >"$result_dir/work-model.tsv"
+if [[ "$run_raw_gate" == 1 ]]; then
+    start_containers
+    apply_network_noise
+    "${docker_cmd[@]}" exec "$node_a" ethtool -k eth0 >"$result_dir/raw/${node_a}-offloads.txt" || true
+    "${docker_cmd[@]}" exec "$node_b" ethtool -k eth0 >"$result_dir/raw/${node_b}-offloads.txt" || true
+    start_iperf_server 5200
+    for streams in 1 "$parallel_streams"; do
+        raw_json="$result_dir/raw/tcp-p${streams}.json"
+        run_iperf raw forward tcp "$streams" 0 172.30.10.3 5200 1 "$raw_json"
+    done
 
-raw_bps=$(jq -er '.end.sum_received.bits_per_second | numbers' "$result_dir/raw/tcp-p${parallel_streams}.json")
-if jq -ne --argjson actual "$raw_bps" --argjson required "$raw_gate_bps" '$actual >= $required'; then
-    printf 'valid\n' >"$result_dir/substrate-status.txt"
-else
-    printf 'substrate-limited\n' >"$result_dir/substrate-status.txt"
-    if [[ "$require_raw_gate" == 1 ]]; then
-        echo "raw substrate ${raw_bps} bps did not meet ${raw_gate_bps} bps gate" >&2
-        exit 2
+    raw_bps=$(jq -er '.end.sum_received.bits_per_second | numbers' "$result_dir/raw/tcp-p${parallel_streams}.json")
+    if jq -ne --argjson actual "$raw_bps" --argjson required "$raw_gate_bps" '$actual >= $required'; then
+        printf 'valid\n' >"$result_dir/substrate-status.txt"
+    else
+        printf 'substrate-limited\n' >"$result_dir/substrate-status.txt"
+        if [[ "$require_raw_gate" == 1 ]]; then
+            echo "raw substrate ${raw_bps} bps did not meet ${raw_gate_bps} bps gate" >&2
+            exit 2
+        fi
     fi
+else
+    printf 'not-run\n' >"$result_dir/substrate-status.txt"
 fi
 
 for mode in "${modes[@]}"; do
@@ -277,15 +361,15 @@ for mode in "${modes[@]}"; do
     start_containers
     apply_network_noise
     "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
-        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 0.0.0.0:15991 $core_args >/tmp/lowertier.log 2>&1"
+        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
     "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
-        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 0.0.0.0:15992 $core_args >/tmp/lowertier.log 2>&1"
+        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
     wait_for_ping "$subnet.2"
     "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \
         >"$result_dir/latency/${profile}-unloaded.txt"
     start_iperf_server 5201
 
-    for direction in forward reverse; do
+    for direction in "${directions[@]}"; do
         for run in $(seq 1 "$runs"); do
             if [[ "$run_tcp" == 1 ]]; then
                 for streams in 1 "$parallel_streams"; do

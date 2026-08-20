@@ -20,7 +20,11 @@ use crate::tunnel::common::{
     bind, eligible_bind_addrs, ensure_local_allowed, ensure_remote_allowed,
 };
 use crate::{
-    common::{shrink_dashmap, underlay_policy::UnderlayPolicy},
+    common::{
+        global_ctx::{ProcessMemoryPermit, global_process_memory_governor},
+        shrink_dashmap,
+        underlay_policy::UnderlayPolicy,
+    },
     tunnel::{
         build_url_from_socket_addr,
         common::TunnelWrapper,
@@ -41,11 +45,13 @@ use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
 use rand::RngCore;
 use tokio::{
     net::UdpSocket,
-    sync::{Mutex, mpsc::unbounded_channel},
+    sync::{Mutex, mpsc::channel},
     task::JoinSet,
 };
 
 const MAX_PACKET: usize = 2048;
+const MAX_WG_LISTENER_PEERS: usize = 8;
+const WG_PEER_MEMORY_CHARGE_BYTES: usize = 640 * 1024;
 
 #[derive(Debug, Clone)]
 enum WgType {
@@ -355,19 +361,19 @@ struct WgPeer {
     tasks: JoinSet<()>,
 
     access_time: AtomicCell<Instant>,
+    _memory_permit: ProcessMemoryPermit,
 }
 
 impl WgPeer {
-    fn new(udp: Arc<UdpSocket>, config: WgConfig, endpoint: SocketAddr) -> Self {
+    fn new(
+        udp: Arc<UdpSocket>,
+        config: WgConfig,
+        endpoint: SocketAddr,
+        tunn: Tunn,
+        memory_permit: ProcessMemoryPermit,
+    ) -> Self {
         WgPeer {
-            tunn: Some(Mutex::new(Tunn::new(
-                config.my_secret_key.clone(),
-                config.peer_public_key,
-                None,
-                None,
-                rand::thread_rng().next_u32(),
-                None,
-            ))),
+            tunn: Some(Mutex::new(tunn)),
 
             udp,
             config,
@@ -378,6 +384,7 @@ impl WgPeer {
             tasks: JoinSet::new(),
 
             access_time: AtomicCell::new(Instant::now()),
+            _memory_permit: memory_permit,
         }
     }
 
@@ -457,8 +464,8 @@ impl WgPeer {
     }
 }
 
-type ConnSender = tokio::sync::mpsc::UnboundedSender<Box<dyn Tunnel>>;
-type ConnReceiver = tokio::sync::mpsc::UnboundedReceiver<Box<dyn Tunnel>>;
+type ConnSender = tokio::sync::mpsc::Sender<Box<dyn Tunnel>>;
+type ConnReceiver = tokio::sync::mpsc::Receiver<Box<dyn Tunnel>>;
 
 pub struct WgTunnelListener {
     addr: url::Url,
@@ -476,7 +483,7 @@ pub struct WgTunnelListener {
 
 impl WgTunnelListener {
     pub fn new(addr: url::Url, config: WgConfig) -> Self {
-        let (conn_send, conn_recv) = unbounded_channel();
+        let (conn_send, conn_recv) = channel(MAX_WG_LISTENER_PEERS);
         WgTunnelListener {
             addr,
             config,
@@ -530,8 +537,38 @@ impl WgTunnelListener {
             tracing::trace!(?n, ?addr, "Received bytes from peer");
 
             if !peer_map.contains_key(&addr) {
+                if peer_map.len() >= MAX_WG_LISTENER_PEERS {
+                    tracing::trace!(?addr, "drop WireGuard source because admission is full");
+                    continue;
+                }
                 tracing::info!("New peer: {}", addr);
-                let mut wg = WgPeer::new(socket.clone(), config.clone(), addr);
+                let mut tunn = Tunn::new(
+                    config.my_secret_key.clone(),
+                    config.peer_public_key,
+                    None,
+                    None,
+                    rand::thread_rng().next_u32(),
+                    None,
+                );
+                let mut auth_buf = [0_u8; MAX_PACKET];
+                let authenticated = match tunn.decapsulate(None, data, &mut auth_buf) {
+                    TunnResult::WriteToNetwork(response) => {
+                        socket.send_to(response, addr).await.is_ok()
+                    }
+                    TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => true,
+                    _ => false,
+                };
+                if !authenticated {
+                    tracing::trace!(?addr, "drop unauthenticated WireGuard source");
+                    continue;
+                }
+                let Some(memory_permit) =
+                    global_process_memory_governor().try_reserve_owned(WG_PEER_MEMORY_CHARGE_BYTES)
+                else {
+                    tracing::trace!(?addr, "drop WireGuard source because memory is full");
+                    continue;
+                };
+                let mut wg = WgPeer::new(socket.clone(), config.clone(), addr, tunn, memory_permit);
                 let (stream, sink) = wg.start_and_get_tunnel().split();
                 let tunnel = Box::new(TunnelWrapper::new(
                     stream,
@@ -553,10 +590,12 @@ impl WgTunnelListener {
                         ),
                     }),
                 ));
-                if let Err(e) = conn_sender.send(tunnel) {
+                if let Err(e) = conn_sender.try_send(tunnel) {
                     tracing::error!("Failed to send tunnel to conn_sender: {}", e);
+                    continue;
                 }
                 peer_map.insert(addr, Arc::new(wg));
+                continue;
             }
 
             let peer = peer_map.get(&addr).unwrap().clone();
@@ -657,7 +696,20 @@ impl WgTunnelConnector {
             .with_context(|| "Failed to get local addr")?
             .to_string();
 
-        let mut wg_peer = WgPeer::new(Arc::new(udp), config.clone(), addr);
+        let tunn = Tunn::new(
+            config.my_secret_key.clone(),
+            config.peer_public_key,
+            None,
+            None,
+            rand::thread_rng().next_u32(),
+            None,
+        );
+        let memory_permit = global_process_memory_governor()
+            .try_reserve_owned(WG_PEER_MEMORY_CHARGE_BYTES)
+            .ok_or_else(|| {
+                TunnelError::InternalError("WireGuard memory limit is full".to_owned())
+            })?;
+        let mut wg_peer = WgPeer::new(Arc::new(udp), config.clone(), addr, tunn, memory_permit);
         let udp = wg_peer.udp_socket();
 
         // do handshake here so we will return after receive first packet

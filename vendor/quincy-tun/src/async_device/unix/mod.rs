@@ -430,12 +430,26 @@ impl AsyncDevice {
         &self,
         gro_table: &mut GROTable,
         bufs: &mut [B],
-        mut offset: usize,
+        offset: usize,
     ) -> io::Result<usize> {
+        self.send_multiple_with_stats(gro_table, bufs, offset)
+            .await
+            .map(|(bytes, _writes)| bytes)
+    }
+
+    /// Sends independently framed packets and returns `(bytes, write_syscalls)`.
+    /// The aggregate permits callers to update telemetry once per batch.
+    #[cfg(target_os = "linux")]
+    pub async fn send_multiple_with_stats<B: crate::platform::ExpandBuffer>(
+        &self,
+        gro_table: &mut GROTable,
+        bufs: &mut [B],
+        mut offset: usize,
+    ) -> io::Result<(usize, usize)> {
         gro_table.reset();
 
         if bufs.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
 
         if bufs.len() > u16::MAX as usize {
@@ -475,6 +489,7 @@ impl AsyncDevice {
         }
 
         let mut total = 0;
+        let mut writes = 0;
         let mut error = None;
         let mut next = 0;
         while next < gro_table.to_write.len() {
@@ -487,6 +502,7 @@ impl AsyncDevice {
                         "invalid offset",
                     ));
                 };
+                writes += 1;
                 match self.try_send(buf) {
                     Ok(n) => {
                         total += n;
@@ -506,6 +522,6 @@ impl AsyncDevice {
         if let Some(error) = error {
             return Err(error);
         }
-        Ok(total)
+        Ok((total, writes))
     }
 }
