@@ -744,7 +744,109 @@ impl Bindable for UdpSocket {
     const PROTOCOL: Option<socket2::Protocol> = Some(socket2::Protocol::UDP);
 
     fn finalize(socket: socket2::Socket) -> Result<Self, TunnelError> {
+        size_plain_udp_socket_buffers(&socket);
         Ok(UdpSocket::from_std(socket.into())?)
+    }
+}
+
+// Bulk dataplane bursts overflow the kernel default (~200 KiB on Linux) between
+// userspace recv calls, silently dropping control packets and feeding false
+// liveness timeouts. Size buffers to match the QUIC transport.
+const PLAIN_UDP_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
+
+fn reported_plain_udp_buffer_meets_target(reported: Option<usize>, target: usize) -> bool {
+    let Some(reported) = reported else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    // Linux doubles the value for bookkeeping before reporting it.
+    return reported >= target.saturating_mul(2);
+    #[cfg(not(target_os = "linux"))]
+    return reported >= target;
+}
+
+#[cfg(target_os = "linux")]
+fn force_plain_udp_socket_buffer(
+    socket: &socket2::Socket,
+    option: nix::libc::c_int,
+    target: usize,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let target = nix::libc::c_int::try_from(target).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plain UDP socket buffer target exceeds Linux c_int",
+        )
+    })?;
+    let result = unsafe {
+        nix::libc::setsockopt(
+            socket.as_raw_fd(),
+            nix::libc::SOL_SOCKET,
+            option,
+            (&target as *const nix::libc::c_int).cast(),
+            std::mem::size_of_val(&target) as nix::libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn size_plain_udp_socket_buffers(socket: &socket2::Socket) {
+    let socket_ref = socket2::SockRef::from(socket);
+    let target = PLAIN_UDP_SOCKET_BUFFER_BYTES;
+    if let Err(error) = socket_ref.set_recv_buffer_size(target) {
+        tracing::warn!(
+            ?error,
+            target,
+            "failed to increase the plain UDP receive buffer"
+        );
+    }
+    if let Err(error) = socket_ref.set_send_buffer_size(target) {
+        tracing::warn!(
+            ?error,
+            target,
+            "failed to increase the plain UDP send buffer"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut recv_reported = socket_ref.recv_buffer_size().ok();
+        let mut send_reported = socket_ref.send_buffer_size().ok();
+        if !reported_plain_udp_buffer_meets_target(recv_reported, target) {
+            match force_plain_udp_socket_buffer(socket, nix::libc::SO_RCVBUFFORCE, target) {
+                Ok(()) => recv_reported = socket_ref.recv_buffer_size().ok(),
+                Err(error) => tracing::debug!(
+                    ?error,
+                    target,
+                    "SO_RCVBUFFORCE is unavailable for the plain UDP socket"
+                ),
+            }
+        }
+        if !reported_plain_udp_buffer_meets_target(send_reported, target) {
+            match force_plain_udp_socket_buffer(socket, nix::libc::SO_SNDBUFFORCE, target) {
+                Ok(()) => send_reported = socket_ref.send_buffer_size().ok(),
+                Err(error) => tracing::debug!(
+                    ?error,
+                    target,
+                    "SO_SNDBUFFORCE is unavailable for the plain UDP socket"
+                ),
+            }
+        }
+        if !reported_plain_udp_buffer_meets_target(recv_reported, target)
+            || !reported_plain_udp_buffer_meets_target(send_reported, target)
+        {
+            tracing::info!(
+                ?recv_reported,
+                ?send_reported,
+                target,
+                "plain UDP socket buffers below target (clamped by the operating system)"
+            );
+        }
     }
 }
 
