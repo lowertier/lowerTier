@@ -46,23 +46,23 @@ Encrypted UDP, QUIC, or TCP link
 Remote LowTier peer
 ```
 
-## Select a network mode
+## Select an interface adapter
 
-Select the mode that matches the operating system and application.
+Select the adapter that matches the operating system and application.
 
-| Mode | Configuration | Local interface | Ethernet support | Privilege |
+| Adapter | Configuration | Local interface | Ethernet support | Privilege |
 | --- | --- | --- | --- | --- |
-| Native Ethernet | `port_mode = "ethernet"` | TAP | Complete L2 | Required |
-| Compatible Ethernet | `port_mode = "compatible-ethernet"` | TUN | IPv4 and IPv6 over the Ethernet overlay | Required |
-| Routed | `port_mode = "routed"` | TUN | No | Required |
+| Ethernet | `interface_adapter = "tap"` | TAP | Complete L2 | Required |
+| IP | `interface_adapter = "tun"` | TUN | IP | Required |
+| Automatic | `interface_adapter = "auto"` | Platform default | Platform default | Required |
 | Userspace networking | `--tun=userspace-networking` | None | No | Not required |
 
 Native Ethernet supports ARP, VLAN, QinQ, LLDP, broadcast, multicast, and unknown EtherTypes.
 Native Ethernet requires Linux.
 
-Compatible Ethernet supports mixed TAP and TUN peers.
-The local TUN interface receives only IPv4 and IPv6 packets.
-Use this mode on macOS and other systems without TAP support.
+All adapters use the unified fabric protocol.
+The TUN adapter receives only IPv4 and IPv6 packets.
+Use the TUN adapter on systems without TAP support.
 
 Routed mode has the lowest interface overhead.
 LowTier selects native Ethernet by default on Linux.
@@ -131,7 +131,7 @@ sudo lowertier-core \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --port-mode ethernet \
+  --interface-adapter tap \
   --listeners udp://0.0.0.0:11010
 ```
 
@@ -143,7 +143,7 @@ sudo lowertier-core \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --port-mode ethernet \
+  --interface-adapter tap \
   --peers udp://192.0.2.10:11010
 ```
 
@@ -174,7 +174,7 @@ sudo lowertier-core \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --port-mode ethernet
+  --interface-adapter tap
 ```
 
 macOS:
@@ -184,11 +184,11 @@ sudo lowertier-core \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --port-mode compatible-ethernet \
+  --interface-adapter tun \
   --peers udp://192.0.2.10:11010
 ```
 
-The macOS edge carries IP through the Ethernet overlay.
+The macOS edge carries IP through the fabric protocol.
 The macOS `utun` interface does not expose arbitrary Ethernet frames.
 
 ## Run without administrator privileges
@@ -255,7 +255,7 @@ uri = "udp://192.0.2.11:11010"
 enabled = true
 
 [flags]
-port_mode = "ethernet"
+interface_adapter = "tap"
 default_protocol = "udp"
 enable_encryption = true
 encryption_algorithm = "chacha20-poly1305"
@@ -570,15 +570,15 @@ The table includes every supported flag.
 | `quic_brutal_loss_compensation` | `true` | Add bounded Brutal attempts for measured loss. | `--quic-brutal-loss-compensation` |
 | `quic_initial_receive_window` | `1250000` | Set the QUIC initial per-stream receive window. | `--quic-initial-receive-window` |
 | `quic_receive_window` | `2^62-1` | Set the QUIC connection receive window. | `--quic-receive-window` |
-| `port_mode` | platform L2 mode | Select `routed`, `ethernet`, `compatible-ethernet`, or `auto`. | `--port-mode` |
+| `interface_adapter` | `auto` | Select `tun`, `tap`, or `auto`. | `--interface-adapter` |
 | `l2_fdb_capacity` | `16384` | Limit learned source MAC entries. | `--l2-fdb-capacity` |
 | `l2_fdb_age_seconds` | `300` | Expire idle MAC entries after this interval. | `--l2-fdb-age-seconds` |
 | `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
 | `quic_datagram_fec_parity` | `0` | Select `0` off, `2` for 16+2, or `3` for 16+3 alternate-path FEC. | `--quic-datagram-fec-parity` |
 | `quic_datagram_alternate_path_parity` | `false` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
 
-`auto` selects native Ethernet on Linux.
-`auto` selects routed mode on other systems.
+`auto` selects TAP on Linux and FreeBSD.
+`auto` selects TUN on other systems.
 
 `l2_fdb_capacity` accepts values from 1 through 1,048,576.
 `l2_fdb_age_seconds` accepts values from 1 through 86,400.
@@ -588,7 +588,7 @@ Brutal mode requires a positive `quic_brutal_send_bps` value.
 ## Complete `lowertier-core` startup reference
 
 Network values have matching `ET_` environment variables when `--help` shows an environment name.
-For example, `--port-mode` maps to `ET_PORT_MODE`.
+For example, `--interface-adapter` maps to `ET_INTERFACE_ADAPTER`.
 
 ### Instance and configuration input
 
@@ -629,7 +629,7 @@ For example, `--port-mode` maps to `ET_PORT_MODE`.
 
 | Option | Purpose |
 | --- | --- |
-| `--port-mode` | Select routed, native Ethernet, compatible Ethernet, or automatic mode. |
+| `--interface-adapter` | Select the `tun`, `tap`, or `auto` adapter. |
 | `--dev-name` | Set the TUN or TAP interface name. |
 | `--tun` | Set the interface name or select `userspace-networking`. |
 | `--mtu` | Set the overlay MTU. |
@@ -838,14 +838,14 @@ LowTier removes forwarding entries after their age limit or peer disconnection.
 The flood limiter controls replicated bytes for each second.
 Keep a finite flood limit on production meshes.
 
-Compatible Ethernet derives a locally administered MAC address from the peer ID.
-The mode answers ARP for its overlay IPv4 address.
-The mode sends normal unicast through the existing IP route table.
+TAP uses native Ethernet frames.
+TUN uses compact IP packets.
+Both adapters use the same fabric send function.
 
-Restart an instance after a `port_mode` change.
-Native Ethernet fails when the operating system does not provide TAP.
-LowTier selects the interface mode before it creates the virtual interface.
-LowTier does not change the interface mode while an instance runs.
+Restart an instance after an `interface_adapter` change.
+The TAP adapter fails when the operating system does not provide TAP.
+LowTier selects the adapter before it creates the virtual interface.
+LowTier does not change the adapter while an instance runs.
 
 See [the Ethernet operator guide](docs/l2-tap.md) for frame-level details.
 
@@ -962,8 +962,8 @@ lowertier-cli node config
 lowertier-cli node info
 ```
 
-Check `port_mode` and the reported interface name.
-Use `ethernet` only when the operating system provides TAP.
+Check `interface_adapter` and the reported interface name.
+Use `tap` only when the operating system provides TAP.
 
 ### Check peer and route state
 
@@ -980,7 +980,7 @@ Try an explicit UDP or TCP peer URL when automatic discovery cannot connect.
 ### Check L2 discovery
 
 Confirm that both peers advertise Ethernet input.
-Confirm that both peers use `ethernet` or `compatible-ethernet`.
+Confirm that each peer uses the correct `tap` or `tun` adapter.
 Check the configured flood limit when broadcast discovery fails.
 
 VLAN, QinQ, LLDP, and unknown EtherTypes require native Ethernet on both local edges.

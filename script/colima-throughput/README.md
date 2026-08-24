@@ -27,7 +27,7 @@ Quick smoke test:
 QUICK=1 script/colima-throughput/e2e.sh
 ```
 
-Full L3, L2-TUN, and TAP matrix:
+Full TUN, TAP, and automatic adapter matrix:
 
 ```bash
 script/colima-throughput/e2e.sh
@@ -39,12 +39,12 @@ Reuse an already-built image:
 BUILD_IMAGE=0 RUNS=3 DURATION=15 script/colima-throughput/e2e.sh
 ```
 
-QUIC DATAGRAM L2-TUN under randomized 100-180 ms one-way delay and 3% loss:
+QUIC DATAGRAM TUN test with 100-180 ms one-way delay and 3% loss:
 
 ```bash
 DOCKER_CONTEXT=colima-lowertier-l2 \
 UNDERLAY_PROTOCOL=quic \
-MODES=compatible-ethernet \
+ADAPTERS=tun \
 NETEM_DELAY=140ms \
 NETEM_JITTER=40ms \
 NETEM_LOSS=3% \
@@ -80,7 +80,7 @@ Important controls:
 | `DOCKER_CONTEXT` | `colima` | Docker endpoint for the VZ profile |
 | `RESULT_DIR` | temporary directory | Stable location for raw JSON and summaries |
 | `RAW_GATE_BPS` | `12000000000` | Minimum valid substrate throughput |
-| `MODES` | `routed compatible-ethernet ethernet` | LowTier port modes |
+| `ADAPTERS` | `tun tap auto` | LowTier interface adapters |
 | `PARALLEL_STREAMS` | `8` | Aggregate TCP stream count |
 | `ENCRYPTION_ALGORITHM` | `chacha20-poly1305` | Explicit authenticated dataplane cipher |
 | `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp` or `quic` |
@@ -93,6 +93,7 @@ Important controls:
 | `UDP_RATES` | `2500M 5000M 7500M 10000M 12000M` | UDP offered-rate sweep |
 | `RUNS` | `1` | Repetitions per workload |
 | `DURATION` | `10` | Measured seconds per iperf run |
+| `IPERF_TIMEOUT_SECONDS` | `DURATION + OMIT + 15` | Maximum seconds for one iperf client |
 | `RUN_TCP` | `1` | Run overlay TCP workloads. Set `0` to omit these workloads. |
 | `RUN_UDP` | `1` | Run overlay UDP workloads |
 | `RUN_CPU_PROBE` | `1` | Run the separate loaded TCP CPU/latency probe |
@@ -101,6 +102,7 @@ Important controls:
 `throughput.tsv` contains only complete normalized iperf results. If an overload
 resets an inner iperf control flow, `workload-errors.tsv` records the workload
 and exact iperf error instead of emitting a malformed throughput row.
+The timeout also prevents an overloaded reverse flow from blocking the matrix.
 `cpu-cores-per-gbit.tsv` reports each LowTier endpoint's process CPU divided by
 received payload throughput. Raw iperf JSON, unloaded and loaded ping samples,
 offload state, logs, and environment metadata remain alongside them.

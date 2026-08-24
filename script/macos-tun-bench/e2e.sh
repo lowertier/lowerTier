@@ -47,7 +47,11 @@ cleanup() {
         sudo -n kill "$sc_usage_pid" 2>/dev/null || true
         wait "$sc_usage_pid" 2>/dev/null || true
     fi
-    docker --context "$docker_context" rm -f "$container_name" >/dev/null 2>&1 || true
+    if docker --context "$docker_context" inspect "$container_name" >/dev/null 2>&1; then
+        docker --context "$docker_context" logs "$container_name" \
+            >"$result_dir/server.log" 2>&1 || true
+        docker --context "$docker_context" rm -f "$container_name" >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -81,7 +85,7 @@ capture_interface_counters() {
 
 mkdir -p "$result_dir"
 mkdir -p "$result_dir/iperf" "$result_dir/loaded-latency" "$result_dir/profiles" "$result_dir/resources"
-perf_write_metadata "$result_dir" "native-macos-compatible-ethernet"
+perf_write_metadata "$result_dir" "native-macos-tun"
 printf 'colima_profile=%s\ndocker_context=%s\nparallel_streams=%s\nencryption_algorithm=%s\nmtu=%s\nruntime_env=%s\nprofile_duration=%s\n' \
     "$colima_profile" "$docker_context" "$parallel_streams" "$encryption_algorithm" "$mtu" "$runtime_env" "$profile_duration" \
     >>"$result_dir/environment.txt"
@@ -94,19 +98,26 @@ docker --context "$docker_context" run -d \
     --name "$container_name" \
     --cap-add NET_ADMIN \
     --device /dev/net/tun \
-    -p "${host_udp_port}:11010/udp" \
     "$image" \
     env $runtime_env /usr/local/bin/lowertier-core \
     --network-name macos-tun-bench \
     --network-secret macos-tun-bench-secret \
     --encryption-algorithm "$encryption_algorithm" \
     --mtu "$mtu" \
-    --port-mode compatible-ethernet \
+    --interface-adapter tun \
     --ipv4 10.91.0.2/24 \
-    --listeners udp://0.0.0.0:11010 \
+    --no-listener \
+    --peers "udp://host.docker.internal:${host_udp_port}" \
     --default-protocol udp \
     --disable-upnp true \
-    --rpc-portal 0.0.0.0:15992 >/dev/null
+    --rpc-portal 127.0.0.1:15992 >/dev/null
+
+sleep 1
+if [[ $(docker --context "$docker_context" inspect -f '{{.State.Running}}' "$container_name") != true ]]; then
+    docker --context "$docker_context" logs "$container_name" >"$result_dir/server.log" 2>&1 || true
+    echo "the Linux benchmark node stopped before the macOS client started" >&2
+    exit 1
+fi
 
 (
     cd "$result_dir"
@@ -115,10 +126,9 @@ docker --context "$docker_context" run -d \
         --network-secret macos-tun-bench-secret \
         --encryption-algorithm "$encryption_algorithm" \
         --mtu "$mtu" \
-        --port-mode compatible-ethernet \
+        --interface-adapter tun \
         --ipv4 10.91.0.1/24 \
-        --no-listener \
-        --peers "udp://127.0.0.1:${host_udp_port}" \
+        --listeners "udp://0.0.0.0:${host_udp_port}" \
         --default-protocol udp \
         --disable-upnp true \
         --rpc-portal 127.0.0.1:15991
@@ -150,7 +160,7 @@ for direction in forward reverse; do
         iperf_json="$result_dir/iperf/${direction}-r${run}.json"
         iperf3 -c 10.91.0.2 --connect-timeout 3000 -t "$duration" -O 2 \
             -P "$parallel_streams" $reverse_flag -J >"$iperf_json"
-        printf 'compatible-ethernet\t%s\n' "$(perf_parse_iperf_json "$direction" "$run" "$iperf_json")" \
+        printf 'tun\t%s\n' "$(perf_parse_iperf_json "$direction" "$run" "$iperf_json")" \
             | tee -a "$results"
     done
 done

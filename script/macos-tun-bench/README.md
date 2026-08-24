@@ -1,13 +1,16 @@
 # Native macOS TUN efficiency benchmark
 
 This harness runs `lowertier-core` natively through macOS utun and connects it to a Linux LowTier
-peer in Colima. It measures L2-TUN in both directions with parallel TCP streams, unloaded and
+peer in Colima. It measures TUN in both directions with parallel TCP streams, unloaded and
 loaded latency, and native LowTier CPU per Gbit.
 
-Absolute throughput is often limited by the macOS-to-VM path, especially when the selected Colima
-profile uses QEMU or UDP port forwarding. CPU per Gbit and latency are therefore the primary
-macOS efficiency measurements. Use the VZ Colima throughput harness for the 10GbE-class Linux
-ceiling.
+Absolute throughput is often limited by the macOS-to-VM path.
+This limit is more visible when the selected Colima profile uses QEMU.
+The native peer listens on macOS.
+The Colima peer connects through `host.docker.internal`.
+This layout does not use Colima UDP port forwarding.
+CPU per Gbit and latency are the primary macOS efficiency measurements.
+Use the Colima throughput harness for the Linux software ceiling.
 
 ## Prerequisites
 
@@ -41,10 +44,10 @@ Useful controls:
 | `PROFILE_DURATION` | `0` | Seconds per optional symbol, interface-counter, and process profile |
 | `COLIMA_PROFILE` | `lowertier-l2` | Peer VM profile |
 | `DOCKER_CONTEXT` | `colima-lowertier-l2` | Peer Docker endpoint |
-| `RESULT_DIR` | temporary directory | Persistent output location |
+| `RESULT_DIR` | temporary directory | Output location |
 
 The result directory contains normalized throughput TSV, raw iperf JSON, unloaded ping samples,
 loaded-latency samples, native `top` samples, RSS and thread samples, LowTier CPU per Gbit, and
-environment metadata. With `PROFILE_DURATION` greater than zero it also contains macOS `sample`,
+environment metadata and the Linux peer log. With `PROFILE_DURATION` greater than zero it also contains macOS `sample`,
 `sc_usage`, `vmmap`, and utun interface-counter artifacts. `sc_usage` is known to return unusable
 zero activity on some macOS releases; the other artifacts remain independent.

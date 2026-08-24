@@ -12,6 +12,7 @@ node_b=${LOWTIER_BENCH_NODE_B:-lowertier-throughput-b}
 result_dir=${RESULT_DIR:-$(mktemp -d -t lowertier-colima-throughput.XXXXXX)}
 duration=${DURATION:-10}
 omit=${OMIT:-2}
+iperf_timeout_seconds=${IPERF_TIMEOUT_SECONDS:-$((duration + omit + 15))}
 runs=${RUNS:-1}
 parallel_streams=${PARALLEL_STREAMS:-8}
 encryption_algorithm=${ENCRYPTION_ALGORITHM:-chacha20-poly1305}
@@ -23,7 +24,7 @@ netem_jitter=${NETEM_JITTER:-0ms}
 netem_loss=${NETEM_LOSS:-0%}
 netem_loss_correlation=${NETEM_LOSS_CORRELATION:-0%}
 netem_limit=${NETEM_LIMIT:-250000}
-modes_text=${MODES:-"routed compatible-ethernet ethernet"}
+adapters_text=${ADAPTERS:-${MODES:-"tun tap auto"}}
 udp_rates_text=${UDP_RATES:-"2500M 5000M 7500M 10000M 12000M"}
 raw_gate_bps=${RAW_GATE_BPS:-12000000000}
 require_raw_gate=${REQUIRE_RAW_GATE:-0}
@@ -48,7 +49,19 @@ cleanup_nodes() {
     "${docker_cmd[@]}" rm -f "${containers[@]}" >/dev/null 2>&1 || true
 }
 
+capture_active_logs() {
+    if [[ ! -d "$result_dir/logs" ]]; then
+        return
+    fi
+    local node
+    for node in "${containers[@]}"; do
+        "${docker_cmd[@]}" cp "$node:/tmp/lowertier.log" \
+            "$result_dir/logs/failure-${node}.log" >/dev/null 2>&1 || true
+    done
+}
+
 cleanup() {
+    capture_active_logs
     cleanup_nodes
     "${docker_cmd[@]}" network rm "$network" >/dev/null 2>&1 || true
 }
@@ -58,18 +71,18 @@ if [[ "$quick" == 1 ]]; then
     duration=${DURATION:-3}
     cpu_duration=${CPU_DURATION:-3}
     runs=${RUNS:-1}
-    modes_text=${MODES:-routed}
+    adapters_text=${ADAPTERS:-${MODES:-tun}}
     udp_rates_text=${UDP_RATES:-10000M}
 fi
 
-read -r -a modes <<<"$modes_text"
+read -r -a adapters <<<"$adapters_text"
 read -r -a udp_rates <<<"$udp_rates_text"
 read -r -a directions <<<"$directions_text"
 
 mkdir -p "$result_dir/raw" "$result_dir/overlay" "$result_dir/cpu" "$result_dir/latency" "$result_dir/logs"
 perf_write_metadata "$result_dir" "colima-throughput:$docker_context"
-printf 'docker_context=%s\nraw_gate_bps=%s\nmodes=%s\nudp_rates=%s\nencryption_algorithm=%s\n' \
-    "$docker_context" "$raw_gate_bps" "$modes_text" "$udp_rates_text" "$encryption_algorithm" \
+printf 'docker_context=%s\nraw_gate_bps=%s\nadapters=%s\nudp_rates=%s\nencryption_algorithm=%s\n' \
+    "$docker_context" "$raw_gate_bps" "$adapters_text" "$udp_rates_text" "$encryption_algorithm" \
     >>"$result_dir/environment.txt"
 printf 'runtime_env=%s\n' "$runtime_env" >>"$result_dir/environment.txt"
 printf 'run_tcp=%s\nrun_udp=%s\nrun_cpu_probe=%s\n' \
@@ -179,7 +192,8 @@ run_iperf() {
     fi
 
     for attempt in $(seq 0 "$iperf_busy_retries"); do
-        "${docker_cmd[@]}" exec "$node_a" iperf3 "${iperf_args[@]}" >"$output" || true
+        "${docker_cmd[@]}" exec "$node_a" \
+            timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$output" || true
         if parsed=$(perf_parse_iperf_json "$direction" "$run" "$output"); then
             printf '%s\t%s\n' "$mode" "$parsed" >>"$result_dir/throughput.tsv"
             return
@@ -277,7 +291,8 @@ record_cpu_probe() {
         >"$ping_file" 2>&1 &
     ping_pid=$!
 
-    "${docker_cmd[@]}" exec "$node_a" iperf3 "${iperf_args[@]}" >"$json"
+    "${docker_cmd[@]}" exec "$node_a" \
+        timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$json"
     wait "$pid_a" "$pid_b" "$ping_pid"
 
     capture_dataplane_snapshot "$node_a" 15991 \
@@ -347,23 +362,22 @@ else
     printf 'not-run\n' >"$result_dir/substrate-status.txt"
 fi
 
-for mode in "${modes[@]}"; do
-    case "$mode" in
-        routed) subnet=10.201.1 ;;
-        compatible-ethernet) subnet=10.201.2 ;;
-        ethernet) subnet=10.201.3 ;;
+for adapter in "${adapters[@]}"; do
+    case "$adapter" in
+        tun) subnet=10.201.1 ;;
+        tap) subnet=10.201.3 ;;
         auto) subnet=10.201.4 ;;
-        *) echo "unsupported mode: $mode" >&2; exit 64 ;;
+        *) echo "unsupported interface adapter: $adapter" >&2; exit 64 ;;
     esac
 
-    profile=$mode
+    profile=$adapter
 
     start_containers
     apply_network_noise
     "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
-        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
+        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --interface-adapter $adapter --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
     "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
-        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --port-mode $mode --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
+        "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --interface-adapter $adapter --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
     wait_for_ping "$subnet.2"
     "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \
         >"$result_dir/latency/${profile}-unloaded.txt"
