@@ -726,9 +726,14 @@ fn admit_udp_ring_run(
     lossy: bool,
 ) -> Result<(), TunnelError> {
     if !lossy {
-        return ring_sender
-            .force_send_batch(batch)
-            .map_err(|_| TunnelError::BufferFull);
+        let batch_len = batch.len();
+        return ring_sender.force_send_batch(batch).map_err(|_| {
+            tracing::warn!(
+                dropped = batch_len,
+                "ring sender full, dropped a reliable run"
+            );
+            TunnelError::BufferFull
+        });
     }
 
     let batch_len = batch.len();
