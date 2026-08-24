@@ -76,10 +76,7 @@ use crate::{
     tunnel::{
         BatchStreamItem, PacketBatchStream, TransportBinding, TransportBindingKind, Tunnel,
         TunnelError,
-        batch::{
-            MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES,
-            wait_for_delivery_with_bounded_prefetch,
-        },
+        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES},
         direct::{DirectTunnel, DirectTunnelSender},
         filter::{
             StatsRecorderTunnelFilter, TunnelFilter, TunnelFilterChain, TunnelWithFilter,
@@ -273,6 +270,56 @@ fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
                 .peer_manager_header()
                 .is_some_and(|header| !packet_batch_is_direct_control(header.packet_type))
         })
+}
+
+fn batch_packet_type_is_direct_ping_pong(packet_type: u8) -> bool {
+    packet_type == PacketType::Ping as u8 || packet_type == PacketType::Pong as u8
+}
+
+fn packet_batch_is_direct_ping_pong(batch: &PacketBatch) -> bool {
+    !batch.is_empty()
+        && batch.iter().all(|packet| {
+            let packet_type = packet
+                .parsed_metadata()
+                .map(|metadata| metadata.packet_type)
+                .or_else(|| {
+                    packet
+                        .peer_manager_header()
+                        .map(|header| header.packet_type)
+                });
+            packet_type.is_some_and(batch_packet_type_is_direct_ping_pong)
+        })
+}
+
+// Liveness probes must not queue behind bulk delivery. When the receive loop is
+// parked waiting for the TUN-bound byte budget, ping and pong batches are still
+// answered from this helper; everything else keeps its existing order.
+async fn respond_to_direct_ping_pong_batch(
+    incoming: PacketBatch,
+    sink: &DirectTunnelSender,
+    ctrl_sender: &broadcast::Sender<ZCPacket>,
+    control_metrics: &AggregateTrafficMetrics,
+) {
+    for mut zc_packet in incoming {
+        let buf_len = zc_packet.buf_len() as u64;
+        let Some(peer_mgr_hdr) = zc_packet.mut_peer_manager_header() else {
+            continue;
+        };
+        if peer_mgr_hdr.packet_type == PacketType::Ping as u8 {
+            control_metrics.record_rx(buf_len);
+            peer_mgr_hdr.packet_type = PacketType::Pong as u8;
+            if let Err(e) = sink.send(zc_packet).await {
+                tracing::error!(?e, "peer conn send req error");
+            } else {
+                control_metrics.record_tx(buf_len);
+            }
+        } else if peer_mgr_hdr.packet_type == PacketType::Pong as u8 {
+            control_metrics.record_rx(buf_len);
+            if let Err(e) = ctrl_sender.send(zc_packet) {
+                tracing::error!(?e, "peer conn send ctrl resp error");
+            }
+        }
+    }
 }
 
 fn speed_probe_ack_packet(my_peer_id: PeerId, peer_id: PeerId, ack: ProbeAck) -> ZCPacket {
@@ -4396,14 +4443,50 @@ impl PeerConn {
 
                     let received_bytes = incoming.buffer_byte_len() as u64;
                     if packet_batch_is_direct_peer_data(&incoming) {
-                        let (delivery, mut prefetched, prefetch_reached_end) =
-                            wait_for_delivery_with_bounded_prefetch(
-                                &mut stream,
-                                sender.send_batch(incoming),
-                                RECEIVE_PREFETCH_BATCHES.saturating_sub(receive_queue.len()),
-                            )
-                            .await;
-                        if delivery.is_err() {
+                        // Deliver the bulk batch while still answering liveness
+                        // traffic: ping/pong-only batches are handled inline
+                        // instead of waiting behind the parked delivery.
+                        let delivery = sender.send_batch(incoming);
+                        tokio::pin!(delivery);
+                        let max_prefetch =
+                            RECEIVE_PREFETCH_BATCHES.saturating_sub(receive_queue.len());
+                        let mut prefetched = VecDeque::with_capacity(max_prefetch.min(8));
+                        let mut prefetch_stream_open = true;
+                        let mut prefetch_reached_end = false;
+                        let mut delivery_failed = false;
+                        loop {
+                            tokio::select! {
+                                biased;
+                                delivery_result = &mut delivery => {
+                                    if delivery_result.is_err() {
+                                        delivery_failed = true;
+                                    }
+                                    break;
+                                }
+                                next = stream.next(), if prefetch_stream_open && prefetched.len() < max_prefetch => {
+                                    match next {
+                                        Some(result) => {
+                                            if result.as_ref().is_ok_and(packet_batch_is_direct_ping_pong) {
+                                                respond_to_direct_ping_pong_batch(
+                                                    result.expect("checked ping/pong batch is ok"),
+                                                    &sink,
+                                                    &ctrl_sender,
+                                                    &control_metrics,
+                                                )
+                                                .await;
+                                            } else {
+                                                prefetched.push_back(result);
+                                            }
+                                        }
+                                        None => {
+                                            prefetch_stream_open = false;
+                                            prefetch_reached_end = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if delivery_failed {
                             break;
                         }
                         if received_bytes != 0
@@ -5122,6 +5205,7 @@ impl Drop for PeerConn {
 
 #[cfg(test)]
 pub mod tests {
+    use crate::tunnel::batch::wait_for_delivery_with_bounded_prefetch;
     use std::{
         pin::Pin,
         sync::Arc,
@@ -5596,6 +5680,39 @@ pub mod tests {
         ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
         batch.try_push(ping).unwrap();
         assert!(!packet_batch_is_direct_peer_data(&batch));
+    }
+
+    #[test]
+    fn ping_pong_only_batches_are_classified_for_inline_handling() {
+        let mut ping_batch = PacketBatch::new();
+        let mut ping = ZCPacket::new_with_payload(b"ping");
+        ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
+        ping_batch.try_push(ping).unwrap();
+        assert!(packet_batch_is_direct_ping_pong(&ping_batch));
+
+        let mut pong_batch = PacketBatch::new();
+        let mut pong = ZCPacket::new_with_payload(b"pong");
+        pong.fill_peer_manager_hdr(1, 2, PacketType::Pong as u8);
+        pong_batch.try_push(pong).unwrap();
+        assert!(packet_batch_is_direct_ping_pong(&pong_batch));
+
+        // Mixed control/data and other control kinds keep the slow path.
+        let mut mixed = PacketBatch::new();
+        let mut ping = ZCPacket::new_with_payload(b"ping");
+        ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
+        mixed.try_push(ping).unwrap();
+        let mut data = ZCPacket::new_with_payload(b"payload");
+        data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        mixed.try_push(data).unwrap();
+        assert!(!packet_batch_is_direct_ping_pong(&mixed));
+
+        let mut probe_batch = PacketBatch::new();
+        let mut probe = ZCPacket::new_with_payload(b"probe");
+        probe.fill_peer_manager_hdr(1, 2, PacketType::SpeedProbe as u8);
+        probe_batch.try_push(probe).unwrap();
+        assert!(!packet_batch_is_direct_ping_pong(&probe_batch));
+
+        assert!(!packet_batch_is_direct_ping_pong(&PacketBatch::new()));
     }
 
     #[test]
