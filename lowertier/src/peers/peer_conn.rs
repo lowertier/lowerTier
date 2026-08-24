@@ -276,6 +276,23 @@ fn batch_packet_type_is_direct_ping_pong(packet_type: u8) -> bool {
     packet_type == PacketType::Ping as u8 || packet_type == PacketType::Pong as u8
 }
 
+fn stamp_and_validate_incoming_identity(
+    batch: &mut PacketBatch,
+    probe_peer_id: PeerId,
+    identity_type: PeerIdentityType,
+    secure_auth_level: SecureAuthLevel,
+    session_id: uuid::Uuid,
+) -> bool {
+    let mut identity_valid = true;
+    for packet in batch.iter_mut() {
+        identity_valid &= packet.set_authenticated_peer_id(probe_peer_id);
+        identity_valid &= packet.set_authenticated_peer_identity_type(identity_type);
+        identity_valid &= packet.set_authenticated_peer_secure_auth_level(secure_auth_level);
+        identity_valid &= packet.set_authenticated_session_id(session_id);
+    }
+    identity_valid
+}
+
 fn packet_batch_is_direct_ping_pong(batch: &PacketBatch) -> bool {
     !batch.is_empty()
         && batch.iter().all(|packet| {
@@ -303,6 +320,10 @@ async fn respond_to_direct_ping_pong_batch(
     for mut zc_packet in incoming {
         let buf_len = zc_packet.buf_len() as u64;
         let Some(peer_mgr_hdr) = zc_packet.mut_peer_manager_header() else {
+            tracing::error!(
+                "unexpected packet: {:?}, cannot decode peer manager hdr",
+                zc_packet
+            );
             continue;
         };
         if peer_mgr_hdr.packet_type == PacketType::Ping as u8 {
@@ -4411,17 +4432,13 @@ impl PeerConn {
                             break;
                         }
                     };
-                    let mut identity_valid = true;
-                    for packet in incoming.iter_mut() {
-                        identity_valid &= packet.set_authenticated_peer_id(probe_peer_id);
-                        identity_valid &= packet
-                            .set_authenticated_peer_identity_type(authenticated_peer_identity_type);
-                        identity_valid &= packet.set_authenticated_peer_secure_auth_level(
-                            authenticated_peer_secure_auth_level,
-                        );
-                        identity_valid &=
-                            packet.set_authenticated_session_id(authenticated_session_id);
-                    }
+                    let identity_valid = stamp_and_validate_incoming_identity(
+                        &mut incoming,
+                        probe_peer_id,
+                        authenticated_peer_identity_type,
+                        authenticated_peer_secure_auth_level,
+                        authenticated_session_id,
+                    );
                     if !identity_valid {
                         tracing::error!(
                             authenticated_peer_id = probe_peer_id,
@@ -4454,6 +4471,7 @@ impl PeerConn {
                         let mut prefetch_stream_open = true;
                         let mut prefetch_reached_end = false;
                         let mut delivery_failed = false;
+                        let mut identity_invalid = false;
                         loop {
                             tokio::select! {
                                 biased;
@@ -4465,19 +4483,40 @@ impl PeerConn {
                                 }
                                 next = stream.next(), if prefetch_stream_open && prefetched.len() < max_prefetch => {
                                     match next {
-                                        Some(result) => {
-                                            if result.as_ref().is_ok_and(packet_batch_is_direct_ping_pong) {
-                                                respond_to_direct_ping_pong_batch(
-                                                    result.expect("checked ping/pong batch is ok"),
-                                                    &sink,
-                                                    &ctrl_sender,
-                                                    &control_metrics,
-                                                )
-                                                .await;
-                                            } else {
-                                                prefetched.push_back(result);
+                                        Some(result) => match result {
+                                            Ok(mut batch) => {
+                                                if !stamp_and_validate_incoming_identity(
+                                                    &mut batch,
+                                                    probe_peer_id,
+                                                    authenticated_peer_identity_type,
+                                                    authenticated_peer_secure_auth_level,
+                                                    authenticated_session_id,
+                                                ) {
+                                                    tracing::error!(
+                                                        authenticated_peer_id = probe_peer_id,
+                                                        "peer packet contains conflicting authenticated identity"
+                                                    );
+                                                    task_ret = Err(TunnelError::InvalidPacket(
+                                                        "peer packet contains conflicting authenticated identity"
+                                                            .to_string(),
+                                                    ));
+                                                    identity_invalid = true;
+                                                    break;
+                                                }
+                                                if packet_batch_is_direct_ping_pong(&batch) {
+                                                    respond_to_direct_ping_pong_batch(
+                                                        batch,
+                                                        &sink,
+                                                        &ctrl_sender,
+                                                        &control_metrics,
+                                                    )
+                                                    .await;
+                                                } else {
+                                                    prefetched.push_back(Ok(batch));
+                                                }
                                             }
-                                        }
+                                            Err(_) => prefetched.push_back(result),
+                                        },
                                         None => {
                                             prefetch_stream_open = false;
                                             prefetch_reached_end = true;
@@ -4486,7 +4525,7 @@ impl PeerConn {
                                 }
                             }
                         }
-                        if delivery_failed {
+                        if delivery_failed || identity_invalid {
                             break;
                         }
                         if received_bytes != 0

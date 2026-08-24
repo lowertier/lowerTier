@@ -7454,6 +7454,33 @@ impl PeerManager {
         DirectNicBatchWriter::send_to(endpoint, delivery).await
     }
 
+    // Drain target for the legacy peer-packet channel. The batched dataplane
+    // rework removed the task that consumed this channel, so batches stranded
+    // there kept their byte credits forever and starved every sibling channel
+    // sharing the same semaphore under load.
+    pub(crate) async fn deliver_batch_to_nic(&self, batch: PacketBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        let Some(endpoint) = self.direct_nic_writer.current_endpoint() else {
+            tracing::debug!(
+                packets = batch.len(),
+                "dropping NIC-bound batch because no direct NIC endpoint is installed"
+            );
+            return;
+        };
+        match plan_direct_nic_delivery(batch) {
+            Ok(delivery) => {
+                if let Err(error) = DirectNicBatchWriter::send_to(endpoint, delivery).await {
+                    tracing::error!(?error, "send direct packet batch to NIC failed");
+                }
+            }
+            Err(error) => {
+                tracing::error!(?error, "prepare direct packet batch for NIC failed");
+            }
+        }
+    }
+
     pub fn get_foreign_network_manager(&self) -> Arc<ForeignNetworkManager> {
         self.foreign_network_manager.clone()
     }

@@ -231,7 +231,7 @@ pub(crate) fn poll_send_batch(
                         "scalar UDP fallback sent a partial datagram",
                     )));
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Poll::Ready(Err(error)),
             }
             continue;
@@ -248,7 +248,7 @@ pub(crate) fn poll_send_batch(
                 )));
             }
             Ok(sent) => *completed += sent,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
             Err(error) => return Poll::Ready(Err(error)),
         }
     }
