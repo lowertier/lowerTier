@@ -4,7 +4,7 @@ Criterion benchmarks for LowTier hot paths.
 
 | Bench                       | What it measures                                                                 |
 | --------------------------- | -------------------------------------------------------------------------------- |
-| `tx_throughput`             | End-to-end TX injection path through `peer_manager::send_msg_by_ip`              |
+| `tx_throughput`             | Unified fabric scalar, batch, and saturation paths                               |
 | `packet_bytes_extraction`   | `ZCPacket::payload_bytes` / `tunnel_payload_bytes` extraction (advance hot path)  |
 
 ## Packet Bytes Extraction
@@ -43,26 +43,25 @@ cargo bench --bench packet_bytes_extraction -- --quiet
 
 ## TX Throughput Benchmark
 
-Criterion benchmark for LowTier's TX injection path (`peer_manager::send_msg_by_ip`).
+This Criterion benchmark measures the unified LowTier fabric transmit path.
 
 ## What it measures
 
-The benchmark sets up two LowTier instances (`hot-a` / `hot-b`) and drives
-packets from `hot-a` to `hot-b` via `peer_manager.send_msg_by_ip`. This is the
-same entry point `lowertier-core` uses for daily forwarded traffic, so the
-numbers reflect the real TX hot path: NIC pipeline → route lookup →
-compress/encrypt → peer connection → tunnel send.
+The benchmark sets up two LowTier instances named `hot-a` and `hot-b`.
+It sends IP packets through the unified fabric API.
+The measured path includes route lookup, encryption, peer processing, and tunnel transmission.
 
-Two variants are reported per tunnel kind:
+Three variants are reported for each tunnel type:
 
-| Bench                             | What it measures                                                                                                                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tx_throughput/<tunnel>`          | Serial baseline. One send in flight at a time. Reports per-packet CPU cost (TX injection latency).                                                                                          |
-| `tx_throughput/<tunnel>-saturate` | Spawns `TX_THROUGHPUT_INFLIGHT` tokio tasks that independently pump `send_msg_by_ip`. Reports the aggregate throughput ceiling the peer manager + tunnel can sustain across worker threads. |
+| Bench | What it measures |
+| --- | --- |
+| `tx_throughput/<tunnel>-p<size>-b<batch>-scalar` | Sends one fabric packet for each API call. |
+| `tx_throughput/<tunnel>-p<size>-b<batch>-batch` | Sends up to `TX_THROUGHPUT_BATCH_SIZE` packets for each API call. |
+| `tx_throughput/<tunnel>-p<size>-b<batch>-saturate` | Sends scalar packets from concurrent Tokio tasks. |
 
-> **Out of scope (by design):** TUN read/write (`no_tun = true`), compression
-> (default `None`), reverse/RX-side measurement, multi-peer fanout. Add
-> separate benchmarks if you need those.
+The benchmark does not include TUN or TAP device access.
+The Colima throughput harness measures these device paths.
+The benchmark also excludes compression, reverse traffic, and multi-peer fanout.
 
 ## Quick start
 
@@ -108,6 +107,7 @@ sudo TX_THROUGHPUT_TUNNEL=udp cargo bench --bench tx_throughput -- --quiet
 | `TX_THROUGHPUT_PKT_SIZE`         | `1400`                | IP total length in bytes               |
 | `TX_THROUGHPUT_WORKER_THREADS`   | `4`                   | tokio worker threads                   |
 | `TX_THROUGHPUT_INFLIGHT`         | `64`                  | saturate-mode concurrency (task count) |
+| `TX_THROUGHPUT_BATCH_SIZE`       | `64`                  | packets in each unified fabric batch   |
 | `TX_THROUGHPUT_TUNNEL_PORT`      | `35521`               | tcp/udp listen port                    |
 | `TX_THROUGHPUT_MEASUREMENT_SECS` | `10`                  | Criterion `measurement_time`           |
 | `TX_THROUGHPUT_WARMUP_SECS`      | `3`                   | Criterion `warm_up_time`               |

@@ -6,6 +6,7 @@ pub mod acl_filter;
 #[cfg(feature = "quic")]
 mod alternate_fec;
 pub mod credential_manager;
+pub(crate) mod crypto_workers;
 pub mod peer;
 pub mod peer_conn;
 pub mod peer_conn_ping;
@@ -18,8 +19,10 @@ pub mod peer_session;
 pub(crate) mod public_ipv6;
 pub(crate) mod receiver_pacing;
 pub mod relay_peer_map;
+pub(crate) mod replay_window;
 pub mod route_trait;
 pub mod rpc_service;
+pub mod service_route;
 pub(crate) mod speed_probe;
 mod traffic_metrics;
 
@@ -34,6 +37,7 @@ pub mod foreign_network_client;
 pub mod foreign_network_manager;
 
 pub mod encrypt;
+pub mod fabric;
 pub(crate) mod link_envelope;
 pub(crate) mod secure_datagram;
 

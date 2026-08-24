@@ -92,7 +92,8 @@ pub fn gen_default_flags() -> Flags {
         speed_first: false,
         speed_probe_interval_seconds: 30,
         speed_probe_budget_bps: 0,
-        port_mode: PortMode::Auto.to_string(),
+        port_mode: String::new(),
+        interface_adapter: InterfaceAdapter::Auto.to_string(),
         l2_fdb_capacity: 16_384,
         l2_fdb_age_seconds: 300,
         l2_flood_bps: 64 * 1024 * 1024,
@@ -100,13 +101,19 @@ pub fn gen_default_flags() -> Flags {
     }
 }
 
+#[allow(deprecated)]
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)?;
 
-    flags.port_mode.parse::<PortMode>().map_err(|_| {
+    InterfaceAdapter::from_flags_checked(flags).map_err(|_| {
+        let field = if flags.port_mode.is_empty() {
+            "interface_adapter"
+        } else {
+            "port_mode"
+        };
         anyhow::anyhow!(
-            "unsupported port_mode {:?}; expected \"routed\", \"ethernet\", \"compatible-ethernet\", or \"auto\"",
-            flags.port_mode
+            "unsupported interface adapter in {field}: {:?}; expected \"tun\", \"tap\", or \"auto\"",
+            InterfaceAdapter::configured_value(flags)
         )
     })?;
     if !(1..=1_048_576).contains(&flags.l2_fdb_capacity) {
@@ -197,28 +204,58 @@ pub fn parse_proxy_listener_url(value: &str, scheme: &str) -> anyhow::Result<url
     Ok(url)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, VariantArray)]
-#[strum(ascii_case_insensitive)]
-pub enum PortMode {
-    #[strum(serialize = "routed")]
-    L3,
-    #[strum(serialize = "ethernet")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterfaceAdapter {
+    Tun,
     Tap,
-    #[strum(serialize = "compatible-ethernet")]
-    L2Tun,
-    #[strum(serialize = "auto")]
     Auto,
 }
 
-impl PortMode {
+impl std::fmt::Display for InterfaceAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Tun => "tun",
+            Self::Tap => "tap",
+            Self::Auto => "auto",
+        })
+    }
+}
+
+impl std::str::FromStr for InterfaceAdapter {
+    type Err = strum::ParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "tun" | "routed" | "compatible-ethernet" => Ok(Self::Tun),
+            "tap" | "ethernet" => Ok(Self::Tap),
+            "auto" => Ok(Self::Auto),
+            _ => Err(strum::ParseError::VariantNotFound),
+        }
+    }
+}
+
+impl InterfaceAdapter {
+    #[allow(deprecated)]
+    fn configured_value(flags: &Flags) -> &str {
+        if !flags.port_mode.is_empty() {
+            &flags.port_mode
+        } else {
+            &flags.interface_adapter
+        }
+    }
+
+    pub fn from_flags_checked(flags: &Flags) -> Result<Self, strum::ParseError> {
+        Self::configured_value(flags).parse()
+    }
+
     pub fn from_flags(flags: &Flags) -> Self {
-        flags.port_mode.parse().expect("port mode was validated")
+        Self::from_flags_checked(flags).expect("interface adapter was validated")
     }
 
     pub fn uses_ethernet_overlay(self) -> bool {
         match self {
-            Self::L3 => false,
-            Self::Tap | Self::L2Tun => true,
+            Self::Tun => false,
+            Self::Tap => true,
             Self::Auto => cfg!(any(target_os = "linux", target_os = "freebsd")),
         }
     }
@@ -227,12 +264,8 @@ impl PortMode {
         match self {
             Self::Tap => true,
             Self::Auto => cfg!(any(target_os = "linux", target_os = "freebsd")),
-            Self::L3 | Self::L2Tun => false,
+            Self::Tun => false,
         }
-    }
-
-    pub fn is_l2_tun(self) -> bool {
-        self == Self::L2Tun
     }
 
     pub fn is_auto(self) -> bool {
@@ -241,9 +274,9 @@ impl PortMode {
 
     pub fn allows_bridge_input(self, enable_bridge: bool) -> bool {
         match self {
-            Self::Tap | Self::L2Tun => true,
+            Self::Tap => true,
             Self::Auto => self.uses_native_ethernet() && enable_bridge,
-            Self::L3 => false,
+            Self::Tun => false,
         }
     }
 
@@ -1879,7 +1912,8 @@ socket_mark = 66
         let flags = gen_default_flags();
 
         assert_eq!(flags.default_protocol, "udp");
-        assert_eq!(flags.port_mode, "auto");
+        assert_eq!(flags.interface_adapter, "auto");
+        assert!(flags.port_mode.is_empty());
         assert!(!flags.enable_bridge);
         assert_eq!(flags.l2_fdb_capacity, 16_384);
         assert_eq!(flags.l2_fdb_age_seconds, 300);
@@ -1936,32 +1970,37 @@ socket_mark = 66
     }
 
     #[test]
-    fn l2_tun_uses_ethernet_overlay_without_native_ethernet_device() {
-        let mode = "compatible-ethernet".parse::<PortMode>().unwrap();
-
-        assert!(mode.uses_ethernet_overlay());
-        assert!(!mode.uses_native_ethernet());
-
-        let mut flags = gen_default_flags();
-        flags.port_mode = "compatible-ethernet".into();
-        validate_flags(&flags).unwrap();
+    fn legacy_port_modes_map_to_interface_adapters() {
+        assert_eq!(
+            "routed".parse::<InterfaceAdapter>().unwrap(),
+            InterfaceAdapter::Tun
+        );
+        assert_eq!(
+            "compatible-ethernet".parse::<InterfaceAdapter>().unwrap(),
+            InterfaceAdapter::Tun
+        );
+        assert_eq!(
+            "ethernet".parse::<InterfaceAdapter>().unwrap(),
+            InterfaceAdapter::Tap
+        );
+        assert_eq!(
+            "auto".parse::<InterfaceAdapter>().unwrap(),
+            InterfaceAdapter::Auto
+        );
     }
 
     #[test]
-    fn port_mode_accepts_only_canonical_profile_names() {
-        assert_eq!("routed".parse::<PortMode>().unwrap(), PortMode::L3);
-        assert_eq!("ethernet".parse::<PortMode>().unwrap(), PortMode::Tap);
+    fn interface_adapter_accepts_canonical_names() {
         assert_eq!(
-            "compatible-ethernet".parse::<PortMode>().unwrap(),
-            PortMode::L2Tun
+            "tun".parse::<InterfaceAdapter>().unwrap(),
+            InterfaceAdapter::Tun
         );
-
-        assert_eq!(PortMode::L3.to_string(), "routed");
-        assert_eq!(PortMode::Tap.to_string(), "ethernet");
-        assert_eq!(PortMode::L2Tun.to_string(), "compatible-ethernet");
-        for removed in ["l3", "tap", "l2-tun"] {
-            assert!(removed.parse::<PortMode>().is_err());
-        }
+        assert_eq!(
+            "tap".parse::<InterfaceAdapter>().unwrap(),
+            InterfaceAdapter::Tap
+        );
+        assert_eq!(InterfaceAdapter::Tun.to_string(), "tun");
+        assert_eq!(InterfaceAdapter::Tap.to_string(), "tap");
     }
 
     #[test]
@@ -1969,7 +2008,7 @@ socket_mark = 66
         let cfg = TomlConfigLoader::new_from_str(
             r#"
 [flags]
-port_mode = "ethernet"
+interface_adapter = "tap"
 l2_fdb_capacity = 32768
 l2_fdb_age_seconds = 600
 l2_flood_bps = 134217728
@@ -1987,7 +2026,7 @@ quic_datagram_alternate_path_parity = false
         .unwrap();
         let flags = cfg.get_flags();
 
-        assert_eq!(flags.port_mode, "ethernet");
+        assert_eq!(flags.interface_adapter, "tap");
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);

@@ -12,7 +12,10 @@ use {
     crate::{
         common::global_ctx::GlobalCtxEvent,
         common::stats_manager::{CounterHandle, LabelSet, LabelType, MetricName},
-        peers::peer_manager::PeerManager,
+        peers::{
+            fabric::{FabricPacket, FabricPayloadKind},
+            peer_manager::PeerManager,
+        },
         tunnel::packet_def::ZCPacket,
     },
     anyhow::Context,
@@ -20,7 +23,7 @@ use {
     socket2::{Domain, Protocol, SockAddr, Socket, Type},
     std::{
         io,
-        net::{IpAddr, SocketAddrV4, UdpSocket as StdUdpSocket},
+        net::{SocketAddrV4, UdpSocket as StdUdpSocket},
         sync::Arc,
     },
     tokio_util::task::AbortOnDropHandle,
@@ -743,7 +746,7 @@ async fn forward_normalized_packet(
 ) {
     let packet = ZCPacket::new_with_payload(&normalized.packet);
     let ret = peer_manager
-        .send_msg_by_ip(packet, IpAddr::V4(normalized.destination), true)
+        .send_fabric_packet(FabricPacket::new(FabricPayloadKind::Ip, packet))
         .await;
 
     let summary = UdpPacketSummary::parse(&normalized.packet);

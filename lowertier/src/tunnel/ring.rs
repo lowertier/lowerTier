@@ -34,6 +34,14 @@ static RING_TUNNEL_RESERVED_CAP: usize = 4;
 
 type RingLock = parking_lot::Mutex<()>;
 
+type PacketPermitFuture = Pin<Box<dyn Future<Output = OwnedSemaphorePermit> + Send + Sync>>;
+
+struct BatchPermitWait {
+    packet_count: usize,
+    reserved_packets: usize,
+    future: PacketPermitFuture,
+}
+
 struct RingItem {
     batch: PacketBatch,
     _packet_permits: OwnedSemaphorePermit,
@@ -167,8 +175,11 @@ pub struct RingSink {
     id: Uuid,
     ring_prod_impl: AsyncHeapProd<RingItem>,
     packet_permits: Arc<Semaphore>,
+    packet_capacity: usize,
     permit_wait: Option<Pin<Box<dyn Future<Output = OwnedSemaphorePermit> + Send + Sync>>>,
     ready_permit: Option<OwnedSemaphorePermit>,
+    batch_permit_wait: Option<BatchPermitWait>,
+    ready_batch_permits: Option<OwnedSemaphorePermit>,
     pending: PacketBatch,
     pending_permits: Option<OwnedSemaphorePermit>,
 }
@@ -179,8 +190,11 @@ impl RingSink {
             id: tunnel.id,
             ring_prod_impl: tunnel.ring_prod_impl.take().unwrap(),
             packet_permits: tunnel.packet_permits.clone(),
+            packet_capacity: tunnel.packet_permits.available_permits(),
             permit_wait: None,
             ready_permit: None,
+            batch_permit_wait: None,
+            ready_batch_permits: None,
             pending: PacketBatch::new(),
             pending_permits: None,
         }
@@ -257,6 +271,94 @@ impl RingSink {
             .map_err(|_| TunnelError::Shutdown)
     }
 
+    fn set_ready_batch_permits(&mut self, mut permits: OwnedSemaphorePermit, packet_count: usize) {
+        let packet_permits = permits
+            .split(packet_count)
+            .expect("the batch reservation includes all packet credits");
+        drop(permits);
+        self.ready_batch_permits = Some(packet_permits);
+    }
+
+    pub(crate) fn poll_reserve_batch(
+        &mut self,
+        cx: &mut Context<'_>,
+        packet_count: usize,
+        reserved_packets: usize,
+    ) -> Poll<Result<(), SinkError>> {
+        if packet_count == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let required = packet_count
+            .checked_add(reserved_packets)
+            .ok_or(TunnelError::BufferFull)?;
+        if required > self.packet_capacity {
+            return Poll::Ready(Err(TunnelError::BufferFull));
+        }
+        if let Some(permits) = self.ready_batch_permits.as_ref() {
+            debug_assert_eq!(permits.num_permits(), packet_count);
+            return Poll::Ready(Ok(()));
+        }
+
+        ready!(self.ring_prod_impl.poll_ready_unpin(cx)).map_err(|_| TunnelError::Shutdown)?;
+
+        if self.batch_permit_wait.is_none() {
+            let required = u32::try_from(required).map_err(|_| TunnelError::BufferFull)?;
+            match self.packet_permits.clone().try_acquire_many_owned(required) {
+                Ok(permits) => {
+                    self.set_ready_batch_permits(permits, packet_count);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(TryAcquireError::Closed) => {
+                    return Poll::Ready(Err(TunnelError::Shutdown));
+                }
+                Err(TryAcquireError::NoPermits) => {}
+            }
+            let permits = self.packet_permits.clone();
+            self.batch_permit_wait = Some(BatchPermitWait {
+                packet_count,
+                reserved_packets,
+                future: Box::pin(async move {
+                    permits
+                        .acquire_many_owned(required)
+                        .await
+                        .expect("ring packet semaphore is never closed")
+                }),
+            });
+        }
+
+        let permit_wait = self
+            .batch_permit_wait
+            .as_mut()
+            .expect("the batch permit future was installed");
+        debug_assert_eq!(permit_wait.packet_count, packet_count);
+        debug_assert_eq!(permit_wait.reserved_packets, reserved_packets);
+        self.ring_prod_impl.register_waker(cx.waker());
+        let permits = ready!(permit_wait.future.as_mut().poll(cx));
+        self.batch_permit_wait = None;
+        self.set_ready_batch_permits(permits, packet_count);
+        Poll::Ready(Ok(()))
+    }
+
+    pub(crate) fn start_send_reserved_batch(
+        &mut self,
+        batch: PacketBatch,
+    ) -> Result<(), SinkError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let packet_permits = self
+            .ready_batch_permits
+            .take()
+            .expect("batch send follows a successful batch reservation");
+        debug_assert_eq!(packet_permits.num_permits(), batch.len());
+        self.ring_prod_impl
+            .start_send_unpin(RingItem {
+                batch,
+                _packet_permits: packet_permits,
+            })
+            .map_err(|_| TunnelError::Shutdown)
+    }
+
     pub fn try_send(&mut self, item: SinkItem) -> Result<(), SinkItem> {
         if self.try_commit_pending().is_err() {
             return Err(item);
@@ -297,7 +399,16 @@ impl RingSink {
     /// This preserves the scalar overload behavior: available packet credits
     /// are used before overflow is dropped, rather than rejecting an entire
     /// vector batch because the whole batch does not fit at once.
-    pub fn try_send_batch_lossy(&mut self, mut batch: PacketBatch) -> usize {
+    pub fn try_send_batch_lossy(&mut self, batch: PacketBatch) -> usize {
+        self.try_send_batch_lossy_with_reserve(batch, 0)
+    }
+
+    /// Admit lossy packets while keeping credits for reliable traffic.
+    pub fn try_send_batch_lossy_with_reserve(
+        &mut self,
+        mut batch: PacketBatch,
+        reserved_packets: usize,
+    ) -> usize {
         if batch.is_empty() {
             return 0;
         }
@@ -305,7 +416,12 @@ impl RingSink {
         if base.occupied_len() >= base.capacity().get() - RING_TUNNEL_RESERVED_CAP {
             return 0;
         }
-        let admitted = batch.len().min(self.packet_permits.available_permits());
+        let reserved_packets = reserved_packets.min(self.packet_capacity.saturating_sub(1));
+        let available = self
+            .packet_permits
+            .available_permits()
+            .saturating_sub(reserved_packets);
+        let admitted = batch.len().min(available);
         if admitted == 0 {
             return 0;
         }

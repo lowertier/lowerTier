@@ -33,13 +33,8 @@ use crate::{
 const MAX_TUN_PACKET_SIZE: usize = u16::MAX as usize;
 const TUN_BUFFER_BATCHES_PER_QUEUE: usize = 2;
 
-fn tun_segment_capacity(l2_tun: bool, mtu: usize) -> (usize, usize) {
-    let payload_offset = ZCPacketType::NIC.get_packet_offsets().payload_offset
-        + if l2_tun {
-            crate::instance::l2_tun::ETHERNET_HEADER_LEN
-        } else {
-            0
-        };
+fn tun_segment_capacity(mtu: usize) -> (usize, usize) {
+    let payload_offset = ZCPacketType::NIC.get_packet_offsets().payload_offset;
     let segment_capacity = payload_offset + mtu.max(1500) + 256 + TAIL_RESERVED_SIZE;
     (payload_offset, segment_capacity)
 }
@@ -74,6 +69,15 @@ struct ReadState {
     pending_batch: Option<PacketBatch>,
     pending_error: Option<TunnelError>,
     failed: bool,
+}
+
+/// Preserve one complete configured TUN batch through crypto and output.
+fn tun_batch_limit() -> usize {
+    bounded_tun_batch_limit(packet_batch_limit())
+}
+
+fn bounded_tun_batch_limit(configured: usize) -> usize {
+    configured.min(MAX_PACKET_BATCH_SIZE)
 }
 
 impl ReadState {
@@ -111,7 +115,7 @@ impl ReadState {
         batch: &mut PacketBatch,
     ) -> Result<(), TunnelError> {
         let (appended, overflow_count) =
-            received_batch_partition(batch.len(), count, packet_batch_limit())?;
+            received_batch_partition(batch.len(), count, tun_batch_limit())?;
         for index in 0..count {
             let packet_len = self.payload_offset + self.sizes[index];
             if packet_len > self.segment_capacity {
@@ -163,7 +167,7 @@ impl ReadState {
         }
 
         if let Some(mut batch) = self.pending_batch.take() {
-            let batch_limit = packet_batch_limit();
+            let batch_limit = tun_batch_limit();
             if batch.len() > batch_limit {
                 self.pending_batch = Some(batch.split_off(batch_limit));
             }
@@ -209,7 +213,7 @@ impl ReadState {
             }
         };
 
-        let batch_limit = packet_batch_limit();
+        let batch_limit = tun_batch_limit();
         let mut batch = PacketBatch::with_capacity(count.min(batch_limit));
         if let Err(error) = self.append_received(count, &mut batch) {
             self.failed = true;
@@ -265,17 +269,10 @@ impl Stream for LinuxTunStream {
     }
 }
 
-fn packet_into_tun_buffer(packet: ZCPacket, l2_tun: bool) -> Result<BytesMut, TunnelError> {
+fn packet_into_tun_buffer(packet: ZCPacket) -> Result<BytesMut, TunnelError> {
     let payload_offset = packet.payload_offset();
     let mut inner = packet.inner();
-    let l2_prefix_len = if l2_tun {
-        crate::instance::l2_tun::decapsulate_ip(&inner[payload_offset..])
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        crate::instance::l2_tun::ETHERNET_HEADER_LEN
-    } else {
-        0
-    };
-    let packet_start = payload_offset + l2_prefix_len;
+    let packet_start = payload_offset;
     if packet_start < VIRTIO_NET_HDR_LEN {
         return Err(TunnelError::InvalidPacket(
             "packet does not have enough headroom for Linux TUN metadata".into(),
@@ -358,9 +355,7 @@ impl QueueSink {
             .gro_spare
             .take()
             .expect("an idle TUN queue owns one GRO table");
-        let stats = self
-            .scheduler
-            .drain_into(&mut buffers, MAX_PACKET_BATCH_SIZE);
+        let stats = self.scheduler.drain_into(&mut buffers, tun_batch_limit());
         debug_assert!(stats.packets != 0);
         self.write_active = true;
         self.in_flight_packets = stats.packets;
@@ -394,7 +389,6 @@ impl QueueSink {
 
 struct LinuxTunSink {
     devices: Vec<Arc<AsyncDevice>>,
-    l2_tun: bool,
     queues: Vec<QueueSink>,
     io_uring_writers: Vec<Option<IoUringTunWriter>>,
     in_flight: FuturesUnordered<SendFuture>,
@@ -404,7 +398,6 @@ struct LinuxTunSink {
 impl LinuxTunSink {
     fn new(
         devices: Vec<Arc<AsyncDevice>>,
-        l2_tun: bool,
         mtu: usize,
         telemetry: Arc<DataplaneTelemetry>,
         offload: bool,
@@ -437,7 +430,6 @@ impl LinuxTunSink {
         }
         Self {
             devices,
-            l2_tun,
             queues,
             io_uring_writers,
             in_flight: FuturesUnordered::new(),
@@ -585,7 +577,6 @@ struct QueueAdmission {
 
 fn plan_tun_batch(
     batch: PacketBatch,
-    l2_tun: bool,
     queue_count: usize,
 ) -> Result<SmallVec<[PlannedTunPacket; MAX_PACKET_BATCH_SIZE]>, TunnelError> {
     debug_assert!(queue_count > 0);
@@ -596,7 +587,7 @@ fn plan_tun_batch(
         let shard = header.and_then(|header| header.flow_shard()).unwrap_or(0);
         let critical = header.is_some_and(|header| header.is_critical_l2_control());
         let queue_index = packet_queue_index(&packet, queue_count);
-        let buffer = packet_into_tun_buffer(packet, l2_tun)?;
+        let buffer = packet_into_tun_buffer(packet)?;
         planned.push(PlannedTunPacket {
             queue_index,
             shard,
@@ -632,7 +623,7 @@ impl Sink<PacketBatch> for LinuxTunSink {
 
     fn start_send(mut self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
         let this = self.as_mut().get_mut();
-        let planned = plan_tun_batch(batch, this.l2_tun, this.queues.len())?;
+        let planned = plan_tun_batch(batch, this.queues.len())?;
         let mut admissions = SmallVec::<[QueueAdmission; 4]>::new();
         admissions.resize(this.queues.len(), QueueAdmission::default());
         for packet in &planned {
@@ -724,14 +715,13 @@ impl Tunnel for LinuxTunTunnel {
 
 pub(crate) fn wrap_devices(
     devices: Vec<AsyncDevice>,
-    l2_tun: bool,
     mtu: usize,
     telemetry: Arc<DataplaneTelemetry>,
     offload: bool,
 ) -> Box<dyn Tunnel> {
     assert!(!devices.is_empty(), "Linux virtual NIC needs one queue");
     let devices = devices.into_iter().map(Arc::new).collect::<Vec<_>>();
-    let (payload_offset, segment_capacity) = tun_segment_capacity(l2_tun, mtu);
+    let (payload_offset, segment_capacity) = tun_segment_capacity(mtu);
     let reusable_pool = ReusableBufferPool::new(
         segment_capacity,
         devices
@@ -755,7 +745,7 @@ pub(crate) fn wrap_devices(
         })
         .collect::<Vec<_>>();
     let sink: Pin<Box<dyn PacketBatchSink>> =
-        Box::pin(LinuxTunSink::new(devices, l2_tun, mtu, telemetry, offload));
+        Box::pin(LinuxTunSink::new(devices, mtu, telemetry, offload));
     Box::new(LinuxTunTunnel::new(streams, sink))
 }
 
@@ -902,7 +892,7 @@ mod tests {
         let mut packet = ZCPacket::new_with_payload(&[0x45, 0, 0, 20]);
         packet = packet.convert_type(ZCPacketType::NIC);
 
-        let buffer = super::packet_into_tun_buffer(packet, false).unwrap();
+        let buffer = super::packet_into_tun_buffer(packet).unwrap();
 
         assert_eq!(
             &buffer[..quincy_tun::VIRTIO_NET_HDR_LEN],
@@ -951,5 +941,46 @@ mod tests {
         );
         assert!(queue.gro_spare.is_some());
         assert!(!queue.write_active);
+    }
+
+    #[test]
+    fn queue_sink_drains_one_complete_configured_output_batch() {
+        let mut queue = super::QueueSink::new(1380);
+        for sequence in 0..super::MAX_PACKET_BATCH_SIZE {
+            let packet = bytes::BytesMut::from(&[sequence as u8; 64][..]);
+            queue.scheduler.push(1, packet, 64, false).unwrap();
+        }
+
+        let (buffers, gro_table, stats) = queue.take_flush_resources();
+        let configured = super::tun_batch_limit();
+
+        assert_eq!(stats.packets, configured);
+        assert_eq!(
+            queue.scheduler.queued_packets(),
+            super::MAX_PACKET_BATCH_SIZE - configured
+        );
+        assert_eq!(
+            buffers.iter().map(|buffer| buffer[0]).collect::<Vec<_>>(),
+            (0..configured)
+                .map(|sequence| sequence as u8)
+                .collect::<Vec<_>>()
+        );
+        queue.restore_flush_resources(buffers, gro_table);
+    }
+
+    #[test]
+    fn tun_batch_limit_preserves_configured_value_above_old_flush_budget() {
+        let old_flush_budget = crate::tunnel::batch::IO_FLUSH_PACKET_BUDGET;
+        assert!(old_flush_budget < super::MAX_PACKET_BATCH_SIZE);
+        assert_eq!(
+            super::bounded_tun_batch_limit(super::MAX_PACKET_BATCH_SIZE),
+            super::MAX_PACKET_BATCH_SIZE
+        );
+        let above_flush_budget = old_flush_budget + 1;
+        assert_eq!(
+            super::bounded_tun_batch_limit(above_flush_budget),
+            above_flush_budget
+        );
+        assert_eq!(super::bounded_tun_batch_limit(4), 4);
     }
 }

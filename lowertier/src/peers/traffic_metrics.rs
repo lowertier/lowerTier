@@ -770,13 +770,15 @@ mod tests {
         );
         let peer_id = 42;
 
-        // A cold try must not update counters or invoke the resolver.
+        // A cold try must leave registered counters at zero and not invoke the resolver.
         assert!(!metrics.try_record_tx_batch(peer_id, PacketType::Data as u8, 100, 2));
         assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
-        assert!(
+        assert_eq!(
             stats_mgr
                 .get_metric(MetricName::TrafficBytesTx, &network_labels("default"),)
-                .is_none()
+                .unwrap()
+                .value,
+            0
         );
 
         // The cold fallback resolves one label and records the full batch.

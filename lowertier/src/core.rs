@@ -614,11 +614,12 @@ struct NetworkOptions {
     underlay_deny_cidrs: Vec<String>,
 
     #[arg(
-        long,
-        env = "ET_PORT_MODE",
+        long = "interface-adapter",
+        visible_alias = "port-mode",
+        env = "ET_INTERFACE_ADAPTER",
         help = t!("core_clap.port_mode").to_string()
     )]
-    port_mode: Option<String>,
+    interface_adapter: Option<String>,
 
     #[arg(
         long,
@@ -1035,6 +1036,7 @@ impl NetworkOptions {
         cfg.get_network_identity().network_name == *network_name
     }
 
+    #[allow(deprecated)]
     fn merge_into(&self, cfg: &TomlConfigLoader) -> anyhow::Result<()> {
         if self.hostname.is_some() {
             cfg.set_hostname(self.hostname.clone());
@@ -1440,8 +1442,9 @@ impl NetworkOptions {
         if !self.underlay_deny_cidrs.is_empty() {
             f.underlay_deny_cidrs = self.underlay_deny_cidrs.clone();
         }
-        if let Some(port_mode) = &self.port_mode {
-            f.port_mode = port_mode.clone();
+        if let Some(interface_adapter) = &self.interface_adapter {
+            f.interface_adapter = interface_adapter.clone();
+            f.port_mode.clear();
         }
         f.l2_fdb_capacity = self.l2_fdb_capacity.unwrap_or(f.l2_fdb_capacity);
         f.l2_fdb_age_seconds = self.l2_fdb_age_seconds.unwrap_or(f.l2_fdb_age_seconds);
@@ -2146,8 +2149,8 @@ credential_bundle = "{credential_bundle}"
             "--quic-datagram-fec-parity",
             "3",
             "--quic-datagram-alternate-path-parity=false",
-            "--port-mode",
-            "ethernet",
+            "--interface-adapter",
+            "tap",
             "--l2-fdb-capacity",
             "32768",
             "--l2-fdb-age-seconds",
@@ -2174,7 +2177,7 @@ credential_bundle = "{credential_bundle}"
         assert_eq!(flags.quic_receive_window, 33_554_432);
         assert_eq!(flags.quic_datagram_fec_parity, 3);
         assert!(!flags.quic_datagram_alternate_path_parity);
-        assert_eq!(flags.port_mode, "ethernet");
+        assert_eq!(flags.interface_adapter, "tap");
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);

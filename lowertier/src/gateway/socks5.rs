@@ -56,7 +56,11 @@ use super::tcp_proxy::NatDstConnector as _;
 use crate::tunnel::common::bind;
 use crate::{
     common::{error::Error, global_ctx::GlobalCtx},
-    peers::{PeerPacketFilter, peer_manager::PeerManager},
+    peers::{
+        PeerPacketFilter,
+        fabric::{FabricPacket, FabricPayloadKind},
+        peer_manager::PeerManager,
+    },
 };
 
 #[cfg(feature = "ffi-dataplane")]
@@ -711,19 +715,18 @@ impl Socks5ServerNet {
                     "receive from smoltcp stack and send to peer mgr packet, len = {}",
                     data.len()
                 );
-                let Some(ipv4) = Ipv4Packet::new(&data) else {
+                if Ipv4Packet::new(&data).is_none() {
                     tracing::error!(?data, "smoltcp stack stream get non ipv4 packet");
                     continue;
-                };
+                }
 
-                let dst = ipv4.get_destination();
                 let packet = ZCPacket::new_with_payload(&data);
                 let Some(peer_manager) = peer_manager.upgrade() else {
                     tracing::warn!("peer manager is gone, smoltcp sender exited");
                     return;
                 };
                 if let Err(e) = peer_manager
-                    .send_msg_by_ip(packet, IpAddr::V4(dst), false)
+                    .send_fabric_packet(FabricPacket::new(FabricPayloadKind::Ip, packet))
                     .await
                 {
                     tracing::error!("send to peer failed in smoltcp sender: {:?}", e);

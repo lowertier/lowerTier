@@ -1392,6 +1392,46 @@ impl ZCPacket {
         self.into_bytes().slice(offset..)
     }
 
+    pub(crate) fn convert_type_in_place(
+        &mut self,
+        target_packet_type: ZCPacketType,
+    ) -> Result<(), &'static str> {
+        if target_packet_type == self.packet_type {
+            return Ok(());
+        }
+
+        let new_offset = match target_packet_type {
+            ZCPacketType::TCP => {
+                self.packet_type
+                    .get_packet_offsets()
+                    .tcp_tunnel_header_offset
+            }
+            ZCPacketType::UDP => {
+                self.packet_type
+                    .get_packet_offsets()
+                    .udp_tunnel_header_offset
+            }
+            ZCPacketType::WG => {
+                self.packet_type
+                    .get_packet_offsets()
+                    .wg_tunnel_header_offset
+            }
+            ZCPacketType::DummyTunnel => {
+                self.packet_type
+                    .get_packet_offsets()
+                    .dummy_tunnel_header_offset
+            }
+            ZCPacketType::NIC => return Err("in-place NIC conversion is not supported"),
+        };
+        if new_offset == INVALID_OFFSET {
+            return Err("the packet does not have the required in-place prefix");
+        }
+
+        self.advance_inner(new_offset);
+        self.packet_type = target_packet_type;
+        Ok(())
+    }
+
     pub fn convert_type(mut self, target_packet_type: ZCPacketType) -> Self {
         if target_packet_type == self.packet_type {
             return self;
@@ -2056,6 +2096,19 @@ mod tests {
         let packet = packet.convert_type(ZCPacketType::UDP);
 
         assert!(packet.is_lossy());
+    }
+
+    #[test]
+    fn in_place_dummy_conversion_keeps_the_packet_allocation() {
+        let mut packet = ZCPacket::new_with_payload(b"protected data");
+        let original_pointer = packet.tunnel_payload().as_ptr();
+
+        packet
+            .convert_type_in_place(ZCPacketType::DummyTunnel)
+            .unwrap();
+
+        assert_eq!(packet.tunnel_payload().as_ptr(), original_pointer);
+        assert_eq!(packet.payload(), b"protected data");
     }
 
     #[test]

@@ -471,11 +471,9 @@ impl Client {
                     .get(&self.to_peer_id)
                     .map(|v| v.clone())
                     .unwrap_or_default();
-                let (buf, c_algo) = compress_packet(
-                    peer_info.compression_info.accepted_algo(),
-                    &rpc_req_bytes,
-                )
-                .await?;
+                let (buf, c_algo) =
+                    compress_packet(peer_info.compression_info.accepted_algo(), &rpc_req_bytes)
+                        .await?;
 
                 let packets = build_rpc_packet(BuildRpcPacketArgs {
                     from_peer: self.from_peer_id,

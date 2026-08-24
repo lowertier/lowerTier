@@ -1007,16 +1007,33 @@ mod tests {
         assert!(split_gro_buffer(BytesMut::from(&b"abc"[..]), 0).is_err());
     }
 
+    #[test]
+    fn gro_stride_restores_full_bounded_batch() {
+        let stride = 1000;
+        let mut super_packet = Vec::with_capacity(super::MAX_PACKET_BATCH_SIZE * stride);
+        for tag in 0_u8..super::MAX_PACKET_BATCH_SIZE as u8 {
+            super_packet.extend(std::iter::repeat_n(tag, stride));
+        }
+
+        let parts = split_gro_buffer(BytesMut::from(super_packet.as_slice()), stride).unwrap();
+
+        assert_eq!(parts.len(), super::MAX_PACKET_BATCH_SIZE);
+        for (tag, part) in parts.iter().enumerate() {
+            assert_eq!(part.len(), stride);
+            assert!(part.iter().all(|byte| *byte == tag as u8));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn linux_udp_gso_and_gro_round_trip_restores_datagrams() {
+    async fn linux_udp_gso_and_gro_round_trip_restores_full_bounded_batch() {
         let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let destination = receiver.local_addr().unwrap();
-        let payloads = (0_u8..8)
+        let payloads = (0_u8..super::MAX_PACKET_BATCH_SIZE as u8)
             .map(|index| {
-                let mut payload = vec![index; 1200];
-                payload[1199] = 0xff - index;
+                let mut payload = vec![index; 1000];
+                payload[999] = 0xff - index;
                 Bytes::from(payload)
             })
             .collect::<Vec<_>>();

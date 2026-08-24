@@ -26,6 +26,7 @@ use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx};
 use crate::common::join_joinset_background;
 use crate::common::log;
 use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
+use crate::peers::fabric::{FabricPacket, FabricPayloadKind};
 use crate::peers::peer_manager::PeerManager;
 use crate::peers::{NicPacketFilter, PeerPacketFilter};
 use crate::proto::api::instance::{
@@ -597,19 +598,18 @@ impl<C: NatDstConnector> TcpProxy<C> {
                         ?data,
                         "receive from smoltcp stack and send to peer mgr packet"
                     );
-                    let Some(ipv4) = Ipv4Packet::new(&data) else {
+                    if Ipv4Packet::new(&data).is_none() {
                         tracing::error!(?data, "smoltcp stack stream get non ipv4 packet");
                         continue;
-                    };
+                    }
 
-                    let dst = ipv4.get_destination();
                     let packet = ZCPacket::new_with_payload(&data);
                     let Some(peer_mgr) = peer_mgr.upgrade() else {
                         tracing::warn!("peer manager is gone, smoltcp sender exited");
                         return;
                     };
                     if let Err(e) = peer_mgr
-                        .send_msg_by_ip(packet, IpAddr::V4(dst), false)
+                        .send_fabric_packet(FabricPacket::new(FabricPayloadKind::Ip, packet))
                         .await
                     {
                         tracing::error!("send to peer failed in smoltcp sender: {:?}", e);

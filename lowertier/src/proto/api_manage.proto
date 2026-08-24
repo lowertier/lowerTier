@@ -110,7 +110,7 @@ message NetworkConfig {
   optional bool quic_brutal_loss_compensation = 73;
   optional uint64 quic_initial_receive_window = 74;
   optional uint64 quic_receive_window = 75;
-  optional string port_mode = 76;
+  optional string port_mode = 76 [deprecated = true];
   optional uint32 l2_fdb_capacity = 77;
   optional uint64 l2_fdb_age_seconds = 78;
   optional uint64 l2_flood_bps = 79;
@@ -124,6 +124,7 @@ message NetworkConfig {
   optional uint64 speed_probe_budget_bps = 87;
   // Authorize complete Ethernet input in automatic mode.
   optional bool enable_bridge = 88;
+  optional string interface_adapter = 89;
 }
 
 message NetworkPeerConfig {

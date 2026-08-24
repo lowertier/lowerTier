@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use super::service_route::{ServiceRoute, ServiceRouteAction, ServiceRouteSnapshot};
 use crate::{
     common::{PeerId, global_ctx::NetworkIdentity},
     proto::{
@@ -288,6 +289,7 @@ pub struct ForwardingDecisionSnapshot {
     ipv6_peer_ids: Arc<HashMap<Ipv6Addr, PeerId>>,
     proxy_ipv4: Arc<PrefixMap<Ipv4Cidr, PeerId>>,
     proxy_ipv6: Arc<PrefixMap<Ipv6Cidr, PeerId>>,
+    service_routes: Arc<ServiceRouteSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -314,6 +316,59 @@ impl ForwardingDecisionSnapshot {
         proxy_ipv4: Arc<PrefixMap<Ipv4Cidr, PeerId>>,
         proxy_ipv6: Arc<PrefixMap<Ipv6Cidr, PeerId>>,
     ) -> Arc<Self> {
+        let service_routes = proxy_ipv4
+            .iter()
+            .map(|(prefix, gateway)| ServiceRoute {
+                prefix: (*prefix).into(),
+                gateway: *gateway,
+                preference: 100,
+                metric: 0,
+                path_id: u64::from(*gateway),
+                action: ServiceRouteAction::Forward,
+            })
+            .chain(proxy_ipv6.iter().map(|(prefix, gateway)| ServiceRoute {
+                prefix: (*prefix).into(),
+                gateway: *gateway,
+                preference: 100,
+                metric: 0,
+                path_id: u64::from(*gateway),
+                action: ServiceRouteAction::Forward,
+            }))
+            .collect();
+        Self::from_parts_with_service_routes(
+            generation,
+            capabilities,
+            suppressed_peer_ids,
+            public_ipv6_gateway_peer_id,
+            least_hop,
+            least_cost,
+            max_goodput,
+            ipv4_peer_ids,
+            ipv6_peer_ids,
+            proxy_ipv4,
+            proxy_ipv6,
+            Arc::new(ServiceRouteSnapshot::from_routes(
+                generation,
+                service_routes,
+            )),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts_with_service_routes(
+        generation: u64,
+        capabilities: ForwardingPeerSnapshot,
+        suppressed_peer_ids: Arc<HashSet<PeerId>>,
+        public_ipv6_gateway_peer_id: Option<PeerId>,
+        least_hop: Arc<HashMap<PeerId, ForwardingNextHop>>,
+        least_cost: Arc<HashMap<PeerId, ForwardingNextHop>>,
+        max_goodput: Arc<HashMap<PeerId, ForwardingNextHop>>,
+        ipv4_peer_ids: Arc<HashMap<Ipv4Addr, PeerId>>,
+        ipv6_peer_ids: Arc<HashMap<Ipv6Addr, PeerId>>,
+        proxy_ipv4: Arc<PrefixMap<Ipv4Cidr, PeerId>>,
+        proxy_ipv6: Arc<PrefixMap<Ipv6Cidr, PeerId>>,
+        service_routes: Arc<ServiceRouteSnapshot>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             generation,
             capabilities,
@@ -326,6 +381,7 @@ impl ForwardingDecisionSnapshot {
             ipv6_peer_ids,
             proxy_ipv4,
             proxy_ipv6,
+            service_routes,
         })
     }
 
@@ -335,6 +391,10 @@ impl ForwardingDecisionSnapshot {
 
     pub fn capabilities(&self) -> &ForwardingPeerTable {
         &self.capabilities
+    }
+
+    pub fn service_routes(&self) -> &Arc<ServiceRouteSnapshot> {
+        &self.service_routes
     }
 
     /// Return true only for a route peer that the authenticated route marked as an Admin bridge.

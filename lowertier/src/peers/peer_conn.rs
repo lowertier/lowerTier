@@ -118,7 +118,7 @@ fn alternate_fec_wire_len(
 }
 
 const MAGIC: u32 = 0xd1e1a5e1;
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const MAX_ADMISSION_CERT_BYTES: usize = 4096;
 const MAX_ADMISSION_STATUS_BYTES: usize = 2048;
 const ADMISSION_CONTEXT_DOMAIN: &[u8] = b"lowertier peer admission context v1\0";
@@ -153,7 +153,7 @@ fn validate_protocol_version(version: u32) -> Result<(), Error> {
         return Ok(());
     }
     Err(Error::WaitRespError(format!(
-        "unsupported peer protocol version: {version}"
+        "peer protocol version {version} does not match local version {VERSION}"
     )))
 }
 
@@ -1253,6 +1253,10 @@ impl TunnelFilter for PeerSessionTunnelFilter {
         scalar_after_received_batch(self, data)
     }
 
+    fn uses_async_crypto_pipeline(&self) -> bool {
+        self.enabled
+    }
+
     fn filter_output(&self) {}
 }
 
@@ -1403,7 +1407,10 @@ impl PeerConn {
         let link_protected = tunnel_info
             .as_ref()
             .is_some_and(|info| matches!(info.tunnel_type.as_str(), "udp" | "ring"));
-        let link_envelope_filter = LinkEnvelopeTunnelFilter::new(link_protected);
+        let link_envelope_filter = LinkEnvelopeTunnelFilter::with_telemetry(
+            link_protected,
+            global_ctx.dataplane_telemetry().clone(),
+        );
         let session_filter = PeerSessionTunnelFilter::new_with_peer_and_link_active(
             my_peer_id,
             true,
@@ -5187,6 +5194,7 @@ pub mod tests {
 
     #[test]
     fn current_protocol_rejects_old_peer_versions() {
+        assert_eq!(VERSION, 4);
         assert!(validate_protocol_version(VERSION).is_ok());
         assert!(validate_protocol_version(VERSION - 1).is_err());
     }

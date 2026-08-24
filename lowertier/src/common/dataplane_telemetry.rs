@@ -25,9 +25,13 @@ pub enum DataplaneStage {
     TunSchedule,
     TunWrite,
     ReceiverPacing,
+    NicIngress,
+    FabricForward,
+    LinkEncrypt,
+    LinkDecrypt,
 }
 
-const DATAPLANE_STAGES: [DataplaneStage; 11] = [
+const DATAPLANE_STAGES: [DataplaneStage; 15] = [
     DataplaneStage::RoutePolicy,
     DataplaneStage::RoutedClassify,
     DataplaneStage::RoutedEnqueue,
@@ -39,6 +43,10 @@ const DATAPLANE_STAGES: [DataplaneStage; 11] = [
     DataplaneStage::TunSchedule,
     DataplaneStage::TunWrite,
     DataplaneStage::ReceiverPacing,
+    DataplaneStage::NicIngress,
+    DataplaneStage::FabricForward,
+    DataplaneStage::LinkEncrypt,
+    DataplaneStage::LinkDecrypt,
 ];
 
 impl DataplaneStage {
@@ -55,6 +63,10 @@ impl DataplaneStage {
             Self::TunSchedule => "tun_schedule",
             Self::TunWrite => "tun_write",
             Self::ReceiverPacing => "receiver_pacing",
+            Self::NicIngress => "nic_ingress",
+            Self::FabricForward => "fabric_forward",
+            Self::LinkEncrypt => "link_encrypt",
+            Self::LinkDecrypt => "link_decrypt",
         }
     }
 }
@@ -567,6 +579,30 @@ mod tests {
             8,
             8192,
         );
+        telemetry.record_stage_sample(
+            DataplaneStage::NicIngress,
+            Some(Instant::now() - Duration::from_micros(8)),
+            8,
+            8192,
+        );
+        telemetry.record_stage_sample(
+            DataplaneStage::FabricForward,
+            Some(Instant::now() - Duration::from_micros(7)),
+            8,
+            8192,
+        );
+        telemetry.record_stage_sample(
+            DataplaneStage::LinkEncrypt,
+            Some(Instant::now() - Duration::from_micros(6)),
+            8,
+            8192,
+        );
+        telemetry.record_stage_sample(
+            DataplaneStage::LinkDecrypt,
+            Some(Instant::now() - Duration::from_micros(5)),
+            8,
+            8192,
+        );
         telemetry.set_queue_occupancy(DataplaneQueueClass::DirectNic, 0, 7, 7000);
         telemetry.record_queue_stall(DataplaneQueueClass::DirectNic, 0, Duration::from_micros(12));
         telemetry.record_io(DataplaneIo::TunWrite, 4, 8, 8192);
@@ -580,6 +616,10 @@ mod tests {
 
         let output = telemetry.export_prometheus();
         assert!(output.contains("stage=\"tun_write\""));
+        assert!(output.contains("stage=\"nic_ingress\""));
+        assert!(output.contains("stage=\"fabric_forward\""));
+        assert!(output.contains("stage=\"link_encrypt\""));
+        assert!(output.contains("stage=\"link_decrypt\""));
         assert!(output.contains("class=\"direct_nic\",queue=\"0\""));
         assert!(output.contains("operation=\"tun_write\""));
         assert!(output.contains("operation=\"source_tx\""));

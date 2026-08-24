@@ -18,7 +18,11 @@ use crate::{
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
         join_joinset_background, shrink_dashmap,
     },
-    peers::{PeerPacketFilter, peer_manager::PeerManager},
+    peers::{
+        PeerPacketFilter,
+        fabric::{FabricPacket, FabricPayloadKind},
+        peer_manager::PeerManager,
+    },
     tunnel::{
         Tunnel, TunnelListener,
         mpsc::{MpscTunnel, MpscTunnelSender},
@@ -126,13 +130,11 @@ impl WireGuardImpl {
                 ip_registered = true;
             }
             tracing::trace!(?i, "Received from wg client");
-            let dst = i.get_destination();
             let _ = peer_mgr
-                .send_msg_by_ip(
+                .send_fabric_packet(FabricPacket::new(
+                    FabricPayloadKind::Ip,
                     ZCPacket::new_with_payload(inner.as_ref()),
-                    IpAddr::V4(dst),
-                    false,
-                )
+                ))
                 .await;
         }
 

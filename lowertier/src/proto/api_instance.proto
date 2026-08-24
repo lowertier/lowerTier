@@ -197,6 +197,39 @@ message GetForeignNetworkSummaryResponse {
   peer_rpc.RouteForeignNetworkSummary summary = 1;
 }
 
+enum LocalBgpRouteAction {
+  FORWARD = 0;
+  EXIT_SNAT = 1;
+  BLACKHOLE = 2;
+}
+
+message LocalBgpRoute {
+  string prefix = 1;
+  uint32 gateway_peer_id = 2;
+  uint32 preference = 3;
+  uint32 metric = 4;
+  uint64 path_id = 5;
+  LocalBgpRouteAction action = 6;
+}
+
+message ReplaceLocalBgpRoutesRequest {
+  InstanceIdentifier instance = 1;
+  repeated LocalBgpRoute routes = 2;
+  optional string admin_token = 3;
+}
+
+message ReplaceLocalBgpRoutesResponse { uint64 generation = 1; }
+
+message ListLocalBgpRoutesRequest {
+  InstanceIdentifier instance = 1;
+  optional string admin_token = 2;
+}
+
+message ListLocalBgpRoutesResponse {
+  repeated LocalBgpRoute routes = 1;
+  uint64 generation = 2;
+}
+
 service PeerManageRpc {
   rpc ListPeer(ListPeerRequest) returns (ListPeerResponse);
   rpc ListPublicIpv6Info(ListPublicIpv6InfoRequest)
@@ -210,6 +243,10 @@ service PeerManageRpc {
   rpc ShowNodeInfo(ShowNodeInfoRequest) returns (ShowNodeInfoResponse);
   rpc GetForeignNetworkSummary(GetForeignNetworkSummaryRequest)
       returns (GetForeignNetworkSummaryResponse);
+  rpc ReplaceLocalBgpRoutes(ReplaceLocalBgpRoutesRequest)
+      returns (ReplaceLocalBgpRoutesResponse);
+  rpc ListLocalBgpRoutes(ListLocalBgpRoutesRequest)
+      returns (ListLocalBgpRoutesResponse);
 }
 
 enum ConnectorStatus {

@@ -1,5 +1,5 @@
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -9,108 +9,33 @@ use std::sync::atomic::AtomicUsize;
 use arc_swap::ArcSwapOption;
 use atomic_shim::AtomicU64;
 use hmac::{Hmac, Mac as _};
-use ring::{aead, hmac as ring_hmac};
+use ring::aead;
 use sha2::Sha256;
 
+use super::replay_window::ReplayWindow;
+use crate::common::dataplane_telemetry::{DataplaneStage, DataplaneTelemetry};
 use crate::tunnel::packet_def::{PacketType, ZCPacket, ZCPacketType};
 use crate::tunnel::{
-    BatchStreamItem, StreamItem, TunnelError, batch::PacketBatch, filter::TunnelFilter,
+    BatchStreamItem, StreamItem, TunnelError,
+    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+    filter::TunnelFilter,
 };
 
 const PUBLIC_HEADER_SIZE: usize = 8;
 const AEAD_TAG_SIZE: usize = 16;
 pub(crate) const LINK_ENVELOPE_OVERHEAD: usize = PUBLIC_HEADER_SIZE + AEAD_TAG_SIZE;
 const PROTOCOL_AAD: &[u8; 4] = b"ETL1";
-const HEADER_PROTECTION_DOMAIN: &[u8; 4] = b"ETHP";
 
 type HmacSha256 = Hmac<Sha256>;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ReplayWindow256 {
-    max_sequence: u64,
-    bitmap: [u64; 4],
-    valid: bool,
-}
-
-fn shift_replay_bitmap(bitmap: &mut [u64; 4], distance: usize) {
-    if distance >= 256 {
-        bitmap.fill(0);
-        return;
-    }
-    if distance == 0 {
-        return;
-    }
-
-    let original = *bitmap;
-    let word_shift = distance / 64;
-    let bit_shift = distance % 64;
-
-    for destination_word in (0..bitmap.len()).rev() {
-        let Some(source_word) = destination_word.checked_sub(word_shift) else {
-            bitmap[destination_word] = 0;
-            continue;
-        };
-
-        let mut value = original[source_word] << bit_shift;
-        if bit_shift != 0 && source_word != 0 {
-            value |= original[source_word - 1] >> (64 - bit_shift);
-        }
-        bitmap[destination_word] = value;
-    }
-}
-
-impl ReplayWindow256 {
-    fn test_bit(&self, index: usize) -> bool {
-        self.bitmap[index / 64] & (1_u64 << (index % 64)) != 0
-    }
-
-    fn set_bit(&mut self, index: usize) {
-        self.bitmap[index / 64] |= 1_u64 << (index % 64);
-    }
-
-    fn shift(&mut self, distance: usize) {
-        shift_replay_bitmap(&mut self.bitmap, distance);
-    }
-
-    fn can_accept(&self, sequence: u64) -> bool {
-        if !self.valid || sequence > self.max_sequence {
-            return true;
-        }
-        let distance = (self.max_sequence - sequence) as usize;
-        distance < 256 && !self.test_bit(distance)
-    }
-
-    fn accept(&mut self, sequence: u64) -> bool {
-        if !self.can_accept(sequence) {
-            return false;
-        }
-        if !self.valid {
-            self.valid = true;
-            self.max_sequence = sequence;
-            self.set_bit(0);
-            return true;
-        }
-        if sequence > self.max_sequence {
-            self.shift((sequence - self.max_sequence) as usize);
-            self.max_sequence = sequence;
-            self.set_bit(0);
-            return true;
-        }
-        self.set_bit((self.max_sequence - sequence) as usize);
-        true
-    }
-}
 
 pub(crate) struct LinkEnvelopeSession {
     send_key: aead::LessSafeKey,
     receive_key: aead::LessSafeKey,
-    send_header_key: ring_hmac::Key,
-    receive_header_key: ring_hmac::Key,
     local_peer_id: u32,
     remote_peer_id: u32,
     send_sequence: AtomicU64,
     send_exhausted: AtomicBool,
-    receive_replay: Mutex<ReplayWindow256>,
+    receive_replay: Mutex<ReplayWindow>,
     #[cfg(test)]
     replay_lock_acquisitions: AtomicUsize,
 }
@@ -120,6 +45,7 @@ pub(crate) struct LinkEnvelopeTunnelFilter {
     enabled: bool,
     active: std::sync::Arc<AtomicBool>,
     session: std::sync::Arc<ArcSwapOption<LinkEnvelopeSession>>,
+    telemetry: Option<Arc<DataplaneTelemetry>>,
     #[cfg(test)]
     session_loads: std::sync::Arc<AtomicUsize>,
 }
@@ -130,9 +56,16 @@ impl LinkEnvelopeTunnelFilter {
             enabled,
             active: std::sync::Arc::new(AtomicBool::new(false)),
             session: std::sync::Arc::new(ArcSwapOption::empty()),
+            telemetry: None,
             #[cfg(test)]
             session_loads: std::sync::Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub(crate) fn with_telemetry(enabled: bool, telemetry: Arc<DataplaneTelemetry>) -> Self {
+        let mut filter = Self::new(enabled);
+        filter.telemetry = Some(telemetry);
+        filter
     }
 
     pub(crate) fn active_flag(&self) -> std::sync::Arc<AtomicBool> {
@@ -231,6 +164,13 @@ impl TunnelFilter for LinkEnvelopeTunnelFilter {
             }
             return Some(data);
         };
+        let _stage = self.telemetry.as_ref().and_then(|telemetry| {
+            telemetry.sample_stage(
+                DataplaneStage::LinkEncrypt,
+                data.len(),
+                data.buffer_byte_len(),
+            )
+        });
         let sealed = session.seal_batch(data);
         (!sealed.is_empty()).then_some(sealed)
     }
@@ -246,6 +186,13 @@ impl TunnelFilter for LinkEnvelopeTunnelFilter {
             Ok(batch) => batch,
             Err(error) => return Some(Err(error)),
         };
+        let _stage = self.telemetry.as_ref().and_then(|telemetry| {
+            telemetry.sample_stage(
+                DataplaneStage::LinkDecrypt,
+                batch.len(),
+                batch.buffer_byte_len(),
+            )
+        });
         Some(
             session
                 .open_batch_with_late_noise_controls(batch)
@@ -253,6 +200,10 @@ impl TunnelFilter for LinkEnvelopeTunnelFilter {
                     TunnelError::InvalidPacket(format!("protected link batch failed: {error}"))
                 }),
         )
+    }
+
+    fn uses_async_crypto_pipeline(&self) -> bool {
+        self.enabled
     }
 
     fn filter_output(&self) {}
@@ -268,32 +219,29 @@ impl LinkEnvelopeSession {
     ) -> Self {
         let a_to_b_key = derive(&root_key, handshake_hash, b"a-to-b-key");
         let b_to_a_key = derive(&root_key, handshake_hash, b"b-to-a-key");
-        let a_to_b_header = derive(&root_key, handshake_hash, b"a-to-b-header");
-        let b_to_a_header = derive(&root_key, handshake_hash, b"b-to-a-header");
-        let (send_key, receive_key, send_header_key, receive_header_key) = if is_client {
-            (a_to_b_key, b_to_a_key, a_to_b_header, b_to_a_header)
+        let (send_key, receive_key) = if is_client {
+            (a_to_b_key, b_to_a_key)
         } else {
-            (b_to_a_key, a_to_b_key, b_to_a_header, a_to_b_header)
+            (b_to_a_key, a_to_b_key)
         };
 
         Self {
             send_key: less_safe_key(send_key),
             receive_key: less_safe_key(receive_key),
-            send_header_key: header_key(send_header_key),
-            receive_header_key: header_key(receive_header_key),
             local_peer_id,
             remote_peer_id,
             send_sequence: AtomicU64::new(0),
             send_exhausted: AtomicBool::new(false),
-            receive_replay: Mutex::new(ReplayWindow256::default()),
+            receive_replay: Mutex::new(ReplayWindow::default()),
             #[cfg(test)]
             replay_lock_acquisitions: AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn seal(&self, packet: ZCPacket) -> Result<ZCPacket, anyhow::Error> {
+    pub(crate) fn seal(&self, mut packet: ZCPacket) -> Result<ZCPacket, anyhow::Error> {
         let sequence = self.reserve_send_sequences(1)?;
-        self.seal_with_sequence(packet, sequence)
+        self.seal_with_sequence(&mut packet, sequence)?;
+        Ok(packet)
     }
 
     fn reserve_send_sequences(&self, count: usize) -> Result<u64, anyhow::Error> {
@@ -331,16 +279,18 @@ impl LinkEnvelopeSession {
 
     fn seal_with_sequence(
         &self,
-        packet: ZCPacket,
+        packet: &mut ZCPacket,
         sequence: u64,
-    ) -> Result<ZCPacket, anyhow::Error> {
+    ) -> Result<(), anyhow::Error> {
         if sequence == u64::MAX {
             self.send_exhausted.store(true, Ordering::Release);
         }
 
         let public_header = sequence.to_be_bytes();
         let lossy = packet.is_lossy();
-        let mut packet = packet.convert_type(ZCPacketType::DummyTunnel);
+        packet
+            .convert_type_in_place(ZCPacketType::DummyTunnel)
+            .map_err(anyhow::Error::msg)?;
         let envelope = packet.mut_inner_preserving_flow_hash();
         envelope.reserve(AEAD_TAG_SIZE + PUBLIC_HEADER_SIZE);
         let tag = self
@@ -352,24 +302,16 @@ impl LinkEnvelopeSession {
             )
             .map_err(|_| anyhow::anyhow!("link envelope encryption failed"))?;
         envelope.extend_from_slice(tag.as_ref());
-        envelope.extend_from_slice(&protect_header(
-            public_header,
-            &envelope,
-            &self.send_header_key,
-        ));
+        envelope.extend_from_slice(&public_header);
         packet.set_lossy_hint(lossy);
-        Ok(packet)
+        Ok(())
     }
 
-    fn seal_batch(&self, data: PacketBatch) -> PacketBatch {
-        let mut items = Vec::with_capacity(data.len());
-        let mut candidate_count = 0;
-        for mut packet in data {
+    fn seal_batch(self: &Arc<Self>, mut data: PacketBatch) -> PacketBatch {
+        for packet in data.iter_mut() {
             packet.clear_authenticated_peer_id();
-            items.push((Some(candidate_count), packet));
-            candidate_count += 1;
         }
-
+        let candidate_count = data.len();
         let first_sequence = match self.reserve_send_sequences(candidate_count) {
             Ok(first_sequence) => first_sequence,
             Err(error) => {
@@ -377,38 +319,30 @@ impl LinkEnvelopeSession {
                 return PacketBatch::new();
             }
         };
-        let mut sealed = PacketBatch::with_capacity(items.len());
-        for (candidate_index, packet) in items {
-            let result = match candidate_index {
-                Some(index) => self.seal_with_sequence(packet, first_sequence + index as u64),
-                None => Ok(packet),
-            };
-            match result {
-                Ok(packet) => sealed
-                    .try_push(packet)
-                    .expect("sealed batch remains within its input bound"),
-                Err(error) => tracing::warn!(?error, "link envelope batch encryption failed"),
-            }
+        let result =
+            super::crypto_workers::ordered_in_place_transform(&mut data, |index, packet| {
+                self.seal_with_sequence(packet, first_sequence + index as u64)
+            });
+        if let Err(error) = result {
+            tracing::warn!(?error, "link envelope batch encryption failed");
+            return PacketBatch::new();
         }
-        sealed
+        data
     }
 
-    pub(crate) fn open(&self, packet: ZCPacket) -> Result<ZCPacket, anyhow::Error> {
-        let mut packet = packet.convert_type(ZCPacketType::DummyTunnel);
+    pub(crate) fn open(&self, mut packet: ZCPacket) -> Result<ZCPacket, anyhow::Error> {
+        packet
+            .convert_type_in_place(ZCPacketType::DummyTunnel)
+            .map_err(anyhow::Error::msg)?;
         let envelope = packet.mut_inner_preserving_flow_hash();
         if envelope.len() < PUBLIC_HEADER_SIZE + AEAD_TAG_SIZE {
             return Err(anyhow::anyhow!("the link envelope is too short"));
         }
 
         let public_header_offset = envelope.len() - PUBLIC_HEADER_SIZE;
-        let protected_header: [u8; PUBLIC_HEADER_SIZE] = envelope[public_header_offset..]
+        let public_header: [u8; PUBLIC_HEADER_SIZE] = envelope[public_header_offset..]
             .try_into()
             .expect("the public header length was checked");
-        let public_header = protect_header(
-            protected_header,
-            &envelope[..public_header_offset],
-            &self.receive_header_key,
-        );
         let sequence = u64::from_be_bytes(public_header);
 
         #[cfg(test)]
@@ -436,10 +370,43 @@ impl LinkEnvelopeSession {
         Ok(packet)
     }
 
-    fn open_batch(&self, data: PacketBatch) -> Result<PacketBatch, anyhow::Error> {
+    fn open_batch_with_late_noise_controls(
+        &self,
+        mut data: PacketBatch,
+    ) -> Result<PacketBatch, anyhow::Error> {
         if data.is_empty() {
             return Ok(data);
         }
+
+        let mut protected = [false; MAX_PACKET_BATCH_SIZE];
+        let mut sequences = [0_u64; MAX_PACKET_BATCH_SIZE];
+        let mut ordered_sequences = [0_u64; MAX_PACKET_BATCH_SIZE];
+        let mut protected_count = 0_usize;
+        for (index, packet) in data.iter_mut().enumerate() {
+            if self.is_late_plaintext_noise_control(packet) {
+                continue;
+            }
+            packet
+                .convert_type_in_place(ZCPacketType::DummyTunnel)
+                .map_err(anyhow::Error::msg)?;
+            let envelope = packet.mut_inner_preserving_flow_hash();
+            if envelope.len() < PUBLIC_HEADER_SIZE + AEAD_TAG_SIZE {
+                return Err(anyhow::anyhow!("the link envelope is too short"));
+            }
+            let public_header_offset = envelope.len() - PUBLIC_HEADER_SIZE;
+            let public_header: [u8; PUBLIC_HEADER_SIZE] = envelope[public_header_offset..]
+                .try_into()
+                .expect("the public header length was checked");
+            let sequence = u64::from_be_bytes(public_header);
+            protected[index] = true;
+            sequences[index] = sequence;
+            ordered_sequences[protected_count] = sequence;
+            protected_count += 1;
+        }
+        if protected_count == 0 {
+            return Ok(data);
+        }
+        ordered_sequences[..protected_count].sort_unstable();
 
         let replay_snapshot = {
             #[cfg(test)]
@@ -447,28 +414,23 @@ impl LinkEnvelopeSession {
                 .fetch_add(1, Ordering::Relaxed);
             *self.receive_replay.lock().unwrap()
         };
-        let mut candidates = Vec::with_capacity(data.len());
-        let mut seen = std::collections::HashSet::with_capacity(data.len());
-
-        for packet in data {
-            let mut packet = packet.convert_type(ZCPacketType::DummyTunnel);
-            let envelope = packet.mut_inner_preserving_flow_hash();
-            if envelope.len() < PUBLIC_HEADER_SIZE + AEAD_TAG_SIZE {
-                return Err(anyhow::anyhow!("the link envelope is too short"));
-            }
-            let public_header_offset = envelope.len() - PUBLIC_HEADER_SIZE;
-            let protected_header: [u8; PUBLIC_HEADER_SIZE] = envelope[public_header_offset..]
-                .try_into()
-                .expect("the public header length was checked");
-            let public_header = protect_header(
-                protected_header,
-                &envelope[..public_header_offset],
-                &self.receive_header_key,
-            );
-            let sequence = u64::from_be_bytes(public_header);
-            if !seen.insert(sequence) || !replay_snapshot.can_accept(sequence) {
+        for index in 0..protected_count {
+            let sequence = ordered_sequences[index];
+            if (index != 0 && sequence == ordered_sequences[index - 1])
+                || !replay_snapshot.can_accept(sequence)
+            {
                 return Err(anyhow::anyhow!("the link sequence is a replay"));
             }
+        }
+
+        super::crypto_workers::ordered_in_place_transform(&mut data, |index, packet| {
+            if !protected[index] {
+                return Ok::<(), anyhow::Error>(());
+            }
+            let sequence = sequences[index];
+            let public_header = sequence.to_be_bytes();
+            let envelope = packet.mut_inner_preserving_flow_hash();
+            let public_header_offset = envelope.len() - PUBLIC_HEADER_SIZE;
             let plaintext_length = self
                 .receive_key
                 .open_in_place(
@@ -479,66 +441,21 @@ impl LinkEnvelopeSession {
                 .map_err(|_| anyhow::anyhow!("link envelope authentication failed"))?
                 .len();
             envelope.truncate(plaintext_length);
-            candidates.push((packet, sequence));
-        }
+            Ok(())
+        })?;
 
         #[cfg(test)]
         self.replay_lock_acquisitions
             .fetch_add(1, Ordering::Relaxed);
         let mut replay = self.receive_replay.lock().unwrap();
         let mut replay_work = *replay;
-        for (_, sequence) in &candidates {
+        for sequence in &ordered_sequences[..protected_count] {
             if !replay_work.accept(*sequence) {
                 return Err(anyhow::anyhow!("the link sequence is a replay"));
             }
         }
         *replay = replay_work;
-        let mut opened = PacketBatch::with_capacity(candidates.len());
-        for (packet, _) in candidates {
-            opened
-                .try_push(packet)
-                .expect("opened batch remains within its input bound");
-        }
-        Ok(opened)
-    }
-
-    fn open_batch_with_late_noise_controls(
-        &self,
-        data: PacketBatch,
-    ) -> Result<PacketBatch, anyhow::Error> {
-        enum BatchSlot {
-            LateNoiseControl(ZCPacket),
-            Protected,
-        }
-
-        let mut slots = Vec::with_capacity(data.len());
-        let mut protected = PacketBatch::with_capacity(data.len());
-        for packet in data {
-            if self.is_late_plaintext_noise_control(&packet) {
-                slots.push(BatchSlot::LateNoiseControl(packet));
-            } else {
-                protected
-                    .try_push(packet)
-                    .expect("the protected subset remains within its input bound");
-                slots.push(BatchSlot::Protected);
-            }
-        }
-
-        let mut opened = self.open_batch(protected)?.into_iter();
-        let mut output = PacketBatch::with_capacity(slots.len());
-        for slot in slots {
-            let packet = match slot {
-                BatchSlot::LateNoiseControl(packet) => packet,
-                BatchSlot::Protected => opened
-                    .next()
-                    .expect("each protected input produces one opened packet"),
-            };
-            output
-                .try_push(packet)
-                .expect("the reconstructed batch keeps its input bound");
-        }
-        debug_assert!(opened.next().is_none());
-        Ok(output)
+        Ok(data)
     }
 
     fn is_late_plaintext_noise_control(&self, packet: &ZCPacket) -> bool {
@@ -587,25 +504,6 @@ fn less_safe_key(key: [u8; 32]) -> aead::LessSafeKey {
     aead::LessSafeKey::new(key)
 }
 
-fn header_key(key: [u8; 32]) -> ring_hmac::Key {
-    ring_hmac::Key::new(ring_hmac::HMAC_SHA256, &key)
-}
-
-fn protect_header(
-    mut header: [u8; PUBLIC_HEADER_SIZE],
-    ciphertext: &[u8],
-    key: &ring_hmac::Key,
-) -> [u8; PUBLIC_HEADER_SIZE] {
-    let mut input = [0_u8; 20];
-    input[..HEADER_PROTECTION_DOMAIN.len()].copy_from_slice(HEADER_PROTECTION_DOMAIN);
-    input[HEADER_PROTECTION_DOMAIN.len()..].copy_from_slice(&ciphertext[..16]);
-    let mask = ring_hmac::sign(key, &input);
-    for (byte, mask_byte) in header.iter_mut().zip(mask.as_ref()) {
-        *byte ^= mask_byte;
-    }
-    header
-}
-
 fn associated_data(public_header: [u8; PUBLIC_HEADER_SIZE]) -> [u8; 12] {
     let mut data = [0_u8; 12];
     data[..PROTOCOL_AAD.len()].copy_from_slice(PROTOCOL_AAD);
@@ -645,88 +543,6 @@ mod tests {
             LinkEnvelopeSession::new(root_key, &handshake_hash, true, 0x1122_3344, 0x5566_7788),
             LinkEnvelopeSession::new(root_key, &handshake_hash, false, 0x5566_7788, 0x1122_3344),
         )
-    }
-
-    fn reference_replay_shift(bitmap: [u64; 4], distance: usize) -> [u64; 4] {
-        let mut shifted = [0_u64; 4];
-        for source in 0..256 {
-            if bitmap[source / 64] & (1_u64 << (source % 64)) == 0 {
-                continue;
-            }
-            let destination = source + distance;
-            if destination < 256 {
-                shifted[destination / 64] |= 1_u64 << (destination % 64);
-            }
-        }
-        shifted
-    }
-
-    #[test]
-    fn replay_word_shift_matches_the_reference_at_boundaries() {
-        let original = [
-            0x8000_0000_0000_0001,
-            0x0123_4567_89ab_cdef,
-            0xfedc_ba98_7654_3210,
-            0x4000_0000_0000_0002,
-        ];
-
-        for distance in [0, 1, 63, 64, 65, 127, 128, 129, 255, 256, 300] {
-            let mut actual = original;
-            shift_replay_bitmap(&mut actual, distance);
-            assert_eq!(actual, reference_replay_shift(original, distance));
-        }
-    }
-
-    #[test]
-    #[ignore = "performance measurement"]
-    fn benchmark_replay_word_shift() {
-        use std::hint::black_box;
-        use std::time::Instant;
-
-        fn shift_each_bit(bitmap: &mut [u8; 32], distance: usize) {
-            for index in (0..256).rev() {
-                let set = index >= distance
-                    && bitmap[(index - distance) / 8] & (1 << ((index - distance) % 8)) != 0;
-                let byte = &mut bitmap[index / 8];
-                let mask = 1 << (index % 8);
-                if set {
-                    *byte |= mask;
-                } else {
-                    *byte &= !mask;
-                }
-            }
-        }
-
-        const ITERATIONS: usize = 2_000_000;
-        let original = [
-            0x8000_0000_0000_0001,
-            0x0123_4567_89ab_cdef,
-            0xfedc_ba98_7654_3210,
-            0x4000_0000_0000_0002,
-        ];
-
-        let reference_start = Instant::now();
-        for _ in 0..ITERATIONS {
-            let mut bitmap = black_box([0x5a_u8; 32]);
-            shift_each_bit(&mut bitmap, black_box(1));
-            black_box(bitmap);
-        }
-        let reference_elapsed = reference_start.elapsed();
-
-        let word_start = Instant::now();
-        for _ in 0..ITERATIONS {
-            let mut bitmap = black_box(original);
-            shift_replay_bitmap(&mut bitmap, black_box(1));
-            black_box(bitmap);
-        }
-        let word_elapsed = word_start.elapsed();
-
-        eprintln!(
-            "replay_shift iterations={ITERATIONS} reference_ns={} word_ns={} speedup={:.3}",
-            reference_elapsed.as_nanos(),
-            word_elapsed.as_nanos(),
-            reference_elapsed.as_secs_f64() / word_elapsed.as_secs_f64()
-        );
     }
 
     #[test]
@@ -787,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_headers_do_not_expose_a_counter() {
+    fn visible_header_contains_the_authenticated_counter() {
         let (client, _) = sessions();
         let values = (0..4)
             .map(|_| {
@@ -801,11 +617,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert!(
-            values
-                .windows(2)
-                .any(|pair| pair[1].wrapping_sub(pair[0]) != 1)
-        );
+        assert_eq!(values, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -1029,5 +841,30 @@ mod tests {
             assert_eq!(server.session_load_count(), 1);
             assert_eq!(server.replay_lock_count(), 2);
         }
+    }
+
+    #[test]
+    fn protected_batch_reuses_the_input_batch_container() {
+        let (client_session, server_session) = sessions();
+        let client = LinkEnvelopeTunnelFilter::new(true);
+        let server = LinkEnvelopeTunnelFilter::new(true);
+        client.install(client_session);
+        server.install(server_session);
+        let mut batch = PacketBatch::new();
+        for index in 0_u64..16 {
+            let mut packet = packet();
+            packet.set_flow_hash(index);
+            batch.try_push(packet).unwrap();
+        }
+        let pointer = batch.as_ptr();
+
+        let sealed = client.before_send_batch(batch).unwrap();
+
+        assert_eq!(sealed.as_ptr(), pointer);
+        assert_eq!(sealed.len(), 16);
+
+        let opened = server.after_received_batch(Ok(sealed)).unwrap().unwrap();
+        assert_eq!(opened.as_ptr(), pointer);
+        assert_eq!(opened.len(), 16);
     }
 }

@@ -1,10 +1,12 @@
 use std::{
-    net::IpAddr,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     process::{Command, Stdio},
     str::FromStr,
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,10 +14,17 @@ use bytes::BytesMut;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use lowertier::{
-    common::config::{ConfigLoader, TomlConfigLoader},
+    common::config::{ConfigLoader, NetworkIdentity, TomlConfigLoader},
     instance::instance::Instance,
+    peers::{
+        PeerPacketFilter,
+        fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
+    },
     tunnel::{
-        packet_def::ZCPacket, ring::RingTunnelConnector, tcp::TcpTunnelConnector,
+        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+        packet_def::ZCPacket,
+        ring::RingTunnelConnector,
+        tcp::TcpTunnelConnector,
         udp::UdpTunnelConnector,
     },
 };
@@ -26,6 +35,9 @@ const DEFAULT_DOCKER_SUBNET: &str = "172.31.250.0/24";
 const DEFAULT_DOCKER_IP_A: &str = "172.31.250.2";
 const DEFAULT_DOCKER_IP_B: &str = "172.31.250.3";
 const DEFAULT_TUNNEL_PORT: u16 = 35521;
+const MAX_PREPARED_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PREPARED_PACKETS: usize = 4096;
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 enum TunnelKind {
@@ -63,8 +75,65 @@ struct BenchTopology {
     _docker: Option<DockerNetns>,
     inst_a: Instance,
     _inst_b: Instance,
-    dst: IpAddr,
     packet: ZCPacket,
+    completion: CompletionTracker,
+}
+
+#[derive(Clone)]
+struct CompletionTracker {
+    completed: Arc<AtomicU64>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl CompletionTracker {
+    fn new() -> Self {
+        Self {
+            completed: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn target_after(&self, packet_count: usize) -> u64 {
+        self.completed
+            .load(Ordering::Acquire)
+            .checked_add(packet_count as u64)
+            .expect("the receiver completion count does not overflow")
+    }
+
+    async fn wait_for(&self, target: u64) {
+        loop {
+            if self.completed.load(Ordering::Acquire) >= target {
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerPacketFilter for CompletionTracker {
+    fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
+        is_benchmark_packet(packet)
+    }
+
+    async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+        let mut completed = 0_u64;
+        let mut remaining = PacketBatch::new();
+        for packet in batch {
+            if is_benchmark_packet(&packet) {
+                completed += 1;
+            } else {
+                remaining
+                    .try_push(packet)
+                    .expect("the retained batch cannot exceed its input batch");
+            }
+        }
+        if completed != 0 {
+            self.completed.fetch_add(completed, Ordering::Release);
+            self.notify.notify_one();
+        }
+        remaining
+    }
 }
 
 struct DockerNetns {
@@ -153,8 +222,15 @@ fn bench_tx_throughput(c: &mut Criterion) {
         packet_size >= MIN_PKT_SIZE,
         "TX_THROUGHPUT_PKT_SIZE={packet_size} is smaller than the minimum {MIN_PKT_SIZE} (IPv4+UDP headers)"
     );
+    assert!(
+        packet_size <= usize::from(u16::MAX),
+        "TX_THROUGHPUT_PKT_SIZE={packet_size} exceeds the IPv4 total-length limit"
+    );
     let worker_threads = env_parse("TX_THROUGHPUT_WORKER_THREADS", 4usize);
     let inflight_depth = env_parse("TX_THROUGHPUT_INFLIGHT", 64usize).max(1);
+    let batch_size = env_parse("TX_THROUGHPUT_BATCH_SIZE", MAX_PACKET_BATCH_SIZE)
+        .clamp(1, MAX_PACKET_BATCH_SIZE);
+    let preparation_limit = prepared_packet_limit(packet_size);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .enable_all()
@@ -164,83 +240,144 @@ fn bench_tx_throughput(c: &mut Criterion) {
     let topology = runtime.block_on(setup_topology(tunnel, packet_size));
     let peer_manager = topology.inst_a.get_peer_manager();
     let packet = topology.packet.clone();
-    let dst = topology.dst;
+    let completion = topology.completion.clone();
 
     eprintln!(
-        "tx_throughput: tunnel={} inflight={} workers={} pkt_size={}",
+        "tx_throughput: measurement=completed-receiver-transfer tunnel={} inflight={} workers={} pkt_size={} batch_size={} preparation_limit={}",
         tunnel.as_str(),
         inflight_depth.max(1),
         worker_threads,
-        packet_size
+        packet_size,
+        batch_size,
+        preparation_limit
     );
 
-    let mut group = c.benchmark_group("tx_throughput");
-    group.throughput(Throughput::Bytes(packet_size as u64));
+    let benchmark_result = catch_unwind(AssertUnwindSafe(|| {
+        let mut group = c.benchmark_group("tx_throughput");
+        group.throughput(Throughput::Bytes(packet_size as u64));
+        let benchmark_prefix = format!("{}-p{packet_size}-b{batch_size}", tunnel.as_str());
 
-    // Serial baseline: one packet in flight at a time.
-    // Measures per-packet CPU cost (TX injection latency).
-    group.bench_function(tunnel.as_str(), |b| {
-        b.iter_custom(|iterations| {
-            let pm = peer_manager.clone();
-            let pkt = packet.clone();
-            runtime.block_on(async move {
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    pm.send_msg_by_ip(pkt.clone(), dst, false)
-                        .await
-                        .expect("send packet by LowTier IP");
-                }
-                start.elapsed()
-            })
-        });
-    });
-
-    // Saturate: spawn TX_THROUGHPUT_INFLIGHT worker tasks, each independently
-    // pumping send_msg_by_ip. Work is distributed across tokio worker threads,
-    // exposing the peer manager + tunnel's true aggregate throughput ceiling.
-    // With TX_THROUGHPUT_INFLIGHT=1 it degrades to the serial baseline.
-    group.bench_function(format!("{}-saturate", tunnel.as_str()), |b| {
-        b.iter_custom(|iterations| {
-            let pm = peer_manager.clone();
-            let pkt = packet.clone();
-            let concurrency = inflight_depth.min(iterations as usize).max(1);
-            runtime.block_on(async move {
-                let counter = Arc::new(AtomicU64::new(iterations));
-                let start = Instant::now();
-                let mut handles = Vec::with_capacity(concurrency);
-                for _ in 0..concurrency {
-                    let pm = pm.clone();
-                    let pkt = pkt.clone();
-                    let counter = counter.clone();
-                    handles.push(tokio::spawn(async move {
-                        loop {
-                            if counter
-                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
-                                    if cur > 0 { Some(cur - 1) } else { None }
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                            pm.send_msg_by_ip(pkt.clone(), dst, false)
+        // The scalar case submits one packet for each fabric API call.
+        // Each timed window ends after the receiver consumes all submitted packets.
+        group.bench_function(format!("{benchmark_prefix}-scalar"), |b| {
+            b.iter_custom(|iterations| {
+                let pm = peer_manager.clone();
+                let pkt = packet.clone();
+                let completion = completion.clone();
+                runtime.block_on(async move {
+                    let mut measured = Duration::ZERO;
+                    let mut remaining = iterations;
+                    let window_limit = inflight_depth
+                        .saturating_mul(batch_size)
+                        .clamp(1, preparation_limit) as u64;
+                    while remaining != 0 {
+                        let packet_count = remaining.min(window_limit) as usize;
+                        let packets = prepare_scalar_window(&pkt, packet_count);
+                        let completion_target = completion.target_after(packet_count);
+                        let start = Instant::now();
+                        for packet in packets {
+                            pm.send_fabric_packet(FabricPacket::new(FabricPayloadKind::Ip, packet))
                                 .await
-                                .expect("send packet by LowTier IP");
+                                .expect("send one packet through the LowTier fabric");
                         }
-                    }));
-                }
-                for h in handles {
-                    h.await.expect("saturate worker task panicked");
-                }
-                start.elapsed()
-            })
+                        wait_for_completed_transfer(&completion, completion_target).await;
+                        measured += start.elapsed();
+                        remaining -= packet_count as u64;
+                    }
+                    measured
+                })
+            });
         });
-    });
 
-    group.finish();
+        group.bench_function(format!("{benchmark_prefix}-batch"), |b| {
+            b.iter_custom(|iterations| {
+                let pm = peer_manager.clone();
+                let pkt = packet.clone();
+                let completion = completion.clone();
+                runtime.block_on(async move {
+                    let mut measured = Duration::ZERO;
+                    let mut remaining = iterations;
+                    let window_limit = inflight_depth
+                        .saturating_mul(batch_size)
+                        .clamp(1, preparation_limit) as u64;
+                    while remaining != 0 {
+                        let packet_count = remaining.min(window_limit) as usize;
+                        let batches = prepare_batch_window(&pkt, packet_count, batch_size);
+                        let completion_target = completion.target_after(packet_count);
+                        let start = Instant::now();
+                        for batch in batches {
+                            pm.send_fabric_batch(batch)
+                                .await
+                                .expect("send one batch through the LowTier fabric");
+                        }
+                        wait_for_completed_transfer(&completion, completion_target).await;
+                        measured += start.elapsed();
+                        remaining -= packet_count as u64;
+                    }
+                    measured
+                })
+            });
+        });
 
-    runtime.block_on(async move {
-        drop(topology);
-    });
+        // Concurrent tasks submit scalar fabric packets.
+        // Each timed window includes receiver completion.
+        group.bench_function(format!("{benchmark_prefix}-saturate"), |b| {
+            b.iter_custom(|iterations| {
+                let pm = peer_manager.clone();
+                let pkt = packet.clone();
+                let completion = completion.clone();
+                let concurrency = inflight_depth
+                    .min(iterations as usize)
+                    .min(preparation_limit)
+                    .max(1);
+                runtime.block_on(async move {
+                    let mut measured = Duration::ZERO;
+                    let mut remaining = iterations;
+                    let window_limit = concurrency
+                        .saturating_mul(batch_size)
+                        .clamp(1, preparation_limit) as u64;
+                    while remaining != 0 {
+                        let packet_count = remaining.min(window_limit) as usize;
+                        let worker_packets =
+                            prepare_saturate_window(&pkt, packet_count, concurrency);
+                        let completion_target = completion.target_after(packet_count);
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(concurrency);
+                        for packets in worker_packets {
+                            let pm = pm.clone();
+                            handles.push(tokio::spawn(async move {
+                                for packet in packets {
+                                    pm.send_fabric_packet(FabricPacket::new(
+                                        FabricPayloadKind::Ip,
+                                        packet,
+                                    ))
+                                    .await
+                                    .expect("send one packet through the LowTier fabric");
+                                }
+                            }));
+                        }
+                        for handle in handles {
+                            handle.await.expect("saturate worker task panicked");
+                        }
+                        wait_for_completed_transfer(&completion, completion_target).await;
+                        measured += start.elapsed();
+                        remaining -= packet_count as u64;
+                    }
+                    measured
+                })
+            });
+        });
+
+        group.finish();
+    }));
+
+    drop(peer_manager);
+    drop(packet);
+    drop(completion);
+    runtime.block_on(teardown_topology(topology));
+    if let Err(payload) = benchmark_result {
+        resume_unwind(payload);
+    }
 }
 
 async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology {
@@ -268,6 +405,11 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
 
     inst_a.run().await.expect("inst_a run");
     inst_b.run().await.expect("inst_b run");
+    let completion = CompletionTracker::new();
+    inst_b
+        .get_peer_manager()
+        .add_packet_process_pipeline(Box::new(completion.clone()))
+        .await;
 
     match tunnel {
         TunnelKind::Ring => inst_b
@@ -305,13 +447,90 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
         _docker: docker,
         inst_a,
         _inst_b: inst_b,
-        dst: VIRTUAL_IP_B.parse().unwrap(),
         packet: make_data_packet(VIRTUAL_IP_A, VIRTUAL_IP_B, packet_size),
+        completion,
     }
 }
 
+async fn teardown_topology(mut topology: BenchTopology) {
+    topology.inst_a.clear_resources().await;
+    topology._inst_b.clear_resources().await;
+    drop(topology);
+    tokio::task::yield_now().await;
+}
+
+fn prepared_packet_limit(packet_size: usize) -> usize {
+    (MAX_PREPARED_PAYLOAD_BYTES / packet_size).clamp(1, MAX_PREPARED_PACKETS)
+}
+
+fn is_benchmark_packet(packet: &ZCPacket) -> bool {
+    let payload = packet.payload();
+    payload.len() >= 28
+        && payload[0] >> 4 == 4
+        && payload[9] == 17
+        && payload[16..20] == [10, 144, 144, 2]
+        && payload[20..24] == [0x30, 0x39, 0xd4, 0x31]
+}
+
+async fn wait_for_completed_transfer(completion: &CompletionTracker, target: u64) {
+    tokio::time::timeout(RECEIVE_TIMEOUT, completion.wait_for(target))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the receiver completed {} packets before the transfer timeout; expected {target}",
+                completion.completed.load(Ordering::Acquire)
+            )
+        });
+}
+
+fn make_packet_batch(packet: &ZCPacket, packet_count: usize) -> PacketBatch {
+    let mut batch = PacketBatch::with_capacity(packet_count);
+    for _ in 0..packet_count {
+        batch
+            .try_push(packet.clone())
+            .expect("the configured packet count fits one batch");
+    }
+    batch
+}
+
+fn prepare_scalar_window(packet: &ZCPacket, packet_count: usize) -> Vec<ZCPacket> {
+    (0..packet_count).map(|_| packet.clone()).collect()
+}
+
+fn prepare_batch_window(
+    packet: &ZCPacket,
+    packet_count: usize,
+    batch_size: usize,
+) -> Vec<FabricBatch> {
+    let mut remaining = packet_count;
+    let mut batches = Vec::with_capacity(packet_count.div_ceil(batch_size));
+    while remaining != 0 {
+        let current = remaining.min(batch_size);
+        batches.push(FabricBatch::new(
+            FabricPayloadKind::Ip,
+            make_packet_batch(packet, current),
+        ));
+        remaining -= current;
+    }
+    batches
+}
+
+fn prepare_saturate_window(
+    packet: &ZCPacket,
+    packet_count: usize,
+    concurrency: usize,
+) -> Vec<Vec<ZCPacket>> {
+    let mut workers = (0..concurrency)
+        .map(|_| Vec::with_capacity(packet_count.div_ceil(concurrency)))
+        .collect::<Vec<_>>();
+    for index in 0..packet_count {
+        workers[index % concurrency].push(packet.clone());
+    }
+    workers
+}
+
 async fn wait_for_routes(inst_a: &Instance, inst_b: &Instance) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let routes_a = inst_a.get_peer_manager().list_routes().await;
             let routes_b = inst_b.get_peer_manager().list_routes().await;
@@ -321,8 +540,26 @@ async fn wait_for_routes(inst_a: &Instance, inst_b: &Instance) {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     })
-    .await
-    .expect("LowTier routes did not converge within 15s");
+    .await;
+    if result.is_ok() {
+        return;
+    }
+
+    let peer_manager_a = inst_a.get_peer_manager();
+    let peer_manager_b = inst_b.get_peer_manager();
+    panic!(
+        "LowTier routes did not converge within 15s.\n\
+         routes_a={:?}\n\
+         routes_b={:?}\n\
+         peers_a={:?}\n\
+         peers_b={:?}\n\
+         connectors_b={:?}",
+        peer_manager_a.list_routes().await,
+        peer_manager_b.list_routes().await,
+        peer_manager_a.get_peer_map().list_peers(),
+        peer_manager_b.get_peer_map().list_peers(),
+        inst_b.get_conn_manager().list_connectors().await,
+    );
 }
 
 fn make_data_packet(src: &str, dst: &str, total_size: usize) -> ZCPacket {
@@ -376,6 +613,10 @@ fn no_tun_config(
 ) -> TomlConfigLoader {
     let config = TomlConfigLoader::default();
     config.set_inst_name(name.to_owned());
+    config.set_network_identity(NetworkIdentity::new(
+        "tx-throughput".to_owned(),
+        "tx-throughput-secret".to_owned(),
+    ));
     config.set_netns(netns);
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_listeners(listeners);

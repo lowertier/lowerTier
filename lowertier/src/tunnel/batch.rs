@@ -23,6 +23,12 @@ use super::{TunnelError, packet_def::ZCPacket};
 /// reach this size; producers append only packets that are already available.
 pub const MAX_PACKET_BATCH_SIZE: usize = 64;
 
+/// Number of stable packet jobs one peer owner may have in the send pipeline.
+pub(crate) const SEND_PIPELINE_SLOT_COUNT: usize = 8;
+
+/// Maximum packet count for one unflushed kernel I/O operation.
+pub(crate) const IO_FLUSH_PACKET_BUDGET: usize = 8;
+
 pub const PARALLEL_CRYPTO_MIN_BATCH_SIZE: usize = 32;
 const RETAINED_PACKET_BATCH_CONTAINERS: usize = 32;
 
@@ -212,12 +218,14 @@ fn packet_batch_pool() -> &'static PacketBatchPool {
 #[derive(Debug)]
 pub struct PacketBatch {
     packets: Vec<ZCPacket>,
+    prefer_inline_crypto: bool,
 }
 
 impl PacketBatch {
     pub fn new() -> Self {
         Self {
             packets: packet_batch_pool().take(),
+            prefer_inline_crypto: false,
         }
     }
 
@@ -228,6 +236,7 @@ impl PacketBatch {
         }
         Self {
             packets: Vec::with_capacity(capacity),
+            prefer_inline_crypto: false,
         }
     }
 
@@ -237,6 +246,18 @@ impl PacketBatch {
             .try_push(packet)
             .expect("a new packet batch accepts one packet");
         batch
+    }
+
+    pub(crate) fn from_vec(packets: Vec<ZCPacket>) -> Self {
+        assert!(packets.len() <= MAX_PACKET_BATCH_SIZE);
+        Self {
+            packets,
+            prefer_inline_crypto: false,
+        }
+    }
+
+    pub(crate) fn into_vec(mut self) -> Vec<ZCPacket> {
+        mem::take(&mut self.packets)
     }
 
     #[allow(clippy::result_large_err)]
@@ -255,6 +276,24 @@ impl PacketBatch {
         Ok(())
     }
 
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn try_append(&mut self, mut other: Self) -> Result<(), Self> {
+        if self.packets.len() + other.packets.len() > MAX_PACKET_BATCH_SIZE {
+            return Err(other);
+        }
+        self.prefer_inline_crypto |= other.prefer_inline_crypto;
+        self.packets.append(&mut other.packets);
+        Ok(())
+    }
+
+    pub(crate) fn mark_inline_crypto(&mut self) {
+        self.prefer_inline_crypto = true;
+    }
+
+    pub(crate) fn prefers_inline_crypto(&self) -> bool {
+        self.prefer_inline_crypto
+    }
+
     pub fn len(&self) -> usize {
         self.packets.len()
     }
@@ -267,6 +306,7 @@ impl PacketBatch {
         debug_assert!(at <= self.packets.len());
         Self {
             packets: self.packets.split_off(at),
+            prefer_inline_crypto: self.prefer_inline_crypto,
         }
     }
 
@@ -523,14 +563,21 @@ pin_project! {
         #[pin]
         inner: S,
         pending_error: Option<TunnelError>,
+        max_batch_size: usize,
     }
 }
 
 impl<S> ScalarToBatchStream<S> {
     pub fn new(inner: S) -> Self {
+        Self::new_with_max_batch_size(inner, MAX_PACKET_BATCH_SIZE)
+    }
+
+    pub fn new_with_max_batch_size(inner: S, max_batch_size: usize) -> Self {
+        assert!(max_batch_size > 0);
         Self {
             inner,
             pending_error: None,
+            max_batch_size: max_batch_size.min(MAX_PACKET_BATCH_SIZE),
         }
     }
 }
@@ -558,7 +605,8 @@ where
         batch
             .try_push(first)
             .expect("a new packet batch accepts its first packet");
-        while batch.len() < packet_batch_limit() {
+        let batch_limit = packet_batch_limit().min(*this.max_batch_size);
+        while batch.len() < batch_limit {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(packet))) => batch
                     .try_push(packet)
@@ -717,6 +765,23 @@ mod batch_interface_tests {
     }
 
     #[tokio::test]
+    async fn scalar_stream_respects_its_local_batch_limit() {
+        let source = stream::iter([
+            Ok(packet(1)),
+            Ok(packet(2)),
+            Ok(packet(3)),
+            Ok(packet(4)),
+            Ok(packet(5)),
+        ]);
+        let mut stream = ScalarToBatchStream::new_with_max_batch_size(source, 2);
+
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 2);
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 2);
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 1);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn batch_stream_scalar_adapter_preserves_packet_order() {
         let mut batch = PacketBatch::new();
         batch.try_push(packet(4)).unwrap();
@@ -780,7 +845,7 @@ mod tests {
     use futures::StreamExt;
 
     use super::{
-        MAX_PACKET_BATCH_SIZE, PARALLEL_CRYPTO_MIN_BATCH_SIZE, PacketBatchPool,
+        MAX_PACKET_BATCH_SIZE, PARALLEL_CRYPTO_MIN_BATCH_SIZE, PacketBatch, PacketBatchPool,
         ordered_parallel_try_for_each, packet_batch_limit_from, parallel_crypto_configured,
     };
 
@@ -796,6 +861,24 @@ mod tests {
             packet_batch_limit_from(Some("invalid")),
             MAX_PACKET_BATCH_SIZE
         );
+    }
+
+    #[test]
+    fn packet_batch_vector_round_trip_preserves_the_container() {
+        let mut batch = PacketBatch::new();
+        batch
+            .try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&[1]))
+            .unwrap();
+        batch
+            .try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&[2]))
+            .unwrap();
+        let pointer = batch.as_ptr();
+
+        let packets = batch.into_vec();
+        let restored = PacketBatch::from_vec(packets);
+
+        assert_eq!(restored.as_ptr(), pointer);
+        assert_eq!(restored.len(), 2);
     }
 
     #[test]

@@ -536,8 +536,11 @@ impl DirectConnectorManagerData {
             }
             timeout(
                 std::time::Duration::from_secs(3),
-                self.peer_manager
-                    .add_client_tunnel_with_peer_id_hint(tunnel, true, Some(dst_peer_id)),
+                self.peer_manager.add_client_tunnel_with_peer_id_hint(
+                    tunnel,
+                    true,
+                    Some(dst_peer_id),
+                ),
             )
             .await??
         };

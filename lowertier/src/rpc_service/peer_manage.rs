@@ -48,6 +48,28 @@ impl PeerManageRpc for PeerManageRpcService {
             .await
     }
 
+    async fn replace_local_bgp_routes(
+        &self,
+        ctrl: Self::Controller,
+        req: instance::ReplaceLocalBgpRoutesRequest,
+    ) -> crate::proto::rpc_types::error::Result<instance::ReplaceLocalBgpRoutesResponse> {
+        super::get_instance_service(&self.instance_manager, &req.instance)?
+            .get_peer_manage_service()
+            .replace_local_bgp_routes(ctrl, req)
+            .await
+    }
+
+    async fn list_local_bgp_routes(
+        &self,
+        ctrl: Self::Controller,
+        req: instance::ListLocalBgpRoutesRequest,
+    ) -> crate::proto::rpc_types::error::Result<instance::ListLocalBgpRoutesResponse> {
+        super::get_instance_service(&self.instance_manager, &req.instance)?
+            .get_peer_manage_service()
+            .list_local_bgp_routes(ctrl, req)
+            .await
+    }
+
     async fn list_route(
         &self,
         ctrl: Self::Controller,

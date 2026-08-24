@@ -1,10 +1,10 @@
 use std::{
     collections::BTreeSet,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr},
     pin::Pin,
     sync::{
-        Arc, OnceLock, Weak,
+        Arc, Mutex as StdMutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
@@ -13,7 +13,8 @@ use std::{
 
 use crate::{
     common::{
-        config::{Flags, PortMode},
+        config::{Flags, InterfaceAdapter},
+        dataplane_telemetry::DataplaneStage,
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
         ifcfg::{IfConfiger, IfConfiguerTrait},
@@ -22,12 +23,13 @@ use crate::{
     instance::proxy_cidrs_monitor::ProxyCidrsMonitor,
     peers::{
         PacketRecvChanReceiver,
+        fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
+        flow::{FLOW_SHARD_COUNT, classify_nic_packet_flow},
         peer_manager::{DirectNicEndpoint, PeerManager},
-        recv_packet_batch_from_chan,
     },
     tunnel::{
         PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
-        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, wait_for_delivery_with_one_prefetch},
+        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES},
         common::{FramedWriter, TunnelWrapper, ZCPacketToBytes},
         packet_def::{ZCPacket, ZCPacketType},
     },
@@ -36,10 +38,9 @@ use crate::{
 use byteorder::WriteBytesExt as _;
 use bytes::{Buf, BufMut, BytesMut};
 use cidr::{Ipv4Inet, Ipv6Inet};
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, lock::BiLock, ready};
+use futures::{FutureExt, Sink, Stream, StreamExt, lock::BiLock, ready};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use pin_project_lite::pin_project;
-use pnet::packet::{ipv4::Ipv4Packet, ipv6::Ipv6Packet};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{Mutex, Notify},
@@ -143,6 +144,127 @@ static NIC_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
 static NIC_MAX_BATCH: AtomicUsize = AtomicUsize::new(0);
 static PEER_BATCH_DISABLED: OnceLock<bool> = OnceLock::new();
 
+#[derive(Default)]
+struct NicIngressFlowLane {
+    next_ticket: u64,
+    serving: u64,
+    completed: BTreeSet<u64>,
+}
+
+struct NicIngressFlowGate {
+    lanes: StdMutex<Vec<NicIngressFlowLane>>,
+    notifiers: Vec<Notify>,
+}
+
+impl NicIngressFlowGate {
+    fn new() -> Self {
+        let lane_count = usize::from(FLOW_SHARD_COUNT);
+        Self {
+            lanes: StdMutex::new(
+                std::iter::repeat_with(NicIngressFlowLane::default)
+                    .take(lane_count)
+                    .collect(),
+            ),
+            notifiers: std::iter::repeat_with(Notify::new)
+                .take(lane_count)
+                .collect(),
+        }
+    }
+
+    fn reserve_batch(
+        self: &Arc<Self>,
+        batch: &PacketBatch,
+        adapter: InterfaceAdapter,
+    ) -> NicIngressFlowPermit {
+        let ethernet = adapter.uses_native_ethernet();
+        self.reserve_shards(
+            batch
+                .iter()
+                .map(|packet| classify_nic_packet_flow(packet, ethernet).shard),
+        )
+    }
+
+    fn reserve_shards(
+        self: &Arc<Self>,
+        shards: impl IntoIterator<Item = u16>,
+    ) -> NicIngressFlowPermit {
+        let mut present = [false; FLOW_SHARD_COUNT as usize];
+        for shard in shards {
+            present[usize::from(shard) % present.len()] = true;
+        }
+
+        // One short lock gives every intersecting batch the same reservation order.
+        let mut lanes = self.lanes.lock().expect("NIC ingress flow gate poisoned");
+        let mut tickets = Vec::new();
+        for (index, is_present) in present.into_iter().enumerate() {
+            if !is_present {
+                continue;
+            }
+            let lane = &mut lanes[index];
+            let ticket = lane.next_ticket;
+            lane.next_ticket = lane.next_ticket.wrapping_add(1);
+            tickets.push((index, ticket));
+        }
+        drop(lanes);
+        NicIngressFlowPermit {
+            gate: self.clone(),
+            tickets,
+        }
+    }
+}
+
+struct NicIngressFlowPermit {
+    gate: Arc<NicIngressFlowGate>,
+    tickets: Vec<(usize, u64)>,
+}
+
+impl NicIngressFlowPermit {
+    async fn wait(&self) {
+        for &(index, ticket) in &self.tickets {
+            loop {
+                let notified = self.gate.notifiers[index].notified();
+                let ready = self
+                    .gate
+                    .lanes
+                    .lock()
+                    .expect("NIC ingress flow gate poisoned")[index]
+                    .serving
+                    == ticket;
+                if ready {
+                    break;
+                }
+                notified.await;
+            }
+        }
+    }
+}
+
+impl Drop for NicIngressFlowPermit {
+    fn drop(&mut self) {
+        let mut notify = Vec::new();
+        let mut lanes = self
+            .gate
+            .lanes
+            .lock()
+            .expect("NIC ingress flow gate poisoned");
+        for &(index, ticket) in &self.tickets {
+            let lane = &mut lanes[index];
+            lane.completed.insert(ticket);
+            let previous = lane.serving;
+            while lane.completed.remove(&lane.serving) {
+                lane.serving = lane.serving.wrapping_add(1);
+            }
+            if lane.serving != previous {
+                notify.push(index);
+            }
+        }
+        drop(lanes);
+        for index in notify {
+            self.gate.notifiers[index].notify_waiters();
+        }
+    }
+}
+
 fn nic_packet_batch_size() -> usize {
     std::env::var("LOWTIER_DEBUG_NIC_BATCH_SIZE")
         .ok()
@@ -165,12 +287,9 @@ fn linux_tun_offload_auto_supported_for(arch: &str) -> bool {
     match arch {
         // Keep the existing well-covered x86_64 behavior.
         "x86_64" => true,
-        // ARM64 Linux 5.15 on the physical VM produced sustained TCP
-        // retransmissions, and controlled Linux 6.8 showed severe throughput
-        // collapse plus intermittent loss of reachability. Keep ARM64 on the
-        // portable backend until a specific platform is validated; the
-        // explicit enable override remains available for controlled testing.
-        "aarch64" => false,
+        // The vendored TUN backend uses NEON for checksum accumulation.
+        // Enable the complete TSO and GRO path on AArch64.
+        "aarch64" => true,
         _ => false,
     }
 }
@@ -379,15 +498,11 @@ fn infer_proto(buf: &[u8]) -> PacketProtocol {
 
 struct TunZCPacketToBytes {
     has_packet_info: bool,
-    l2_tun: bool,
 }
 
 impl TunZCPacketToBytes {
-    pub fn new(has_packet_info: bool, l2_tun: bool) -> Self {
-        Self {
-            has_packet_info,
-            l2_tun,
-        }
+    pub fn new(has_packet_info: bool) -> Self {
+        Self { has_packet_info }
     }
 
     pub fn fill_packet_info(
@@ -410,20 +525,13 @@ impl ZCPacketToBytes for TunZCPacketToBytes {
         // we have peer manager header, so payload offset must larger than 4
         assert!(payload_offset >= 4);
 
-        let l2_prefix_len = if self.l2_tun {
-            crate::instance::l2_tun::decapsulate_ip(&inner[payload_offset..])
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            crate::instance::l2_tun::ETHERNET_HEADER_LEN
-        } else {
-            0
-        };
         let ret = if self.has_packet_info {
-            inner.advance(payload_offset + l2_prefix_len - 4);
+            inner.advance(payload_offset - 4);
             let proto = infer_proto(&inner[4..]);
             self.fill_packet_info(&mut inner[0..4], proto)?;
             inner
         } else {
-            inner.advance(payload_offset + l2_prefix_len);
+            inner.advance(payload_offset);
             inner
         };
 
@@ -504,21 +612,20 @@ impl Drop for VirtualNic {
 }
 
 impl VirtualNic {
-    fn port_mode(flags: &Flags) -> PortMode {
-        PortMode::from_flags(flags)
+    fn interface_adapter(flags: &Flags) -> InterfaceAdapter {
+        InterfaceAdapter::from_flags(flags)
+    }
+
+    fn needs_tap_edge_adapter(adapter: InterfaceAdapter) -> bool {
+        adapter.uses_native_ethernet()
     }
 
     fn wrap_tun_device(
         dev: tun::platform::Device,
         has_packet_info: bool,
-        l2_tun: bool,
         mtu: usize,
     ) -> Result<Box<dyn Tunnel>, Error> {
-        let payload_prefix_len = if l2_tun {
-            crate::instance::l2_tun::ETHERNET_HEADER_LEN
-        } else {
-            0
-        };
+        let payload_prefix_len = 0;
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
@@ -526,10 +633,7 @@ impl VirtualNic {
                 crate::instance::darwin_tun::split_device(dev, payload_prefix_len, mtu)?;
             let tunnel = TunnelWrapper::new(
                 stream,
-                FramedWriter::new_with_converter(
-                    writer,
-                    TunZCPacketToBytes::new(has_packet_info, l2_tun),
-                ),
+                FramedWriter::new_with_converter(writer, TunZCPacketToBytes::new(has_packet_info)),
                 None,
             );
             Ok(Box::new(tunnel))
@@ -544,7 +648,7 @@ impl VirtualNic {
                 TunStream::new(reader, has_packet_info, payload_prefix_len),
                 FramedWriter::new_with_converter_and_max_buffer_count(
                     TunAsyncWrite { l: writer },
-                    TunZCPacketToBytes::new(has_packet_info, l2_tun),
+                    TunZCPacketToBytes::new(has_packet_info),
                     1,
                 ),
                 None,
@@ -783,14 +887,14 @@ impl VirtualNic {
     async fn create_tun(&self) -> Result<tun::platform::Device, Error> {
         let mut config = Configuration::default();
         let flags = self.global_ctx.get_flags();
-        let port_mode = Self::port_mode(&flags);
-        if port_mode.uses_native_ethernet() {
+        let adapter = Self::interface_adapter(&flags);
+        if adapter.uses_native_ethernet() {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             config.layer(Layer::L2);
 
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             return Err(anyhow::anyhow!(
-                "port_mode=tap is supported only on Linux and FreeBSD; use port_mode=l3"
+                "interface_adapter=tap is supported only on Linux and FreeBSD; use interface_adapter=tun"
             )
             .into());
         } else {
@@ -886,11 +990,12 @@ impl VirtualNic {
         tun_fd: std::os::fd::RawFd,
     ) -> Result<Box<dyn Tunnel>, Error> {
         let flags = self.global_ctx.get_flags();
-        let port_mode = Self::port_mode(&flags);
-        if port_mode.uses_native_ethernet() {
-            return Err(
-                anyhow::anyhow!("port_mode=tap is not supported by mobile virtual NICs").into(),
-            );
+        let adapter = Self::interface_adapter(&flags);
+        if adapter.uses_native_ethernet() {
+            return Err(anyhow::anyhow!(
+                "interface_adapter=tap is not supported by mobile virtual NICs"
+            )
+            .into());
         }
         log::debug!(%tun_fd);
         let mut config = Configuration::default();
@@ -911,9 +1016,8 @@ impl VirtualNic {
             all(target_os = "macos", feature = "macos-ne")
         ));
         let dev = tun::create(&config)?;
-        let l2_tun = port_mode.is_l2_tun();
         let mtu = flags.mtu as usize;
-        let ft = Self::wrap_tun_device(dev, has_packet_info, l2_tun, mtu)?;
+        let ft = Self::wrap_tun_device(dev, has_packet_info, mtu)?;
 
         self.ifname = Some(format!("tunfd_{}", tun_fd));
 
@@ -931,7 +1035,7 @@ impl VirtualNic {
         let kernel_mtu = u16::try_from(effective_mtu)
             .map_err(|_| anyhow::anyhow!("TUN MTU {effective_mtu} exceeds Linux u16 limits"))?;
 
-        let native_ethernet = Self::port_mode(&flags).uses_native_ethernet();
+        let native_ethernet = Self::interface_adapter(&flags).uses_native_ethernet();
         let parallelism = std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(1);
@@ -982,10 +1086,8 @@ impl VirtualNic {
             let _guard = self.global_ctx.net_ns.guard();
             self.ifcfg.set_mtu(ifname.as_str(), effective_mtu).await?;
         }
-        let l2_tun = Self::port_mode(&flags).is_l2_tun();
         let tunnel = crate::instance::linux_tun::wrap_devices(
             devices,
-            l2_tun,
             effective_mtu as usize,
             self.global_ctx.dataplane_telemetry().clone(),
             offload,
@@ -1084,8 +1186,7 @@ impl VirtualNic {
         }
 
         let has_packet_info = cfg!(all(target_os = "macos", not(feature = "macos-ne")));
-        let l2_tun = Self::port_mode(&flags).is_l2_tun();
-        let ft = Self::wrap_tun_device(dev, has_packet_info, l2_tun, mtu_in_config as usize)?;
+        let ft = Self::wrap_tun_device(dev, has_packet_info, mtu_in_config as usize)?;
 
         self.ifname = Some(ifname.to_owned());
 
@@ -1297,268 +1398,58 @@ impl NicCtx {
         Ok(())
     }
 
-    async fn do_forward_nic_to_peers_ipv4(ret: ZCPacket, mgr: &PeerManager) {
-        if let Some(ipv4) = Ipv4Packet::new(ret.payload()) {
-            if ipv4.get_version() != 4 {
-                tracing::info!("[USER_PACKET] not ipv4 packet: {:?}", ipv4);
+    async fn do_forward_nic_to_peers(ret: ZCPacket, mgr: &PeerManager, adapter: InterfaceAdapter) {
+        let payload_kind = if adapter.uses_native_ethernet() {
+            Self::learn_hybrid_multicast_membership(ret.payload(), mgr);
+            if Self::handle_hybrid_control_frame(&ret, mgr).await {
                 return;
             }
-            let dst_ipv4 = ipv4.get_destination();
-            let src_ipv4 = ipv4.get_source();
-            let my_ipv4 = mgr.get_global_ctx().get_ipv4().map(|x| x.address());
-            tracing::trace!(
-                ?ret,
-                ?src_ipv4,
-                ?dst_ipv4,
-                "[USER_PACKET] recv new packet from tun device and forward to peers."
-            );
-
-            // Subnet A is proxied as 10.0.0.0/24, and Subnet B is also proxied as 10.0.0.0/24.
-            //
-            // Subnet A has received a route advertised by Subnet B. As a result, A can reach
-            // the physical subnet 10.0.0.0/24 directly and has also added a virtual route for
-            // the same subnet 10.0.0.0/24. However, the physical route has a higher priority
-            // (lower metric) than the virtual one.
-            //
-            // When A sends a UDP packet to a non-existent IP within this subnet, the packet
-            // cannot be delivered on the physical network and is instead routed to the virtual
-            // network interface.
-            //
-            // The virtual interface receives the packet and forwards it to itself, which triggers
-            // the subnet proxy logic. The subnet proxy then attempts to send another packet to
-            // the same destination address, causing the same process to repeat and creating an
-            // infinite loop. Therefore, we must avoid re-sending packets back to ourselves
-            // when the subnet proxy itself is the originator of the packet.
-            //
-            // However, there is a special scenario to consider: when A acts as a gateway,
-            // packets from devices behind A may be forwarded by the OS to the ET (e.g., an
-            // eBPF or tunneling component), which happens to proxy the subnet. In this case,
-            // the packet’s source IP is not A’s own IP, and we must allow such packets to be
-            // sent to the virtual interface (i.e., "sent to ourselves") to maintain correct
-            // forwarding behavior. Thus, loop prevention should only apply when the source IP
-            // belongs to the local host.
-            let send_ret = mgr
-                .send_msg_by_ip(ret, IpAddr::V4(dst_ipv4), Some(src_ipv4) == my_ipv4)
-                .await;
-            if send_ret.is_err() {
-                tracing::trace!(?send_ret, "[USER_PACKET] send_msg failed")
-            }
+            FabricPayloadKind::Ethernet
         } else {
-            tracing::warn!(?ret, "[USER_PACKET] not ipv4 packet");
-        }
-    }
-
-    async fn do_forward_nic_to_peers_ipv6(ret: ZCPacket, mgr: &PeerManager) {
-        if let Some(ipv6) = Ipv6Packet::new(ret.payload()) {
-            if ipv6.get_version() != 6 {
-                tracing::info!("[USER_PACKET] not ipv6 packet: {:?}", ipv6);
-                return;
-            }
-            let src_ipv6 = ipv6.get_source();
-            let dst_ipv6 = ipv6.get_destination();
-            let is_local_src = mgr.get_global_ctx().is_ip_local_ipv6(&src_ipv6);
-            tracing::trace!(
-                ?ret,
-                ?src_ipv6,
-                ?dst_ipv6,
-                "[USER_PACKET] recv new packet from tun device and forward to peers."
-            );
-
-            if src_ipv6.is_unicast_link_local() && !is_local_src {
-                // do not route link local packet to other nodes unless the address is assigned by user
-                return;
-            }
-
-            // TODO: use zero-copy
-            let send_ret = mgr
-                .send_msg_by_ip(ret, IpAddr::V6(dst_ipv6), is_local_src)
-                .await;
-            if send_ret.is_err() {
-                tracing::trace!(?send_ret, "[USER_PACKET] send_msg failed")
-            }
-        } else {
-            tracing::warn!(?ret, "[USER_PACKET] not ipv6 packet");
-        }
-    }
-
-    async fn do_forward_l2_tun_to_peers(ret: ZCPacket, mgr: &PeerManager) {
-        let Some(ip_packet) = ret
-            .payload()
-            .get(crate::instance::l2_tun::ETHERNET_HEADER_LEN..)
-        else {
-            tracing::warn!(
-                ?ret,
-                "[USER_PACKET] compatible Ethernet packet is too short"
-            );
-            return;
-        };
-        let Some(version) = ip_packet.first().map(|byte| byte >> 4) else {
-            return;
-        };
-        let (destination, local_source) = match version {
-            4 => {
-                let Some(ipv4) = Ipv4Packet::new(ip_packet) else {
-                    tracing::warn!(
-                        ?ret,
-                        "[USER_PACKET] invalid compatible Ethernet IPv4 packet"
-                    );
-                    return;
-                };
-                let source = ipv4.get_source();
-                (
-                    IpAddr::V4(ipv4.get_destination()),
-                    mgr.get_global_ctx().get_ipv4().map(|ip| ip.address()) == Some(source),
-                )
-            }
-            6 => {
-                let Some(ipv6) = Ipv6Packet::new(ip_packet) else {
-                    tracing::warn!(
-                        ?ret,
-                        "[USER_PACKET] invalid compatible Ethernet IPv6 packet"
-                    );
-                    return;
-                };
-                let source = ipv6.get_source();
-                (
-                    IpAddr::V6(ipv6.get_destination()),
-                    mgr.get_global_ctx().is_ip_local_ipv6(&source),
-                )
-            }
-            _ => {
-                tracing::warn!(
-                    version,
-                    "[USER_PACKET] unsupported compatible Ethernet IP version"
-                );
-                return;
-            }
-        };
-
-        if let Err(error) = mgr.send_msg_by_l2_tun(ret, destination, local_source).await {
-            tracing::trace!(
-                ?error,
-                "[USER_PACKET] send compatible Ethernet frame failed"
-            );
-        }
-    }
-
-    async fn do_forward_nic_to_peers(ret: ZCPacket, mgr: &PeerManager, port_mode: PortMode) {
-        if port_mode.uses_native_ethernet() {
-            if port_mode.is_auto() {
-                Self::learn_hybrid_multicast_membership(ret.payload(), mgr);
-                if Self::handle_hybrid_control_frame(&ret, mgr).await {
-                    return;
-                }
-            }
-            let send_ret = if port_mode.is_auto() {
-                mgr.send_msg_by_hybrid_ethernet(ret).await
-            } else {
-                mgr.send_msg_by_ethernet(ret).await
-            };
-            if send_ret.is_err() {
-                tracing::trace!(?send_ret, "[USER_PACKET] send ethernet frame failed");
-            }
-            return;
-        }
-        if port_mode.is_l2_tun() {
-            Self::do_forward_l2_tun_to_peers(ret, mgr).await;
-            return;
-        }
-
-        if port_mode.is_auto() {
             Self::learn_hybrid_ip_multicast_membership(ret.payload(), mgr);
-            let Some((destination, local_source)) = mgr.routed_packet_destination(&ret) else {
-                tracing::warn!(?ret, "[USER_PACKET] invalid automatic IP packet");
-                return;
-            };
-            if let Err(error) = mgr
-                .send_msg_by_hybrid_ip(ret, destination, local_source)
-                .await
-            {
-                tracing::trace!(?error, "[USER_PACKET] send automatic IP packet failed");
-            }
-            return;
-        }
-
-        let payload = ret.payload();
-        if payload.is_empty() {
-            return;
-        }
-
-        match payload[0] >> 4 {
-            4 => Self::do_forward_nic_to_peers_ipv4(ret, mgr).await,
-            6 => Self::do_forward_nic_to_peers_ipv6(ret, mgr).await,
-            _ => {
-                tracing::warn!(?ret, "[USER_PACKET] unknown IP version");
-            }
+            FabricPayloadKind::Ip
+        };
+        if let Err(error) = mgr
+            .send_fabric_packet(FabricPacket::new(payload_kind, ret))
+            .await
+        {
+            tracing::trace!(?error, "[USER_PACKET] send fabric packet failed");
         }
     }
 
     async fn do_forward_nic_batch_to_peers(
         batch: PacketBatch,
         mgr: &PeerManager,
-        port_mode: PortMode,
+        adapter: InterfaceAdapter,
     ) {
         if peer_batch_disabled() {
             for packet in batch {
-                Self::do_forward_nic_to_peers(packet, mgr, port_mode).await;
+                Self::do_forward_nic_to_peers(packet, mgr, adapter).await;
             }
             return;
         }
-        if port_mode.uses_native_ethernet() {
-            if port_mode.is_auto() {
-                let mut data = PacketBatch::new();
-                for packet in batch {
-                    Self::learn_hybrid_multicast_membership(packet.payload(), mgr);
-                    if Self::handle_hybrid_control_frame(&packet, mgr).await {
-                        continue;
-                    }
-                    data.try_push(packet)
-                        .expect("a filtered NIC batch cannot exceed its input");
+        let (payload_kind, batch) = if adapter.uses_native_ethernet() {
+            let mut data = PacketBatch::new();
+            for packet in batch {
+                Self::learn_hybrid_multicast_membership(packet.payload(), mgr);
+                if Self::handle_hybrid_control_frame(&packet, mgr).await {
+                    continue;
                 }
-                if let Err(error) = mgr.send_msg_by_hybrid_ethernet_batch(data).await {
-                    tracing::trace!(?error, "[USER_PACKET] send automatic Ethernet batch failed");
-                }
-                return;
+                data.try_push(packet)
+                    .expect("a filtered NIC batch cannot exceed its input");
             }
-            match batch.pop_singleton() {
-                Ok(packet) => {
-                    if let Err(error) = mgr.send_msg_by_ethernet(packet).await {
-                        tracing::trace!(?error, "[USER_PACKET] send ethernet packet failed");
-                    }
-                }
-                Err(batch) => {
-                    if let Err(error) = mgr.send_msg_by_ethernet_batch(batch).await {
-                        tracing::trace!(?error, "[USER_PACKET] send ethernet batch failed");
-                    }
-                }
-            }
-            return;
-        }
-        if port_mode.is_l2_tun() {
-            match batch.pop_singleton() {
-                Ok(packet) => Self::do_forward_nic_to_peers(packet, mgr, port_mode).await,
-                Err(batch) => {
-                    if let Err(error) = mgr.send_msg_by_l2_tun_batch(batch).await {
-                        tracing::trace!(
-                            ?error,
-                            "[USER_PACKET] send compatible Ethernet batch failed"
-                        );
-                    }
-                }
-            }
-            return;
-        }
-
-        let result = if port_mode.is_auto() {
+            (FabricPayloadKind::Ethernet, data)
+        } else {
             for packet in &batch {
                 Self::learn_hybrid_ip_multicast_membership(packet.payload(), mgr);
             }
-            mgr.send_msg_by_hybrid_ip_batch(batch).await
-        } else {
-            mgr.send_msg_by_ip_batch(batch).await
+            (FabricPayloadKind::Ip, batch)
         };
-        if let Err(error) = result {
-            tracing::trace!(?error, "[USER_PACKET] send routed IP batch failed");
+        if let Err(error) = mgr
+            .send_fabric_batch(FabricBatch::new(payload_kind, batch))
+            .await
+        {
+            tracing::trace!(?error, "[USER_PACKET] send fabric batch failed");
         }
     }
 
@@ -1658,7 +1549,8 @@ impl NicCtx {
     async fn run_nic_ingress_worker(
         mut stream: Pin<Box<dyn PacketBatchStream>>,
         mgr: Arc<PeerManager>,
-        port_mode: PortMode,
+        adapter: InterfaceAdapter,
+        flow_gate: Arc<NicIngressFlowGate>,
         close_notifier: Arc<Notify>,
         cancellation: CancellationToken,
         reported: Arc<AtomicBool>,
@@ -1691,7 +1583,7 @@ impl NicCtx {
                             tokio::select! {
                                 biased;
                                 _ = cancellation.cancelled() => return,
-                                _ = Self::do_forward_nic_to_peers(packet, mgr.as_ref(), port_mode) => {}
+                                _ = Self::do_forward_nic_to_peers(packet, mgr.as_ref(), adapter) => {}
                             }
                         }
                     }
@@ -1712,46 +1604,65 @@ impl NicCtx {
         }
 
         let record_batch_stats = std::env::var_os("LOWTIER_DEBUG_BATCH_STATS").is_some();
-        let mut pending = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return,
-            result = stream.next() => result,
-        };
-        while let Some(result) = pending {
-            let batch = match result {
-                Ok(batch) => batch,
-                Err(error) => {
-                    if !cancellation.is_cancelled() {
-                        Self::report_nic_ingress_failure(
-                            mgr.as_ref(),
-                            close_notifier.as_ref(),
-                            &cancellation,
-                            reported.as_ref(),
-                            Some(&error),
-                        );
-                    }
-                    return;
-                }
-            };
-            if record_batch_stats {
-                record_nic_batch_size(batch.len());
-            }
-            let (_, prefetched) = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return,
-                result = wait_for_delivery_with_one_prefetch(&mut stream, async {
-                    Self::do_forward_nic_batch_to_peers(batch, mgr.as_ref(), port_mode).await;
-                    Ok::<(), ()>(())
-                }) => result,
-            };
-            pending = match prefetched {
-                Some(next) => next,
-                None => tokio::select! {
+        let max_in_flight = RECEIVE_PREFETCH_BATCHES + 1;
+        let mut deliveries = JoinSet::new();
+        let mut stream_open = true;
+        while stream_open || !deliveries.is_empty() {
+            if deliveries.len() >= max_in_flight || !stream_open {
+                tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => return,
-                    result = stream.next() => result,
-                },
-            };
+                    _ = deliveries.join_next(), if !deliveries.is_empty() => {}
+                }
+                continue;
+            }
+
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return,
+                result = stream.next() => {
+                    let Some(result) = result else {
+                        stream_open = false;
+                        continue;
+                    };
+                    let batch = match result {
+                        Ok(batch) => batch,
+                        Err(error) => {
+                            if !cancellation.is_cancelled() {
+                                Self::report_nic_ingress_failure(
+                                    mgr.as_ref(),
+                                    close_notifier.as_ref(),
+                                    &cancellation,
+                                    reported.as_ref(),
+                                    Some(&error),
+                                );
+                            }
+                            return;
+                        }
+                    };
+                    if record_batch_stats {
+                        record_nic_batch_size(batch.len());
+                    }
+                    let permit = flow_gate.reserve_batch(&batch, adapter);
+                    let delivery_mgr = mgr.clone();
+                    deliveries.spawn(async move {
+                        permit.wait().await;
+                        let _stage = delivery_mgr
+                            .get_global_ctx_ref()
+                            .dataplane_telemetry()
+                            .sample_stage_with_shape(DataplaneStage::NicIngress, || {
+                                (batch.len(), batch.buffer_byte_len())
+                            });
+                        Self::do_forward_nic_batch_to_peers(
+                            batch,
+                            delivery_mgr.as_ref(),
+                            adapter,
+                        )
+                        .await;
+                    });
+                }
+                _ = deliveries.join_next(), if !deliveries.is_empty() => {}
+            }
         }
 
         if !cancellation.is_cancelled() {
@@ -1776,111 +1687,23 @@ impl NicCtx {
             return Err(anyhow::anyhow!("virtual NIC has no ingress queues").into());
         }
 
-        let port_mode = VirtualNic::port_mode(&self.global_ctx.get_flags());
+        let adapter = VirtualNic::interface_adapter(&self.global_ctx.get_flags());
         let cancellation = CancellationToken::new();
         let reported = Arc::new(AtomicBool::new(false));
+        let flow_gate = Arc::new(NicIngressFlowGate::new());
         let close_notifier = self.close_notifier.clone();
         for stream in streams {
             self.tasks.spawn(Self::run_nic_ingress_worker(
                 stream,
                 mgr.clone(),
-                port_mode,
+                adapter,
+                flow_gate.clone(),
                 close_notifier.clone(),
                 cancellation.clone(),
                 reported.clone(),
             ));
         }
         Ok(())
-    }
-
-    async fn l2_tun_packet_is_deliverable(packet: &ZCPacket, mgr: &PeerManager) -> bool {
-        let payload = packet.payload();
-        let Some(ether_type) = payload.get(12..14) else {
-            return false;
-        };
-        match ether_type {
-            [0x08, 0x00] | [0x86, 0xdd] => true,
-            [0x08, 0x06] => {
-                let Some(local_ipv4) = mgr.get_global_ctx().get_ipv4().map(|ip| ip.address())
-                else {
-                    return false;
-                };
-                let Some(reply) = crate::instance::l2_tun::arp_reply_for_local_ipv4(
-                    payload,
-                    mgr.my_peer_id(),
-                    local_ipv4,
-                ) else {
-                    return false;
-                };
-                let from_peer_id = packet
-                    .peer_manager_header()
-                    .map(|header| header.from_peer_id.get())
-                    .unwrap_or_default();
-                if from_peer_id == 0 {
-                    return false;
-                }
-                if let Err(error) = mgr
-                    .send_ethernet_to_peer(ZCPacket::new_with_payload(&reply), from_peer_id)
-                    .await
-                {
-                    tracing::debug!(
-                        ?error,
-                        from_peer_id,
-                        "failed to send compatible Ethernet proxy ARP reply"
-                    );
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
-    fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn PacketBatchSink>>) {
-        let channel = self.peer_packet_receiver.clone();
-        let close_notifier = self.close_notifier.clone();
-        let l2_tun = VirtualNic::port_mode(&self.global_ctx.get_flags()).is_l2_tun();
-        let peer_mgr = self.peer_mgr.upgrade();
-        self.tasks.spawn(async move {
-            // unlock until coroutine finished
-            let mut channel = channel.lock().await;
-            while let Ok(batch) = recv_packet_batch_from_chan(&mut channel).await {
-                if !l2_tun {
-                    if let Err(error) = sink.send(batch).await {
-                        tracing::error!(?error, "send native Ethernet batch to NIC failed");
-                    }
-                    continue;
-                }
-
-                let mut deliverable = PacketBatch::new();
-                for packet in batch {
-                    tracing::trace!(
-                        "[USER_PACKET] forward packet from peers to nic. packet: {:?}",
-                        packet
-                    );
-                    if l2_tun {
-                        let Some(mgr) = peer_mgr.as_deref() else {
-                            tracing::debug!(
-                                "peer manager unavailable for compatible Ethernet ingress"
-                            );
-                            continue;
-                        };
-                        if !Self::l2_tun_packet_is_deliverable(&packet, mgr).await {
-                            continue;
-                        }
-                    }
-                    deliverable
-                        .try_push(packet)
-                        .expect("the compatible Ethernet output cannot exceed its input");
-                }
-                if !deliverable.is_empty()
-                    && let Err(error) = sink.send(deliverable).await
-                {
-                    tracing::error!(?error, "send compatible Ethernet batch to NIC failed");
-                }
-            }
-            close_notifier.notify_one();
-            tracing::error!("nic closed when sending to it");
-        });
     }
 
     #[cfg(target_os = "windows")]
@@ -2242,8 +2065,8 @@ impl NicCtx {
         };
 
         let flags = self.global_ctx.get_flags();
-        let port_mode = VirtualNic::port_mode(&flags);
-        let hybrid_tap_mac = if port_mode.is_auto() && port_mode.uses_native_ethernet() {
+        let adapter = VirtualNic::interface_adapter(&flags);
+        let hybrid_tap_mac = if VirtualNic::needs_tap_edge_adapter(adapter) {
             let ifname = self
                 .ifname()
                 .await
@@ -2255,23 +2078,19 @@ impl NicCtx {
         };
         let (streams, sink) = tunnel.split_ingress_queues();
 
-        if !port_mode.is_l2_tun() {
-            let peer_mgr = self
-                .peer_mgr
-                .upgrade()
-                .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
-            let sink: Pin<Box<dyn PacketBatchSink>> = if let Some(local_mac) = hybrid_tap_mac {
-                Box::pin(HybridTapSink {
-                    inner: sink,
-                    local_mac,
-                })
-            } else {
-                sink
-            };
-            self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+        let sink: Pin<Box<dyn PacketBatchSink>> = if let Some(local_mac) = hybrid_tap_mac {
+            Box::pin(HybridTapSink {
+                inner: sink,
+                local_mac,
+            })
         } else {
-            self.do_forward_peers_to_nic(sink);
-        }
+            sink
+        };
+        self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
         self.do_forward_nic_to_peers_task(streams)?;
 
         // Assign IPv4 address if provided
@@ -2316,16 +2135,11 @@ impl NicCtx {
         let (streams, sink) = tunnel.split_ingress_queues();
 
         self.do_forward_nic_to_peers_task(streams)?;
-        let port_mode = VirtualNic::port_mode(&self.global_ctx.get_flags());
-        if !port_mode.is_l2_tun() {
-            let peer_mgr = self
-                .peer_mgr
-                .upgrade()
-                .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
-            self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
-        } else {
-            self.do_forward_peers_to_nic(sink);
-        }
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+        self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
         self.start_multicast_membership_expiry_task();
 
         Ok(())
@@ -2334,7 +2148,7 @@ impl NicCtx {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, atomic::AtomicBool};
 
     use crate::common::{
         config::gen_default_flags, error::Error, global_ctx::tests::get_mock_global_ctx,
@@ -2348,8 +2162,9 @@ mod tests {
     use futures::{StreamExt as _, stream};
 
     use super::{
-        NicCtx, TUN_READ_SPARE_BYTES, TunZCPacketToBytes, VirtualNic, parse_interface_mac,
-        prepare_tun_read_buffer, read_ready_packet_batch, restore_compact_ip_for_tap,
+        NicCtx, NicIngressFlowGate, TUN_READ_SPARE_BYTES, TunZCPacketToBytes, VirtualNic,
+        parse_interface_mac, prepare_tun_read_buffer, read_ready_packet_batch,
+        restore_compact_ip_for_tap,
     };
 
     #[test]
@@ -2412,7 +2227,7 @@ mod tests {
     #[test]
     fn linux_tun_offload_auto_support_is_conservative_by_arch() {
         assert!(super::linux_tun_offload_auto_supported_for("x86_64"));
-        assert!(!super::linux_tun_offload_auto_supported_for("aarch64"));
+        assert!(super::linux_tun_offload_auto_supported_for("aarch64"));
         assert!(!super::linux_tun_offload_auto_supported_for("riscv64"));
     }
 
@@ -2502,45 +2317,94 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tap_port_mode_selects_ethernet_frames() {
-        let mut flags = gen_default_flags();
-        flags.port_mode = "ethernet".to_string();
+    #[tokio::test]
+    async fn nic_ingress_gate_serializes_one_flow() {
+        let gate = Arc::new(NicIngressFlowGate::new());
+        let first = gate.reserve_shards([7]);
+        first.wait().await;
+        let second = gate.reserve_shards([7]);
 
-        assert!(VirtualNic::port_mode(&flags).uses_ethernet_overlay());
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), second.wait())
+                .await
+                .is_err()
+        );
+
+        drop(first);
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), second.wait())
+            .await
+            .expect("the next same-flow batch did not start");
+    }
+
+    #[tokio::test]
+    async fn nic_ingress_gate_allows_independent_flows() {
+        let gate = Arc::new(NicIngressFlowGate::new());
+        let first = gate.reserve_shards([7]);
+        first.wait().await;
+        let independent = gate.reserve_shards([8]);
+
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), independent.wait())
+            .await
+            .expect("an independent flow did not start");
+    }
+
+    #[tokio::test]
+    async fn nic_ingress_gate_skips_a_cancelled_reservation() {
+        let gate = Arc::new(NicIngressFlowGate::new());
+        let first = gate.reserve_shards([7]);
+        first.wait().await;
+        let cancelled = gate.reserve_shards([7]);
+        let third = gate.reserve_shards([7]);
+
+        drop(cancelled);
+        drop(first);
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), third.wait())
+            .await
+            .expect("a cancelled reservation blocked its flow");
     }
 
     #[test]
-    fn l3_port_mode_keeps_ip_packet_forwarding() {
+    fn tap_adapter_selects_ethernet_frames() {
         let mut flags = gen_default_flags();
-        flags.port_mode = "routed".to_string();
+        flags.interface_adapter = "tap".to_string();
 
-        assert!(!VirtualNic::port_mode(&flags).uses_ethernet_overlay());
+        let adapter = VirtualNic::interface_adapter(&flags);
+        assert!(adapter.uses_ethernet_overlay());
+        assert!(VirtualNic::needs_tap_edge_adapter(adapter));
     }
 
     #[test]
-    fn l2_tun_uses_ethernet_overlay_on_a_layer_three_device() {
+    fn tun_adapter_keeps_ip_packet_forwarding() {
+        let mut flags = gen_default_flags();
+        flags.interface_adapter = "tun".to_string();
+
+        let adapter = VirtualNic::interface_adapter(&flags);
+        assert!(!adapter.uses_ethernet_overlay());
+        assert!(!VirtualNic::needs_tap_edge_adapter(adapter));
+    }
+
+    #[test]
+    fn compatible_ethernet_maps_to_the_tun_adapter() {
         let mut flags = gen_default_flags();
         flags.port_mode = "compatible-ethernet".to_string();
 
-        let port_mode = VirtualNic::port_mode(&flags);
-        assert!(port_mode.uses_ethernet_overlay());
-        assert!(!port_mode.uses_native_ethernet());
+        let adapter = VirtualNic::interface_adapter(&flags);
+        assert!(!adapter.uses_ethernet_overlay());
+        assert!(!adapter.uses_native_ethernet());
     }
 
     #[test]
-    fn l2_tun_writer_removes_ethernet_header_before_tun_delivery() {
+    fn tap_writer_keeps_the_complete_ethernet_frame() {
         let mut frame = vec![0; ETHERNET_HEADER_LEN + 20];
         frame[ETHERNET_HEADER_LEN] = 0x45;
         prepare_ip_frame(&mut frame, 1, Some(2)).unwrap();
         let packet = ZCPacket::new_with_payload(&frame);
 
-        let bytes = TunZCPacketToBytes::new(false, true)
+        let bytes = TunZCPacketToBytes::new(false)
             .zcpacket_into_bytes(packet)
             .unwrap();
 
-        assert_eq!(bytes.len(), 20);
-        assert_eq!(bytes[0] >> 4, 4);
+        assert_eq!(bytes.as_ref(), frame.as_slice());
     }
 
     #[test]

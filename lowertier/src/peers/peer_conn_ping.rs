@@ -124,6 +124,24 @@ pub struct PeerConnPinger {
     tasks: JoinSet<Result<(), TunnelError>>,
 }
 
+struct PingAttemptResult {
+    result: Result<u128, Error>,
+    rx_packets_at_start: u64,
+}
+
+fn update_loss_counter(
+    loss_counter: &AtomicU32,
+    succeeded: bool,
+    rx_packets_at_start: u64,
+    current_rx_packets: u64,
+) {
+    if succeeded || current_rx_packets > rx_packets_at_start {
+        loss_counter.store(0, Ordering::Relaxed);
+    } else {
+        loss_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl std::fmt::Debug for PeerConnPinger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerConnPinger")
@@ -272,9 +290,10 @@ impl PeerConnPinger {
                     let control_metrics = control_metrics.clone();
                     let receiver = ctrl_resp_sender.subscribe();
                     let ping_res_sender = ping_res_sender.clone();
+                    let rx_packets_at_start = controller.throughput.rx_packets();
                     pingpong_tasks.spawn(async move {
                         let mut receiver = receiver.resubscribe();
-                        let pingpong_once_ret = Self::do_pingpong_once(
+                        let result = Self::do_pingpong_once(
                             my_node_id,
                             peer_id,
                             &sink,
@@ -284,7 +303,11 @@ impl PeerConnPinger {
                         )
                         .await;
 
-                        if let Err(e) = ping_res_sender.send(pingpong_once_ret).await {
+                        let attempt = PingAttemptResult {
+                            result,
+                            rx_packets_at_start,
+                        };
+                        if let Err(e) = ping_res_sender.send(attempt).await {
                             tracing::info!(?e, "pingpong task send result error, exit..");
                         };
                     });
@@ -300,17 +323,21 @@ impl PeerConnPinger {
         );
 
         let throughput = self.throughput_stats.clone();
-        let mut last_rx_packets = throughput.rx_packets();
-
-        while let Some(ret) = ping_res_receiver.recv().await {
+        while let Some(attempt) = ping_res_receiver.recv().await {
+            let ret = attempt.result;
+            let current_rx_packets = throughput.rx_packets();
             if let Ok(lat) = ret {
                 latency_stats.record_latency(lat as u32);
-
                 loss_rate_stats_1.record_latency(0);
             } else {
                 loss_rate_stats_1.record_latency(1);
-                loss_counter.fetch_add(1, Ordering::Relaxed);
             }
+            update_loss_counter(
+                &loss_counter,
+                ret.is_ok(),
+                attempt.rx_packets_at_start,
+                current_rx_packets,
+            );
 
             let loss_rate_1: f64 = loss_rate_stats_1.get_latency_us();
 
@@ -321,19 +348,12 @@ impl PeerConnPinger {
                 "pingpong task recv pingpong_once result"
             );
 
-            let current_rx_packets = throughput.rx_packets();
-            if last_rx_packets != current_rx_packets {
-                // if we receive some packet from peers, reset the counter to avoid conn close.
-                // conn will close only if we have 5 continous round pingpong loss after no packet received.
-                loss_counter.store(0, Ordering::Relaxed);
-            }
-
             tracing::debug!(
-                "loss_counter: {:?}, loss_rate_1: {}, cur_rx_packets: {}, last_rx: {}, node_id: {}",
+                "loss_counter: {:?}, loss_rate_1: {}, cur_rx_packets: {}, attempt_rx: {}, node_id: {}",
                 loss_counter,
                 loss_rate_1,
                 current_rx_packets,
-                last_rx_packets,
+                attempt.rx_packets_at_start,
                 my_node_id
             );
 
@@ -343,19 +363,50 @@ impl PeerConnPinger {
                     ?self,
                     ?loss_rate_1,
                     ?loss_counter,
-                    ?last_rx_packets,
+                    attempt_rx_packets = attempt.rx_packets_at_start,
                     ?current_rx_packets,
                     "pingpong loss too much pingpong packet and no other ingress packets, closing the connection",
                 );
                 break;
             }
 
-            last_rx_packets = throughput.rx_packets();
             self.loss_rate_stats
                 .store((loss_rate_1 * 100.0) as u32, Ordering::Relaxed);
         }
 
         stopped.store(1, Ordering::Relaxed);
         ping_res_receiver.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingress_during_failed_ping_clears_previous_losses() {
+        let losses = AtomicU32::new(4);
+
+        update_loss_counter(&losses, false, 100, 101);
+
+        assert_eq!(losses.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn failed_ping_without_ingress_increments_losses() {
+        let losses = AtomicU32::new(4);
+
+        update_loss_counter(&losses, false, 100, 100);
+
+        assert_eq!(losses.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn successful_ping_clears_previous_losses() {
+        let losses = AtomicU32::new(4);
+
+        update_loss_counter(&losses, true, 100, 100);
+
+        assert_eq!(losses.load(Ordering::Relaxed), 0);
     }
 }

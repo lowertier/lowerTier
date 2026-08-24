@@ -386,13 +386,16 @@ pub(crate) fn classify_packet_flow(packet: &ZCPacket) -> PacketFlow {
             shard,
         };
     }
-    let mut hasher = StableFlowHasher::new();
     let packet_type = packet
         .peer_manager_header()
         .map(|header| header.packet_type)
         .unwrap_or(PacketType::Data as u8);
+    classify_payload_flow(packet.payload(), packet_type)
+}
+
+fn classify_payload_flow(payload: &[u8], packet_type: u8) -> PacketFlow {
+    let mut hasher = StableFlowHasher::new();
     hasher.write_u8(packet_type);
-    let payload = packet.payload();
     let parsed = if packet_type == PacketType::Ethernet as u8 {
         hash_ethernet(&mut hasher, payload)
     } else {
@@ -410,6 +413,21 @@ pub(crate) fn classify_packet_flow(packet: &ZCPacket) -> PacketFlow {
         hash,
         shard: (hash % u64::from(FLOW_SHARD_COUNT)) as u16,
     }
+}
+
+pub(crate) fn classify_nic_packet_flow(packet: &ZCPacket, ethernet: bool) -> PacketFlow {
+    if let Some(hash) = packet.flow_hash() {
+        return PacketFlow {
+            hash,
+            shard: (hash % u64::from(FLOW_SHARD_COUNT)) as u16,
+        };
+    }
+    let packet_type = if ethernet {
+        PacketType::Ethernet as u8
+    } else {
+        PacketType::Data as u8
+    };
+    classify_payload_flow(packet.payload(), packet_type)
 }
 
 /// Records the flow shard in the peer header while the cleartext L2/L3 tuple

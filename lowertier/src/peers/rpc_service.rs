@@ -12,10 +12,13 @@ use crate::{
             GetAclStatsResponse, GetForeignNetworkSummaryRequest, GetForeignNetworkSummaryResponse,
             GetWhitelistRequest, GetWhitelistResponse, ListCredentialsRequest,
             ListCredentialsResponse, ListForeignNetworkRequest, ListForeignNetworkResponse,
-            ListGlobalForeignNetworkRequest, ListGlobalForeignNetworkResponse, ListPeerRequest,
+            ListGlobalForeignNetworkRequest, ListGlobalForeignNetworkResponse,
+            ListLocalBgpRoutesRequest, ListLocalBgpRoutesResponse, ListPeerRequest,
             ListPeerResponse, ListPublicIpv6InfoRequest, ListPublicIpv6InfoResponse,
-            ListRouteRequest, ListRouteResponse, PeerInfo, PeerManageRpc, RevokeCredentialRequest,
-            RevokeCredentialResponse, ShowNodeInfoRequest, ShowNodeInfoResponse,
+            ListRouteRequest, ListRouteResponse, LocalBgpRoute, LocalBgpRouteAction, PeerInfo,
+            PeerManageRpc, ReplaceLocalBgpRoutesRequest, ReplaceLocalBgpRoutesResponse,
+            RevokeCredentialRequest, RevokeCredentialResponse, ShowNodeInfoRequest,
+            ShowNodeInfoResponse,
         },
         rpc_types::{
             self,
@@ -26,6 +29,7 @@ use crate::{
 };
 
 use super::peer_manager::PeerManager;
+use super::service_route::{ServiceRoute, ServiceRouteAction};
 
 #[derive(Clone)]
 pub struct PeerManagerRpcService {
@@ -82,7 +86,7 @@ impl PeerManagerRpcService {
         peer_infos
     }
 
-    fn authorize_credential_management(
+    fn authorize_local_admin_api(
         controller: &BaseController,
         global_ctx: &crate::common::global_ctx::GlobalCtx,
         admin_token: Option<&str>,
@@ -104,8 +108,56 @@ impl PeerManagerRpcService {
             return Ok(());
         }
         Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
-            "credential management requires a loopback channel and a valid administrator token"
+            "the local administrator API requires a loopback channel and a valid administrator token"
         )))
+    }
+
+    fn route_from_api(route: LocalBgpRoute) -> Result<ServiceRoute, rpc_types::error::Error> {
+        let prefix = route.prefix.parse::<cidr::IpCidr>().map_err(|error| {
+            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                "invalid BGP prefix {:?}: {error}",
+                route.prefix
+            ))
+        })?;
+        let action = match LocalBgpRouteAction::try_from(route.action) {
+            Ok(LocalBgpRouteAction::Forward) => ServiceRouteAction::Forward,
+            Ok(LocalBgpRouteAction::ExitSnat) => ServiceRouteAction::ExitSnat,
+            Ok(LocalBgpRouteAction::Blackhole) => ServiceRouteAction::Blackhole,
+            Err(error) => {
+                return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "invalid BGP route action: {error}"
+                )));
+            }
+        };
+        if route.gateway_peer_id == 0 && action != ServiceRouteAction::Blackhole {
+            return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                "a forwarding BGP route requires a gateway peer ID"
+            )));
+        }
+        Ok(ServiceRoute {
+            prefix,
+            gateway: route.gateway_peer_id,
+            preference: route.preference,
+            metric: route.metric,
+            path_id: route.path_id,
+            action,
+        })
+    }
+
+    fn route_to_api(route: ServiceRoute) -> LocalBgpRoute {
+        let action = match route.action {
+            ServiceRouteAction::Forward => LocalBgpRouteAction::Forward,
+            ServiceRouteAction::ExitSnat => LocalBgpRouteAction::ExitSnat,
+            ServiceRouteAction::Blackhole => LocalBgpRouteAction::Blackhole,
+        };
+        LocalBgpRoute {
+            prefix: route.prefix.to_string(),
+            gateway_peer_id: route.gateway,
+            preference: route.preference,
+            metric: route.metric,
+            path_id: route.path_id,
+            action: action.into(),
+        }
     }
 }
 
@@ -136,6 +188,39 @@ impl PeerManageRpc for PeerManagerRpcService {
         Ok(weak_upgrade(&self.peer_manager)?
             .get_local_public_ipv6_info()
             .await)
+    }
+
+    async fn replace_local_bgp_routes(
+        &self,
+        controller: BaseController,
+        request: ReplaceLocalBgpRoutesRequest,
+    ) -> Result<ReplaceLocalBgpRoutesResponse, rpc_types::error::Error> {
+        let peer_manager = weak_upgrade(&self.peer_manager)?;
+        let global_ctx = peer_manager.get_global_ctx();
+        Self::authorize_local_admin_api(&controller, &global_ctx, request.admin_token.as_deref())?;
+        let routes = request
+            .routes
+            .into_iter()
+            .map(Self::route_from_api)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ReplaceLocalBgpRoutesResponse {
+            generation: peer_manager.replace_local_bgp_routes(routes),
+        })
+    }
+
+    async fn list_local_bgp_routes(
+        &self,
+        controller: BaseController,
+        request: ListLocalBgpRoutesRequest,
+    ) -> Result<ListLocalBgpRoutesResponse, rpc_types::error::Error> {
+        let peer_manager = weak_upgrade(&self.peer_manager)?;
+        let global_ctx = peer_manager.get_global_ctx();
+        Self::authorize_local_admin_api(&controller, &global_ctx, request.admin_token.as_deref())?;
+        let (routes, generation) = peer_manager.local_bgp_routes_snapshot();
+        Ok(ListLocalBgpRoutesResponse {
+            routes: routes.into_iter().map(Self::route_to_api).collect(),
+            generation,
+        })
     }
 
     async fn list_route(
@@ -256,11 +341,7 @@ impl CredentialManageRpc for PeerManagerRpcService {
     ) -> Result<GenerateCredentialResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
-        Self::authorize_credential_management(
-            &controller,
-            &global_ctx,
-            request.admin_token.as_deref(),
-        )?;
+        Self::authorize_local_admin_api(&controller, &global_ctx, request.admin_token.as_deref())?;
 
         if global_ctx
             .get_network_identity()
@@ -316,11 +397,7 @@ impl CredentialManageRpc for PeerManagerRpcService {
     ) -> Result<RevokeCredentialResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
-        Self::authorize_credential_management(
-            &controller,
-            &global_ctx,
-            request.admin_token.as_deref(),
-        )?;
+        Self::authorize_local_admin_api(&controller, &global_ctx, request.admin_token.as_deref())?;
         if global_ctx
             .get_network_identity()
             .network_secret
@@ -355,14 +432,45 @@ impl CredentialManageRpc for PeerManagerRpcService {
     ) -> Result<ListCredentialsResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
-        Self::authorize_credential_management(
-            &controller,
-            &global_ctx,
-            request.admin_token.as_deref(),
-        )?;
+        Self::authorize_local_admin_api(&controller, &global_ctx, request.admin_token.as_deref())?;
 
         Ok(ListCredentialsResponse {
             credentials: global_ctx.get_credential_manager().list_credentials(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::proto::api::instance::{LocalBgpRoute, LocalBgpRouteAction};
+
+    use super::PeerManagerRpcService;
+
+    #[test]
+    fn local_bgp_route_api_accepts_ipv6_and_exit_action() {
+        let route = PeerManagerRpcService::route_from_api(LocalBgpRoute {
+            prefix: "2001:db8:10::/48".to_string(),
+            gateway_peer_id: 42,
+            preference: 200,
+            metric: 10,
+            path_id: 7,
+            action: LocalBgpRouteAction::ExitSnat.into(),
+        })
+        .unwrap();
+
+        assert_eq!(route.gateway, 42);
+        assert_eq!(route.prefix.to_string(), "2001:db8:10::/48");
+    }
+
+    #[test]
+    fn local_bgp_route_api_rejects_zero_forwarding_gateway() {
+        let result = PeerManagerRpcService::route_from_api(LocalBgpRoute {
+            prefix: "10.0.0.0/8".to_string(),
+            gateway_peer_id: 0,
+            action: LocalBgpRouteAction::Forward.into(),
+            ..Default::default()
+        });
+
+        assert!(result.is_err());
     }
 }

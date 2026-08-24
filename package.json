@@ -1,10 +1,14 @@
 {
   "name": "lowertier-monorepo",
   "private": true,
-  "pnpm": {
-    "overrides": {
-      "happy-dom": "16.8.1",
-      "minimatch": "10.2.4"
-    }
-  }
+  "overrides": {
+    "happy-dom": "16.8.1",
+    "minimatch": "10.2.4"
+  },
+  "workspaces": [
+    "lowertier-web/frontend",
+    "lowertier-web/frontend-lib",
+    "lowertier-gui",
+    "tauri-plugin-vpnservice"
+  ]
 }

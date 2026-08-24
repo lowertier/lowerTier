@@ -98,8 +98,8 @@ message FlagsInConfig {
   uint64 quic_initial_receive_window = 49;
   uint64 quic_receive_window = 50;
 
-  // Virtual NIC mode and bounded Ethernet forwarding state.
-  string port_mode = 51;
+  // Deprecated interface adapter name. Use interface_adapter.
+  string port_mode = 51 [deprecated = true];
   uint32 l2_fdb_capacity = 52;
   uint64 l2_fdb_age_seconds = 53;
   // Maximum unknown-unicast, broadcast, and multicast bytes per second.
@@ -122,6 +122,8 @@ message FlagsInConfig {
   uint64 speed_probe_budget_bps = 60;
   // Permit complete Ethernet frames from this authenticated admin node.
   bool enable_bridge = 61;
+  // Local packet adapter. Supported values are auto, tun, and tap.
+  string interface_adapter = 62;
 }
 
 message RpcDescriptor {

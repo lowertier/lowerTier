@@ -951,9 +951,8 @@ impl Server {
                     | crate::proto::peer_rpc::PeerIdentityType::SharedNode
             )
         ) && !foreign_relay_rpc_allowed(packet.descriptor.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("foreign relay RPC request has no service descriptor")
-            })?)
-        {
+            anyhow::anyhow!("foreign relay RPC request has no service descriptor")
+        })?) {
             return Err(anyhow::anyhow!("foreign relay RPC service is not permitted").into());
         }
 

@@ -1,6 +1,6 @@
 use crate::common::config::{
-    ConfigFileControl, ConfigSource, PortForwardConfig, parse_mapped_listener_urls,
-    parse_proxy_listener_url, process_secure_mode_cfg,
+    ConfigFileControl, ConfigSource, InterfaceAdapter, PortForwardConfig,
+    parse_mapped_listener_urls, parse_proxy_listener_url, process_secure_mode_cfg,
 };
 #[cfg(feature = "ffi-dataplane")]
 use crate::gateway::socks5::Socks5Server;
@@ -682,6 +682,7 @@ impl NetworkConfig {
         Ok(peers)
     }
 
+    #[allow(deprecated)]
     pub fn gen_config(&self) -> Result<TomlConfigLoader, anyhow::Error> {
         let cfg = TomlConfigLoader::default();
         cfg.set_id(
@@ -1030,7 +1031,10 @@ impl NetworkConfig {
         if !self.underlay_deny_cidrs.is_empty() {
             flags.underlay_deny_cidrs = self.underlay_deny_cidrs.clone();
         }
-        if let Some(port_mode) = &self.port_mode {
+        if let Some(adapter) = &self.interface_adapter {
+            flags.interface_adapter = adapter.clone();
+            flags.port_mode.clear();
+        } else if let Some(port_mode) = &self.port_mode {
             flags.port_mode = port_mode.clone();
         }
         if let Some(l2_fdb_capacity) = self.l2_fdb_capacity {
@@ -1312,8 +1316,10 @@ impl NetworkConfig {
         result.socket_mark = flags.socket_mark;
         result.underlay_deny_interfaces = flags.underlay_deny_interfaces.clone();
         result.underlay_deny_cidrs = flags.underlay_deny_cidrs.clone();
-        result.port_mode =
-            (flags.port_mode != default_flags.port_mode).then_some(flags.port_mode.clone());
+        let interface_adapter = InterfaceAdapter::from_flags(&flags).to_string();
+        let default_interface_adapter = InterfaceAdapter::from_flags(&default_flags).to_string();
+        result.interface_adapter =
+            (interface_adapter != default_interface_adapter).then_some(interface_adapter);
         result.l2_fdb_capacity = (flags.l2_fdb_capacity != default_flags.l2_fdb_capacity)
             .then_some(flags.l2_fdb_capacity);
         result.l2_fdb_age_seconds = (flags.l2_fdb_age_seconds != default_flags.l2_fdb_age_seconds)
@@ -1419,7 +1425,7 @@ mod tests {
         flags.quic_receive_window = 32 * 1024 * 1024;
         flags.quic_datagram_fec_parity = 3;
         flags.quic_datagram_alternate_path_parity = false;
-        flags.port_mode = "ethernet".into();
+        flags.interface_adapter = "tap".into();
         flags.l2_fdb_capacity = 32_768;
         flags.l2_fdb_age_seconds = 600;
         flags.l2_flood_bps = 128 * 1024 * 1024;
@@ -1435,7 +1441,7 @@ mod tests {
         assert_eq!(network_config.quic_brutal_send_bps, Some(100_000_000));
         assert_eq!(network_config.quic_datagram_fec_parity, Some(3));
         assert_eq!(network_config.quic_datagram_alternate_path_parity, None);
-        assert_eq!(network_config.port_mode.as_deref(), Some("ethernet"));
+        assert_eq!(network_config.interface_adapter.as_deref(), Some("tap"));
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
         assert_eq!(network_config.l2_fdb_age_seconds, Some(600));
         assert_eq!(network_config.l2_flood_bps, Some(128 * 1024 * 1024));
@@ -1476,7 +1482,7 @@ mod tests {
             regenerated_flags.quic_datagram_alternate_path_parity,
             flags.quic_datagram_alternate_path_parity
         );
-        assert_eq!(regenerated_flags.port_mode, flags.port_mode);
+        assert_eq!(regenerated_flags.interface_adapter, flags.interface_adapter);
         assert_eq!(regenerated_flags.l2_fdb_capacity, flags.l2_fdb_capacity);
         assert_eq!(
             regenerated_flags.l2_fdb_age_seconds,
@@ -1568,6 +1574,7 @@ mod tests {
         let network_config = super::NetworkConfig {
             network_name: Some("admin-network".to_owned()),
             network_secret: Some("admin-secret".to_owned()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
             secure_mode: Some(SecureModeConfig {
                 enabled: true,
                 local_private_key: None,
@@ -1661,6 +1668,8 @@ mod tests {
         let network_config = super::NetworkConfig {
             instance_id: Some(uuid::Uuid::new_v4().to_string()),
             dhcp: Some(true),
+            network_name: Some("legacy-urls".to_owned()),
+            network_secret: Some("legacy-secret".to_owned()),
             networking_method: Some(crate::proto::api::manage::NetworkingMethod::Manual as i32),
             peer_urls: vec![
                 " tcp://1.2.3.4:11010 ".to_string(),

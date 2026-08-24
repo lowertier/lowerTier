@@ -90,3 +90,6 @@ lowertier-gui/src-tauri/*.sys
 
 # contrib
 go.sum
+
+# local reference checkouts
+/ref/

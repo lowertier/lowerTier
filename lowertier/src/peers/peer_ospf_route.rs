@@ -78,6 +78,7 @@ use super::{
         DefaultRouteCostCalculator, ForeignNetworkRouteInfoMap, NextHopPolicy, RouteCostCalculator,
         RouteCostCalculatorInterface, RouteQuality,
     },
+    service_route::{ServiceRoute, ServiceRouteAction, ServiceRouteSnapshot},
 };
 use crate::peers::PUBLIC_SERVER_HOSTNAME_PREFIX;
 
@@ -2693,6 +2694,7 @@ struct SharedRouteMaps {
     ipv6_peer_id_map: Arc<HashMap<Ipv6Addr, PeerId>>,
     cidr_peer_id_map: Arc<PrefixMap<Ipv4Cidr, PeerId>>,
     cidr_v6_peer_id_map: Arc<PrefixMap<Ipv6Cidr, PeerId>>,
+    service_routes: Arc<ServiceRouteSnapshot>,
     next_hop_map_version: Version,
 }
 
@@ -3812,6 +3814,7 @@ impl RouteTable {
         let mut ipv6_peer_id_map = HashMap::new();
         let mut cidr_peer_id_map = PrefixMap::new();
         let mut cidr_v6_peer_id_map = PrefixMap::new();
+        let mut service_routes = Vec::new();
 
         for (peer_id, info) in input.peer_infos.iter() {
             if !is_reachable(*peer_id) {
@@ -3900,6 +3903,15 @@ impl RouteTable {
                     continue;
                 }
 
+                service_routes.push(ServiceRoute {
+                    prefix: cidr,
+                    gateway: *peer_id,
+                    preference: 100,
+                    metric: 0,
+                    path_id: u64::from(*peer_id),
+                    action: ServiceRouteAction::Forward,
+                });
+
                 match cidr {
                     IpCidr::V4(cidr) => {
                         cidr_peer_id_map
@@ -3949,6 +3961,10 @@ impl RouteTable {
             ipv6_peer_id_map: Arc::new(ipv6_peer_id_map),
             cidr_peer_id_map: Arc::new(cidr_peer_id_map),
             cidr_v6_peer_id_map: Arc::new(cidr_v6_peer_id_map),
+            service_routes: Arc::new(ServiceRouteSnapshot::from_routes(
+                u64::from(input.version),
+                service_routes,
+            )),
             next_hop_map_version: input.version,
         })
     }
@@ -4089,6 +4105,10 @@ impl RouteTable {
                             .collect(),
                     )
                 }),
+            service_routes: shared_maps
+                .as_ref()
+                .map(|maps| maps.service_routes.clone())
+                .unwrap_or_else(|| Arc::new(ServiceRouteSnapshot::default())),
             next_hop_map_version: self.next_hop_map_version.get(),
         }
     }
@@ -4104,6 +4124,7 @@ struct RouteTableSnapshot {
     ipv6_peer_id_map: Arc<HashMap<Ipv6Addr, PeerId>>,
     cidr_peer_id_map: Arc<PrefixMap<Ipv4Cidr, PeerId>>,
     cidr_v6_peer_id_map: Arc<PrefixMap<Ipv6Cidr, PeerId>>,
+    service_routes: Arc<ServiceRouteSnapshot>,
     next_hop_map_version: Version,
 }
 
@@ -6138,7 +6159,7 @@ impl PeerRouteServiceImpl {
                     })
             });
 
-        let decision_snapshot = ForwardingDecisionSnapshot::from_parts(
+        let decision_snapshot = ForwardingDecisionSnapshot::from_parts_with_service_routes(
             generation,
             forwarding_peers.clone(),
             route_table.suppressed_peer_ids.clone(),
@@ -6150,6 +6171,7 @@ impl PeerRouteServiceImpl {
             route_table.ipv6_peer_id_map.clone(),
             route_table.cidr_peer_id_map.clone(),
             route_table.cidr_v6_peer_id_map.clone(),
+            route_table.service_routes.clone(),
         );
 
         let next_snapshot = Arc::new(ForwardingSnapshot {
@@ -15763,6 +15785,22 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
+        let snapshot = p_a
+            .get_peer_map()
+            .forwarding_decision_snapshot()
+            .await
+            .unwrap();
+        let candidates = snapshot
+            .service_routes()
+            .candidates(IpAddr::V4(test_ip))
+            .unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|route| route.gateway)
+                .collect::<HashSet<_>>(),
+            HashSet::from([p_b.my_peer_id(), p_c.my_peer_id()])
+        );
     }
     #[rstest::rstest]
     #[tokio::test]

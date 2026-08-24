@@ -10,35 +10,31 @@ use std::{
 
 use futures::future::poll_fn;
 use tokio::{
-    sync::{Mutex, Notify, mpsc, oneshot, watch},
+    sync::{Notify, mpsc, watch},
     time::{Instant, timeout_at},
 };
 
 use super::{
     PacketBatchSink, PacketBatchStream, Tunnel, TunnelError,
-    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
+    batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, SEND_PIPELINE_SLOT_COUNT},
     packet_def::{PacketType, ZCPacket},
 };
 use crate::common::global_ctx::{ProcessMemoryGovernor, ProcessMemoryPermit};
 
-const DIRECT_PACKET_BUDGET: usize = MAX_PACKET_BATCH_SIZE * 2;
-const DIRECT_BYTE_BUDGET: usize = 128 * 1024;
 const DIRECT_CONTROL_PACKET_BUDGET: usize = MAX_PACKET_BATCH_SIZE;
-const DIRECT_DATA_PACKET_BUDGET: usize = DIRECT_PACKET_BUDGET - DIRECT_CONTROL_PACKET_BUDGET;
-const DIRECT_CONTROL_BYTE_BUDGET: usize = DIRECT_BYTE_BUDGET / 8;
-const DIRECT_DATA_BYTE_BUDGET: usize = DIRECT_BYTE_BUDGET - DIRECT_CONTROL_BYTE_BUDGET;
+const DIRECT_DATA_PACKET_BUDGET: usize = MAX_PACKET_BATCH_SIZE * SEND_PIPELINE_SLOT_COUNT;
+const DIRECT_CONTROL_BYTE_BUDGET: usize = 16 * 1024;
+const DIRECT_DATA_BYTE_BUDGET: usize = 128 * 1024 * SEND_PIPELINE_SLOT_COUNT;
 const DIRECT_PACKET_OVERHEAD: usize = std::mem::size_of::<ZCPacket>();
 const MAX_CONSECUTIVE_CONTROL_SENDS: usize = 8;
-const DIRECT_UNFLUSHED_PACKET_BUDGET: usize = 8;
+// A scalar producer can fill every packet position in the stable job window.
+const DIRECT_INFLIGHT_RUN_CAPACITY: usize = DIRECT_DATA_PACKET_BUDGET;
 
 type BoxedPacketBatchSink = Pin<Box<dyn PacketBatchSink>>;
 
 struct DirectSinkState {
-    sink: Arc<Mutex<BoxedPacketBatchSink>>,
-    sink_gate: Arc<PrioritySinkGate>,
     ownership_budget: Arc<AdmissionBudget>,
     control_budget: Arc<AdmissionBudget>,
-    data_budget: Arc<AdmissionBudget>,
     terminal_error: OnceLock<String>,
     terminal_tx: watch::Sender<()>,
     control_tx: mpsc::Sender<DirectSendWork>,
@@ -48,7 +44,6 @@ struct DirectSinkState {
 struct DirectSendWork {
     batch: PacketBatch,
     ownership: AdmissionPermit,
-    completion: oneshot::Sender<Result<(), String>>,
     deadline: Option<Instant>,
 }
 
@@ -59,15 +54,13 @@ struct DirectBatchPlan {
     byte_count: usize,
 }
 
-struct SendBudget {
-    _permit: AdmissionPermit,
-}
-
 struct AdmissionBudget {
     packet_capacity: usize,
     byte_capacity: usize,
+    run_capacity: Option<usize>,
     packets_in_use: AtomicUsize,
     bytes_in_use: AtomicUsize,
+    runs_in_use: AtomicUsize,
     wake: Notify,
     process_memory: Option<Arc<ProcessMemoryGovernor>>,
 }
@@ -76,31 +69,8 @@ struct AdmissionPermit {
     budget: Arc<AdmissionBudget>,
     packet_count: usize,
     byte_count: usize,
+    run_count: usize,
     _process_memory: Option<ProcessMemoryPermit>,
-}
-
-#[derive(Default)]
-struct PrioritySinkGateState {
-    locked: bool,
-    waiting_control: usize,
-    waiting_data: usize,
-    consecutive_control: usize,
-}
-
-struct PrioritySinkGate {
-    state: std::sync::Mutex<PrioritySinkGateState>,
-    control_wake: Notify,
-    data_wake: Notify,
-}
-
-struct PrioritySinkPermit {
-    gate: Arc<PrioritySinkGate>,
-}
-
-struct PriorityWaiter {
-    gate: Arc<PrioritySinkGate>,
-    control: bool,
-    counted: bool,
 }
 
 impl DirectSinkState {
@@ -109,25 +79,21 @@ impl DirectSinkState {
         close_timeout: Option<Duration>,
         process_memory: Option<Arc<ProcessMemoryGovernor>>,
     ) -> Arc<Self> {
+        let data_run_capacity = DIRECT_INFLIGHT_RUN_CAPACITY;
         let (terminal_tx, _) = watch::channel(());
         let (control_tx, control_rx) = mpsc::channel(2);
-        let (data_tx, data_rx) = mpsc::channel(DIRECT_UNFLUSHED_PACKET_BUDGET);
+        let (data_tx, data_rx) = mpsc::channel(data_run_capacity);
         let state = Arc::new(Self {
-            sink: Arc::new(Mutex::new(sink)),
-            sink_gate: Arc::new(PrioritySinkGate::new()),
-            ownership_budget: Arc::new(AdmissionBudget::with_process(
+            ownership_budget: Arc::new(AdmissionBudget::with_process_and_runs(
                 DIRECT_DATA_PACKET_BUDGET,
                 DIRECT_DATA_BYTE_BUDGET,
+                data_run_capacity,
                 process_memory.clone(),
             )),
             control_budget: Arc::new(AdmissionBudget::with_process(
                 DIRECT_CONTROL_PACKET_BUDGET,
                 DIRECT_CONTROL_BYTE_BUDGET,
                 process_memory,
-            )),
-            data_budget: Arc::new(AdmissionBudget::new(
-                DIRECT_DATA_PACKET_BUDGET,
-                DIRECT_DATA_BYTE_BUDGET,
             )),
             terminal_error: OnceLock::new(),
             terminal_tx,
@@ -136,6 +102,7 @@ impl DirectSinkState {
         });
         tokio::spawn(run_direct_sink_owner(
             Arc::downgrade(&state),
+            sink,
             control_rx,
             data_rx,
             close_timeout,
@@ -144,133 +111,42 @@ impl DirectSinkState {
     }
 }
 
-impl PrioritySinkGate {
-    fn new() -> Self {
-        Self {
-            state: std::sync::Mutex::new(PrioritySinkGateState::default()),
-            control_wake: Notify::new(),
-            data_wake: Notify::new(),
-        }
-    }
-
-    async fn acquire(self: &Arc<Self>, control: bool) -> PrioritySinkPermit {
-        let mut waiter = PriorityWaiter::new(self.clone(), control);
-        loop {
-            let wake = if control {
-                self.control_wake.notified()
-            } else {
-                self.data_wake.notified()
-            };
-            tokio::pin!(wake);
-            {
-                let mut state = self.state.lock().unwrap();
-                let can_acquire = if control {
-                    state.waiting_data == 0
-                        || state.consecutive_control < MAX_CONSECUTIVE_CONTROL_SENDS
-                } else {
-                    state.waiting_control == 0
-                        || state.consecutive_control >= MAX_CONSECUTIVE_CONTROL_SENDS
-                };
-                if !state.locked && can_acquire {
-                    state.locked = true;
-                    if control {
-                        state.waiting_control = state.waiting_control.saturating_sub(1);
-                        if state.waiting_data == 0 {
-                            state.consecutive_control = 0;
-                        } else {
-                            state.consecutive_control = state.consecutive_control.saturating_add(1);
-                        }
-                    } else {
-                        state.waiting_data = state.waiting_data.saturating_sub(1);
-                        state.consecutive_control = 0;
-                    }
-                    waiter.counted = false;
-                    return PrioritySinkPermit { gate: self.clone() };
-                }
-            }
-            wake.await;
-        }
-    }
-
-    fn release(&self) {
-        let wake_control = {
-            let mut state = self.state.lock().unwrap();
-            state.locked = false;
-            state.waiting_control > 0
-                && (state.waiting_data == 0
-                    || state.consecutive_control < MAX_CONSECUTIVE_CONTROL_SENDS)
-        };
-        if wake_control {
-            self.control_wake.notify_one();
-        } else {
-            self.data_wake.notify_one();
-        }
-    }
-}
-
-impl PriorityWaiter {
-    fn new(gate: Arc<PrioritySinkGate>, control: bool) -> Self {
-        let mut state = gate.state.lock().unwrap();
-        if control {
-            state.waiting_control += 1;
-        } else {
-            state.waiting_data += 1;
-        }
-        drop(state);
-        Self {
-            gate,
-            control,
-            counted: true,
-        }
-    }
-}
-
-impl Drop for PriorityWaiter {
-    fn drop(&mut self) {
-        if !self.counted {
-            return;
-        }
-        let wake_control = {
-            let mut state = self.gate.state.lock().unwrap();
-            if self.control {
-                state.waiting_control = state.waiting_control.saturating_sub(1);
-            } else {
-                state.waiting_data = state.waiting_data.saturating_sub(1);
-            }
-            !state.locked
-                && state.waiting_control > 0
-                && (state.waiting_data == 0
-                    || state.consecutive_control < MAX_CONSECUTIVE_CONTROL_SENDS)
-        };
-        if wake_control {
-            self.gate.control_wake.notify_one();
-        } else {
-            self.gate.data_wake.notify_one();
-        }
-    }
-}
-
-impl Drop for PrioritySinkPermit {
-    fn drop(&mut self) {
-        self.gate.release();
-    }
-}
-
 impl AdmissionBudget {
-    fn new(packet_capacity: usize, byte_capacity: usize) -> Self {
-        Self::with_process(packet_capacity, byte_capacity, None)
-    }
-
     fn with_process(
         packet_capacity: usize,
         byte_capacity: usize,
         process_memory: Option<Arc<ProcessMemoryGovernor>>,
     ) -> Self {
+        Self::with_optional_runs(packet_capacity, byte_capacity, None, process_memory)
+    }
+
+    fn with_process_and_runs(
+        packet_capacity: usize,
+        byte_capacity: usize,
+        run_capacity: usize,
+        process_memory: Option<Arc<ProcessMemoryGovernor>>,
+    ) -> Self {
+        Self::with_optional_runs(
+            packet_capacity,
+            byte_capacity,
+            Some(run_capacity),
+            process_memory,
+        )
+    }
+
+    fn with_optional_runs(
+        packet_capacity: usize,
+        byte_capacity: usize,
+        run_capacity: Option<usize>,
+        process_memory: Option<Arc<ProcessMemoryGovernor>>,
+    ) -> Self {
         Self {
             packet_capacity,
             byte_capacity,
+            run_capacity,
             packets_in_use: AtomicUsize::new(0),
             bytes_in_use: AtomicUsize::new(0),
+            runs_in_use: AtomicUsize::new(0),
             wake: Notify::new(),
             process_memory,
         }
@@ -335,10 +211,42 @@ impl AdmissionBudget {
                 )
                 .is_ok()
             {
+                let run_count = if let Some(run_capacity) = self.run_capacity {
+                    loop {
+                        let current_runs = self.runs_in_use.load(Ordering::Acquire);
+                        let Some(next_runs) = current_runs.checked_add(1) else {
+                            self.packets_in_use
+                                .fetch_sub(packet_count, Ordering::AcqRel);
+                            self.bytes_in_use.fetch_sub(byte_count, Ordering::AcqRel);
+                            return None;
+                        };
+                        if next_runs > run_capacity {
+                            self.packets_in_use
+                                .fetch_sub(packet_count, Ordering::AcqRel);
+                            self.bytes_in_use.fetch_sub(byte_count, Ordering::AcqRel);
+                            return None;
+                        }
+                        if self
+                            .runs_in_use
+                            .compare_exchange(
+                                current_runs,
+                                next_runs,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            break 1;
+                        }
+                    }
+                } else {
+                    0
+                };
                 return Some(AdmissionPermit {
                     budget: self.clone(),
                     packet_count,
                     byte_count,
+                    run_count,
                     _process_memory: process_memory,
                 });
             }
@@ -358,6 +266,11 @@ impl Drop for AdmissionPermit {
         self.budget
             .bytes_in_use
             .fetch_sub(self.byte_count, Ordering::AcqRel);
+        if self.run_count != 0 {
+            self.budget
+                .runs_in_use
+                .fetch_sub(self.run_count, Ordering::AcqRel);
+        }
         self.budget.wake.notify_one();
     }
 }
@@ -384,15 +297,17 @@ impl DirectTunnelSender {
             let plan = plan_direct_batch(&mut batch)?;
             let deadline = self.send_timeout.map(|duration| Instant::now() + duration);
             let ownership = run_until(acquire_batch_ownership(&self.state, plan), deadline).await?;
-            self.send_segment(batch, ownership, plan.control).await
+            self.enqueue_run(batch, ownership, plan.control, deadline)
+                .await
         }
     }
 
-    async fn send_segment(
+    async fn enqueue_run(
         &self,
         batch: PacketBatch,
         ownership: AdmissionPermit,
         control: bool,
+        deadline: Option<Instant>,
     ) -> Result<(), TunnelError> {
         debug_assert!(!batch.is_empty());
 
@@ -400,12 +315,10 @@ impl DirectTunnelSender {
         if self.state.terminal_error.get().is_some() {
             return Err(self.terminal_error());
         }
-        let (completion, result) = oneshot::channel();
         let work = DirectSendWork {
             batch,
             ownership,
-            completion,
-            deadline: self.send_timeout.map(|duration| Instant::now() + duration),
+            deadline,
         };
         let sender = if control {
             &self.state.control_tx
@@ -421,15 +334,7 @@ impl DirectTunnelSender {
                 }
             }
         }
-        tokio::select! {
-            biased;
-            result = result => match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(message)) => Err(TunnelError::InternalError(message)),
-                Err(_) => Err(self.terminal_error()),
-            },
-            _ = terminal.changed() => Err(self.terminal_error()),
-        }
+        Ok(())
     }
 
     fn terminal_error(&self) -> TunnelError {
@@ -451,57 +356,103 @@ fn earliest_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<In
     }
 }
 
-async fn start_direct_send_work(
+async fn start_direct_batch(
     sink: &mut BoxedPacketBatchSink,
-    work: DirectSendWork,
-) -> Option<(usize, AdmissionPermit, Option<Instant>)> {
-    let DirectSendWork {
-        batch,
-        ownership,
-        completion,
-        deadline,
-    } = work;
-    let packet_count = batch.len();
+    batch: PacketBatch,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    run_until(poll_fn(|cx| sink.as_mut().poll_ready(cx)), deadline)
+        .await
+        .map_err(|error| format!("direct tunnel sink failed: {error}"))?;
+    sink.as_mut()
+        .start_send(batch)
+        .map_err(|error| format!("direct tunnel sink failed: {error}"))
+}
 
-    if let Err(error) = run_until(poll_fn(|cx| sink.as_mut().poll_ready(cx)), deadline).await {
-        let _ = completion.send(Err(format!("direct tunnel sink failed: {error}")));
-        return None;
-    }
-    if let Err(error) = sink.as_mut().start_send(batch) {
-        let _ = completion.send(Err(format!("direct tunnel sink failed: {error}")));
-        return None;
+async fn start_pending_direct_batch(
+    sink: &mut BoxedPacketBatchSink,
+    pending_batch: &mut Option<PacketBatch>,
+    pending_deadline: &mut Option<Instant>,
+) -> Result<(), String> {
+    let Some(batch) = pending_batch.take() else {
+        return Ok(());
+    };
+    let deadline = pending_deadline.take();
+    start_direct_batch(sink, batch, deadline).await
+}
+
+async fn accumulate_direct_data_batch(
+    sink: &mut BoxedPacketBatchSink,
+    pending_batch: &mut Option<PacketBatch>,
+    pending_deadline: &mut Option<Instant>,
+    batch: PacketBatch,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    if pending_batch
+        .as_ref()
+        .is_some_and(|pending| pending.len() + batch.len() > MAX_PACKET_BATCH_SIZE)
+    {
+        start_pending_direct_batch(sink, pending_batch, pending_deadline).await?;
     }
 
-    // start_send transfers ownership of the batch to the sink. Preserve the
-    // sender contract by acknowledging now while the admission permit stays
-    // held until the shared flush completes.
-    let _ = completion.send(Ok(()));
-    Some((packet_count, ownership, deadline))
+    if pending_batch.is_none() && batch.len() == MAX_PACKET_BATCH_SIZE {
+        return start_direct_batch(sink, batch, deadline).await;
+    }
+
+    if pending_batch.is_none() {
+        let mut pooled_batch = PacketBatch::new();
+        pooled_batch.mark_inline_crypto();
+        *pending_batch = Some(pooled_batch);
+        *pending_deadline = deadline;
+    } else {
+        *pending_deadline = earliest_deadline(*pending_deadline, deadline);
+    }
+    pending_batch
+        .as_mut()
+        .expect("the pooled direct batch was installed")
+        .try_append(batch)
+        .expect("coalesced direct batches remain bounded");
+
+    if pending_batch
+        .as_ref()
+        .is_some_and(|pending| pending.len() == MAX_PACKET_BATCH_SIZE)
+    {
+        start_pending_direct_batch(sink, pending_batch, pending_deadline).await?;
+    }
+    Ok(())
 }
 
 async fn run_direct_sink_owner(
     state: std::sync::Weak<DirectSinkState>,
+    mut sink: BoxedPacketBatchSink,
     mut control_rx: mpsc::Receiver<DirectSendWork>,
     mut data_rx: mpsc::Receiver<DirectSendWork>,
     close_timeout: Option<Duration>,
 ) {
-    let Some(owner) = state.upgrade() else {
-        return;
-    };
-    let sink_owner = owner.sink.clone();
-    drop(owner);
-    let mut sink = sink_owner.lock().await;
     let mut consecutive_control = 0_usize;
     let mut pending_work: Option<(DirectSendWork, bool)> = None;
+    let mut started_ownerships = Vec::with_capacity(DIRECT_INFLIGHT_RUN_CAPACITY);
 
     loop {
+        debug_assert!(started_ownerships.is_empty());
         if pending_work.is_none() && control_rx.is_closed() && data_rx.is_closed() {
             close_sink(&mut sink, close_timeout).await;
             break;
         }
 
-        let next = if let Some(work) = pending_work.take() {
-            Some(work)
+        let next = if let Some((work, control_lane)) = pending_work.take() {
+            if !control_lane && consecutive_control < MAX_CONSECUTIVE_CONTROL_SENDS {
+                match control_rx.try_recv() {
+                    Ok(control_work) => {
+                        pending_work = Some((work, false));
+                        Some((control_work, true))
+                    }
+                    Err(mpsc::error::TryRecvError::Empty)
+                    | Err(mpsc::error::TryRecvError::Disconnected) => Some((work, false)),
+                }
+            } else {
+                Some((work, control_lane))
+            }
         } else if consecutive_control >= MAX_CONSECUTIVE_CONTROL_SENDS {
             tokio::select! {
                 biased;
@@ -529,55 +480,98 @@ async fn run_direct_sink_owner(
             consecutive_control = 0;
         }
 
-        let mut started_ownerships = Vec::with_capacity(DIRECT_UNFLUSHED_PACKET_BUDGET);
-        let mut started_packets = 0_usize;
         let mut flush_deadline = None;
-        let mut current = Some((work, control_lane));
 
-        while let Some((work, lane_is_control)) = current.take() {
-            let Some((packet_count, ownership, deadline)) =
-                start_direct_send_work(&mut sink, work).await
-            else {
-                break;
-            };
-            started_packets = started_packets.saturating_add(packet_count);
-            flush_deadline = earliest_deadline(flush_deadline, deadline);
+        let start_result = if control_lane {
+            let DirectSendWork {
+                batch,
+                ownership,
+                deadline,
+            } = work;
+            flush_deadline = deadline;
             started_ownerships.push(ownership);
+            start_direct_batch(&mut sink, batch, deadline).await
+        } else {
+            let mut started_packets = 0_usize;
+            let mut current = Some(work);
+            let mut pending_batch = None;
+            let mut pending_batch_deadline = None;
+            let mut yielded_for_fill = false;
+            let mut result = Ok(());
 
-            // Control traffic is latency-sensitive. A data batch that already
-            // reaches the packet budget also flushes immediately, so a large
-            // batch cannot be multiplied into a much larger unflushed burst.
-            if lane_is_control || started_packets >= DIRECT_UNFLUSHED_PACKET_BUDGET {
-                break;
-            }
-
-            // One scheduling turn gives saturated scalar TUN producers a
-            // chance to fill the bounded queue. Only already-ready work is
-            // coalesced, so idle traffic does not wait for a batching timer.
-            tokio::task::yield_now().await;
-
-            match control_rx.try_recv() {
-                Ok(work) => {
-                    pending_work = Some((work, true));
-                    break;
-                }
-                Err(mpsc::error::TryRecvError::Empty) => {}
-                Err(mpsc::error::TryRecvError::Disconnected) => {}
-            }
-
-            match data_rx.try_recv() {
-                Ok(work) => {
-                    if started_packets.saturating_add(work.batch.len())
-                        > DIRECT_UNFLUSHED_PACKET_BUDGET
-                    {
+            loop {
+                if let Some(work) = current.take() {
+                    let packet_count = work.batch.len();
+                    if started_packets.saturating_add(packet_count) > DIRECT_DATA_PACKET_BUDGET {
                         pending_work = Some((work, false));
                         break;
                     }
-                    current = Some((work, false));
+                    let DirectSendWork {
+                        batch,
+                        ownership,
+                        deadline,
+                    } = work;
+                    started_packets = started_packets.saturating_add(packet_count);
+                    flush_deadline = earliest_deadline(flush_deadline, deadline);
+                    started_ownerships.push(ownership);
+                    if let Err(message) = accumulate_direct_data_batch(
+                        &mut sink,
+                        &mut pending_batch,
+                        &mut pending_batch_deadline,
+                        batch,
+                        deadline,
+                    )
+                    .await
+                    {
+                        result = Err(message);
+                        break;
+                    }
                 }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
+
+                match control_rx.try_recv() {
+                    Ok(work) => {
+                        pending_work = Some((work, true));
+                        break;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                    Err(mpsc::error::TryRecvError::Disconnected) => {}
+                }
+
+                if started_packets >= DIRECT_DATA_PACKET_BUDGET {
+                    break;
+                }
+
+                match data_rx.try_recv() {
+                    Ok(work) => current = Some(work),
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    Err(mpsc::error::TryRecvError::Empty) if !yielded_for_fill => {
+                        yielded_for_fill = true;
+                        tokio::task::yield_now().await;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                }
             }
+
+            if result.is_ok()
+                && let Err(message) = start_pending_direct_batch(
+                    &mut sink,
+                    &mut pending_batch,
+                    &mut pending_batch_deadline,
+                )
+                .await
+            {
+                result = Err(message);
+            }
+            result
+        };
+
+        if let Err(message) = start_result {
+            started_ownerships.clear();
+            if let Some(state) = state.upgrade() {
+                set_terminal_error(&state, message);
+            }
+            close_sink(&mut sink, close_timeout).await;
+            return;
         }
 
         if started_ownerships.is_empty() {
@@ -585,10 +579,10 @@ async fn run_direct_sink_owner(
         }
 
         match run_until(poll_fn(|cx| sink.as_mut().poll_flush(cx)), flush_deadline).await {
-            Ok(()) => drop(started_ownerships),
+            Ok(()) => started_ownerships.clear(),
             Err(error) => {
                 let message = format!("direct tunnel sink failed: {error}");
-                drop(started_ownerships);
+                started_ownerships.clear();
                 if let Some(state) = state.upgrade() {
                     set_terminal_error(&state, message);
                 }
@@ -652,7 +646,7 @@ impl<T: Tunnel> DirectTunnel<T> {
     }
 }
 
-fn is_data_packet(packet: &ZCPacket) -> bool {
+pub(crate) fn is_data_packet(packet: &ZCPacket) -> bool {
     let Some(header) = packet.peer_manager_header() else {
         return false;
     };
@@ -683,12 +677,6 @@ fn is_data_packet(packet: &ZCPacket) -> bool {
             || x == PacketType::AlternateFecSource as u8
             || x == PacketType::AlternateFecParity as u8
     )
-}
-
-fn is_control_batch(batch: &PacketBatch) -> bool {
-    // Mixed batches stay on the data lane to preserve packet ordering.
-    // A segment uses the control lane only when every packet is control.
-    batch.iter().all(|packet| !is_data_packet(packet))
 }
 
 pub(crate) fn batch_has_uniform_priority(batch: &PacketBatch) -> bool {
@@ -754,56 +742,6 @@ fn plan_direct_batch(batch: &mut PacketBatch) -> Result<DirectBatchPlan, TunnelE
     })
 }
 
-async fn acquire_send_budget(
-    state: &DirectSinkState,
-    batch: &PacketBatch,
-) -> Result<SendBudget, TunnelError> {
-    if state.terminal_error.get().is_some() {
-        return Err(TunnelError::InternalError(
-            state
-                .terminal_error
-                .get()
-                .cloned()
-                .unwrap_or_else(|| "direct tunnel sink owner stopped".to_owned()),
-        ));
-    }
-
-    let packet_count = batch.len();
-    let byte_count = batch_budget_bytes(batch);
-    if packet_count > DIRECT_PACKET_BUDGET {
-        return Err(TunnelError::ExceedMaxPacketSize(
-            DIRECT_PACKET_BUDGET,
-            packet_count,
-        ));
-    }
-    if byte_count > DIRECT_BYTE_BUDGET {
-        return Err(TunnelError::ExceedMaxPacketSize(
-            DIRECT_BYTE_BUDGET,
-            byte_count,
-        ));
-    }
-
-    let budget = if is_control_batch(batch) {
-        state.control_budget.clone()
-    } else {
-        state.data_budget.clone()
-    };
-    if packet_count > budget.packet_capacity {
-        return Err(TunnelError::ExceedMaxPacketSize(
-            budget.packet_capacity,
-            packet_count,
-        ));
-    }
-    if byte_count > budget.byte_capacity {
-        return Err(TunnelError::ExceedMaxPacketSize(
-            budget.byte_capacity,
-            byte_count,
-        ));
-    }
-    let permit = acquire_budget_or_terminal(state, budget, packet_count, byte_count).await?;
-    Ok(SendBudget { _permit: permit })
-}
-
 async fn acquire_budget_or_terminal(
     state: &DirectSinkState,
     budget: Arc<AdmissionBudget>,
@@ -839,19 +777,6 @@ impl DirectSinkState {
                 .unwrap_or_else(|| "direct tunnel sink owner stopped".to_owned()),
         )
     }
-}
-
-async fn send_sink_batch(
-    sink: &mut BoxedPacketBatchSink,
-    batch: PacketBatch,
-    deadline: Option<Instant>,
-) -> Result<(), TunnelError> {
-    let operation = async {
-        poll_fn(|cx| sink.as_mut().poll_ready(cx)).await?;
-        sink.as_mut().start_send(batch)?;
-        poll_fn(|cx| sink.as_mut().poll_flush(cx)).await
-    };
-    run_until(operation, deadline).await
 }
 
 async fn run_until<F, T>(operation: F, deadline: Option<Instant>) -> Result<T, TunnelError>
@@ -1028,6 +953,61 @@ mod tests {
         flush_count: Arc<AtomicUsize>,
     }
 
+    struct CoalescingSink {
+        batches: UnboundedSender<Vec<u16>>,
+        release_ready: Option<oneshot::Receiver<()>>,
+        release_flush: Option<oneshot::Receiver<()>>,
+    }
+
+    impl Sink<PacketBatch> for CoalescingSink {
+        type Error = crate::tunnel::TunnelError;
+
+        fn poll_ready(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if let Some(release_ready) = self.release_ready.as_mut() {
+                match Pin::new(release_ready).poll(cx) {
+                    Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => self.release_ready = None,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+            let markers = batch
+                .into_iter()
+                .map(|packet| {
+                    let payload = packet.payload();
+                    u16::from_le_bytes([payload[0], payload[1]])
+                })
+                .collect();
+            self.get_mut().batches.send(markers).unwrap();
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if let Some(release_flush) = self.release_flush.as_mut() {
+                match Pin::new(release_flush).poll(cx) {
+                    Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => self.release_flush = None,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     impl Sink<PacketBatch> for CountingSink {
         type Error = crate::tunnel::TunnelError;
 
@@ -1039,7 +1019,7 @@ mod tests {
         }
 
         fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
-            assert_eq!(batch.len(), MAX_PACKET_BATCH_SIZE);
+            assert_eq!(batch.len(), super::MAX_PACKET_BATCH_SIZE);
             self.start_send_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
@@ -1153,6 +1133,12 @@ mod tests {
         packet
     }
 
+    fn indexed_data_packet(value: u16) -> ZCPacket {
+        let mut packet = ZCPacket::new_with_payload(&value.to_le_bytes());
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        packet
+    }
+
     fn sized_batch(
         packet_type: PacketType,
         packet_count: usize,
@@ -1168,7 +1154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_data_batch_has_one_start_send_and_flush() {
+    async fn full_data_batch_is_one_complete_sink_run() {
         let start_send_count = Arc::new(AtomicUsize::new(0));
         let flush_count = Arc::new(AtomicUsize::new(0));
         let sink = Box::pin(CountingSink {
@@ -1186,18 +1172,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(start_send_count.load(Ordering::Acquire), 1);
-        // The sink owner acknowledges a started batch before flushing it.
         crate::tunnel::common::tests::wait_for_condition(
-            || async { flush_count.load(Ordering::Acquire) == 1 },
+            || async {
+                start_send_count.load(Ordering::Acquire) == 1
+                    && flush_count.load(Ordering::Acquire) == 1
+            },
             std::time::Duration::from_secs(1),
         )
         .await;
+        assert_eq!(start_send_count.load(Ordering::Acquire), 1);
         assert_eq!(flush_count.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
-    async fn control_send_precedes_waiting_data_without_an_extra_queue() {
+    async fn control_run_precedes_a_waiting_data_run() {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_data, release_data_rx) = oneshot::channel();
         let sink = Box::pin(BlockedDataSink {
@@ -1211,21 +1199,11 @@ mod tests {
             send_timeout: None,
         };
 
-        let data_send = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send(data_packet(1)).await }
-        });
+        sender.send(data_packet(1)).await.unwrap();
         assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
 
-        let second_data_send = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send(data_packet(3)).await }
-        });
-        tokio::task::yield_now().await;
-        let control_send = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send(control_packet(2)).await }
-        });
+        sender.send(data_packet(3)).await.unwrap();
+        sender.send(control_packet(2)).await.unwrap();
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), events_rx.recv())
                 .await
@@ -1234,49 +1212,10 @@ mod tests {
         release_data.send(()).unwrap();
         assert_eq!(events_rx.recv().await, Some(WriteKind::Control));
         assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        assert!(control_send.await.unwrap().is_ok());
-        assert!(second_data_send.await.unwrap().is_ok());
-        assert!(data_send.await.unwrap().is_ok());
     }
 
     #[tokio::test]
-    async fn control_reserve_admits_when_data_budget_is_full() {
-        let (tunnel, _peer) = create_ring_tunnel_pair();
-        let state = super::DirectSinkState::new(tunnel.split().1, None, None);
-
-        let mut data_permits = Vec::new();
-        for _ in 0..(super::DIRECT_DATA_PACKET_BUDGET / super::MAX_PACKET_BATCH_SIZE) {
-            let data = sized_batch(PacketType::Data, super::MAX_PACKET_BATCH_SIZE, 1);
-            data_permits.push(super::acquire_send_budget(&state, &data).await.unwrap());
-        }
-
-        let data = sized_batch(PacketType::Data, 1, 1);
-        let waiting_state = state.clone();
-        let mut waiter =
-            tokio::spawn(async move { super::acquire_send_budget(&waiting_state, &data).await });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
-                .await
-                .is_err()
-        );
-
-        waiter.abort();
-        let _ = waiter.await;
-
-        let control = sized_batch(PacketType::Ping, 1, 1_024);
-        let released = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            super::acquire_send_budget(&state, &control),
-        )
-        .await
-        .expect("the control reserve must admit while data is saturated")
-        .unwrap();
-        drop(released);
-        drop(data_permits);
-    }
-
-    #[tokio::test]
-    async fn in_flight_sends_have_bounded_batch_ownership() {
+    async fn control_reserve_admits_when_data_run_window_is_full() {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_data, release_data_rx) = oneshot::channel();
         let sink = Box::pin(BlockedDataSink {
@@ -1290,22 +1229,60 @@ mod tests {
             send_timeout: None,
         };
 
-        // One full in-flight data batch saturates the data packet budget.
-        let first = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                sender
-                    .send_batch(sized_batch(PacketType::Data, MAX_PACKET_BATCH_SIZE, 1))
-                    .await
-            }
-        });
+        sender.send(data_packet(1)).await.unwrap();
         assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
+        for _ in 1..super::DIRECT_INFLIGHT_RUN_CAPACITY {
+            sender.send(data_packet(2)).await.unwrap();
+        }
 
-        // A further data send waits for released budget instead of growing
-        // an unbounded queue.
+        let mut waiter = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send(data_packet(3)).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err()
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            sender.send(control_packet(4)),
+        )
+        .await
+        .expect("the control reserve must admit while data runs are saturated")
+        .unwrap();
+
+        release_data.send(()).unwrap();
+        assert!(waiter.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn admitted_data_runs_have_bounded_batch_ownership() {
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_data, release_data_rx) = oneshot::channel();
+        let sink = Box::pin(BlockedDataSink {
+            events: events_tx,
+            pending: None,
+            release_data: Some(release_data_rx),
+        }) as Pin<Box<dyn PacketBatchSink>>;
+        let state = super::DirectSinkState::new(sink, None, None);
+        let sender = super::DirectTunnelSender {
+            state,
+            send_timeout: None,
+        };
+
+        let run_capacity = super::DIRECT_INFLIGHT_RUN_CAPACITY;
+        sender.send(data_packet(1)).await.unwrap();
+        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
+        for _ in 1..run_capacity {
+            sender.send(data_packet(2)).await.unwrap();
+        }
+
+        // A further complete run waits for released ownership.
         let mut second = tokio::spawn({
             let sender = sender.clone();
-            async move { sender.send_batch(sized_batch(PacketType::Data, 1, 1)).await }
+            async move { sender.send(data_packet(3)).await }
         });
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
@@ -1315,11 +1292,10 @@ mod tests {
 
         release_data.send(()).unwrap();
         assert!(second.await.unwrap().is_ok());
-        assert!(first.await.unwrap().is_ok());
     }
 
     #[tokio::test]
-    async fn small_data_requests_coalesce_to_packet_budget() {
+    async fn data_runs_share_one_total_packet_budget() {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_data, release_data_rx) = oneshot::channel();
         let sink = Box::pin(BlockedDataSink {
@@ -1333,31 +1309,118 @@ mod tests {
             send_timeout: None,
         };
 
-        let sends = (0..(super::DIRECT_UNFLUSHED_PACKET_BUDGET + 1))
-            .map(|value| {
-                let sender = sender.clone();
-                tokio::spawn(async move { sender.send(data_packet(value as u8)).await })
-            })
-            .collect::<Vec<_>>();
-
-        for _ in 0..super::DIRECT_UNFLUSHED_PACKET_BUDGET {
-            assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
+        sender
+            .send_batch(sized_batch(
+                PacketType::Data,
+                super::MAX_PACKET_BATCH_SIZE,
+                1,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
+        for _ in 1..super::SEND_PIPELINE_SLOT_COUNT {
+            sender
+                .send_batch(sized_batch(
+                    PacketType::Data,
+                    super::MAX_PACKET_BATCH_SIZE,
+                    1,
+                ))
+                .await
+                .unwrap();
         }
+
+        let mut excess = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send(data_packet(3)).await }
+        });
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), events_rx.recv())
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut excess)
                 .await
                 .is_err()
         );
 
         release_data.send(()).unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        for send in sends {
-            assert!(send.await.unwrap().is_ok());
-        }
+        assert!(excess.await.unwrap().is_ok());
     }
 
     #[tokio::test]
-    async fn next_batch_waits_for_previous_flush() {
+    async fn scalar_window_coalesces_into_eight_ordered_batches_until_flush() {
+        let (batches_tx, mut batches_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_ready, release_ready_rx) = oneshot::channel();
+        let (release_flush, release_flush_rx) = oneshot::channel();
+        let sink = Box::pin(CoalescingSink {
+            batches: batches_tx,
+            release_ready: Some(release_ready_rx),
+            release_flush: Some(release_flush_rx),
+        }) as Pin<Box<dyn PacketBatchSink>>;
+        let state = super::DirectSinkState::new(sink, None, None);
+        let sender = super::DirectTunnelSender {
+            state: state.clone(),
+            send_timeout: None,
+        };
+
+        for value in 0..super::DIRECT_DATA_PACKET_BUDGET as u16 {
+            sender.send(indexed_data_packet(value)).await.unwrap();
+        }
+        assert_eq!(
+            state.ownership_budget.runs_in_use.load(Ordering::Acquire),
+            super::DIRECT_INFLIGHT_RUN_CAPACITY
+        );
+
+        let mut excess = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                sender
+                    .send(indexed_data_packet(super::DIRECT_DATA_PACKET_BUDGET as u16))
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut excess)
+                .await
+                .is_err()
+        );
+
+        release_ready.send(()).unwrap();
+        let mut observed = Vec::with_capacity(super::DIRECT_DATA_PACKET_BUDGET);
+        for _ in 0..super::SEND_PIPELINE_SLOT_COUNT {
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(1), batches_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch.len(), super::MAX_PACKET_BATCH_SIZE);
+            observed.extend(batch);
+        }
+        assert_eq!(
+            observed,
+            (0..super::DIRECT_DATA_PACKET_BUDGET as u16).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.ownership_budget.runs_in_use.load(Ordering::Acquire),
+            super::DIRECT_INFLIGHT_RUN_CAPACITY
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut excess)
+                .await
+                .is_err()
+        );
+
+        release_flush.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut excess)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let final_batch =
+            tokio::time::timeout(std::time::Duration::from_secs(1), batches_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(final_batch, vec![super::DIRECT_DATA_PACKET_BUDGET as u16]);
+    }
+
+    #[tokio::test]
+    async fn queued_batch_admission_does_not_wait_for_previous_flush() {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_data, release_data_rx) = oneshot::channel();
         let sink = Box::pin(BlockedDataSink {
@@ -1372,18 +1435,13 @@ mod tests {
         };
         let half_batch = MAX_PACKET_BATCH_SIZE / 2;
 
-        let first = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                sender
-                    .send_batch(sized_batch(PacketType::Data, half_batch, 1))
-                    .await
-            }
-        });
+        sender
+            .send_batch(sized_batch(PacketType::Data, half_batch, 1))
+            .await
+            .unwrap();
         assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        assert!(first.await.unwrap().is_ok());
 
-        let second = tokio::spawn({
+        let mut second = tokio::spawn({
             let sender = sender.clone();
             async move {
                 sender
@@ -1392,6 +1450,13 @@ mod tests {
             }
         });
         assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+                .await
+                .expect("the second run should enter the fixed window")
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), events_rx.recv())
                 .await
                 .is_err()
@@ -1399,11 +1464,10 @@ mod tests {
 
         release_data.send(()).unwrap();
         assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        assert!(second.await.unwrap().is_ok());
     }
 
     #[tokio::test]
-    async fn terminal_write_failure_reaches_queued_callers_and_closes_once() {
+    async fn terminal_write_failure_rejects_later_admission_and_closes_once() {
         let close_count = Arc::new(AtomicUsize::new(0));
         let sink = Box::pin(FailingSink {
             close_count: close_count.clone(),
