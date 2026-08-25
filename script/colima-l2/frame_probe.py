@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import errno
-import os
 import socket
 import struct
 import sys
@@ -14,6 +13,7 @@ from pathlib import Path
 
 
 ETH_P_ALL = 0x0003
+LINUX_AF_PACKET = 17
 PACKET_OUTGOING = 4
 PACKET_AUXDATA = 8
 SOL_PACKET = 263
@@ -50,8 +50,10 @@ def build_frame(args: argparse.Namespace) -> bytes:
     return header + marker + fill
 
 
-def open_socket(interface: str) -> socket.socket:
-    packet_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
+def open_packet_socket(interface: str) -> socket.socket:
+    packet_socket = socket.socket(
+        LINUX_AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
+    )
     packet_socket.bind((interface, 0))
     return packet_socket
 
@@ -77,7 +79,7 @@ def write_result(path: str | None, message: str) -> None:
 
 def send_frame(args: argparse.Namespace) -> int:
     frame = build_frame(args)
-    with open_socket(args.interface) as packet_socket:
+    with open_packet_socket(args.interface) as packet_socket:
         try:
             sent = packet_socket.send(frame)
         except OSError as error:
@@ -95,7 +97,7 @@ def receive_frame(args: argparse.Namespace) -> int:
     expected = build_frame(args)
     marker = b"ETL2" + bytes.fromhex(args.token)
     deadline = time.monotonic() + args.timeout
-    with open_socket(args.interface) as packet_socket:
+    with open_packet_socket(args.interface) as packet_socket:
         packet_socket.setsockopt(SOL_PACKET, PACKET_AUXDATA, 1)
         packet_socket.settimeout(0.1)
         if args.ready_file:

@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import Iterable
+from collections.abc import Iterable, Iterator
 
 
 def parse_int_list(value: str, *, minimum: int, maximum: int) -> list[int]:
@@ -32,7 +32,7 @@ def case_name(inner_bytes: int, batch_cap: int, flows: int, run: int) -> str:
     return f"L{inner_bytes:04d}-B{batch_cap:02d}-F{flows:02d}-R{run:02d}"
 
 
-def run_command(command: list[str], env: dict[str, str], log_path: Path) -> None:
+def run_logged_command(command: list[str], env: dict[str, str], log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.run(
@@ -41,6 +41,7 @@ def run_command(command: list[str], env: dict[str, str], log_path: Path) -> None
             text=True,
             stdout=log,
             stderr=subprocess.STDOUT,
+            check=False,
         )
     if process.returncode != 0:
         raise RuntimeError(
@@ -53,7 +54,7 @@ def iter_cases(
     batch_caps: Iterable[int],
     flow_counts: Iterable[int],
     runs: int,
-):
+) -> Iterator[tuple[int, int, int, int, int]]:
     for batch_cap in batch_caps:
         for inner_bytes in packet_sizes:
             udp_payload_bytes = inner_bytes - 28
@@ -71,9 +72,7 @@ def main() -> int:
     parser.add_argument(
         "--result-dir", type=Path, default=Path("target/arm-work-model")
     )
-    parser.add_argument(
-        "--image", default="lowertier-throughput:work-model"
-    )
+    parser.add_argument("--image", default="lowertier-throughput:work-model")
     parser.add_argument("--docker-context", default="colima")
     parser.add_argument("--packet-sizes", default="64,256,512,1024,1360")
     parser.add_argument("--batch-caps", default="1,4,16,64")
@@ -129,9 +128,7 @@ def main() -> int:
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
-    cases = list(
-        iter_cases(packet_sizes, batch_caps, flow_counts, args.runs)
-    )
+    cases = list(iter_cases(packet_sizes, batch_caps, flow_counts, args.runs))
     first_pending = True
     for index, (inner_bytes, udp_payload, batch_cap, flows, run) in enumerate(
         cases, start=1
@@ -202,7 +199,7 @@ def main() -> int:
             flush=True,
         )
         try:
-            run_command(
+            run_logged_command(
                 ["bash", str(harness)],
                 env,
                 result_root / "logs" / f"{name}.log",
@@ -222,6 +219,7 @@ def main() -> int:
     process = subprocess.run(
         [sys.executable, str(fit_script), str(result_root)],
         text=True,
+        check=False,
     )
     return process.returncode
 

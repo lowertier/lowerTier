@@ -11,12 +11,133 @@ import re
 import statistics
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 
 
-def read_tsv(path: Path) -> list[dict[str, str]]:
+JsonObject = dict[str, object]
+
+
+class UdpMetrics(TypedDict):
+    sent_packets: int | None
+    received_packets: int | None
+    lost_packets: int | None
+    loss_percent: float | None
+    jitter_ms: float | None
+
+
+class LatencyMetrics(TypedDict):
+    samples: int
+    transmitted: int
+    received: int
+    min_ms: float | None
+    mean_ms: float | None
+    p95_ms: float | None
+    max_ms: float | None
+
+
+class ResourceMetrics(TypedDict):
+    sampled: bool
+    complete: bool
+    samples: int
+    cpu_pct: float
+    peak_rss_kib: int
+    process_lifetime_hwm_kib: int
+    peak_rss_anon_kib: int
+    peak_rss_file_kib: int
+    peak_rss_shmem_kib: int
+    peak_pss_kib: int
+    peak_private_clean_kib: int
+    peak_private_dirty_kib: int
+    peak_threads: int
+    rx_packets: int
+    tx_packets: int
+    rx_bytes: int
+    tx_bytes: int
+    rows: list[dict[str, str]]
+
+
+class CombinedResourceMetrics(TypedDict):
+    peak_rss_kib: int
+    hwm_sum_kib: int
+    peak_rss_anon_kib: int
+    peak_rss_file_kib: int
+    peak_rss_shmem_kib: int
+    peak_pss_kib: int
+    peak_private_clean_kib: int
+    peak_private_dirty_kib: int
+    peak_private_total_kib: int
+    aligned_samples: int
+
+
+ReportValue = str | int | float | bool | None
+BenchmarkResult = dict[str, ReportValue]
+BenchmarkSummary = dict[str, ReportValue]
+BenchmarkGroupKey = tuple[str, str, int, str, str, int]
+
+
+def as_json_object(value: object) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    return cast(JsonObject, value)
+
+
+def read_json_object(path: Path) -> JsonObject:
+    payload: object = json.loads(path.read_text(encoding="utf-8"))
+    result = as_json_object(payload)
+    if result is None:
+        raise ValueError(f"JSON document is not an object: {path}")
+    return result
+
+
+def json_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
+def json_integer(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
+
+
+def parse_float(value: str | None) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def parse_integer(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def collect_float_values(rows: list[dict[str, str]], name: str) -> list[float]:
+    return [
+        parsed for row in rows if (parsed := parse_float(row.get(name))) is not None
+    ]
+
+
+def collect_integer_values(rows: list[dict[str, str]], name: str) -> list[int]:
+    return [
+        parsed for row in rows if (parsed := parse_integer(row.get(name))) is not None
+    ]
+
+
+def read_tsv_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as source:
-        return list(csv.DictReader(source, delimiter="\t"))
+        return [
+            {key: value or "" for key, value in row.items() if key is not None}
+            for row in csv.DictReader(source, delimiter="\t")
+        ]
 
 
 def rate_to_bps(value: str) -> float:
@@ -40,48 +161,50 @@ def rate_to_bps(value: str) -> float:
 def iperf_throughput(path: Path) -> float:
     """Read the most stable throughput field from an iperf3 JSON result."""
 
-    data = json.loads(path.read_text(encoding="utf-8"))
-    end = data.get("end", {})
-    candidates: list[Any] = [
-        end.get("sum_received", {}).get("bits_per_second"),
-        end.get("sum", {}).get("bits_per_second"),
-        end.get("sum_sent", {}).get("bits_per_second"),
-    ]
-    for value in candidates:
-        if value is not None:
-            throughput = float(value)
-            if not math.isfinite(throughput) or throughput <= 0:
-                raise ValueError(f"iperf3 throughput is not positive and finite: {path}")
-            return throughput
+    data = read_json_object(path)
+    end = as_json_object(data.get("end")) or {}
+    for summary_name in ("sum_received", "sum", "sum_sent"):
+        summary = as_json_object(end.get(summary_name))
+        if summary is None:
+            continue
+        raw_throughput = summary.get("bits_per_second")
+        if raw_throughput is None:
+            continue
+        throughput = json_float(raw_throughput)
+        if throughput is None or throughput <= 0:
+            raise ValueError(f"iperf3 throughput is not positive and finite: {path}")
+        return throughput
     raise ValueError(f"iperf3 result has no throughput field: {path}")
 
 
-def iperf_udp_metrics(path: Path) -> dict[str, float | int | None]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    summary = data.get("end", {}).get("sum", {})
+def empty_udp_metrics() -> UdpMetrics:
+    return {
+        "sent_packets": None,
+        "received_packets": None,
+        "lost_packets": None,
+        "loss_percent": None,
+        "jitter_ms": None,
+    }
+
+
+def iperf_udp_metrics(path: Path) -> UdpMetrics:
+    data = read_json_object(path)
+    end = as_json_object(data.get("end")) or {}
+    summary = as_json_object(end.get("sum"))
+    if summary is None:
+        return empty_udp_metrics()
     required = ("packets", "lost_packets", "lost_percent", "jitter_ms")
     if any(summary.get(name) is None for name in required):
-        return {
-            "sent_packets": None,
-            "received_packets": None,
-            "lost_packets": None,
-            "loss_percent": None,
-            "jitter_ms": None,
-        }
-    sent = int(summary["packets"])
-    lost = int(summary["lost_packets"])
+        return empty_udp_metrics()
+
+    sent = json_integer(summary.get("packets"))
+    lost = json_integer(summary.get("lost_packets"))
+    loss = json_float(summary.get("lost_percent"))
+    jitter = json_float(summary.get("jitter_ms"))
+    if sent is None or lost is None or loss is None or jitter is None:
+        raise ValueError(f"iperf3 UDP metrics are not numeric: {path}")
     received = sent - lost
-    loss = float(summary["lost_percent"])
-    jitter = float(summary["jitter_ms"])
-    if (
-        sent <= 0
-        or lost < 0
-        or received < 0
-        or not math.isfinite(loss)
-        or loss < 0
-        or not math.isfinite(jitter)
-        or jitter < 0
-    ):
+    if sent <= 0 or lost < 0 or received < 0 or loss < 0 or jitter < 0:
         raise ValueError(f"iperf3 UDP metrics are invalid: {path}")
     return {
         "sent_packets": sent,
@@ -106,8 +229,8 @@ def prometheus_metric(path: Path, metric_name: str) -> int:
 
 def resource_metrics(
     path: Path, window_start_ms: int, window_end_ms: int
-) -> dict[str, Any]:
-    rows = read_tsv(path)
+) -> ResourceMetrics:
+    rows = read_tsv_rows(path)
     rows = [
         row
         for row in rows
@@ -135,27 +258,18 @@ def resource_metrics(
             "rows": [],
         }
 
-    def values(name: str, cast: type[float] | type[int]) -> list[float | int]:
-        result: list[float | int] = []
-        for row in rows:
-            try:
-                result.append(cast(row[name]))
-            except (KeyError, TypeError, ValueError):
-                continue
-        return result
+    cpu_values = collect_float_values(rows, "cpu_pct")
+    rss_values = collect_integer_values(rows, "rss_kib")
+    hwm_values = collect_integer_values(rows, "hwm_kib")
+    rss_anon_values = collect_integer_values(rows, "rss_anon_kib")
+    rss_file_values = collect_integer_values(rows, "rss_file_kib")
+    rss_shmem_values = collect_integer_values(rows, "rss_shmem_kib")
+    pss_values = collect_integer_values(rows, "pss_kib")
+    private_clean_values = collect_integer_values(rows, "private_clean_kib")
+    private_dirty_values = collect_integer_values(rows, "private_dirty_kib")
+    thread_values = collect_integer_values(rows, "threads")
 
-    cpu_values = [float(value) for value in values("cpu_pct", float)]
-    rss_values = [int(value) for value in values("rss_kib", int)]
-    hwm_values = [int(value) for value in values("hwm_kib", int)]
-    rss_anon_values = [int(value) for value in values("rss_anon_kib", int)]
-    rss_file_values = [int(value) for value in values("rss_file_kib", int)]
-    rss_shmem_values = [int(value) for value in values("rss_shmem_kib", int)]
-    pss_values = [int(value) for value in values("pss_kib", int)]
-    private_clean_values = [int(value) for value in values("private_clean_kib", int)]
-    private_dirty_values = [int(value) for value in values("private_dirty_kib", int)]
-    thread_values = [int(value) for value in values("threads", int)]
-
-    def delta(values_for_delta: list[int]) -> int:
+    def counter_delta(values_for_delta: list[int]) -> int:
         if len(values_for_delta) < 2:
             return 0
         return max(0, values_for_delta[-1] - values_for_delta[0])
@@ -170,6 +284,7 @@ def resource_metrics(
     )
     first_pid = rows[0].get("process_pid", "")
     first_start_ticks = rows[0].get("process_start_ticks", "")
+
     def positive_integer(row: dict[str, str], name: str) -> bool:
         try:
             return int(row.get(name, "0")) > 0
@@ -197,15 +312,17 @@ def resource_metrics(
         "peak_private_clean_kib": max(private_clean_values, default=0),
         "peak_private_dirty_kib": max(private_dirty_values, default=0),
         "peak_threads": max(thread_values, default=0),
-        "rx_packets": delta([int(row.get("rx_packets", "0")) for row in rows]),
-        "tx_packets": delta([int(row.get("tx_packets", "0")) for row in rows]),
-        "rx_bytes": delta([int(row.get("rx_bytes", "0")) for row in rows]),
-        "tx_bytes": delta([int(row.get("tx_bytes", "0")) for row in rows]),
+        "rx_packets": counter_delta([int(row.get("rx_packets", "0")) for row in rows]),
+        "tx_packets": counter_delta([int(row.get("tx_packets", "0")) for row in rows]),
+        "rx_bytes": counter_delta([int(row.get("rx_bytes", "0")) for row in rows]),
+        "tx_bytes": counter_delta([int(row.get("tx_bytes", "0")) for row in rows]),
         "rows": rows,
     }
 
 
-def combined_resource_metrics(resources: list[dict[str, Any]]) -> dict[str, int]:
+def combined_resource_metrics(
+    resources: list[ResourceMetrics],
+) -> CombinedResourceMetrics:
     """Compute time-aligned process totals and conservative HWM totals."""
 
     if not resources or any(not resource["rows"] for resource in resources):
@@ -231,7 +348,7 @@ def combined_resource_metrics(resources: list[dict[str, Any]]) -> dict[str, int]
         "private_clean_kib",
         "private_dirty_kib",
     )
-    peaks = {field: 0 for field in fields}
+    peaks: dict[str, int] = dict.fromkeys(fields, 0)
     private_total_peak = 0
     aligned_samples = 0
     for base in resources[0]["rows"]:
@@ -249,8 +366,7 @@ def combined_resource_metrics(resources: list[dict[str, Any]]) -> dict[str, int]
             continue
         aligned_samples += 1
         totals = {
-            field: sum(int(row.get(field, "0")) for row in aligned)
-            for field in fields
+            field: sum(int(row.get(field, "0")) for row in aligned) for field in fields
         }
         for field, total in totals.items():
             peaks[field] = max(peaks[field], total)
@@ -277,20 +393,24 @@ def combined_resource_metrics(resources: list[dict[str, Any]]) -> dict[str, int]
 
 def route_proof_valid(path: Path, scenario: str) -> bool:
     try:
-        proof = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        proof = read_json_object(path)
+    except (OSError, json.JSONDecodeError, ValueError):
         return False
-    if not isinstance(proof, dict) or proof.get("scenario") != scenario:
+    if proof.get("scenario") != scenario:
         return False
     if scenario == "direct-underlay":
         return bool(proof.get("forward_target") and proof.get("reverse_target"))
     expected_path_len = 2 if scenario == "relay-compact-l3" else 1
     expected_targets = {"forward": "10.88.0.2", "reverse": "10.88.0.1"}
     for direction in ("forward", "reverse"):
-        route = proof.get(direction)
-        if not isinstance(route, dict) or int(route.get("path_len", 0)) != expected_path_len:
+        route = as_json_object(proof.get(direction))
+        if route is None or json_integer(route.get("path_len")) != expected_path_len:
             return False
-        if str(route.get("ipv4", "")).split("/", 1)[0] != expected_targets[direction]:
+        ipv4 = route.get("ipv4")
+        if (
+            not isinstance(ipv4, str)
+            or ipv4.split("/", 1)[0] != expected_targets[direction]
+        ):
             return False
         if (
             scenario == "relay-compact-l3"
@@ -308,7 +428,7 @@ PING_SUMMARY = re.compile(
 
 def latency_metrics(
     path: Path, window_start_ms: int | None = None, window_end_ms: int | None = None
-) -> dict[str, float | int | None]:
+) -> LatencyMetrics:
     samples: list[float] = []
     transmitted = 0
     received = 0
@@ -327,7 +447,15 @@ def latency_metrics(
             continue
         samples.append(float(match.group("ms")))
     if not samples:
-        return {"samples": 0, "transmitted": transmitted, "received": received, "min_ms": None, "mean_ms": None, "p95_ms": None, "max_ms": None}
+        return {
+            "samples": 0,
+            "transmitted": transmitted,
+            "received": received,
+            "min_ms": None,
+            "mean_ms": None,
+            "p95_ms": None,
+            "max_ms": None,
+        }
     ordered = sorted(samples)
     p95_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
     return {
@@ -349,9 +477,43 @@ def finite(value: float | int | None) -> float | int | None:
     return value
 
 
+def result_text(result: BenchmarkResult, key: str) -> str:
+    value = result[key]
+    if not isinstance(value, str):
+        raise TypeError(f"benchmark result {key!r} is not text: {value!r}")
+    return value
+
+
+def result_integer(result: BenchmarkResult, key: str) -> int:
+    value = result[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"benchmark result {key!r} is not an integer: {value!r}")
+    return value
+
+
+def result_number(result: BenchmarkResult, key: str) -> float:
+    value = result[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"benchmark result {key!r} is not numeric: {value!r}")
+    return float(value)
+
+
+def result_optional_number(result: BenchmarkResult, key: str) -> float | None:
+    if result[key] is None:
+        return None
+    return result_number(result, key)
+
+
+def result_boolean(result: BenchmarkResult, key: str) -> bool:
+    value = result[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"benchmark result {key!r} is not boolean: {value!r}")
+    return value
+
+
 def build_result(
     result_dir: Path, case: dict[str, str], memory_ceiling_kib: int
-) -> dict[str, Any]:
+) -> BenchmarkResult:
     window_start_ms = int(case["window_start_ms"])
     window_end_ms = int(case["window_end_ms"])
     endpoint_a = resource_metrics(
@@ -369,7 +531,9 @@ def build_result(
     )
     throughput = iperf_throughput(result_dir / case["iperf_json"])
     is_underlay = case["scenario"] == "direct-underlay"
-    required_resources = [] if is_underlay else [endpoint_a, endpoint_b]
+    required_resources: list[ResourceMetrics] = (
+        [] if is_underlay else [endpoint_a, endpoint_b]
+    )
     if case["scenario"] == "relay-compact-l3":
         required_resources.append(relay)
     combined_resources = combined_resource_metrics(required_resources)
@@ -401,8 +565,7 @@ def build_result(
     load_received = int(load_latency["samples"] or 0)
     idle_latency_valid = (
         int(idle_latency["samples"]) >= idle_expected
-        and
-        idle_transmitted >= idle_expected
+        and idle_transmitted >= idle_expected
         and idle_received * 100 >= idle_transmitted * 95
         and idle_latency["mean_ms"] is not None
         and idle_latency["p95_ms"] is not None
@@ -419,13 +582,7 @@ def build_result(
     udp_metrics = (
         iperf_udp_metrics(result_dir / case["iperf_json"])
         if case["protocol"] == "udp"
-        else {
-            "sent_packets": None,
-            "received_packets": None,
-            "lost_packets": None,
-            "loss_percent": None,
-            "jitter_ms": None,
-        }
+        else empty_udp_metrics()
     )
     udp_loss_valid = case["protocol"] != "udp" or (
         udp_metrics["loss_percent"] is not None
@@ -439,8 +596,12 @@ def build_result(
         compact_l3_packets = sum(
             max(
                 0,
-                prometheus_metric(result_dir / case[after], "hybrid_compact_l3_packets_tx")
-                - prometheus_metric(result_dir / case[before], "hybrid_compact_l3_packets_tx"),
+                prometheus_metric(
+                    result_dir / case[after], "hybrid_compact_l3_packets_tx"
+                )
+                - prometheus_metric(
+                    result_dir / case[before], "hybrid_compact_l3_packets_tx"
+                ),
             )
             for before, after in (
                 ("mode_stats_a_before", "mode_stats_a_after"),
@@ -450,8 +611,12 @@ def build_result(
         full_ethernet_packets = sum(
             max(
                 0,
-                prometheus_metric(result_dir / case[after], "hybrid_full_ethernet_packets_tx")
-                - prometheus_metric(result_dir / case[before], "hybrid_full_ethernet_packets_tx"),
+                prometheus_metric(
+                    result_dir / case[after], "hybrid_full_ethernet_packets_tx"
+                )
+                - prometheus_metric(
+                    result_dir / case[before], "hybrid_full_ethernet_packets_tx"
+                ),
             )
             for before, after in (
                 ("mode_stats_a_before", "mode_stats_a_after"),
@@ -466,7 +631,7 @@ def build_result(
         and int(relay["tx_bytes"]) > 0
     )
     route_valid = route_proof_valid(result_dir / case["route_proof"], case["scenario"])
-    result = {
+    result: BenchmarkResult = {
         "case_id": case["case_id"],
         "scenario": case["scenario"],
         "mode": case["mode"],
@@ -661,47 +826,50 @@ def quartiles(values: list[float]) -> tuple[float, float, float]:
     return first, third, third - first
 
 
-def aggregate_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = collections.defaultdict(list)
+def aggregate_results(results: list[BenchmarkResult]) -> list[BenchmarkSummary]:
+    groups: dict[BenchmarkGroupKey, list[BenchmarkResult]] = collections.defaultdict(
+        list
+    )
     for result in results:
         key = (
-            result["scenario"],
-            result["mode"],
-            result["queue_count"],
-            result["protocol"],
-            result["direction"],
-            result["streams"],
+            result_text(result, "scenario"),
+            result_text(result, "mode"),
+            result_integer(result, "queue_count"),
+            result_text(result, "protocol"),
+            result_text(result, "direction"),
+            result_integer(result, "streams"),
         )
         groups[key].append(result)
 
-    summaries: list[dict[str, Any]] = []
+    summaries: list[BenchmarkSummary] = []
     for key, group in sorted(groups.items()):
-        throughputs = [float(result["throughput_bps"]) for result in group]
+        throughputs = [result_number(result, "throughput_bps") for result in group]
         first, third, spread = quartiles(throughputs)
         sampled_rss = [
-            int(result[field])
+            value
             for result in group
             for field in (
                 "endpoint_a_peak_rss_kib",
                 "endpoint_b_peak_rss_kib",
                 "relay_peak_rss_kib",
             )
-            if int(result[field]) > 0
+            if (value := result_integer(result, field)) > 0
         ]
         sampled_hwm = [
-            int(result[field])
+            value
             for result in group
             for field in (
                 "endpoint_a_process_lifetime_hwm_kib",
                 "endpoint_b_process_lifetime_hwm_kib",
                 "relay_process_lifetime_hwm_kib",
             )
-            if int(result[field]) > 0
+            if (value := result_integer(result, field)) > 0
         ]
         load_p95_values = [
-            float(result["load_latency_p95_ms"])
+            value
             for result in group
-            if result["load_latency_p95_ms"] is not None
+            if (value := result_optional_number(result, "load_latency_p95_ms"))
+            is not None
         ]
         summaries.append(
             {
@@ -722,30 +890,38 @@ def aggregate_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "peak_rss_max_kib": max(sampled_rss, default=0),
                 "process_lifetime_hwm_max_kib": max(sampled_hwm, default=0),
                 "topology_peak_rss_max_kib": max(
-                    (int(result["total_peak_rss_kib"]) for result in group),
+                    (result_integer(result, "total_peak_rss_kib") for result in group),
                     default=0,
                 ),
                 "topology_hwm_sum_max_kib": max(
-                    (int(result["total_hwm_sum_kib"]) for result in group),
+                    (result_integer(result, "total_hwm_sum_kib") for result in group),
                     default=0,
                 ),
                 "topology_pss_max_kib": max(
-                    (int(result["total_peak_pss_kib"]) for result in group),
+                    (result_integer(result, "total_peak_pss_kib") for result in group),
                     default=0,
                 ),
                 "topology_private_max_kib": max(
-                    (int(result["total_peak_private_kib"]) for result in group),
+                    (
+                        result_integer(result, "total_peak_private_kib")
+                        for result in group
+                    ),
                     default=0,
                 ),
-                "all_cases_valid": all(bool(result["case_valid"]) for result in group),
+                "all_cases_valid": all(
+                    result_boolean(result, "case_valid") for result in group
+                ),
                 "memory_ceiling_status": (
                     "not_applicable"
                     if all(
-                        result["memory_ceiling_status"] == "not_applicable"
+                        result_text(result, "memory_ceiling_status") == "not_applicable"
                         for result in group
                     )
                     else "pass"
-                    if all(result["memory_ceiling_status"] == "pass" for result in group)
+                    if all(
+                        result_text(result, "memory_ceiling_status") == "pass"
+                        for result in group
+                    )
                     else "fail"
                 ),
             }
@@ -760,12 +936,14 @@ def main() -> int:
 
     result_dir = Path(sys.argv[1])
     memory_ceiling_kib = int(sys.argv[2])
-    cases = read_tsv(result_dir / "cases.tsv")
+    cases = read_tsv_rows(result_dir / "cases.tsv")
     results = [build_result(result_dir, case, memory_ceiling_kib) for case in cases]
     summaries = aggregate_results(results)
 
     with (result_dir / "results.tsv").open("w", newline="", encoding="utf-8") as output:
-        writer = csv.DictWriter(output, fieldnames=FIELDS, delimiter="\t", extrasaction="ignore")
+        writer = csv.DictWriter(
+            output, fieldnames=FIELDS, delimiter="\t", extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(results)
 
@@ -776,17 +954,22 @@ def main() -> int:
         writer.writerows(summaries)
 
     (result_dir / "results.json").write_text(
-        json.dumps({"cases": results, "summary": summaries}, indent=2, sort_keys=True) + "\n",
+        json.dumps({"cases": results, "summary": summaries}, indent=2, sort_keys=True)
+        + "\n",
         encoding="utf-8",
     )
 
     print(f"Parsed {len(results)} benchmark cases")
     print(f"Results: {result_dir / 'results.tsv'}")
-    invalid = [result["case_id"] for result in results if not result["case_valid"]]
-    memory_failures = [
-        result["case_id"]
+    invalid = [
+        result_text(result, "case_id")
         for result in results
-        if result["memory_ceiling_status"] == "fail"
+        if not result_boolean(result, "case_valid")
+    ]
+    memory_failures = [
+        result_text(result, "case_id")
+        for result in results
+        if result_text(result, "memory_ceiling_status") == "fail"
     ]
     if invalid:
         print(

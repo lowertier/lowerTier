@@ -10,11 +10,26 @@ import socket
 import time
 from collections import Counter
 from pathlib import Path
+from typing import TypedDict
 
 
 ETH_P_ALL = 0x0003
+LINUX_AF_PACKET = 17
 PACKET_OUTGOING = 4
 VLAN_TYPES = {0x8100, 0x88A8}
+
+
+class SignatureReport(TypedDict):
+    packet_count: int
+    minimum_packet_bytes: int
+    maximum_packet_bytes: int
+    unique_packet_ratio: float
+    common_prefix_bytes: int
+    common_suffix_bytes: int
+    fixed_absolute_positions: int
+    minimum_position_entropy_bits: float
+    mean_position_entropy_bits: float
+    forbidden_hits: dict[str, int]
 
 
 def common_prefix_length(packets: list[bytes]) -> int:
@@ -40,12 +55,14 @@ def byte_entropy(values: list[int]) -> float:
     return -sum((count / total) * math.log2(count / total) for count in counts.values())
 
 
-def scan_packets(packets: list[bytes], forbidden: list[bytes]) -> dict[str, object]:
+def scan_packets(packets: list[bytes], forbidden: list[bytes]) -> SignatureReport:
     if not packets:
         raise ValueError("the capture has no packets")
     minimum_length = min(map(len, packets))
-    entropies = [byte_entropy([packet[index] for packet in packets])
-                 for index in range(minimum_length)]
+    entropies = [
+        byte_entropy([packet[index] for packet in packets])
+        for index in range(minimum_length)
+    ]
     forbidden_hits = {
         value.decode("ascii", errors="backslashreplace"): sum(
             packet.count(value) for packet in packets
@@ -74,7 +91,7 @@ def udp_datagram_from_ethernet(frame: bytes) -> tuple[int, int, bytes] | None:
     while ether_type in VLAN_TYPES:
         if len(frame) < offset + 4:
             return None
-        ether_type = int.from_bytes(frame[offset + 2:offset + 4], "big")
+        ether_type = int.from_bytes(frame[offset + 2 : offset + 4], "big")
         offset += 4
     if ether_type != 0x0800 or len(frame) < offset + 20:
         return None
@@ -84,23 +101,23 @@ def udp_datagram_from_ethernet(frame: bytes) -> tuple[int, int, bytes] | None:
     if frame[offset + 9] != socket.IPPROTO_UDP:
         return None
     udp_offset = offset + header_length
-    udp_length = int.from_bytes(frame[udp_offset + 4:udp_offset + 6], "big")
+    udp_length = int.from_bytes(frame[udp_offset + 4 : udp_offset + 6], "big")
     if udp_length < 8 or len(frame) < udp_offset + udp_length:
         return None
-    source_port = int.from_bytes(frame[udp_offset:udp_offset + 2], "big")
-    destination_port = int.from_bytes(frame[udp_offset + 2:udp_offset + 4], "big")
-    payload = frame[udp_offset + 8:udp_offset + udp_length]
+    source_port = int.from_bytes(frame[udp_offset : udp_offset + 2], "big")
+    destination_port = int.from_bytes(frame[udp_offset + 2 : udp_offset + 4], "big")
+    payload = frame[udp_offset + 8 : udp_offset + udp_length]
     return source_port, destination_port, payload
 
 
 def capture_packets(args: argparse.Namespace) -> int:
     packet_socket = socket.socket(
-        socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
+        LINUX_AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
     )
     packet_socket.bind((args.interface, 0))
     packet_socket.settimeout(0.1)
     deadline = time.monotonic() + args.timeout
-    packets = []
+    packets: list[bytes] = []
     with packet_socket:
         while len(packets) < args.count and time.monotonic() < deadline:
             try:
@@ -128,7 +145,7 @@ def capture_packets(args: argparse.Namespace) -> int:
 
 def scan_capture(args: argparse.Namespace) -> int:
     packets = [
-        bytes.fromhex(line.strip())[args.strip_bytes:]
+        bytes.fromhex(line.strip())[args.strip_bytes :]
         for line in Path(args.input).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
@@ -140,9 +157,7 @@ def scan_capture(args: argparse.Namespace) -> int:
         Path(args.output).write_text(output + "\n", encoding="utf-8")
     print(output)
     has_forbidden = any(report["forbidden_hits"].values())
-    fixed_edge = max(
-        int(report["common_prefix_bytes"]), int(report["common_suffix_bytes"])
-    )
+    fixed_edge = max(report["common_prefix_bytes"], report["common_suffix_bytes"])
     return int(has_forbidden or fixed_edge > args.max_common_edge)
 
 

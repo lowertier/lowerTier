@@ -1,0 +1,8 @@
+{
+  "include": ["script"],
+  "exclude": ["script/**/__pycache__"],
+  "extraPaths": ["script/colima-throughput"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.10",
+  "reportMissingTypeStubs": false
+}

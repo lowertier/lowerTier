@@ -5,24 +5,17 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass, asdict
 import json
 import math
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass
 from pathlib import Path
-import re
-import sys
-from typing import Iterable, Mapping
 
-
-METRIC_RE = re.compile(
-    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>.*)\})?\s+"
-    r"(?P<value>[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)$"
-)
-LABEL_RE = re.compile(r'(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)="(?P<value>(?:\\.|[^"])*)"')
+from prometheus_metrics import MetricKey, read_prometheus_metrics
 
 
 @dataclass
-class Sample:
+class WorkSample:
     case: str
     role: str
     node: str
@@ -54,7 +47,7 @@ class Sample:
 
 
 @dataclass
-class Fit:
+class WorkModelFit:
     name: str
     sample_count: int
     beta0_seconds_per_packet: float
@@ -73,38 +66,8 @@ class Fit:
     reference_total_ns: float
 
 
-def parse_labels(text: str | None) -> dict[str, str]:
-    if not text:
-        return {}
-    labels: dict[str, str] = {}
-    for match in LABEL_RE.finditer(text):
-        labels[match.group("name")] = bytes(
-            match.group("value"), "utf-8"
-        ).decode("unicode_escape")
-    return labels
-
-
-def read_prometheus(path: Path) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
-    metrics: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
-    if not path.exists():
-        return metrics
-    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = METRIC_RE.match(line)
-        if match is None:
-            continue
-        key = (
-            match.group("name"),
-            tuple(sorted(parse_labels(match.group("labels")).items())),
-        )
-        metrics[key] = metrics.get(key, 0.0) + float(match.group("value"))
-    return metrics
-
-
-def metric(
-    metrics: Mapping[tuple[str, tuple[tuple[str, str], ...]], float],
+def sum_metric(
+    metrics: Mapping[MetricKey, float],
     name: str,
     labels: Mapping[str, str] | None = None,
 ) -> float:
@@ -119,21 +82,24 @@ def metric(
     return total
 
 
-def delta(
-    before: Mapping[tuple[str, tuple[tuple[str, str], ...]], float],
-    after: Mapping[tuple[str, tuple[tuple[str, str], ...]], float],
+def counter_delta(
+    before: Mapping[MetricKey, float],
+    after: Mapping[MetricKey, float],
     name: str,
     labels: Mapping[str, str] | None = None,
 ) -> float:
-    return max(0.0, metric(after, name, labels) - metric(before, name, labels))
+    return max(
+        0.0,
+        sum_metric(after, name, labels) - sum_metric(before, name, labels),
+    )
 
 
 def safe_ratio(numerator: float, denominator: float, fallback: float = 0.0) -> float:
     return numerator / denominator if denominator > 0.0 else fallback
 
 
-def load_samples(result_root: Path) -> list[Sample]:
-    samples: list[Sample] = []
+def load_samples(result_root: Path) -> list[WorkSample]:
+    samples: list[WorkSample] = []
     for case_path in sorted(result_root.glob("*/case.json")):
         case_dir = case_path.parent
         if not (case_dir / "complete.json").exists():
@@ -151,23 +117,23 @@ def load_samples(result_root: Path) -> list[Sample]:
             role = "sender" if node == case["node_a"] else "receiver"
             stage = "quic_send" if role == "sender" else "tun_schedule"
             prefix = f"{row['mode']}-{row['direction']}-{node}-prometheus"
-            before = read_prometheus(case_dir / "cpu" / f"{prefix}-before.txt")
-            after = read_prometheus(case_dir / "cpu" / f"{prefix}-after.txt")
+            before = read_prometheus_metrics(case_dir / "cpu" / f"{prefix}-before.txt")
+            after = read_prometheus_metrics(case_dir / "cpu" / f"{prefix}-after.txt")
 
             stage_labels = {"stage": stage}
-            stage_packets = delta(
+            stage_packets = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_stage_sampled_packets_total",
                 stage_labels,
             )
-            stage_batches = delta(
+            stage_batches = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_stage_sampled_batches_total",
                 stage_labels,
             )
-            stage_ns = delta(
+            stage_ns = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_stage_sampled_ns_total",
@@ -182,38 +148,34 @@ def load_samples(result_root: Path) -> list[Sample]:
 
             received_bps = float(row["received_bps"])
             udp_payload_bytes = int(row["udp_payload_bytes"])
-            packet_rate = safe_ratio(
-                received_bps, 8.0 * float(udp_payload_bytes)
-            )
+            packet_rate = safe_ratio(received_bps, 8.0 * float(udp_payload_bytes))
             average_cpu_percent = float(row["average_cpu_percent"])
             cpu_seconds_per_packet = safe_ratio(
                 average_cpu_percent / 100.0, packet_rate
             )
 
-            quic_operation = (
-                "quic_udp_send" if role == "sender" else "quic_udp_receive"
-            )
+            quic_operation = "quic_udp_send" if role == "sender" else "quic_udp_receive"
             quic_labels = {"operation": quic_operation}
-            quic_packets = delta(
+            quic_packets = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_io_packets_total",
                 quic_labels,
             )
-            quic_syscalls = delta(
+            quic_syscalls = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_io_syscalls_total",
                 quic_labels,
             )
             tun_labels = {"operation": "tun_write"}
-            tun_packets = delta(
+            tun_packets = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_io_packets_total",
                 tun_labels,
             )
-            tun_syscalls = delta(
+            tun_syscalls = counter_delta(
                 before,
                 after,
                 "lowertier_dataplane_io_syscalls_total",
@@ -222,10 +184,14 @@ def load_samples(result_root: Path) -> list[Sample]:
             direct_labels = {"class": "direct_nic", "queue": "0"}
             tun_queue_labels = {"class": "tun"}
 
-            if received_bps <= 0.0 or packet_rate <= 0.0 or cpu_seconds_per_packet <= 0.0:
+            if (
+                received_bps <= 0.0
+                or packet_rate <= 0.0
+                or cpu_seconds_per_packet <= 0.0
+            ):
                 continue
             samples.append(
-                Sample(
+                WorkSample(
                     case=case["case"],
                     role=role,
                     node=node,
@@ -250,25 +216,25 @@ def load_samples(result_root: Path) -> list[Sample]:
                     tun_io_packets=tun_packets,
                     tun_io_syscalls=tun_syscalls,
                     tun_packets_per_syscall=safe_ratio(tun_packets, tun_syscalls),
-                    direct_nic_stall_events=delta(
+                    direct_nic_stall_events=counter_delta(
                         before,
                         after,
                         "lowertier_dataplane_queue_stall_events_total",
                         direct_labels,
                     ),
-                    direct_nic_stall_ns=delta(
+                    direct_nic_stall_ns=counter_delta(
                         before,
                         after,
                         "lowertier_dataplane_queue_stall_ns_total",
                         direct_labels,
                     ),
-                    tun_stall_events=delta(
+                    tun_stall_events=counter_delta(
                         before,
                         after,
                         "lowertier_dataplane_queue_stall_events_total",
                         tun_queue_labels,
                     ),
-                    tun_stall_ns=delta(
+                    tun_stall_ns=counter_delta(
                         before,
                         after,
                         "lowertier_dataplane_queue_stall_ns_total",
@@ -283,11 +249,9 @@ def solve_linear(matrix: list[list[float]], vector: list[float]) -> list[float]:
     size = len(vector)
     if size == 0 or len(matrix) != size or any(len(row) != size for row in matrix):
         raise ValueError("the linear system must be square and nonempty")
-    augmented = [row[:] + [value] for row, value in zip(matrix, vector)]
+    augmented = [[*row, value] for row, value in zip(matrix, vector, strict=True)]
     for column in range(size):
-        pivot = max(
-            range(column, size), key=lambda row: abs(augmented[row][column])
-        )
+        pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
         if abs(augmented[pivot][column]) < 1e-30:
             raise ValueError("the work-model design matrix is singular")
         augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
@@ -299,7 +263,9 @@ def solve_linear(matrix: list[list[float]], vector: list[float]) -> list[float]:
             factor = augmented[row][column]
             augmented[row] = [
                 current - factor * pivot_value
-                for current, pivot_value in zip(augmented[row], augmented[column])
+                for current, pivot_value in zip(
+                    augmented[row], augmented[column], strict=True
+                )
             ]
     return [augmented[row][size] for row in range(size)]
 
@@ -320,7 +286,7 @@ def nonnegative_least_squares(
         active = [index for index in range(3) if mask & (1 << index)]
         normal = [[0.0 for _ in active] for _ in active]
         rhs = [0.0 for _ in active]
-        for row, observed in zip(x_rows, observations):
+        for row, observed in zip(x_rows, observations, strict=True):
             for i, column_i in enumerate(active):
                 rhs[i] += row[column_i] * observed
                 for j, column_j in enumerate(active):
@@ -332,12 +298,13 @@ def nonnegative_least_squares(
         if any(value < -tolerance for value in active_beta):
             continue
         beta = [0.0, 0.0, 0.0]
-        for column, value in zip(active, active_beta):
+        for column, value in zip(active, active_beta, strict=True):
             beta[column] = max(0.0, value)
         error = 0.0
-        for row, observed in zip(x_rows, observations):
+        for row, observed in zip(x_rows, observations, strict=True):
             predicted = sum(
-                coefficient * value for coefficient, value in zip(beta, row)
+                coefficient * value
+                for coefficient, value in zip(beta, row, strict=True)
             )
             error += (observed - predicted) ** 2
         if error < best_error:
@@ -345,7 +312,8 @@ def nonnegative_least_squares(
             best_beta = beta
     return best_beta
 
-def fit_rows(name: str, rows: Iterable[tuple[float, float, float]]) -> Fit:
+
+def fit_rows(name: str, rows: Iterable[tuple[float, float, float]]) -> WorkModelFit:
     points = list(rows)
     if len(points) < 4:
         raise ValueError(f"{name}: at least four samples are required")
@@ -353,11 +321,13 @@ def fit_rows(name: str, rows: Iterable[tuple[float, float, float]]) -> Fit:
     y = [value for _, _, value in points]
     beta0, beta1, beta2 = nonnegative_least_squares(x_rows, y)
     predictions = [
-        beta0 + beta1 * length + beta2 / batch
-        for length, batch, _ in points
+        beta0 + beta1 * length + beta2 / batch for length, batch, _ in points
     ]
     mean = sum(y) / len(y)
-    residual_sum = sum((observed - predicted) ** 2 for observed, predicted in zip(y, predictions))
+    residual_sum = sum(
+        (observed - predicted) ** 2
+        for observed, predicted in zip(y, predictions, strict=True)
+    )
     total_sum = sum((observed - mean) ** 2 for observed in y)
     r_squared = 1.0 - residual_sum / total_sum if total_sum > 0.0 else 1.0
     rmse = math.sqrt(residual_sum / len(y))
@@ -366,7 +336,7 @@ def fit_rows(name: str, rows: Iterable[tuple[float, float, float]]) -> Fit:
     packet_term = beta0 * 1e9
     byte_term = beta1 * reference_length * 1e9
     batch_term = beta2 / reference_batch * 1e9
-    return Fit(
+    return WorkModelFit(
         name=name,
         sample_count=len(points),
         beta0_seconds_per_packet=beta0,
@@ -386,7 +356,9 @@ def fit_rows(name: str, rows: Iterable[tuple[float, float, float]]) -> Fit:
     )
 
 
-def role_fit(samples: Iterable[Sample], role: str, flows: int | None = None) -> Fit:
+def role_fit(
+    samples: Iterable[WorkSample], role: str, flows: int | None = None
+) -> WorkModelFit:
     selected = [
         sample
         for sample in samples
@@ -406,12 +378,14 @@ def role_fit(samples: Iterable[Sample], role: str, flows: int | None = None) -> 
     )
 
 
-def combined_samples(samples: Iterable[Sample]) -> list[tuple[float, float, float, int]]:
-    grouped: dict[str, list[Sample]] = {}
+def combined_samples(
+    samples: Iterable[WorkSample],
+) -> list[tuple[float, float, float, int]]:
+    grouped: dict[str, list[WorkSample]] = {}
     for sample in samples:
         grouped.setdefault(sample.case, []).append(sample)
     combined: list[tuple[float, float, float, int]] = []
-    for case, rows in grouped.items():
+    for rows in grouped.values():
         roles = {row.role for row in rows}
         if roles != {"sender", "receiver"}:
             continue
@@ -427,7 +401,7 @@ def combined_samples(samples: Iterable[Sample]) -> list[tuple[float, float, floa
     return combined
 
 
-def write_samples(path: Path, samples: list[Sample]) -> None:
+def write_samples(path: Path, samples: list[WorkSample]) -> None:
     fields = list(asdict(samples[0]).keys())
     with path.open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(output, fieldnames=fields, delimiter="\t")
@@ -436,7 +410,7 @@ def write_samples(path: Path, samples: list[Sample]) -> None:
             writer.writerow(asdict(sample))
 
 
-def write_summary(path: Path, fits: list[Fit], sample_count: int) -> None:
+def write_summary(path: Path, fits: list[WorkModelFit], sample_count: int) -> None:
     lines = [
         "# LowTier transfer-work model",
         "",
@@ -447,19 +421,14 @@ def write_summary(path: Path, fits: list[Fit], sample_count: int) -> None:
         "| Fit | n | beta0 ns/packet | beta1 ns/byte | beta2 ns | R² | RMSE ns/packet | reference total ns |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for fit in fits:
-        lines.append(
-            "| {name} | {n} | {b0:.3f} | {b1:.6f} | {b2:.3f} | {r2:.4f} | {rmse:.3f} | {total:.3f} |".format(
-                name=fit.name,
-                n=fit.sample_count,
-                b0=fit.beta0_ns_per_packet,
-                b1=fit.beta1_ns_per_byte,
-                b2=fit.beta2_ns_per_packet_batch_term,
-                r2=fit.r_squared,
-                rmse=fit.rmse_seconds_per_packet * 1e9,
-                total=fit.reference_total_ns,
-            )
-        )
+    lines.extend(
+        f"| {fit.name} | {fit.sample_count} | "
+        f"{fit.beta0_ns_per_packet:.3f} | {fit.beta1_ns_per_byte:.6f} | "
+        f"{fit.beta2_ns_per_packet_batch_term:.3f} | {fit.r_squared:.4f} | "
+        f"{fit.rmse_seconds_per_packet * 1e9:.3f} | "
+        f"{fit.reference_total_ns:.3f} |"
+        for fit in fits
+    )
     lines.extend(
         [
             "",
@@ -472,7 +441,7 @@ def write_summary(path: Path, fits: list[Fit], sample_count: int) -> None:
 
 def self_test() -> None:
     beta = (1.2e-6, 0.42e-9, 0.75e-6)
-    points = []
+    points: list[tuple[float, float, float]] = []
     for length in [64.0, 256.0, 1024.0, 1360.0]:
         for batch in [1.0, 4.0, 16.0, 64.0]:
             value = beta[0] + beta[1] * length + beta[2] / batch
@@ -483,7 +452,7 @@ def self_test() -> None:
         fit.beta1_seconds_per_byte,
         fit.beta2_seconds_per_packet_batch_term,
     )
-    for expected, actual in zip(beta, observed):
+    for expected, actual in zip(beta, observed, strict=True):
         if not math.isclose(expected, actual, rel_tol=1e-9, abs_tol=1e-18):
             raise AssertionError((expected, actual))
     if fit.r_squared < 0.999999999:
@@ -496,11 +465,14 @@ def self_test() -> None:
         (1360.0, 64.0, 1.4e-6),
     ]
     boundary_fit = fit_rows("boundary", boundary_points)
-    if min(
-        boundary_fit.beta0_seconds_per_packet,
-        boundary_fit.beta1_seconds_per_byte,
-        boundary_fit.beta2_seconds_per_packet_batch_term,
-    ) < 0.0:
+    if (
+        min(
+            boundary_fit.beta0_seconds_per_packet,
+            boundary_fit.beta1_seconds_per_byte,
+            boundary_fit.beta2_seconds_per_packet_batch_term,
+        )
+        < 0.0
+    ):
         raise AssertionError(boundary_fit)
 
 
@@ -522,7 +494,7 @@ def main() -> int:
         raise SystemExit("no valid work-model samples found")
     write_samples(result_root / "samples.tsv", samples)
 
-    fits: list[Fit] = []
+    fits: list[WorkModelFit] = []
     flows = sorted({sample.flows for sample in samples})
     for role in ["sender", "receiver"]:
         fits.append(role_fit(samples, role))

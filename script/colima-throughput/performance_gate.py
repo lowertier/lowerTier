@@ -7,10 +7,10 @@ import argparse
 import csv
 import math
 import sys
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Iterable, Sequence
 
 THROUGHPUT_FILE = "throughput.tsv"
 WORKLOAD_ERROR_FILE = "workload-errors.tsv"
@@ -125,7 +125,7 @@ def canonical_number(raw: str, *, field: str, path: Path, line: int) -> str:
     return format(value, ".17g")
 
 
-def read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+def read_tsv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     if not path.is_file():
         raise GateInputError(f"required result file is missing: {path}")
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -133,7 +133,11 @@ def read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         if reader.fieldnames is None:
             raise GateInputError(f"result file has no header: {path}")
         rows = [
-            {key: (value or "").strip() for key, value in row.items() if key is not None}
+            {
+                key: (value or "").strip()
+                for key, value in row.items()
+                if key is not None
+            }
             for row in reader
         ]
         return [name.strip() for name in reader.fieldnames], rows
@@ -143,7 +147,7 @@ def load_throughput(
     result_dir: Path, protocols: frozenset[str]
 ) -> dict[WorkloadKey, dict[int, Sample]]:
     path = result_dir / THROUGHPUT_FILE
-    fieldnames, rows = read_tsv(path)
+    fieldnames, rows = read_tsv_rows(path)
     missing = THROUGHPUT_COLUMNS.difference(fieldnames)
     if missing:
         raise GateInputError(
@@ -183,7 +187,9 @@ def load_throughput(
         key = WorkloadKey(mode, direction, protocol, streams, offered_bps)
         runs = workloads.setdefault(key, {})
         if run in runs:
-            raise GateInputError(f"{path}:{line}: duplicate run {run} for {key.label()}")
+            raise GateInputError(
+                f"{path}:{line}: duplicate run {run} for {key.label()}"
+            )
         runs[run] = Sample(run, received_bps, retransmits, lost_percent)
 
     if not workloads:
@@ -239,7 +245,9 @@ def read_environment(result_dir: Path) -> dict[str, str]:
     if not path.is_file():
         raise GateInputError(f"required environment file is missing: {path}")
     values: dict[str, str] = {}
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
@@ -264,11 +272,11 @@ def validate_environment(
             continue
         baseline_value = baseline.get(key)
         candidate_value = candidate.get(key)
-        if baseline_value is None or candidate_value is None:
-            differences.append(
-                f"{key}: baseline={baseline_value!r}, candidate={candidate_value!r}"
-            )
-        elif baseline_value != candidate_value:
+        if (
+            baseline_value is None
+            or candidate_value is None
+            or baseline_value != candidate_value
+        ):
             differences.append(
                 f"{key}: baseline={baseline_value!r}, candidate={candidate_value!r}"
             )
@@ -279,10 +287,12 @@ def validate_environment(
 
 def validate_no_workload_errors(result_dir: Path) -> None:
     path = result_dir / WORKLOAD_ERROR_FILE
-    _, rows = read_tsv(path)
+    _, rows = read_tsv_rows(path)
     populated = [row for row in rows if any(value for value in row.values())]
     if populated:
-        raise GateInputError(f"{path}: contains {len(populated)} failed workload row(s)")
+        raise GateInputError(
+            f"{path}: contains {len(populated)} failed workload row(s)"
+        )
 
 
 def validate_substrate(
@@ -415,16 +425,16 @@ def compare_results(
     ignored_environment_keys: frozenset[str],
 ) -> list[Comparison]:
     if not baseline_dirs or not candidate_dirs:
-        raise GateInputError("at least one baseline and candidate result directory is required")
+        raise GateInputError(
+            "at least one baseline and candidate result directory is required"
+        )
     if len(baseline_dirs) != len(candidate_dirs):
         raise GateInputError(
             "baseline and candidate result-directory counts differ: "
             f"{len(baseline_dirs)} != {len(candidate_dirs)}"
         )
 
-    for baseline_dir, candidate_dir in zip(
-        baseline_dirs, candidate_dirs, strict=True
-    ):
+    for baseline_dir, candidate_dir in zip(baseline_dirs, candidate_dirs, strict=True):
         validate_environment(baseline_dir, candidate_dir, ignored_environment_keys)
         validate_no_workload_errors(baseline_dir)
         validate_no_workload_errors(candidate_dir)
@@ -433,13 +443,9 @@ def compare_results(
     baseline_reference = baseline_dirs[0]
     candidate_reference = candidate_dirs[0]
     for result_dir in baseline_dirs[1:]:
-        validate_environment(
-            baseline_reference, result_dir, ignored_environment_keys
-        )
+        validate_environment(baseline_reference, result_dir, ignored_environment_keys)
     for result_dir in candidate_dirs[1:]:
-        validate_environment(
-            candidate_reference, result_dir, ignored_environment_keys
-        )
+        validate_environment(candidate_reference, result_dir, ignored_environment_keys)
 
     baseline = merge_throughput(baseline_dirs, protocols)
     candidate = merge_throughput(candidate_dirs, protocols)

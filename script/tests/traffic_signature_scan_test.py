@@ -22,8 +22,10 @@ class TrafficSignatureScanTest(unittest.TestCase):
         udp_length = 8 + len(payload)
         ipv4_length = 20 + udp_length
         ethernet = bytes.fromhex("00112233445566778899aabb0800")
-        ipv4 = bytes.fromhex("4500") + ipv4_length.to_bytes(2, "big") + bytes.fromhex(
-            "0000000040110000c0000201c0000202"
+        ipv4 = (
+            bytes.fromhex("4500")
+            + ipv4_length.to_bytes(2, "big")
+            + bytes.fromhex("0000000040110000c0000201c0000202")
         )
         udp = (11010).to_bytes(2, "big") + (42000).to_bytes(2, "big")
         udp += udp_length.to_bytes(2, "big") + b"\x00\x00"
@@ -33,9 +35,7 @@ class TrafficSignatureScanTest(unittest.TestCase):
         self.assertEqual(datagram, (11010, 42000, payload))
 
     def test_reports_forbidden_values_and_repeated_edges(self) -> None:
-        packets = [
-            b"AB" + bytes([value]) + b"lowertier" + b"ZZ" for value in range(8)
-        ]
+        packets = [b"AB" + bytes([value]) + b"lowertier" + b"ZZ" for value in range(8)]
 
         report = SCANNER.scan_packets(packets, [b"lowertier"])
 
@@ -45,8 +45,10 @@ class TrafficSignatureScanTest(unittest.TestCase):
         self.assertEqual(report["forbidden_hits"]["lowertier"], 8)
 
     def test_varied_ciphertext_has_no_repeated_edge(self) -> None:
-        packets = [bytes((index * 31 + position * 17) & 0xFF for position in range(64))
-                   for index in range(32)]
+        packets = [
+            bytes((index * 31 + position * 17) & 0xFF for position in range(64))
+            for index in range(32)
+        ]
 
         report = SCANNER.scan_packets(packets, [b"lowertier"])
 

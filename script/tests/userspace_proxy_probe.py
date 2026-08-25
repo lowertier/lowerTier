@@ -10,14 +10,20 @@ import socket
 import statistics
 import struct
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+from typing import TypedDict, cast
 
 
 READ_TIMEOUT_SECONDS = 15
 TRANSFER_CHUNK = b"lowertier-userspace-path\n" * 2731
 RTT_TOKEN = b"ETRTT001"
 HTTP_MARKER = b"userspace-http-ok"
+
+
+class MeasurementSummary(TypedDict):
+    median: float
+    runs: list[float]
 
 
 def recv_exact(stream: socket.socket, size: int) -> bytes:
@@ -57,64 +63,71 @@ def read_socks_address(stream: socket.socket, address_type: int) -> tuple[str, i
     return host, port
 
 
-def open_proxy_socket(proxy_port: int) -> socket.socket:
+def connect_to_proxy(proxy_port: int) -> socket.socket:
     stream = socket.create_connection(("127.0.0.1", proxy_port), READ_TIMEOUT_SECONDS)
     stream.settimeout(READ_TIMEOUT_SECONDS)
     stream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return stream
 
 
-def open_socks5(
-    proxy_port: int,
-    target_ip: str,
-    target_port: int,
-) -> socket.socket:
-    stream = open_proxy_socket(proxy_port)
+def negotiate_socks5(stream: socket.socket) -> None:
     stream.sendall(b"\x05\x01\x00")
     if recv_exact(stream, 2) != b"\x05\x00":
-        stream.close()
         raise RuntimeError("The SOCKS5 proxy rejected unauthenticated access.")
 
-    request = b"\x05\x01\x00\x01" + socket.inet_aton(target_ip)
-    request += struct.pack("!H", target_port)
-    stream.sendall(request)
+
+def encode_socks5_address(target_host: str) -> bytes:
+    try:
+        return b"\x01" + socket.inet_pton(socket.AF_INET, target_host)
+    except OSError:
+        pass
+    try:
+        return b"\x04" + socket.inet_pton(socket.AF_INET6, target_host)
+    except OSError:
+        pass
+    encoded_host = target_host.encode("idna")
+    if len(encoded_host) > 255:
+        raise ValueError(
+            "The SOCKS5 target hostname exceeds 255 bytes after IDNA encoding."
+        )
+    return b"\x03" + bytes((len(encoded_host),)) + encoded_host
+
+
+def read_socks5_reply(stream: socket.socket, operation: str) -> tuple[str, int]:
     response = recv_exact(stream, 4)
-    if response[:2] != b"\x05\x00":
-        stream.close()
-        raise RuntimeError(f"The SOCKS5 connection failed with status {response[1]}.")
-    read_socks_address(stream, response[3])
-    return stream
+    if response[0] != 5 or response[2] != 0:
+        raise RuntimeError(
+            f"The SOCKS5 {operation} response is malformed: {response!r}."
+        )
+    if response[1] != 0:
+        raise RuntimeError(f"The SOCKS5 {operation} failed with status {response[1]}.")
+    return read_socks_address(stream, response[3])
 
 
-def open_socks5_domain(
+def connect_via_socks5(
     proxy_port: int,
     target_host: str,
     target_port: int,
 ) -> socket.socket:
-    stream = open_proxy_socket(proxy_port)
-    stream.sendall(b"\x05\x01\x00")
-    if recv_exact(stream, 2) != b"\x05\x00":
+    stream = connect_to_proxy(proxy_port)
+    try:
+        negotiate_socks5(stream)
+        request = b"\x05\x01\x00" + encode_socks5_address(target_host)
+        stream.sendall(request + struct.pack("!H", target_port))
+        read_socks5_reply(stream, "connection")
+    except Exception:
         stream.close()
-        raise RuntimeError("The SOCKS5 proxy rejected unauthenticated access.")
-    encoded_host = target_host.encode("ascii")
-    request = b"\x05\x01\x00\x03" + bytes([len(encoded_host)]) + encoded_host
-    request += struct.pack("!H", target_port)
-    stream.sendall(request)
-    response = recv_exact(stream, 4)
-    if response[:2] != b"\x05\x00":
-        stream.close()
-        raise RuntimeError(f"The SOCKS5 domain connection failed with status {response[1]}.")
-    read_socks_address(stream, response[3])
+        raise
     return stream
 
 
-def open_http_connect(
+def connect_via_http_proxy(
     proxy_port: int,
-    target_ip: str,
+    target_host: str,
     target_port: int,
 ) -> socket.socket:
-    stream = open_proxy_socket(proxy_port)
-    authority = f"{target_ip}:{target_port}"
+    stream = connect_to_proxy(proxy_port)
+    authority = f"{target_host}:{target_port}"
     request = (
         f"CONNECT {authority} HTTP/1.1\r\n"
         f"Host: {authority}\r\n"
@@ -128,7 +141,9 @@ def open_http_connect(
     return stream
 
 
-def open_direct(_proxy_port: int, _target_ip: str, target_port: int) -> socket.socket:
+def connect_directly(
+    _proxy_port: int, _target_host: str, target_port: int
+) -> socket.socket:
     stream = socket.create_connection(("127.0.0.1", target_port), READ_TIMEOUT_SECONDS)
     stream.settimeout(READ_TIMEOUT_SECONDS)
     stream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -138,15 +153,20 @@ def open_direct(_proxy_port: int, _target_ip: str, target_port: int) -> socket.s
 Connector = Callable[[int, str, int], socket.socket]
 
 
-def verify_tcp(connector: Connector, proxy_port: int, target_ip: str, target_port: int) -> None:
-    with connector(proxy_port, target_ip, target_port) as stream:
+def verify_tcp_echo(
+    connector: Connector,
+    proxy_port: int,
+    target_host: str,
+    target_port: int,
+) -> None:
+    with connector(proxy_port, target_host, target_port) as stream:
         stream.sendall(b"ECHO\n" + RTT_TOKEN)
         if recv_exact(stream, len(RTT_TOKEN)) != RTT_TOKEN:
             raise RuntimeError("The TCP echo response does not match the request.")
 
 
 def verify_http_proxy(proxy_port: int, target_ip: str, http_port: int) -> None:
-    with open_proxy_socket(proxy_port) as stream:
+    with connect_to_proxy(proxy_port) as stream:
         authority = f"{target_ip}:{http_port}"
         request = (
             f"GET http://{authority}/probe HTTP/1.1\r\n"
@@ -162,19 +182,16 @@ def verify_http_proxy(proxy_port: int, target_ip: str, http_port: int) -> None:
                 break
             response.extend(chunk)
     if not response.startswith(b"HTTP/1.1 200 ") or HTTP_MARKER not in response:
-        raise RuntimeError(f"The ordinary HTTP proxy response is invalid: {response!r}.")
+        raise RuntimeError(
+            f"The ordinary HTTP proxy response is invalid: {response!r}."
+        )
 
 
 def verify_socks5_udp(proxy_port: int, target_ip: str, target_port: int) -> None:
-    with open_proxy_socket(proxy_port) as control:
-        control.sendall(b"\x05\x01\x00")
-        if recv_exact(control, 2) != b"\x05\x00":
-            raise RuntimeError("The SOCKS5 proxy rejected the UDP association.")
+    with connect_to_proxy(proxy_port) as control:
+        negotiate_socks5(control)
         control.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
-        response = recv_exact(control, 4)
-        if response[:2] != b"\x05\x00":
-            raise RuntimeError(f"The SOCKS5 UDP association failed: {response!r}.")
-        relay_host, relay_port = read_socks_address(control, response[3])
+        relay_host, relay_port = read_socks5_reply(control, "UDP association")
         if relay_host in {"0.0.0.0", "::"}:
             relay_host = "127.0.0.1"
 
@@ -190,7 +207,9 @@ def verify_socks5_udp(proxy_port: int, target_ip: str, target_port: int) -> None
     if len(reply) < 10 or reply[:3] != b"\x00\x00\x00":
         raise RuntimeError(f"The SOCKS5 UDP response header is invalid: {reply!r}.")
     if reply[3] != 1:
-        raise RuntimeError(f"The SOCKS5 UDP response address type is invalid: {reply[3]}.")
+        raise RuntimeError(
+            f"The SOCKS5 UDP response address type is invalid: {reply[3]}."
+        )
     if reply[10:] != payload:
         raise RuntimeError("The SOCKS5 UDP response does not match the request.")
 
@@ -252,7 +271,7 @@ def measure_throughput(
     return values
 
 
-def metric_summary(values: list[float]) -> dict[str, object]:
+def summarize_measurements(values: list[float]) -> MeasurementSummary:
     return {
         "median": round(statistics.median(values), 3),
         "runs": [round(value, 3) for value in values],
@@ -261,23 +280,35 @@ def metric_summary(values: list[float]) -> dict[str, object]:
 
 def run_client(args: argparse.Namespace) -> None:
     connectors: dict[str, Connector] = {
-        "direct_loopback": open_direct,
-        "socks5_overlay": open_socks5,
-        "http_connect_overlay": open_http_connect,
+        "direct_loopback": connect_directly,
+        "socks5_overlay": connect_via_socks5,
+        "http_connect_overlay": connect_via_http_proxy,
     }
 
-    verify_tcp(open_socks5, args.proxy_port, args.target_ip, args.tcp_port)
-    verify_tcp(open_http_connect, args.proxy_port, args.target_ip, args.tcp_port)
-    verify_tcp(open_socks5_domain, args.proxy_port, args.target_hostname, args.tcp_port)
-    verify_tcp(open_http_connect, args.proxy_port, args.target_hostname, args.tcp_port)
+    verify_tcp_echo(connect_via_socks5, args.proxy_port, args.target_ip, args.tcp_port)
+    verify_tcp_echo(
+        connect_via_http_proxy, args.proxy_port, args.target_ip, args.tcp_port
+    )
+    verify_tcp_echo(
+        connect_via_socks5,
+        args.proxy_port,
+        args.target_hostname,
+        args.tcp_port,
+    )
+    verify_tcp_echo(
+        connect_via_http_proxy,
+        args.proxy_port,
+        args.target_hostname,
+        args.tcp_port,
+    )
     verify_http_proxy(args.proxy_port, args.target_ip, args.http_port)
     verify_socks5_udp(args.proxy_port, args.target_ip, args.udp_port)
 
-    setup: dict[str, object] = {}
-    rtt: dict[str, object] = {}
-    throughput: dict[str, object] = {}
+    setup: dict[str, MeasurementSummary] = {}
+    rtt: dict[str, MeasurementSummary] = {}
+    throughput: dict[str, MeasurementSummary] = {}
     for name, connector in connectors.items():
-        setup[name] = metric_summary(
+        setup[name] = summarize_measurements(
             measure_setup(
                 connector,
                 args.proxy_port,
@@ -286,7 +317,7 @@ def run_client(args: argparse.Namespace) -> None:
                 args.setup_runs,
             )
         )
-        rtt[name] = metric_summary(
+        rtt[name] = summarize_measurements(
             measure_rtt(
                 connector,
                 args.proxy_port,
@@ -295,7 +326,7 @@ def run_client(args: argparse.Namespace) -> None:
                 args.rtt_runs,
             )
         )
-        throughput[name] = metric_summary(
+        throughput[name] = summarize_measurements(
             measure_throughput(
                 connector,
                 args.proxy_port,
@@ -323,10 +354,14 @@ def run_client(args: argparse.Namespace) -> None:
         "throughput_mbps": throughput,
     }
     output = Path(args.output)
-    output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
-async def handle_tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def handle_tcp(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
     try:
         command = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_SECONDS)
         if command == b"ECHO\n":
@@ -344,7 +379,9 @@ async def handle_tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
                     await writer.drain()
             await writer.drain()
         else:
-            raise RuntimeError(f"The test server received an invalid command: {command!r}.")
+            raise RuntimeError(
+                f"The test server received an invalid command: {command!r}."
+            )
     except (asyncio.IncompleteReadError, ConnectionResetError):
         pass
     finally:
@@ -352,9 +389,13 @@ async def handle_tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
         await writer.wait_closed()
 
 
-async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def handle_http(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
     try:
-        header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), READ_TIMEOUT_SECONDS)
+        header = await asyncio.wait_for(
+            reader.readuntil(b"\r\n\r\n"), READ_TIMEOUT_SECONDS
+        )
         if not header.startswith(b"GET /probe HTTP/1.1\r\n"):
             raise RuntimeError(f"The test HTTP request is invalid: {header!r}.")
         response = (
@@ -371,11 +412,16 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 
 
 class EchoDatagramProtocol(asyncio.DatagramProtocol):
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        self.transport = transport
+    def __init__(self) -> None:
+        self.transport: asyncio.DatagramTransport | None = None
 
-    def datagram_received(self, data: bytes, address: tuple[str, int]) -> None:
-        self.transport.sendto(data, address)
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = cast(asyncio.DatagramTransport, transport)
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        if self.transport is None:
+            raise RuntimeError("The UDP transport has not been initialized.")
+        self.transport.sendto(data, addr)
 
 
 async def run_server(args: argparse.Namespace) -> None:
@@ -400,11 +446,17 @@ async def run_server(args: argparse.Namespace) -> None:
 def print_ports() -> None:
     sockets: list[socket.socket] = []
     ports: list[int] = []
-    families = [socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM]
-    families += [socket.SOCK_DGRAM, socket.SOCK_STREAM]
-    families += [socket.SOCK_STREAM, socket.SOCK_STREAM]
+    socket_types = [
+        socket.SOCK_DGRAM,
+        socket.SOCK_STREAM,
+        socket.SOCK_STREAM,
+        socket.SOCK_DGRAM,
+        socket.SOCK_STREAM,
+        socket.SOCK_STREAM,
+        socket.SOCK_STREAM,
+    ]
     try:
-        for socket_type in families:
+        for socket_type in socket_types:
             probe = socket.socket(socket.AF_INET, socket_type)
             probe.bind(("127.0.0.1", 0))
             sockets.append(probe)

@@ -7,13 +7,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "colima-throughput"
-    / "performance_gate.py"
+    Path(__file__).resolve().parents[1] / "colima-throughput" / "performance_gate.py"
 )
 
 THROUGHPUT_HEADER = (

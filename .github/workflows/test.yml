@@ -8,8 +8,8 @@ on:
       - "Cargo.lock"
       - "lowertier/**"
       - "vendor/**"
-      - "script/colima-throughput/performance_gate.py"
-      - "script/tests/test_performance_gate.py"
+      - "script/**/*.py"
+      - "pyrightconfig.json"
       - ".github/actions/prepare-build/**"
       - ".github/workflows/test.yml"
   pull_request:
@@ -19,8 +19,8 @@ on:
       - "Cargo.lock"
       - "lowertier/**"
       - "vendor/**"
-      - "script/colima-throughput/performance_gate.py"
-      - "script/tests/test_performance_gate.py"
+      - "script/**/*.py"
+      - "pyrightconfig.json"
       - ".github/actions/prepare-build/**"
       - ".github/workflows/test.yml"
 
@@ -40,8 +40,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Test strict performance gate
-        run: python3 -m unittest script.tests.test_performance_gate -v
+      - name: Type-check Python scripts
+        run: npx --yes pyright@1.1.413
+
+      - name: Test Python scripts
+        run: python3 -m unittest discover -s script/tests -p "*test*.py" -v
 
       - name: Prepare build environment
         uses: ./.github/actions/prepare-build

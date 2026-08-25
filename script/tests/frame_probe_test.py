@@ -40,9 +40,7 @@ class RestoreVlanTagTest(unittest.TestCase):
 
         self.assertEqual(
             restored,
-            bytes.fromhex(
-                "00112233445566778899aabb88a800648100002a88b57061796c6f6164"
-            ),
+            bytes.fromhex("00112233445566778899aabb88a800648100002a88b57061796c6f6164"),
         )
 
     def test_leaves_frame_without_vlan_metadata_unchanged(self) -> None:
