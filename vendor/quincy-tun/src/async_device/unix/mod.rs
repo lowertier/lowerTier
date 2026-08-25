@@ -1,6 +1,6 @@
 use crate::platform::DeviceImpl;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use crate::platform::GROTable;
+use crate::platform::{GROTable, VirtioReadResult};
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 use crate::{
     builder::Layer,
@@ -16,6 +16,49 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 mod tokio;
 pub use self::tokio::AsyncDevice;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug, Clone, Copy)]
+pub struct GsoReadContinuation {
+    header: VirtioNetHdr,
+    packet_offset: usize,
+    packet_len: usize,
+    next_segment: usize,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug, Clone, Copy)]
+pub enum RecvMultipleResult {
+    Complete(usize),
+    Partial {
+        count: usize,
+        continuation: GsoReadContinuation,
+    },
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn recv_multiple_result(
+    result: VirtioReadResult,
+    packet_offset: usize,
+    packet_len: usize,
+) -> RecvMultipleResult {
+    match result {
+        VirtioReadResult::Complete(count) => RecvMultipleResult::Complete(count),
+        VirtioReadResult::Partial {
+            count,
+            header,
+            next_segment,
+        } => RecvMultipleResult::Partial {
+            count,
+            continuation: GsoReadContinuation {
+                header,
+                packet_offset,
+                packet_len,
+                next_segment,
+            },
+        },
+    }
+}
 
 impl FromRawFd for AsyncDevice {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
@@ -335,6 +378,23 @@ impl AsyncDevice {
         sizes: &mut [usize],
         offset: usize,
     ) -> io::Result<usize> {
+        match self.try_recv_multiple_bounded(original_buffer, bufs, sizes, offset)? {
+            RecvMultipleResult::Complete(count) => Ok(count),
+            RecvMultipleResult::Partial { .. } => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many GSO segments",
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn try_recv_multiple_bounded<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<RecvMultipleResult> {
         if bufs.is_empty() || bufs.len() != sizes.len() {
             return Err(io::Error::other("bufs error"));
         }
@@ -379,18 +439,19 @@ impl AsyncDevice {
                         gso_none_checksum(packet, hdr.csum_start, hdr.csum_offset)?;
                     }
                     sizes[0] = packet_len;
-                    return Ok(1);
+                    return Ok(RecvMultipleResult::Complete(1));
                 }
 
                 original_buffer[..direct_len]
                     .copy_from_slice(&bufs[0].as_ref()[offset..offset + direct_len]);
-                return tun.handle_virtio_read(
+                let result = tun.handle_virtio_read_bounded(
                     hdr,
                     &mut original_buffer[..packet_len],
                     bufs,
                     sizes,
                     offset,
-                );
+                )?;
+                return Ok(recv_multiple_result(result, 0, packet_len));
             }
 
             let len = self.try_recv(original_buffer)?;
@@ -400,13 +461,18 @@ impl AsyncDevice {
                 )));
             }
             let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
-            tun.handle_virtio_read(
+            let result = tun.handle_virtio_read_bounded(
                 hdr,
                 &mut original_buffer[VIRTIO_NET_HDR_LEN..len],
                 bufs,
                 sizes,
                 offset,
-            )
+            )?;
+            Ok(recv_multiple_result(
+                result,
+                VIRTIO_NET_HDR_LEN,
+                len - VIRTIO_NET_HDR_LEN,
+            ))
         } else {
             let Some(buf) = bufs[0].as_mut().get_mut(offset..) else {
                 return Err(io::Error::new(
@@ -416,8 +482,41 @@ impl AsyncDevice {
             };
             let len = self.try_recv(buf)?;
             sizes[0] = len;
-            Ok(1)
+            Ok(RecvMultipleResult::Complete(1))
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn continue_recv_multiple<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+        continuation: GsoReadContinuation,
+    ) -> io::Result<RecvMultipleResult> {
+        let packet_end = continuation
+            .packet_offset
+            .checked_add(continuation.packet_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "GSO packet overflow"))?;
+        let input = original_buffer
+            .get_mut(continuation.packet_offset..packet_end)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "GSO packet is truncated")
+            })?;
+        let result = self.get_ref().continue_virtio_read(
+            continuation.header,
+            input,
+            bufs,
+            sizes,
+            offset,
+            continuation.next_segment,
+        )?;
+        Ok(recv_multiple_result(
+            result,
+            continuation.packet_offset,
+            continuation.packet_len,
+        ))
     }
 
     /// Sends multiple fragmented data packets, optionally merging via GRO.

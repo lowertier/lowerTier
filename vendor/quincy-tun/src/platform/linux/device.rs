@@ -1,8 +1,8 @@
 use crate::platform::linux::offload::{
-    VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_GSO_TCPV4,
+    GsoSplitResult, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_GSO_TCPV4,
     VIRTIO_NET_HDR_GSO_TCPV6, VIRTIO_NET_HDR_GSO_UDP_L4, VIRTIO_NET_HDR_LEN, VirtioNetHdr,
-    ethernet_ip_offset, gso_none_checksum, gso_split, gso_split_ethernet, handle_gro,
-    handle_gro_ethernet,
+    ethernet_ip_offset, gso_none_checksum, gso_split_bounded, gso_split_ethernet_bounded,
+    handle_gro, handle_gro_ethernet,
 };
 use crate::platform::unix::device::{ctl, ctl_v6};
 use crate::platform::{ExpandBuffer, GROTable};
@@ -67,6 +67,15 @@ pub struct DeviceImpl {
     pub(crate) udp_gso: bool,
     pub(crate) op_lock: Arc<RwLock<()>>,
     pub(crate) layer: Layer,
+}
+
+pub(crate) enum VirtioReadResult {
+    Complete(usize),
+    Partial {
+        count: usize,
+        header: VirtioNetHdr,
+        next_segment: usize,
+    },
 }
 
 impl DeviceImpl {
@@ -594,12 +603,29 @@ impl DeviceImpl {
     /// and returns the number of packets read.
     pub(crate) fn handle_virtio_read<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
-        mut hdr: VirtioNetHdr,
+        hdr: VirtioNetHdr,
         input: &mut [u8],
         bufs: &mut [B],
         sizes: &mut [usize],
         offset: usize,
     ) -> io::Result<usize> {
+        match self.handle_virtio_read_bounded(hdr, input, bufs, sizes, offset)? {
+            VirtioReadResult::Complete(count) => Ok(count),
+            VirtioReadResult::Partial { .. } => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many GSO segments",
+            )),
+        }
+    }
+
+    pub(crate) fn handle_virtio_read_bounded<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        mut hdr: VirtioNetHdr,
+        input: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<VirtioReadResult> {
         if sizes.len() < bufs.len() {
             return Err(io::Error::other("sizes must be at least as long as bufs"));
         }
@@ -633,7 +659,7 @@ impl DeviceImpl {
             }
             sizes[0] = len;
             bufs[0].as_mut()[offset..offset + len].copy_from_slice(input);
-            return Ok(1);
+            return Ok(VirtioReadResult::Complete(1));
         }
         if hdr.gso_size == 0 {
             return Err(io::Error::new(
@@ -720,10 +746,57 @@ impl DeviceImpl {
                 c_sum_at + 1,
             )))?
         }
-        if self.layer == Layer::L2 {
-            gso_split_ethernet(input, hdr, bufs, sizes, offset)
+        let result = if self.layer == Layer::L2 {
+            gso_split_ethernet_bounded(input, hdr, bufs, sizes, offset, 0)?
         } else {
-            gso_split(input, hdr, bufs, sizes, offset, ip_version == 6)
+            gso_split_bounded(input, hdr, bufs, sizes, offset, ip_version == 6, 0)?
+        };
+        Ok(Self::virtio_read_result(result, hdr))
+    }
+
+    pub(crate) fn continue_virtio_read<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        hdr: VirtioNetHdr,
+        input: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+        segment_start: usize,
+    ) -> io::Result<VirtioReadResult> {
+        let result = if self.layer == Layer::L2 {
+            gso_split_ethernet_bounded(input, hdr, bufs, sizes, offset, segment_start)?
+        } else {
+            let ip_version = input
+                .first()
+                .map(|byte| byte >> 4)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty GSO packet"))?;
+            if !matches!(ip_version, 4 | 6) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid GSO IP version",
+                ));
+            }
+            gso_split_bounded(
+                input,
+                hdr,
+                bufs,
+                sizes,
+                offset,
+                ip_version == 6,
+                segment_start,
+            )?
+        };
+        Ok(Self::virtio_read_result(result, hdr))
+    }
+
+    fn virtio_read_result(result: GsoSplitResult, header: VirtioNetHdr) -> VirtioReadResult {
+        match result.next_segment {
+            Some(next_segment) => VirtioReadResult::Partial {
+                count: result.count,
+                header,
+                next_segment,
+            },
+            None => VirtioReadResult::Complete(result.count),
         }
     }
 

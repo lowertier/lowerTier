@@ -41,31 +41,21 @@ export http_proxy="$HTTP_PROXY"
 export https_proxy="$HTTPS_PROXY"
 ```
 
-Use `socks5h` when the application must send domain names through the proxy.
+Use `socks5h` so LowTier resolves peer names inside the overlay.
 
-## Configuration file
-
-The equivalent TOML settings are shown below.
-
-```toml
-socks5_proxy = "socks5://127.0.0.1:1055"
-outbound_http_proxy = "http://127.0.0.1:1055"
-
-[flags]
-no_tun = true
-use_smoltcp = true
-bind_device = false
-proxy_forward_by_system = false
-```
-
-The command-line mode also disables local DNS acceptance and UDP broadcast relay.
+The userspace mode selects all required internal settings.
+The removed low-level CLI flags cannot select a partial userspace mode.
+The mode also disables local DNS acceptance and UDP broadcast relay.
 It rejects a socket mark because that option can require operating system privileges.
 
 ## Protocol behavior
 
 The SOCKS5 listener supports TCP connections and the existing SOCKS5 UDP association path.
 The HTTP listener supports `CONNECT` tunnels and normal HTTP proxy requests.
-Both proxy protocols use LowTier peer selection and overlay routing.
+Both proxy protocols pass unresolved names to one central dial path.
+The dial path resolves peer hostnames and qualified names from the current route table.
+It uses system DNS only when the route table has no matching peer name.
+It uses the same peer, subnet, exit, service, and blackhole routes as packet forwarding.
 The userspace overlay target path currently supports IPv4 destinations.
 One SOCKS5 UDP association can use at most 256 active targets.
 

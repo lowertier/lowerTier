@@ -14,7 +14,10 @@ use dashmap::DashMap;
 
 use super::{
     PeerId,
-    config::{ConfigLoader, Flags, InterfaceAdapter, process_secure_mode_cfg, validate_flags},
+    config::{
+        ConfigLoader, Flags, InterfaceAdapter, process_secure_mode_cfg,
+        remove_obsolete_adapter_flags, validate_flags,
+    },
     netns::NetNS,
     network::IPCollector,
     stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -644,7 +647,7 @@ impl GlobalCtx {
         feature_flags.no_relay_quic = flags.disable_relay_quic;
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
-        let interface_adapter = InterfaceAdapter::from_flags(flags);
+        let interface_adapter = InterfaceAdapter::automatic();
         feature_flags.ethernet_input = interface_adapter.uses_ethernet_overlay();
         feature_flags.hybrid_l3 = true;
         feature_flags.bridge_input = interface_adapter.allows_bridge_input(flags.enable_bridge);
@@ -1139,7 +1142,8 @@ impl GlobalCtx {
         self.process_memory_governor.clone()
     }
 
-    pub fn set_flags(&self, flags: Flags) {
+    pub fn set_flags(&self, mut flags: Flags) {
+        remove_obsolete_adapter_flags(&mut flags);
         if let Err(error) = validate_flags(&flags) {
             tracing::error!(?error, "rejected invalid runtime flags");
             return;
@@ -1786,6 +1790,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn set_flags_keeps_derived_feature_flags_in_sync() {
         let config = TomlConfigLoader::default();
         let global_ctx = GlobalCtx::new(config);
@@ -1803,7 +1808,13 @@ pub mod tests {
         flags.need_p2p = true;
         flags.disable_p2p = true;
         flags.port_mode = "ethernet".to_string();
+        flags.interface_adapter = "tun".to_string();
+        flags.enable_bridge = false;
         global_ctx.set_flags(flags);
+
+        let stored_flags = global_ctx.get_flags();
+        assert!(stored_flags.port_mode.is_empty());
+        assert!(stored_flags.interface_adapter.is_empty());
 
         let feature_flags = global_ctx.get_feature_flags();
         assert!(!feature_flags.kcp_input);
@@ -1812,36 +1823,16 @@ pub mod tests {
         assert!(feature_flags.no_relay_quic);
         assert!(feature_flags.need_p2p);
         assert!(feature_flags.disable_p2p);
-        assert!(feature_flags.ethernet_input);
+        assert_eq!(
+            feature_flags.ethernet_input,
+            cfg!(any(target_os = "linux", target_os = "freebsd"))
+        );
         assert!(feature_flags.hybrid_l3);
-        assert!(feature_flags.bridge_input);
+        assert!(!feature_flags.bridge_input);
         assert!(feature_flags.support_conn_list_sync);
         assert!(feature_flags.avoid_relay_data);
         assert!(feature_flags.is_public_server);
         assert!(!feature_flags.ipv6_public_addr_provider);
-
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "routed".to_string();
-        global_ctx.set_flags(flags);
-        let feature_flags = global_ctx.get_feature_flags();
-        assert!(!feature_flags.ethernet_input);
-        assert!(feature_flags.hybrid_l3);
-        assert!(!feature_flags.bridge_input);
-        assert!(feature_flags.multicast_membership);
-
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "compatible-ethernet".to_string();
-        global_ctx.set_flags(flags);
-        let feature_flags = global_ctx.get_feature_flags();
-        assert!(!feature_flags.ethernet_input);
-        assert!(feature_flags.hybrid_l3);
-        assert!(!feature_flags.bridge_input);
-
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "auto".to_string();
-        flags.enable_bridge = false;
-        global_ctx.set_flags(flags);
-        assert!(!global_ctx.get_feature_flags().bridge_input);
 
         let mut flags = global_ctx.get_flags();
         flags.enable_bridge = true;

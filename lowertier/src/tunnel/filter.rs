@@ -288,9 +288,12 @@ where
     S: PacketBatchSink + Unpin + 'static,
 {
     fn new(filter: Arc<F>, sink: S) -> Self {
-        let crypto = (filter.uses_async_crypto_pipeline()
-            && crypto_workers::send_crypto_pipeline_enabled())
-        .then(|| Arc::new(SendCryptoSlots::new(filter.clone())));
+        Self::new_with_crypto_pipeline(filter, sink, crypto_workers::send_crypto_pipeline_enabled())
+    }
+
+    fn new_with_crypto_pipeline(filter: Arc<F>, sink: S, enabled: bool) -> Self {
+        let crypto = (filter.uses_async_crypto_pipeline() && enabled)
+            .then(|| Arc::new(SendCryptoSlots::new(filter.clone())));
         let mut free_slots = SmallVec::new();
         if crypto.is_some() {
             free_slots.extend((0..SEND_CRYPTO_SLOT_COUNT as u16).rev());
@@ -659,6 +662,9 @@ impl TunnelFilter for StatsRecorderTunnelFilter {
 
     fn before_send(&self, data: SinkItem) -> Option<SinkItem> {
         self.throughput.record_tx_bytes(data.buf_len() as u64);
+        if super::direct::is_data_packet(&data) {
+            self.throughput.record_tx_data_packets(1);
+        }
         Some(data)
     }
 
@@ -675,6 +681,10 @@ impl TunnelFilter for StatsRecorderTunnelFilter {
     fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
         self.throughput
             .record_tx_batch(data.buffer_byte_len() as u64, data.len() as u64);
+        if data.first().is_some_and(super::direct::is_data_packet) {
+            debug_assert!(data.iter().all(super::direct::is_data_packet));
+            self.throughput.record_tx_data_packets(data.len() as u64);
+        }
         Some(data)
     }
 
@@ -721,6 +731,8 @@ pub mod tests {
     use filter::ring::create_ring_tunnel_pair;
     use futures::{Sink, SinkExt, task::AtomicWaker};
     use tokio::{sync::Notify, time::timeout};
+
+    use crate::tunnel::packet_def::PacketType;
 
     use super::*;
 
@@ -787,6 +799,22 @@ pub mod tests {
         assert_eq!(1, a.0.len());
         assert_eq!(1, b.0.len());
         assert_eq!(1, c.0.len());
+    }
+
+    #[test]
+    fn stats_recorder_counts_data_progress_separately_from_ping() {
+        let filter = StatsRecorderTunnelFilter::new();
+        let mut data = ZCPacket::new_with_payload(&[1]);
+        data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        let mut ping = ZCPacket::new_with_payload(&[2]);
+        ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
+
+        assert!(filter.before_send(data).is_some());
+        assert!(filter.before_send(ping).is_some());
+
+        let throughput = filter.get_throughput();
+        assert_eq!(throughput.tx_packets(), 2);
+        assert_eq!(throughput.tx_data_packets(), 1);
     }
 
     struct AsyncMarkerFilter {
@@ -997,11 +1025,12 @@ pub mod tests {
         let filter = Arc::new(AsyncMarkerFilter {
             dead_marker: Some(3),
         });
-        let mut sink = FilteredBatchSink::new(
+        let mut sink = FilteredBatchSink::new_with_crypto_pipeline(
             filter,
             RecordingBatchSink {
                 markers: markers.clone(),
             },
+            true,
         );
         let crypto = sink.crypto.as_ref().unwrap().clone();
         let mut submitted_slots = Vec::with_capacity(SEND_CRYPTO_SLOT_COUNT);
@@ -1029,7 +1058,11 @@ pub mod tests {
     async fn stable_slots_release_only_after_transport_flush_completion() {
         let gate = Arc::new(FlushGate::new());
         let filter = Arc::new(AsyncMarkerFilter { dead_marker: None });
-        let mut sink = FilteredBatchSink::new(filter, FlushGatedBatchSink { gate: gate.clone() });
+        let mut sink = FilteredBatchSink::new_with_crypto_pipeline(
+            filter,
+            FlushGatedBatchSink { gate: gate.clone() },
+            true,
+        );
 
         for marker in 0..SEND_CRYPTO_SLOT_COUNT as u8 {
             sink.feed(marker_batch(marker)).await.unwrap();

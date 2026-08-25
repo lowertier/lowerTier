@@ -212,9 +212,8 @@ assert_stable_ping() {
 
 start_node() {
     local node="$1"
-    local mode="$2"
-    local overlay_ip="$3"
-    local peer_url="${4:-}"
+    local overlay_ip="$2"
+    local peer_url="${3:-}"
 
     "${docker_cmd[@]}" run -d \
         --name "${node}" \
@@ -227,7 +226,6 @@ start_node() {
         lowertier-core
         --network-name colima-l2
         --network-secret colima-l2-secret
-        --port-mode "${mode}"
         --dev-name et0
         --ipv4 "${overlay_ip}/24"
         --listeners udp://0.0.0.0:11010
@@ -244,55 +242,27 @@ start_node() {
 }
 
 run_suite() {
-    local mode="$1"
-    local subnet="$2"
+    local subnet="$1"
 
     cleanup
     "${docker_cmd[@]}" network create "${network_name}" >/dev/null
 
-    start_node "${nodes[0]}" "${mode}" "${subnet}.1"
-    start_node "${nodes[1]}" "${mode}" "${subnet}.2" "udp://${nodes[0]}:11010"
-    start_node "${nodes[2]}" "${mode}" "${subnet}.3" "udp://${nodes[1]}:11010"
+    start_node "${nodes[0]}" "${subnet}.1"
+    start_node "${nodes[1]}" "${subnet}.2" "udp://${nodes[0]}:11010"
+    start_node "${nodes[2]}" "${subnet}.3" "udp://${nodes[1]}:11010"
 
     for node in "${nodes[@]}"; do
         wait_for_interface "${node}"
     done
 
-    if [[ "${mode}" == "ethernet" ]]; then
-        "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tap'
-    fi
+    "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tap'
 
     assert_stable_ping "${nodes[0]}" "${subnet}.3"
     assert_stable_ping "${nodes[2]}" "${subnet}.1"
 
-    if [[ "${mode}" == "ethernet" ]]; then
-        "${docker_cmd[@]}" exec -d "${nodes[2]}" iperf3 -s -1 -p 5201
-        "${docker_cmd[@]}" exec "${nodes[0]}" iperf3 -c "${subnet}.3" -p 5201 -t 3
-        run_tap_frame_matrix
-    fi
-
-    if [[ "${mode}" == "compatible-ethernet" ]]; then
-        "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tun'
-        "${docker_cmd[@]}" exec -d "${nodes[2]}" iperf3 -s -1 -p 5202
-        "${docker_cmd[@]}" exec "${nodes[0]}" iperf3 -c "${subnet}.3" -p 5202 -t 3
-    fi
-}
-
-run_mixed_suite() {
-    cleanup
-    "${docker_cmd[@]}" network create "${network_name}" >/dev/null
-
-    start_node "${nodes[0]}" compatible-ethernet 10.80.0.1
-    start_node "${nodes[1]}" ethernet 10.80.0.2 "udp://${nodes[0]}:11010"
-
-    wait_for_interface "${nodes[0]}"
-    wait_for_interface "${nodes[1]}"
-    "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tun'
-    "${docker_cmd[@]}" exec "${nodes[1]}" ip -d link show et0 | grep -q 'tap'
-
-    assert_stable_ping "${nodes[0]}" 10.80.0.2
-    assert_stable_ping "${nodes[1]}" 10.80.0.1
-    "${docker_cmd[@]}" exec "${nodes[1]}" ip neigh show dev et0 | grep -q '02:45:'
+    "${docker_cmd[@]}" exec -d "${nodes[2]}" iperf3 -s -1 -p 5201
+    "${docker_cmd[@]}" exec "${nodes[0]}" iperf3 -c "${subnet}.3" -p 5201 -t 3
+    run_tap_frame_matrix
 }
 
 trap cleanup EXIT INT TERM
@@ -308,20 +278,6 @@ if [[ "${SKIP_IMAGE_BUILD:-0}" != "1" ]]; then
         -t "${image_name}" "$repo_root"
 fi
 
-case "${LOWTIER_L2_TEST_SCOPE:-all}" in
-    ethernet)
-        run_suite ethernet 10.77.0
-        ;;
-    all)
-        run_suite ethernet 10.77.0
-        run_suite routed 10.78.0
-        run_suite compatible-ethernet 10.79.0
-        run_mixed_suite
-        ;;
-    *)
-        echo "Unsupported test scope: ${LOWTIER_L2_TEST_SCOPE}" >&2
-        exit 2
-        ;;
-esac
+run_suite 10.77.0
 
-echo "Colima QEMU exact L2, L2-TUN, mixed-edge, and L3 checks passed"
+echo "Colima QEMU automatic L2 checks passed"

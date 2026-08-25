@@ -1,16 +1,15 @@
-# Ethernet interface adapter
+# Automatic Ethernet interface
 
 LowTier carries IP packets and complete Ethernet frames through one fabric protocol.
 
-Use the TAP adapter when an application requires ARP, VLAN, LLDP, broadcast, or other Ethernet data.
+LowTier uses TAP when the operating system supports the required implementation.
 
 Native TAP is available on Linux and FreeBSD.
 
-Use the TUN adapter on systems that provide only an IP interface.
+LowTier uses TUN on other operating systems.
 
 ```toml
 [flags]
-interface_adapter = "tap"
 dev_name = "et0"
 
 l2_fdb_capacity = 16384
@@ -18,16 +17,7 @@ l2_fdb_age_seconds = 300
 l2_flood_bps = 67108864
 ```
 
-Use this configuration for an IP interface:
-
-```toml
-[flags]
-interface_adapter = "tun"
-```
-
-Use `interface_adapter = "auto"` for the platform default.
-
-The equivalent CLI option is `--interface-adapter`.
+Users do not select TAP or TUN.
 
 Known unicast frames use the learned destination MAC.
 
@@ -43,10 +33,6 @@ Ethernet frames do not enter IP ACL parsing.
 
 The underlay policy still applies to all transport sockets.
 
-The old `port_mode` field remains a migration alias.
-
-The old `routed` and `compatible-ethernet` values map to `tun`.
-
-The old `ethernet` value maps to `tap`.
+LowTier ignores the removed `port_mode` and `interface_adapter` fields during migration.
 
 Protocol version 4 does not use the old L2-TUN send path.

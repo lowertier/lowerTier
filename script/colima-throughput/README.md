@@ -27,7 +27,7 @@ Quick smoke test:
 QUICK=1 script/colima-throughput/e2e.sh
 ```
 
-Full TUN, TAP, and automatic adapter matrix:
+Full automatic-adapter run:
 
 ```bash
 script/colima-throughput/e2e.sh
@@ -44,7 +44,6 @@ QUIC DATAGRAM TUN test with 100-180 ms one-way delay and 3% loss:
 ```bash
 DOCKER_CONTEXT=colima-lowertier-l2 \
 UNDERLAY_PROTOCOL=quic \
-ADAPTERS=tun \
 NETEM_DELAY=140ms \
 NETEM_JITTER=40ms \
 NETEM_LOSS=3% \
@@ -80,7 +79,6 @@ Important controls:
 | `DOCKER_CONTEXT` | `colima` | Docker endpoint for the VZ profile |
 | `RESULT_DIR` | temporary directory | Stable location for raw JSON and summaries |
 | `RAW_GATE_BPS` | `12000000000` | Minimum valid substrate throughput |
-| `ADAPTERS` | `tun tap auto` | LowTier interface adapters |
 | `PARALLEL_STREAMS` | `8` | Aggregate TCP stream count |
 | `ENCRYPTION_ALGORITHM` | `chacha20-poly1305` | Explicit authenticated dataplane cipher |
 | `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp` or `quic` |

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     io,
     net::SocketAddr,
     sync::OnceLock,
@@ -12,7 +13,8 @@ use tokio::{io::Interest, net::UdpSocket};
 use super::batch::MAX_PACKET_BATCH_SIZE;
 use super::packet_def::ReusableBufferPool;
 
-const MAX_UDP_GSO_PAYLOAD: usize = u16::MAX as usize;
+const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
+const MAX_UDP_GRO_PAYLOAD: usize = u16::MAX as usize;
 static UDP_SEND_VECTOR_DISABLED: OnceLock<bool> = OnceLock::new();
 static UDP_RECV_VECTOR_DISABLED: OnceLock<bool> = OnceLock::new();
 
@@ -39,13 +41,13 @@ fn udp_recv_vector_disabled() -> bool {
 /// Return the largest prefix that Linux UDP GSO can submit as one super-packet.
 /// All segments have the first packet's size, except for an optional shorter
 /// final segment. The kernel API represents both the segment size and total
-/// payload with 16-bit values.
+/// payload within the IPv4 packet length limit.
 fn compatible_gso_prefix(buffers: &[Bytes]) -> usize {
     let Some(first) = buffers.first() else {
         return 0;
     };
     let segment_size = first.len();
-    if segment_size == 0 || segment_size > MAX_UDP_GSO_PAYLOAD {
+    if segment_size == 0 || segment_size > MAX_IPV4_UDP_PAYLOAD {
         return 1;
     }
 
@@ -53,7 +55,7 @@ fn compatible_gso_prefix(buffers: &[Bytes]) -> usize {
     for (index, buffer) in buffers.iter().take(MAX_PACKET_BATCH_SIZE).enumerate() {
         if buffer.is_empty()
             || buffer.len() > segment_size
-            || total.saturating_add(buffer.len()) > MAX_UDP_GSO_PAYLOAD
+            || total.saturating_add(buffer.len()) > MAX_IPV4_UDP_PAYLOAD
         {
             return index.max(1);
         }
@@ -87,6 +89,20 @@ pub(crate) struct ReceivedDatagram {
 
 pub(crate) type ReceivedDatagramBatch = SmallVec<[ReceivedDatagram; 4]>;
 
+fn append_received_datagrams(
+    output: &mut ReceivedDatagramBatch,
+    pending: &mut VecDeque<ReceivedDatagram>,
+    incoming: impl IntoIterator<Item = ReceivedDatagram>,
+) {
+    for datagram in incoming {
+        if output.len() < MAX_PACKET_BATCH_SIZE {
+            output.push(datagram);
+        } else {
+            pending.push_back(datagram);
+        }
+    }
+}
+
 pub(crate) struct UdpBatchReceiver {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
     slots: ReceiveSlotPool,
@@ -94,6 +110,8 @@ pub(crate) struct UdpBatchReceiver {
     reusable_pool: Option<(usize, ReusableBufferPool)>,
     #[cfg(target_os = "linux")]
     gro_enabled: Option<bool>,
+    #[cfg(target_os = "linux")]
+    pending: VecDeque<ReceivedDatagram>,
 }
 
 impl UdpBatchReceiver {
@@ -105,6 +123,8 @@ impl UdpBatchReceiver {
             reusable_pool: None,
             #[cfg(target_os = "linux")]
             gro_enabled: None,
+            #[cfg(target_os = "linux")]
+            pending: VecDeque::new(),
         }
     }
 
@@ -131,6 +151,11 @@ impl UdpBatchReceiver {
             self.gro_enabled = Some(enabled);
             enabled
         };
+
+        #[cfg(target_os = "linux")]
+        if gro_enabled {
+            return self.recv_gro_batch(socket, max_datagram_size).await;
+        }
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         let reusable_pool = self.receive_pool(max_datagram_size).clone();
@@ -163,6 +188,49 @@ impl UdpBatchReceiver {
                 Ok(_) => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn recv_gro_batch(
+        &mut self,
+        socket: &UdpSocket,
+        max_datagram_size: usize,
+    ) -> io::Result<ReceivedDatagramBatch> {
+        let mut output = ReceivedDatagramBatch::new();
+        while output.len() < MAX_PACKET_BATCH_SIZE {
+            let Some(datagram) = self.pending.pop_front() else {
+                break;
+            };
+            output.push(datagram);
+        }
+        if output.len() == MAX_PACKET_BATCH_SIZE {
+            return Ok(output);
+        }
+
+        loop {
+            let incoming = if output.is_empty() {
+                loop {
+                    socket.readable().await?;
+                    match socket.try_io(Interest::READABLE, || {
+                        try_recv_batch(socket, max_datagram_size, true, &mut self.slots, None)
+                    }) {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                        result => break result?,
+                    }
+                }
+            } else {
+                match try_recv_batch(socket, max_datagram_size, true, &mut self.slots, None) {
+                    Ok(incoming) => incoming,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(output),
+                    Err(error) => return Err(error),
+                }
+            };
+
+            append_received_datagrams(&mut output, &mut self.pending, incoming);
+            if output.len() == MAX_PACKET_BATCH_SIZE {
+                return Ok(output);
             }
         }
     }
@@ -220,6 +288,17 @@ pub(crate) fn poll_send_batch(
     completed: &mut usize,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<()>> {
+    poll_send_batch_with_gso(socket, destination, buffers, completed, true, cx)
+}
+
+pub(crate) fn poll_send_batch_with_gso(
+    socket: &UdpSocket,
+    destination: SocketAddr,
+    buffers: &[Bytes],
+    completed: &mut usize,
+    send_gso: bool,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
     while *completed < buffers.len() {
         ready!(socket.poll_send_ready(cx))?;
         if udp_send_vector_disabled() {
@@ -239,7 +318,7 @@ pub(crate) fn poll_send_batch(
 
         let remaining = &buffers[*completed..];
         match socket.try_io(Interest::WRITABLE, || {
-            try_send_batch(socket, destination, remaining)
+            try_send_batch(socket, destination, remaining, send_gso)
         }) {
             Ok(0) => {
                 return Poll::Ready(Err(io::Error::new(
@@ -544,7 +623,7 @@ fn try_recv_batch(
         MAX_PACKET_BATCH_SIZE
     };
     let slot_size = if gro_enabled {
-        MAX_UDP_GSO_PAYLOAD
+        MAX_UDP_GRO_PAYLOAD
     } else {
         max_datagram_size
     };
@@ -712,6 +791,7 @@ fn try_send_batch(
     socket: &UdpSocket,
     destination: SocketAddr,
     buffers: &[Bytes],
+    _send_gso: bool,
 ) -> io::Result<usize> {
     use std::{os::fd::AsRawFd, ptr};
 
@@ -792,6 +872,7 @@ fn try_send_batch(
     socket: &UdpSocket,
     destination: SocketAddr,
     buffers: &[Bytes],
+    send_gso: bool,
 ) -> io::Result<usize> {
     use std::{os::fd::AsRawFd, ptr};
 
@@ -802,7 +883,7 @@ fn try_send_batch(
         return Ok(0);
     }
     let gso_prefix = compatible_gso_prefix(buffers);
-    if gso_prefix >= 2 && std::env::var_os("LOWTIER_DEBUG_DISABLE_UDP_GSO").is_none() {
+    if gso_prefix >= 2 && send_gso && std::env::var_os("LOWTIER_DEBUG_DISABLE_UDP_GSO").is_none() {
         match try_send_gso(socket, destination, &buffers[..gso_prefix]) {
             Ok(()) => return Ok(gso_prefix),
             Err(error) if udp_gso_is_unsupported(&error) => {}
@@ -947,6 +1028,7 @@ fn try_send_batch(
     socket: &UdpSocket,
     destination: SocketAddr,
     buffers: &[Bytes],
+    _send_gso: bool,
 ) -> io::Result<usize> {
     let Some(buffer) = buffers.first() else {
         return Ok(0);
@@ -956,9 +1038,14 @@ fn try_send_batch(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, net::SocketAddr};
+
     use bytes::{Bytes, BytesMut};
 
-    use super::{ReceiveSlotPool, checked_message_count, compatible_gso_prefix, split_gro_buffer};
+    use super::{
+        ReceiveSlotPool, ReceivedDatagram, ReceivedDatagramBatch, append_received_datagrams,
+        checked_message_count, compatible_gso_prefix, split_gro_buffer,
+    };
 
     #[test]
     fn receive_slot_pool_retains_every_unused_allocation() {
@@ -998,6 +1085,15 @@ mod tests {
     }
 
     #[test]
+    fn gso_prefix_keeps_ipv4_udp_payload_within_protocol_limit() {
+        let mut payloads = vec![Bytes::from(vec![1; 1024]); 63];
+        payloads.push(Bytes::from(vec![2; 1008]));
+
+        assert_eq!(payloads.iter().map(Bytes::len).sum::<usize>(), 65_520);
+        assert_eq!(compatible_gso_prefix(&payloads), 63);
+    }
+
+    #[test]
     fn gro_stride_restores_individual_datagrams_without_copying() {
         let parts = split_gro_buffer(BytesMut::from(&b"aabbc"[..]), 2).unwrap();
         assert_eq!(
@@ -1022,6 +1118,42 @@ mod tests {
             assert_eq!(part.len(), stride);
             assert!(part.iter().all(|byte| *byte == tag as u8));
         }
+    }
+
+    #[test]
+    fn consecutive_gro_packets_fill_one_bounded_receive_batch() {
+        let source: SocketAddr = "127.0.0.1:11010".parse().unwrap();
+        let make_datagrams = |start: u8, count: u8| {
+            (start..start + count)
+                .map(|tag| ReceivedDatagram {
+                    buffer: BytesMut::from(&[tag][..]),
+                    source,
+                    reusable_pool: None,
+                })
+                .collect::<ReceivedDatagramBatch>()
+        };
+        let mut output = ReceivedDatagramBatch::new();
+        let mut pending = VecDeque::new();
+
+        append_received_datagrams(&mut output, &mut pending, make_datagrams(0, 40));
+        append_received_datagrams(&mut output, &mut pending, make_datagrams(40, 40));
+
+        assert_eq!(output.len(), super::MAX_PACKET_BATCH_SIZE);
+        assert_eq!(pending.len(), 16);
+        assert_eq!(
+            output
+                .iter()
+                .map(|datagram| datagram.buffer[0])
+                .collect::<Vec<_>>(),
+            (0_u8..64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .map(|datagram| datagram.buffer[0])
+                .collect::<Vec<_>>(),
+            (64_u8..80).collect::<Vec<_>>()
+        );
     }
 
     #[cfg(target_os = "linux")]

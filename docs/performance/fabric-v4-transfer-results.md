@@ -197,12 +197,11 @@ TX_THROUGHPUT_SAMPLE_SIZE=10 \
 cargo bench -p lowertier --bench tx_throughput
 ```
 
-The Linux device matrix used this command shape:
+The current Linux device test uses automatic TAP selection:
 
 ```bash
 BUILD_IMAGE=0 \
 DOCKER_CONTEXT=colima-easytier-l2 \
-ADAPTERS="tun tap" \
 RUN_TCP=1 RUN_UDP=0 RUN_CPU_PROBE=1 \
 RUNS=2 DURATION=5 CPU_DURATION=5 PARALLEL_STREAMS=4 \
 script/colima-throughput/e2e.sh

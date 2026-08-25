@@ -8,7 +8,7 @@ Protocol version 4 uses one fabric dataplane for IP packets and Ethernet frames.
 
 `FabricBatch` contains packets of one payload kind.
 
-The sender uses one `send_fabric_batch` function for all interface adapters.
+The sender uses one `send_fabric_batch` function for all platform interfaces.
 
 The IP payload kind uses the compact routed representation.
 
@@ -16,21 +16,15 @@ The Ethernet payload kind retains the complete Ethernet frame when L2 data is ne
 
 The receiver continues to use authenticated peer headers for both payload kinds.
 
-## Interface adapters
+## Platform interface
 
-Use `interface_adapter = "tun"` for an IP interface.
+LowTier selects TAP on Linux and FreeBSD.
 
-Use `interface_adapter = "tap"` for an Ethernet interface.
+LowTier selects TUN on other operating systems.
 
-Use `interface_adapter = "auto"` to select the native adapter for the operating system.
+The removed adapter settings do not change this selection.
 
-The old `port_mode` field is deprecated.
-
-The values `routed` and `compatible-ethernet` map to the `tun` adapter.
-
-The value `ethernet` maps to the `tap` adapter.
-
-The compatible Ethernet mode no longer adds a synthetic Ethernet header to TUN packets.
+TAP IP traffic uses the compact routed representation.
 
 ## Route planes
 

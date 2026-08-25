@@ -1801,6 +1801,31 @@ pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
     out_offset: usize,
     is_v6: bool,
 ) -> io::Result<usize> {
+    let result = gso_split_bounded(input, hdr, out_bufs, sizes, out_offset, is_v6, 0)?;
+    if result.next_segment.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many GSO segments",
+        ));
+    }
+    Ok(result.count)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GsoSplitResult {
+    pub count: usize,
+    pub next_segment: Option<usize>,
+}
+
+pub fn gso_split_bounded<B: AsRef<[u8]> + AsMut<[u8]>>(
+    input: &mut [u8],
+    hdr: VirtioNetHdr,
+    out_bufs: &mut [B],
+    sizes: &mut [usize],
+    out_offset: usize,
+    is_v6: bool,
+    segment_start: usize,
+) -> io::Result<GsoSplitResult> {
     if sizes.len() < out_bufs.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1914,15 +1939,21 @@ pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
         nonlast_len_for_pseudo,
     );
 
-    let mut next_segment_data_at = hdr.hdr_len as usize;
-    let mut i = 0;
+    let consumed_data = (hdr.gso_size as usize)
+        .checked_mul(segment_start)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "GSO segment overflow"))?;
+    let mut next_segment_data_at = (hdr.hdr_len as usize)
+        .checked_add(consumed_data)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "GSO segment overflow"))?;
+    let mut segment_index = segment_start;
+    let mut output_index = 0;
 
     while next_segment_data_at < input.len() {
-        if i == out_bufs.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "too many GSO segments",
-            ));
+        if output_index == out_bufs.len() {
+            return Ok(GsoSplitResult {
+                count: output_index,
+                next_segment: Some(segment_index),
+            });
         }
 
         let next_segment_end = next_segment_data_at + hdr.gso_size as usize;
@@ -1953,15 +1984,15 @@ pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
                 )
             };
 
-        sizes[i] = total_len;
-        let out_len = out_bufs[i].as_ref().len();
+        sizes[output_index] = total_len;
+        let out_len = out_bufs[output_index].as_ref().len();
         if out_offset > out_len || out_len - out_offset < total_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "output buffer too small",
             ));
         }
-        let out = &mut out_bufs[i].as_mut()[out_offset..];
+        let out = &mut out_bufs[output_index].as_mut()[out_offset..];
 
         out[..iph_len].copy_from_slice(&input[..iph_len]);
 
@@ -1969,8 +2000,8 @@ pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
             // For IPv4 we are responsible for incrementing the ID field,
             // updating the total len field, and recalculating the header
             // checksum.
-            if i > 0 {
-                let id = BigEndian::read_u16(&out[4..]).wrapping_add(i as u16);
+            if segment_index > 0 {
+                let id = BigEndian::read_u16(&out[4..]).wrapping_add(segment_index as u16);
                 BigEndian::write_u16(&mut out[4..6], id);
             }
             BigEndian::write_u16(&mut out[2..4], total_len as u16);
@@ -1988,7 +2019,8 @@ pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
             .copy_from_slice(&input[hdr.csum_start as usize..hdr.hdr_len as usize]);
 
         if protocol == IPPROTO_TCP {
-            let tcp_seq = first_tcp_seq_num.wrapping_add(hdr.gso_size as u32 * i as u32);
+            let tcp_seq =
+                first_tcp_seq_num.wrapping_add(hdr.gso_size as u32 * segment_index as u32);
             BigEndian::write_u32(
                 &mut out[(hdr.csum_start + 4) as usize..(hdr.csum_start + 8) as usize],
                 tcp_seq,
@@ -2018,10 +2050,14 @@ pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
         );
 
         next_segment_data_at += hdr.gso_size as usize;
-        i += 1;
+        segment_index += 1;
+        output_index += 1;
     }
 
-    Ok(i)
+    Ok(GsoSplitResult {
+        count: output_index,
+        next_segment: None,
+    })
 }
 
 pub(crate) fn ethernet_ip_offset(frame: &[u8]) -> io::Result<(usize, bool)> {
@@ -2056,13 +2092,14 @@ pub(crate) fn ethernet_ip_offset(frame: &[u8]) -> io::Result<(usize, bool)> {
     }
 }
 
-pub fn gso_split_ethernet<B: AsRef<[u8]> + AsMut<[u8]>>(
+pub fn gso_split_ethernet_bounded<B: AsRef<[u8]> + AsMut<[u8]>>(
     frame: &mut [u8],
     mut hdr: VirtioNetHdr,
     out_bufs: &mut [B],
     sizes: &mut [usize],
     out_offset: usize,
-) -> io::Result<usize> {
+    segment_start: usize,
+) -> io::Result<GsoSplitResult> {
     let (l2_len, is_v6) = ethernet_ip_offset(frame)?;
     let l2_len_u16 = u16::try_from(l2_len)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Ethernet header is too large"))?;
@@ -2080,15 +2117,16 @@ pub fn gso_split_ethernet<B: AsRef<[u8]> + AsMut<[u8]>>(
     })?;
     let mut l2_header = [0_u8; 22];
     l2_header[..l2_len].copy_from_slice(&frame[..l2_len]);
-    let count = gso_split(
+    let result = gso_split_bounded(
         &mut frame[l2_len..],
         hdr,
         out_bufs,
         sizes,
         out_offset + l2_len,
         is_v6,
+        segment_start,
     )?;
-    for index in 0..count {
+    for index in 0..result.count {
         let frame_start = out_bufs[index]
             .as_mut()
             .get_mut(out_offset..out_offset + l2_len)
@@ -2098,7 +2136,7 @@ pub fn gso_split_ethernet<B: AsRef<[u8]> + AsMut<[u8]>>(
         frame_start.copy_from_slice(&l2_header[..l2_len]);
         sizes[index] += l2_len;
     }
-    Ok(count)
+    Ok(result)
 }
 
 /// Calculate checksum for packets without GSO.
@@ -2567,6 +2605,59 @@ mod tests {
     }
 
     #[test]
+    fn bounded_gso_split_preserves_all_segments_across_batches() {
+        let mut expected_input = make_ipv4_tcp_packet(7, 2000);
+        let mut actual_input = expected_input.clone();
+        let hdr = VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 100,
+            csum_start: 20,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let mut expected = vec![vec![0u8; 256]; 20];
+        let mut expected_sizes = vec![0usize; 20];
+        let expected_count = gso_split(
+            &mut expected_input,
+            hdr,
+            &mut expected,
+            &mut expected_sizes,
+            0,
+            false,
+        )
+        .unwrap();
+
+        let mut actual = Vec::new();
+        let mut actual_sizes = Vec::new();
+        let mut next_segment = 0;
+        loop {
+            let mut batch = vec![vec![0u8; 256]; 6];
+            let mut batch_sizes = vec![0usize; 6];
+            let result = gso_split_bounded(
+                &mut actual_input,
+                hdr,
+                &mut batch,
+                &mut batch_sizes,
+                0,
+                false,
+                next_segment,
+            )
+            .unwrap();
+            actual.extend(batch.into_iter().take(result.count));
+            actual_sizes.extend(batch_sizes.into_iter().take(result.count));
+            let Some(continuation) = result.next_segment else {
+                break;
+            };
+            next_segment = continuation;
+        }
+
+        assert_eq!(actual.len(), expected_count);
+        assert_eq!(actual_sizes, expected_sizes);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn ethernet_gso_preserves_the_l2_header_on_every_segment() {
         const L2_LEN: usize = 14;
         const OUTPUT_OFFSET: usize = 32;
@@ -2588,8 +2679,10 @@ mod tests {
         let mut out = vec![vec![0u8; OUTPUT_OFFSET + 1200]; 2];
         let mut sizes = vec![0usize; 2];
 
-        let count =
-            gso_split_ethernet(&mut frame, hdr, &mut out, &mut sizes, OUTPUT_OFFSET).unwrap();
+        let result =
+            gso_split_ethernet_bounded(&mut frame, hdr, &mut out, &mut sizes, OUTPUT_OFFSET, 0)
+                .unwrap();
+        let count = result.count;
 
         assert_eq!(count, 2);
         assert_eq!(sizes, [1054, 1054]);

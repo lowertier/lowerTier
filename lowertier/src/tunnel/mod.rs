@@ -1,5 +1,9 @@
 use std::{
-    collections::hash_map::DefaultHasher, hash::Hasher, net::SocketAddr, pin::Pin, sync::Arc,
+    collections::hash_map::DefaultHasher,
+    hash::Hasher,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use crate::{
@@ -119,6 +123,7 @@ pub struct TransportBinding {
 /// The callback reads the transport state without changing it. Non-QUIC
 /// tunnels return no budget and use the conservative FEC fallback.
 pub type DatagramSizeBudget = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
+pub type ReceiveBackpressure = Arc<AtomicBool>;
 
 pub trait ZCPacketStream: Stream<Item = StreamItem> + Send {}
 impl<T> ZCPacketStream for T where T: Stream<Item = StreamItem> + Send {}
@@ -172,6 +177,11 @@ pub trait Tunnel: Send {
 
     fn is_transport_authenticated(&self) -> bool {
         false
+    }
+
+    /// Report local transport receive backpressure to connection liveness.
+    fn receive_backpressure(&self) -> Option<ReceiveBackpressure> {
+        None
     }
 }
 

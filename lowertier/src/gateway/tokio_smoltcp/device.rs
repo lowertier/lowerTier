@@ -6,11 +6,13 @@ use smoltcp::{
 };
 use std::{collections::VecDeque, io};
 
+use crate::tunnel::packet_def::ZCPacket;
+
 /// Default value of `max_burst_size`.
 pub const DEFAULT_MAX_BURST_SIZE: usize = 100;
 
 /// A packet used in `AsyncDevice`.
-pub type Packet = Vec<u8>;
+pub type Packet = ZCPacket;
 
 /// A device that send and receive packets asynchronously.
 pub trait AsyncDevice:
@@ -41,13 +43,11 @@ pub struct BufferDevice {
 pub struct BufferRxToken(Packet);
 
 impl RxToken for BufferRxToken {
-    fn consume<R, F>(mut self, f: F) -> R
+    fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        let p = &mut self.0;
-
-        f(p)
+        f(self.0.payload())
     }
 }
 
@@ -59,10 +59,10 @@ impl<'d> TxToken for BufferTxToken<'d> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut buffer = vec![0u8; len];
-        let result = f(&mut buffer);
+        let mut packet = ZCPacket::new_with_payload_len(len);
+        let result = f(packet.mut_payload());
 
-        self.0.send_queue.push_back(buffer);
+        self.0.send_queue.push_back(packet);
 
         result
     }

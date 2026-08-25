@@ -140,6 +140,8 @@ pub struct ServiceRouteStore {
     plans: DashMap<GatewayFlowPlanKey, GatewayFlowPlan>,
     pin_capacity: usize,
     pin_ttl: Duration,
+    #[cfg(test)]
+    selection_count: std::sync::atomic::AtomicUsize,
 }
 
 impl ServiceRouteStore {
@@ -152,7 +154,21 @@ impl ServiceRouteStore {
             plans: DashMap::with_capacity(pin_capacity.min(1024)),
             pin_capacity,
             pin_ttl,
+            #[cfg(test)]
+            selection_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_count(&self) -> usize {
+        self.selection_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_selection_count(&self) {
+        self.selection_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> Arc<ServiceRouteSnapshot> {
@@ -199,6 +215,9 @@ impl ServiceRouteStore {
     where
         F: Fn(PeerId) -> bool,
     {
+        #[cfg(test)]
+        self.selection_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let snapshot = self.snapshot.load_full();
         let plan_key = GatewayFlowPlanKey { address, flow };
         let now = Instant::now();

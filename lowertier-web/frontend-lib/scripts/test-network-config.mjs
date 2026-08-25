@@ -164,7 +164,6 @@ function allFieldFixture() {
     quic_brutal_loss_compensation: true,
     quic_initial_receive_window: '8388608',
     quic_receive_window: '33554432',
-    port_mode: 'compatible-ethernet',
     l2_fdb_capacity: 16384,
     l2_fdb_age_seconds: '300',
     l2_flood_bps: '134217728',
@@ -287,7 +286,6 @@ function assertFullFieldRoundTrip() {
   assert.equal(backend.quic_brutal_send_bps, '50000000')
   assert.equal(backend.quic_initial_receive_window, '8388608')
   assert.equal(backend.quic_receive_window, '33554432')
-  assert.equal(backend.port_mode, 'l2-tun')
   assert.equal(backend.l2_fdb_age_seconds, '300')
   assert.equal(backend.l2_flood_bps, '134217728')
   assert.equal(backend.secure_mode.enabled, true)

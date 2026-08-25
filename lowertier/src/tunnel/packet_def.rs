@@ -956,6 +956,13 @@ impl ZCPacket {
         ret
     }
 
+    pub(crate) fn new_with_payload_len(payload_len: usize) -> Self {
+        let mut ret = Self::new_nic_packet();
+        let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
+        ret.inner.resize(payload_off + payload_len, 0);
+        ret
+    }
+
     pub fn new_for_tun(cap: usize, packet_info_len: usize) -> Self {
         let mut ret = Self::new_nic_packet();
         let total_len = ret.packet_type.get_packet_offsets().payload_offset - packet_info_len;
@@ -1753,6 +1760,16 @@ impl ZCPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_length_constructor_exposes_initialized_payload() {
+        let mut packet = ZCPacket::new_with_payload_len(1284);
+
+        assert_eq!(packet.payload().len(), 1284);
+        assert!(packet.payload().iter().all(|byte| *byte == 0));
+        packet.mut_payload()[0] = 7;
+        assert_eq!(packet.payload()[0], 7);
+    }
 
     #[test]
     fn reusable_buffer_returns_after_transport_bytes_drop() {

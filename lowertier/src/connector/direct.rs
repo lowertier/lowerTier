@@ -172,10 +172,7 @@ async fn resolve_mapped_listener_addrs(listener: &url::Url) -> Result<Vec<Socket
 }
 
 fn direct_listener_allowed_before_resolution(policy: &UnderlayPolicy, listener: &url::Url) -> bool {
-    !policy.is_active()
-        || listener
-            .host_str()
-            .is_some_and(|host| host.parse::<IpAddr>().is_ok())
+    !policy.is_active() || super::url_has_ip_literal_host(listener)
 }
 
 fn is_usable_public_ipv6_candidate(ip: &Ipv6Addr, global_ctx: &ArcGlobalCtx) -> bool {
@@ -1205,6 +1202,10 @@ mod tests {
         assert!(super::direct_listener_allowed_before_resolution(
             &policy,
             &"quic://192.0.2.20:11010".parse().unwrap(),
+        ));
+        assert!(super::direct_listener_allowed_before_resolution(
+            &policy,
+            &"quic://[2001:db8::20]:11010".parse().unwrap(),
         ));
     }
 

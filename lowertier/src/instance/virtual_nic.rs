@@ -13,7 +13,7 @@ use std::{
 
 use crate::{
     common::{
-        config::{Flags, InterfaceAdapter},
+        config::InterfaceAdapter,
         dataplane_telemetry::DataplaneStage,
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
@@ -173,15 +173,17 @@ impl NicIngressFlowGate {
 
     fn reserve_batch(
         self: &Arc<Self>,
-        batch: &PacketBatch,
+        batch: &mut PacketBatch,
         adapter: InterfaceAdapter,
     ) -> NicIngressFlowPermit {
         let ethernet = adapter.uses_native_ethernet();
-        self.reserve_shards(
-            batch
-                .iter()
-                .map(|packet| classify_nic_packet_flow(packet, ethernet).shard),
-        )
+        self.reserve_shards(batch.iter_mut().map(|packet| {
+            let flow = classify_nic_packet_flow(packet, ethernet);
+            if packet.flow_hash().is_none() {
+                packet.set_flow_hash(flow.hash);
+            }
+            flow.shard
+        }))
     }
 
     fn reserve_shards(
@@ -612,8 +614,8 @@ impl Drop for VirtualNic {
 }
 
 impl VirtualNic {
-    fn interface_adapter(flags: &Flags) -> InterfaceAdapter {
-        InterfaceAdapter::from_flags(flags)
+    fn interface_adapter() -> InterfaceAdapter {
+        InterfaceAdapter::automatic()
     }
 
     fn needs_tap_edge_adapter(adapter: InterfaceAdapter) -> bool {
@@ -886,15 +888,14 @@ impl VirtualNic {
 
     async fn create_tun(&self) -> Result<tun::platform::Device, Error> {
         let mut config = Configuration::default();
-        let flags = self.global_ctx.get_flags();
-        let adapter = Self::interface_adapter(&flags);
+        let adapter = Self::interface_adapter();
         if adapter.uses_native_ethernet() {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             config.layer(Layer::L2);
 
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             return Err(anyhow::anyhow!(
-                "interface_adapter=tap is supported only on Linux and FreeBSD; use interface_adapter=tun"
+                "the automatic Ethernet adapter is supported only on Linux and FreeBSD"
             )
             .into());
         } else {
@@ -990,10 +991,10 @@ impl VirtualNic {
         tun_fd: std::os::fd::RawFd,
     ) -> Result<Box<dyn Tunnel>, Error> {
         let flags = self.global_ctx.get_flags();
-        let adapter = Self::interface_adapter(&flags);
+        let adapter = Self::interface_adapter();
         if adapter.uses_native_ethernet() {
             return Err(anyhow::anyhow!(
-                "interface_adapter=tap is not supported by mobile virtual NICs"
+                "the automatic Ethernet adapter is not supported by mobile virtual NICs"
             )
             .into());
         }
@@ -1035,7 +1036,7 @@ impl VirtualNic {
         let kernel_mtu = u16::try_from(effective_mtu)
             .map_err(|_| anyhow::anyhow!("TUN MTU {effective_mtu} exceeds Linux u16 limits"))?;
 
-        let native_ethernet = Self::interface_adapter(&flags).uses_native_ethernet();
+        let native_ethernet = Self::interface_adapter().uses_native_ethernet();
         let parallelism = std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(1);
@@ -1649,7 +1650,7 @@ impl NicCtx {
                         stream_open = false;
                         continue;
                     };
-                    let batch = match result {
+                    let mut batch = match result {
                         Ok(batch) => batch,
                         Err(error) => {
                             if !cancellation.is_cancelled() {
@@ -1667,7 +1668,7 @@ impl NicCtx {
                     if record_batch_stats {
                         record_nic_batch_size(batch.len());
                     }
-                    let permit = flow_gate.reserve_batch(&batch, adapter);
+                    let permit = flow_gate.reserve_batch(&mut batch, adapter);
                     let delivery_mgr = mgr.clone();
                     deliveries.spawn(async move {
                         permit.wait().await;
@@ -1711,7 +1712,7 @@ impl NicCtx {
             return Err(anyhow::anyhow!("virtual NIC has no ingress queues").into());
         }
 
-        let adapter = VirtualNic::interface_adapter(&self.global_ctx.get_flags());
+        let adapter = VirtualNic::interface_adapter();
         let cancellation = CancellationToken::new();
         let reported = Arc::new(AtomicBool::new(false));
         let flow_gate = Arc::new(NicIngressFlowGate::new());
@@ -2088,8 +2089,7 @@ impl NicCtx {
             }
         };
 
-        let flags = self.global_ctx.get_flags();
-        let adapter = VirtualNic::interface_adapter(&flags);
+        let adapter = VirtualNic::interface_adapter();
         let hybrid_tap_mac = if VirtualNic::needs_tap_edge_adapter(adapter) {
             let ifname = self
                 .ifname()
@@ -2175,9 +2175,7 @@ impl NicCtx {
 mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
-    use crate::common::{
-        config::gen_default_flags, error::Error, global_ctx::tests::get_mock_global_ctx,
-    };
+    use crate::common::{error::Error, global_ctx::tests::get_mock_global_ctx};
     use crate::instance::l2_tun::{ETHERNET_HEADER_LEN, prepare_ip_frame};
     use crate::tunnel::{
         TunnelError,
@@ -2374,6 +2372,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nic_ingress_reservation_reuses_the_flow_hash_downstream() {
+        let gate = Arc::new(NicIngressFlowGate::new());
+        let mut packet = vec![0_u8; 40];
+        packet[0] = 0x45;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        packet[20..22].copy_from_slice(&1234_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        let mut batch =
+            crate::tunnel::batch::PacketBatch::singleton(ZCPacket::new_with_payload(&packet));
+
+        let permit = gate.reserve_batch(&mut batch, crate::common::config::InterfaceAdapter::Tun);
+        permit.wait().await;
+
+        assert!(batch[0].flow_hash().is_some());
+    }
+
+    #[tokio::test]
     async fn nic_ingress_gate_skips_a_cancelled_reservation() {
         let gate = Arc::new(NicIngressFlowGate::new());
         let first = gate.reserve_shards([7]);
@@ -2389,33 +2406,12 @@ mod tests {
     }
 
     #[test]
-    fn tap_adapter_selects_ethernet_frames() {
-        let mut flags = gen_default_flags();
-        flags.interface_adapter = "tap".to_string();
+    fn automatic_adapter_uses_native_ethernet_when_the_platform_supports_it() {
+        let adapter = VirtualNic::interface_adapter();
+        let native_ethernet = cfg!(any(target_os = "linux", target_os = "freebsd"));
 
-        let adapter = VirtualNic::interface_adapter(&flags);
-        assert!(adapter.uses_ethernet_overlay());
-        assert!(VirtualNic::needs_tap_edge_adapter(adapter));
-    }
-
-    #[test]
-    fn tun_adapter_keeps_ip_packet_forwarding() {
-        let mut flags = gen_default_flags();
-        flags.interface_adapter = "tun".to_string();
-
-        let adapter = VirtualNic::interface_adapter(&flags);
-        assert!(!adapter.uses_ethernet_overlay());
-        assert!(!VirtualNic::needs_tap_edge_adapter(adapter));
-    }
-
-    #[test]
-    fn compatible_ethernet_maps_to_the_tun_adapter() {
-        let mut flags = gen_default_flags();
-        flags.port_mode = "compatible-ethernet".to_string();
-
-        let adapter = VirtualNic::interface_adapter(&flags);
-        assert!(!adapter.uses_ethernet_overlay());
-        assert!(!adapter.uses_native_ethernet());
+        assert_eq!(adapter.uses_ethernet_overlay(), native_ethernet);
+        assert_eq!(VirtualNic::needs_tap_edge_adapter(adapter), native_ethernet);
     }
 
     #[test]

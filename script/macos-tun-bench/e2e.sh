@@ -104,7 +104,6 @@ docker --context "$docker_context" run -d \
     --network-secret macos-tun-bench-secret \
     --encryption-algorithm "$encryption_algorithm" \
     --mtu "$mtu" \
-    --interface-adapter tun \
     --ipv4 10.91.0.2/24 \
     --no-listener \
     --peers "udp://host.docker.internal:${host_udp_port}" \
@@ -126,7 +125,6 @@ fi
         --network-secret macos-tun-bench-secret \
         --encryption-algorithm "$encryption_algorithm" \
         --mtu "$mtu" \
-        --interface-adapter tun \
         --ipv4 10.91.0.1/24 \
         --listeners "udp://0.0.0.0:${host_udp_port}" \
         --default-protocol udp \

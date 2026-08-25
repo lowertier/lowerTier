@@ -142,7 +142,7 @@ The candidate run received 5.40 Gbit/s forward and 5.42 Gbit/s reverse when offe
 UDP. Unloaded RTT averaged 0.643 ms; loaded RTT averaged 1.272 ms. The 0.7% mean TCP change was
 too small to justify retention after the native A/B result disagreed.
 
-The full baseline matrix found the same ceiling in every port mode:
+The historical baseline matrix found the same ceiling in every interface profile:
 
 | Mode | Forward TCP | Reverse TCP |
 | --- | ---: | ---: |
@@ -297,7 +297,7 @@ reverse UDP and latency workloads completed.
 Tailscale's published 10GbE work used two bare-metal Linux systems with Mellanox 25GbE adapters,
 then added packet vectors, UDP GSO/GRO, and checksum work. LowTier's VZ result is therefore not
 an apples-to-apples product comparison. It is an actionable bottleneck test: the substrate is
-fast enough, all LowTier port modes converge near 4 Gbit/s TCP, and the remaining work belongs
+fast enough, all historical LowTier interface profiles converge near 4 Gbit/s TCP, and the remaining work belongs
 in the shared queue/socket backend.
 
 References:

@@ -21,6 +21,16 @@ pub mod udp_hole_punch;
 pub mod dns_connector;
 pub mod http_connector;
 
+fn url_has_ip_literal_host(url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
+            .parse::<IpAddr>()
+            .is_ok()
+    })
+}
+
 pub(crate) fn should_try_p2p_with_peer(
     feature_flag: Option<&PeerFeatureFlag>,
     allow_public_server: bool,
@@ -257,11 +267,7 @@ pub async fn create_connector_by_url(
     let mut connector: Box<dyn TunnelConnector + 'static> = match scheme {
         TunnelScheme::Ip(scheme) => {
             let underlay_policy = global_ctx.get_underlay_policy();
-            if underlay_policy.is_active()
-                && url
-                    .host_str()
-                    .is_none_or(|host| host.parse::<std::net::IpAddr>().is_err())
-            {
+            if underlay_policy.is_active() && !url_has_ip_literal_host(&url) {
                 return Err(TunnelError::UnderlayPolicyDenied(format!(
                     "strict underlay policy requires a literal IP peer address: {url}"
                 ))
@@ -388,6 +394,18 @@ mod tests {
                 crate::tunnel::TunnelError::UnderlayPolicyDenied(_)
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn strict_policy_accepts_ipv6_literal() {
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_deny_interfaces = vec!["tailscale0".into()];
+        global_ctx.set_flags(flags);
+
+        let ret = create_connector_by_url("udp://[::1]:11010", &global_ctx, IpVersion::V6).await;
+
+        assert!(ret.is_ok(), "IPv6 literal was rejected: {ret:?}");
     }
 
     #[test]

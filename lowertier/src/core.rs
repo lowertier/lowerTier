@@ -410,33 +410,6 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_PROXY_FORWARD_BY_SYSTEM",
-        help = t!("core_clap.proxy_forward_by_system").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    proxy_forward_by_system: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_NO_TUN",
-        help = t!("core_clap.no_tun").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    no_tun: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_USE_SMOLTCP",
-        help = t!("core_clap.use_smoltcp").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    use_smoltcp: Option<bool>,
-
-    #[arg(
-        long,
         env = "ET_MANUAL_ROUTES",
         value_delimiter = ',',
         help = t!("core_clap.manual_routes").to_string(),
@@ -549,14 +522,6 @@ struct NetworkOptions {
     #[cfg(feature = "socks5")]
     #[arg(
         long,
-        env = "ET_SOCKS5",
-        help = t!("core_clap.socks5").to_string()
-    )]
-    socks5: Option<u16>,
-
-    #[cfg(feature = "socks5")]
-    #[arg(
-        long,
         env = "ET_SOCKS5_SERVER",
         help = t!("core_clap.socks5_server").to_string()
     )]
@@ -612,14 +577,6 @@ struct NetworkOptions {
         num_args = 0..
     )]
     underlay_deny_cidrs: Vec<String>,
-
-    #[arg(
-        long = "interface-adapter",
-        visible_alias = "port-mode",
-        env = "ET_INTERFACE_ADAPTER",
-        help = t!("core_clap.port_mode").to_string()
-    )]
-    interface_adapter: Option<String>,
 
     #[arg(
         long,
@@ -1281,17 +1238,8 @@ impl NetworkOptions {
 
         #[cfg(feature = "socks5")]
         {
-            if self.socks5.is_some() && self.socks5_server.is_some() {
-                anyhow::bail!("--socks5 and --socks5-server cannot be used together");
-            }
             if let Some(socks5_server) = self.socks5_server.as_deref() {
                 cfg.set_socks5_portal(Some(parse_proxy_listener_url(socks5_server, "socks5")?));
-            } else if let Some(socks5_port) = self.socks5 {
-                cfg.set_socks5_portal(Some(
-                    format!("socks5://0.0.0.0:{socks5_port}")
-                        .parse()
-                        .expect("legacy SOCKS5 listener should be valid"),
-                ));
             }
 
             if let Some(http_proxy) = self.outbound_http_proxy_listen.as_deref() {
@@ -1399,11 +1347,7 @@ impl NetworkOptions {
             f.mtu = mtu as u32;
         }
         f.enable_exit_node = self.enable_exit_node.unwrap_or(f.enable_exit_node);
-        f.proxy_forward_by_system = self
-            .proxy_forward_by_system
-            .unwrap_or(f.proxy_forward_by_system);
-        f.no_tun = self.no_tun.unwrap_or(f.no_tun) || cfg!(not(feature = "tun"));
-        f.use_smoltcp = self.use_smoltcp.unwrap_or(f.use_smoltcp);
+        f.no_tun |= cfg!(not(feature = "tun"));
         if let Some(wl) = self.relay_network_whitelist.as_ref() {
             f.relay_network_whitelist = wl.join(" ");
         }
@@ -1441,10 +1385,6 @@ impl NetworkOptions {
         }
         if !self.underlay_deny_cidrs.is_empty() {
             f.underlay_deny_cidrs = self.underlay_deny_cidrs.clone();
-        }
-        if let Some(interface_adapter) = &self.interface_adapter {
-            f.interface_adapter = interface_adapter.clone();
-            f.port_mode.clear();
         }
         f.l2_fdb_capacity = self.l2_fdb_capacity.unwrap_or(f.l2_fdb_capacity);
         f.l2_fdb_age_seconds = self.l2_fdb_age_seconds.unwrap_or(f.l2_fdb_age_seconds);
@@ -2149,8 +2089,6 @@ credential_bundle = "{credential_bundle}"
             "--quic-datagram-fec-parity",
             "3",
             "--quic-datagram-alternate-path-parity=false",
-            "--interface-adapter",
-            "tap",
             "--l2-fdb-capacity",
             "32768",
             "--l2-fdb-age-seconds",
@@ -2177,11 +2115,17 @@ credential_bundle = "{credential_bundle}"
         assert_eq!(flags.quic_receive_window, 33_554_432);
         assert_eq!(flags.quic_datagram_fec_parity, 3);
         assert!(!flags.quic_datagram_alternate_path_parity);
-        assert_eq!(flags.interface_adapter, "tap");
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);
         assert!(flags.enable_bridge);
+    }
+
+    #[test]
+    fn cli_rejects_removed_adapter_options() {
+        for option in ["--interface-adapter=tun", "--port-mode=routed"] {
+            assert!(Cli::try_parse_from(["lowertier-core", option]).is_err());
+        }
     }
 
     #[test]
@@ -2256,18 +2200,14 @@ credential_bundle = "{credential_bundle}"
     }
 
     #[test]
-    fn new_socks5_option_rejects_legacy_socks5_option() {
-        let cli = Cli::try_parse_from([
-            "lowertier-core",
+    fn cli_rejects_removed_userspace_mode_options() {
+        for option in [
+            "--no-tun",
+            "--use-smoltcp",
+            "--proxy-forward-by-system",
             "--socks5=1080",
-            "--socks5-server=127.0.0.1:1055",
-        ])
-        .unwrap();
-        let cfg = TomlConfigLoader::default();
-
-        let error = cli.network_options.merge_into(&cfg).unwrap_err();
-
-        assert!(error.to_string().contains("--socks5"));
-        assert!(error.to_string().contains("--socks5-server"));
+        ] {
+            assert!(Cli::try_parse_from(["lowertier-core", option]).is_err());
+        }
     }
 }

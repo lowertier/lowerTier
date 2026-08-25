@@ -1,4 +1,5 @@
 .git
+**/.git
 target
 **/target
 node_modules

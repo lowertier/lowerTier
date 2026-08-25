@@ -67,6 +67,7 @@ pub struct Throughput {
     rx_bytes: UnsafeCell<u64>,
     tx_packets: UnsafeCell<u64>,
     rx_packets: UnsafeCell<u64>,
+    tx_data_packets: UnsafeCell<u64>,
 }
 
 impl Clone for Throughput {
@@ -76,6 +77,7 @@ impl Clone for Throughput {
             rx_bytes: UnsafeCell::new(unsafe { *self.rx_bytes.get() }),
             tx_packets: UnsafeCell::new(unsafe { *self.tx_packets.get() }),
             rx_packets: UnsafeCell::new(unsafe { *self.rx_packets.get() }),
+            tx_data_packets: UnsafeCell::new(unsafe { *self.tx_data_packets.get() }),
         }
     }
 }
@@ -91,6 +93,7 @@ impl Default for Throughput {
             rx_bytes: UnsafeCell::new(0),
             tx_packets: UnsafeCell::new(0),
             rx_packets: UnsafeCell::new(0),
+            tx_data_packets: UnsafeCell::new(0),
         }
     }
 }
@@ -116,6 +119,10 @@ impl Throughput {
         unsafe { *self.rx_packets.get() }
     }
 
+    pub fn tx_data_packets(&self) -> u64 {
+        unsafe { *self.tx_data_packets.get() }
+    }
+
     pub fn record_tx_bytes(&self, bytes: u64) {
         self.record_tx_batch(bytes, 1);
     }
@@ -124,6 +131,12 @@ impl Throughput {
         unsafe {
             *self.tx_bytes.get() += bytes;
             *self.tx_packets.get() += packets;
+        }
+    }
+
+    pub fn record_tx_data_packets(&self, packets: u64) {
+        unsafe {
+            *self.tx_data_packets.get() += packets;
         }
     }
 

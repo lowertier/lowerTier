@@ -26,7 +26,8 @@ use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx};
 use crate::common::join_joinset_background;
 use crate::common::log;
 use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
-use crate::peers::fabric::{FabricPacket, FabricPayloadKind};
+#[cfg(feature = "smoltcp")]
+use crate::peers::fabric::{FabricBatch, FabricPayloadKind};
 use crate::peers::peer_manager::PeerManager;
 use crate::peers::{NicPacketFilter, PeerPacketFilter};
 use crate::proto::api::instance::{
@@ -35,6 +36,8 @@ use crate::proto::api::instance::{
 };
 use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
+#[cfg(feature = "smoltcp")]
+use crate::tunnel::batch::PacketBatch;
 use crate::tunnel::packet_def::{PacketType, PeerManagerHeader, ZCPacket};
 
 use super::CidrSet;
@@ -584,7 +587,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
             self.tasks.lock().unwrap().spawn(async move {
                 while let Some(packet) = smoltcp_stack_receiver.recv().await {
                     tracing::trace!(?packet, "receive from peer send to smoltcp packet");
-                    if let Err(e) = stack_sink.send(Ok(packet.payload().to_vec())).await {
+                    if let Err(e) = stack_sink.send(Ok(PacketBatch::singleton(packet))).await {
                         tracing::error!("send to smoltcp stack failed: {:?}", e);
                     }
                 }
@@ -593,23 +596,21 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
             let peer_mgr = self.peer_manager.clone();
             self.tasks.lock().unwrap().spawn(async move {
-                while let Some(data) = stack_stream.recv().await {
-                    tracing::trace!(
-                        ?data,
-                        "receive from smoltcp stack and send to peer mgr packet"
-                    );
-                    if Ipv4Packet::new(&data).is_none() {
-                        tracing::error!(?data, "smoltcp stack stream get non ipv4 packet");
+                while let Some(packet) = stack_stream.recv().await {
+                    if Ipv4Packet::new(packet.payload()).is_none() {
+                        tracing::error!("smoltcp stack stream produced a non-IPv4 packet");
                         continue;
                     }
 
-                    let packet = ZCPacket::new_with_payload(&data);
                     let Some(peer_mgr) = peer_mgr.upgrade() else {
                         tracing::warn!("peer manager is gone, smoltcp sender exited");
                         return;
                     };
                     if let Err(e) = peer_mgr
-                        .send_fabric_packet(FabricPacket::new(FabricPayloadKind::Ip, packet))
+                        .send_fabric_batch(FabricBatch::new(
+                            FabricPayloadKind::Ip,
+                            PacketBatch::singleton(packet),
+                        ))
                         .await
                     {
                         tracing::error!("send to peer failed in smoltcp sender: {:?}", e);

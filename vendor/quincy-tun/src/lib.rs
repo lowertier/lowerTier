@@ -61,6 +61,8 @@ mod builder;
 mod platform;
 
 pub use async_device::AsyncDevice;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub use async_device::{GsoReadContinuation, RecvMultipleResult};
 
 #[cfg(any(
     target_os = "macos",

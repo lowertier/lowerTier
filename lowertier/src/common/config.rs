@@ -93,7 +93,7 @@ pub fn gen_default_flags() -> Flags {
         speed_probe_interval_seconds: 30,
         speed_probe_budget_bps: 0,
         port_mode: String::new(),
-        interface_adapter: InterfaceAdapter::Auto.to_string(),
+        interface_adapter: String::new(),
         l2_fdb_capacity: 16_384,
         l2_fdb_age_seconds: 300,
         l2_flood_bps: 64 * 1024 * 1024,
@@ -101,21 +101,8 @@ pub fn gen_default_flags() -> Flags {
     }
 }
 
-#[allow(deprecated)]
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)?;
-
-    InterfaceAdapter::from_flags_checked(flags).map_err(|_| {
-        let field = if flags.port_mode.is_empty() {
-            "interface_adapter"
-        } else {
-            "port_mode"
-        };
-        anyhow::anyhow!(
-            "unsupported interface adapter in {field}: {:?}; expected \"tun\", \"tap\", or \"auto\"",
-            InterfaceAdapter::configured_value(flags)
-        )
-    })?;
     if !(1..=1_048_576).contains(&flags.l2_fdb_capacity) {
         anyhow::bail!("l2_fdb_capacity must be between 1 and 1048576");
     }
@@ -170,6 +157,12 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(deprecated)]
+pub(crate) fn remove_obsolete_adapter_flags(flags: &mut Flags) {
+    flags.port_mode.clear();
+    flags.interface_adapter.clear();
+}
+
 pub fn parse_proxy_listener_url(value: &str, scheme: &str) -> anyhow::Result<url::Url> {
     let authority = value.trim();
     if authority.is_empty()
@@ -208,76 +201,33 @@ pub fn parse_proxy_listener_url(value: &str, scheme: &str) -> anyhow::Result<url
 pub enum InterfaceAdapter {
     Tun,
     Tap,
-    Auto,
-}
-
-impl std::fmt::Display for InterfaceAdapter {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Tun => "tun",
-            Self::Tap => "tap",
-            Self::Auto => "auto",
-        })
-    }
-}
-
-impl std::str::FromStr for InterfaceAdapter {
-    type Err = strum::ParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "tun" | "routed" | "compatible-ethernet" => Ok(Self::Tun),
-            "tap" | "ethernet" => Ok(Self::Tap),
-            "auto" => Ok(Self::Auto),
-            _ => Err(strum::ParseError::VariantNotFound),
-        }
-    }
 }
 
 impl InterfaceAdapter {
-    #[allow(deprecated)]
-    fn configured_value(flags: &Flags) -> &str {
-        if !flags.port_mode.is_empty() {
-            &flags.port_mode
+    pub fn automatic() -> Self {
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            Self::Tap
         } else {
-            &flags.interface_adapter
+            Self::Tun
         }
-    }
-
-    pub fn from_flags_checked(flags: &Flags) -> Result<Self, strum::ParseError> {
-        Self::configured_value(flags).parse()
-    }
-
-    pub fn from_flags(flags: &Flags) -> Self {
-        Self::from_flags_checked(flags).expect("interface adapter was validated")
     }
 
     pub fn uses_ethernet_overlay(self) -> bool {
         match self {
             Self::Tun => false,
             Self::Tap => true,
-            Self::Auto => cfg!(any(target_os = "linux", target_os = "freebsd")),
         }
     }
 
     pub fn uses_native_ethernet(self) -> bool {
         match self {
             Self::Tap => true,
-            Self::Auto => cfg!(any(target_os = "linux", target_os = "freebsd")),
             Self::Tun => false,
         }
-    }
-
-    pub fn is_auto(self) -> bool {
-        self == Self::Auto
     }
 
     pub fn allows_bridge_input(self, enable_bridge: bool) -> bool {
-        match self {
-            Self::Tap => true,
-            Self::Auto => self.uses_native_ethernet() && enable_bridge,
-            Self::Tun => false,
-        }
+        self.uses_native_ethernet() && enable_bridge
     }
 
     pub fn uses_ethernet(self) -> bool {
@@ -1030,8 +980,9 @@ impl TomlConfigLoader {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
-        let flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
+        let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
             .context("failed to parse flags")?;
+        remove_obsolete_adapter_flags(&mut flags);
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         config.flags_struct = Some(flags);
         config.secure_mode = config
@@ -1393,7 +1344,8 @@ impl ConfigLoader for TomlConfigLoader {
             .unwrap_or_default()
     }
 
-    fn set_flags(&self, flags: Flags) {
+    fn set_flags(&self, mut flags: Flags) {
+        remove_obsolete_adapter_flags(&mut flags);
         self.config.lock().unwrap().flags_struct = Some(flags);
     }
 
@@ -1908,11 +1860,12 @@ socket_mark = 66
     }
 
     #[test]
+    #[allow(deprecated)]
     fn underlay_and_quic_flags_have_safe_defaults() {
         let flags = gen_default_flags();
 
         assert_eq!(flags.default_protocol, "udp");
-        assert_eq!(flags.interface_adapter, "auto");
+        assert!(flags.interface_adapter.is_empty());
         assert!(flags.port_mode.is_empty());
         assert!(!flags.enable_bridge);
         assert_eq!(flags.l2_fdb_capacity, 16_384);
@@ -1970,37 +1923,45 @@ socket_mark = 66
     }
 
     #[test]
-    fn legacy_port_modes_map_to_interface_adapters() {
+    fn automatic_adapter_uses_the_platform_capability() {
         assert_eq!(
-            "routed".parse::<InterfaceAdapter>().unwrap(),
-            InterfaceAdapter::Tun
-        );
-        assert_eq!(
-            "compatible-ethernet".parse::<InterfaceAdapter>().unwrap(),
-            InterfaceAdapter::Tun
-        );
-        assert_eq!(
-            "ethernet".parse::<InterfaceAdapter>().unwrap(),
-            InterfaceAdapter::Tap
-        );
-        assert_eq!(
-            "auto".parse::<InterfaceAdapter>().unwrap(),
-            InterfaceAdapter::Auto
+            InterfaceAdapter::automatic().uses_native_ethernet(),
+            cfg!(any(target_os = "linux", target_os = "freebsd"))
         );
     }
 
     #[test]
-    fn interface_adapter_accepts_canonical_names() {
-        assert_eq!(
-            "tun".parse::<InterfaceAdapter>().unwrap(),
-            InterfaceAdapter::Tun
-        );
-        assert_eq!(
-            "tap".parse::<InterfaceAdapter>().unwrap(),
-            InterfaceAdapter::Tap
-        );
-        assert_eq!(InterfaceAdapter::Tun.to_string(), "tun");
-        assert_eq!(InterfaceAdapter::Tap.to_string(), "tap");
+    #[allow(deprecated)]
+    fn obsolete_adapter_fields_are_removed_during_config_load() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[flags]
+port_mode = "removed-value"
+interface_adapter = "also-removed"
+"#,
+        )
+        .unwrap();
+        let flags = config.get_flags();
+
+        assert!(flags.port_mode.is_empty());
+        assert!(flags.interface_adapter.is_empty());
+        assert!(!config.dump().contains("port_mode"));
+        assert!(!config.dump().contains("interface_adapter"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn obsolete_adapter_fields_are_removed_from_runtime_updates() {
+        let config = TomlConfigLoader::default();
+        let mut flags = config.get_flags();
+        flags.port_mode = "removed-value".to_string();
+        flags.interface_adapter = "also-removed".to_string();
+
+        config.set_flags(flags);
+        let flags = config.get_flags();
+
+        assert!(flags.port_mode.is_empty());
+        assert!(flags.interface_adapter.is_empty());
     }
 
     #[test]
@@ -2008,7 +1969,6 @@ socket_mark = 66
         let cfg = TomlConfigLoader::new_from_str(
             r#"
 [flags]
-interface_adapter = "tap"
 l2_fdb_capacity = 32768
 l2_fdb_age_seconds = 600
 l2_flood_bps = 134217728
@@ -2026,7 +1986,6 @@ quic_datagram_alternate_path_parity = false
         .unwrap();
         let flags = cfg.get_flags();
 
-        assert_eq!(flags.interface_adapter, "tap");
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
         assert_eq!(flags.l2_flood_bps, 134_217_728);
@@ -2081,7 +2040,6 @@ quic_congestion = "turbo"
     #[test]
     fn rejects_invalid_l2_flags() {
         for (key, value) in [
-            ("port_mode", "\"invalid\""),
             ("l2_fdb_capacity", "0"),
             ("l2_fdb_capacity", "1048577"),
             ("l2_fdb_age_seconds", "0"),

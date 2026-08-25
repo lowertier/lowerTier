@@ -546,6 +546,22 @@ impl IntoIterator for OrderedPeerBatches {
         self.batches.into_iter()
     }
 }
+
+type HybridRoutePeers = SmallVec<[PeerId; 2]>;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct HybridBatchRouteKey {
+    address: IpAddr,
+    flow: u64,
+}
+
+#[derive(Clone)]
+struct HybridBatchRoute {
+    peers: HybridRoutePeers,
+    is_exit_node: bool,
+    blackholed: bool,
+}
+
 fn is_peer_rpc_packet_type(packet_type: u8) -> bool {
     packet_type == PacketType::TaRpc as u8
         || packet_type == PacketType::RpcReq as u8
@@ -930,11 +946,6 @@ struct DirectNicWork {
     queue_credits: OwnedSemaphorePermit,
 }
 
-struct DirectNicInFlight {
-    _queue_guard: DirectNicQueueGuard,
-    _queue_credits: OwnedSemaphorePermit,
-}
-
 pub(crate) struct DirectNicEndpoint {
     sender: mpsc::Sender<DirectNicWork>,
     queue_credits: Arc<Semaphore>,
@@ -1073,18 +1084,13 @@ fn plan_direct_nic_delivery(mut batch: PacketBatch) -> Result<DirectNicDelivery,
 async fn feed_direct_nic_work(
     sink: &mut std::pin::Pin<Box<dyn PacketBatchSink>>,
     work: DirectNicWork,
-    in_flight: &mut SmallVec<[DirectNicInFlight; DIRECT_NIC_QUEUE_BATCH_CAPACITY]>,
 ) -> Result<(), TunnelError> {
     let DirectNicWork {
         batch,
-        queue_guard,
-        queue_credits,
+        queue_guard: _queue_guard,
+        queue_credits: _queue_credits,
     } = work;
     sink.feed(batch).await?;
-    in_flight.push(DirectNicInFlight {
-        _queue_guard: queue_guard,
-        _queue_credits: queue_credits,
-    });
     Ok(())
 }
 
@@ -1105,10 +1111,8 @@ async fn run_direct_nic_writer(
     terminal_error: Arc<OnceLock<String>>,
     global_ctx: ArcGlobalCtx,
 ) {
-    let mut in_flight = SmallVec::<[DirectNicInFlight; DIRECT_NIC_QUEUE_BATCH_CAPACITY]>::new();
-
     while let Some(work) = receiver.recv().await {
-        if let Err(error) = feed_direct_nic_work(&mut sink, work, &mut in_flight).await {
+        if let Err(error) = feed_direct_nic_work(&mut sink, work).await {
             record_direct_nic_writer_failure(&terminal_error, &global_ctx, error);
             return;
         }
@@ -1116,12 +1120,25 @@ async fn run_direct_nic_writer(
         loop {
             tokio::select! {
                 biased;
+                result = sink.flush() => {
+                    match result {
+                        Ok(()) => {
+                            break;
+                        }
+                        Err(error) => {
+                            record_direct_nic_writer_failure(
+                                &terminal_error,
+                                &global_ctx,
+                                error,
+                            );
+                            return;
+                        }
+                    }
+                }
                 next = receiver.recv() => {
                     match next {
                         Some(work) => {
-                            if let Err(error) =
-                                feed_direct_nic_work(&mut sink, work, &mut in_flight).await
-                            {
+                            if let Err(error) = feed_direct_nic_work(&mut sink, work).await {
                                 record_direct_nic_writer_failure(
                                     &terminal_error,
                                     &global_ctx,
@@ -1138,22 +1155,6 @@ async fn run_direct_nic_writer(
                                     error,
                                 );
                             }
-                            return;
-                        }
-                    }
-                }
-                result = sink.flush() => {
-                    match result {
-                        Ok(()) => {
-                            in_flight.clear();
-                            break;
-                        }
-                        Err(error) => {
-                            record_direct_nic_writer_failure(
-                                &terminal_error,
-                                &global_ctx,
-                                error,
-                            );
                             return;
                         }
                     }
@@ -1353,6 +1354,16 @@ impl DirectNicIngress {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserRoutePlan {
+    System,
+    Overlay {
+        peer_ids: Vec<PeerId>,
+        is_exit_node: bool,
+    },
+    Blackhole,
 }
 
 pub struct PeerManager {
@@ -5760,7 +5771,20 @@ impl PeerManager {
         (Vec::new(), false)
     }
 
-    fn hybrid_destination_from_packet_snapshot(
+    fn sync_topology_service_routes(&self, snapshot: &ForwardingDecisionSnapshotHandle) {
+        let topology_routes = snapshot.service_routes();
+        let topology_generation = topology_routes.generation();
+        if self
+            .topology_service_route_generation
+            .swap(topology_generation, Ordering::AcqRel)
+            != topology_generation
+        {
+            self.service_routes
+                .replace_source(RouteSource::Overlay, topology_routes.routes().to_vec());
+        }
+    }
+
+    fn hybrid_destination_from_packet_snapshot_with_synced_routes(
         &self,
         packet: &ZCPacket,
         snapshot: &ForwardingDecisionSnapshotHandle,
@@ -5776,16 +5800,6 @@ impl PeerManager {
                 .peer_manager_header()
                 .is_some_and(|header| header.is_exit_node());
             return (vec![overridden_peer], is_exit_node, false);
-        }
-        let topology_routes = snapshot.service_routes();
-        let topology_generation = topology_routes.generation();
-        if self
-            .topology_service_route_generation
-            .swap(topology_generation, Ordering::AcqRel)
-            != topology_generation
-        {
-            self.service_routes
-                .replace_source(RouteSource::Overlay, topology_routes.routes().to_vec());
         }
         if let Some(route) = self.service_routes.select_gateway(
             ip_addr,
@@ -5806,6 +5820,74 @@ impl PeerManager {
         let (peers, is_exit_node) =
             self.hybrid_destination_from_snapshot(snapshot, ip_addr, configured_exit_nodes);
         (peers, is_exit_node, false)
+    }
+
+    fn hybrid_destination_from_packet_snapshot(
+        &self,
+        packet: &ZCPacket,
+        snapshot: &ForwardingDecisionSnapshotHandle,
+        ip_addr: IpAddr,
+        configured_exit_nodes: &[IpAddr],
+    ) -> (Vec<PeerId>, bool, bool) {
+        self.sync_topology_service_routes(snapshot);
+        self.hybrid_destination_from_packet_snapshot_with_synced_routes(
+            packet,
+            snapshot,
+            ip_addr,
+            configured_exit_nodes,
+        )
+    }
+
+    pub async fn plan_user_route(&self, ip_addr: IpAddr) -> Result<UserRoutePlan, Error> {
+        let snapshot = self
+            .peers
+            .forwarding_decision_snapshot()
+            .await
+            .ok_or_else(|| {
+                Error::RouteError(Some(
+                    "forwarding decision snapshot is unavailable".to_string(),
+                ))
+            })?;
+        self.sync_topology_service_routes(&snapshot);
+        let flow = match ip_addr {
+            IpAddr::V4(address) => u64::from(u32::from(address)),
+            IpAddr::V6(address) => {
+                let address = u128::from(address);
+                address as u64 ^ (address >> 64) as u64
+            }
+        };
+        if let Some(route) = self
+            .service_routes
+            .select_gateway(ip_addr, flow, |gateway| {
+                gateway == self.my_peer_id
+                    || snapshot
+                        .next_hop(gateway, NextHopPolicy::LeastCost)
+                        .is_some()
+            })
+        {
+            return Ok(match route.action {
+                ServiceRouteAction::Forward => UserRoutePlan::Overlay {
+                    peer_ids: vec![route.gateway],
+                    is_exit_node: false,
+                },
+                ServiceRouteAction::ExitSnat => UserRoutePlan::Overlay {
+                    peer_ids: vec![route.gateway],
+                    is_exit_node: true,
+                },
+                ServiceRouteAction::Blackhole => UserRoutePlan::Blackhole,
+            });
+        }
+        let configured_exit_nodes = self.exit_nodes.load_full();
+        let (peer_ids, is_exit_node) =
+            self.hybrid_destination_from_snapshot(&snapshot, ip_addr, &configured_exit_nodes);
+        if peer_ids.is_empty() {
+            Ok(UserRoutePlan::System)
+        } else {
+            Ok(UserRoutePlan::Overlay {
+                peer_ids,
+                is_exit_node,
+            })
+        }
     }
 
     async fn capture_hybrid_forwarding_state(
@@ -6861,6 +6943,10 @@ impl PeerManager {
         })?;
         let configured_exit_nodes = self.exit_nodes.load_full();
         let origin_auth_snapshot = descriptor.origin_auth_snapshot.as_ref();
+        self.sync_topology_service_routes(snapshot);
+        let mut route_cache = SmallVec::<[HybridBatchRoute; 4]>::new();
+        let mut route_inline_indexes = SmallVec::<[(HybridBatchRouteKey, usize); 4]>::new();
+        let mut route_spill_indexes = None;
         let mut compact_batches = OrderedPeerBatches::new();
         let mut full_batches = OrderedPeerBatches::new();
         let mut errors = Vec::new();
@@ -6869,16 +6955,56 @@ impl PeerManager {
             let Some((ip_addr, not_send_to_self)) = self.routed_packet_destination(&packet) else {
                 continue;
             };
-            let (candidate_peers, is_exit_node, blackholed) = self
-                .hybrid_destination_from_packet_snapshot(
-                    &packet,
-                    snapshot,
-                    ip_addr,
-                    &configured_exit_nodes,
-                );
-            if blackholed {
+            let overridden_peer = packet
+                .peer_manager_header()
+                .map(|header| header.to_peer_id.get())
+                .unwrap_or_default();
+            let route = if overridden_peer != 0 {
+                let is_exit_node = packet
+                    .peer_manager_header()
+                    .is_some_and(|header| header.is_exit_node());
+                HybridBatchRoute {
+                    peers: HybridRoutePeers::from_slice(&[overridden_peer]),
+                    is_exit_node,
+                    blackholed: false,
+                }
+            } else {
+                let key = HybridBatchRouteKey {
+                    address: ip_addr,
+                    flow: packet.flow_hash().unwrap_or_default(),
+                };
+                if let Some(index) = lazy_batch_group_index(
+                    key,
+                    route_cache.len(),
+                    &mut route_inline_indexes,
+                    &mut route_spill_indexes,
+                ) {
+                    route_cache[index].clone()
+                } else {
+                    let (peers, is_exit_node, blackholed) = self
+                        .hybrid_destination_from_packet_snapshot_with_synced_routes(
+                            &packet,
+                            snapshot,
+                            ip_addr,
+                            &configured_exit_nodes,
+                        );
+                    let route = HybridBatchRoute {
+                        peers: peers.into_iter().collect(),
+                        is_exit_node,
+                        blackholed,
+                    };
+                    route_cache.push(route.clone());
+                    route
+                }
+            };
+            if route.blackholed {
                 continue;
             }
+            let HybridBatchRoute {
+                peers: candidate_peers,
+                is_exit_node,
+                blackholed: _,
+            } = route;
             if let Some(peer_id) =
                 self.hybrid_compact_unicast_peer(&candidate_peers, ip_addr, snapshot)
             {
@@ -7793,7 +7919,7 @@ mod tests {
 
     use super::{
         DIRECT_NIC_BATCH_CREDIT_BYTES, DIRECT_NIC_QUEUE_CREDIT_BYTES, DirectNicBatchWriter,
-        DirectNicDelivery, EthernetBatchInput, OriginAuthCapability, PeerManager,
+        DirectNicDelivery, EthernetBatchInput, OriginAuthCapability, PeerManager, UserRoutePlan,
         apply_local_route_policy, check_tunnel_info_underlay, decoded_local_nic_batch_source,
         direct_batch_group_key, direct_selected_conn_allowed, is_foreign_network_packet_type,
         ordered_probe_indexes, packet_batch_contains_peer_rpc, packet_supports_speed_first,
@@ -8252,6 +8378,49 @@ mod tests {
         fail_flush: bool,
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum DirectNicWriterEvent {
+        Start(u8),
+        Flush,
+    }
+
+    struct ImmediateFlushDirectNicSink {
+        events: futures::channel::mpsc::UnboundedSender<DirectNicWriterEvent>,
+    }
+
+    impl futures::Sink<PacketBatch> for ImmediateFlushDirectNicSink {
+        type Error = crate::tunnel::TunnelError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+            self.get_mut()
+                .events
+                .unbounded_send(DirectNicWriterEvent::Start(batch[0].payload()[0]))
+                .map_err(|_| crate::tunnel::TunnelError::Shutdown)
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.get_mut()
+                .events
+                .unbounded_send(DirectNicWriterEvent::Flush)
+                .map_err(|_| crate::tunnel::TunnelError::Shutdown)?;
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
     impl futures::Sink<PacketBatch> for GatedDirectNicSink {
         type Error = crate::tunnel::TunnelError;
 
@@ -8396,7 +8565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_nic_writer_overlaps_three_batches_and_bounds_the_fourth() {
+    async fn direct_nic_writer_releases_admission_after_sink_accepts_batch() {
         let (sent, mut received) = futures::channel::mpsc::unbounded::<PacketBatch>();
         let released = Arc::new(AtomicBool::new(false));
         let flush_waker = Arc::new(futures::task::AtomicWaker::new());
@@ -8441,11 +8610,6 @@ mod tests {
             )
             .await
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!fourth_send.is_finished());
-
-        released.store(true, Ordering::Release);
-        flush_waker.wake();
         tokio::time::timeout(Duration::from_secs(1), fourth_send)
             .await
             .unwrap()
@@ -8456,10 +8620,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fourth[0].payload()[0], 4);
+
+        released.store(true, Ordering::Release);
+        flush_waker.wake();
     }
 
     #[tokio::test]
-    async fn direct_nic_ingress_backpressures_noncritical_batch_without_loss() {
+    async fn direct_nic_writer_releases_completed_work_before_ready_ingress() {
+        let (events, mut received) = futures::channel::mpsc::unbounded::<DirectNicWriterEvent>();
+        let writer = DirectNicBatchWriter::default();
+        let endpoint = writer.install(
+            Box::pin(ImmediateFlushDirectNicSink { events }),
+            get_mock_global_ctx(),
+        );
+
+        for marker in 1_u8..=3 {
+            DirectNicBatchWriter::send_to(endpoint.clone(), direct_nic_writer_batch(marker, 1))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(received.next().await, Some(DirectNicWriterEvent::Start(1)));
+        assert_eq!(received.next().await, Some(DirectNicWriterEvent::Flush));
+    }
+
+    #[tokio::test]
+    async fn direct_nic_ingress_transfers_accepted_batch_ownership_without_loss() {
         let (sent, mut received) = futures::channel::mpsc::unbounded::<PacketBatch>();
         let released = Arc::new(AtomicBool::new(false));
         let flush_waker = Arc::new(futures::task::AtomicWaker::new());
@@ -8492,11 +8678,14 @@ mod tests {
                 .unwrap();
             assert_eq!(batch[0].payload()[0], marker);
         }
-        assert_eq!(endpoint.queue_credits.available_permits(), 0);
+        assert_eq!(
+            endpoint.queue_credits.available_permits(),
+            DIRECT_NIC_QUEUE_CREDIT_BYTES
+        );
 
         let packet_ingress = peer_manager.packet_ingress.clone();
         let destination_peer_id = peer_manager.my_peer_id();
-        let mut fourth_send = tokio::spawn(async move {
+        let fourth_send = tokio::spawn(async move {
             packet_ingress
                 .send_batch(direct_nic_ingress_batch(
                     destination_peer_id,
@@ -8506,14 +8695,6 @@ mod tests {
                 .await
         });
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut fourth_send)
-                .await
-                .is_err()
-        );
-
-        released.store(true, Ordering::Release);
-        flush_waker.wake();
         tokio::time::timeout(Duration::from_secs(1), fourth_send)
             .await
             .unwrap()
@@ -8524,6 +8705,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fourth[0].payload()[0], 4);
+
+        released.store(true, Ordering::Release);
+        flush_waker.wake();
     }
 
     #[tokio::test]
@@ -8931,10 +9115,15 @@ mod tests {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(ipv4.map(|address| cidr::Ipv4Inet::new(address, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
-        flags.port_mode = "ethernet".to_string();
         flags.enable_bridge = true;
         flags.l2_flood_bps = l2_flood_bps;
         global_ctx.set_flags(flags);
+        let mut features = global_ctx.get_feature_flags();
+        features.ethernet_input = true;
+        features.hybrid_l3 = true;
+        features.bridge_input = true;
+        features.multicast_membership = true;
+        global_ctx.set_base_advertised_feature_flags(features);
 
         let (packet_send, packet_recv) = create_packet_recv_chan();
         let peer_manager = Arc::new(PeerManager::new(
@@ -8949,9 +9138,12 @@ mod tests {
     async fn create_routed_peer_manager_with_ipv4(ipv4: std::net::Ipv4Addr) -> Arc<PeerManager> {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "routed".to_string();
-        global_ctx.set_flags(flags);
+        let mut features = global_ctx.get_feature_flags();
+        features.ethernet_input = false;
+        features.hybrid_l3 = true;
+        features.bridge_input = false;
+        features.multicast_membership = true;
+        global_ctx.set_base_advertised_feature_flags(features);
 
         let (packet_send, _packet_recv) = create_packet_recv_chan();
         let peer_manager = Arc::new(PeerManager::new(
@@ -8984,18 +9176,15 @@ mod tests {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
-        flags.port_mode = "auto".to_string();
         flags.enable_bridge = enable_bridge;
         flags.l2_flood_bps = l2_flood_bps;
         global_ctx.set_flags(flags);
-        if enable_bridge {
-            let mut features = global_ctx.get_feature_flags();
-            features.ethernet_input = true;
-            features.hybrid_l3 = true;
-            features.bridge_input = true;
-            features.multicast_membership = true;
-            global_ctx.set_base_advertised_feature_flags(features);
-        }
+        let mut features = global_ctx.get_feature_flags();
+        features.ethernet_input = true;
+        features.hybrid_l3 = true;
+        features.bridge_input = enable_bridge;
+        features.multicast_membership = true;
+        global_ctx.set_base_advertised_feature_flags(features);
 
         let (packet_send, packet_recv) = create_packet_recv_chan();
         let peer_manager = Arc::new(PeerManager::new(
@@ -9201,10 +9390,6 @@ mod tests {
     #[tokio::test]
     async fn direct_nic_ingress_bypasses_both_packet_channels() {
         let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "ethernet".to_string();
-        flags.enable_bridge = true;
-        global_ctx.set_flags(flags);
         let (nic_sender, mut legacy_nic) = create_packet_recv_chan();
         let peer_manager = Arc::new(PeerManager::new(
             RouteAlgoType::Ospf,
@@ -9265,10 +9450,6 @@ mod tests {
         }
 
         let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "ethernet".to_string();
-        flags.enable_bridge = true;
-        global_ctx.set_flags(flags);
         let (nic_sender, _legacy_nic) = create_packet_recv_chan();
         let peer_manager = Arc::new(PeerManager::new(
             RouteAlgoType::Ospf,
@@ -9307,9 +9488,10 @@ mod tests {
     #[tokio::test]
     async fn routed_direct_nic_ingress_rejects_ethernet() {
         let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.port_mode = "routed".to_string();
-        global_ctx.set_flags(flags);
+        let mut features = global_ctx.get_feature_flags();
+        features.ethernet_input = false;
+        features.bridge_input = false;
+        global_ctx.set_base_advertised_feature_flags(features);
         let (nic_sender, _legacy_nic) = create_packet_recv_chan();
         let peer_manager = Arc::new(PeerManager::new(
             RouteAlgoType::Ospf,
@@ -9523,7 +9705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unrelated_tap_peer_keeps_compact_hybrid_packets_across_transport_segments() {
+    async fn unrelated_tap_peer_keeps_one_compact_hybrid_packet_batch() {
         let (peer_mgr_a, _nic_a) =
             create_hybrid_peer_manager_with_ipv4("10.144.145.1".parse().unwrap()).await;
         let (peer_mgr_b, _nic_b) =
@@ -9561,15 +9743,15 @@ mod tests {
             .await
             .unwrap();
 
-        let mut markers = Vec::with_capacity(64);
-        while markers.len() < 64 {
-            let received = tokio::time::timeout(Duration::from_secs(5), direct_nic.next())
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(received.len() <= crate::tunnel::batch::IO_FLUSH_PACKET_BUDGET);
-            markers.extend(received.iter().map(|packet| packet.payload()[8]));
-        }
+        let received = tokio::time::timeout(Duration::from_secs(5), direct_nic.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.len(), 64);
+        let markers = received
+            .iter()
+            .map(|packet| packet.payload()[8])
+            .collect::<Vec<_>>();
         assert_eq!(markers, (0_u8..64).collect::<Vec<_>>());
         assert!(direct_nic.try_next().is_err());
     }
@@ -10535,12 +10717,85 @@ mod tests {
         assert_eq!(invocations.load(Ordering::Relaxed), 4);
     }
 
+    #[tokio::test]
+    async fn hybrid_ip_batch_selects_one_service_route_per_flow() {
+        let source = "10.144.153.1".parse().unwrap();
+        let destination = "10.144.153.2".parse().unwrap();
+        let (peer_mgr_a, _nic_a) = create_hybrid_peer_manager_with_ipv4(source).await;
+        let (peer_mgr_b, _nic_b) = create_hybrid_peer_manager_with_ipv4(destination).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        peer_mgr_a.replace_local_bgp_routes(vec![ServiceRoute {
+            prefix: "10.144.153.2/32".parse().unwrap(),
+            gateway: peer_mgr_b.my_peer_id(),
+            preference: 200,
+            metric: 0,
+            path_id: 1,
+            action: ServiceRouteAction::Forward,
+        }]);
+
+        let mut batch = PacketBatch::new();
+        for marker in 0_u8..8 {
+            batch
+                .try_push(routed_ipv4_packet(source, destination, marker))
+                .unwrap();
+        }
+        peer_mgr_a.service_routes.reset_selection_count();
+
+        peer_mgr_a.send_msg_by_hybrid_ip_batch(batch).await.unwrap();
+
+        assert_eq!(peer_mgr_a.service_routes.selection_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_route_plan_uses_authoritative_service_routes() {
+        let source = "10.144.154.1".parse().unwrap();
+        let gateway = "10.144.154.2".parse().unwrap();
+        let destination = "198.51.100.24".parse().unwrap();
+        let (peer_mgr_a, _nic_a) = create_hybrid_peer_manager_with_ipv4(source).await;
+        let (peer_mgr_b, _nic_b) = create_hybrid_peer_manager_with_ipv4(gateway).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        peer_mgr_a.replace_local_bgp_routes(vec![ServiceRoute {
+            prefix: "198.51.100.0/24".parse().unwrap(),
+            gateway: peer_mgr_b.my_peer_id(),
+            preference: 200,
+            metric: 0,
+            path_id: 1,
+            action: ServiceRouteAction::Forward,
+        }]);
+
+        assert_eq!(
+            peer_mgr_a.plan_user_route(destination).await.unwrap(),
+            UserRoutePlan::Overlay {
+                peer_ids: vec![peer_mgr_b.my_peer_id()],
+                is_exit_node: false,
+            }
+        );
+
+        peer_mgr_a.replace_local_bgp_routes(vec![ServiceRoute {
+            prefix: "198.51.100.0/24".parse().unwrap(),
+            gateway: 0,
+            preference: 200,
+            metric: 0,
+            path_id: 2,
+            action: ServiceRouteAction::Blackhole,
+        }]);
+        assert_eq!(
+            peer_mgr_a.plan_user_route(destination).await.unwrap(),
+            UserRoutePlan::Blackhole
+        );
+    }
+
     #[cfg(feature = "zstd")]
     #[tokio::test]
     async fn nic_filter_size_change_refreshes_length_before_zstd() {
         let global_ctx = get_mock_global_ctx();
         let mut flags = global_ctx.get_flags();
-        flags.port_mode = "auto".to_string();
         flags.data_compress_algo = CompressionAlgoPb::Zstd.into();
         global_ctx.set_flags(flags);
         let (packet_send, _packet_recv) = create_packet_recv_chan();

@@ -89,10 +89,30 @@ fn device_crypto_queue() -> &'static DeviceCryptoQueue {
 
 /// Resolve the emergency/debug opt-out once when a protected tunnel is built.
 /// Packet processing never reads the environment or branches on this setting.
+fn send_crypto_pipeline_configured(explicitly_enabled: bool, explicitly_disabled: bool) -> bool {
+    explicitly_enabled && !explicitly_disabled
+}
+
 pub(crate) fn send_crypto_pipeline_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var_os("LOWTIER_DEBUG_DISABLE_ASYNC_CRYPTO_PIPELINE").is_none())
+    *ENABLED.get_or_init(|| {
+        send_crypto_pipeline_configured(
+            std::env::var_os("LOWTIER_ENABLE_ASYNC_CRYPTO_PIPELINE").is_some(),
+            std::env::var_os("LOWTIER_DEBUG_DISABLE_ASYNC_CRYPTO_PIPELINE").is_some(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod send_pipeline_configuration_tests {
+    use super::send_crypto_pipeline_configured;
+
+    #[test]
+    fn asynchronous_send_crypto_requires_explicit_enablement() {
+        assert!(!send_crypto_pipeline_configured(false, false));
+        assert!(send_crypto_pipeline_configured(true, false));
+        assert!(!send_crypto_pipeline_configured(true, true));
+    }
 }
 
 /// Queue one stable slot index for a persistent device worker.

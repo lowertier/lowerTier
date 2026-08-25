@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
+use std::net::SocketAddr;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
@@ -183,10 +183,18 @@ impl<A: Authentication> Config<A> {
 }
 
 #[async_trait::async_trait]
-pub trait AsyncTcpConnector {
+pub trait AsyncTcpConnector: Send + Sync {
     type S: AsyncRead + AsyncWrite + Unpin + Send + Sync;
 
     async fn tcp_connect(&self, addr: SocketAddr, timeout_s: u64) -> Result<Self::S>;
+
+    async fn tcp_connect_target(&self, target: TargetAddr, timeout_s: u64) -> Result<Self::S> {
+        let address = match target.resolve_dns().await? {
+            TargetAddr::Ip(address) => address,
+            TargetAddr::Domain(_, _) => unreachable!("DNS resolution returned a domain"),
+        };
+        self.tcp_connect(address, timeout_s).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -200,6 +208,18 @@ pub trait AsyncUdpConnector: Send + Sync {
     type S: AsyncUdpSocket + 'static;
 
     async fn udp_connect(&self, addr: SocketAddr, timeout_s: u64) -> Result<Self::S>;
+
+    async fn udp_connect_target(
+        &self,
+        target: TargetAddr,
+        timeout_s: u64,
+    ) -> Result<(Self::S, SocketAddr)> {
+        let address = match target.resolve_dns().await? {
+            TargetAddr::Ip(address) => address,
+            TargetAddr::Domain(_, _) => unreachable!("DNS resolution returned a domain"),
+        };
+        Ok((self.udp_connect(address, timeout_s).await?, address))
+    }
 }
 
 pub struct DefaultTcpConnector {}
@@ -646,18 +666,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector 
     async fn execute_command_connect(&mut self) -> Result<()> {
         // async-std's ToSocketAddrs doesn't supports external trait implementation
         // @see https://github.com/async-rs/async-std/issues/539
-        let addr = self
+        let target = self
             .target_addr
             .as_ref()
             .context("target_addr empty")?
-            .to_socket_addrs()?
-            .next()
-            .context("unreachable")?;
+            .clone();
 
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
         let outbound = self
             .tcp_connector
-            .tcp_connect(addr, self.config.request_timeout)
+            .tcp_connect_target(target, self.config.request_timeout)
             .await?;
 
         debug!("Connected to remote destination");
@@ -802,11 +820,10 @@ async fn transfer_udp<C: AsyncUdpConnector>(
             if targets.len() >= MAX_UDP_ASSOCIATION_TARGETS {
                 return Err(anyhow::anyhow!("The SOCKS5 UDP target limit was reached.").into());
             }
-            let resolved_target = match target.clone().resolve_dns().await? {
-                TargetAddr::Ip(address) => address,
-                TargetAddr::Domain(_, _) => unreachable!("DNS resolution returned a domain"),
-            };
-            let socket = Arc::new(connector.udp_connect(resolved_target, timeout_s).await?);
+            let (socket, resolved_target) = connector
+                .udp_connect_target(target.clone(), timeout_s)
+                .await?;
+            let socket = Arc::new(socket);
             targets.insert(target, socket.clone());
 
             let response_socket = socket.clone();

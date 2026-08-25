@@ -232,9 +232,6 @@ core_clap:
   underlay_deny_cidrs:
     en: "deny LowTier local source and remote destination addresses in these IPv4 or IPv6 CIDRs"
     zh-CN: "禁止 LowTier 使用这些 IPv4 或 IPv6 CIDR 中的本地源地址和远程目标地址"
-  port_mode:
-    en: "network profile: routed, ethernet, compatible-ethernet, or auto; ethernet requires Linux or FreeBSD and a restart"
-    zh-CN: "网络配置：routed、ethernet、compatible-ethernet 或 auto；ethernet 需要 Linux 或 FreeBSD，并且修改后需要重启"
   l2_fdb_capacity:
     en: "maximum learned Ethernet MAC entries in TAP mode"
     zh-CN: "TAP 模式下可学习的以太网 MAC 条目上限"

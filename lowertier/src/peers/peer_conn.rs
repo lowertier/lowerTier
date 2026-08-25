@@ -1383,6 +1383,7 @@ pub struct PeerConn {
     pending_recv: parking_lot::Mutex<VecDeque<ZCPacket>>,
     tunnel_info: Option<TunnelInfo>,
     transport_binding: Option<TransportBinding>,
+    receive_backpressure: Option<crate::tunnel::ReceiveBackpressure>,
 
     tasks: JoinSet<Result<(), TunnelError>>,
 
@@ -1462,6 +1463,7 @@ impl PeerConn {
         let flags = global_ctx.get_flags();
         let tunnel_info = tunnel.info();
         let transport_binding = tunnel.transport_binding();
+        let receive_backpressure = tunnel.receive_backpressure();
         #[cfg(feature = "quic")]
         let alternate_fec_datagram_size_budget = tunnel.datagram_size_budget();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
@@ -1526,6 +1528,7 @@ impl PeerConn {
             pending_recv: parking_lot::Mutex::new(VecDeque::new()),
             tunnel_info,
             transport_binding,
+            receive_backpressure,
 
             tasks: JoinSet::new(),
 
@@ -4525,6 +4528,11 @@ impl PeerConn {
                                 }
                             }
                         }
+                        if delivery_failed {
+                            tracing::warn!(
+                                "peer receive loop could not admit a direct data batch"
+                            );
+                        }
                         if delivery_failed || identity_invalid {
                             break;
                         }
@@ -4761,8 +4769,19 @@ impl PeerConn {
                         break;
                     }
 
-                    if !data.is_empty() && sender.send_batch(data).await.is_err() {
-                        break;
+                    if !data.is_empty() {
+                        let packets = data.len();
+                        let bytes = data.buffer_byte_len();
+                        let retained_bytes = data.retained_buffer_capacity();
+                        if sender.send_batch(data).await.is_err() {
+                            tracing::warn!(
+                                packets,
+                                bytes,
+                                retained_bytes,
+                                "peer receive loop could not admit a filtered batch"
+                            );
+                            break;
+                        }
                     }
 
                     if received_bytes != 0
@@ -4802,6 +4821,7 @@ impl PeerConn {
             self.loss_rate_stats.clone(),
             self.throughput.clone(),
             self.control_metrics(&self.get_conn_info().network_name),
+            self.receive_backpressure.clone(),
         );
 
         let close_event_notifier = self.close_event_notifier.clone();

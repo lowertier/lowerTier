@@ -339,6 +339,30 @@ impl RingSink {
         Poll::Ready(Ok(()))
     }
 
+    pub(crate) fn poll_reserve_batch_prefix(
+        &mut self,
+        cx: &mut Context<'_>,
+        max_packet_count: usize,
+        reserved_packets: usize,
+    ) -> Poll<Result<usize, SinkError>> {
+        if max_packet_count == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let packet_count = if let Some(wait) = self.batch_permit_wait.as_ref() {
+            wait.packet_count
+        } else if let Some(permits) = self.ready_batch_permits.as_ref() {
+            permits.num_permits()
+        } else {
+            let available = self
+                .packet_permits
+                .available_permits()
+                .saturating_sub(reserved_packets);
+            max_packet_count.min(available).max(1)
+        };
+        ready!(self.poll_reserve_batch(cx, packet_count, reserved_packets))?;
+        Poll::Ready(Ok(packet_count))
+    }
+
     pub(crate) fn start_send_reserved_batch(
         &mut self,
         batch: PacketBatch,

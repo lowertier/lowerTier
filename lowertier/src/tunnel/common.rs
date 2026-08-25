@@ -12,8 +12,9 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{
-    DatagramSizeBudget, PacketBatchSink, PacketBatchStream, SinkItem, SplitTunnel, StreamItem,
-    TransportBinding, Tunnel, TunnelError, TunnelInfo, ZCPacketSink, ZCPacketStream,
+    DatagramSizeBudget, PacketBatchSink, PacketBatchStream, ReceiveBackpressure, SinkItem,
+    SplitTunnel, StreamItem, TransportBinding, Tunnel, TunnelError, TunnelInfo, ZCPacketSink,
+    ZCPacketStream,
     batch::{ScalarToBatchSink, ScalarToBatchStream},
     buf::BufList,
     packet_def::{TCP_TUNNEL_HEADER_SIZE, TCPTunnelHeader, ZCPacketType},
@@ -213,6 +214,7 @@ pub struct BatchTunnelWrapper<R, W> {
     transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
     datagram_size_budget: Option<DatagramSizeBudget>,
+    receive_backpressure: Option<ReceiveBackpressure>,
 }
 
 impl<R, W> BatchTunnelWrapper<R, W> {
@@ -225,6 +227,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated: false,
             datagram_size_budget: None,
+            receive_backpressure: None,
         }
     }
 
@@ -242,6 +245,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated,
             datagram_size_budget: None,
+            receive_backpressure: None,
         }
     }
 
@@ -260,6 +264,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated,
             datagram_size_budget,
+            receive_backpressure: None,
         }
     }
 
@@ -279,7 +284,13 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding,
             transport_authenticated,
             datagram_size_budget,
+            receive_backpressure: None,
         }
+    }
+
+    pub fn with_receive_backpressure(mut self, signal: ReceiveBackpressure) -> Self {
+        self.receive_backpressure = Some(signal);
+        self
     }
 }
 
@@ -308,6 +319,10 @@ where
 
     fn is_transport_authenticated(&self) -> bool {
         self.transport_authenticated
+    }
+
+    fn receive_backpressure(&self) -> Option<ReceiveBackpressure> {
+        self.receive_backpressure.clone()
     }
 }
 

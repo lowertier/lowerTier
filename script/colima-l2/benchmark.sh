@@ -135,18 +135,16 @@ start_container() {
 
 start_core() {
     local node=$1
-    local port_mode=$2
-    local overlay_ip=${3:-}
-    local peer_url=${4:-}
-    local disable_p2p=${5:-false}
-    local no_tun=${6:-false}
-    local relay_node=${7:-false}
-    local enable_bridge=${8:-false}
+    local overlay_ip=${2:-}
+    local peer_url=${3:-}
+    local disable_p2p=${4:-false}
+    local no_tun=${5:-false}
+    local relay_node=${6:-false}
+    local enable_bridge=${7:-false}
     local args=(
         lowertier-core
         --network-name l2-benchmark
         --network-secret l2-benchmark-secret
-        --port-mode "$port_mode"
         --listeners udp://0.0.0.0:11010
         --disable-upnp true
         --disable-p2p "$disable_p2p"
@@ -601,23 +599,18 @@ run_scenario() {
             target_ip="$underlay_b"
             sample_core=false
             ;;
-        routed-compact-l3)
-            mode=routed
-            topology=direct
-            target_ip="$overlay_b"
-            ;;
         automatic-compact-l3)
-            mode=auto
+            mode=automatic
             topology=direct
             target_ip="$overlay_b"
             ;;
         authorized-bridge-compact-l3)
-            mode=auto
+            mode=automatic
             topology=direct
             target_ip="$overlay_b"
             ;;
         relay-compact-l3)
-            mode=auto
+            mode=automatic
             topology=relay
             target_ip="$overlay_b"
             sample_relay=true
@@ -637,19 +630,19 @@ run_scenario() {
         start_container "$node_relay" "$network_a" "$relay_underlay_a"
         "${docker_cmd[@]}" network connect --ip "$relay_underlay_b" \
             "$network_b" "$node_relay"
-        start_core "$node_relay" routed "" "" false true true
-        start_core "$node_a" "$mode" "$overlay_a" "udp://$node_relay:11010" true
-        start_core "$node_b" "$mode" "$overlay_b" "udp://$node_relay:11010" true
+        start_core "$node_relay" "" "" false true true
+        start_core "$node_a" "$overlay_a" "udp://$node_relay:11010" true
+        start_core "$node_b" "$overlay_b" "udp://$node_relay:11010" true
     elif [[ "$scenario" == authorized-bridge-compact-l3 ]]; then
         start_container "$node_a" "$network_a" "$underlay_a"
         start_container "$node_b" "$network_a" "$underlay_b"
-        start_core "$node_a" "$mode" "$overlay_a" "" false false false true
-        start_core "$node_b" "$mode" "$overlay_b" "udp://$node_a:11010" false false false true
+        start_core "$node_a" "$overlay_a" "" false false false true
+        start_core "$node_b" "$overlay_b" "udp://$node_a:11010" false false false true
     elif [[ "$scenario" != direct-underlay ]]; then
         start_container "$node_a" "$network_a" "$underlay_a"
         start_container "$node_b" "$network_a" "$underlay_b"
-        start_core "$node_a" "$mode" "$overlay_a"
-        start_core "$node_b" "$mode" "$overlay_b" "udp://$node_a:11010"
+        start_core "$node_a" "$overlay_a"
+        start_core "$node_b" "$overlay_b" "udp://$node_a:11010"
     else
         start_container "$node_a" "$network_a" "$underlay_a"
         start_container "$node_b" "$network_a" "$underlay_b"

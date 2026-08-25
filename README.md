@@ -46,28 +46,22 @@ Encrypted UDP, QUIC, or TCP link
 Remote LowTier peer
 ```
 
-## Select an interface adapter
+## Automatic interface adapter
 
-Select the adapter that matches the operating system and application.
+LowTier selects the interface adapter from operating system capabilities.
 
 | Adapter | Configuration | Local interface | Ethernet support | Privilege |
 | --- | --- | --- | --- | --- |
-| Ethernet | `interface_adapter = "tap"` | TAP | Complete L2 | Required |
-| IP | `interface_adapter = "tun"` | TUN | IP | Required |
-| Automatic | `interface_adapter = "auto"` | Platform default | Platform default | Required |
+| Automatic | No setting | TAP on Linux and FreeBSD | Complete L2 with compact IP | Required |
+| Automatic IP | No setting | TUN on other systems | IP | Required |
 | Userspace networking | `--tun=userspace-networking` | None | No | Not required |
 
 Native Ethernet supports ARP, VLAN, QinQ, LLDP, broadcast, multicast, and unknown EtherTypes.
-Native Ethernet requires Linux.
+Native Ethernet requires Linux or FreeBSD.
 
 All adapters use the unified fabric protocol.
 The TUN adapter receives only IPv4 and IPv6 packets.
-Use the TUN adapter on systems without TAP support.
-
-Routed mode has the lowest interface overhead.
-LowTier selects native Ethernet by default on Linux.
-LowTier selects compatible Ethernet by default on other systems.
-Set `routed` only when the node must use the L3 packet path.
+LowTier uses compact IP for normal transfers from both adapters.
 
 Userspace networking follows the Tailscale application-proxy model.
 It does not provide ARP, raw Ethernet, transparent ping, or host routes.
@@ -131,7 +125,6 @@ sudo lowertier-core \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --interface-adapter tap \
   --listeners udp://0.0.0.0:11010
 ```
 
@@ -143,7 +136,6 @@ sudo lowertier-core \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --interface-adapter tap \
   --peers udp://192.0.2.10:11010
 ```
 
@@ -164,8 +156,8 @@ Use a protected configuration file for a production deployment.
 
 ## Start a mixed Linux and macOS network
 
-Use native Ethernet on Linux.
-Use compatible Ethernet on macOS.
+LowTier selects native Ethernet on Linux.
+LowTier selects an IP interface on macOS.
 
 Linux:
 
@@ -173,8 +165,7 @@ Linux:
 sudo lowertier-core \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
-  --network-secret '<same-secret>' \
-  --interface-adapter tap
+  --network-secret '<same-secret>'
 ```
 
 macOS:
@@ -184,7 +175,6 @@ sudo lowertier-core \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --interface-adapter tun \
   --peers udp://192.0.2.10:11010
 ```
 
@@ -255,7 +245,6 @@ uri = "udp://192.0.2.11:11010"
 enabled = true
 
 [flags]
-interface_adapter = "tap"
 default_protocol = "udp"
 enable_encryption = true
 encryption_algorithm = "chacha20-poly1305"
@@ -529,8 +518,6 @@ The table includes every supported flag.
 | `speed_probe_interval_seconds` | `30` | Set the normal interval between direct-link probe cycles. | `--speed-probe-interval-seconds` |
 | `speed_probe_budget_bps` | `0` | Limit average probe traffic across the complete node. Zero disables probes. | `--speed-probe-budget-bps` |
 | `enable_exit_node` | `false` | Permit other peers to use this node as an exit node. | `--enable-exit-node` |
-| `no_tun` | `false` | Disable local virtual-interface creation. | `--no-tun` |
-| `use_smoltcp` | `false` | Enable the userspace IP stack for proxy paths. | `--use-smoltcp` |
 | `relay_network_whitelist` | `*` | Select network names that this node can relay. | `--relay-network-whitelist` |
 | `disable_p2p` | `false` | Disable ordinary automatic direct links. | `--disable-p2p` |
 | `relay_all_peer_rpc` | `false` | Relay peer RPC outside the relay whitelist. | `--relay-all-peer-rpc` |
@@ -541,7 +528,6 @@ The table includes every supported flag.
 | `enable_kcp_proxy` | `false` | Convert eligible TCP streams to KCP. | `--enable-kcp-proxy` |
 | `disable_kcp_input` | `false` | Reject inbound KCP stream conversion. | `--disable-kcp-input` |
 | `disable_relay_kcp` | `false` | Reject relayed KCP packets from the local network. | `--disable-relay-kcp` |
-| `proxy_forward_by_system` | `false` | Use kernel forwarding for exported subnets. | `--proxy-forward-by-system` |
 | `accept_dns` | `false` | Install and accept Magic DNS settings. | `--accept-dns` |
 | `private_mode` | `false` | Require verified foreign-network membership. | `--private-mode` |
 | `enable_quic_proxy` | `false` | Convert eligible TCP streams to QUIC. | `--enable-quic-proxy` |
@@ -570,15 +556,14 @@ The table includes every supported flag.
 | `quic_brutal_loss_compensation` | `true` | Add bounded Brutal attempts for measured loss. | `--quic-brutal-loss-compensation` |
 | `quic_initial_receive_window` | `1250000` | Set the QUIC initial per-stream receive window. | `--quic-initial-receive-window` |
 | `quic_receive_window` | `2^62-1` | Set the QUIC connection receive window. | `--quic-receive-window` |
-| `interface_adapter` | `auto` | Select `tun`, `tap`, or `auto`. | `--interface-adapter` |
 | `l2_fdb_capacity` | `16384` | Limit learned source MAC entries. | `--l2-fdb-capacity` |
 | `l2_fdb_age_seconds` | `300` | Expire idle MAC entries after this interval. | `--l2-fdb-age-seconds` |
 | `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
 | `quic_datagram_fec_parity` | `0` | Select `0` off, `2` for 16+2, or `3` for 16+3 alternate-path FEC. | `--quic-datagram-fec-parity` |
 | `quic_datagram_alternate_path_parity` | `false` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
 
-`auto` selects TAP on Linux and FreeBSD.
-`auto` selects TUN on other systems.
+LowTier selects TAP on Linux and FreeBSD.
+LowTier selects TUN on other systems.
 
 `l2_fdb_capacity` accepts values from 1 through 1,048,576.
 `l2_fdb_age_seconds` accepts values from 1 through 86,400.
@@ -588,7 +573,7 @@ Brutal mode requires a positive `quic_brutal_send_bps` value.
 ## Complete `lowertier-core` startup reference
 
 Network values have matching `ET_` environment variables when `--help` shows an environment name.
-For example, `--interface-adapter` maps to `ET_INTERFACE_ADAPTER`.
+For example, `--network-name` maps to `ET_NETWORK_NAME`.
 
 ### Instance and configuration input
 
@@ -625,17 +610,13 @@ For example, `--interface-adapter` maps to `ET_INTERFACE_ADAPTER`.
 | `--vpn-portal` | Start a WireGuard portal for external clients. |
 | `--port-forward` | Add a TCP or UDP local-to-overlay forwarding rule. |
 
-### Interface and userspace selection
+### Interface and userspace operation
 
 | Option | Purpose |
 | --- | --- |
-| `--interface-adapter` | Select the `tun`, `tap`, or `auto` adapter. |
 | `--dev-name` | Set the TUN or TAP interface name. |
 | `--tun` | Set the interface name or select `userspace-networking`. |
 | `--mtu` | Set the overlay MTU. |
-| `--no-tun` | Disable the virtual interface. |
-| `--use-smoltcp` | Enable the userspace IP stack. |
-| `--socks5` | Start the legacy port-only SOCKS5 listener. |
 | `--socks5-server` | Start a SOCKS5 listener at `host:port`. |
 | `--outbound-http-proxy-listen` | Start an HTTP proxy listener at `host:port`. |
 
@@ -838,14 +819,9 @@ LowTier removes forwarding entries after their age limit or peer disconnection.
 The flood limiter controls replicated bytes for each second.
 Keep a finite flood limit on production meshes.
 
-TAP uses native Ethernet frames.
-TUN uses compact IP packets.
-Both adapters use the same fabric send function.
-
-Restart an instance after an `interface_adapter` change.
-The TAP adapter fails when the operating system does not provide TAP.
-LowTier selects the adapter before it creates the virtual interface.
-LowTier does not change the adapter while an instance runs.
+TAP uses native Ethernet frames at the host boundary.
+Normal IP traffic uses compact routed packets on the wire.
+TUN uses the same compact IP representation.
 
 See [the Ethernet operator guide](docs/l2-tap.md) for frame-level details.
 
@@ -955,15 +931,14 @@ lowertier-core --config-file /etc/lowtier/office.toml --check-config
 
 The error report includes the file, line, and invalid field.
 
-### Confirm the selected interface mode
+### Confirm the selected interface
 
 ```bash
 lowertier-cli node config
 lowertier-cli node info
 ```
 
-Check `interface_adapter` and the reported interface name.
-Use `tap` only when the operating system provides TAP.
+Check the reported interface name and link type.
 
 ### Check peer and route state
 

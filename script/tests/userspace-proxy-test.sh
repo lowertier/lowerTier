@@ -128,6 +128,7 @@ RUST_LOG=warn "$core" \
     --instance-name userspace-proxy-server \
     --network-name userspace-proxy-test \
     --network-secret userspace-proxy-secret \
+    --hostname userspace-proxy-server \
     --ipv4 10.77.0.2 \
     --tun=userspace-networking \
     --listeners "udp://127.0.0.1:$underlay_port" \
@@ -156,6 +157,7 @@ shared_idle_rss_kib=$(median_values <"$shared_rss_samples")
 python3 "$probe" client \
     --proxy-port "$proxy_port" \
     --target-ip 10.77.0.2 \
+    --target-hostname userspace-proxy-server.et.net \
     --tcp-port "$tcp_port" \
     --udp-port "$udp_port" \
     --http-port "$http_port" \

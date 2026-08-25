@@ -26,7 +26,7 @@ use crate::{
                 AcceptAuthentication, AsyncTcpConnector, AsyncUdpConnector, AsyncUdpSocket, Config,
                 SimpleUserPassword, Socks5Socket,
             },
-            util::stream::tcp_connect_with_timeout,
+            util::{stream::tcp_connect_with_timeout, target_addr::TargetAddr},
         },
         http_proxy::serve_http_proxy,
         ip_reassembler::IpReassembler,
@@ -58,8 +58,8 @@ use crate::{
     common::{error::Error, global_ctx::GlobalCtx},
     peers::{
         PeerPacketFilter,
-        fabric::{FabricPacket, FabricPayloadKind},
-        peer_manager::PeerManager,
+        fabric::{FabricBatch, FabricPayloadKind},
+        peer_manager::{PeerManager, UserRoutePlan},
     },
 };
 
@@ -415,6 +415,13 @@ enum ProxyProtocol {
     Http,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StackPacketAction {
+    Pass,
+    Consume,
+    Mirror,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ProxyProtocols {
     socks5: bool,
@@ -494,6 +501,81 @@ async fn plan_proxy_listeners(
         .collect())
 }
 
+fn resolve_overlay_name(
+    name: &str,
+    port: u16,
+    zone: &str,
+    local_hostname: &str,
+    local_ipv4: Option<Ipv4Addr>,
+    local_ipv6: Option<std::net::Ipv6Addr>,
+    routes: &[crate::proto::api::instance::Route],
+) -> Option<SocketAddr> {
+    let query = name.trim_end_matches('.').to_ascii_lowercase();
+    let zone = zone.trim_matches('.').to_ascii_lowercase();
+    let name_matches = |hostname: &str| {
+        let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+        query == hostname || (!zone.is_empty() && query == format!("{hostname}.{zone}"))
+    };
+    if name_matches(local_hostname) {
+        return local_ipv4
+            .map(|address| SocketAddr::new(IpAddr::V4(address), port))
+            .or_else(|| local_ipv6.map(|address| SocketAddr::new(IpAddr::V6(address), port)));
+    }
+    routes
+        .iter()
+        .find(|route| !route.hostname.is_empty() && name_matches(&route.hostname))
+        .and_then(|route| {
+            route
+                .ipv4_addr
+                .as_ref()
+                .and_then(|inet| inet.address)
+                .map(|address| SocketAddr::new(IpAddr::V4(address.into()), port))
+                .or_else(|| {
+                    route
+                        .ipv6_addr
+                        .as_ref()
+                        .and_then(|inet| inet.address)
+                        .map(|address| SocketAddr::new(IpAddr::V6(address.into()), port))
+                })
+        })
+}
+
+impl Socks5AutoConnector {
+    async fn resolve_target(
+        &self,
+        target: TargetAddr,
+    ) -> crate::gateway::fast_socks5::Result<SocketAddr> {
+        let TargetAddr::Domain(name, port) = target else {
+            return match target {
+                TargetAddr::Ip(address) => Ok(address),
+                TargetAddr::Domain(_, _) => unreachable!(),
+            };
+        };
+        let peer_manager = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("peer manager is dropped"))?;
+        let global_ctx = peer_manager.get_global_ctx();
+        let flags = global_ctx.config.get_flags();
+        let routes = peer_manager.list_routes().await;
+        if let Some(address) = resolve_overlay_name(
+            &name,
+            port,
+            &flags.tld_dns_zone,
+            &global_ctx.get_hostname(),
+            global_ctx.get_ipv4().map(|inet| inet.address()),
+            global_ctx.get_ipv6().map(|inet| inet.address()),
+            &routes,
+        ) {
+            return Ok(address);
+        }
+        match TargetAddr::Domain(name, port).resolve_dns().await? {
+            TargetAddr::Ip(address) => Ok(address),
+            TargetAddr::Domain(_, _) => unreachable!("DNS resolution returned a domain"),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl AsyncTcpConnector for Socks5AutoConnector {
     type S = SocksTcpStream;
@@ -519,22 +601,34 @@ impl AsyncTcpConnector for Socks5AutoConnector {
         }
 
         let has_smoltcp_net = self.smoltcp_net.is_some();
-        let dst_peers = if has_smoltcp_net && !addr.ip().is_loopback() {
-            Some(peer_mgr_arc.get_msg_dst_peer(&addr.ip()).await.0)
+        let route_plan = if has_smoltcp_net && !addr.ip().is_loopback() {
+            Some(
+                peer_mgr_arc
+                    .plan_user_route(addr.ip())
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error))?,
+            )
         } else {
             None
         };
+        let dst_peers = match &route_plan {
+            Some(UserRoutePlan::Overlay { peer_ids, .. }) => Some(peer_ids),
+            _ => None,
+        };
+
+        if matches!(route_plan, Some(UserRoutePlan::Blackhole)) {
+            return Err(anyhow::anyhow!("the route policy blocks destination {addr}").into());
+        }
 
         if !has_smoltcp_net
-            || dst_peers.as_ref().is_some_and(Vec::is_empty)
+            || matches!(route_plan, Some(UserRoutePlan::System))
             || addr.ip().is_loopback()
         {
-            // cannot find dst in virtual network, so try connect to dst directly
             tracing::trace!(
                 ?addr,
                 src_addr = ?self.src_addr,
                 has_smoltcp_net,
-                dst_peer_count = dst_peers.as_ref().map(Vec::len),
+                dst_peer_count = dst_peers.map(Vec::len),
                 is_loopback = addr.ip().is_loopback(),
                 "socks5 auto connector falling back to kernel tcp connect"
             );
@@ -547,13 +641,13 @@ impl AsyncTcpConnector for Socks5AutoConnector {
         tracing::debug!("dst_allow_kcp: {:?}", dst_allow_kcp);
 
         #[cfg(feature = "kcp")]
-        let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send> =
+        let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync> =
             match (&self.kcp_endpoint, dst_allow_kcp) {
                 (Some(kcp_endpoint), true) => {
                     tracing::trace!(
                         ?addr,
                         src_addr = ?self.src_addr,
-                        dst_peer_count = dst_peers.as_ref().map(Vec::len),
+                        dst_peer_count = dst_peers.map(Vec::len),
                         "socks5 auto connector selected kcp"
                     );
                     Box::new(Socks5KcpConnector {
@@ -566,7 +660,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                     tracing::trace!(
                         ?addr,
                         src_addr = ?self.src_addr,
-                        dst_peer_count = dst_peers.as_ref().map(Vec::len),
+                        dst_peer_count = dst_peers.map(Vec::len),
                         dst_allow_kcp,
                         has_kcp_endpoint = self.kcp_endpoint.is_some(),
                         "socks5 auto connector selected smoltcp"
@@ -584,7 +678,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             tracing::trace!(
                 ?addr,
                 src_addr = ?self.src_addr,
-                dst_peer_count = dst_peers.as_ref().map(Vec::len),
+                dst_peer_count = dst_peers.map(Vec::len),
                 "socks5 auto connector selected smoltcp"
             );
             Box::new(SmolTcpConnector {
@@ -598,6 +692,15 @@ impl AsyncTcpConnector for Socks5AutoConnector {
         let ret = connector.tcp_connect(addr, timeout_s).await;
         self.inner_connector.lock().replace(Box::new(connector));
         ret
+    }
+
+    async fn tcp_connect_target(
+        &self,
+        target: TargetAddr,
+        timeout_s: u64,
+    ) -> crate::gateway::fast_socks5::Result<SocksTcpStream> {
+        let address = self.resolve_target(target).await?;
+        self.tcp_connect(address, timeout_s).await
     }
 }
 
@@ -620,11 +723,20 @@ impl AsyncUdpConnector for Socks5AutoConnector {
             addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
         }
 
-        let use_overlay = if self.smoltcp_net.is_some() && !addr.ip().is_loopback() {
-            !peer_manager.get_msg_dst_peer(&addr.ip()).await.0.is_empty()
+        let route_plan = if self.smoltcp_net.is_some() && !addr.ip().is_loopback() {
+            Some(
+                peer_manager
+                    .plan_user_route(addr.ip())
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error))?,
+            )
         } else {
-            false
+            None
         };
+        if matches!(route_plan, Some(UserRoutePlan::Blackhole)) {
+            return Err(anyhow::anyhow!("the route policy blocks destination {addr}").into());
+        }
+        let use_overlay = matches!(route_plan, Some(UserRoutePlan::Overlay { .. }));
 
         if !use_overlay {
             let bind_addr = if addr.is_ipv4() {
@@ -671,6 +783,15 @@ impl AsyncUdpConnector for Socks5AutoConnector {
             _port_holder: Some(port_holder),
         })
     }
+
+    async fn udp_connect_target(
+        &self,
+        target: TargetAddr,
+        timeout_s: u64,
+    ) -> crate::gateway::fast_socks5::Result<(Self::S, SocketAddr)> {
+        let address = self.resolve_target(target).await?;
+        Ok((self.udp_connect(address, timeout_s).await?, address))
+    }
 }
 
 struct Socks5ServerNet {
@@ -688,7 +809,7 @@ impl Socks5ServerNet {
         ipv4_addr: cidr::Ipv4Inet,
         auth: Option<SimpleUserPassword>,
         peer_manager: Weak<PeerManager>,
-        packet_recv: Arc<Mutex<mpsc::Receiver<ZCPacket>>>,
+        packet_recv: Arc<Mutex<mpsc::Receiver<PacketBatch>>>,
         entries: Socks5EntrySet,
     ) -> Self {
         let mut forward_tasks = JoinSet::new();
@@ -699,9 +820,12 @@ impl Socks5ServerNet {
 
         forward_tasks.spawn(async move {
             let mut smoltcp_stack_receiver = packet_recv.lock().await;
-            while let Some(packet) = smoltcp_stack_receiver.recv().await {
-                tracing::trace!(?packet, "receive from peer send to smoltcp packet");
-                if let Err(e) = stack_sink.send(Ok(packet.payload().to_vec())).await {
+            while let Some(batch) = smoltcp_stack_receiver.recv().await {
+                tracing::trace!(
+                    packet_count = batch.len(),
+                    "receive from peer send to smoltcp"
+                );
+                if let Err(e) = stack_sink.send(Ok(batch)).await {
                     tracing::error!("send to smoltcp stack failed: {:?}", e);
                 }
             }
@@ -709,24 +833,34 @@ impl Socks5ServerNet {
         });
 
         forward_tasks.spawn(async move {
-            while let Some(data) = stack_stream.recv().await {
-                tracing::trace!(
-                    ?data,
-                    "receive from smoltcp stack and send to peer mgr packet, len = {}",
-                    data.len()
-                );
-                if Ipv4Packet::new(&data).is_none() {
-                    tracing::error!(?data, "smoltcp stack stream get non ipv4 packet");
+            while let Some(packet) = stack_stream.recv().await {
+                let mut batch = PacketBatch::new();
+                if Ipv4Packet::new(packet.payload()).is_some() {
+                    batch
+                        .try_push(packet)
+                        .expect("a new batch accepts one packet");
+                } else {
+                    tracing::error!("smoltcp stack stream produced a non-IPv4 packet");
                     continue;
                 }
-
-                let packet = ZCPacket::new_with_payload(&data);
+                while batch.len() < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+                    let Ok(packet) = stack_stream.try_recv() else {
+                        break;
+                    };
+                    if Ipv4Packet::new(packet.payload()).is_some() {
+                        batch
+                            .try_push(packet)
+                            .expect("the batch has available capacity");
+                    } else {
+                        tracing::error!("smoltcp stack stream produced a non-IPv4 packet");
+                    }
+                }
                 let Some(peer_manager) = peer_manager.upgrade() else {
                     tracing::warn!("peer manager is gone, smoltcp sender exited");
                     return;
                 };
                 if let Err(e) = peer_manager
-                    .send_fabric_packet(FabricPacket::new(FabricPayloadKind::Ip, packet))
+                    .send_fabric_batch(FabricBatch::new(FabricPayloadKind::Ip, batch))
                     .await
                 {
                     tracing::error!("send to peer failed in smoltcp sender: {:?}", e);
@@ -776,6 +910,7 @@ impl Socks5ServerNet {
         config.set_udp_support(true);
         config.set_skip_auth(false);
         config.set_allow_no_auth(true);
+        config.set_dns_resolve(false);
 
         let mut socket = Socks5Socket::new(stream, Arc::new(config), connector);
         socket.set_reply_ip(reply_ip);
@@ -858,8 +993,8 @@ pub struct Socks5Server {
     auth: Option<SimpleUserPassword>,
 
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
-    packet_sender: mpsc::Sender<ZCPacket>,
-    packet_recv: Arc<Mutex<mpsc::Receiver<ZCPacket>>>,
+    packet_sender: mpsc::Sender<PacketBatch>,
+    packet_recv: Arc<Mutex<mpsc::Receiver<PacketBatch>>>,
 
     net: Arc<Mutex<Option<Socks5ServerNet>>>,
     entries: Socks5EntrySet,
@@ -1023,7 +1158,10 @@ impl PeerPacketFilter for Socks5Server {
                     if is_in_entries {
                         // if the packet is fragmented, no matther what the payload is, need send it to both smoltcp and kernel tun. because
                         // we cannot determine the udp port of the packet.
-                        match self.packet_sender.try_send(packet.clone()) {
+                        match self
+                            .packet_sender
+                            .try_send(PacketBatch::singleton(packet.clone()))
+                        {
                             Ok(()) => tracing::trace!(
                                 ?ipv4_src,
                                 entry_count = self.entry_count.load(Ordering::Relaxed),
@@ -1081,7 +1219,7 @@ impl PeerPacketFilter for Socks5Server {
             "socks5 found entry for packet from peer"
         );
 
-        match self.packet_sender.try_send(packet) {
+        match self.packet_sender.try_send(PacketBatch::singleton(packet)) {
             Ok(()) => tracing::trace!(
                 ?entry_key,
                 ?tcp_flags,
@@ -1106,18 +1244,112 @@ impl PeerPacketFilter for Socks5Server {
         }
 
         let mut remaining = PacketBatch::with_capacity(batch.len());
+        let mut stack_packets = PacketBatch::with_capacity(batch.len());
         for packet in batch {
-            if let Some(packet) = self.try_process_packet_from_peer(packet).await {
-                remaining
+            match self.stack_packet_action(&packet) {
+                StackPacketAction::Pass => remaining
                     .try_push(packet)
-                    .expect("a filtered batch cannot exceed its input batch");
+                    .expect("a filtered batch cannot exceed its input batch"),
+                StackPacketAction::Consume => stack_packets
+                    .try_push(packet)
+                    .expect("a filtered batch cannot exceed its input batch"),
+                StackPacketAction::Mirror => {
+                    stack_packets
+                        .try_push(packet.clone())
+                        .expect("a filtered batch cannot exceed its input batch");
+                    remaining
+                        .try_push(packet)
+                        .expect("a filtered batch cannot exceed its input batch");
+                }
             }
+        }
+        if !stack_packets.is_empty()
+            && let Err(error) = self.packet_sender.try_send(stack_packets)
+        {
+            tracing::trace!(?error, "userspace stack batch delivery failed");
         }
         remaining
     }
 }
 
 impl Socks5Server {
+    fn stack_packet_action(&self, packet: &ZCPacket) -> StackPacketAction {
+        if self.packet_path_is_idle() {
+            return StackPacketAction::Pass;
+        }
+        let Some(header) = packet.peer_manager_header() else {
+            return StackPacketAction::Pass;
+        };
+        let modified_source = matches!(
+            header.packet_type,
+            value if value == PacketType::DataWithKcpSrcModified as u8
+                || value == PacketType::DataWithQuicSrcModified as u8
+        );
+        if header.packet_type != PacketType::Data as u8 && !modified_source {
+            return StackPacketAction::Pass;
+        }
+        if modified_source && header.from_peer_id != header.to_peer_id {
+            return StackPacketAction::Pass;
+        }
+        let Some(ipv4) = Ipv4Packet::new(packet.payload()) else {
+            return StackPacketAction::Pass;
+        };
+        if ipv4.get_version() != 4 {
+            return StackPacketAction::Pass;
+        }
+        let entry = match ipv4.get_next_level_protocol() {
+            IpNextHeaderProtocols::Tcp => {
+                let Some(tcp) = TcpPacket::new(ipv4.payload()) else {
+                    return StackPacketAction::Pass;
+                };
+                let entry = Socks5Entry {
+                    dst: SocketAddr::new(ipv4.get_source().into(), tcp.get_source()),
+                    src: SocketAddr::new(ipv4.get_destination().into(), tcp.get_destination()),
+                    entry_type: TCP_ENTRY,
+                };
+                #[cfg(feature = "ffi-dataplane")]
+                let entry = if self.entries.contains_key(&entry) {
+                    entry
+                } else {
+                    Socks5Entry {
+                        src: entry.src,
+                        dst: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                        entry_type: TCP_LISTEN_ENTRY,
+                    }
+                };
+                entry
+            }
+            IpNextHeaderProtocols::Udp => {
+                if IpReassembler::is_packet_fragmented(&ipv4) {
+                    let source: IpAddr = ipv4.get_source().into();
+                    return if self
+                        .entries
+                        .iter()
+                        .any(|entry| entry.key().dst.ip() == source)
+                    {
+                        StackPacketAction::Mirror
+                    } else {
+                        StackPacketAction::Pass
+                    };
+                }
+                let Some(udp) = UdpPacket::new(ipv4.payload()) else {
+                    return StackPacketAction::Pass;
+                };
+                Socks5Entry {
+                    dst: SocketAddr::new(ipv4.get_source().into(), udp.get_source()),
+                    src: SocketAddr::new(ipv4.get_destination().into(), udp.get_destination()),
+                    entry_type: UDP_ENTRY,
+                }
+            }
+            _ => return StackPacketAction::Pass,
+        };
+        if self.entries.contains_key(&entry) {
+            StackPacketAction::Consume
+        } else {
+            StackPacketAction::Pass
+        }
+    }
+
     fn packet_path_is_idle(&self) -> bool {
         self.entry_count.load(Ordering::Relaxed) == 0
             && !self.userspace_proxy_enabled.load(Ordering::Relaxed)
@@ -1390,7 +1622,7 @@ impl Socks5Server {
 
     async fn handle_port_forward_connection(
         mut incoming_socket: tokio::net::TcpStream,
-        connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send>,
+        connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync>,
         dst_addr: SocketAddr,
     ) {
         tracing::trace!(?dst_addr, "port forward: connecting to destination");
@@ -1753,6 +1985,53 @@ mod tests {
     use super::*;
     use crate::peers::tests::create_mock_peer_manager;
 
+    #[test]
+    fn overlay_name_resolution_accepts_short_and_qualified_names() {
+        let routes = vec![crate::proto::api::instance::Route {
+            hostname: "Peer-One".to_string(),
+            ipv4_addr: Some("10.144.155.2/24".parse::<cidr::Ipv4Inet>().unwrap().into()),
+            ipv6_addr: Some("fd00::2/64".parse::<cidr::Ipv6Inet>().unwrap().into()),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            resolve_overlay_name(
+                "peer-one",
+                443,
+                "et.net.",
+                "local-peer",
+                Some("10.144.155.1".parse().unwrap()),
+                None,
+                &routes,
+            ),
+            Some("10.144.155.2:443".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_overlay_name(
+                "PEER-ONE.ET.NET.",
+                8443,
+                "et.net.",
+                "local-peer",
+                Some("10.144.155.1".parse().unwrap()),
+                None,
+                &routes,
+            ),
+            Some("10.144.155.2:8443".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_overlay_name(
+                "local-peer.et.net",
+                80,
+                "et.net.",
+                "local-peer",
+                Some("10.144.155.1".parse().unwrap()),
+                None,
+                &routes,
+            ),
+            Some("10.144.155.1:80".parse().unwrap())
+        );
+    }
+
     #[tokio::test]
     async fn new_socks_server_has_an_idle_packet_path() {
         let peer_manager = create_mock_peer_manager().await;
@@ -1855,10 +2134,46 @@ mod tests {
             let mut receiver = server.packet_recv.lock().await;
             let received = receiver.try_recv().unwrap();
             assert_eq!(
-                received.peer_manager_header().unwrap().packet_type,
+                received[0].peer_manager_header().unwrap().packet_type,
                 packet_type as u8
             );
         }
+    }
+
+    #[tokio::test]
+    async fn socks5_delivers_matching_input_as_one_owned_batch() {
+        let peer_manager = create_mock_peer_manager().await;
+        let server = Socks5Server::new(peer_manager.get_global_ctx(), peer_manager, None);
+        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40000);
+        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        insert_entry_and_increment_count(
+            &server.entries,
+            &server.entry_count,
+            Socks5Entry {
+                src: local,
+                dst: remote,
+                entry_type: TCP_ENTRY,
+            },
+            Socks5EntryData::Tcp(listener),
+        );
+        let mut batch = PacketBatch::new();
+        for packet_type in [
+            PacketType::DataWithKcpSrcModified,
+            PacketType::DataWithQuicSrcModified,
+        ] {
+            let mut packet = ZCPacket::new_with_payload(&build_tcp_packet(remote, local));
+            packet.fill_peer_manager_hdr(1, 1, packet_type as u8);
+            batch.try_push(packet).unwrap();
+        }
+
+        let remaining = server.try_process_batch_from_peer(batch).await;
+
+        assert!(remaining.is_empty());
+        let mut receiver = server.packet_recv.lock().await;
+        let received = receiver.try_recv().unwrap();
+        assert_eq!(received.len(), 2);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1966,7 +2281,7 @@ mod tests {
         let mut receiver = server.packet_recv.lock().await;
         let received = receiver.try_recv().unwrap();
         assert_eq!(
-            received.peer_manager_header().unwrap().packet_type,
+            received[0].peer_manager_header().unwrap().packet_type,
             PacketType::Data as u8
         );
     }

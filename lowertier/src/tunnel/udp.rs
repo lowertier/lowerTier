@@ -11,7 +11,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use dashmap::DashMap;
-use futures::{Sink, stream::FuturesUnordered};
+use futures::{Sink, SinkExt, stream::FuturesUnordered};
 use hmac::{Hmac, Mac};
 use rand::{Rng, SeedableRng};
 use sha2::Sha256;
@@ -37,6 +37,7 @@ use super::{
     packet_def::{UDP_TUNNEL_HEADER_SIZE, UDPTunnelHeader, V4HolePunchPacket, V6HolePunchPacket},
     ring::{RingSink, RingStream},
 };
+use crate::peers::flow::FLOW_SHARD_COUNT;
 use crate::tunnel::common::{
     bind, eligible_bind_addrs, ensure_local_allowed, ensure_remote_allowed,
 };
@@ -47,7 +48,9 @@ use crate::{
         underlay_policy::UnderlayPolicy,
     },
     tunnel::{
-        batch::{IO_FLUSH_PACKET_BUDGET, PacketBatch, ScalarToBatchStream},
+        batch::{
+            IO_FLUSH_PACKET_BUDGET, PacketBatch, SEND_PIPELINE_SLOT_COUNT, ScalarToBatchStream,
+        },
         build_url_from_socket_addr,
         common::BatchTunnelWrapper,
         packet_def::{UdpPacketType, ZCPacket, ZCPacketType},
@@ -74,17 +77,23 @@ struct UdpConnectionAdmission {
 
 struct UdpConnectionState {
     closed: AtomicBool,
+    receive_backpressure: Arc<AtomicBool>,
 }
 
 impl UdpConnectionState {
     fn new() -> Self {
         Self {
             closed: AtomicBool::new(false),
+            receive_backpressure: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn is_replaceable(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    fn receive_backpressure(&self) -> Arc<AtomicBool> {
+        self.receive_backpressure.clone()
     }
 }
 
@@ -442,16 +451,121 @@ fn prepare_udp_data_packet(packet: ZCPacket, conn_id: u32) -> ZCPacket {
     packet
 }
 
+fn udp_send_run_end(flow_hashes: &[Option<u64>], completed: usize) -> usize {
+    let Some(flow_hash) = flow_hashes.get(completed) else {
+        return flow_hashes.len();
+    };
+    flow_hashes[completed + 1..]
+        .iter()
+        .position(|candidate| candidate != flow_hash)
+        .map_or(flow_hashes.len(), |offset| completed + 1 + offset)
+}
+
+fn udp_sender_worker_count(parallelism: usize) -> usize {
+    let maximum = parallelism
+        .max(1)
+        .min(SEND_PIPELINE_SLOT_COUNT)
+        .min(UDP_RING_PACKET_CAPACITY);
+    1 << (usize::BITS - 1 - maximum.leading_zeros())
+}
+
+fn udp_sender_worker_capacities(worker_count: usize) -> Vec<usize> {
+    assert!(worker_count > 0);
+    let base = UDP_RING_PACKET_CAPACITY / worker_count;
+    let remainder = UDP_RING_PACKET_CAPACITY % worker_count;
+    (0..worker_count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct UdpFlowWorkerAssignment {
+    key: u64,
+    worker: usize,
+    last_used: u64,
+}
+
+struct UdpFlowWorkerAssignments {
+    entries: [Option<UdpFlowWorkerAssignment>; FLOW_SHARD_COUNT as usize],
+    worker_count: usize,
+    next_worker: usize,
+    use_counter: u64,
+}
+
+impl UdpFlowWorkerAssignments {
+    fn new(worker_count: usize) -> Self {
+        assert!(worker_count > 0);
+        Self {
+            entries: [None; FLOW_SHARD_COUNT as usize],
+            worker_count,
+            next_worker: 0,
+            use_counter: 0,
+        }
+    }
+
+    fn worker_for_key(&mut self, key: u64) -> usize {
+        self.use_counter = self.use_counter.wrapping_add(1);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.key == key)
+        {
+            entry.last_used = self.use_counter;
+            return entry.worker;
+        }
+
+        let index = self
+            .entries
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or_else(|| {
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, entry)| {
+                        entry
+                            .as_ref()
+                            .expect("a full UDP flow table has no empty entries")
+                            .last_used
+                    })
+                    .map(|(index, _)| index)
+                    .expect("the UDP flow table is not empty")
+            });
+        let worker = self.next_worker;
+        self.next_worker = (self.next_worker + 1) % self.worker_count;
+        self.entries[index] = Some(UdpFlowWorkerAssignment {
+            key,
+            worker,
+            last_used: self.use_counter,
+        });
+        worker
+    }
+
+    fn worker_for_packet(&mut self, packet: &ZCPacket) -> usize {
+        let key = packet.flow_hash().or_else(|| {
+            packet
+                .peer_manager_header()
+                .and_then(|header| header.flow_shard())
+                .map(|shard| u64::MAX - u64::from(shard))
+        });
+        key.map_or(0, |key| self.worker_for_key(key))
+    }
+}
+
 struct UdpBatchSink {
     socket: Arc<UdpSocket>,
     destination: SocketAddr,
     conn_id: u32,
     pending: Option<SmallVec<[bytes::Bytes; 4]>>,
     spare: SmallVec<[bytes::Bytes; 4]>,
+    pending_flow_hashes: SmallVec<[Option<u64>; 4]>,
+    spare_flow_hashes: SmallVec<[Option<u64>; 4]>,
     completed: usize,
     close_event_sender: Option<UdpCloseEventSender>,
     _admission: Option<Arc<UdpConnectionAdmission>>,
     connection_state: Arc<UdpConnectionState>,
+    send_gso: bool,
 }
 
 impl UdpBatchSink {
@@ -462,6 +576,7 @@ impl UdpBatchSink {
         close_event_sender: UdpCloseEventSender,
         admission: Option<Arc<UdpConnectionAdmission>>,
         connection_state: Arc<UdpConnectionState>,
+        send_gso: bool,
     ) -> Self {
         Self {
             socket,
@@ -469,32 +584,39 @@ impl UdpBatchSink {
             conn_id,
             pending: None,
             spare: SmallVec::new(),
+            pending_flow_hashes: SmallVec::new(),
+            spare_flow_hashes: SmallVec::new(),
             completed: 0,
             close_event_sender: Some(close_event_sender),
             _admission: admission,
             connection_state,
+            send_gso,
         }
     }
 
     fn notify_close(&mut self, error: Option<TunnelError>) {
-        self.connection_state.closed.store(true, Ordering::Release);
+        if self.connection_state.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         if let Some(sender) = self.close_event_sender.take() {
             let _ = sender.send((self.destination, self.conn_id, error));
         }
     }
 
     fn poll_pending(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), TunnelError>> {
-        let Self {
-            socket,
-            destination,
-            pending,
-            completed,
-            ..
-        } = self;
-        let Some(buffers) = pending.as_ref() else {
+        let Some(buffers) = self.pending.as_ref() else {
             return Poll::Ready(Ok(()));
         };
-        match super::udp_vector_io::poll_send_batch(socket, *destination, buffers, completed, cx) {
+        let run_end = udp_send_run_end(&self.pending_flow_hashes, self.completed);
+        match super::udp_vector_io::poll_send_batch_with_gso(
+            &self.socket,
+            self.destination,
+            &buffers[..run_end],
+            &mut self.completed,
+            self.send_gso,
+            cx,
+        ) {
+            Poll::Ready(Ok(())) if self.completed < buffers.len() => self.poll_pending(cx),
             Poll::Ready(Ok(())) => {
                 let mut buffers = self
                     .pending
@@ -502,6 +624,8 @@ impl UdpBatchSink {
                     .expect("the completed UDP send has pending buffers");
                 buffers.clear();
                 self.spare = buffers;
+                self.pending_flow_hashes.clear();
+                std::mem::swap(&mut self.pending_flow_hashes, &mut self.spare_flow_hashes);
                 self.completed = 0;
                 Poll::Ready(Ok(()))
             }
@@ -513,12 +637,135 @@ impl UdpBatchSink {
                     .expect("the failed UDP send has pending buffers");
                 buffers.clear();
                 self.spare = buffers;
+                self.pending_flow_hashes.clear();
+                std::mem::swap(&mut self.pending_flow_hashes, &mut self.spare_flow_hashes);
                 self.completed = 0;
                 self.notify_close(Some(TunnelError::InternalError(message)));
                 Poll::Ready(Err(TunnelError::IOError(error)))
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+struct UdpShardedBatchSink {
+    lanes: Vec<RingSink>,
+    pending: Vec<Option<PacketBatch>>,
+    assignments: UdpFlowWorkerAssignments,
+}
+
+impl UdpShardedBatchSink {
+    fn new(lanes: Vec<RingSink>) -> Self {
+        assert!(!lanes.is_empty());
+        let worker_count = lanes.len();
+        Self {
+            lanes,
+            pending: std::iter::repeat_with(|| None).take(worker_count).collect(),
+            assignments: UdpFlowWorkerAssignments::new(worker_count),
+        }
+    }
+
+    fn take_pending_prefix(batch: &mut Option<PacketBatch>, count: usize) -> PacketBatch {
+        let pending = batch.as_mut().expect("a UDP worker has pending packets");
+        if count == pending.len() {
+            return batch.take().expect("the complete UDP worker batch exists");
+        }
+        let remainder = pending.split_off(count);
+        std::mem::replace(pending, remainder)
+    }
+
+    fn poll_pending(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), TunnelError>> {
+        loop {
+            let mut remaining = false;
+            let mut progressed = false;
+            for index in 0..self.lanes.len() {
+                let Some(packet_count) = self.pending[index].as_ref().map(PacketBatch::len) else {
+                    continue;
+                };
+                remaining = true;
+                match self.lanes[index].poll_reserve_batch_prefix(cx, packet_count, 0) {
+                    Poll::Ready(Ok(admitted)) => {
+                        let batch = Self::take_pending_prefix(&mut self.pending[index], admitted);
+                        self.lanes[index].start_send_reserved_batch(batch)?;
+                        progressed = true;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => {}
+                }
+            }
+            if !remaining {
+                return Poll::Ready(Ok(()));
+            }
+            if !progressed {
+                return Poll::Pending;
+            }
+        }
+    }
+
+    fn poll_lanes<F>(
+        &mut self,
+        cx: &mut TaskContext<'_>,
+        mut poll: F,
+    ) -> Poll<Result<(), TunnelError>>
+    where
+        F: FnMut(Pin<&mut RingSink>, &mut TaskContext<'_>) -> Poll<Result<(), TunnelError>>,
+    {
+        let mut all_ready = true;
+        for lane in &mut self.lanes {
+            match poll(Pin::new(lane), cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => all_ready = false,
+            }
+        }
+        if all_ready {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Sink<PacketBatch> for UdpShardedBatchSink {
+    type Error = TunnelError;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.poll_pending(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+        if self.pending.iter().any(Option::is_some) {
+            return Err(TunnelError::InternalError(
+                "sharded UDP sink received data before readiness".to_owned(),
+            ));
+        }
+        for packet in batch {
+            let worker = self.assignments.worker_for_packet(&packet);
+            let lane_batch = self.pending[worker].get_or_insert_with(PacketBatch::new);
+            lane_batch
+                .try_push(packet)
+                .expect("a UDP worker partition cannot exceed its input batch");
+        }
+        Ok(())
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        std::task::ready!(self.poll_pending(cx))?;
+        self.poll_lanes(cx, |lane, cx| lane.poll_flush(cx))
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        std::task::ready!(self.poll_pending(cx))?;
+        self.poll_lanes(cx, |lane, cx| lane.poll_close(cx))
     }
 }
 
@@ -539,12 +786,17 @@ impl Sink<PacketBatch> for UdpBatchSink {
             ));
         }
         let mut buffers = std::mem::take(&mut self.spare);
+        let mut flow_hashes = std::mem::take(&mut self.spare_flow_hashes);
         buffers.clear();
+        flow_hashes.clear();
         buffers.reserve(batch.len());
+        flow_hashes.reserve(batch.len());
         for packet in batch {
+            flow_hashes.push(packet.flow_hash());
             buffers.push(prepare_udp_data_packet(packet, self.conn_id).into_bytes());
         }
         self.pending = Some(buffers);
+        self.pending_flow_hashes = flow_hashes;
         self.completed = 0;
         Ok(())
     }
@@ -576,6 +828,55 @@ impl Drop for UdpBatchSink {
     }
 }
 
+async fn forward_ring_to_udp(
+    mut ring_stream: RingStream,
+    mut udp_sink: UdpBatchSink,
+) -> Result<(), TunnelError> {
+    while let Some(batch) = ring_stream.recv_batch().await {
+        udp_sink.send(batch).await?;
+    }
+    udp_sink.close().await
+}
+
+fn spawn_udp_outbound_workers(
+    socket: Arc<UdpSocket>,
+    destination: SocketAddr,
+    conn_id: u32,
+    close_event_sender: UdpCloseEventSender,
+    admission: Option<Arc<UdpConnectionAdmission>>,
+    connection_state: Arc<UdpConnectionState>,
+    span: tracing::Span,
+) -> UdpShardedBatchSink {
+    let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
+    let worker_count = udp_sender_worker_count(parallelism);
+    let mut lanes = Vec::with_capacity(worker_count);
+    for (worker, capacity) in udp_sender_worker_capacities(worker_count)
+        .into_iter()
+        .enumerate()
+    {
+        let ring = Arc::new(RingTunnel::new(capacity));
+        lanes.push(RingSink::new(ring.clone()));
+        let udp_sink = UdpBatchSink::new(
+            socket.clone(),
+            destination,
+            conn_id,
+            close_event_sender.clone(),
+            admission.clone(),
+            connection_state.clone(),
+            true,
+        );
+        tokio::spawn(
+            async move {
+                if let Err(error) = forward_ring_to_udp(RingStream::new(ring), udp_sink).await {
+                    tracing::warn!(worker, ?error, "UDP outbound worker failed");
+                }
+            }
+            .instrument(span.clone()),
+        );
+    }
+    UdpShardedBatchSink::new(lanes)
+}
+
 async fn udp_recv_from_socket_forward_task(
     socket: &UdpSocket,
     receiver: &mut super::udp_vector_io::UdpBatchReceiver,
@@ -605,18 +906,16 @@ async fn udp_recv_from_socket_forward_task(
 
 struct UdpConnection {
     conn_id: u32,
-    ring_sender: RingSink,
+    ring_sender: tokio::sync::Mutex<UdpRingBatchSink>,
     _admission: Option<Arc<UdpConnectionAdmission>>,
     state: Arc<UdpConnectionState>,
 }
 
-#[cfg(test)]
 struct UdpRingBatchSink {
     inner: RingSink,
     pending: Option<PacketBatch>,
 }
 
-#[cfg(test)]
 impl UdpRingBatchSink {
     fn new(inner: RingSink) -> Self {
         Self {
@@ -650,18 +949,43 @@ impl UdpRingBatchSink {
         std::mem::replace(pending, remainder)
     }
 
+    fn prioritize_reliable_packets(batch: PacketBatch) -> PacketBatch {
+        let all_lossy = batch.iter().all(ZCPacket::is_lossy);
+        let any_lossy = batch.iter().any(ZCPacket::is_lossy);
+        if all_lossy || !any_lossy {
+            return batch;
+        }
+
+        let mut reliable = PacketBatch::with_capacity(batch.len());
+        let mut lossy = PacketBatch::with_capacity(batch.len());
+        for packet in batch {
+            let destination = if packet.is_lossy() {
+                &mut lossy
+            } else {
+                &mut reliable
+            };
+            destination
+                .try_push(packet)
+                .expect("a reliability partition cannot exceed its input batch");
+        }
+        reliable
+            .try_append(lossy)
+            .expect("recombined reliability partitions preserve the input bound");
+        reliable
+    }
+
     fn poll_pending(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), TunnelError>> {
         while let Some((run_len, lossy)) = self.pending_run() {
             let reserve = if lossy { UDP_CONTROL_PACKET_RESERVE } else { 0 };
-            std::task::ready!(self.inner.poll_reserve_batch(cx, run_len, reserve))?;
-            let run = self.take_pending_run(run_len);
+            let admitted =
+                std::task::ready!(self.inner.poll_reserve_batch_prefix(cx, run_len, reserve))?;
+            let run = self.take_pending_run(admitted);
             self.inner.start_send_reserved_batch(run)?;
         }
         Poll::Ready(Ok(()))
     }
 }
 
-#[cfg(test)]
 impl Sink<PacketBatch> for UdpRingBatchSink {
     type Error = TunnelError;
 
@@ -677,7 +1001,7 @@ impl Sink<PacketBatch> for UdpRingBatchSink {
             ));
         }
         if !batch.is_empty() {
-            self_mut.pending = Some(batch);
+            self_mut.pending = Some(Self::prioritize_reliable_packets(batch));
         }
         Ok(())
     }
@@ -757,18 +1081,19 @@ impl UdpConnection {
     ) -> Self {
         Self {
             conn_id,
-            ring_sender,
+            ring_sender: tokio::sync::Mutex::new(UdpRingBatchSink::new(ring_sender)),
             _admission: admission,
             state,
         }
     }
 
-    pub fn handle_packet_from_remote(&mut self, zc_packet: ZCPacket) -> Result<(), TunnelError> {
+    pub async fn handle_packet_from_remote(&self, zc_packet: ZCPacket) -> Result<(), TunnelError> {
         self.handle_packet_batch_from_remote(PacketBatch::singleton(zc_packet))
+            .await
     }
 
-    pub fn handle_packet_batch_from_remote(
-        &mut self,
+    pub async fn handle_packet_batch_from_remote(
+        &self,
         batch: PacketBatch,
     ) -> Result<(), TunnelError> {
         for zc_packet in &batch {
@@ -779,7 +1104,17 @@ impl UdpConnection {
                 return Err(TunnelError::ConnIdNotMatch(self.conn_id, conn_id));
             }
         }
-        admit_udp_ring_batch(&mut self.ring_sender, batch)
+        struct BackpressureGuard(Arc<AtomicBool>);
+        impl Drop for BackpressureGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        let signal = self.state.receive_backpressure();
+        signal.store(true, Ordering::Release);
+        let _guard = BackpressureGuard(signal);
+        self.ring_sender.lock().await.send(batch).await
     }
 }
 
@@ -788,7 +1123,7 @@ struct UdpTunnelListenerData {
     local_url: url::Url,
     socket: Option<Arc<UdpSocket>>,
     send_gate: Arc<tokio::sync::Mutex<()>>,
-    sock_map: Arc<DashMap<SocketAddr, UdpConnection>>,
+    sock_map: Arc<DashMap<SocketAddr, Arc<UdpConnection>>>,
     conn_send: Sender<Box<dyn Tunnel>>,
     close_event_sender: UdpCloseEventSender,
     connection_admission: Arc<Semaphore>,
@@ -940,9 +1275,16 @@ impl UdpTunnelListenerData {
             }
             let old_conn_id = connection.conn_id;
             drop(connection);
-            self.sock_map.remove_if(&remote_addr, |_, connection| {
+            let removed = self.sock_map.remove_if(&remote_addr, |_, connection| {
                 connection.conn_id == old_conn_id
             });
+            if removed.is_some() {
+                tracing::warn!(
+                    ?remote_addr,
+                    conn_id = old_conn_id,
+                    "UDP receive connection removed for replacement"
+                );
+            }
         }
 
         let ring_for_recv_udp = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
@@ -963,7 +1305,7 @@ impl UdpTunnelListenerData {
         let duplicate_syn = match self.sock_map.entry(remote_addr) {
             dashmap::mapref::entry::Entry::Occupied(_) => true,
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(new_internal_conn());
+                entry.insert(Arc::new(new_internal_conn()));
                 false
             }
         };
@@ -976,45 +1318,70 @@ impl UdpTunnelListenerData {
         }
 
         if let Err(e) = self.send_control(&socket, &sack_buf, remote_addr).await {
-            self.sock_map
+            let removed = self
+                .sock_map
                 .remove_if(&remote_addr, |_, conn| conn.conn_id == conn_id);
+            if removed.is_some() {
+                tracing::warn!(
+                    ?remote_addr,
+                    ?conn_id,
+                    "UDP receive connection removed after SACK failure"
+                );
+            }
             tracing::error!(?e, "udp send sack packet error");
             return;
         }
 
-        let udp_sink = UdpBatchSink::new(
+        let receive_backpressure = connection_state.receive_backpressure();
+        let udp_sink = spawn_udp_outbound_workers(
             socket,
             remote_addr,
             conn_id,
             self.close_event_sender.clone(),
             Some(admission),
             connection_state,
+            tracing::info_span!(
+                "udp forward from ring to listener socket",
+                ?conn_id,
+                ?remote_addr
+            ),
         );
-        let conn = Box::new(BatchTunnelWrapper::new(
-            ScalarToBatchStream::new(RingStream::new(ring_for_recv_udp)),
-            udp_sink,
-            Some(TunnelInfo {
-                tunnel_type: "udp".to_owned(),
-                local_addr: Some(self.local_url.clone().into()),
-                remote_addr: Some(
-                    build_url_from_socket_addr(&remote_addr.to_string(), "udp").into(),
-                ),
-                resolved_remote_addr: Some(
-                    build_url_from_socket_addr(&remote_addr.to_string(), "udp").into(),
-                ),
-            }),
-        ));
+        let conn = Box::new(
+            BatchTunnelWrapper::new(
+                ScalarToBatchStream::new(RingStream::new(ring_for_recv_udp)),
+                udp_sink,
+                Some(TunnelInfo {
+                    tunnel_type: "udp".to_owned(),
+                    local_addr: Some(self.local_url.clone().into()),
+                    remote_addr: Some(
+                        build_url_from_socket_addr(&remote_addr.to_string(), "udp").into(),
+                    ),
+                    resolved_remote_addr: Some(
+                        build_url_from_socket_addr(&remote_addr.to_string(), "udp").into(),
+                    ),
+                }),
+            )
+            .with_receive_backpressure(receive_backpressure),
+        );
 
         tracing::info!(info = ?conn.info().unwrap().remote_addr, "udp connection accept done");
 
         if let Err(error) = self.conn_send.try_send(conn) {
-            self.sock_map
+            let removed = self
+                .sock_map
                 .remove_if(&remote_addr, |_, connection| connection.conn_id == conn_id);
+            if removed.is_some() {
+                tracing::warn!(
+                    ?remote_addr,
+                    ?conn_id,
+                    "UDP receive connection removed after accept rejection"
+                );
+            }
             tracing::warn!(?error, "drop UDP connection because accept ingress is full");
         }
     }
 
-    fn do_forward_one_packet_to_conn(&self, zc_packet: ZCPacket, addr: SocketAddr) {
+    async fn do_forward_one_packet_to_conn(&self, zc_packet: ZCPacket, addr: SocketAddr) {
         if let Err(error) = ensure_remote_allowed(&self.underlay_policy, addr) {
             tracing::warn!(?addr, ?error, "drop UDP packet denied by underlay policy");
             return;
@@ -1025,10 +1392,10 @@ impl UdpTunnelListenerData {
             && header.len.get() == 8
             && zc_packet.udp_payload().len() == 8;
         if !looks_like_syn
-            && let Some(mut conn) = self.sock_map.get_mut(&addr)
+            && let Some(conn) = self.sock_map.get(&addr).map(|entry| entry.clone())
             && conn.conn_id == conn_id
         {
-            if let Err(error) = conn.handle_packet_from_remote(zc_packet) {
+            if let Err(error) = conn.handle_packet_from_remote(zc_packet).await {
                 tracing::trace!(?error, "udp forward packet error");
             }
             return;
@@ -1204,11 +1571,11 @@ impl UdpTunnelListenerData {
                 "udp forward packet send hole punch packet"
             );
         } else if header.msg_type != UdpPacketType::HolePunch as u8 {
-            let Some(mut conn) = self.sock_map.get_mut(&addr) else {
+            let Some(conn) = self.sock_map.get(&addr).map(|entry| entry.clone()) else {
                 tracing::trace!(?header, "udp forward packet error, connection not found");
                 return;
             };
-            if let Err(e) = conn.handle_packet_from_remote(zc_packet) {
+            if let Err(e) = conn.handle_packet_from_remote(zc_packet).await {
                 tracing::trace!(?e, "udp forward packet error");
             }
         } else {
@@ -1216,19 +1583,19 @@ impl UdpTunnelListenerData {
         }
     }
 
-    fn forward_existing_batch(&self, addr: SocketAddr, conn_id: u32, batch: PacketBatch) {
-        let Some(mut connection) = self.sock_map.get_mut(&addr) else {
+    async fn forward_existing_batch(&self, addr: SocketAddr, conn_id: u32, batch: PacketBatch) {
+        let Some(connection) = self.sock_map.get(&addr).map(|entry| entry.clone()) else {
             return;
         };
         if connection.conn_id != conn_id {
             return;
         }
-        if let Err(error) = connection.handle_packet_batch_from_remote(batch) {
+        if let Err(error) = connection.handle_packet_batch_from_remote(batch).await {
             tracing::trace!(?error, "UDP batch forwarding failed");
         }
     }
 
-    fn do_forward_packet_batch(&self, packets: SmallVec<[(ZCPacket, SocketAddr); 4]>) {
+    async fn do_forward_packet_batch(&self, packets: SmallVec<[(ZCPacket, SocketAddr); 4]>) {
         let mut pending: Option<(SocketAddr, u32, PacketBatch)> = None;
         for (packet, addr) in packets {
             if let Err(error) = ensure_remote_allowed(&self.underlay_policy, addr) {
@@ -1256,20 +1623,22 @@ impl UdpTunnelListenerData {
                     }
                     _ => {
                         if let Some((pending_addr, pending_conn_id, batch)) = pending.take() {
-                            self.forward_existing_batch(pending_addr, pending_conn_id, batch);
+                            self.forward_existing_batch(pending_addr, pending_conn_id, batch)
+                                .await;
                         }
                         pending = Some((addr, conn_id, PacketBatch::singleton(packet)));
                     }
                 }
             } else {
                 if let Some((pending_addr, pending_conn_id, batch)) = pending.take() {
-                    self.forward_existing_batch(pending_addr, pending_conn_id, batch);
+                    self.forward_existing_batch(pending_addr, pending_conn_id, batch)
+                        .await;
                 }
-                self.do_forward_one_packet_to_conn(packet, addr);
+                self.do_forward_one_packet_to_conn(packet, addr).await;
             }
         }
         if let Some((addr, conn_id, batch)) = pending {
-            self.forward_existing_batch(addr, conn_id, batch);
+            self.forward_existing_batch(addr, conn_id, batch).await;
         }
     }
 
@@ -1278,7 +1647,7 @@ impl UdpTunnelListenerData {
         let mut batch_receiver = super::udp_vector_io::UdpBatchReceiver::new();
         loop {
             match udp_recv_from_socket_forward_task(&socket, &mut batch_receiver, true).await {
-                Ok(packets) => self.do_forward_packet_batch(packets),
+                Ok(packets) => self.do_forward_packet_batch(packets).await,
                 Err(e) => {
                     tracing::error!(?e, "udp recv packet error");
                     break;
@@ -1399,7 +1768,7 @@ impl TunnelListener for UdpTunnelListener {
 
     fn get_conn_counter(&self) -> Arc<Box<dyn TunnelConnCounter>> {
         struct UdpTunnelConnCounter {
-            sock_map: Weak<DashMap<SocketAddr, UdpConnection>>,
+            sock_map: Weak<DashMap<SocketAddr, Arc<UdpConnection>>>,
         }
 
         impl TunnelConnCounter for UdpTunnelConnCounter {
@@ -1570,7 +1939,7 @@ impl UdpTunnelConnector {
 
         let ring_sender = RingSink::new(ring_for_recv_udp.clone());
         let connection_state = Arc::new(UdpConnectionState::new());
-        let mut udp_conn = UdpConnection::new(conn_id, ring_sender, None, connection_state.clone());
+        let udp_conn = UdpConnection::new(conn_id, ring_sender, None, connection_state.clone());
 
         let socket_clone = socket.clone();
         let underlay_policy = self.underlay_policy.clone();
@@ -1616,13 +1985,13 @@ impl UdpTunnelConnector {
                                 .expect("UDP receive vectors are bounded");
                         }
                         if !batch.is_empty()
-                            && let Err(e) = udp_conn.handle_packet_batch_from_remote(batch)
+                            && let Err(e) = udp_conn.handle_packet_batch_from_remote(batch).await
                         {
                             tracing::trace!(?e, "udp forward packet batch error");
                         }
                     }
                     Err(e) => {
-                        tracing::trace!(?e, "udp forward task error");
+                        tracing::warn!(?e, "connector UDP receive task failed");
                         break;
                     }
                 }
@@ -1646,28 +2015,37 @@ impl UdpTunnelConnector {
             )),
         );
 
-        let udp_sink = UdpBatchSink::new(
+        let receive_backpressure = connection_state.receive_backpressure();
+        let udp_sink = spawn_udp_outbound_workers(
             socket.clone(),
             dst_addr,
             conn_id,
             close_event_sender,
             None,
             connection_state,
+            tracing::info_span!(
+                "udp forward from ring to connector socket",
+                ?conn_id,
+                ?dst_addr
+            ),
         );
-        Ok(Box::new(BatchTunnelWrapper::new(
-            ScalarToBatchStream::new(RingStream::new(ring_for_recv_udp)),
-            udp_sink,
-            Some(TunnelInfo {
-                tunnel_type: "udp".to_owned(),
-                local_addr: Some(
-                    build_url_from_socket_addr(&socket.local_addr()?.to_string(), "udp").into(),
-                ),
-                remote_addr: Some(self.addr.clone().into()),
-                resolved_remote_addr: Some(
-                    build_url_from_socket_addr(&dst_addr.to_string(), "udp").into(),
-                ),
-            }),
-        )))
+        Ok(Box::new(
+            BatchTunnelWrapper::new(
+                ScalarToBatchStream::new(RingStream::new(ring_for_recv_udp)),
+                udp_sink,
+                Some(TunnelInfo {
+                    tunnel_type: "udp".to_owned(),
+                    local_addr: Some(
+                        build_url_from_socket_addr(&socket.local_addr()?.to_string(), "udp").into(),
+                    ),
+                    remote_addr: Some(self.addr.clone().into()),
+                    resolved_remote_addr: Some(
+                        build_url_from_socket_addr(&dst_addr.to_string(), "udp").into(),
+                    ),
+                }),
+            )
+            .with_receive_backpressure(receive_backpressure),
+        ))
     }
 
     pub async fn try_connect_with_socket(
@@ -1930,7 +2308,38 @@ mod tests {
         assert_eq!(packet.udp_tunnel_header().unwrap().padding, 0);
     }
 
-    fn assert_sync_packet_handler(_: fn(&mut UdpConnection, ZCPacket) -> Result<(), TunnelError>) {}
+    #[test]
+    fn udp_send_runs_do_not_cross_flow_boundaries() {
+        let flow_hashes = [Some(7), Some(7), Some(9), Some(9), Some(7)];
+
+        assert_eq!(udp_send_run_end(&flow_hashes, 0), 2);
+        assert_eq!(udp_send_run_end(&flow_hashes, 2), 4);
+        assert_eq!(udp_send_run_end(&flow_hashes, 4), 5);
+    }
+
+    #[test]
+    fn udp_sender_workers_split_the_existing_packet_capacity_exactly() {
+        for parallelism in 1..=32 {
+            let worker_count = udp_sender_worker_count(parallelism);
+            let capacities = udp_sender_worker_capacities(worker_count);
+
+            assert!(worker_count.is_power_of_two());
+            assert_eq!(capacities.len(), worker_count);
+            assert_eq!(capacities.iter().sum::<usize>(), UDP_RING_PACKET_CAPACITY);
+        }
+    }
+
+    #[test]
+    fn colliding_udp_flow_shards_get_distinct_stable_workers() {
+        let mut assignments = UdpFlowWorkerAssignments::new(4);
+
+        assert_eq!(assignments.worker_for_key(17), 0);
+        assert_eq!(assignments.worker_for_key(81), 1);
+        assert_eq!(assignments.worker_for_key(145), 2);
+        assert_eq!(assignments.worker_for_key(209), 3);
+        assert_eq!(assignments.worker_for_key(17), 0);
+        assert_eq!(assignments.worker_for_key(81), 1);
+    }
 
     #[test]
     fn udp_listener_admission_is_bounded() {
@@ -1983,12 +2392,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn udp_connection_accepts_full_non_lossy_vector_batch() {
+    #[tokio::test]
+    async fn udp_connection_accepts_full_non_lossy_vector_batch() {
         let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
         let ring_sender = crate::tunnel::ring::RingSink::new(tunnel.clone());
         let mut ring_stream = crate::tunnel::ring::RingStream::new(tunnel);
-        let mut connection =
+        let connection =
             UdpConnection::new(77, ring_sender, None, Arc::new(UdpConnectionState::new()));
         let mut batch = PacketBatch::new();
         for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
@@ -1997,19 +2406,22 @@ mod tests {
             batch.try_push(packet).unwrap();
         }
 
-        connection.handle_packet_batch_from_remote(batch).unwrap();
+        connection
+            .handle_packet_batch_from_remote(batch)
+            .await
+            .unwrap();
         let received = ring_stream
             .try_recv_batch()
             .expect("the full UDP vector batch is queued");
         assert_eq!(received.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
     }
 
-    #[test]
-    fn udp_connection_preserves_mixed_reliability_order() {
+    #[tokio::test]
+    async fn udp_connection_prioritizes_reliable_packets_stably() {
         let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
         let ring_sender = crate::tunnel::ring::RingSink::new(tunnel.clone());
         let mut ring_stream = crate::tunnel::ring::RingStream::new(tunnel);
-        let mut connection =
+        let connection =
             UdpConnection::new(77, ring_sender, None, Arc::new(UdpConnectionState::new()));
         let packet_types = [
             PacketType::Data,
@@ -2026,17 +2438,20 @@ mod tests {
                 .unwrap();
         }
 
-        connection.handle_packet_batch_from_remote(batch).unwrap();
+        connection
+            .handle_packet_batch_from_remote(batch)
+            .await
+            .unwrap();
 
         let mut tags = Vec::new();
         while let Some(batch) = ring_stream.try_recv_batch() {
             tags.extend(batch.iter().map(|packet| packet.payload()[0]));
         }
-        assert_eq!(tags, (0_u8..packet_types.len() as u8).collect::<Vec<_>>());
+        assert_eq!(tags, vec![1, 3, 5, 0, 2, 4]);
     }
 
     #[tokio::test]
-    async fn udp_tunnel_receive_stream_keeps_full_vector_batch() {
+    async fn udp_tunnel_receive_stream_keeps_all_vector_packets_in_order() {
         let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
         listener.listen().await.unwrap();
         let mut connector = UdpTunnelConnector::new(listener.local_url());
@@ -2052,71 +2467,20 @@ mod tests {
         }
 
         connected_sink.send(sent).await.unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(1), accepted_stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let mut received_tags = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while received_tags.len() < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+                let received = accepted_stream.next().await.unwrap().unwrap();
+                received_tags.extend(received.iter().map(|packet| packet.payload()[0]));
+            }
+        })
+        .await
+        .unwrap();
 
-        assert_eq!(received.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
         assert_eq!(
-            received
-                .iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
+            received_tags,
             (0_u8..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE as u8).collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn udp_connection_lossy_vector_batch_admits_available_prefix() {
-        let tunnel = Arc::new(RingTunnel::new(16));
-        let ring_sender = crate::tunnel::ring::RingSink::new(tunnel.clone());
-        let mut ring_stream = crate::tunnel::ring::RingStream::new(tunnel);
-        let mut connection =
-            UdpConnection::new(77, ring_sender, None, Arc::new(UdpConnectionState::new()));
-        let mut batch = PacketBatch::new();
-        for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
-            batch
-                .try_push(new_udp_data_packet(77, PacketType::Data))
-                .unwrap();
-        }
-
-        connection.handle_packet_batch_from_remote(batch).unwrap();
-        let received = ring_stream
-            .try_recv_batch()
-            .expect("the available lossy prefix is queued");
-        assert_eq!(received.len(), 8);
-    }
-
-    #[test]
-    fn udp_connection_keeps_ring_credits_for_reliable_control() {
-        let tunnel = Arc::new(RingTunnel::new(16));
-        let ring_sender = crate::tunnel::ring::RingSink::new(tunnel.clone());
-        let mut ring_stream = crate::tunnel::ring::RingStream::new(tunnel);
-        let mut connection =
-            UdpConnection::new(77, ring_sender, None, Arc::new(UdpConnectionState::new()));
-        let mut bulk = PacketBatch::new();
-        for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
-            bulk.try_push(new_udp_data_packet(77, PacketType::Data))
-                .unwrap();
-        }
-        connection.handle_packet_batch_from_remote(bulk).unwrap();
-
-        let mut mixed = PacketBatch::new();
-        mixed
-            .try_push(new_udp_data_packet(77, PacketType::Data))
-            .unwrap();
-        mixed
-            .try_push(new_udp_data_packet(77, PacketType::RpcReq))
-            .unwrap();
-        connection.handle_packet_batch_from_remote(mixed).unwrap();
-
-        let first = ring_stream.try_recv_batch().unwrap();
-        let second = ring_stream.try_recv_batch().unwrap();
-        assert_eq!(first.len(), 8);
-        assert_eq!(second.len(), 1);
-        assert!(!second[0].is_lossy());
     }
 
     #[tokio::test]
@@ -2165,7 +2529,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_outbound_batch_sink_preserves_mixed_reliability_order() {
+    async fn udp_outbound_mixed_batch_admits_reliable_control_before_blocked_data() {
+        let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
+        let mut sink = UdpRingBatchSink::new(crate::tunnel::ring::RingSink::new(tunnel.clone()));
+        let mut stream = crate::tunnel::ring::RingStream::new(tunnel);
+        let make_bulk = |len: usize| {
+            let mut batch = PacketBatch::new();
+            for _ in 0..len {
+                batch
+                    .try_push(new_udp_data_packet(77, PacketType::Data))
+                    .unwrap();
+            }
+            batch
+        };
+        sink.send(make_bulk(crate::tunnel::batch::MAX_PACKET_BATCH_SIZE))
+            .await
+            .unwrap();
+        sink.send(make_bulk(
+            UDP_RING_PACKET_CAPACITY
+                - UDP_CONTROL_PACKET_RESERVE
+                - crate::tunnel::batch::MAX_PACKET_BATCH_SIZE,
+        ))
+        .await
+        .unwrap();
+
+        let mut mixed = PacketBatch::new();
+        mixed
+            .try_push(new_tagged_udp_data_packet(77, PacketType::Data, 1))
+            .unwrap();
+        mixed
+            .try_push(new_tagged_udp_data_packet(77, PacketType::Ping, 2))
+            .unwrap();
+        let mut blocked_send = Box::pin(sink.send(mixed));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut blocked_send)
+                .await
+                .is_err(),
+            "bulk data must remain blocked by the control reserve"
+        );
+
+        let mut reliable_tags = Vec::new();
+        while let Some(batch) = stream.try_recv_batch() {
+            reliable_tags.extend(
+                batch
+                    .iter()
+                    .filter(|packet| !packet.is_lossy())
+                    .map(|packet| packet.payload()[0]),
+            );
+        }
+        assert_eq!(reliable_tags, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn udp_outbound_batch_sink_prioritizes_reliable_packets_stably() {
         let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
         let mut sink = UdpRingBatchSink::new(crate::tunnel::ring::RingSink::new(tunnel.clone()));
         let mut stream = crate::tunnel::ring::RingStream::new(tunnel);
@@ -2190,7 +2606,7 @@ mod tests {
         while let Some(batch) = stream.try_recv_batch() {
             tags.extend(batch.iter().map(|packet| packet.payload()[0]));
         }
-        assert_eq!(tags, (0_u8..packet_types.len() as u8).collect::<Vec<_>>());
+        assert_eq!(tags, vec![1, 3, 5, 0, 2, 4]);
     }
 
     #[tokio::test]
@@ -2226,17 +2642,59 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let second = stream.recv_batch().await.unwrap();
+        let mut second_tags = Vec::new();
+        while second_tags.len() < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+            let batch = stream.recv_batch().await.unwrap();
+            second_tags.extend(batch.iter().map(|packet| packet.payload()[0]));
+        }
 
         assert_eq!(first.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
-        assert_eq!(second.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
-        assert_eq!(
-            second
-                .iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
-            (64_u8..128).collect::<Vec<_>>()
+        assert_eq!(second_tags, (64_u8..128).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn udp_ring_batch_sink_uses_available_credits_before_waiting() {
+        let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
+        let mut sink = UdpRingBatchSink::new(crate::tunnel::ring::RingSink::new(tunnel.clone()));
+        let mut stream = crate::tunnel::ring::RingStream::new(tunnel);
+        let make_batch = |start: u8| {
+            let mut batch = PacketBatch::new();
+            for offset in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE as u8 {
+                batch
+                    .try_push(new_tagged_udp_data_packet(
+                        77,
+                        PacketType::Data,
+                        start + offset,
+                    ))
+                    .unwrap();
+            }
+            batch
+        };
+
+        sink.send(make_batch(0)).await.unwrap();
+        let mut second_send = Box::pin(sink.send(make_batch(64)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second_send)
+                .await
+                .is_err()
         );
+
+        let first = stream.recv_batch().await.unwrap();
+        assert_eq!(first.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        let admitted_prefix = stream
+            .try_recv_batch()
+            .expect("the second batch must use available ring credits");
+        assert_eq!(
+            admitted_prefix.len(),
+            UDP_RING_PACKET_CAPACITY
+                - UDP_CONTROL_PACKET_RESERVE
+                - crate::tunnel::batch::MAX_PACKET_BATCH_SIZE
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), second_send)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2267,9 +2725,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let second = stream.recv_batch().await.unwrap();
-
-        assert_eq!(second.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        let mut retained = 0;
+        while retained < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+            retained += stream.recv_batch().await.unwrap().len();
+        }
+        assert_eq!(retained, crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
     }
 
     #[tokio::test]
@@ -2316,6 +2776,7 @@ mod tests {
             close_sender,
             None,
             Arc::new(UdpConnectionState::new()),
+            true,
         );
         let mut batch = PacketBatch::new();
         for payload in [
@@ -2340,6 +2801,97 @@ mod tests {
             assert_eq!(packet.udp_tunnel_header().unwrap().conn_id.get(), 77);
             assert_eq!(packet.payload(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn outbound_ring_task_preserves_packet_order() {
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let destination = receiver.local_addr().unwrap();
+        let (close_sender, _close_receiver) = unbounded_channel();
+        let udp_sink = UdpBatchSink::new(
+            sender,
+            destination,
+            77,
+            close_sender,
+            None,
+            Arc::new(UdpConnectionState::new()),
+            true,
+        );
+        let tunnel = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
+        let mut ring_sink =
+            crate::tunnel::batch::ScalarToBatchSink::new(RingSink::new(tunnel.clone()));
+        let forward = tokio::spawn(forward_ring_to_udp(RingStream::new(tunnel), udp_sink));
+
+        let mut batch = PacketBatch::new();
+        for payload in [
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"third".as_slice(),
+        ] {
+            batch.try_push(ZCPacket::new_with_payload(payload)).unwrap();
+        }
+        ring_sink.send(batch).await.unwrap();
+        ring_sink.flush().await.unwrap();
+
+        for expected in [
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"third".as_slice(),
+        ] {
+            let mut buffer = [0_u8; 256];
+            let (length, _) = receiver.recv_from(&mut buffer).await.unwrap();
+            let packet =
+                get_zcpacket_from_buf(BytesMut::from(&buffer[..length]), None, false).unwrap();
+            assert_eq!(packet.payload(), expected);
+        }
+        drop(ring_sink);
+        assert!(forward.await.unwrap().is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharded_udp_workers_preserve_order_inside_each_flow() {
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let destination = receiver.local_addr().unwrap();
+        let (close_sender, _close_receiver) = unbounded_channel();
+        let mut sink = spawn_udp_outbound_workers(
+            sender,
+            destination,
+            77,
+            close_sender,
+            None,
+            Arc::new(UdpConnectionState::new()),
+            tracing::info_span!("sharded UDP test"),
+        );
+        let mut batch = PacketBatch::new();
+        for sequence in 0..16_u8 {
+            for (flow, hash) in [(1_u8, 17_u64), (2_u8, 29_u64)] {
+                let mut packet = ZCPacket::new_with_payload(&[flow, sequence]);
+                packet.set_flow_hash(hash);
+                batch.try_push(packet).unwrap();
+            }
+        }
+
+        sink.send(batch).await.unwrap();
+        sink.flush().await.unwrap();
+
+        let mut received = [Vec::new(), Vec::new()];
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while received.iter().map(Vec::len).sum::<usize>() < 32 {
+                let mut buffer = [0_u8; 256];
+                let (length, _) = receiver.recv_from(&mut buffer).await.unwrap();
+                let packet =
+                    get_zcpacket_from_buf(BytesMut::from(&buffer[..length]), None, false).unwrap();
+                let payload = packet.payload();
+                received[usize::from(payload[0] - 1)].push(payload[1]);
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(received[0], (0..16_u8).collect::<Vec<_>>());
+        assert_eq!(received[1], (0..16_u8).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -2456,34 +3008,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_connection_handler_uses_sync_nonblocking_ring_delivery() {
-        assert_sync_packet_handler(UdpConnection::handle_packet_from_remote);
-
-        let ring_for_recv_udp = Arc::new(RingTunnel::new(8));
-        let mut conn = UdpConnection::new(
+    async fn udp_connection_reports_backpressure_while_lossless_delivery_waits() {
+        let ring_for_recv_udp = Arc::new(RingTunnel::new(UDP_RING_PACKET_CAPACITY));
+        let state = Arc::new(UdpConnectionState::new());
+        let signal = state.receive_backpressure();
+        let conn = Arc::new(UdpConnection::new(
             7,
-            RingSink::new(ring_for_recv_udp),
+            RingSink::new(ring_for_recv_udp.clone()),
             None,
-            Arc::new(UdpConnectionState::new()),
-        );
-
-        for _ in 0..16 {
-            conn.handle_packet_from_remote(new_udp_data_packet(7, PacketType::Data))
-                .unwrap();
-        }
-
-        let mut got_buffer_full = false;
-        for _ in 0..16 {
-            match conn.handle_packet_from_remote(new_udp_data_packet(7, PacketType::Ping)) {
-                Ok(()) => {}
-                Err(TunnelError::BufferFull) => {
-                    got_buffer_full = true;
-                    break;
-                }
-                Err(e) => panic!("unexpected error: {e:?}"),
+            state,
+        ));
+        let mut stream = RingStream::new(ring_for_recv_udp);
+        let make_batch = || {
+            let mut batch = PacketBatch::new();
+            for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+                batch
+                    .try_push(new_udp_data_packet(7, PacketType::Data))
+                    .unwrap();
             }
-        }
-        assert!(got_buffer_full);
+            batch
+        };
+
+        conn.handle_packet_batch_from_remote(make_batch())
+            .await
+            .unwrap();
+        let waiting_conn = conn.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiting_conn
+                .handle_packet_batch_from_remote(make_batch())
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert!(signal.load(Ordering::Acquire));
+
+        while stream.try_recv_batch().is_some() {}
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!signal.load(Ordering::Acquire));
     }
 
     #[tokio::test]

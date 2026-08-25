@@ -131,12 +131,20 @@ struct QueuedPacketBatch {
     _queue_credits: OwnedSemaphorePermit,
 }
 
-fn queue_credit_count(batch: &PacketBatch) -> Option<u32> {
-    let retained_bytes = batch.retained_buffer_capacity();
+fn queue_credit_count(batch: &mut PacketBatch) -> Option<u32> {
+    let packet_credits = batch.len().checked_mul(PACKET_QUEUE_SLOT_BYTES)?;
+    let mut retained_bytes = batch.retained_buffer_capacity();
+    if retained_bytes > PACKET_QUEUE_CREDIT_BYTES
+        && batch.buffer_byte_len().max(packet_credits) <= PACKET_QUEUE_CREDIT_BYTES
+    {
+        for packet in batch.iter_mut() {
+            packet.compact_retained_buffer();
+        }
+        retained_bytes = batch.retained_buffer_capacity();
+    }
     if retained_bytes > PACKET_QUEUE_CREDIT_BYTES {
         return None;
     }
-    let packet_credits = batch.len().checked_mul(PACKET_QUEUE_SLOT_BYTES)?;
     u32::try_from(retained_bytes.max(packet_credits)).ok()
 }
 
@@ -176,7 +184,7 @@ impl PacketRecvChan {
         if batch.is_empty() {
             return Ok(());
         }
-        let batch = if let Some(direct_nic) = self.direct_nic.get() {
+        let mut batch = if let Some(direct_nic) = self.direct_nic.get() {
             match direct_nic.try_process(batch).await {
                 Ok(()) => return Ok(()),
                 Err(batch) => batch,
@@ -184,7 +192,13 @@ impl PacketRecvChan {
         } else {
             batch
         };
-        let Some(credit_count) = queue_credit_count(&batch) else {
+        let Some(credit_count) = queue_credit_count(&mut batch) else {
+            tracing::warn!(
+                packets = batch.len(),
+                bytes = batch.buffer_byte_len(),
+                retained_bytes = batch.retained_buffer_capacity(),
+                "peer packet batch exceeds the fallback queue credit limit"
+            );
             return Err(tokio::sync::mpsc::error::SendError(batch));
         };
         let permit = match self
@@ -194,7 +208,10 @@ impl PacketRecvChan {
             .await
         {
             Ok(permit) => permit,
-            Err(_) => return Err(tokio::sync::mpsc::error::SendError(batch)),
+            Err(_) => {
+                tracing::warn!("peer packet fallback queue credits are closed");
+                return Err(tokio::sync::mpsc::error::SendError(batch));
+            }
         };
         self.sender
             .send(QueuedPacketBatch {
@@ -202,7 +219,10 @@ impl PacketRecvChan {
                 _queue_credits: permit,
             })
             .await
-            .map_err(|error| tokio::sync::mpsc::error::SendError(error.0.batch))
+            .map_err(|error| {
+                tracing::warn!("peer packet fallback queue receiver is closed");
+                tokio::sync::mpsc::error::SendError(error.0.batch)
+            })
     }
 
     pub(crate) fn install_direct_nic(&self, ingress: Arc<peer_manager::DirectNicIngress>) {
@@ -213,8 +233,8 @@ impl PacketRecvChan {
         &self,
         packet: ZCPacket,
     ) -> Result<(), tokio::sync::mpsc::error::TrySendError<ZCPacket>> {
-        let batch = PacketBatch::singleton(packet);
-        let Some(credit_count) = queue_credit_count(&batch) else {
+        let mut batch = PacketBatch::singleton(packet);
+        let Some(credit_count) = queue_credit_count(&mut batch) else {
             return Err(tokio::sync::mpsc::error::TrySendError::Full(
                 batch.pop_singleton().expect("scalar packet channel job"),
             ));
@@ -384,6 +404,25 @@ mod vector_channel_tests {
             sender.try_send(packet),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn peer_channel_compacts_small_packets_with_large_retained_buffers() {
+        let (sender, mut receiver) = create_packet_recv_chan();
+        let mut batch = PacketBatch::new();
+        for value in 0_u8..15 {
+            let mut packet = ZCPacket::new_with_payload(&[value]);
+            packet.mut_inner().reserve(64 * 1024);
+            batch.try_push(packet).unwrap();
+        }
+        assert!(batch.retained_buffer_capacity() > super::PACKET_QUEUE_CREDIT_BYTES);
+        assert!(batch.buffer_byte_len() < super::PACKET_QUEUE_CREDIT_BYTES);
+
+        sender.send_batch(batch).await.unwrap();
+        let received = recv_packet_batch_from_chan(&mut receiver).await.unwrap();
+
+        assert_eq!(received.len(), 15);
+        assert!(received.retained_buffer_capacity() <= super::PACKET_QUEUE_CREDIT_BYTES);
     }
 
     #[tokio::test]

@@ -86,6 +86,28 @@ def open_socks5(
     return stream
 
 
+def open_socks5_domain(
+    proxy_port: int,
+    target_host: str,
+    target_port: int,
+) -> socket.socket:
+    stream = open_proxy_socket(proxy_port)
+    stream.sendall(b"\x05\x01\x00")
+    if recv_exact(stream, 2) != b"\x05\x00":
+        stream.close()
+        raise RuntimeError("The SOCKS5 proxy rejected unauthenticated access.")
+    encoded_host = target_host.encode("ascii")
+    request = b"\x05\x01\x00\x03" + bytes([len(encoded_host)]) + encoded_host
+    request += struct.pack("!H", target_port)
+    stream.sendall(request)
+    response = recv_exact(stream, 4)
+    if response[:2] != b"\x05\x00":
+        stream.close()
+        raise RuntimeError(f"The SOCKS5 domain connection failed with status {response[1]}.")
+    read_socks_address(stream, response[3])
+    return stream
+
+
 def open_http_connect(
     proxy_port: int,
     target_ip: str,
@@ -246,6 +268,8 @@ def run_client(args: argparse.Namespace) -> None:
 
     verify_tcp(open_socks5, args.proxy_port, args.target_ip, args.tcp_port)
     verify_tcp(open_http_connect, args.proxy_port, args.target_ip, args.tcp_port)
+    verify_tcp(open_socks5_domain, args.proxy_port, args.target_hostname, args.tcp_port)
+    verify_tcp(open_http_connect, args.proxy_port, args.target_hostname, args.tcp_port)
     verify_http_proxy(args.proxy_port, args.target_ip, args.http_port)
     verify_socks5_udp(args.proxy_port, args.target_ip, args.udp_port)
 
@@ -288,6 +312,7 @@ def run_client(args: argparse.Namespace) -> None:
         "correctness": {
             "http_connect_tcp": "pass",
             "http_forward": "pass",
+            "overlay_name_resolution": "pass",
             "socks5_tcp": "pass",
             "socks5_udp": "pass",
         },
@@ -410,6 +435,7 @@ def parse_args() -> argparse.Namespace:
     client = commands.add_parser("client")
     client.add_argument("--proxy-port", type=positive_integer, required=True)
     client.add_argument("--target-ip", required=True)
+    client.add_argument("--target-hostname", required=True)
     client.add_argument("--tcp-port", type=positive_integer, required=True)
     client.add_argument("--udp-port", type=positive_integer, required=True)
     client.add_argument("--http-port", type=positive_integer, required=True)

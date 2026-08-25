@@ -32,15 +32,9 @@ The configured 16,384-entry logical limit did not change.
 
 The benchmark now records mean RSS, peak RSS, and thread counts for both LowTier nodes.
 
-The `port_mode` field now accepts these profile names:
+Linux and FreeBSD use native Ethernet automatically.
 
-- `routed` selects the IP-only TUN path.
-- `ethernet` selects native TAP and complete Ethernet behavior.
-- `compatible-ethernet` selects an IP-only edge on the Ethernet overlay.
-
-Linux and FreeBSD use native Ethernet by default.
-Other systems use compatible Ethernet by default.
-Select `routed` to use the L3 path.
+Other systems use an IP interface automatically.
 
 ## Test Environment
 
@@ -121,19 +115,17 @@ The tests do not claim active probing resistance.
 
 ## Full L2 Verification
 
-The QEMU harness passed native TAP, relay, L2-TUN, mixed TAP and L2-TUN, and L3 checks.
+The QEMU harness passed native TAP, relay, mixed-edge, and L3 checks.
 
 The exact frame cases included VLAN, QinQ, LLDP, broadcast, unicast, MAC movement, and MTU boundaries.
 
-The `ethernet` profile fails when native TAP is unavailable.
-
-LowTier does not silently replace complete Ethernet behavior with L2-TUN.
+Normal TAP IP traffic uses the compact routed representation.
 
 ## Verification Commands
 
 ```text
 cargo fmt --all -- --check
-cargo test --locked -p lowertier --no-default-features --features tun port_mode
+cargo test --locked -p lowertier --no-default-features --features tun automatic_adapter
 cargo test --locked -p lowertier --no-default-features --features tun link_envelope::tests -- --nocapture
 cargo test --locked -p lowertier --no-default-features --features tun l2_fabric::tests -- --nocapture
 cargo test --locked -p lowertier --no-default-features --features tun l2 -- --nocapture

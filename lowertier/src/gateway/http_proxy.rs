@@ -5,7 +5,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::fast_socks5::server::AsyncTcpConnector;
+use super::fast_socks5::{server::AsyncTcpConnector, util::target_addr::TargetAddr};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -283,21 +283,11 @@ where
     .map_err(|_| HttpProxyError::new(408, "request header timed out"))?
 }
 
-async fn resolve_target(target: &ProxyTarget) -> Result<SocketAddr, HttpProxyError> {
+fn connector_target(target: &ProxyTarget) -> TargetAddr {
     if let Ok(ip) = target.host.parse() {
-        return Ok(SocketAddr::new(ip, target.port));
+        return TargetAddr::Ip(SocketAddr::new(ip, target.port));
     }
-
-    let addresses: Vec<_> = tokio::net::lookup_host((target.host.as_str(), target.port))
-        .await
-        .map_err(|_| HttpProxyError::new(502, "destination name resolution failed"))?
-        .collect();
-    addresses
-        .iter()
-        .copied()
-        .find(SocketAddr::is_ipv4)
-        .or_else(|| addresses.first().copied())
-        .ok_or_else(|| HttpProxyError::new(502, "destination has no address"))
+    TargetAddr::Domain(target.host.clone(), target.port)
 }
 
 async fn write_error<I>(inbound: &mut I, error: &HttpProxyError)
@@ -332,15 +322,9 @@ where
             return Err(error.into());
         }
     };
-    let destination = match resolve_target(&request.target).await {
-        Ok(destination) => destination,
-        Err(error) => {
-            write_error(&mut inbound, &error).await;
-            return Err(error.into());
-        }
-    };
+    let destination = connector_target(&request.target);
     let mut outbound = match connector
-        .tcp_connect(destination, REQUEST_TIMEOUT.as_secs())
+        .tcp_connect_target(destination, REQUEST_TIMEOUT.as_secs())
         .await
     {
         Ok(outbound) => outbound,
@@ -372,7 +356,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::fast_socks5::{Result, server::AsyncTcpConnector};
+    use crate::gateway::fast_socks5::{
+        Result, server::AsyncTcpConnector, util::target_addr::TargetAddr,
+    };
     use std::net::SocketAddr;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -387,6 +373,24 @@ mod tests {
 
         async fn tcp_connect(&self, addr: SocketAddr, _timeout_s: u64) -> Result<Self::S> {
             Ok(TcpStream::connect(addr).await?)
+        }
+    }
+
+    struct DomainConnector {
+        destination: SocketAddr,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncTcpConnector for DomainConnector {
+        type S = TcpStream;
+
+        async fn tcp_connect(&self, _addr: SocketAddr, _timeout_s: u64) -> Result<Self::S> {
+            panic!("the proxy resolved the target before the central dialer");
+        }
+
+        async fn tcp_connect_target(&self, target: TargetAddr, _timeout_s: u64) -> Result<Self::S> {
+            assert_eq!(target, TargetAddr::Domain("peer.et.net".to_string(), 443));
+            Ok(TcpStream::connect(self.destination).await?)
         }
     }
 
@@ -490,6 +494,38 @@ mod tests {
         let mut reply = [0_u8; 4];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"pong");
+        client.shutdown().await.unwrap();
+
+        destination_task.await.unwrap();
+        proxy_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_passes_domain_to_central_dialer() {
+        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination_addr = destination.local_addr().unwrap();
+        let destination_task = tokio::spawn(async move {
+            let (mut stream, _) = destination.accept().await.unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping");
+        });
+        let (mut client, server) = tokio::io::duplex(4096);
+        let proxy_task = tokio::spawn(serve_http_proxy(
+            server,
+            DomainConnector {
+                destination: destination_addr,
+            },
+        ));
+
+        client
+            .write_all(b"CONNECT peer.et.net:443 HTTP/1.1\r\nHost: peer.et.net:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = [0_u8; 39];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.write_all(b"ping").await.unwrap();
         client.shutdown().await.unwrap();
 
         destination_task.await.unwrap();

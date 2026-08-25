@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     future::Future,
     io,
     os::fd::AsRawFd,
@@ -9,7 +10,9 @@ use std::{
 
 use bytes::{Buf, BytesMut};
 use futures::{Sink, Stream, ready, stream::FuturesUnordered};
-use quincy_tun::{AsyncDevice, GROTable, VIRTIO_NET_HDR_LEN};
+use quincy_tun::{
+    AsyncDevice, GROTable, GsoReadContinuation, RecvMultipleResult, VIRTIO_NET_HDR_LEN,
+};
 use smallvec::SmallVec;
 
 use crate::{
@@ -18,9 +21,7 @@ use crate::{
     },
     instance::{
         linux_tun_uring::{self, IoUringTunWriter},
-        tun_scheduler::{
-            FlowDrrScheduler, TUN_SCHEDULER_BYTE_CAPACITY, TUN_SCHEDULER_PACKET_CAPACITY,
-        },
+        tun_scheduler::{DrainStats, TUN_SCHEDULER_BYTE_CAPACITY, TUN_SCHEDULER_PACKET_CAPACITY},
     },
     tunnel::{
         BatchStreamItem, PacketBatchSink, PacketBatchStream, SplitIngressTunnel, SplitTunnel,
@@ -67,6 +68,7 @@ struct ReadState {
     reusable_pool: ReusableBufferPool,
     telemetry: Arc<DataplaneTelemetry>,
     pending_batch: Option<PacketBatch>,
+    pending_gso: Option<GsoReadContinuation>,
     pending_error: Option<TunnelError>,
     failed: bool,
 }
@@ -104,6 +106,7 @@ impl ReadState {
             reusable_pool,
             telemetry,
             pending_batch: None,
+            pending_gso: None,
             pending_error: None,
             failed: false,
         }
@@ -183,6 +186,46 @@ impl ReadState {
         let mut io_calls = 0_usize;
         let mut io_packets = 0_usize;
         let mut io_bytes = 0_usize;
+        if let Some(continuation) = self.pending_gso.take() {
+            let result = self.device.continue_recv_multiple(
+                &mut self.original,
+                &mut self.segments,
+                &mut self.sizes,
+                self.payload_offset,
+                continuation,
+            );
+            let count = match result {
+                Ok(RecvMultipleResult::Complete(count)) => count,
+                Ok(RecvMultipleResult::Partial {
+                    count,
+                    continuation,
+                }) => {
+                    self.pending_gso = Some(continuation);
+                    count
+                }
+                Err(error) => {
+                    self.failed = true;
+                    return Poll::Ready(Some(Err(TunnelError::IOError(error))));
+                }
+            };
+            io_packets = count;
+            io_bytes = self.sizes[..count].iter().copied().sum::<usize>();
+            let mut batch = PacketBatch::with_capacity(count.min(tun_batch_limit()));
+            if let Err(error) = self.append_received(count, &mut batch) {
+                self.failed = true;
+                return Poll::Ready(Some(Err(error)));
+            }
+            self.telemetry
+                .record_io(DataplaneIo::TunRead, io_calls, io_packets, io_bytes);
+            self.telemetry.record_stage_sample(
+                DataplaneStage::TunRead,
+                stage_started,
+                io_packets,
+                io_bytes,
+            );
+            return Poll::Ready(Some(Ok(batch)));
+        }
+
         let count = loop {
             match self.device.poll_readable(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -193,13 +236,23 @@ impl ReadState {
                 Poll::Ready(Ok(())) => {}
             }
             io_calls += 1;
-            match self.device.try_recv_multiple(
+            match self.device.try_recv_multiple_bounded(
                 &mut self.original,
                 &mut self.segments,
                 &mut self.sizes,
                 self.payload_offset,
             ) {
-                Ok(count) => {
+                Ok(RecvMultipleResult::Complete(count)) => {
+                    io_packets += count;
+                    io_bytes =
+                        io_bytes.saturating_add(self.sizes[..count].iter().copied().sum::<usize>());
+                    break count;
+                }
+                Ok(RecvMultipleResult::Partial {
+                    count,
+                    continuation,
+                }) => {
+                    self.pending_gso = Some(continuation);
                     io_packets += count;
                     io_bytes =
                         io_bytes.saturating_add(self.sizes[..count].iter().copied().sum::<usize>());
@@ -220,15 +273,18 @@ impl ReadState {
             return Poll::Ready(Some(Err(error)));
         }
 
-        while batch.len() < batch_limit && self.pending_batch.is_none() {
+        while batch.len() < batch_limit
+            && self.pending_batch.is_none()
+            && self.pending_gso.is_none()
+        {
             io_calls += 1;
-            match self.device.try_recv_multiple(
+            match self.device.try_recv_multiple_bounded(
                 &mut self.original,
                 &mut self.segments,
                 &mut self.sizes,
                 self.payload_offset,
             ) {
-                Ok(count) => {
+                Ok(RecvMultipleResult::Complete(count)) => {
                     io_packets += count;
                     io_bytes =
                         io_bytes.saturating_add(self.sizes[..count].iter().copied().sum::<usize>());
@@ -236,6 +292,19 @@ impl ReadState {
                         self.pending_error = Some(error);
                         break;
                     }
+                }
+                Ok(RecvMultipleResult::Partial {
+                    count,
+                    continuation,
+                }) => {
+                    self.pending_gso = Some(continuation);
+                    io_packets += count;
+                    io_bytes =
+                        io_bytes.saturating_add(self.sizes[..count].iter().copied().sum::<usize>());
+                    if let Err(error) = self.append_received(count, &mut batch) {
+                        self.pending_error = Some(error);
+                    }
+                    break;
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => {
@@ -300,7 +369,7 @@ type SendFuture = Pin<
 >;
 
 struct QueueSink {
-    scheduler: FlowDrrScheduler<BytesMut>,
+    pending: TunPacketQueue,
     max_batch_bytes: usize,
     spare: Option<Vec<BytesMut>>,
     gro_spare: Option<GROTable>,
@@ -308,6 +377,70 @@ struct QueueSink {
     in_flight_packets: usize,
     in_flight_bytes: usize,
     stall_started: Option<std::time::Instant>,
+}
+
+struct QueuedTunPacket {
+    buffer: BytesMut,
+    bytes: usize,
+}
+
+struct TunPacketQueue {
+    packets: VecDeque<QueuedTunPacket>,
+    bytes: usize,
+    packet_capacity: usize,
+    byte_capacity: usize,
+}
+
+impl TunPacketQueue {
+    fn new(packet_capacity: usize, byte_capacity: usize) -> Self {
+        Self {
+            packets: VecDeque::with_capacity(packet_capacity),
+            bytes: 0,
+            packet_capacity,
+            byte_capacity,
+        }
+    }
+
+    fn can_accept(&self, packets: usize, bytes: usize) -> bool {
+        packets <= self.packet_capacity.saturating_sub(self.packets.len())
+            && bytes <= self.byte_capacity.saturating_sub(self.bytes)
+    }
+
+    fn push(&mut self, buffer: BytesMut, bytes: usize) -> Result<(), BytesMut> {
+        if !self.can_accept(1, bytes) {
+            return Err(buffer);
+        }
+        self.packets.push_back(QueuedTunPacket { buffer, bytes });
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    fn drain_into(&mut self, output: &mut Vec<BytesMut>, limit: usize) -> DrainStats {
+        debug_assert!(output.is_empty());
+        let mut stats = DrainStats::default();
+        while stats.packets < limit {
+            let Some(packet) = self.packets.pop_front() else {
+                break;
+            };
+            stats.packets += 1;
+            stats.bytes = stats.bytes.saturating_add(packet.bytes);
+            self.bytes -= packet.bytes;
+            output.push(packet.buffer);
+        }
+        stats
+    }
+
+    fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    fn queued_packets(&self) -> usize {
+        self.packets.len()
+    }
+
+    fn queued_bytes(&self) -> usize {
+        self.bytes
+    }
 }
 
 impl QueueSink {
@@ -320,11 +453,7 @@ impl QueueSink {
         let byte_capacity = TUN_SCHEDULER_BYTE_CAPACITY
             .max(max_packet_bytes.saturating_mul(TUN_SCHEDULER_PACKET_CAPACITY));
         Self {
-            scheduler: FlowDrrScheduler::new(
-                TUN_SCHEDULER_PACKET_CAPACITY,
-                byte_capacity,
-                mtu.max(1),
-            ),
+            pending: TunPacketQueue::new(TUN_SCHEDULER_PACKET_CAPACITY, byte_capacity),
             max_batch_bytes,
             spare: Some(Vec::with_capacity(MAX_PACKET_BATCH_SIZE)),
             gro_spare: Some(GROTable::default()),
@@ -336,17 +465,11 @@ impl QueueSink {
     }
 
     fn can_accept_batch(&self) -> bool {
-        self.scheduler
+        self.pending
             .can_accept(MAX_PACKET_BATCH_SIZE, self.max_batch_bytes)
     }
 
-    fn take_flush_resources(
-        &mut self,
-    ) -> (
-        Vec<BytesMut>,
-        GROTable,
-        crate::instance::tun_scheduler::DrainStats,
-    ) {
+    fn take_flush_resources(&mut self) -> (Vec<BytesMut>, GROTable, DrainStats) {
         let mut buffers = self
             .spare
             .take()
@@ -355,7 +478,7 @@ impl QueueSink {
             .gro_spare
             .take()
             .expect("an idle TUN queue owns one GRO table");
-        let stats = self.scheduler.drain_into(&mut buffers, tun_batch_limit());
+        let stats = self.pending.drain_into(&mut buffers, tun_batch_limit());
         debug_assert!(stats.packets != 0);
         self.write_active = true;
         self.in_flight_packets = stats.packets;
@@ -375,13 +498,13 @@ impl QueueSink {
     }
 
     fn occupancy_packets(&self) -> usize {
-        self.scheduler
+        self.pending
             .queued_packets()
             .saturating_add(self.in_flight_packets)
     }
 
     fn occupancy_bytes(&self) -> usize {
-        self.scheduler
+        self.pending
             .queued_bytes()
             .saturating_add(self.in_flight_bytes)
     }
@@ -470,7 +593,7 @@ impl LinuxTunSink {
     fn begin_flush(&mut self) {
         for index in 0..self.queues.len() {
             let queue = &mut self.queues[index];
-            if queue.write_active || queue.scheduler.is_empty() {
+            if queue.write_active || queue.pending.is_empty() {
                 continue;
             }
             let schedule_started = DataplaneTelemetry::sample_start();
@@ -517,6 +640,7 @@ impl LinuxTunSink {
     }
 
     fn poll_complete_in_flight(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TunnelError>> {
+        let mut completed = false;
         while !self.in_flight.is_empty() {
             match Pin::new(&mut self.in_flight).poll_next(cx) {
                 Poll::Ready(Some((
@@ -543,12 +667,24 @@ impl LinuxTunSink {
                     );
                     self.queues[index].restore_flush_resources(buffers, gro_table);
                     self.record_queue_occupancy(index);
+                    completed = true;
                 }
                 Poll::Ready(None) => break,
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    // A completion can expose queued work on its TUN queue.
+                    // Re-poll the sink so begin_flush starts that write.
+                    if completed {
+                        cx.waker().wake_by_ref();
+                    }
+                    return Poll::Pending;
+                }
             }
         }
         Poll::Ready(Ok(()))
+    }
+
+    fn poll_newly_started_writes(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TunnelError>> {
+        self.poll_complete_in_flight(cx)
     }
 }
 
@@ -556,15 +692,11 @@ fn packet_queue_index(packet: &ZCPacket, queue_count: usize) -> usize {
     packet
         .peer_manager_header()
         .and_then(|header| header.flow_shard())
-        .map_or(0, |shard| {
-            FlowDrrScheduler::<BytesMut>::queue_index(shard, queue_count)
-        })
+        .map_or(0, |shard| usize::from(shard) % queue_count)
 }
 
 struct PlannedTunPacket {
     queue_index: usize,
-    shard: u16,
-    critical: bool,
     bytes: usize,
     buffer: BytesMut,
 }
@@ -583,15 +715,10 @@ fn plan_tun_batch(
     let mut planned: SmallVec<[PlannedTunPacket; MAX_PACKET_BATCH_SIZE]> =
         SmallVec::with_capacity(batch.len());
     for packet in batch {
-        let header = packet.peer_manager_header();
-        let shard = header.and_then(|header| header.flow_shard()).unwrap_or(0);
-        let critical = header.is_some_and(|header| header.is_critical_l2_control());
         let queue_index = packet_queue_index(&packet, queue_count);
         let buffer = packet_into_tun_buffer(packet)?;
         planned.push(PlannedTunPacket {
             queue_index,
-            shard,
-            critical,
             bytes: buffer.len(),
             buffer,
         });
@@ -611,9 +738,13 @@ impl Sink<PacketBatch> for LinuxTunSink {
         }
         // A completion can make a previously full queue writable. Start its
         // next ready vector before checking admission; otherwise a full
-        // scheduler can return Pending with no in-flight future left to wake
-        // this sink.
+        // queue can return Pending with no in-flight future left to wake this
+        // sink.
         this.begin_flush();
+        match this.poll_newly_started_writes(cx) {
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) | Poll::Pending => {}
+        }
         if this.update_stall_state() {
             Poll::Ready(Ok(()))
         } else {
@@ -633,7 +764,7 @@ impl Sink<PacketBatch> for LinuxTunSink {
         }
         for (index, admission) in admissions.iter().enumerate() {
             if !this.queues[index]
-                .scheduler
+                .pending
                 .can_accept(admission.packets, admission.bytes)
             {
                 return Err(TunnelError::BufferFull);
@@ -641,8 +772,8 @@ impl Sink<PacketBatch> for LinuxTunSink {
         }
         for packet in planned {
             this.queues[packet.queue_index]
-                .scheduler
-                .push(packet.shard, packet.buffer, packet.bytes, packet.critical)
+                .pending
+                .push(packet.buffer, packet.bytes)
                 .expect("TUN batch admission was preflighted");
         }
         for (index, admission) in admissions.iter().enumerate() {
@@ -658,8 +789,8 @@ impl Sink<PacketBatch> for LinuxTunSink {
         let this = self.as_mut().get_mut();
         loop {
             this.begin_flush();
-            let schedulers_empty = this.queues.iter().all(|queue| queue.scheduler.is_empty());
-            if schedulers_empty && this.in_flight.is_empty() {
+            let queues_empty = this.queues.iter().all(|queue| queue.pending.is_empty());
+            if queues_empty && this.in_flight.is_empty() {
                 return Poll::Ready(Ok(()));
             }
             ready!(this.poll_complete_in_flight(cx))?;
@@ -753,10 +884,16 @@ pub(crate) fn wrap_devices(
 mod tests {
     use std::{
         pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         task::{Context, Poll},
     };
 
-    use futures::{Sink, StreamExt, stream};
+    use bytes::BytesMut;
+    use futures::{Sink, StreamExt, stream, task::ArcWake};
+    use quincy_tun::GROTable;
 
     use crate::tunnel::{
         BatchStreamItem, PacketBatchSink, PacketBatchStream, Tunnel,
@@ -803,6 +940,81 @@ mod tests {
         fn assert_batch_sink<T: PacketBatchSink>() {}
 
         assert_batch_sink::<super::LinuxTunSink>();
+    }
+
+    #[test]
+    fn newly_started_tun_write_registers_its_waker_before_pending() {
+        let global_ctx = crate::common::global_ctx::tests::get_mock_global_ctx();
+        let mut sink = super::LinuxTunSink::new(
+            Vec::new(),
+            1500,
+            global_ctx.dataplane_telemetry().clone(),
+            true,
+        );
+        let polled = Arc::new(AtomicBool::new(false));
+        let future_polled = polled.clone();
+        sink.in_flight
+            .push(Box::pin(futures::future::poll_fn(move |_| {
+                future_polled.store(true, Ordering::Release);
+                Poll::Pending
+            })));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        assert!(sink.poll_newly_started_writes(&mut context).is_pending());
+        assert!(polled.load(Ordering::Acquire));
+    }
+
+    struct WakeCounter(AtomicUsize);
+
+    impl ArcWake for WakeCounter {
+        fn wake_by_ref(counter: &Arc<Self>) {
+            counter.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn tun_flush_repolls_after_a_completion_exposes_queued_work() {
+        let global_ctx = crate::common::global_ctx::tests::get_mock_global_ctx();
+        let mut queues = vec![super::QueueSink::new(1500), super::QueueSink::new(1500)];
+        for queue in &mut queues {
+            queue.spare = None;
+            queue.gro_spare = None;
+            queue.write_active = true;
+            queue.in_flight_packets = 1;
+            queue.in_flight_bytes = 32;
+        }
+        queues[0]
+            .pending
+            .push(BytesMut::from(&[0_u8; 32][..]), 32)
+            .unwrap();
+        let mut sink = super::LinuxTunSink {
+            devices: Vec::new(),
+            queues,
+            io_uring_writers: Vec::new(),
+            in_flight: futures::stream::FuturesUnordered::new(),
+            telemetry: global_ctx.dataplane_telemetry().clone(),
+        };
+        sink.in_flight.push(Box::pin(async {
+            (
+                0,
+                Ok((32, 1)),
+                Vec::new(),
+                GROTable::default(),
+                1,
+                None,
+                false,
+            )
+        }));
+        sink.in_flight.push(Box::pin(futures::future::pending()));
+        let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = futures::task::waker(wake_counter.clone());
+        let mut context = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut sink).poll_flush(&mut context).is_pending());
+        assert_eq!(wake_counter.0.load(Ordering::Acquire), 1);
+        assert!(!sink.queues[0].write_active);
+        assert!(!sink.queues[0].pending.is_empty());
     }
 
     #[test]
@@ -922,14 +1134,11 @@ mod tests {
         let mut queue = super::QueueSink::new(1380);
         let packet = bytes::BytesMut::from(&[0x45, 0, 0, 20][..]);
         let packet_bytes = packet.len();
-        queue
-            .scheduler
-            .push(1, packet, packet_bytes, false)
-            .unwrap();
+        queue.pending.push(packet, packet_bytes).unwrap();
 
         let (buffers, gro_table, stats) = queue.take_flush_resources();
         assert_eq!(stats.packets, 1);
-        assert!(queue.scheduler.is_empty());
+        assert!(queue.pending.is_empty());
         assert!(queue.write_active);
         assert!(queue.spare.is_none());
         assert!(queue.gro_spare.is_none());
@@ -948,7 +1157,7 @@ mod tests {
         let mut queue = super::QueueSink::new(1380);
         for sequence in 0..super::MAX_PACKET_BATCH_SIZE {
             let packet = bytes::BytesMut::from(&[sequence as u8; 64][..]);
-            queue.scheduler.push(1, packet, 64, false).unwrap();
+            queue.pending.push(packet, 64).unwrap();
         }
 
         let (buffers, gro_table, stats) = queue.take_flush_resources();
@@ -956,7 +1165,7 @@ mod tests {
 
         assert_eq!(stats.packets, configured);
         assert_eq!(
-            queue.scheduler.queued_packets(),
+            queue.pending.queued_packets(),
             super::MAX_PACKET_BATCH_SIZE - configured
         );
         assert_eq!(
@@ -966,6 +1175,22 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         queue.restore_flush_resources(buffers, gro_table);
+    }
+
+    #[test]
+    fn tun_queue_preserves_arrival_order_across_flow_shards() {
+        let mut queue = super::QueueSink::new(1380);
+        for (_shard, marker) in [(7, 1_u8), (0, 2), (7, 3), (0, 4)] {
+            let packet = BytesMut::from(&[marker][..]);
+            queue.pending.push(packet, 1).unwrap();
+        }
+
+        let (buffers, _gro_table, _stats) = queue.take_flush_resources();
+
+        assert_eq!(
+            buffers.iter().map(|buffer| buffer[0]).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]

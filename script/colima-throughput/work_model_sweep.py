@@ -180,7 +180,6 @@ def main() -> int:
                 "RUN_RAW_GATE": "1" if raw_gate else "0",
                 "REQUIRE_RAW_GATE": "1" if raw_gate else "0",
                 "RAW_GATE_BPS": str(args.raw_gate_bps),
-                "MODES": "auto",
                 "DIRECTIONS": "forward",
                 "UNDERLAY_PROTOCOL": "quic",
                 "RUN_TCP": "0",

@@ -121,12 +121,14 @@ pub struct PeerConnPinger {
     loss_rate_stats: Arc<AtomicU32>,
     throughput_stats: Arc<Throughput>,
     control_metrics: AggregateTrafficMetrics,
+    receive_backpressure: Option<Arc<std::sync::atomic::AtomicBool>>,
     tasks: JoinSet<Result<(), TunnelError>>,
 }
 
 struct PingAttemptResult {
     result: Result<u128, Error>,
     rx_packets_at_start: u64,
+    tx_data_packets_at_start: u64,
 }
 
 fn update_loss_counter(
@@ -134,8 +136,15 @@ fn update_loss_counter(
     succeeded: bool,
     rx_packets_at_start: u64,
     current_rx_packets: u64,
+    tx_data_packets_at_start: u64,
+    current_tx_data_packets: u64,
+    receive_backpressured: bool,
 ) {
-    if succeeded || current_rx_packets > rx_packets_at_start {
+    if succeeded
+        || current_rx_packets > rx_packets_at_start
+        || current_tx_data_packets > tx_data_packets_at_start
+        || receive_backpressured
+    {
         loss_counter.store(0, Ordering::Relaxed);
     } else {
         loss_counter.fetch_add(1, Ordering::Relaxed);
@@ -162,6 +171,7 @@ impl PeerConnPinger {
         loss_rate_stats: Arc<AtomicU32>,
         throughput_stats: Arc<Throughput>,
         control_metrics: AggregateTrafficMetrics,
+        receive_backpressure: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Self {
         Self {
             my_peer_id,
@@ -173,6 +183,7 @@ impl PeerConnPinger {
             loss_rate_stats,
             throughput_stats,
             control_metrics,
+            receive_backpressure,
         }
     }
 
@@ -291,6 +302,7 @@ impl PeerConnPinger {
                     let receiver = ctrl_resp_sender.subscribe();
                     let ping_res_sender = ping_res_sender.clone();
                     let rx_packets_at_start = controller.throughput.rx_packets();
+                    let tx_data_packets_at_start = controller.throughput.tx_data_packets();
                     pingpong_tasks.spawn(async move {
                         let mut receiver = receiver.resubscribe();
                         let result = Self::do_pingpong_once(
@@ -306,6 +318,7 @@ impl PeerConnPinger {
                         let attempt = PingAttemptResult {
                             result,
                             rx_packets_at_start,
+                            tx_data_packets_at_start,
                         };
                         if let Err(e) = ping_res_sender.send(attempt).await {
                             tracing::info!(?e, "pingpong task send result error, exit..");
@@ -326,6 +339,7 @@ impl PeerConnPinger {
         while let Some(attempt) = ping_res_receiver.recv().await {
             let ret = attempt.result;
             let current_rx_packets = throughput.rx_packets();
+            let current_tx_data_packets = throughput.tx_data_packets();
             if let Ok(lat) = ret {
                 latency_stats.record_latency(lat as u32);
                 loss_rate_stats_1.record_latency(0);
@@ -337,6 +351,11 @@ impl PeerConnPinger {
                 ret.is_ok(),
                 attempt.rx_packets_at_start,
                 current_rx_packets,
+                attempt.tx_data_packets_at_start,
+                current_tx_data_packets,
+                self.receive_backpressure
+                    .as_ref()
+                    .is_some_and(|signal| signal.load(Ordering::Acquire)),
             );
 
             let loss_rate_1: f64 = loss_rate_stats_1.get_latency_us();
@@ -349,11 +368,13 @@ impl PeerConnPinger {
             );
 
             tracing::debug!(
-                "loss_counter: {:?}, loss_rate_1: {}, cur_rx_packets: {}, attempt_rx: {}, node_id: {}",
+                "loss_counter: {:?}, loss_rate_1: {}, cur_rx_packets: {}, attempt_rx: {}, cur_tx_data_packets: {}, attempt_tx_data: {}, node_id: {}",
                 loss_counter,
                 loss_rate_1,
                 current_rx_packets,
                 attempt.rx_packets_at_start,
+                current_tx_data_packets,
+                attempt.tx_data_packets_at_start,
                 my_node_id
             );
 
@@ -365,7 +386,9 @@ impl PeerConnPinger {
                     ?loss_counter,
                     attempt_rx_packets = attempt.rx_packets_at_start,
                     ?current_rx_packets,
-                    "pingpong loss too much pingpong packet and no other ingress packets, closing the connection",
+                    attempt_tx_data_packets = attempt.tx_data_packets_at_start,
+                    ?current_tx_data_packets,
+                    "pingpong loss too much pingpong packet and no other connection traffic, closing the connection",
                 );
                 break;
             }
@@ -387,7 +410,7 @@ mod tests {
     fn ingress_during_failed_ping_clears_previous_losses() {
         let losses = AtomicU32::new(4);
 
-        update_loss_counter(&losses, false, 100, 101);
+        update_loss_counter(&losses, false, 100, 101, 200, 200, false);
 
         assert_eq!(losses.load(Ordering::Relaxed), 0);
     }
@@ -396,7 +419,7 @@ mod tests {
     fn failed_ping_without_ingress_increments_losses() {
         let losses = AtomicU32::new(4);
 
-        update_loss_counter(&losses, false, 100, 100);
+        update_loss_counter(&losses, false, 100, 100, 200, 200, false);
 
         assert_eq!(losses.load(Ordering::Relaxed), 5);
     }
@@ -405,7 +428,25 @@ mod tests {
     fn successful_ping_clears_previous_losses() {
         let losses = AtomicU32::new(4);
 
-        update_loss_counter(&losses, true, 100, 100);
+        update_loss_counter(&losses, true, 100, 100, 200, 200, false);
+
+        assert_eq!(losses.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn local_receive_backpressure_clears_failed_ping_losses() {
+        let losses = AtomicU32::new(4);
+
+        update_loss_counter(&losses, false, 100, 100, 200, 200, true);
+
+        assert_eq!(losses.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn outbound_progress_during_failed_ping_clears_previous_losses() {
+        let losses = AtomicU32::new(4);
+
+        update_loss_counter(&losses, false, 100, 100, 200, 201, false);
 
         assert_eq!(losses.load(Ordering::Relaxed), 0);
     }

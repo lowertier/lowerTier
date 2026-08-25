@@ -400,9 +400,7 @@ async fn accumulate_direct_data_batch(
     }
 
     if pending_batch.is_none() {
-        let mut pooled_batch = PacketBatch::new();
-        pooled_batch.mark_inline_crypto();
-        *pending_batch = Some(pooled_batch);
+        *pending_batch = Some(PacketBatch::new());
         *pending_deadline = deadline;
     } else {
         *pending_deadline = earliest_deadline(*pending_deadline, deadline);
@@ -756,6 +754,7 @@ async fn acquire_budget_or_terminal(
 
         let wake = budget.wake.notified();
         tokio::pin!(wake);
+        enable_admission_waiter(wake.as_mut());
         if let Some(permit) = budget.try_acquire(packet_count, byte_count) {
             return Ok(permit);
         }
@@ -766,6 +765,10 @@ async fn acquire_budget_or_terminal(
             _ = &mut wake => {}
         }
     }
+}
+
+fn enable_admission_waiter(waiter: Pin<&mut tokio::sync::futures::Notified<'_>>) {
+    waiter.enable();
 }
 
 impl DirectSinkState {
@@ -792,7 +795,8 @@ where
 }
 
 fn set_terminal_error(state: &DirectSinkState, terminal: String) {
-    if state.terminal_error.set(terminal).is_ok() {
+    if state.terminal_error.set(terminal.clone()).is_ok() {
+        tracing::warn!(error = %terminal, "direct tunnel entered a terminal state");
         state.terminal_tx.send_replace(());
     }
 }
@@ -957,6 +961,43 @@ mod tests {
         batches: UnboundedSender<Vec<u16>>,
         release_ready: Option<oneshot::Receiver<()>>,
         release_flush: Option<oneshot::Receiver<()>>,
+    }
+
+    struct InlineHintRecordingSink {
+        hints: UnboundedSender<bool>,
+    }
+
+    impl Sink<PacketBatch> for InlineHintRecordingSink {
+        type Error = crate::tunnel::TunnelError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+            self.get_mut()
+                .hints
+                .send(batch.prefers_inline_crypto())
+                .unwrap();
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
     }
 
     impl Sink<PacketBatch> for CoalescingSink {
@@ -1185,6 +1226,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coalesced_full_batch_remains_eligible_for_crypto_workers() {
+        let (hints_tx, mut hints_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut sink =
+            Box::pin(InlineHintRecordingSink { hints: hints_tx }) as Pin<Box<dyn PacketBatchSink>>;
+        let mut pending_batch = None;
+        let mut pending_deadline = None;
+        let half = MAX_PACKET_BATCH_SIZE / 2;
+
+        super::accumulate_direct_data_batch(
+            &mut sink,
+            &mut pending_batch,
+            &mut pending_deadline,
+            sized_batch(PacketType::Data, half, 1),
+            None,
+        )
+        .await
+        .unwrap();
+        super::accumulate_direct_data_batch(
+            &mut sink,
+            &mut pending_batch,
+            &mut pending_deadline,
+            sized_batch(PacketType::Data, half, 1),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hints_rx.recv().await, Some(false));
+    }
+
+    #[tokio::test]
     async fn control_run_precedes_a_waiting_data_run() {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_data, release_data_rx) = oneshot::channel();
@@ -1292,6 +1364,28 @@ mod tests {
 
         release_data.send(()).unwrap();
         assert!(second.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn admission_waiters_keep_one_wake_for_each_released_run() {
+        let budget = Arc::new(super::AdmissionBudget::with_process(2, 2, None));
+        let first_owner = budget.try_acquire(1, 1).unwrap();
+        let second_owner = budget.try_acquire(1, 1).unwrap();
+        let first_wait = budget.wake.notified();
+        let second_wait = budget.wake.notified();
+        tokio::pin!(first_wait);
+        tokio::pin!(second_wait);
+        super::enable_admission_waiter(first_wait.as_mut());
+        super::enable_admission_waiter(second_wait.as_mut());
+
+        drop(first_owner);
+        drop(second_owner);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(first_wait, second_wait);
+        })
+        .await
+        .expect("each released run must wake one registered waiter");
     }
 
     #[tokio::test]
