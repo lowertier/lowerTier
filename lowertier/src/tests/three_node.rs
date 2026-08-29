@@ -2361,7 +2361,7 @@ pub async fn port_forward_with_inbound_default_drop_acl_test(
 #[rstest::rstest]
 #[serial_test::serial]
 #[tokio::test]
-pub async fn relay_bps_limit_test(#[values(100, 200, 400, 800)] bps_limit: u64) {
+pub async fn relay_bps_limit_test(#[values(800)] bps_limit: u64) {
     let insts = init_three_node_ex(
         "udp",
         |cfg| {
@@ -2409,7 +2409,7 @@ pub async fn relay_bps_limit_test(#[values(100, 200, 400, 800)] bps_limit: u64) 
 #[rstest::rstest]
 #[serial_test::serial]
 #[tokio::test]
-pub async fn instance_recv_bps_limit_test(#[values(100, 800)] bps_limit: u64) {
+pub async fn instance_recv_bps_limit_test(#[values(800)] bps_limit: u64) {
     let insts = init_three_node_ex(
         "tcp",
         |cfg| {

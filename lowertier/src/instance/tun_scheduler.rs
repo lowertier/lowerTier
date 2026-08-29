@@ -1,6 +1,8 @@
 use std::{array, collections::VecDeque};
 
-pub(crate) const FLOW_SHARD_COUNT: usize = 64;
+use crate::peers::flow::FLOW_SHARD_COUNT as FLOW_SHARD_COUNT_U16;
+
+pub(crate) const FLOW_SHARD_COUNT: usize = FLOW_SHARD_COUNT_U16 as usize;
 pub(crate) const TUN_SCHEDULER_PACKET_CAPACITY: usize = 128;
 pub(crate) const TUN_SCHEDULER_BYTE_CAPACITY: usize = 512 * 1024;
 const DEFAULT_CONTROL_BURST_PACKETS: usize = 8;

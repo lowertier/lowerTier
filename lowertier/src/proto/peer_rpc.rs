@@ -263,52 +263,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn perf_test_generate_with_proof() {
-        let group_name = "test_group".to_string();
-        let group_secret = "secret123".to_string();
-        let peer_id = 42u32;
-        let iterations = 100000;
-
-        let start = std::time::Instant::now();
-        for _ in 0..iterations {
-            let _ = PeerGroupInfo::generate_with_proof(
-                group_name.clone(),
-                group_secret.clone(),
-                peer_id,
-            );
-        }
-        let duration = start.elapsed();
-
-        println!(
-            "generate_with_proof took {:?} for {} iterations",
-            duration, iterations
-        );
-        println!("Avg time per iteration: {:?}", duration / iterations as u32);
-    }
-
-    #[test]
-    #[ignore]
-    fn perf_test_verify() {
-        let group_name = "test_group".to_string();
-        let group_secret = "secret123".to_string();
-        let peer_id = 42u32;
-        let iterations = 100000;
-
-        let peer_group_info =
-            PeerGroupInfo::generate_with_proof(group_name, group_secret.clone(), peer_id);
-
-        let start = std::time::Instant::now();
-        for _ in 0..iterations {
-            assert!(peer_group_info.verify(&group_secret, peer_id));
-        }
-        let duration = start.elapsed();
-
-        println!("verify took {:?} for {} iterations", duration, iterations);
-        println!("Avg time per iteration: {:?}", duration / iterations as u32);
-    }
-
-    #[test]
     fn test_trusted_credential_pubkey_hmac_valid() {
         let credential = TrustedCredentialPubkey {
             pubkey: vec![7u8; 32],

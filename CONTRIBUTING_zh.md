@@ -204,10 +204,11 @@ cargo test --no-default-features --features=full --verbose
 
 ### 测试要求
 
-- 为新功能编写测试
-- 维护现有测试覆盖率
-- 测试应该是独立且可重复的
-- 包含单元测试和集成测试
+测试要少，只保留会锁住真实不变量的用例：协议、加密、认证、ACL、数据包路径、资源上限。
+
+不要为同一断言再写一份标量路径和一份批量路径。不要为同一条拒绝路径堆叠变体。不要把被 ignore 的性能基准放进 `src/`。
+
+CI 只跑 `.github/workflows/test.yml` 里的 essential nextest 过滤。新测试只有在确实关键时才加入该过滤。
 
 ## Pull Request 规范
 

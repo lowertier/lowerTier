@@ -3638,14 +3638,6 @@ impl PeerManager {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_ospf_route_impl(&self) -> Option<Arc<PeerRoute>> {
-        match &self.route_algo_inst {
-            RouteAlgoInst::Ospf(route) => Some(route.clone()),
-            RouteAlgoInst::None => None,
-        }
-    }
-
     pub fn get_route(&self) -> Box<dyn Route + Send + Sync + 'static> {
         match &self.route_algo_inst {
             RouteAlgoInst::Ospf(route) => Box::new(route.clone()),
@@ -4849,26 +4841,6 @@ impl PeerManager {
         send_result
     }
 
-    async fn send_msg_internal_batch(
-        peers: &Arc<PeerMap>,
-        foreign_network_client: &Arc<ForeignNetworkClient>,
-        relay_peer_map: &Arc<RelayPeerMap>,
-        direct_tx_metrics: Option<&Arc<TrafficMetricRecorder>>,
-        batch: PacketBatch,
-        dst_peer_id: PeerId,
-    ) -> Result<(), Error> {
-        Self::send_msg_internal_batch_authorized(
-            peers,
-            foreign_network_client,
-            relay_peer_map,
-            direct_tx_metrics,
-            batch,
-            dst_peer_id,
-            None,
-        )
-        .await
-    }
-
     async fn send_msg_internal_batch_authorized(
         peers: &Arc<PeerMap>,
         foreign_network_client: &Arc<ForeignNetworkClient>,
@@ -5041,28 +5013,6 @@ impl PeerManager {
             }
         }
         send_result
-    }
-
-    async fn send_msg_internal_batch_with_next_hop(
-        peers: &Arc<PeerMap>,
-        foreign_network_client: &Arc<ForeignNetworkClient>,
-        relay_peer_map: &Arc<RelayPeerMap>,
-        direct_tx_metrics: Option<&Arc<TrafficMetricRecorder>>,
-        batch: PacketBatch,
-        dst_peer_id: PeerId,
-        next_hop: PeerId,
-    ) -> Result<(), Error> {
-        Self::send_msg_internal_batch_with_next_hop_authorized(
-            peers,
-            foreign_network_client,
-            relay_peer_map,
-            direct_tx_metrics,
-            batch,
-            dst_peer_id,
-            next_hop,
-            None,
-        )
-        .await
     }
 
     async fn send_msg_internal_batch_with_next_hop_authorized(
@@ -9368,44 +9318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_sender_uses_compact_ip_for_a_tap_peer() {
-        let (peer_mgr_a, _nic_a) =
-            create_hybrid_peer_manager_with_ipv4("10.144.144.1".parse().unwrap()).await;
-        let (peer_mgr_b, mut nic_b) =
-            create_hybrid_peer_manager_with_ipv4("10.144.144.2".parse().unwrap()).await;
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
-            .await
-            .unwrap();
-
-        let destination = peer_mgr_b.get_global_ctx().get_ipv4().unwrap().address();
-        let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
-        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-        let ip = &mut frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..];
-        ip[0] = 0x45;
-        ip[16..20].copy_from_slice(&destination.octets());
-
-        peer_mgr_a
-            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
-            .await
-            .unwrap();
-
-        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            received.peer_manager_header().unwrap().packet_type,
-            PacketType::Data as u8
-        );
-        assert_eq!(
-            received.payload(),
-            &frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..]
-        );
-    }
-
-    #[tokio::test]
-    async fn hybrid_rejects_malformed_ip_ethertypes_in_scalar_and_batch_paths() {
+    async fn hybrid_rejects_malformed_ip_ethertypes() {
         let (peer_mgr_a, _nic_a) =
             create_hybrid_peer_manager_with_ipv4_and_bridge("10.144.154.1".parse().unwrap(), true)
                 .await;
@@ -9417,35 +9330,21 @@ mod tests {
             .await
             .unwrap();
 
-        for (ether_type, payload_len) in [([0x08, 0x00], 4_usize), ([0x86, 0xdd], 10)] {
-            let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + payload_len];
-            frame[12..14].copy_from_slice(&ether_type);
-
-            let scalar = peer_mgr_a
-                .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
-                .await;
-            assert!(matches!(
-                scalar,
-                Err(crate::common::error::Error::InvalidEthernetFrame(_))
-            ));
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
-                    .await
-                    .is_err()
-            );
-
-            let batch = peer_mgr_a
+        let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 4];
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+        assert!(
+            peer_mgr_a
                 .send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(
                     ZCPacket::new_with_payload(&frame),
                 ))
-                .await;
-            assert!(batch.is_err());
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
-                    .await
-                    .is_err()
-            );
-        }
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -9684,7 +9583,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_routes_after_nic_destination_rewrite_for_scalar_and_batch() {
+    async fn hybrid_routes_after_nic_destination_rewrite() {
         let source_ip: Ipv4Addr = "10.159.159.1".parse().unwrap();
         let compact_ip: Ipv4Addr = "10.159.159.2".parse().unwrap();
         let bridge_ip: Ipv4Addr = "10.159.159.3".parse().unwrap();
@@ -9704,131 +9603,31 @@ mod tests {
             .add_nic_packet_process_pipeline(Box::new(RewriteIpv4Destination(compact_ip)))
             .await;
 
-        let make_frame = || {
-            let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
-            frame[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
-            frame[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
-            frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-            let ip = &mut frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..];
-            ip[0] = 0x45;
-            ip[2..4].copy_from_slice(&20_u16.to_be_bytes());
-            ip[12..16].copy_from_slice(&source_ip.octets());
-            // This is the bridge address before the NIC rewrite.
-            ip[16..20].copy_from_slice(&bridge_ip.octets());
-            frame
-        };
-
-        peer_mgr_a
-            .send_msg_by_ethernet(ZCPacket::new_with_payload(&make_frame()))
-            .await
-            .unwrap();
-        let scalar = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            scalar.peer_manager_header().unwrap().packet_type,
-            PacketType::Data as u8
-        );
-        assert_eq!(&scalar.payload()[16..20], &compact_ip.octets());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), nic_c.recv())
-                .await
-                .is_err()
-        );
+        let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
+        frame[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]);
+        frame[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        let ip = &mut frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&20_u16.to_be_bytes());
+        ip[12..16].copy_from_slice(&source_ip.octets());
+        ip[16..20].copy_from_slice(&bridge_ip.octets());
 
         peer_mgr_a
             .send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(ZCPacket::new_with_payload(
-                &make_frame(),
+                &frame,
             )))
             .await
             .unwrap();
-        let batched = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            batched.peer_manager_header().unwrap().packet_type,
+            received.peer_manager_header().unwrap().packet_type,
             PacketType::Data as u8
         );
-        assert_eq!(&batched.payload()[16..20], &compact_ip.octets());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), nic_c.recv())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn hybrid_compact_scalar_and_batch_match_after_destination_rewrite() {
-        let source_ip: Ipv4Addr = "10.160.160.1".parse().unwrap();
-        let selected_bridge_ip: Ipv4Addr = "10.160.160.2".parse().unwrap();
-        let original_bridge_ip: Ipv4Addr = "10.160.160.3".parse().unwrap();
-        let (peer_mgr_a, _nic_a) =
-            create_hybrid_peer_manager_with_ipv4_and_bridge(source_ip, true).await;
-        let (peer_mgr_b, mut nic_b) =
-            create_hybrid_peer_manager_with_ipv4_and_bridge(selected_bridge_ip, true).await;
-        let (peer_mgr_c, mut nic_c) =
-            create_hybrid_peer_manager_with_ipv4_and_bridge(original_bridge_ip, true).await;
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_c.clone()).await;
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
-            .await
-            .unwrap();
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
-            .await
-            .unwrap();
-        peer_mgr_a
-            .add_nic_packet_process_pipeline(Box::new(RewriteIpv4Destination(selected_bridge_ip)))
-            .await;
-
-        let make_frame = || {
-            let mut frame = vec![0_u8; crate::instance::l2_tun::ETHERNET_HEADER_LEN + 20];
-            frame[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x63]);
-            frame[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
-            frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-            let ip = &mut frame[crate::instance::l2_tun::ETHERNET_HEADER_LEN..];
-            ip[0] = 0x45;
-            ip[2..4].copy_from_slice(&20_u16.to_be_bytes());
-            ip[12..16].copy_from_slice(&source_ip.octets());
-            ip[16..20].copy_from_slice(&original_bridge_ip.octets());
-            frame
-        };
-
-        peer_mgr_a
-            .send_msg_by_ethernet(ZCPacket::new_with_payload(&make_frame()))
-            .await
-            .unwrap();
-        let scalar = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            scalar.peer_manager_header().unwrap().packet_type,
-            PacketType::Data as u8
-        );
-        assert_eq!(&scalar.payload()[16..20], &selected_bridge_ip.octets());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), nic_c.recv())
-                .await
-                .is_err()
-        );
-
-        peer_mgr_a
-            .send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(ZCPacket::new_with_payload(
-                &make_frame(),
-            )))
-            .await
-            .unwrap();
-        let batched = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            batched.peer_manager_header().unwrap().packet_type,
-            PacketType::Data as u8
-        );
-        assert_eq!(batched.payload(), scalar.payload());
+        assert_eq!(&received.payload()[16..20], &compact_ip.octets());
         assert!(
             tokio::time::timeout(Duration::from_millis(100), nic_c.recv())
                 .await
@@ -9957,38 +9756,6 @@ mod tests {
             PacketType::Ethernet as u8
         );
         assert_eq!(received.payload(), frame);
-    }
-
-    #[tokio::test]
-    async fn hybrid_ip_acl_denial_blocks_the_full_ethernet_branch() {
-        let (peer_mgr_a, _nic_a) =
-            create_hybrid_peer_manager_with_ipv4("10.144.150.1".parse().unwrap()).await;
-        let (peer_mgr_b, mut nic_b) =
-            create_hybrid_peer_manager_with_ipv4_and_bridge("10.144.150.2".parse().unwrap(), true)
-                .await;
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
-            .await
-            .unwrap();
-        peer_mgr_a
-            .get_global_ctx()
-            .get_acl_filter()
-            .reload_rules(Some(&deny_outbound_acl()));
-
-        peer_mgr_a
-            .send_msg_by_hybrid_ip_batch(PacketBatch::singleton(routed_ipv4_packet(
-                "10.144.150.1".parse().unwrap(),
-                "10.144.150.2".parse().unwrap(),
-                1,
-            )))
-            .await
-            .unwrap();
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), nic_b.recv())
-                .await
-                .is_err()
-        );
     }
 
     #[tokio::test]

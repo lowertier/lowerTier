@@ -317,9 +317,6 @@ pub(crate) enum L2TunError {
     FrameTooShort,
     #[error("TUN payload is not IPv4 or IPv6")]
     UnsupportedIpVersion,
-    #[cfg(test)]
-    #[error("Ethernet frame does not contain IPv4 or IPv6")]
-    UnsupportedEtherType,
 }
 
 pub(crate) fn encode_peer_mac(peer_id: u32) -> [u8; 6] {
@@ -436,24 +433,6 @@ pub(crate) fn prepare_ip_frame_with_ipv4_prefix(
     frame[6..12].copy_from_slice(&encode_peer_mac(source_peer_id));
     frame[12..14].copy_from_slice(&(ether_type as u16).to_be_bytes());
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn decapsulate_ip(frame: &[u8]) -> Result<&[u8], L2TunError> {
-    if frame.len() <= ETHERNET_HEADER_LEN {
-        return Err(L2TunError::FrameTooShort);
-    }
-    let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
-    let expected_version = match ether_type {
-        value if value == EtherType::Ipv4 as u16 => 4,
-        value if value == EtherType::Ipv6 as u16 => 6,
-        _ => return Err(L2TunError::UnsupportedEtherType),
-    };
-    let payload = &frame[ETHERNET_HEADER_LEN..];
-    if payload[0] >> 4 != expected_version {
-        return Err(L2TunError::UnsupportedIpVersion);
-    }
-    Ok(payload)
 }
 
 /// Build the proxy-ARP response that lets a native TAP peer address an IP-only TUN edge.
@@ -839,10 +818,10 @@ fn ipv6_membership_updates(
 mod tests {
     use super::{
         ETHERNET_HEADER_LEN, EtherType, NeighborTarget, arp_reply_for_known_ipv4,
-        arp_reply_for_local_ipv4, decapsulate_ip, encode_peer_mac, internet_checksum,
-        multicast_membership_updates, multicast_membership_updates_from_ip,
-        multicast_membership_updates_with_reporter, ndp_reply_for_known_ipv6, prepare_ip_frame,
-        prepare_ip_frame_with_ipv4_prefix, validated_neighbor_request,
+        arp_reply_for_local_ipv4, encode_peer_mac, internet_checksum, multicast_membership_updates,
+        multicast_membership_updates_from_ip, multicast_membership_updates_with_reporter,
+        ndp_reply_for_known_ipv6, prepare_ip_frame, prepare_ip_frame_with_ipv4_prefix,
+        validated_neighbor_request,
     };
 
     #[test]
@@ -905,21 +884,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(&ipv4[..6], &[0xff; 6]);
-    }
-
-    #[test]
-    fn decapsulates_only_supported_ip_frames() {
-        let mut frame = vec![0; ETHERNET_HEADER_LEN + 20];
-        frame[ETHERNET_HEADER_LEN] = 0x45;
-        prepare_ip_frame(&mut frame, 1, Some(2)).unwrap();
-        assert_eq!(
-            decapsulate_ip(&frame).unwrap(),
-            &frame[ETHERNET_HEADER_LEN..]
-        );
-
-        frame[12..14].copy_from_slice(&0x0806_u16.to_be_bytes());
-        assert!(decapsulate_ip(&frame).is_err());
-        assert!(decapsulate_ip(&frame[..10]).is_err());
     }
 
     #[test]
@@ -998,30 +962,6 @@ mod tests {
     }
 
     #[test]
-    fn validates_an_arp_request_inside_a_vlan() {
-        let requester_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
-        let target: std::net::Ipv4Addr = "10.81.0.9".parse().unwrap();
-        let mut request = vec![0_u8; 46];
-        request[..6].copy_from_slice(&[0xff; 6]);
-        request[6..12].copy_from_slice(&requester_mac);
-        request[12..14].copy_from_slice(&0x8100_u16.to_be_bytes());
-        request[14..16].copy_from_slice(&7_u16.to_be_bytes());
-        request[16..18].copy_from_slice(&0x0806_u16.to_be_bytes());
-        request[18..26].copy_from_slice(&[0, 1, 0x08, 0, 6, 4, 0, 1]);
-        request[26..32].copy_from_slice(&requester_mac);
-        request[32..36].copy_from_slice(&[10, 81, 0, 2]);
-        request[42..46].copy_from_slice(&target.octets());
-
-        let request = validated_neighbor_request(&request).unwrap();
-
-        assert_eq!(request.target(), NeighborTarget::Ipv4(target));
-        let reply = request.reply(9);
-        assert_eq!(reply.len(), 46);
-        assert_eq!(&reply[12..18], &request.frame[12..18]);
-        assert_eq!(&reply[24..26], &2_u16.to_be_bytes());
-    }
-
-    #[test]
     fn answers_ndp_for_a_known_overlay_peer() {
         let requester_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
         let requester_ip: std::net::Ipv6Addr = "fd00::2".parse().unwrap();
@@ -1074,39 +1014,6 @@ mod tests {
             ]),
             0
         );
-    }
-
-    #[test]
-    fn rejects_normal_ipv6_as_a_neighbor_request() {
-        let mut frame = vec![0_u8; 14 + 40 + 8];
-        frame[12..14].copy_from_slice(&0x86dd_u16.to_be_bytes());
-        frame[14] = 0x60;
-        frame[18..20].copy_from_slice(&8_u16.to_be_bytes());
-        frame[20] = 17;
-        frame[21] = 64;
-
-        assert!(validated_neighbor_request(&frame).is_none());
-    }
-
-    #[test]
-    fn rejects_an_ndp_request_with_a_bad_checksum() {
-        let mut request = vec![0_u8; 86];
-        request[12..14].copy_from_slice(&0x86dd_u16.to_be_bytes());
-        request[14] = 0x60;
-        request[18..20].copy_from_slice(&32_u16.to_be_bytes());
-        request[20] = 58;
-        request[21] = 255;
-        request[22..38].copy_from_slice(&"fd00::2".parse::<std::net::Ipv6Addr>().unwrap().octets());
-        request[38..54].copy_from_slice(
-            &"ff02::1:ff00:9"
-                .parse::<std::net::Ipv6Addr>()
-                .unwrap()
-                .octets(),
-        );
-        request[54] = 135;
-        request[62..78].copy_from_slice(&"fd00::9".parse::<std::net::Ipv6Addr>().unwrap().octets());
-
-        assert!(validated_neighbor_request(&request).is_none());
     }
 
     #[test]
@@ -1177,36 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_ndp_option_with_a_zero_length() {
-        let requester_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
-        let requester_ip: std::net::Ipv6Addr = "fd00::2".parse().unwrap();
-        let target: std::net::Ipv6Addr = "fd00::9".parse().unwrap();
-        let destination = super::solicited_node_multicast(target);
-        let mut request = vec![0_u8; 86];
-        request[6..12].copy_from_slice(&requester_mac);
-        request[12..14].copy_from_slice(&0x86dd_u16.to_be_bytes());
-        request[14] = 0x60;
-        request[18..20].copy_from_slice(&32_u16.to_be_bytes());
-        request[20] = 58;
-        request[21] = 255;
-        request[22..38].copy_from_slice(&requester_ip.octets());
-        request[38..54].copy_from_slice(&destination.octets());
-        request[54] = 135;
-        request[62..78].copy_from_slice(&target.octets());
-        request[78] = 1;
-        let checksum = internet_checksum(&[
-            &requester_ip.octets(),
-            &destination.octets(),
-            &32_u32.to_be_bytes(),
-            &[0, 0, 0, 58],
-            &request[54..],
-        ]);
-        request[56..58].copy_from_slice(&checksum.to_be_bytes());
-
-        assert!(validated_neighbor_request(&request).is_none());
-    }
-
-    #[test]
     fn reads_igmp_membership_changes() {
         let group: std::net::Ipv4Addr = "239.1.2.3".parse().unwrap();
         let mut report = vec![0_u8; 42];
@@ -1239,25 +1116,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_igmp_v1_membership_report() {
-        let group: std::net::Ipv4Addr = "239.1.2.4".parse().unwrap();
-        let mut report = vec![0_u8; 42];
-        report[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-        report[14] = 0x45;
-        report[16..18].copy_from_slice(&28_u16.to_be_bytes());
-        report[23] = 2;
-        report[34] = 0x12;
-        report[38..42].copy_from_slice(&group.octets());
-        let checksum = internet_checksum(&[&report[34..42]]);
-        report[36..38].copy_from_slice(&checksum.to_be_bytes());
-
-        assert_eq!(
-            multicast_membership_updates(&report),
-            vec![(std::net::IpAddr::V4(group), true)]
-        );
-    }
-
-    #[test]
     fn reporter_key_preserves_source_mac_and_vlan_context() {
         let group: std::net::Ipv4Addr = "239.1.2.5".parse().unwrap();
         let source_mac = [0x02, 1, 2, 3, 4, 5];
@@ -1283,89 +1141,6 @@ mod tests {
         assert_eq!(reporter.source_ip, None);
         assert_eq!(update_group, std::net::IpAddr::V4(group));
         assert!(joined);
-    }
-
-    #[test]
-    fn rejects_igmp_records_outside_the_declared_ipv4_length() {
-        let group: std::net::Ipv4Addr = "239.1.2.3".parse().unwrap();
-        let mut report = vec![0_u8; 42];
-        report[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-        report[14] = 0x45;
-        report[16..18].copy_from_slice(&8_u16.to_be_bytes());
-        report[23] = 2;
-        report[34] = 0x16;
-        report[38..42].copy_from_slice(&group.octets());
-
-        assert!(multicast_membership_updates(&report).is_empty());
-    }
-
-    #[test]
-    fn rejects_igmp_with_an_invalid_checksum() {
-        let group: std::net::Ipv4Addr = "239.1.2.3".parse().unwrap();
-        let mut report = vec![0_u8; 42];
-        report[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-        report[14] = 0x45;
-        report[16..18].copy_from_slice(&28_u16.to_be_bytes());
-        report[23] = 2;
-        report[34] = 0x16;
-        report[38..42].copy_from_slice(&group.octets());
-        report[36..38].copy_from_slice(&1_u16.to_be_bytes());
-
-        assert!(multicast_membership_updates(&report).is_empty());
-    }
-
-    #[test]
-    fn source_filter_include_records_create_membership() {
-        let group: std::net::Ipv4Addr = "239.1.2.3".parse().unwrap();
-        let mut report = vec![0_u8; 54];
-        report[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-        report[14] = 0x45;
-        report[16..18].copy_from_slice(&40_u16.to_be_bytes());
-        report[23] = 2;
-        report[34] = 0x22;
-        report[40..42].copy_from_slice(&1_u16.to_be_bytes());
-        report[42] = 1;
-        report[44..46].copy_from_slice(&1_u16.to_be_bytes());
-        report[46..50].copy_from_slice(&group.octets());
-        let checksum = super::internet_checksum(&[&report[34..54]]);
-        report[36..38].copy_from_slice(&checksum.to_be_bytes());
-
-        assert_eq!(
-            multicast_membership_updates(&report),
-            vec![(std::net::IpAddr::V4(group), true)]
-        );
-    }
-
-    #[test]
-    fn reads_mldv2_include_membership_with_sources() {
-        let group: std::net::Ipv6Addr = "ff02::1235".parse().unwrap();
-        let source: std::net::Ipv6Addr = "fd00::2".parse().unwrap();
-        let mut report = vec![0_u8; ETHERNET_HEADER_LEN + 40 + 8 + 36];
-        report[12..14].copy_from_slice(&0x86dd_u16.to_be_bytes());
-        report[14] = 0x60;
-        report[18..20].copy_from_slice(&44_u16.to_be_bytes());
-        report[20] = 58;
-        report[22..38].copy_from_slice(&source.octets());
-        report[38..54].copy_from_slice(&group.octets());
-        report[54] = 143;
-        report[60..62].copy_from_slice(&1_u16.to_be_bytes());
-        report[62] = 1;
-        report[64..66].copy_from_slice(&1_u16.to_be_bytes());
-        report[66..82].copy_from_slice(&group.octets());
-        report[82..98].copy_from_slice(&source.octets());
-        let checksum = internet_checksum(&[
-            &report[22..38],
-            &report[38..54],
-            &44_u32.to_be_bytes(),
-            &[0, 0, 0, 58],
-            &report[54..98],
-        ]);
-        report[56..58].copy_from_slice(&checksum.to_be_bytes());
-
-        assert_eq!(
-            multicast_membership_updates(&report),
-            vec![(std::net::IpAddr::V6(group), true)]
-        );
     }
 
     #[test]

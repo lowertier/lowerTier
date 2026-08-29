@@ -143,10 +143,6 @@ impl L2Fabric {
         self.destination_at(frame, Instant::now())
     }
 
-    pub fn allow_flood(&self, frame_len: usize) -> bool {
-        self.allow_flood_replicated(frame_len, 1)
-    }
-
     /// Reserve the complete output byte cost before a frame is replicated.
     ///
     /// The recipient bound prevents an untrusted route table from forcing an
@@ -206,10 +202,6 @@ impl L2Fabric {
 
     pub fn len(&self) -> usize {
         self.entry_count.load(Ordering::Acquire)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     pub(crate) fn learn_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) {

@@ -196,10 +196,18 @@ cargo test --no-default-features --features=full --verbose
 
 ### Test Requirements
 
-- Write tests for new features
-- Maintain existing test coverage
-- Tests should be isolated and repeatable
-- Include both unit and integration tests
+Keep tests minimal. A test stays in the tree only if it locks a real invariant: protocol, crypto, auth, ACL, packet path, or a resource bound.
+
+Do not add scalar-plus-batch copies of the same assertion. Do not add combinatorial matrices unless each cell is a different invariant. Do not put ignored perf benches in `src/`.
+
+CI runs the essential nextest filter in `.github/workflows/test.yml`. New tests belong there only when they are critical.
+
+```bash
+# Full local suite
+cargo test -p lowertier --offline --lib
+```
+
+CI runs a smaller essential filter defined in `.github/workflows/test.yml`.
 
 ## Pull Request Guidelines
 

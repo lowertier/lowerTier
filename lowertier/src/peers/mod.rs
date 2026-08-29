@@ -30,8 +30,6 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-#[cfg(test)]
-mod dataplane_cost;
 pub(crate) mod flow;
 pub mod foreign_network_client;
 pub mod foreign_network_manager;
@@ -275,10 +273,6 @@ impl PacketRecvChan {
                     )
                 }
             })
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.sender.is_closed()
     }
 }
 
