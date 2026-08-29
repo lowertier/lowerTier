@@ -10,8 +10,6 @@ mod win;
 #[cfg(target_os = "windows")]
 mod windows;
 
-mod route;
-
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use async_trait::async_trait;

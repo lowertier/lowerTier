@@ -1,6 +1,6 @@
-// most code is copied from https://github.com/spacemeowx2/tokio-smoltcp
-
 //! An asynchronous wrapper for smoltcp.
+// most code is copied from https://github.com/spacemeowx2/tokio-smoltcp
+#![allow(dead_code)]
 
 use std::{
     io,

@@ -448,7 +448,7 @@ impl PeerMap {
         } else {
             let previous = self
                 .next_peer_instance_epoch
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     current.checked_add(1)
                 })
                 .map_err(|_| Error::RouteError(Some("peer instance epoch exhausted".into())))?;
@@ -1298,7 +1298,7 @@ impl PeerMap {
             }
             updated.expires_at = grant.expires_at;
             self.origin_auth_grants.insert(grant_key, updated);
-            let mut entries = previous.entries.clone();
+            let entries = previous.entries.clone();
             let mut grants = previous.grants.clone();
             grants.insert(grant_key, updated);
             self.publish_auth_snapshot(Arc::new(OriginAuthSnapshot {
@@ -1314,7 +1314,7 @@ impl PeerMap {
         };
         grant.revision = generation;
         self.origin_auth_grants.insert(grant_key, grant);
-        let mut entries = previous.entries.clone();
+        let entries = previous.entries.clone();
         let mut grants = previous.grants.clone();
         grants.insert(grant_key, grant);
         self.publish_auth_snapshot(Arc::new(OriginAuthSnapshot {
@@ -1346,7 +1346,7 @@ impl PeerMap {
         }
         self.origin_auth_grants.remove(&grant_key);
         let previous = self.origin_auth_snapshot();
-        let mut entries = previous.entries.clone();
+        let entries = previous.entries.clone();
         let mut grants = previous.grants.clone();
         grants.remove(&grant_key);
         let Some(generation) = self.next_auth_generation() else {

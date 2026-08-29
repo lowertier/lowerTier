@@ -8,7 +8,6 @@ use crossbeam::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
 use guarden::defer;
 use quanta::Instant;
-use rand::seq::SliceRandom as _;
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 use tracing::{Instrument, Level, instrument};
 use zerocopy::FromBytes as _;
@@ -79,13 +78,6 @@ pub(crate) async fn bind_ipv4_socket(
     Err(TunnelError::UnderlayPolicyDenied(
         "no allowed local IPv4 source could bind a UDP socket".into(),
     ))
-}
-
-fn generate_shuffled_port_vec() -> Vec<u16> {
-    let mut rng = rand::thread_rng();
-    let mut port_vec: Vec<u16> = (1..=65535).collect();
-    port_vec.shuffle(&mut rng);
-    port_vec
 }
 
 pub(crate) enum UdpPunchClientMethod {

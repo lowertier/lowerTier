@@ -1040,19 +1040,6 @@ impl AclProcessor {
     }
 }
 
-// 新增辅助函数
-fn parse_port_start(port_strs: &[String]) -> Option<u16> {
-    port_strs
-        .iter()
-        .filter_map(|s| parse_port_range(s).map(|(start, _)| start))
-        .min()
-}
-fn parse_port_end(port_strs: &[String]) -> Option<u16> {
-    port_strs
-        .iter()
-        .filter_map(|s| parse_port_range(s).map(|(_, end)| end))
-        .max()
-}
 fn parse_port_range(s: &str) -> Option<(u16, u16)> {
     if let Some((start, end)) = s.split_once('-') {
         let start = start.trim().parse().ok()?;

@@ -317,6 +317,7 @@ pub(crate) enum L2TunError {
     FrameTooShort,
     #[error("TUN payload is not IPv4 or IPv6")]
     UnsupportedIpVersion,
+    #[cfg(test)]
     #[error("Ethernet frame does not contain IPv4 or IPv6")]
     UnsupportedEtherType,
 }
@@ -398,6 +399,7 @@ fn ip_destination_mac_with_ipv4_prefix(
     ip_destination_mac(ip_packet, unicast)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_ip_frame(
     frame: &mut [u8],
     source_peer_id: u32,
@@ -436,6 +438,7 @@ pub(crate) fn prepare_ip_frame_with_ipv4_prefix(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn decapsulate_ip(frame: &[u8]) -> Result<&[u8], L2TunError> {
     if frame.len() <= ETHERNET_HEADER_LEN {
         return Err(L2TunError::FrameTooShort);
@@ -455,6 +458,7 @@ pub(crate) fn decapsulate_ip(frame: &[u8]) -> Result<&[u8], L2TunError> {
 
 /// Build the proxy-ARP response that lets a native TAP peer address an IP-only TUN edge.
 /// Non-ARP frames and requests for another address are deliberately ignored.
+#[cfg(test)]
 pub(crate) fn arp_reply_for_local_ipv4(
     frame: &[u8],
     local_peer_id: u32,
@@ -463,6 +467,7 @@ pub(crate) fn arp_reply_for_local_ipv4(
     arp_reply_for_known_ipv4(frame, local_peer_id, local_ipv4)
 }
 
+#[cfg(test)]
 pub(crate) fn arp_reply_for_known_ipv4(
     frame: &[u8],
     target_peer_id: u32,
@@ -493,6 +498,7 @@ fn internet_checksum(parts: &[&[u8]]) -> u16 {
     !(sum as u16)
 }
 
+#[cfg(test)]
 pub(crate) fn ndp_reply_for_known_ipv6(
     frame: &[u8],
     target_peer_id: u32,
@@ -504,6 +510,7 @@ pub(crate) fn ndp_reply_for_known_ipv6(
 
 const MAX_MEMBERSHIP_UPDATES_PER_FRAME: usize = 256;
 
+#[cfg(test)]
 pub(crate) fn multicast_membership_updates(frame: &[u8]) -> Vec<(std::net::IpAddr, bool)> {
     multicast_membership_updates_with_reporter(frame)
         .into_iter()
@@ -511,6 +518,7 @@ pub(crate) fn multicast_membership_updates(frame: &[u8]) -> Vec<(std::net::IpAdd
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn multicast_membership_updates_from_ip(packet: &[u8]) -> Vec<(std::net::IpAddr, bool)> {
     multicast_membership_updates_from_ip_with_reporter(packet)
         .into_iter()

@@ -477,19 +477,6 @@ impl OrderedPeerBatches {
         }
     }
 
-    fn push_packet(&mut self, peer_id: PeerId, packet: ZCPacket, mark_recent: bool) {
-        self.push_packet_with_next_hop(peer_id, packet, mark_recent, None);
-    }
-
-    fn shape(&self) -> (usize, usize) {
-        self.batches.iter().fold((0, 0), |(packets, bytes), batch| {
-            (
-                packets + batch.packets.len(),
-                bytes + batch.packets.buffer_byte_len(),
-            )
-        })
-    }
-
     fn push_packet_with_next_hop(
         &mut self,
         peer_id: PeerId,
@@ -765,15 +752,6 @@ static BATCH_QUEUE_DISABLED: OnceLock<bool> = OnceLock::new();
 fn batch_queue_disabled() -> bool {
     *BATCH_QUEUE_DISABLED
         .get_or_init(|| std::env::var_os("LOWTIER_DEBUG_DISABLE_BATCH_QUEUE").is_some())
-}
-
-fn push_ordered_peer_batch(
-    peer_batches: &mut OrderedPeerBatches,
-    peer_id: PeerId,
-    packet: ZCPacket,
-    mark_recent: bool,
-) {
-    peer_batches.push_packet(peer_id, packet, mark_recent);
 }
 
 struct PreparedPacketBatch {
@@ -1680,6 +1658,7 @@ impl PeerManager {
     ///
     /// A route snapshot can outlive a capability revocation. The current
     /// immutable authority snapshot must therefore approve the same key.
+    #[cfg(test)]
     fn current_full_ethernet_destination_is_authorized(
         peers: &PeerMap,
         destination_peer_id: PeerId,
@@ -1725,6 +1704,7 @@ impl PeerManager {
             && grant.is_live(quanta::Instant::now())
     }
 
+    #[cfg(test)]
     fn snapshot_and_current_full_ethernet_destination_is_authorized(
         peers: &PeerMap,
         snapshot: &ForwardingDecisionSnapshotHandle,
@@ -3889,73 +3869,6 @@ impl PeerManager {
             .await
     }
 
-    pub(crate) async fn send_ethernet_to_peer(
-        &self,
-        msg: ZCPacket,
-        destination_peer_id: PeerId,
-    ) -> Result<(), Error> {
-        self.send_msg_by_ethernet_to_peer(msg, Some(destination_peer_id), false, false)
-            .await
-    }
-
-    async fn send_msg_by_ethernet_to_peer(
-        &self,
-        mut msg: ZCPacket,
-        destination_peer_id: Option<PeerId>,
-        is_exit_node: bool,
-        suppress_local_delivery: bool,
-    ) -> Result<(), Error> {
-        msg.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
-        {
-            let header = msg.mut_peer_manager_header().unwrap();
-            if let Some(peer_id) = destination_peer_id {
-                header.to_peer_id.set(peer_id);
-            }
-            header.set_exit_node(is_exit_node);
-            if suppress_local_delivery {
-                header.set_not_send_to_tun(true);
-                header.set_no_proxy(true);
-            }
-        }
-        if !self.run_nic_packet_process_pipeline(&mut msg).await {
-            return Ok(());
-        }
-        let descriptor = self.peers.dataplane_descriptor();
-        if descriptor.forwarding_snapshot.is_none() {
-            return Err(Error::RouteError(Some(
-                "forwarding decision snapshot is unavailable for complete Ethernet".to_string(),
-            )));
-        }
-        self.send_preclassified_ethernet_batch_with_descriptor(
-            [EthernetBatchInput {
-                packet: msg,
-                destination_peer_id: None,
-                is_exit_node,
-                suppress_local_delivery,
-            }],
-            &descriptor,
-        )
-        .await
-    }
-
-    async fn send_ethernet_to_selected_peers(
-        &self,
-        msg: ZCPacket,
-        destination_peers: &[PeerId],
-        is_exit_node: bool,
-    ) -> Result<(), Error> {
-        let descriptor = self.peers.dataplane_descriptor();
-        self.send_ethernet_to_selected_peers_with_descriptor(
-            msg,
-            destination_peers,
-            is_exit_node,
-            &descriptor,
-            false,
-            false,
-        )
-        .await
-    }
-
     async fn send_ethernet_to_selected_peers_with_descriptor(
         &self,
         mut msg: ZCPacket,
@@ -4023,37 +3936,7 @@ impl PeerManager {
             .await
     }
 
-    async fn send_msg_by_ethernet_batch_to_peer(
-        &self,
-        batch: PacketBatch,
-        destination_peer_id: Option<PeerId>,
-        is_exit_node: bool,
-        suppress_local_delivery: bool,
-    ) -> Result<(), Error> {
-        let batch = match batch.pop_singleton() {
-            Ok(packet) => {
-                return self
-                    .send_msg_by_ethernet_to_peer(
-                        packet,
-                        destination_peer_id,
-                        is_exit_node,
-                        suppress_local_delivery,
-                    )
-                    .await;
-            }
-            Err(batch) => batch,
-        };
-        let inputs = batch.into_iter().map(|packet| EthernetBatchInput {
-            packet,
-            destination_peer_id,
-            is_exit_node,
-            suppress_local_delivery,
-        });
-        let descriptor = self.peers.dataplane_descriptor();
-        self.send_preclassified_ethernet_batch_with_descriptor(inputs, &descriptor)
-            .await
-    }
-
+    #[cfg(test)]
     async fn send_preclassified_ethernet_batch<I>(&self, inputs: I) -> Result<(), Error>
     where
         I: IntoIterator<Item = EthernetBatchInput>,
@@ -6076,28 +5959,6 @@ impl PeerManager {
         self.send_fabric_batch(FabricBatch::singleton(packet)).await
     }
 
-    async fn send_compact_ip_to_peers(
-        &self,
-        msg: ZCPacket,
-        ip_addr: IpAddr,
-        not_send_to_self: bool,
-        dst_peers: Vec<PeerId>,
-        is_exit_node: bool,
-    ) -> Result<(), Error> {
-        self.send_compact_ip_to_peers_with_snapshot(
-            msg,
-            ip_addr,
-            not_send_to_self,
-            dst_peers,
-            is_exit_node,
-            None,
-            false,
-            false,
-            false,
-        )
-        .await
-    }
-
     async fn send_compact_ip_to_peers_with_snapshot(
         &self,
         mut msg: ZCPacket,
@@ -6145,281 +6006,6 @@ impl PeerManager {
             fanout_budget_reserved,
         )
         .await
-    }
-
-    pub async fn send_msg_by_hybrid_ethernet(&self, msg: ZCPacket) -> Result<(), Error> {
-        self.send_msg_by_hybrid_ethernet_with_snapshot(msg, false)
-            .await
-    }
-
-    async fn send_msg_by_hybrid_ethernet_with_snapshot(
-        &self,
-        msg: ZCPacket,
-        pipeline_already_run: bool,
-    ) -> Result<(), Error> {
-        const ETHERNET_HEADER_LEN: usize = crate::instance::l2_tun::ETHERNET_HEADER_LEN;
-        let descriptor = self.peers.dataplane_descriptor();
-        let snapshot = descriptor.forwarding_snapshot.as_ref().ok_or_else(|| {
-            Error::RouteError(Some(
-                "forwarding decision snapshot is unavailable for complete Ethernet".to_string(),
-            ))
-        })?;
-        let frame = msg.payload();
-        let ethernet_header: [u8; ETHERNET_HEADER_LEN] = frame
-            .get(..ETHERNET_HEADER_LEN)
-            .ok_or_else(|| {
-                Error::InvalidEthernetFrame("frame is shorter than the Ethernet header".to_string())
-            })?
-            .try_into()
-            .map_err(|_| Error::InvalidEthernetFrame("invalid Ethernet header".to_string()))?;
-        let Some(ether_type) = frame.get(12..14) else {
-            return Err(Error::InvalidEthernetFrame(
-                "frame is shorter than the Ethernet header".to_string(),
-            ));
-        };
-        match ether_type {
-            [0x08, 0x00] => {
-                Ipv4Packet::new(&frame[ETHERNET_HEADER_LEN..]).ok_or_else(|| {
-                    Error::InvalidEthernetFrame("invalid Ethernet IPv4 payload".to_string())
-                })?;
-            }
-            [0x86, 0xdd] => {
-                Ipv6Packet::new(&frame[ETHERNET_HEADER_LEN..]).ok_or_else(|| {
-                    Error::InvalidEthernetFrame("invalid Ethernet IPv6 payload".to_string())
-                })?;
-            }
-            _ => {
-                return self
-                    .send_preclassified_ethernet_batch_with_descriptor(
-                        [EthernetBatchInput {
-                            packet: msg,
-                            destination_peer_id: None,
-                            is_exit_node: false,
-                            suppress_local_delivery: false,
-                        }],
-                        &descriptor,
-                    )
-                    .await;
-            }
-        };
-
-        // Keep the original L2 destination for the authorized bridge fallback.
-        let fdb_destination = self.l2_fabric.destination(frame).ok();
-
-        let mut compact_msg = msg;
-        compact_msg
-            .remove_payload_prefix_preserving_flow_hash(ETHERNET_HEADER_LEN)
-            .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?;
-        compact_msg.fill_peer_manager_hdr_preserving_flow_hash(
-            self.my_peer_id,
-            0,
-            PacketType::Data as u8,
-        );
-        if !pipeline_already_run && !self.run_nic_packet_process_pipeline(&mut compact_msg).await {
-            return Ok(());
-        }
-        stamp_packet_flow(&mut compact_msg);
-
-        // Filters can rewrite the destination or the explicit peer override. Route only the
-        // accepted packet so compact and full representations use the same decision.
-        let Some((ip_addr, not_send_to_self)) = self.routed_packet_destination(&compact_msg) else {
-            return Err(Error::InvalidEthernetFrame(
-                "NIC pipeline produced an invalid IP payload".to_string(),
-            ));
-        };
-        let is_multicast = ip_addr.is_multicast();
-        let is_broadcast = match ip_addr {
-            IpAddr::V4(address) => self.is_all_peers_broadcast_ipv4(&address),
-            IpAddr::V6(address) => self.is_all_peers_broadcast_ipv6(&address),
-        };
-        let configured_exit_nodes = self.exit_nodes.load_full();
-        let (mut candidate_peers, is_exit_node, blackholed) = self
-            .hybrid_destination_from_packet_snapshot(
-                &compact_msg,
-                snapshot,
-                ip_addr,
-                &configured_exit_nodes,
-            );
-        if blackholed {
-            return Ok(());
-        }
-        let routes = snapshot.capabilities();
-
-        let mut bridge_fallback = false;
-        let mut targeted_bridge = None;
-        if candidate_peers.is_empty() && !is_multicast && !is_broadcast {
-            if let Some(EthernetDestination::Known(peer_id)) = fdb_destination
-                && routes.is_authorized_bridge(peer_id)
-            {
-                candidate_peers.push(peer_id);
-                targeted_bridge = Some(peer_id);
-            } else {
-                candidate_peers = routes.ethernet_peers();
-                bridge_fallback = true;
-            }
-        }
-
-        let full_peers = if is_multicast {
-            routes
-                .ethernet_multicast_peers(ip_addr)
-                .iter()
-                .copied()
-                .filter(|peer_id| *peer_id != self.my_peer_id)
-                .collect::<Vec<_>>()
-        } else if is_broadcast {
-            routes.ethernet_peers()
-        } else if targeted_bridge.is_some() {
-            candidate_peers.clone()
-        } else if bridge_fallback {
-            routes
-                .ethernet_peers()
-                .into_iter()
-                .filter(|peer_id| *peer_id != self.my_peer_id)
-                .collect::<Vec<_>>()
-        } else {
-            candidate_peers
-                .iter()
-                .copied()
-                .filter(|peer_id| {
-                    routes.get(*peer_id).is_some_and(|route| {
-                        Self::route_requires_full_ethernet(route, self.my_peer_id)
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let (full_peers, unauthorized_full) =
-            self.filter_authorized_full_ethernet_peers(full_peers, &descriptor);
-
-        let compact_peers = candidate_peers
-            .iter()
-            .copied()
-            .filter(|peer_id| {
-                if full_peers.binary_search(peer_id).is_ok() {
-                    return false;
-                }
-                if targeted_bridge == Some(*peer_id) {
-                    return false;
-                }
-                if *peer_id == self.my_peer_id {
-                    return true;
-                }
-                routes
-                    .get(*peer_id)
-                    .is_some_and(|route| Self::route_accepts_compact_ip(route))
-            })
-            .collect::<Vec<_>>();
-        let full_frame_needed = !full_peers.is_empty();
-
-        if compact_peers.is_empty() && !full_frame_needed {
-            if unauthorized_full {
-                return Err(Error::RouteError(Some(
-                    "complete Ethernet destination is not an authorized bridge".to_string(),
-                )));
-            }
-            return Ok(());
-        }
-
-        // Build the complete Ethernet copy before compact compression changes its payload.
-        let mut full_frame = full_frame_needed
-            .then(|| Self::rebuild_ethernet_from_accepted_ip(&compact_msg, &ethernet_header))
-            .transpose()?;
-        let total_recipients = compact_peers.len().saturating_add(full_peers.len());
-        let (compact_packet_prepared, full_packet_prepared, fanout_budget_reserved) = {
-            compact_msg
-                .mut_peer_manager_header()
-                .unwrap()
-                .set_exit_node(is_exit_node);
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(compact_msg.buf_len() as u64);
-            Self::try_compress(self.data_compress_algo, &mut compact_msg)?;
-            self.self_tx_counters
-                .compress_tx_bytes_after
-                .add(compact_msg.buf_len() as u64);
-
-            if let Some(full_frame) = full_frame.as_mut() {
-                let direct_full_peer = if full_peers.len() == 1
-                    && !is_multicast
-                    && !is_broadcast
-                    && !bridge_fallback
-                {
-                    Some(full_peers[0])
-                } else {
-                    None
-                };
-                if let Some(peer_id) = direct_full_peer {
-                    self.prepare_hybrid_full_ethernet_frame(full_frame, Some(peer_id))?;
-                }
-                full_frame.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
-                full_frame
-                    .mut_peer_manager_header()
-                    .unwrap()
-                    .set_hybrid_ip_ethernet(true)
-                    .set_exit_node(is_exit_node);
-                self.self_tx_counters
-                    .compress_tx_bytes_before
-                    .add(full_frame.buf_len() as u64);
-                Self::try_compress(self.data_compress_algo, full_frame)?;
-                self.self_tx_counters
-                    .compress_tx_bytes_after
-                    .add(full_frame.buf_len() as u64);
-            }
-
-            let compact_bytes = compact_msg.buf_len().saturating_mul(compact_peers.len());
-            let full_bytes = full_frame
-                .as_ref()
-                .map_or(0, |frame| frame.buf_len().saturating_mul(full_peers.len()));
-            let output_bytes = compact_bytes.saturating_add(full_bytes);
-            let reserve_fanout_budget = Self::hybrid_delivery_requires_fanout_budget(
-                is_multicast,
-                is_broadcast,
-                bridge_fallback,
-                compact_peers.len(),
-                full_peers.len(),
-            );
-            if reserve_fanout_budget
-                && !self.reserve_fanout_output_bytes(output_bytes, total_recipients)
-            {
-                return Err(Error::L2FloodRateLimited);
-            }
-            (true, full_frame.is_some(), reserve_fanout_budget)
-        };
-
-        let compact_result = if compact_peers.is_empty() {
-            Ok(())
-        } else {
-            self.send_compact_ip_to_peers_with_snapshot(
-                compact_msg,
-                ip_addr,
-                not_send_to_self,
-                compact_peers,
-                is_exit_node,
-                Some(snapshot),
-                true,
-                compact_packet_prepared,
-                fanout_budget_reserved,
-            )
-            .await
-        };
-        let full_result = if unauthorized_full {
-            Err(Error::RouteError(Some(
-                "complete Ethernet destination is not an authorized bridge".to_string(),
-            )))
-        } else if let Some(full_frame) = full_frame {
-            self.send_ethernet_to_selected_peers_with_descriptor(
-                full_frame,
-                &full_peers,
-                is_exit_node,
-                &descriptor,
-                full_packet_prepared,
-                fanout_budget_reserved,
-            )
-            .await
-        } else {
-            Ok(())
-        };
-        Self::combine_hybrid_delivery_results(compact_result, full_result)
     }
 
     pub async fn send_msg_by_hybrid_ethernet_batch(&self, batch: PacketBatch) -> Result<(), Error> {
@@ -6704,219 +6290,6 @@ impl PeerManager {
                 .expect("one hybrid Ethernet delivery error exists")),
             _ => Err(anyhow::anyhow!("hybrid Ethernet batch delivery failed: {errors:?}").into()),
         }
-    }
-
-    pub async fn send_msg_by_hybrid_ip(
-        &self,
-        msg: ZCPacket,
-        ip_addr: IpAddr,
-        not_send_to_self: bool,
-    ) -> Result<(), Error> {
-        self.send_msg_by_hybrid_ip_with_snapshot(msg, ip_addr, not_send_to_self, false)
-            .await
-    }
-
-    async fn send_msg_by_hybrid_ip_with_snapshot(
-        &self,
-        msg: ZCPacket,
-        _ip_addr: IpAddr,
-        _not_send_to_self: bool,
-        pipeline_already_run: bool,
-    ) -> Result<(), Error> {
-        let mut msg = msg;
-        if !pipeline_already_run {
-            msg.fill_peer_manager_hdr_preserving_flow_hash(
-                self.my_peer_id,
-                0,
-                PacketType::Data as u8,
-            );
-            if !self.run_nic_packet_process_pipeline(&mut msg).await {
-                return Ok(());
-            }
-        }
-        stamp_packet_flow(&mut msg);
-        let Some((ip_addr, not_send_to_self)) = self.routed_packet_destination(&msg) else {
-            return Err(Error::InvalidEthernetFrame(
-                "NIC pipeline produced an invalid IP payload".to_string(),
-            ));
-        };
-        let is_broadcast = match ip_addr {
-            IpAddr::V4(address) => self.is_all_peers_broadcast_ipv4(&address),
-            IpAddr::V6(address) => self.is_all_peers_broadcast_ipv6(&address),
-        };
-        let descriptor = self.peers.dataplane_descriptor();
-        let snapshot = descriptor.forwarding_snapshot.as_ref().ok_or_else(|| {
-            Error::RouteError(Some(
-                "forwarding decision snapshot is unavailable".to_string(),
-            ))
-        })?;
-        let configured_exit_nodes = self.exit_nodes.load_full();
-        let (candidate_peers, is_exit_node, blackholed) = self
-            .hybrid_destination_from_packet_snapshot(
-                &msg,
-                snapshot,
-                ip_addr,
-                &configured_exit_nodes,
-            );
-        if blackholed {
-            return Ok(());
-        }
-        let routes = snapshot.capabilities();
-        let full_peers = if ip_addr.is_multicast() {
-            routes
-                .ethernet_multicast_peers(ip_addr)
-                .iter()
-                .copied()
-                .filter(|peer_id| *peer_id != self.my_peer_id)
-                .collect::<Vec<_>>()
-        } else if is_broadcast {
-            routes.ethernet_peers()
-        } else {
-            candidate_peers
-                .iter()
-                .copied()
-                .filter(|peer_id| {
-                    routes.get(*peer_id).is_some_and(|route| {
-                        Self::route_requires_full_ethernet(route, self.my_peer_id)
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        let (full_peers, unauthorized_full) =
-            self.filter_authorized_full_ethernet_peers(full_peers, &descriptor);
-        let compact_peers = candidate_peers
-            .iter()
-            .copied()
-            .filter(|peer_id| {
-                full_peers.binary_search(peer_id).is_err()
-                    && (*peer_id == self.my_peer_id
-                        || routes
-                            .get(*peer_id)
-                            .is_some_and(|route| Self::route_accepts_compact_ip(route)))
-            })
-            .collect::<Vec<_>>();
-        let full_frame_needed = !full_peers.is_empty();
-
-        if compact_peers.is_empty() && !full_frame_needed {
-            if unauthorized_full {
-                return Err(Error::RouteError(Some(
-                    "complete Ethernet destination is not an authorized bridge".to_string(),
-                )));
-            }
-            return Ok(());
-        }
-        let direct_full_peer = if full_peers.len() == 1 && !ip_addr.is_multicast() && !is_broadcast
-        {
-            Some(full_peers[0])
-        } else {
-            None
-        };
-
-        // Prepare both representations before fanout accounting.
-        let mut pending_msg = Some(msg);
-        let mut compact_msg = if compact_peers.is_empty() {
-            None
-        } else {
-            pending_msg.take()
-        };
-        let mut full_frame = if full_frame_needed {
-            let mut frame = compact_msg
-                .as_ref()
-                .map(Clone::clone)
-                .or_else(|| pending_msg.take())
-                .expect("hybrid IP output has no source packet");
-            Self::ensure_ethernet_headroom(&mut frame)?;
-            self.prepare_hybrid_full_ethernet_frame(&mut frame, direct_full_peer)?;
-            Some(frame)
-        } else {
-            None
-        };
-
-        if let Some(msg) = compact_msg.as_mut() {
-            msg.mut_peer_manager_header()
-                .unwrap()
-                .set_exit_node(is_exit_node);
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(msg.buf_len() as u64);
-            Self::try_compress(self.data_compress_algo, msg)?;
-            self.self_tx_counters
-                .compress_tx_bytes_after
-                .add(msg.buf_len() as u64);
-        }
-        if let Some(frame) = full_frame.as_mut() {
-            frame.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
-            frame
-                .mut_peer_manager_header()
-                .unwrap()
-                .set_hybrid_ip_ethernet(true)
-                .set_exit_node(is_exit_node);
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(frame.buf_len() as u64);
-            Self::try_compress(self.data_compress_algo, frame)?;
-            self.self_tx_counters
-                .compress_tx_bytes_after
-                .add(frame.buf_len() as u64);
-        }
-
-        let compact_count = compact_peers.len();
-        let full_count = full_peers.len();
-        let recipient_count = compact_count.saturating_add(full_count);
-        let output_bytes = compact_msg
-            .as_ref()
-            .map_or(0, |packet| packet.buf_len().saturating_mul(compact_count))
-            .saturating_add(
-                full_frame
-                    .as_ref()
-                    .map_or(0, |packet| packet.buf_len().saturating_mul(full_count)),
-            );
-        let reserve_fanout_budget = Self::hybrid_delivery_requires_fanout_budget(
-            ip_addr.is_multicast(),
-            is_broadcast,
-            false,
-            compact_count,
-            full_count,
-        );
-        if reserve_fanout_budget && !self.reserve_fanout_output_bytes(output_bytes, recipient_count)
-        {
-            return Err(Error::L2FloodRateLimited);
-        }
-
-        let compact_result = if let Some(msg) = compact_msg.take() {
-            self.send_compact_ip_to_peers_with_snapshot(
-                msg,
-                ip_addr,
-                not_send_to_self,
-                compact_peers,
-                is_exit_node,
-                Some(snapshot),
-                true,
-                true,
-                reserve_fanout_budget,
-            )
-            .await
-        } else {
-            Ok(())
-        };
-        let full_result = if unauthorized_full {
-            Err(Error::RouteError(Some(
-                "complete Ethernet destination is not an authorized bridge".to_string(),
-            )))
-        } else if let Some(frame) = full_frame.take() {
-            self.send_ethernet_to_selected_peers_with_descriptor(
-                frame,
-                &full_peers,
-                is_exit_node,
-                &descriptor,
-                true,
-                reserve_fanout_budget,
-            )
-            .await
-        } else {
-            Ok(())
-        };
-        Self::combine_hybrid_delivery_results(compact_result, full_result)
     }
 
     pub async fn send_msg_by_hybrid_ip_batch(&self, batch: PacketBatch) -> Result<(), Error> {
@@ -9911,7 +9284,7 @@ mod tests {
         ip[16..20].copy_from_slice(&[239, 1, 2, 3]);
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
             .await
             .unwrap();
 
@@ -9952,7 +9325,7 @@ mod tests {
         ip[16..20].copy_from_slice(&[239, 1, 2, 3]);
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
             .await
             .unwrap();
 
@@ -10013,7 +9386,7 @@ mod tests {
         ip[16..20].copy_from_slice(&destination.octets());
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
             .await
             .unwrap();
 
@@ -10049,7 +9422,7 @@ mod tests {
             frame[12..14].copy_from_slice(&ether_type);
 
             let scalar = peer_mgr_a
-                .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+                .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
                 .await;
             assert!(matches!(
                 scalar,
@@ -10107,7 +9480,7 @@ mod tests {
         };
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&make_frame(1)))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&make_frame(1)))
             .await
             .unwrap();
         let scalar = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
@@ -10186,7 +9559,7 @@ mod tests {
             .unwrap();
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
             .await
             .unwrap();
 
@@ -10346,7 +9719,7 @@ mod tests {
         };
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&make_frame()))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&make_frame()))
             .await
             .unwrap();
         let scalar = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
@@ -10423,7 +9796,7 @@ mod tests {
         };
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&make_frame()))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&make_frame()))
             .await
             .unwrap();
         let scalar = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
@@ -10507,7 +9880,7 @@ mod tests {
         );
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
             .await
             .unwrap();
         let scalar = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
@@ -10572,7 +9945,7 @@ mod tests {
             .unwrap();
 
         peer_mgr_a
-            .send_msg_by_hybrid_ethernet(ZCPacket::new_with_payload(&frame))
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
             .await
             .unwrap();
         let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
@@ -10603,15 +9976,11 @@ mod tests {
             .reload_rules(Some(&deny_outbound_acl()));
 
         peer_mgr_a
-            .send_msg_by_hybrid_ip(
-                routed_ipv4_packet(
-                    "10.144.150.1".parse().unwrap(),
-                    "10.144.150.2".parse().unwrap(),
-                    1,
-                ),
+            .send_msg_by_hybrid_ip_batch(PacketBatch::singleton(routed_ipv4_packet(
+                "10.144.150.1".parse().unwrap(),
                 "10.144.150.2".parse().unwrap(),
-                false,
-            )
+                1,
+            )))
             .await
             .unwrap();
 
@@ -10675,7 +10044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_ip_pipeline_runs_once_per_scalar_and_batch_packet() {
+    async fn hybrid_ip_pipeline_runs_once_per_packet() {
         let (peer_mgr_a, _nic_a) =
             create_hybrid_peer_manager_with_ipv4("10.144.152.1".parse().unwrap()).await;
         let (peer_mgr_b, _nic_b) =
@@ -10690,15 +10059,11 @@ mod tests {
             .await;
 
         peer_mgr_a
-            .send_msg_by_hybrid_ip(
-                routed_ipv4_packet(
-                    "10.144.152.1".parse().unwrap(),
-                    "10.144.152.2".parse().unwrap(),
-                    1,
-                ),
+            .send_msg_by_hybrid_ip_batch(PacketBatch::singleton(routed_ipv4_packet(
+                "10.144.152.1".parse().unwrap(),
                 "10.144.152.2".parse().unwrap(),
-                false,
-            )
+                1,
+            )))
             .await
             .unwrap();
         assert_eq!(invocations.load(Ordering::Relaxed), 1);

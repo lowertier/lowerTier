@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Fast SOCKS5 client/server implementation written in Rust async/.await (with tokio).
 //!
 //! This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.

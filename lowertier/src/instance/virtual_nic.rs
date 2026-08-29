@@ -29,16 +29,21 @@ use crate::{
     },
     tunnel::{
         PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
-        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES},
+        batch::{PacketBatch, RECEIVE_PREFETCH_BATCHES},
         common::{FramedWriter, TunnelWrapper, ZCPacketToBytes},
         packet_def::{ZCPacket, ZCPacketType},
     },
 };
 
+#[cfg(test)]
+use crate::tunnel::batch::MAX_PACKET_BATCH_SIZE;
+
 use byteorder::WriteBytesExt as _;
 use bytes::{Buf, BufMut, BytesMut};
 use cidr::{Ipv4Inet, Ipv6Inet};
-use futures::{FutureExt, Sink, Stream, StreamExt, lock::BiLock, ready};
+#[cfg(test)]
+use futures::FutureExt;
+use futures::{Sink, Stream, StreamExt, lock::BiLock, ready};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use pin_project_lite::pin_project;
 use tokio::{
@@ -138,7 +143,6 @@ impl Sink<PacketBatch> for HybridTapSink {
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
 
-const NIC_PACKET_BATCH_SIZE: usize = MAX_PACKET_BATCH_SIZE;
 static NIC_BATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 static NIC_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
 static NIC_MAX_BATCH: AtomicUsize = AtomicUsize::new(0);
@@ -267,14 +271,6 @@ impl Drop for NicIngressFlowPermit {
     }
 }
 
-fn nic_packet_batch_size() -> usize {
-    std::env::var("LOWTIER_DEBUG_NIC_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|value| value.clamp(1, MAX_PACKET_BATCH_SIZE))
-        .unwrap_or(NIC_PACKET_BATCH_SIZE)
-}
-
 #[cfg(target_os = "linux")]
 fn linux_tun_offload_enabled() -> bool {
     linux_tun_offload_configured(
@@ -308,6 +304,7 @@ fn linux_tun_offload_configured(
 /// Maximum Linux TUN/TAP queues. Each queue is one character device FD with
 /// independent read and write completion. More than four queues adds memory
 /// without helping the single-core receive pump.
+#[cfg(target_os = "linux")]
 const LINUX_VIRTUAL_NIC_MAX_QUEUES: usize = 4;
 
 #[cfg(target_os = "linux")]
@@ -349,6 +346,7 @@ fn peer_batch_disabled() -> bool {
         .get_or_init(|| std::env::var_os("LOWTIER_DEBUG_DISABLE_PEER_BATCH").is_some())
 }
 
+#[cfg(test)]
 async fn read_ready_packet_batch<S>(
     stream: &mut S,
     max_packets: usize,
@@ -748,12 +746,6 @@ impl VirtualNic {
             \n\t5. Check if your system/container supports TUN devices\
             \nNote: TUN functionality may still work if the kernel supports dynamic device creation."
         );
-    }
-
-    /// For non-Linux systems, this is a no-op
-    #[cfg(not(target_os = "linux"))]
-    async fn ensure_tun_device_node() -> Result<(), Error> {
-        Ok(())
     }
 
     /// FreeBSD specific: Rename a TUN interface

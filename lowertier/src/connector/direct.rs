@@ -288,9 +288,6 @@ impl PeerManagerForDirectConnector for PeerManager {
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
-struct DstBlackListItem(PeerId, String);
-
-#[derive(Hash, Eq, PartialEq, Clone)]
 struct DstListenerUrlBlackListItem(PeerId, String);
 
 struct DirectConnectorManagerData {

@@ -224,6 +224,7 @@ fn insert_entry_and_increment_count(
     }
 }
 
+#[cfg(feature = "ffi-dataplane")]
 fn try_insert_entry_and_increment_count(
     entries: &Socks5EntrySet,
     entry_count: &AtomicUsize,

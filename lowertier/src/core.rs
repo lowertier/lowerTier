@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 #[cfg(feature = "socks5")]
 use crate::common::config::parse_proxy_listener_url;
 use crate::{
@@ -54,6 +52,7 @@ fn set_prof_active(_active: bool) {
     }
 }
 
+#[cfg(feature = "jemalloc-prof")]
 fn get_dump_profile_path(cur_allocated: usize, suffix: &str) -> String {
     format!(
         "profile-{}-{}.{}",

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use quinn::{TransportConfig, VarInt, congestion::BbrConfig};
 
-use super::adaptive::{AdaptiveConfig, AdaptiveFactory, ConfigError};
+use super::adaptive::core::ConfigError;
+use super::adaptive::{AdaptiveConfig, AdaptiveFactory};
 use super::wire_profile::WireProfile;
 
 const MIB: u64 = 1024 * 1024;

@@ -9,11 +9,6 @@ use crate::{
     tunnel::{batch::PacketBatch, packet_def::ZCPacket},
 };
 
-const RPC_PACKET_CONTENT_MTU: usize = 1300;
-
-type PeerRpcServiceId = u32;
-type PeerRpcTransactId = u32;
-
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait PeerRpcManagerTransport: Send + Sync + 'static {

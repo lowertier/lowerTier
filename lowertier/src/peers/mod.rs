@@ -109,11 +109,6 @@ pub trait NicPacketFilter {
 type BoxPeerPacketFilter = Box<dyn PeerPacketFilter + Send + Sync>;
 type BoxNicPacketFilter = Box<dyn NicPacketFilter + Send + Sync>;
 
-// pub type PacketRecvChan = tachyonix::Sender<ZCPacket>;
-// pub type PacketRecvChanReceiver = tachyonix::Receiver<ZCPacket>;
-// pub fn create_packet_recv_chan() -> (PacketRecvChan, PacketRecvChanReceiver) {
-//     tachyonix::channel(128)
-// }
 #[derive(Clone)]
 pub struct PacketRecvChan {
     sender: tokio::sync::mpsc::Sender<QueuedPacketBatch>,

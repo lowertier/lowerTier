@@ -57,7 +57,9 @@ use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket, ZCPacketType};
 
 pub(crate) mod adaptive;
 pub(crate) mod brutal;
+#[cfg(test)]
 pub(crate) mod quic_config;
+#[cfg(test)]
 pub(crate) mod wire_profile;
 
 use self::adaptive::{AdaptiveConfig, AdaptiveFactory};

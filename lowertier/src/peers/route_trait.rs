@@ -626,7 +626,7 @@ impl ForwardingDecisionSnapshotStoreInner {
     ) -> Result<ForwardingSnapshotRegistration, ForwardingSnapshotCommitError> {
         let previous = self
             .next_source_token
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| ForwardingSnapshotCommitError::SourceTokenExhausted)?;

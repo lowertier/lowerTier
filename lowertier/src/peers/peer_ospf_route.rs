@@ -4721,7 +4721,7 @@ impl PeerRouteServiceImpl {
     ) -> Result<u64, super::route_trait::RouteOriginAuthPublishError> {
         let previous = self
             .next_forwarding_generation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| {

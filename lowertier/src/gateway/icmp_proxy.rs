@@ -68,8 +68,6 @@ impl IcmpNatEntry {
 }
 
 type IcmpNatTable = Arc<dashmap::DashMap<IcmpNatKey, IcmpNatEntry>>;
-type NewPacketSender = tokio::sync::mpsc::UnboundedSender<IcmpNatKey>;
-type NewPacketReceiver = tokio::sync::mpsc::UnboundedReceiver<IcmpNatKey>;
 
 #[derive(Debug)]
 pub struct IcmpProxy {

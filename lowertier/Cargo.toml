@@ -422,11 +422,5 @@ tracing = ["tokio/tracing", "dep:console-subscriber"]
 magic-dns = ["dep:hickory-client", "dep:hickory-server"]
 faketcp = ["dep:flume"]
 zstd = ["dep:zstd"]
-# Deprecated: hotpath profiling has been removed. These feature aliases are
-# retained as no-ops so existing build scripts using `--features hotpath*`
-# continue to work without pulling in any dependencies.
-hotpath = []
-hotpath-cpu = ["hotpath"]
-hotpath-alloc = ["hotpath"]
 # For Network Extension on macOS
 macos-ne = []
