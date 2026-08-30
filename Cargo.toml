@@ -10,6 +10,7 @@ exclude = [
     "vendor/boringtun-lowertier",
     "vendor/http_req",
     "vendor/kcp-sys",
+    "vendor/quinn-proto",
     "vendor/rust-tun",
     "vendor/service-manager-rs",
     "vendor/thunk/thunk-rs",
@@ -21,6 +22,7 @@ exclude = [
 [patch.crates-io]
 quincy-tun = { path = "vendor/quincy-tun" }
 quinn = { path = "vendor/quinn" }
+quinn-proto = { path = "vendor/quinn-proto" }
 
 [workspace.package]
 edition = "2024"

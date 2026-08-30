@@ -924,6 +924,41 @@ struct DirectNicWork {
     queue_credits: OwnedSemaphorePermit,
 }
 
+struct DirectNicWriteBatch {
+    batch: PacketBatch,
+    ownership:
+        SmallVec<[(DirectNicQueueGuard, OwnedSemaphorePermit); DIRECT_NIC_QUEUE_BATCH_CAPACITY]>,
+}
+
+impl DirectNicWriteBatch {
+    fn new(work: DirectNicWork) -> Self {
+        let DirectNicWork {
+            batch,
+            queue_guard,
+            queue_credits,
+        } = work;
+        let mut ownership = SmallVec::new();
+        ownership.push((queue_guard, queue_credits));
+        Self { batch, ownership }
+    }
+
+    fn try_append(&mut self, work: DirectNicWork) -> Result<(), DirectNicWork> {
+        if self.batch.len().saturating_add(work.batch.len()) > MAX_PACKET_BATCH_SIZE {
+            return Err(work);
+        }
+        let DirectNicWork {
+            batch,
+            queue_guard,
+            queue_credits,
+        } = work;
+        self.batch
+            .try_append(batch)
+            .expect("the direct NIC write batch checks its packet bound");
+        self.ownership.push((queue_guard, queue_credits));
+        Ok(())
+    }
+}
+
 pub(crate) struct DirectNicEndpoint {
     sender: mpsc::Sender<DirectNicWork>,
     queue_credits: Arc<Semaphore>,
@@ -1059,15 +1094,35 @@ fn plan_direct_nic_delivery(mut batch: PacketBatch) -> Result<DirectNicDelivery,
     finish_direct_nic_batch(batch, byte_count, retained_bytes)
 }
 
-async fn feed_direct_nic_work(
+fn collect_direct_nic_write_batch(
+    first: DirectNicWork,
+    receiver: &mut mpsc::Receiver<DirectNicWork>,
+    pending: &mut Option<DirectNicWork>,
+) -> DirectNicWriteBatch {
+    let mut write = DirectNicWriteBatch::new(first);
+    while write.batch.len() < MAX_PACKET_BATCH_SIZE {
+        let work = match receiver.try_recv() {
+            Ok(work) => work,
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                break;
+            }
+        };
+        if let Err(work) = write.try_append(work) {
+            *pending = Some(work);
+            break;
+        }
+    }
+    write
+}
+
+async fn feed_direct_nic_write_batch(
     sink: &mut std::pin::Pin<Box<dyn PacketBatchSink>>,
-    work: DirectNicWork,
+    write: DirectNicWriteBatch,
 ) -> Result<(), TunnelError> {
-    let DirectNicWork {
+    let DirectNicWriteBatch {
         batch,
-        queue_guard: _queue_guard,
-        queue_credits: _queue_credits,
-    } = work;
+        ownership: _ownership,
+    } = write;
     sink.feed(batch).await?;
     Ok(())
 }
@@ -1089,34 +1144,37 @@ async fn run_direct_nic_writer(
     terminal_error: Arc<OnceLock<String>>,
     global_ctx: ArcGlobalCtx,
 ) {
-    while let Some(work) = receiver.recv().await {
-        if let Err(error) = feed_direct_nic_work(&mut sink, work).await {
+    let mut pending = None;
+    while let Some(work) = match pending.take() {
+        Some(work) => Some(work),
+        None => receiver.recv().await,
+    } {
+        let write = collect_direct_nic_write_batch(work, &mut receiver, &mut pending);
+        if let Err(error) = feed_direct_nic_write_batch(&mut sink, write).await {
             record_direct_nic_writer_failure(&terminal_error, &global_ctx, error);
             return;
         }
 
         loop {
+            if let Some(work) = pending.take() {
+                let write = collect_direct_nic_write_batch(work, &mut receiver, &mut pending);
+                if let Err(error) = feed_direct_nic_write_batch(&mut sink, write).await {
+                    record_direct_nic_writer_failure(&terminal_error, &global_ctx, error);
+                    return;
+                }
+                continue;
+            }
             tokio::select! {
                 biased;
-                result = sink.flush() => {
-                    match result {
-                        Ok(()) => {
-                            break;
-                        }
-                        Err(error) => {
-                            record_direct_nic_writer_failure(
-                                &terminal_error,
-                                &global_ctx,
-                                error,
-                            );
-                            return;
-                        }
-                    }
-                }
                 next = receiver.recv() => {
                     match next {
                         Some(work) => {
-                            if let Err(error) = feed_direct_nic_work(&mut sink, work).await {
+                            let write = collect_direct_nic_write_batch(
+                                work,
+                                &mut receiver,
+                                &mut pending,
+                            );
+                            if let Err(error) = feed_direct_nic_write_batch(&mut sink, write).await {
                                 record_direct_nic_writer_failure(
                                     &terminal_error,
                                     &global_ctx,
@@ -1133,6 +1191,21 @@ async fn run_direct_nic_writer(
                                     error,
                                 );
                             }
+                            return;
+                        }
+                    }
+                }
+                result = sink.flush() => {
+                    match result {
+                        Ok(()) => {
+                            break;
+                        }
+                        Err(error) => {
+                            record_direct_nic_writer_failure(
+                                &terminal_error,
+                                &global_ctx,
+                                error,
+                            );
                             return;
                         }
                     }
@@ -7805,6 +7878,43 @@ mod tests {
             .unwrap()
             .set_critical_l2_control(true);
         plan_direct_nic_delivery(PacketBatch::singleton(packet)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn direct_nic_writer_coalesces_ready_batches_in_order() {
+        let global_ctx = get_mock_global_ctx();
+        let (sender, receiver) = tokio::sync::mpsc::channel(3);
+        let terminal_error = Arc::new(std::sync::OnceLock::new());
+        let queue_state = Arc::new(DirectNicQueueState::new(
+            global_ctx.dataplane_telemetry().clone(),
+        ));
+        let endpoint = Arc::new(DirectNicEndpoint {
+            sender,
+            queue_credits: Arc::new(tokio::sync::Semaphore::new(DIRECT_NIC_QUEUE_CREDIT_BYTES)),
+            queue_state,
+            terminal_error: terminal_error.clone(),
+        });
+        let first = direct_nic_writer_batch(1, 2);
+        endpoint.enqueue(first.batch, first.plan).await.unwrap();
+        let second = direct_nic_writer_batch(2, 2);
+        endpoint.enqueue(second.batch, second.plan).await.unwrap();
+        drop(endpoint);
+
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        run_direct_nic_writer(
+            Box::pin(ImmediateFlushDirectNicSink { events: events_tx }),
+            receiver,
+            terminal_error,
+            global_ctx,
+        )
+        .await;
+
+        assert_eq!(
+            events_rx.next().await,
+            Some(DirectNicWriterEvent::Start(vec![1, 1, 2, 2]))
+        );
+        assert_eq!(events_rx.next().await, Some(DirectNicWriterEvent::Flush));
+        assert_eq!(events_rx.next().await, None);
     }
 
     fn direct_nic_ingress_batch(

@@ -7,10 +7,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
-    task::{ready, Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::Bytes;
@@ -18,21 +18,23 @@ use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::sync::{
+    Notify,
     futures::{Notified, OwnedNotified},
-    mpsc, oneshot, Notify,
+    mpsc, oneshot,
 };
-use tracing::{debug_span, Instrument, Span};
+use tracing::{Instrument, Span, debug_span};
 
 use crate::{
+    ConnectionEvent, Duration, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPoller},
     send_stream::SendStream,
-    udp_transmit, ConnectionEvent, Duration, Instant, VarInt,
+    udp_transmit,
 };
 use proto::{
-    congestion::Controller, ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent,
-    Side, StreamEvent, StreamId,
+    ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
+    StreamId, congestion::Controller,
 };
 
 /// In-progress connection attempt future
@@ -251,11 +253,14 @@ impl Future for ConnectionDriver {
         let span = debug_span!("drive", id = conn.handle.0);
         let _guard = span.enter();
 
-        if let Err(e) = conn.process_conn_events(&self.0.shared, cx) {
-            conn.terminate(e, &self.0.shared);
-            return Poll::Ready(Ok(()));
-        }
-        let mut keep_going = conn.drive_transmit(cx)?;
+        let mut keep_going = match conn.process_conn_events(&self.0.shared, cx) {
+            Ok(keep_going) => keep_going,
+            Err(e) => {
+                conn.terminate(e, &self.0.shared);
+                return Poll::Ready(Ok(()));
+            }
+        };
+        keep_going |= conn.drive_transmit(cx)?;
         // If a timer expires, there might be more to transmit. When we transmit something, we
         // might need to reset a timer. Hence, we must loop until neither happens.
         keep_going |= conn.drive_timer(cx);
@@ -1142,10 +1147,7 @@ impl State {
         let now = self.runtime.now();
         let mut transmits = 0;
 
-        let max_datagrams = self
-            .socket
-            .max_transmit_segments()
-            .min(MAX_TRANSMIT_SEGMENTS);
+        let max_datagrams = transmit_segment_capacity(self.socket.max_transmit_segments());
 
         loop {
             // Retry the last transmit, or get a new one.
@@ -1218,8 +1220,8 @@ impl State {
         &mut self,
         shared: &Shared,
         cx: &mut Context,
-    ) -> Result<(), ConnectionError> {
-        loop {
+    ) -> Result<bool, ConnectionError> {
+        for _ in 0..MAX_CONNECTION_EVENT_BATCHES_PER_POLL {
             match self.conn_events.poll_recv(cx) {
                 Poll::Ready(Some(ConnectionEvent::Rebind(socket))) => {
                     self.socket = socket;
@@ -1245,10 +1247,11 @@ impl State {
                     }));
                 }
                 Poll::Pending => {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
+        Ok(true)
     }
 
     fn forward_app_events(&mut self, shared: &Shared) {
@@ -1462,10 +1465,32 @@ pub enum SendDatagramError {
 /// This limits the amount of CPU resources consumed by datagram generation,
 /// and allows other tasks (like receiving ACKs) to run in between.
 const MAX_TRANSMIT_DATAGRAMS: usize = 20;
-
-/// The maximum amount of datagrams that are sent in a single transmit
+/// Process one endpoint batch before application wakeups.
 ///
-/// This can be lower than the maximum platform capabilities, to avoid excessive
-/// memory allocations when calling `poll_transmit()`. Benchmarks have shown
-/// that numbers around 10 are a good compromise.
-const MAX_TRANSMIT_SEGMENTS: usize = 10;
+/// One endpoint batch fits inside the default application datagram buffer.
+const MAX_CONNECTION_EVENT_BATCHES_PER_POLL: usize = 1;
+/// Bound one GSO burst below the platform maximum.
+///
+/// Some software bridges advertise 64 segments but drop that full burst before
+/// the receiving QUIC task can drain it.
+const MAX_TRANSMIT_SEGMENTS: usize = 20;
+
+/// Use the bounded GSO burst that the platform supports.
+fn transmit_segment_capacity(platform_capacity: usize) -> usize {
+    platform_capacity.min(MAX_TRANSMIT_SEGMENTS).max(1)
+}
+
+#[cfg(test)]
+mod transmit_segment_tests {
+    use super::{MAX_TRANSMIT_SEGMENTS, transmit_segment_capacity};
+
+    #[test]
+    fn respects_transmit_segment_limit() {
+        assert_eq!(transmit_segment_capacity(64), MAX_TRANSMIT_SEGMENTS);
+    }
+
+    #[test]
+    fn keeps_non_segmenting_sockets_usable() {
+        assert_eq!(transmit_segment_capacity(0), 1);
+    }
+}

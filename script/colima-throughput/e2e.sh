@@ -15,10 +15,13 @@ omit=${OMIT:-2}
 iperf_timeout_seconds=${IPERF_TIMEOUT_SECONDS:-$((duration + omit + 15))}
 runs=${RUNS:-1}
 parallel_streams=${PARALLEL_STREAMS:-8}
+tcp_streams_text=${TCP_STREAMS:-"1 $parallel_streams"}
 encryption_algorithm=${ENCRYPTION_ALGORITHM:-chacha20-poly1305}
 runtime_env=${LOWTIER_RUNTIME_ENV:-}
 underlay_protocol=${UNDERLAY_PROTOCOL:-udp}
 core_args=${LOWTIER_CORE_ARGS:-}
+core_binary=${LOWTIER_CORE_BINARY:-}
+tcp_congestion_control=${TCP_CONGESTION_CONTROL:-}
 netem_delay=${NETEM_DELAY:-}
 netem_jitter=${NETEM_JITTER:-0ms}
 netem_loss=${NETEM_LOSS:-0%}
@@ -75,6 +78,36 @@ fi
 
 read -r -a udp_rates <<<"$udp_rates_text"
 read -r -a directions <<<"$directions_text"
+if ! [[ "$parallel_streams" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PARALLEL_STREAMS must be a positive integer" >&2
+    exit 64
+fi
+raw_tcp_streams=(1)
+if [[ "$parallel_streams" != 1 ]]; then
+    raw_tcp_streams+=("$parallel_streams")
+fi
+read -r -a requested_tcp_streams <<<"$tcp_streams_text"
+tcp_streams=()
+for streams in "${requested_tcp_streams[@]}"; do
+    if ! [[ "$streams" =~ ^[1-9][0-9]*$ ]]; then
+        echo "TCP_STREAMS must contain positive integers" >&2
+        exit 64
+    fi
+    duplicate=0
+    for existing in ${tcp_streams[*]-}; do
+        if [[ "$existing" == "$streams" ]]; then
+            duplicate=1
+            break
+        fi
+    done
+    if [[ "$duplicate" == 0 ]]; then
+        tcp_streams+=("$streams")
+    fi
+done
+if [[ "${#tcp_streams[@]}" == 0 ]]; then
+    echo "TCP_STREAMS must contain at least one stream count" >&2
+    exit 64
+fi
 
 mkdir -p "$result_dir/raw" "$result_dir/overlay" "$result_dir/cpu" "$result_dir/latency" "$result_dir/logs"
 perf_write_metadata "$result_dir" "colima-throughput:$docker_context"
@@ -89,10 +122,22 @@ printf 'cpu_protocol=%s\ncpu_udp_rate=%s\ncpu_udp_length=%s\ncapture_dataplane_s
     >>"$result_dir/environment.txt"
 printf 'directions=%s\nrun_raw_gate=%s\n' "$directions_text" "$run_raw_gate" \
     >>"$result_dir/environment.txt"
+printf 'tcp_streams=%s\n' "$tcp_streams_text" >>"$result_dir/environment.txt"
 printf 'underlay_protocol=%s\ncore_args=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
     "$underlay_protocol" "$core_args" "$netem_delay" "$netem_jitter" "$netem_loss" \
     "$netem_loss_correlation" "$netem_limit" \
     >>"$result_dir/environment.txt"
+printf 'tcp_congestion_control=%s\n' "$tcp_congestion_control" \
+    >>"$result_dir/environment.txt"
+if [[ -n "$core_binary" ]]; then
+    if [[ ! -f "$core_binary" || ! -x "$core_binary" ]]; then
+        echo "LOWTIER_CORE_BINARY must name an executable file" >&2
+        exit 64
+    fi
+    core_binary=$(cd "$(dirname "$core_binary")" && pwd -P)/$(basename "$core_binary")
+    printf 'core_binary_name=%s\n' "$(basename "$core_binary")" >>"$result_dir/environment.txt"
+    shasum -a 256 "$core_binary" >>"$result_dir/core-binary-sha256.txt"
+fi
 
 case "$underlay_protocol" in
     udp|quic) ;;
@@ -123,10 +168,17 @@ fi
 
 start_containers() {
     cleanup_nodes
-    "${docker_cmd[@]}" run -d --name "$node_a" --network "$network" --ip 172.30.10.2 \
-        --cap-add NET_ADMIN --device /dev/net/tun "$image" sleep infinity >/dev/null
-    "${docker_cmd[@]}" run -d --name "$node_b" --network "$network" --ip 172.30.10.3 \
-        --cap-add NET_ADMIN --device /dev/net/tun "$image" sleep infinity >/dev/null
+    local run_args=(--pull never -d --network "$network" --cap-add NET_ADMIN --device /dev/net/tun)
+    if [[ -n "$core_binary" ]]; then
+        run_args+=(-v "$core_binary:/usr/local/bin/lowertier-core:ro")
+    fi
+    if [[ -n "$tcp_congestion_control" ]]; then
+        run_args+=(--sysctl "net.ipv4.tcp_congestion_control=$tcp_congestion_control")
+    fi
+    "${docker_cmd[@]}" run "${run_args[@]}" --name "$node_a" --ip 172.30.10.2 \
+        "$image" sleep infinity >/dev/null
+    "${docker_cmd[@]}" run "${run_args[@]}" --name "$node_b" --ip 172.30.10.3 \
+        "$image" sleep infinity >/dev/null
 }
 
 apply_network_noise() {
@@ -340,7 +392,7 @@ if [[ "$run_raw_gate" == 1 ]]; then
     "${docker_cmd[@]}" exec "$node_a" ethtool -k eth0 >"$result_dir/raw/${node_a}-offloads.txt" || true
     "${docker_cmd[@]}" exec "$node_b" ethtool -k eth0 >"$result_dir/raw/${node_b}-offloads.txt" || true
     start_iperf_server 5200
-    for streams in 1 "$parallel_streams"; do
+    for streams in "${raw_tcp_streams[@]}"; do
         raw_json="$result_dir/raw/tcp-p${streams}.json"
         run_iperf raw forward tcp "$streams" 0 172.30.10.3 5200 1 "$raw_json"
     done
@@ -376,7 +428,7 @@ start_iperf_server 5201
 for direction in "${directions[@]}"; do
     for run in $(seq 1 "$runs"); do
         if [[ "$run_tcp" == 1 ]]; then
-            for streams in 1 "$parallel_streams"; do
+            for streams in "${tcp_streams[@]}"; do
                 output="$result_dir/overlay/${profile}-${direction}-tcp-p${streams}-r${run}.json"
                 run_iperf "$profile" "$direction" tcp "$streams" 0 "$subnet.2" 5201 "$run" "$output"
             done

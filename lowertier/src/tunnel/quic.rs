@@ -28,8 +28,9 @@ use derive_more::{Deref, DerefMut};
 use futures::{Future, FutureExt, Sink, Stream, StreamExt};
 use parking_lot::RwLock;
 use quinn::{
-    ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, Incoming, RecvStream,
-    SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig, default_runtime,
+    ClientConfig, ConnectError, Connection, DatagramReceiveDropPolicy, Endpoint, EndpointConfig,
+    Incoming, RecvStream, SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig,
+    default_runtime,
 };
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -59,10 +60,12 @@ pub(crate) mod adaptive;
 pub(crate) mod brutal;
 #[cfg(test)]
 pub(crate) mod quic_config;
+pub(crate) mod tunnel_cc;
 #[cfg(test)]
 pub(crate) mod wire_profile;
 
 use self::adaptive::{AdaptiveConfig, AdaptiveFactory};
+use self::tunnel_cc::TunnelConfig;
 
 const QUIC_INITIAL_MTU: u16 = 1452;
 const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize;
@@ -706,6 +709,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .min_mtu(1200)
         .enable_segmentation_offload(true)
         .datagram_receive_buffer_size(Some(QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES))
+        .datagram_receive_drop_policy(DatagramReceiveDropPolicy::Newest)
         .datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_BYTES)
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
@@ -727,6 +731,9 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         }
         "bbr" => {
             config.congestion_controller_factory(Arc::new(BbrConfig::default()));
+        }
+        "tunnel" => {
+            config.congestion_controller_factory(Arc::new(TunnelConfig));
         }
         "brutal" => {
             let brutal = brutal::BrutalConfig::new(
@@ -2281,26 +2288,31 @@ impl QuicHybridWriter {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
-        if self
-            .pending_datagrams
-            .as_ref()
-            .is_some_and(|datagrams| !datagrams.is_empty())
-        {
-            self.begin_datagram_flush();
-        }
-        match self.poll_datagram_queue(cx) {
-            Poll::Pending
-                if self.pending_datagram_send.is_some()
-                    && self
-                        .pending_datagrams
-                        .as_ref()
-                        .is_none_or(VecDeque::is_empty) =>
+        loop {
+            if self
+                .pending_datagrams
+                .as_ref()
+                .is_none_or(VecDeque::is_empty)
             {
-                Poll::Ready(Ok(()))
+                return Poll::Ready(Ok(()));
             }
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            self.begin_datagram_flush();
+            match self.poll_datagram_queue(cx) {
+                Poll::Pending
+                    if self.pending_datagram_send.is_some()
+                        && self
+                            .pending_datagrams
+                            .as_ref()
+                            .is_none_or(VecDeque::is_empty) =>
+                {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                // A completed send can move staged datagrams back to the
+                // pending queue. Start that queue before the sink is ready.
+                Poll::Ready(Ok(())) => {}
+            }
         }
     }
 
@@ -2310,11 +2322,22 @@ impl QuicHybridWriter {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
-        self.begin_datagram_flush();
-        match self.poll_datagram_queue(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => self.poll_reliable_completion(cx),
+        loop {
+            self.begin_datagram_flush();
+            match self.poll_datagram_queue(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {
+                    let staged = self
+                        .pending_datagrams
+                        .as_ref()
+                        .is_some_and(|datagrams| !datagrams.is_empty());
+                    if staged || self.pending_datagram_send.is_some() {
+                        continue;
+                    }
+                    return self.poll_reliable_completion(cx);
+                }
+            }
         }
     }
 

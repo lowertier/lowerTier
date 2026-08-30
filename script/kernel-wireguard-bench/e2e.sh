@@ -5,8 +5,8 @@ umask 077
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$repo_root/script/throughput-common.sh"
 
-colima_profile=${COLIMA_PROFILE:-easytier-l2}
-docker_context=${DOCKER_CONTEXT:-colima-easytier-l2}
+colima_profile=${COLIMA_PROFILE:-default}
+docker_context=${DOCKER_CONTEXT:-colima}
 image=${WIREGUARD_TEST_IMAGE:-lowertier-kernel-wireguard-bench:tmp}
 network=${LOWTIER_KERNEL_WG_NETWORK:-lowertier-kernel-wireguard-net}
 node_a=${LOWTIER_KERNEL_WG_NODE_A:-lowertier-kernel-wireguard-a}
@@ -22,6 +22,13 @@ raw_gate_bps=${RAW_GATE_BPS:-12000000000}
 build_image=${BUILD_IMAGE:-1}
 run_cpu_probe=${RUN_CPU_PROBE:-1}
 iperf_timeout_seconds=${IPERF_TIMEOUT_SECONDS:-$((duration + omit + 15))}
+tcp_congestion_control=${TCP_CONGESTION_CONTROL:-}
+netem_delay=${NETEM_DELAY:-}
+netem_jitter=${NETEM_JITTER:-0ms}
+netem_loss=${NETEM_LOSS:-0%}
+netem_loss_correlation=${NETEM_LOSS_CORRELATION:-0%}
+netem_limit=${NETEM_LIMIT:-250000}
+wireguard_tools_deb=${WIREGUARD_TOOLS_DEB:-}
 dockerfile="$repo_root/script/wireguard-macos-bench/Dockerfile"
 docker_cmd=(docker --context "$docker_context")
 containers=("$node_a" "$node_b")
@@ -133,6 +140,9 @@ perf_write_metadata "$result_dir" "kernel-wireguard:$docker_context"
 printf 'colima_profile=%s\ndocker_context=%s\nimage=%s\nstream_counts=%s\nmtu=%s\nraw_gate_bps=%s\n' \
     "$colima_profile" "$docker_context" "$image" "$stream_counts_text" "$mtu" "$raw_gate_bps" \
     >>"$result_dir/environment.txt"
+printf 'tcp_congestion_control=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
+    "$tcp_congestion_control" "$netem_delay" "$netem_jitter" "$netem_loss" \
+    "$netem_loss_correlation" "$netem_limit" >>"$result_dir/environment.txt"
 
 colima -p "$colima_profile" status
 "${docker_cmd[@]}" info >/dev/null
@@ -144,10 +154,41 @@ fi
 cleanup
 "${docker_cmd[@]}" network create --driver bridge --subnet 172.30.12.0/24 \
     --opt com.docker.network.driver.mtu=9000 "$network" >/dev/null
-"${docker_cmd[@]}" run -d --name "$node_a" --network "$network" --ip 172.30.12.2 \
-    --privileged "$image" >/dev/null
-"${docker_cmd[@]}" run -d --name "$node_b" --network "$network" --ip 172.30.12.3 \
-    --privileged "$image" >/dev/null
+run_args=(--pull never -d --network "$network" --cap-add NET_ADMIN)
+if [[ -n "$tcp_congestion_control" ]]; then
+    run_args+=(--sysctl "net.ipv4.tcp_congestion_control=$tcp_congestion_control")
+fi
+"${docker_cmd[@]}" run "${run_args[@]}" --name "$node_a" --ip 172.30.12.2 \
+    "$image" sleep infinity >/dev/null
+"${docker_cmd[@]}" run "${run_args[@]}" --name "$node_b" --ip 172.30.12.3 \
+    "$image" sleep infinity >/dev/null
+
+for node in "${containers[@]}"; do
+    if ! "${docker_cmd[@]}" exec "$node" sh -lc 'command -v wg >/dev/null'; then
+        if [[ -n "$wireguard_tools_deb" ]]; then
+            "${docker_cmd[@]}" cp "$wireguard_tools_deb" "$node:/tmp/wireguard-tools.deb"
+            "${docker_cmd[@]}" exec "$node" sh -lc \
+                'dpkg -i /tmp/wireguard-tools.deb >/dev/null && rm -f /tmp/wireguard-tools.deb'
+        else
+            "${docker_cmd[@]}" exec "$node" sh -lc \
+                'apt-get update >/dev/null && apt-get install -y --no-install-recommends wireguard-tools >/dev/null && rm -rf /var/lib/apt/lists/*'
+        fi
+    fi
+    netem_args=(tc qdisc replace dev eth0 root netem)
+    if [[ -n "$netem_delay" ]]; then
+        netem_args+=(delay "$netem_delay" "$netem_jitter")
+    fi
+    if [[ "$netem_loss" != 0% ]]; then
+        netem_args+=(loss random "$netem_loss")
+        if [[ "$netem_loss_correlation" != 0% ]]; then
+            netem_args+=("$netem_loss_correlation")
+        fi
+    fi
+    if [[ -n "$netem_delay" || "$netem_loss" != 0% ]]; then
+        netem_args+=(limit "$netem_limit")
+        "${docker_cmd[@]}" exec "$node" "${netem_args[@]}"
+    fi
+done
 
 perf_result_header | awk '{print "mode\t" $0}' >"$result_dir/throughput.tsv"
 printf 'mode\tdirection\trun\tprotocol\tstreams\terror\n' >"$result_dir/workload-errors.tsv"

@@ -5,13 +5,11 @@ Date: 2026-08-23
 These tests measure the unified fabric packet path.
 They include the unified batch API and real TUN and TAP devices.
 All data stayed in memory or temporary storage.
-The test reused the running `easytier-l2` Colima profile.
+The test reused an existing Colima profile.
 The test did not create a VM.
 
 ## Test system
 
-The host was an Apple M4 Max with 16 CPU cores and 128 GiB of memory.
-The host ran macOS 27.0.
 The Colima profile used QEMU with four ARM64 CPUs and 8 GiB of memory.
 The Linux tests used real `/dev/net/tun` TUN and TAP interfaces.
 The native macOS test used an `utun` interface.
@@ -201,7 +199,6 @@ The current Linux device test uses automatic TAP selection:
 
 ```bash
 BUILD_IMAGE=0 \
-DOCKER_CONTEXT=colima-easytier-l2 \
 RUN_TCP=1 RUN_UDP=0 RUN_CPU_PROBE=1 \
 RUNS=2 DURATION=5 CPU_DURATION=5 PARALLEL_STREAMS=4 \
 script/colima-throughput/e2e.sh
@@ -210,8 +207,8 @@ script/colima-throughput/e2e.sh
 The native macOS device test used this command shape:
 
 ```bash
-COLIMA_PROFILE=easytier-l2 \
-DOCKER_CONTEXT=colima-easytier-l2 \
+COLIMA_PROFILE=PROFILE_NAME \
+DOCKER_CONTEXT=DOCKER_CONTEXT_NAME \
 RUNS=1 DURATION=5 CPU_DURATION=5 PROFILE_DURATION=0 \
 PARALLEL_STREAMS=4 \
 script/macos-tun-bench/e2e.sh target/release/lowertier-core
@@ -220,8 +217,8 @@ script/macos-tun-bench/e2e.sh target/release/lowertier-core
 The kernel WireGuard target used this command:
 
 ```bash
-COLIMA_PROFILE=easytier-l2 \
-DOCKER_CONTEXT=colima-easytier-l2 \
+COLIMA_PROFILE=PROFILE_NAME \
+DOCKER_CONTEXT=DOCKER_CONTEXT_NAME \
 RUNS=3 DURATION=8 CPU_DURATION=8 OMIT=2 \
 STREAM_COUNTS="1 4" \
 script/kernel-wireguard-bench/e2e.sh

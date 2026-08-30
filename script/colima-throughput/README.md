@@ -1,23 +1,40 @@
-# Colima 10GbE-class dataplane benchmark
+# Colima dataplane benchmark
 
-This harness offers LowTier up to 12 Gbit/s inside the VZ-backed default Colima VM. It is a
-software throughput and CPU-efficiency test, not a claim that Colima emulates a physical 10GbE
-NIC.
+This harness measures LowTier inside a Colima virtual machine.
+Set `DOCKER_CONTEXT` when the benchmark uses a non-default Colima profile.
 
 The raw Docker bridge is measured first with one and eight TCP streams. Its eight-stream result
 must reach `RAW_GATE_BPS` (12 Gbit/s by default) for the run to be marked `valid`. When it does not,
 `substrate-status.txt` contains `substrate-limited`; LowTier measurements are retained for
 diagnostics but cannot establish a 10GbE ceiling. Set `REQUIRE_RAW_GATE=1` to stop immediately.
 
-## Prerequisites
+## Build once
 
-- a running default Colima profile using VZ with enough CPU and memory;
-- Docker context `colima`;
-- Docker BuildKit;
-- enough free disk space for the Rust release image.
+Build one Linux binary with the existing builder image:
 
-Suggested profile resources are at least 12 CPUs and 16 GiB RAM. Confirm them with
-`colima status` before interpreting results.
+```bash
+script/colima-throughput/build-core.sh
+```
+
+The QEMU profile supports 9p file shares. It does not support VirtioFS. The build script shares
+only the 14 MB source input set. It copies that set into the VM-local volume before compilation.
+It excludes the large repository `target` directory.
+
+The script keeps Cargo sources and compiled objects in the `lowertier-linux-build-cache` Docker
+volume. The first build copies the host Cargo cache. Later builds use the VM-local cache.
+
+The script uses `easytier-throughput:wan-builder`. It does not pull or create an image.
+
+Run the same binary in both benchmark containers:
+
+```bash
+BUILD_IMAGE=0 \
+LOWTIER_CORE_BINARY=benchmark-results/.work/lowertier-core-linux \
+script/colima-throughput/e2e.sh
+```
+
+The runtime containers use the selected existing runtime image. They receive `NET_ADMIN` and
+`/dev/net/tun`. The binary mount is read-only.
 
 ## Runs
 
@@ -39,10 +56,11 @@ Reuse an already-built image:
 BUILD_IMAGE=0 RUNS=3 DURATION=15 script/colima-throughput/e2e.sh
 ```
 
-QUIC DATAGRAM TUN test with 100-180 ms one-way delay and 3% loss:
+QUIC DATAGRAM TUN test with 100-180 ms one-way delay and 3% random loss:
 
 ```bash
-DOCKER_CONTEXT=colima-lowertier-l2 \
+BUILD_IMAGE=0 \
+LOWTIER_CORE_BINARY=benchmark-results/.work/lowertier-core-linux \
 UNDERLAY_PROTOCOL=quic \
 NETEM_DELAY=140ms \
 NETEM_JITTER=40ms \
@@ -52,12 +70,13 @@ PARALLEL_STREAMS=4 \
 UDP_RATES=100M \
 DURATION=10 \
 OMIT=2 \
-LOWTIER_CORE_ARGS="--quic-congestion brutal --quic-brutal-send-bps 10000000" \
+TCP_CONGESTION_CONTROL=bbr \
+LOWTIER_CORE_ARGS="--quic-congestion tunnel" \
 script/colima-throughput/e2e.sh
 ```
 
-Use Brutal only when you know the path capacity. Use BBR when the path capacity
-is not known. Inner TCP handles normal Ethernet frame loss.
+Tunnel mode does not pace or retransmit business datagrams. Upper applications control
+congestion. QUIC still supplies TLS 1.3 encryption and valid QUIC packets.
 
 For burst loss, repeat the same run with correlated netem loss:
 
@@ -76,13 +95,16 @@ Important controls:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DOCKER_CONTEXT` | `colima` | Docker endpoint for the VZ profile |
+| `DOCKER_CONTEXT` | `colima` | Docker endpoint. Set this value for a non-default profile. |
 | `RESULT_DIR` | temporary directory | Stable location for raw JSON and summaries |
 | `RAW_GATE_BPS` | `12000000000` | Minimum valid substrate throughput |
 | `PARALLEL_STREAMS` | `8` | Aggregate TCP stream count |
+| `TCP_STREAMS` | `1 PARALLEL_STREAMS` | Overlay TCP stream counts. Set one value for an isolated workload. |
 | `ENCRYPTION_ALGORITHM` | `chacha20-poly1305` | Explicit authenticated dataplane cipher |
 | `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp` or `quic` |
 | `LOWTIER_CORE_ARGS` | empty | Extra arguments passed to both LowTier nodes |
+| `LOWTIER_CORE_BINARY` | empty | Linux binary mounted into both runtime containers |
+| `TCP_CONGESTION_CONTROL` | empty | Inner TCP congestion control. Use `bbr` for matched results. |
 | `NETEM_DELAY` | empty | Mean egress delay; empty disables netem |
 | `NETEM_JITTER` | `0ms` | Random delay range around the mean |
 | `NETEM_LOSS` | `0%` | Random egress packet loss |

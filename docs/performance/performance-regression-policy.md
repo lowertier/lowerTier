@@ -10,6 +10,10 @@ A performance change is accepted only when the candidate is measurably faster th
 
 Correctness and security work may be mandatory. A change with a measured throughput cost cannot be described or merged as a performance optimization. Its cost must be recorded and recovered before the corresponding performance milestone is considered complete.
 
+The QUIC L2 milestone is 90 percent of the saved kernel WireGuard throughput.
+Each matched direction and flow count must pass independently.
+See [QUIC L2 WireGuard performance target](quic-l2-wireguard-target.md).
+
 ## What the 2026-08-20 bisection established
 
 The measurements below used adjacent runs in the same ARM64 Colima profile. Absolute throughput moved with host load. The adjacent deltas repeatedly identified the same expensive boundaries.

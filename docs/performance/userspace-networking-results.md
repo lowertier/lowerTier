@@ -18,8 +18,7 @@ The shared process reached 28.766 MiB during transfers.
 
 ## Test boundary
 
-The test ran two release LowTier processes on one Apple M4 Max host.
-The host ran macOS 27.0 on ARM64.
+The test ran two release LowTier processes on one ARM64 host.
 Rust 1.95.0 built the current worktree.
 
 The build used only the `socks5` and `quic` features.
