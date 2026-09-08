@@ -968,8 +968,8 @@ impl Future for SendDatagrams<'_> {
         if this.data.is_empty() {
             return Poll::Ready((Ok(()), std::mem::take(this.data)));
         }
-        drop(state);
-
+        // Keep the connection locked until the waiter is registered. Otherwise the
+        // driver can drain the queue here, and we consume its only wakeup as stale.
         loop {
             match this.notify.as_mut().poll(ctx) {
                 Poll::Pending => return Poll::Pending,

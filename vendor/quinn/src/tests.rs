@@ -893,6 +893,41 @@ async fn datagram_batch_reader_does_not_lose_edge_wakes() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn datagram_batch_writer_does_not_lose_edge_wakes() {
+    use std::collections::VecDeque;
+
+    let mut config = TransportConfig::default();
+    // Every batch must wait for the driver to drain the one-datagram buffer.
+    config.datagram_send_buffer_size(64);
+    config.datagram_receive_buffer_size(Some(1024 * 1024));
+    let endpoint = endpoint_with_config(config);
+    let (client, server) = tokio::join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    );
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let reader = tokio::spawn(async move { while server.read_datagram().await.is_ok() {} });
+
+    let payload = Bytes::from_static(&[0x5a; 64]);
+    let mut batch = VecDeque::with_capacity(32);
+    for round in 0..2048 {
+        batch.extend((0..32).map(|_| payload.clone()));
+        let (result, remaining) =
+            timeout(Duration::from_secs(2), client.send_datagrams_wait(batch))
+                .await
+                .unwrap_or_else(|_| panic!("batch {round} lost its queue-space wakeup"));
+        result.unwrap();
+        assert!(remaining.is_empty());
+        batch = remaining;
+    }
+    client.close(0_u32.into(), b"done");
+    reader.await.unwrap();
+}
+
 #[tokio::test]
 async fn multiple_conns_with_zero_length_cids() {
     let _guard = subscribe();
