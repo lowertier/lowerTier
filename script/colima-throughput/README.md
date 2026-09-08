@@ -23,7 +23,11 @@ It excludes the large repository `target` directory.
 The script keeps Cargo sources and compiled objects in the `lowertier-linux-build-cache` Docker
 volume. The first build copies the host Cargo cache. Later builds use the VM-local cache.
 
-The script uses `easytier-throughput:wan-builder`. It does not pull or create an image.
+The default image is `easytier-throughput:wan-builder`. Set `LOWTIER_BUILDER_IMAGE`
+to select another prepared image. H2/WSS client TLS requires CMake and libclang
+(`cmake` and `libclang-dev` on Debian), in addition to the existing C/C++, Rust
+and Protobuf tools. The checked-in Dockerfile includes these dependencies.
+The build script does not pull or create an image.
 
 Run the same binary in both benchmark containers:
 
@@ -35,6 +39,26 @@ script/colima-throughput/e2e.sh
 
 The runtime containers use the selected existing runtime image. They receive `NET_ADMIN` and
 `/dev/net/tun`. The binary mount is read-only.
+
+## TCP buffer experiment
+
+H2 and WebSocket can opt into larger Linux TCP socket buffers with
+`LOWTIER_ENABLE_TCP_LARGE_BUFFERS=1`. For this harness, pass it through
+`LOWTIER_RUNTIME_ENV=LOWTIER_ENABLE_TCP_LARGE_BUFFERS=1` on both nodes.
+The experiment requests 32 MiB per direction before the TCP handshake; Linux
+reports a 64 MiB accounting limit. This limit is separate from process RSS.
+With the VPN's existing `NET_ADMIN` capability, the request uses per-socket
+buffer overrides. Without that capability, small system limits leave TCP
+autotuning unchanged. No global sysctls are changed.
+
+This experiment is disabled by default pending the complete throughput and
+reliability matrix in `docs/performance/performance-regression-policy.md`.
+A TCP reverse proxy has its own socket limits and must be measured separately.
+Both this harness and `script/kernel-wireguard-bench/e2e.sh` accept optional
+`TCP_RMEM` and `TCP_WMEM` triplets for per-container TCP autotuning controls.
+For example, `TCP_RMEM="4096 131072 16777216"` and
+`TCP_WMEM="4096 16384 16777216"` raise the maxima to 16 MiB. Apply the same
+settings to the WireGuard control; they also affect inner TCP flows.
 
 ## Runs
 
@@ -101,7 +125,7 @@ Important controls:
 | `PARALLEL_STREAMS` | `8` | Aggregate TCP stream count |
 | `TCP_STREAMS` | `1 PARALLEL_STREAMS` | Overlay TCP stream counts. Set one value for an isolated workload. |
 | `ENCRYPTION_ALGORITHM` | `chacha20-poly1305` | Explicit authenticated dataplane cipher |
-| `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp` or `quic` |
+| `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp`, `tcp`, `quic`, `ws`, or `wss` |
 | `LOWTIER_CORE_ARGS` | empty | Extra arguments passed to both LowTier nodes |
 | `LOWTIER_CORE_BINARY` | empty | Linux binary mounted into both runtime containers |
 | `TCP_CONGESTION_CONTROL` | empty | Inner TCP congestion control. Use `bbr` for matched results. |
@@ -158,3 +182,27 @@ smoke run may use `--min-samples 1`, `--allow-partial-matrix`, and
 Absolute results are not directly comparable with Tailscale's published bare-metal 25GbE test.
 The comparable engineering question is whether LowTier preserves packets in batches, avoids
 avoidable syscalls and queue handoffs, and reduces CPU cores consumed per Gbit/s.
+
+
+## Browser TLS and independent TCP lanes
+
+Build with `LOWTIER_BUILD_FEATURES=tun,quic,websocket` for both H2 and WSS.
+For a matched comparison, use one binary and select `UNDERLAY_PROTOCOL=tcp`
+(H2) or `UNDERLAY_PROTOCOL=wss`, with `LOWTIER_TCP_LANES=1`, `2` or `4`.
+The harness applies the corresponding `?lanes=N` to both listener and peer
+URLs. A multi-lane group retains one authenticated logical peer connection.
+
+For ordinary TLS on H2, use `--quic-sni-passthrough true`; the legacy routing
+prefix mode is deliberately distinguishable and is outside the browser TLS
+profile. WSS uses normal TLS followed by the WebSocket upgrade. Multiple
+lanes require end-to-end TLS; plain WS and `via=cdn` / `via=proxy` are rejected.
+An L4 proxy must keep all lanes on one backend, for example with Caddy
+`lb_policy ip_hash`. Round-robin backend selection is suitable for single lanes.
+
+The client profile is compared with isolated Chrome 152 captures. Stable TLS
+fields align with that browser family; H2 does not advertise unsupported ALPS,
+native trust-anchor hints may differ, and signature-algorithm GREASE differs
+from the captured Chrome build. Packet timing, HTTP/2 settings, server identity
+and application behavior are separate properties. QUIC retains its existing
+TLS implementation. See `docs/performance/tcp-lanes-tracklist.md` for the
+measurement gates and recorded experiments.

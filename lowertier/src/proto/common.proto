@@ -124,6 +124,21 @@ message FlagsInConfig {
   bool enable_bridge = 61;
   // Removed adapter selector. Readers ignore this compatibility field.
   string interface_adapter = 62 [deprecated = true];
+  // HTTP/3 server certificate chain and private key in PEM format.
+  string quic_tls_cert = 63;
+  string quic_tls_key = 64;
+  // DNS name used for QUIC SNI and certificate validation.
+  string quic_server_name = 65;
+  // Shared secret used only for encrypted HTTP/3 CONNECT-IP admission.
+  string quic_admission_secret = 66;
+  // Static website root served to ordinary and unauthorized HTTP/3 requests.
+  string quic_fallback_root = 67;
+  // Forward QUIC connections without a valid routing marker to this UDP endpoint.
+  string quic_decoy_upstream = 68;
+  // Admit QUIC Initials whose TLS SNI matches quic_server_name, so a stream UDP
+  // passthrough can split the VPN from other HTTP/3 sites. Off keeps CID-only
+  // decoy routing when the VPN and the decoy share a name.
+  bool quic_sni_passthrough = 69;
 }
 
 message RpcDescriptor {

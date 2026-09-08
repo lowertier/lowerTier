@@ -105,11 +105,14 @@ atomic_refcell = "0.1.13"
 
 quinn = { version = "0.11.11", optional = true, features = ["ring"] }
 quinn-proto = { version = "0.11.16", optional = true }
+h2 = { version = "0.4", optional = true }
 reed-solomon-simd = { version = "3.1.0", optional = true }
 rustls = { version = "0.23.0", features = [
     "ring", "tls12"
 ], default-features = false, optional = true }
 rcgen = { version = "0.12.1", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 # for websocket
 tokio-websockets = { version = "0.13.2", path = "../vendor/tokio-websockets", optional = true, features = [
@@ -124,6 +127,11 @@ http = { version = "1", default-features = false, features = [
 ], optional = true }
 forwarded-header-value = { version = "0.1.1", optional = true }
 tokio-rustls = { version = "0.26", default-features = false, optional = true }
+boring = { version = "5.2", optional = true }
+boring-sys = { version = "5.2", optional = true }
+foreign-types = { version = "0.5", optional = true }
+tokio-boring = { version = "5.2", optional = true }
+brotli-decompressor = { version = "5", optional = true }
 
 # for tap device
 tun = { package = "tun-lowertier", path = "../vendor/rust-tun", features = [
@@ -390,9 +398,19 @@ wireguard = ["dep:boringtun"]
 quic = [
     "dep:quinn",
     "dep:quinn-proto",
+    "dep:h2",
     "dep:reed-solomon-simd",
     "dep:rustls",
     "dep:rcgen",
+    "dep:rustls-native-certs",
+    "dep:rustls-pemfile",
+    "dep:http",
+    "dep:tokio-rustls",
+    "dep:boring",
+    "dep:boring-sys",
+    "dep:foreign-types",
+    "dep:tokio-boring",
+    "dep:brotli-decompressor",
 ]
 kcp = ["dep:kcp-sys"]
 mimalloc = ["dep:mimalloc"]
@@ -404,8 +422,14 @@ websocket = [
     "dep:http",
     "dep:forwarded-header-value",
     "dep:tokio-rustls",
+    "dep:boring",
+    "dep:boring-sys",
+    "dep:foreign-types",
+    "dep:tokio-boring",
+    "dep:brotli-decompressor",
     "dep:rustls",
     "dep:rcgen",
+    "dep:rustls-native-certs",
 ]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]

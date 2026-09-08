@@ -1,7 +1,7 @@
 FROM rust:1.95-bookworm AS builder
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential mold pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && apt-get install -y --no-install-recommends build-essential cmake libclang-dev mold pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

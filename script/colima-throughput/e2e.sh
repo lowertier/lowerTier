@@ -19,11 +19,32 @@ tcp_streams_text=${TCP_STREAMS:-"1 $parallel_streams"}
 encryption_algorithm=${ENCRYPTION_ALGORITHM:-chacha20-poly1305}
 runtime_env=${LOWTIER_RUNTIME_ENV:-}
 underlay_protocol=${UNDERLAY_PROTOCOL:-udp}
+tcp_lanes=${LOWTIER_TCP_LANES:-1}
+lane_query=
+case "$tcp_lanes" in
+    1) ;;
+    2|4)
+        if [[ "$underlay_protocol" != tcp && "$underlay_protocol" != wss ]]; then
+            echo "Multiple TCP lanes require tcp (H2) or wss" >&2
+            exit 64
+        fi
+        lane_query="?lanes=$tcp_lanes"
+        ;;
+    *) echo "LOWTIER_TCP_LANES must be 1, 2 or 4" >&2; exit 64 ;;
+esac
 core_args=${LOWTIER_CORE_ARGS:-}
 core_binary=${LOWTIER_CORE_BINARY:-}
+underlay_mtu=${UNDERLAY_MTU:-1500}
+caddy_binary=${CADDY_BIN:-}
+cpu_processes=lowertier-core
+listener_port=11010
+peer_host=$node_a
 tcp_congestion_control=${TCP_CONGESTION_CONTROL:-}
+tcp_rmem=${TCP_RMEM:-}
+tcp_wmem=${TCP_WMEM:-}
 netem_delay=${NETEM_DELAY:-}
 netem_jitter=${NETEM_JITTER:-0ms}
+netem_distribution=${NETEM_DISTRIBUTION:-}
 netem_loss=${NETEM_LOSS:-0%}
 netem_loss_correlation=${NETEM_LOSS_CORRELATION:-0%}
 netem_limit=${NETEM_LIMIT:-250000}
@@ -60,6 +81,11 @@ capture_active_logs() {
         "${docker_cmd[@]}" cp "$node:/tmp/lowertier.log" \
             "$result_dir/logs/failure-${node}.log" >/dev/null 2>&1 || true
     done
+    "${docker_cmd[@]}" cp "$node_b:/tmp/iperf-server-5201.log" \
+        "$result_dir/logs/iperf-server.log" >/dev/null 2>&1 || true
+    if [[ -n "$caddy_binary" ]]; then
+        "${docker_cmd[@]}" cp "$node_a:/tmp/caddy.log" "$result_dir/logs/caddy.log" >/dev/null 2>&1 || true
+    fi
 }
 
 cleanup() {
@@ -74,6 +100,11 @@ if [[ "$quick" == 1 ]]; then
     cpu_duration=${CPU_DURATION:-3}
     runs=${RUNS:-1}
     udp_rates_text=${UDP_RATES:-10000M}
+fi
+
+if ! [[ "$underlay_mtu" =~ ^[0-9]+$ ]] || (( underlay_mtu < 1280 || underlay_mtu > 9000 )); then
+    echo "UNDERLAY_MTU must be between 1280 and 9000" >&2
+    exit 64
 fi
 
 read -r -a udp_rates <<<"$udp_rates_text"
@@ -114,7 +145,7 @@ perf_write_metadata "$result_dir" "colima-throughput:$docker_context"
 printf 'docker_context=%s\nraw_gate_bps=%s\nadapter=automatic\nudp_rates=%s\nencryption_algorithm=%s\n' \
     "$docker_context" "$raw_gate_bps" "$udp_rates_text" "$encryption_algorithm" \
     >>"$result_dir/environment.txt"
-printf 'runtime_env=%s\n' "$runtime_env" >>"$result_dir/environment.txt"
+printf 'runtime_env=%s\ntcp_lanes=%s\n' "$runtime_env" "$tcp_lanes" >>"$result_dir/environment.txt"
 printf 'run_tcp=%s\nrun_udp=%s\nrun_cpu_probe=%s\n' \
     "$run_tcp" "$run_udp" "$run_cpu_probe" >>"$result_dir/environment.txt"
 printf 'cpu_protocol=%s\ncpu_udp_rate=%s\ncpu_udp_length=%s\ncapture_dataplane_stats=%s\n' \
@@ -123,8 +154,11 @@ printf 'cpu_protocol=%s\ncpu_udp_rate=%s\ncpu_udp_length=%s\ncapture_dataplane_s
 printf 'directions=%s\nrun_raw_gate=%s\n' "$directions_text" "$run_raw_gate" \
     >>"$result_dir/environment.txt"
 printf 'tcp_streams=%s\n' "$tcp_streams_text" >>"$result_dir/environment.txt"
-printf 'underlay_protocol=%s\ncore_args=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
-    "$underlay_protocol" "$core_args" "$netem_delay" "$netem_jitter" "$netem_loss" \
+printf 'underlay_mtu=%s\nduration=%s\nomit=%s\nruns=%s\n' \
+    "$underlay_mtu" "$duration" "$omit" "$runs" >>"$result_dir/environment.txt"
+printf 'underlay_protocol=%s\ncore_args=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_distribution=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
+    "$underlay_protocol" "$core_args" "$netem_delay" "$netem_jitter" \
+    "$netem_distribution" "$netem_loss" \
     "$netem_loss_correlation" "$netem_limit" \
     >>"$result_dir/environment.txt"
 printf 'tcp_congestion_control=%s\n' "$tcp_congestion_control" \
@@ -140,9 +174,27 @@ if [[ -n "$core_binary" ]]; then
 fi
 
 case "$underlay_protocol" in
-    udp|quic) ;;
+    udp|tcp|quic|ws|wss) ;;
     *) echo "unsupported underlay protocol: $underlay_protocol" >&2; exit 64 ;;
 esac
+if [[ -n "$caddy_binary" ]]; then
+    if [[ ! -f "$caddy_binary" || ! -x "$caddy_binary" ]]; then
+        echo "CADDY_BIN must name an executable Linux Caddy-L4 binary" >&2
+        exit 64
+    fi
+    caddy_binary=$(cd "$(dirname "$caddy_binary")" && pwd -P)/$(basename "$caddy_binary")
+    case "$underlay_protocol" in
+        quic) proxy_network=udp; proxy_matcher=quic ;;
+        tcp|wss) proxy_network=tcp; proxy_matcher=tls ;;
+        *) echo "Caddy SNI benchmark requires quic, tcp (H2), or wss" >&2; exit 64 ;;
+    esac
+    listener_port=11011
+    peer_host=challenges.cloudflare.com
+    cpu_processes=lowertier-core,caddy
+    printf 'caddy_binary_name=%s\n' "$(basename "$caddy_binary")" >>"$result_dir/environment.txt"
+fi
+printf 'cpu_processes=%s\n' "$cpu_processes" >>"$result_dir/environment.txt"
+
 case "$cpu_protocol" in
     tcp|udp) ;;
     *) echo "unsupported CPU probe protocol: $cpu_protocol" >&2; exit 64 ;;
@@ -154,6 +206,7 @@ if [[ "$cpu_protocol" == udp ]]; then
     fi
 fi
 
+printf 'tcp_rmem=%s\ntcp_wmem=%s\n' "$tcp_rmem" "$tcp_wmem" >>"$result_dir/environment.txt"
 "${docker_cmd[@]}" info >/dev/null
 if [[ "$build_image" == 1 ]]; then
     "${docker_cmd[@]}" build \
@@ -163,7 +216,7 @@ fi
 
 "${docker_cmd[@]}" network rm "$network" >/dev/null 2>&1 || true
 "${docker_cmd[@]}" network create \
-    --driver bridge --subnet 172.30.10.0/24 --opt com.docker.network.driver.mtu=9000 \
+    --driver bridge --subnet 172.30.10.0/24 --opt "com.docker.network.driver.mtu=$underlay_mtu" \
     "$network" >/dev/null
 
 start_containers() {
@@ -174,6 +227,15 @@ start_containers() {
     fi
     if [[ -n "$tcp_congestion_control" ]]; then
         run_args+=(--sysctl "net.ipv4.tcp_congestion_control=$tcp_congestion_control")
+    fi
+    if [[ -n "$tcp_rmem" ]]; then
+        run_args+=(--sysctl "net.ipv4.tcp_rmem=$tcp_rmem")
+    fi
+    if [[ -n "$tcp_wmem" ]]; then
+        run_args+=(--sysctl "net.ipv4.tcp_wmem=$tcp_wmem")
+    fi
+    if [[ -n "$caddy_binary" ]]; then
+        run_args+=(-v "$caddy_binary:/usr/local/bin/caddy:ro" --add-host challenges.cloudflare.com:172.30.10.2)
     fi
     "${docker_cmd[@]}" run "${run_args[@]}" --name "$node_a" --ip 172.30.10.2 \
         "$image" sleep infinity >/dev/null
@@ -190,6 +252,9 @@ apply_network_noise() {
         local netem_args=(tc qdisc replace dev eth0 root netem)
         if [[ -n "$netem_delay" ]]; then
             netem_args+=(delay "$netem_delay" "$netem_jitter")
+            if [[ -n "$netem_distribution" ]]; then
+                netem_args+=(distribution "$netem_distribution")
+            fi
         fi
         if [[ "$netem_loss" != 0% ]]; then
             netem_args+=(loss random "$netem_loss")
@@ -204,14 +269,15 @@ apply_network_noise() {
 
 start_iperf_server() {
     local port=$1
-    "${docker_cmd[@]}" exec "$node_b" sh -lc "pkill iperf3 2>/dev/null || true; iperf3 -s -D -p $port"
+    "${docker_cmd[@]}" exec "$node_b" sh -lc \
+        "pkill iperf3 2>/dev/null || true; sleep 0.1; iperf3 -s -D -p $port --logfile /tmp/iperf-server-$port.log; for attempt in 1 2 3 4 5; do ss -lntH 'sport = :$port' | grep -q . && exit 0; sleep 0.1; done; exit 1"
 }
 
 wait_for_ping() {
     local destination=$1
     local attempt
     for attempt in $(seq 1 30); do
-        if "${docker_cmd[@]}" exec "$node_a" ping -q -c 1 -W 1 "$destination" >/dev/null 2>&1; then
+        if "${docker_cmd[@]}" exec "$node_a" ping -I et0 -q -c 1 -W 1 "$destination" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -231,7 +297,7 @@ run_iperf() {
     local run=$8
     local output=$9
     local iperf_args=(-c "$destination" -p "$port" -t "$duration" -O "$omit" -P "$streams" -J)
-    local parsed error attempt
+    local parsed error attempt exit_code
 
     if [[ "$direction" == reverse ]]; then
         iperf_args+=(-R)
@@ -240,10 +306,15 @@ run_iperf() {
         iperf_args+=(-u -b "$rate")
     fi
 
+    # Keep a prior daemon exit from invalidating the next measured direction.
+    start_iperf_server "$port"
     for attempt in $(seq 0 "$iperf_busy_retries"); do
+        exit_code=0
         "${docker_cmd[@]}" exec "$node_a" \
-            timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$output" || true
-        if parsed=$(perf_parse_iperf_json "$direction" "$run" "$output"); then
+            timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$output" || exit_code=$?
+        if [[ "$exit_code" == 0 ]] \
+            && jq -e '(.error == null) and (.end.sum_received.bytes > 0) and (.end.sum_received.seconds > 0)' "$output" >/dev/null 2>&1 \
+            && parsed=$(perf_parse_iperf_json "$direction" "$run" "$output"); then
             printf '%s\t%s\n' "$mode" "$parsed" >>"$result_dir/throughput.tsv"
             return
         fi
@@ -266,7 +337,7 @@ sample_cpu() {
     local output=$2
     local samples=$3
     "${docker_cmd[@]}" exec "$node" sh -lc \
-        "i=0; while [ \"\$i\" -lt $samples ]; do ps -C lowertier-core -o %cpu=,rss= | awk '{cpu+=\$1; rss+=\$2} END {print cpu+0, rss+0}'; i=\$((i+1)); sleep 1; done" \
+        "i=0; while [ \"\$i\" -lt $samples ]; do ps -C $cpu_processes -o %cpu=,rss= | awk '{cpu+=\$1; rss+=\$2} END {print cpu+0, rss+0}'; i=\$((i+1)); sleep 1; done" \
         >"$output"
 }
 
@@ -296,6 +367,11 @@ capture_dataplane_snapshot() {
     mv "$temporary" "$output"
 }
 
+vm_cpu_snapshot() {
+    "${docker_cmd[@]}" exec "$node_a" awk \
+        'NR == 1 { total = 0; for (field = 2; field <= 9; field++) total += $field; print total, $5 + $6; exit }' /proc/stat
+}
+
 record_cpu_probe() {
     local mode=$1
     local direction=$2
@@ -306,11 +382,12 @@ record_cpu_probe() {
     local cpu_b="$result_dir/cpu/${mode}-${direction}-${node_b}.txt"
     local ping_file="$result_dir/latency/${mode}-${direction}-loaded.txt"
     local iperf_args=(-c "$destination" -p "$port" -t "$cpu_duration" -O "$omit" -P "$parallel_streams" -J)
-    local samples=$((cpu_duration + 1))
-    local ping_count=$((cpu_duration * 20))
+    local samples=$((cpu_duration + omit + 1))
+    local ping_count=$(((cpu_duration + omit) * 20))
     local inner_packet_length=0
     local offered_rate=0
     local pid_a pid_b ping_pid received cpu_avg cpu_max cores rss_avg rss_max
+    local iperf_pid total_before idle_before total_after idle_after vm_vcpus busy_cores
 
     if [[ "$cpu_protocol" == udp ]]; then
         iperf_args+=(-u -b "$cpu_udp_rate" -l "$cpu_udp_length")
@@ -340,8 +417,14 @@ record_cpu_probe() {
         >"$ping_file" 2>&1 &
     ping_pid=$!
 
+    vm_vcpus=$("${docker_cmd[@]}" exec "$node_a" grep -c '^cpu[0-9]' /proc/stat)
     "${docker_cmd[@]}" exec "$node_a" \
-        timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$json"
+        timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$json" &
+    iperf_pid=$!
+    sleep "$omit"
+    read -r total_before idle_before < <(vm_cpu_snapshot)
+    wait "$iperf_pid"
+    read -r total_after idle_after < <(vm_cpu_snapshot)
     wait "$pid_a" "$pid_b" "$ping_pid"
 
     capture_dataplane_snapshot "$node_a" 15991 \
@@ -358,6 +441,14 @@ record_cpu_probe() {
         echo "CPU probe delivered zero payload bytes for $mode/$direction" >&2
         return 1
     fi
+    busy_cores=$(awk -v total="$((total_after - total_before))" \
+        -v idle="$((idle_after - idle_before))" -v cpus="$vm_vcpus" \
+        'BEGIN { if (total <= 0) print "nan"; else printf "%.6f", cpus * (total - idle) / total }')
+    cores=$(awk -v cores="$busy_cores" -v bps="$received" \
+        'BEGIN { printf "%.6f", cores / (bps / 1000000000) }')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$mode" "$direction" "$parallel_streams" "$received" "$busy_cores" "$cores" \
+        >>"$result_dir/vm-cpu-cores-per-gbit.tsv"
     for node in "$node_a" "$node_b"; do
         local cpu_file="$result_dir/cpu/${mode}-${direction}-${node}.txt"
         cpu_avg=$(awk 'NF {sum += $1; count++} END {if (count) printf "%.6f", sum/count; else print "0.000000"}' "$cpu_file")
@@ -378,6 +469,8 @@ record_cpu_probe() {
     done
 }
 
+printf 'mode\tdirection\tstreams\treceived_bps\tvm_busy_cores\tvm_cores_per_gbit\n' \
+    >"$result_dir/vm-cpu-cores-per-gbit.tsv"
 perf_result_header | awk '{print "mode\t" $0}' >"$result_dir/throughput.tsv"
 printf 'mode\tdirection\trun\tprotocol\tstreams\toffered_bps\terror\n' \
     >"$result_dir/workload-errors.tsv"
@@ -416,10 +509,30 @@ subnet=10.201.4
 
 start_containers
 apply_network_noise
+if [[ -n "$caddy_binary" ]]; then
+    cat >"$result_dir/Caddyfile" <<EOF
+{
+    admin off
+    layer4 {
+        $proxy_network/:11010 {
+            @vpn $proxy_matcher sni challenges.cloudflare.com
+            route @vpn {
+                proxy $proxy_network/127.0.0.1:$listener_port
+            }
+        }
+    }
+}
+EOF
+    "${docker_cmd[@]}" cp "$result_dir/Caddyfile" "$node_a:/tmp/Caddyfile"
+    "${docker_cmd[@]}" exec "$node_a" caddy adapt --adapter caddyfile --config /tmp/Caddyfile \
+        >"$result_dir/caddy.json"
+    "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
+        'exec caddy run --adapter caddyfile --config /tmp/Caddyfile >/tmp/caddy.log 2>&1'
+fi
 "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
-    "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.1/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
+    "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.1/24 --listeners '${underlay_protocol}://0.0.0.0:$listener_port$lane_query' --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
 "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
-    "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.2/24 --listeners ${underlay_protocol}://0.0.0.0:11010 --peers ${underlay_protocol}://$node_a:11010 --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
+    "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.2/24 --listeners '${underlay_protocol}://0.0.0.0:11010$lane_query' --peers '${underlay_protocol}://$peer_host:11010$lane_query' --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
 wait_for_ping "$subnet.2"
 "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \
     >"$result_dir/latency/${profile}-unloaded.txt"
@@ -444,6 +557,12 @@ for direction in "${directions[@]}"; do
         record_cpu_probe "$profile" "$direction" "$subnet.2" 5201
     fi
 done
+for node in "$node_a" "$node_b"; do
+    "${docker_cmd[@]}" exec "$node" cat /proc/net/snmp \
+        >"$result_dir/logs/${node}-snmp.txt"
+    "${docker_cmd[@]}" exec "$node" ss -u -m -a -n \
+        >"$result_dir/logs/${node}-udp-sockets.txt"
+done
 "${docker_cmd[@]}" exec "$node_a" pkill -TERM lowertier-core 2>/dev/null || true
 "${docker_cmd[@]}" exec "$node_b" pkill -TERM lowertier-core 2>/dev/null || true
 sleep 1
@@ -452,4 +571,8 @@ for node in "$node_a" "$node_b"; do
     "${docker_cmd[@]}" cp "$node:/tmp/lowertier.log" "$log_file" 2>/dev/null || true
 done
 
+if [[ $(wc -l <"$result_dir/workload-errors.tsv") -gt 1 ]]; then
+    echo "One or more throughput workloads failed; see workload-errors.tsv" >&2
+    exit 1
+fi
 echo "results: $result_dir"

@@ -18,13 +18,17 @@ runs=${RUNS:-3}
 cpu_duration=${CPU_DURATION:-10}
 stream_counts_text=${STREAM_COUNTS:-"1 4"}
 mtu=${MTU:-1360}
+underlay_mtu=${UNDERLAY_MTU:-1500}
 raw_gate_bps=${RAW_GATE_BPS:-12000000000}
 build_image=${BUILD_IMAGE:-1}
 run_cpu_probe=${RUN_CPU_PROBE:-1}
 iperf_timeout_seconds=${IPERF_TIMEOUT_SECONDS:-$((duration + omit + 15))}
 tcp_congestion_control=${TCP_CONGESTION_CONTROL:-}
+tcp_rmem=${TCP_RMEM:-}
+tcp_wmem=${TCP_WMEM:-}
 netem_delay=${NETEM_DELAY:-}
 netem_jitter=${NETEM_JITTER:-0ms}
+netem_distribution=${NETEM_DISTRIBUTION:-}
 netem_loss=${NETEM_LOSS:-0%}
 netem_loss_correlation=${NETEM_LOSS_CORRELATION:-0%}
 netem_limit=${NETEM_LIMIT:-250000}
@@ -47,7 +51,7 @@ trap cleanup EXIT INT TERM
 start_iperf_server() {
     local port=$1
     "${docker_cmd[@]}" exec "$node_b" sh -lc \
-        "pkill iperf3 2>/dev/null || true; iperf3 -s -D -p $port"
+        "pkill iperf3 2>/dev/null || true; sleep 0.1; iperf3 -s -D -p $port; for attempt in 1 2 3 4 5; do ss -lntH 'sport = :$port' | grep -q . && exit 0; sleep 0.1; done; exit 1"
 }
 
 run_iperf() {
@@ -61,6 +65,7 @@ run_iperf() {
     local reverse_flag=
     local parsed
     local error
+    local exit_code=0
 
     if [[ "$direction" == reverse ]]; then
         reverse_flag=-R
@@ -68,8 +73,10 @@ run_iperf() {
     start_iperf_server "$port"
     "${docker_cmd[@]}" exec "$node_a" timeout "$iperf_timeout_seconds" \
         iperf3 -c "$destination" -p "$port" -t "$duration" -O "$omit" \
-        -P "$streams" $reverse_flag -J >"$output" || true
-    if parsed=$(perf_parse_iperf_json "$direction" "$run" "$output"); then
+        -P "$streams" $reverse_flag -J >"$output" || exit_code=$?
+    if [[ "$exit_code" == 0 ]] \
+        && jq -e '(.error == null) and (.end.sum_received.bytes > 0) and (.end.sum_received.seconds > 0)' "$output" >/dev/null 2>&1 \
+        && parsed=$(perf_parse_iperf_json "$direction" "$run" "$output"); then
         printf '%s\t%s\n' "$mode" "$parsed" >>"$result_dir/throughput.tsv"
         return 0
     fi
@@ -82,8 +89,8 @@ run_iperf() {
 }
 
 vm_cpu_snapshot() {
-    colima -p "$colima_profile" ssh -- sh -lc \
-        "awk 'NR == 1 { total = 0; for (field = 2; field <= NF; field++) total += \$field; idle = \$5 + \$6; print total, idle }' /proc/stat"
+    "${docker_cmd[@]}" exec "$node_a" awk \
+        'NR == 1 { total = 0; for (field = 2; field <= 9; field++) total += $field; print total, $5 + $6; exit }' /proc/stat
 }
 
 record_vm_cpu_probe() {
@@ -119,6 +126,11 @@ record_vm_cpu_probe() {
         >>"$result_dir/vm-cpu-cores-per-gbit.tsv"
 }
 
+if ! [[ "$underlay_mtu" =~ ^[0-9]+$ ]] || (( underlay_mtu < 1280 || underlay_mtu > 9000 )); then
+    echo "UNDERLAY_MTU must be between 1280 and 9000" >&2
+    exit 64
+fi
+
 read -r -a stream_counts <<<"$stream_counts_text"
 if ((${#stream_counts[@]} == 0)); then
     echo "STREAM_COUNTS must contain at least one positive integer" >&2
@@ -140,11 +152,13 @@ perf_write_metadata "$result_dir" "kernel-wireguard:$docker_context"
 printf 'colima_profile=%s\ndocker_context=%s\nimage=%s\nstream_counts=%s\nmtu=%s\nraw_gate_bps=%s\n' \
     "$colima_profile" "$docker_context" "$image" "$stream_counts_text" "$mtu" "$raw_gate_bps" \
     >>"$result_dir/environment.txt"
-printf 'tcp_congestion_control=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
-    "$tcp_congestion_control" "$netem_delay" "$netem_jitter" "$netem_loss" \
-    "$netem_loss_correlation" "$netem_limit" >>"$result_dir/environment.txt"
+printf 'tcp_congestion_control=%s\nnetem_delay=%s\nnetem_jitter=%s\nnetem_distribution=%s\nnetem_loss=%s\nnetem_loss_correlation=%s\nnetem_limit=%s\n' \
+    "$tcp_congestion_control" "$netem_delay" "$netem_jitter" "$netem_distribution" \
+    "$netem_loss" "$netem_loss_correlation" "$netem_limit" >>"$result_dir/environment.txt"
 
-colima -p "$colima_profile" status
+printf 'underlay_mtu=%s\nduration=%s\nomit=%s\nruns=%s\n' \
+    "$underlay_mtu" "$duration" "$omit" "$runs" >>"$result_dir/environment.txt"
+printf 'tcp_rmem=%s\ntcp_wmem=%s\n' "$tcp_rmem" "$tcp_wmem" >>"$result_dir/environment.txt"
 "${docker_cmd[@]}" info >/dev/null
 if [[ "$build_image" == 1 ]]; then
     "${docker_cmd[@]}" build -q -f "$dockerfile" -t "$image" \
@@ -153,10 +167,16 @@ fi
 
 cleanup
 "${docker_cmd[@]}" network create --driver bridge --subnet 172.30.12.0/24 \
-    --opt com.docker.network.driver.mtu=9000 "$network" >/dev/null
+    --opt "com.docker.network.driver.mtu=$underlay_mtu" "$network" >/dev/null
 run_args=(--pull never -d --network "$network" --cap-add NET_ADMIN)
 if [[ -n "$tcp_congestion_control" ]]; then
     run_args+=(--sysctl "net.ipv4.tcp_congestion_control=$tcp_congestion_control")
+fi
+if [[ -n "$tcp_rmem" ]]; then
+    run_args+=(--sysctl "net.ipv4.tcp_rmem=$tcp_rmem")
+fi
+if [[ -n "$tcp_wmem" ]]; then
+    run_args+=(--sysctl "net.ipv4.tcp_wmem=$tcp_wmem")
 fi
 "${docker_cmd[@]}" run "${run_args[@]}" --name "$node_a" --ip 172.30.12.2 \
     "$image" sleep infinity >/dev/null
@@ -177,6 +197,9 @@ for node in "${containers[@]}"; do
     netem_args=(tc qdisc replace dev eth0 root netem)
     if [[ -n "$netem_delay" ]]; then
         netem_args+=(delay "$netem_delay" "$netem_jitter")
+        if [[ -n "$netem_distribution" ]]; then
+            netem_args+=(distribution "$netem_distribution")
+        fi
     fi
     if [[ "$netem_loss" != 0% ]]; then
         netem_args+=(loss random "$netem_loss")
@@ -234,9 +257,8 @@ printf '%s\n' "$private_b" | "${docker_cmd[@]}" exec -i "$node_b" sh -lc \
 "${docker_cmd[@]}" exec "$node_b" ip link set mtu "$mtu" up dev wg0
 
 {
-    colima -p "$colima_profile" ssh -- uname -a
-    colima -p "$colima_profile" ssh -- sh -lc 'grep -w wireguard /proc/modules'
-    colima -p "$colima_profile" ssh -- sh -lc 'modinfo wireguard 2>/dev/null || true'
+    "${docker_cmd[@]}" exec "$node_a" uname -a
+    "${docker_cmd[@]}" exec "$node_a" grep -w wireguard /proc/modules || true
     "${docker_cmd[@]}" exec "$node_a" ip -d link show wg0
     "${docker_cmd[@]}" exec "$node_a" wg show wg0
     "${docker_cmd[@]}" exec "$node_b" ip -d link show wg0
@@ -267,7 +289,7 @@ for direction in forward reverse; do
     done
 done
 
-vm_vcpus=$(colima -p "$colima_profile" ssh -- nproc)
+vm_vcpus=$("${docker_cmd[@]}" exec "$node_a" grep -c '^cpu[0-9]' /proc/stat)
 if [[ "$run_cpu_probe" == 1 ]]; then
     record_vm_cpu_probe forward "$max_streams"
     record_vm_cpu_probe reverse "$max_streams"

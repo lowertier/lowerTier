@@ -646,6 +646,57 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_QUIC_TLS_CERT",
+        help = "Optional QUIC TLS certificate chain in PEM format"
+    )]
+    quic_tls_cert: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_QUIC_TLS_KEY",
+        help = "Optional QUIC TLS private key in PEM format"
+    )]
+    quic_tls_key: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_QUIC_SERVER_NAME",
+        help = "DNS name for QUIC SNI, validation, and automatic Let's Encrypt path discovery"
+    )]
+    quic_server_name: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_QUIC_ADMISSION_SECRET",
+        help = "Shared secret for encrypted HTTP/3 CONNECT-IP admission"
+    )]
+    quic_admission_secret: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_QUIC_FALLBACK_ROOT",
+        help = "Static website root for ordinary HTTP/3 requests"
+    )]
+    quic_fallback_root: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_QUIC_DECOY_UPSTREAM",
+        help = "UDP endpoint for QUIC connections without a valid routing marker"
+    )]
+    quic_decoy_upstream: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_QUIC_SNI_PASSTHROUGH",
+        help = "Admit QUIC clients whose TLS SNI matches quic_server_name when other UDP is forwarded to quic_decoy_upstream",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    quic_sni_passthrough: Option<bool>,
+
+    #[arg(
+        long,
         env = "ET_QUIC_DATAGRAM_FEC_PARITY",
         help = t!("core_clap.quic_datagram_fec_parity").to_string()
     )]
@@ -1400,6 +1451,25 @@ impl NetworkOptions {
             .quic_initial_receive_window
             .unwrap_or(f.quic_initial_receive_window);
         f.quic_receive_window = self.quic_receive_window.unwrap_or(f.quic_receive_window);
+        if let Some(cert) = &self.quic_tls_cert {
+            f.quic_tls_cert = cert.clone();
+        }
+        if let Some(key) = &self.quic_tls_key {
+            f.quic_tls_key = key.clone();
+        }
+        if let Some(server_name) = &self.quic_server_name {
+            f.quic_server_name = server_name.clone();
+        }
+        if let Some(secret) = &self.quic_admission_secret {
+            f.quic_admission_secret = secret.clone();
+        }
+        if let Some(root) = &self.quic_fallback_root {
+            f.quic_fallback_root = root.clone();
+        }
+        if let Some(upstream) = &self.quic_decoy_upstream {
+            f.quic_decoy_upstream = upstream.clone();
+        }
+        f.quic_sni_passthrough = self.quic_sni_passthrough.unwrap_or(f.quic_sni_passthrough);
         f.quic_datagram_fec_parity = self
             .quic_datagram_fec_parity
             .unwrap_or(f.quic_datagram_fec_parity);

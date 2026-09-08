@@ -7198,6 +7198,7 @@ impl PeerManager {
 
 #[cfg(test)]
 mod tests {
+    use super::{DirectNicQueueState, DirectNicEndpoint, run_direct_nic_writer};
     use base64::Engine;
     use futures::{SinkExt as _, StreamExt as _};
     use std::{
@@ -7776,7 +7777,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     enum DirectNicWriterEvent {
-        Start(u8),
+        Start(Vec<u8>),
         Flush,
     }
 
@@ -7797,7 +7798,7 @@ mod tests {
         fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
             self.get_mut()
                 .events
-                .unbounded_send(DirectNicWriterEvent::Start(batch[0].payload()[0]))
+                .unbounded_send(DirectNicWriterEvent::Start(batch.iter().map(|packet| packet.payload()[0]).collect()))
                 .map_err(|_| crate::tunnel::TunnelError::Shutdown)
         }
 
@@ -8073,7 +8074,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(received.next().await, Some(DirectNicWriterEvent::Start(1)));
+        assert!(matches!(received.next().await, Some(DirectNicWriterEvent::Start(markers)) if markers.first() == Some(&1)));
         assert_eq!(received.next().await, Some(DirectNicWriterEvent::Flush));
     }
 
@@ -10065,7 +10066,7 @@ mod tests {
         );
 
         PeerManager::try_compress(CompressorAlgo::ZstdDefault, &mut packet).unwrap();
-        DefaultCompressor::new().decompress(&mut packet).unwrap();
+        crate::common::compressor::Compressor::decompress(&DefaultCompressor::new(), &mut packet).unwrap();
         assert_eq!(packet.payload_len(), expected_len);
         assert_eq!(
             packet.peer_manager_header().unwrap().len.get() as usize,

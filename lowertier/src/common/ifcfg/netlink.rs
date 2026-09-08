@@ -35,7 +35,7 @@ use nix::{
 };
 use pnet::ipnetwork::ip_mask_to_prefix;
 
-use super::{Error, IfConfiguerTrait, route::Route};
+use super::{Error, IfConfiguerTrait};
 
 pub(crate) fn dummy_socket() -> Result<std::net::UdpSocket, Error> {
     Ok(std::net::UdpSocket::bind("0:0")?)
@@ -110,39 +110,30 @@ fn addr_to_ip(addr: RouteAddress) -> Option<IpAddr> {
     }
 }
 
-impl From<RouteMessage> for Route {
-    fn from(msg: RouteMessage) -> Self {
-        let mut gateway = None;
-        let mut source = None;
-        let mut source_hint = None;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RouteIdentity {
+    destination: IpAddr,
+    prefix: u8,
+    ifindex: Option<u32>,
+}
+
+impl From<&RouteMessage> for RouteIdentity {
+    fn from(msg: &RouteMessage) -> Self {
         let mut destination = None;
         let mut ifindex = None;
-        let mut metric = None;
 
-        for attr in msg.attributes {
+        for attr in &msg.attributes {
             match attr {
-                RouteAttribute::Source(addr) => {
-                    source = addr_to_ip(addr);
-                }
-                RouteAttribute::PrefSource(addr) => {
-                    source_hint = addr_to_ip(addr);
-                }
                 RouteAttribute::Destination(addr) => {
-                    destination = addr_to_ip(addr);
-                }
-                RouteAttribute::Gateway(addr) => {
-                    gateway = addr_to_ip(addr);
+                    destination = addr_to_ip(addr.clone());
                 }
                 RouteAttribute::Oif(i) => {
-                    ifindex = Some(i);
-                }
-                RouteAttribute::Priority(priority) => {
-                    metric = Some(priority);
+                    ifindex = Some(*i);
                 }
                 _ => {}
             }
         }
-        // rtnetlink gives None instead of 0.0.0.0 for the default route, but we'll convert to 0 here to make it match the other platforms
+        // Netlink omits the destination attribute for a default route.
         let destination = destination.unwrap_or_else(|| match msg.header.address_family {
             AddressFamily::Inet => Ipv4Addr::UNSPECIFIED.into(),
             AddressFamily::Inet6 => Ipv6Addr::UNSPECIFIED.into(),
@@ -151,13 +142,7 @@ impl From<RouteMessage> for Route {
         Self {
             destination,
             prefix: msg.header.destination_prefix_length,
-            source,
-            source_prefix: msg.header.source_prefix_length,
-            source_hint,
-            gateway,
             ifindex,
-            table: msg.header.table,
-            metric,
         }
     }
 }
@@ -526,7 +511,7 @@ impl IfConfiguerTrait for NetlinkIfConfiger {
         let ifidx = NetlinkIfConfiger::get_interface_index(name)?;
 
         for msg in routes {
-            let other_route: Route = msg.clone().into();
+            let other_route = RouteIdentity::from(&msg);
             if other_route.destination == std::net::IpAddr::V4(address)
                 && other_route.prefix == cidr_prefix
                 && other_route.ifindex == Some(ifidx)
@@ -692,7 +677,7 @@ impl IfConfiguerTrait for NetlinkIfConfiger {
         let ifidx = NetlinkIfConfiger::get_interface_index(name)?;
 
         for msg in routes {
-            let other_route: Route = msg.clone().into();
+            let other_route = RouteIdentity::from(&msg);
             if other_route.destination == std::net::IpAddr::V6(address)
                 && other_route.prefix == cidr_prefix
                 && other_route.ifindex == Some(ifidx)

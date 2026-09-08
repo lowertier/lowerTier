@@ -57,10 +57,12 @@ docker_cmd=(docker --context "$docker_context")
 
 output_dir=$(cd "$(dirname "$output")" && pwd -P)
 output_name=$(basename "$output")
+build_features=${LOWTIER_BUILD_FEATURES:-tun,quic}
 
 "${docker_cmd[@]}" run --rm --pull never --network none --cap-add NET_ADMIN \
     -e CARGO_HOME=/cache/cargo \
     -e CARGO_TARGET_DIR=/cache/target \
+    -e LOWTIER_BUILD_FEATURES="$build_features" \
     -v "$cache_volume:/cache" \
     -v "$stage:/work:ro" \
     -v "$output_dir:/output" \
@@ -71,9 +73,9 @@ output_name=$(basename "$output")
         rm -rf /cache/source
         mv /cache/source.next /cache/source
         cd /cache/source
-        /usr/local/cargo/bin/cargo +1.95 --offline build --locked --release \
+        RUSTUP_TOOLCHAIN=1.95.0 /usr/local/cargo/bin/cargo --offline build --locked --release \
             -p lowertier --bin lowertier-core \
-            --no-default-features --features tun,quic
+            --no-default-features --features "${LOWTIER_BUILD_FEATURES:-tun,quic}"
         install -m 0755 /cache/target/release/lowertier-core "/output/$1"
     ' sh "$output_name"
 

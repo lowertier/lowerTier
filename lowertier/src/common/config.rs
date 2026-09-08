@@ -98,11 +98,70 @@ pub fn gen_default_flags() -> Flags {
         l2_fdb_age_seconds: 300,
         l2_flood_bps: 64 * 1024 * 1024,
         enable_bridge: false,
+        quic_tls_cert: String::new(),
+        quic_tls_key: String::new(),
+        quic_server_name: String::new(),
+        quic_admission_secret: String::new(),
+        quic_fallback_root: String::new(),
+        quic_decoy_upstream: String::new(),
+        quic_sni_passthrough: false,
     }
 }
 
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)?;
+    flags
+        .encryption_algorithm
+        .parse::<EncryptionAlgorithm>()
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "unsupported encryption_algorithm {:?}",
+                flags.encryption_algorithm
+            )
+        })?;
+    if flags.quic_tls_cert.is_empty() != flags.quic_tls_key.is_empty() {
+        anyhow::bail!("quic_tls_cert and quic_tls_key must be configured together");
+    }
+    if !flags.quic_tls_cert.is_empty() && flags.quic_server_name.is_empty() {
+        anyhow::bail!("quic_server_name is required with a QUIC TLS certificate");
+    }
+    if flags.quic_sni_passthrough && flags.quic_decoy_upstream.is_empty() {
+        anyhow::bail!("quic_sni_passthrough requires quic_decoy_upstream");
+    }
+    if !flags.quic_server_name.is_empty()
+        && flags.quic_fallback_root.is_empty()
+        && flags.quic_decoy_upstream.is_empty()
+    {
+        anyhow::bail!("quic_fallback_root is required with quic_server_name");
+    }
+    if !flags.quic_server_name.is_empty()
+        && (flags.quic_server_name.parse::<IpAddr>().is_ok()
+            || flags.quic_server_name.contains('/')
+            || flags.quic_server_name.contains(':'))
+    {
+        anyhow::bail!("quic_server_name must be a DNS name");
+    }
+    if !flags.quic_admission_secret.is_empty() && flags.quic_admission_secret.len() < 16 {
+        anyhow::bail!("quic_admission_secret must contain at least 16 bytes");
+    }
+    if !flags.quic_decoy_upstream.is_empty() {
+        if flags.quic_server_name.is_empty() {
+            anyhow::bail!("quic_server_name is required with quic_decoy_upstream");
+        }
+        if flags.quic_admission_secret.len() < 16 {
+            anyhow::bail!("quic_admission_secret is required with quic_decoy_upstream");
+        }
+        if flags.quic_decoy_upstream.parse::<SocketAddr>().is_err()
+            && !flags.quic_decoy_upstream.contains(':')
+        {
+            anyhow::bail!("quic_decoy_upstream must include a UDP port");
+        }
+    }
+    if !flags.quic_fallback_root.is_empty()
+        && !std::path::Path::new(&flags.quic_fallback_root).is_dir()
+    {
+        anyhow::bail!("quic_fallback_root must be an existing directory");
+    }
     if !(1..=1_048_576).contains(&flags.l2_fdb_capacity) {
         anyhow::bail!("l2_fdb_capacity must be between 1 and 1048576");
     }

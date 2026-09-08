@@ -626,17 +626,30 @@ fn admission_context_hash(
     Ok(hasher.finalize().into())
 }
 
+fn tls_exporter_tunnel(tunnel_type: Option<&str>) -> bool {
+    let Some(value) = tunnel_type else {
+        return false;
+    };
+    if value.eq_ignore_ascii_case("quic") || value.eq_ignore_ascii_case("wss") {
+        return true;
+    }
+    #[cfg(feature = "quic")]
+    if value.eq_ignore_ascii_case("tcp") {
+        return true;
+    }
+    false
+}
+
 fn validate_transport_binding(
     tunnel_type: Option<&str>,
     binding: Option<TransportBinding>,
 ) -> Result<Option<TransportBinding>, Error> {
-    let is_quic = tunnel_type.is_some_and(|value| value.eq_ignore_ascii_case("quic"));
-    match (is_quic, binding) {
+    match (tls_exporter_tunnel(tunnel_type), binding) {
         (true, None) => Err(Error::WaitRespError(
-            "QUIC tunnel is missing a transport binding".to_owned(),
+            "TLS exporter tunnel is missing a transport binding".to_owned(),
         )),
         (false, Some(_)) => Err(Error::WaitRespError(
-            "non-QUIC tunnel has a transport binding".to_owned(),
+            "non-exporter tunnel has a transport binding".to_owned(),
         )),
         (_, binding) => Ok(binding),
     }
@@ -648,6 +661,18 @@ fn transport_binding_context(binding: Option<TransportBinding>) -> (u32, [u8; 32
             kind: TransportBindingKind::QuicTlsExporterV1,
             bytes,
         }) => (1, bytes),
+        Some(TransportBinding {
+            kind: TransportBindingKind::WssTlsExporterV1,
+            bytes,
+        }) => (2, bytes),
+        Some(TransportBinding {
+            kind: TransportBindingKind::Http2TlsExporterV1,
+            bytes,
+        }) => (3, bytes),
+        Some(TransportBinding {
+            kind: TransportBindingKind::TlsExporterLanesV1,
+            bytes,
+        }) => (4, bytes),
         None => (0, [0; 32]),
     }
 }
@@ -801,6 +826,8 @@ impl PeerSessionTunnelFilter {
     }
 
     fn uses_quic_exporter(&self) -> bool {
+        // QUIC, WSS, and HTTP/2 TCP select QuicExporter after a TLS binding.
+        // Direct hops then skip inner session AEAD.
         self.data_protection_mode.load(Ordering::Acquire)
             == PeerConnDataProtectionPb::QuicExporter as u8
     }

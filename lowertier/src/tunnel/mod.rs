@@ -30,6 +30,10 @@ pub mod packet_def;
 pub mod ring;
 pub mod stats;
 pub mod tcp;
+#[cfg(any(feature = "quic", feature = "websocket"))]
+mod tcp_lanes;
+#[cfg(any(feature = "quic", feature = "websocket"))]
+mod browser_tls;
 pub mod udp;
 pub(crate) mod udp_src;
 pub(crate) mod udp_vector_io;
@@ -42,6 +46,12 @@ pub mod wireguard;
 
 #[cfg(feature = "quic")]
 pub mod quic;
+
+#[cfg(feature = "quic")]
+pub mod http2;
+
+#[cfg(feature = "quic")]
+pub(crate) mod stealth_tls;
 
 #[cfg(feature = "websocket")]
 pub mod websocket;
@@ -109,6 +119,9 @@ pub type BatchSinkItem = batch::PacketBatch;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportBindingKind {
     QuicTlsExporterV1,
+    WssTlsExporterV1,
+    Http2TlsExporterV1,
+    TlsExporterLanesV1,
 }
 
 /// Immutable, fixed-size binding for one authenticated transport connection.
@@ -169,8 +182,9 @@ pub trait Tunnel: Send {
 
     /// Return the binding for this transport connection, when one exists.
     ///
-    /// QUIC tunnels derive this value from the TLS exporter. Other transports
-    /// return `None` because they do not expose an equivalent connection secret.
+    /// QUIC, WSS, and HTTP/2 TCP tunnels derive this value from the TLS
+    /// exporter. Other transports return `None` because they do not expose an
+    /// equivalent connection secret.
     fn transport_binding(&self) -> Option<TransportBinding> {
         None
     }
@@ -563,3 +577,7 @@ mod tests {
         assert!(matches_scheme!(&url, TunnelScheme::Ip(IpScheme::Udp)));
     }
 }
+
+
+#[cfg(all(test, feature = "quic", feature = "websocket"))]
+mod caddy_tcp_tests;

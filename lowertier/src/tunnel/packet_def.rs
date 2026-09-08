@@ -118,6 +118,7 @@ pub enum PacketType {
     RelayHandshakeReset = 40,
     RelayHandshakeResetAck = 41,
     ReceiverPressure = 42,
+    OverlayStream = 43,
 
     // used internally,
     DataWithKcpSrcModified = 18,
@@ -920,6 +921,17 @@ impl ZCPacket {
         }
     }
 
+    pub(crate) fn new_from_buf_with_prefix(
+        mut buf: BytesMut,
+        prefix_length: usize,
+        packet_type: ZCPacketType,
+    ) -> Self {
+        let prefix = buf.split_to(prefix_length);
+        let mut packet = Self::new_from_buf(buf, packet_type);
+        packet.reusable_prefix = Some(prefix);
+        packet
+    }
+
     pub(crate) fn new_from_reusable_buf(
         buf: BytesMut,
         packet_type: ZCPacketType,
@@ -960,6 +972,18 @@ impl ZCPacket {
         let mut ret = Self::new_nic_packet();
         let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
         ret.inner.resize(payload_off + payload_len, 0);
+        ret
+    }
+
+    pub(crate) fn new_with_payload_parts(parts: &[&[u8]]) -> Self {
+        let mut ret = Self::new_nic_packet();
+        let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
+        let payload_len = parts.iter().map(|part| part.len()).sum::<usize>();
+        ret.inner.reserve(payload_off.saturating_add(payload_len));
+        ret.inner.resize(payload_off, 0);
+        for part in parts {
+            ret.inner.extend_from_slice(part);
+        }
         ret
     }
 
@@ -1399,6 +1423,35 @@ impl ZCPacket {
         self.into_bytes().slice(offset..)
     }
 
+    pub(crate) fn tunnel_payload_with_prefix_into_bytes(mut self, prefix: &[u8]) -> Bytes {
+        let payload_offset = self
+            .packet_type
+            .get_packet_offsets()
+            .peer_manager_header_offset;
+        if payload_offset >= prefix.len() {
+            let start = payload_offset - prefix.len();
+            self.inner[start..payload_offset].copy_from_slice(prefix);
+            return self.into_bytes().slice(start..);
+        }
+
+        if let Some(mut headroom) = self.reusable_prefix.take() {
+            if headroom.len() >= prefix.len() {
+                let start = headroom.len() - prefix.len();
+                headroom[start..].copy_from_slice(prefix);
+                headroom.unsplit(std::mem::take(&mut self.inner));
+                self.inner = headroom;
+                return self.into_bytes().slice(start..);
+            }
+            self.reusable_prefix = Some(headroom);
+        }
+
+        let payload = self.tunnel_payload();
+        let mut bytes = BytesMut::with_capacity(prefix.len() + payload.len());
+        bytes.extend_from_slice(prefix);
+        bytes.extend_from_slice(payload);
+        bytes.freeze()
+    }
+
     pub(crate) fn convert_type_in_place(
         &mut self,
         target_packet_type: ZCPacketType,
@@ -1760,6 +1813,13 @@ impl ZCPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_parts_constructor_initializes_only_the_supplied_payload() {
+        let packet = ZCPacket::new_with_payload_parts(&[b"abc", b"def"]);
+
+        assert_eq!(packet.payload(), b"abcdef");
+    }
 
     #[test]
     fn payload_length_constructor_exposes_initialized_payload() {

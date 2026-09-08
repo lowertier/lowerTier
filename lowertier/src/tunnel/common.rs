@@ -176,6 +176,10 @@ impl<R, W> TunnelWrapper<R, W> {
             transport_authenticated,
         }
     }
+
+    pub fn set_associate_data(&mut self, associate_data: Box<dyn Any + Send + 'static>) {
+        self.associate_data = Some(associate_data);
+    }
 }
 
 impl<R, W> Tunnel for TunnelWrapper<R, W>
@@ -781,7 +785,7 @@ fn reported_plain_udp_buffer_meets_target(reported: Option<usize>, target: usize
 }
 
 #[cfg(target_os = "linux")]
-fn force_plain_udp_socket_buffer(
+fn force_linux_socket_buffer(
     socket: &socket2::Socket,
     option: nix::libc::c_int,
     target: usize,
@@ -791,7 +795,7 @@ fn force_plain_udp_socket_buffer(
     let target = nix::libc::c_int::try_from(target).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "plain UDP socket buffer target exceeds Linux c_int",
+            "socket buffer target exceeds Linux c_int",
         )
     })?;
     let result = unsafe {
@@ -807,6 +811,64 @@ fn force_plain_udp_socket_buffer(
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+pub(crate) fn size_tcp_socket_buffers(#[allow(unused_variables)] socket: &socket2::Socket) {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("LOWTIER_ENABLE_TCP_LARGE_BUFFERS").is_none() {
+            return;
+        }
+        const TARGET: usize = 32 * 1024 * 1024;
+        for (index, path) in ["/proc/sys/net/ipv4/tcp_rmem", "/proc/sys/net/ipv4/tcp_wmem"]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(automatic) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|value| value.split_whitespace().last()?.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let target = TARGET.max(automatic.div_ceil(2));
+            let option = if index == 0 {
+                nix::libc::SO_RCVBUFFORCE
+            } else {
+                nix::libc::SO_SNDBUFFORCE
+            };
+            if force_linux_socket_buffer(socket, option, target).is_ok() {
+                continue;
+            }
+            // Explicit buffers disable autotuning. Probe separately so a small
+            // net.core limit cannot lock an unprivileged tunnel below its ceiling.
+            let Ok(probe) = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            ) else {
+                continue;
+            };
+            let reported = if index == 0 {
+                probe
+                    .set_recv_buffer_size(target)
+                    .and_then(|()| probe.recv_buffer_size())
+            } else {
+                probe
+                    .set_send_buffer_size(target)
+                    .and_then(|()| probe.send_buffer_size())
+            };
+            if reported.is_ok_and(|bytes| bytes / 2 >= target) {
+                let result = if index == 0 {
+                    socket.set_recv_buffer_size(target)
+                } else {
+                    socket.set_send_buffer_size(target)
+                };
+                if let Err(error) = result {
+                    tracing::warn!(?error, "failed to increase the TCP socket buffer");
+                }
+            }
+        }
     }
 }
 
@@ -833,7 +895,7 @@ fn size_plain_udp_socket_buffers(socket: &socket2::Socket) {
         let mut recv_reported = socket_ref.recv_buffer_size().ok();
         let mut send_reported = socket_ref.send_buffer_size().ok();
         if !reported_plain_udp_buffer_meets_target(recv_reported, target) {
-            match force_plain_udp_socket_buffer(socket, nix::libc::SO_RCVBUFFORCE, target) {
+            match force_linux_socket_buffer(socket, nix::libc::SO_RCVBUFFORCE, target) {
                 Ok(()) => recv_reported = socket_ref.recv_buffer_size().ok(),
                 Err(error) => tracing::debug!(
                     ?error,
@@ -843,7 +905,7 @@ fn size_plain_udp_socket_buffers(socket: &socket2::Socket) {
             }
         }
         if !reported_plain_udp_buffer_meets_target(send_reported, target) {
-            match force_plain_udp_socket_buffer(socket, nix::libc::SO_SNDBUFFORCE, target) {
+            match force_linux_socket_buffer(socket, nix::libc::SO_SNDBUFFORCE, target) {
                 Ok(()) => send_reported = socket_ref.send_buffer_size().ok(),
                 Err(error) => tracing::debug!(
                     ?error,
@@ -1298,7 +1360,7 @@ pub mod tests {
         if !once {
             while let Some(item) = recv.next().await {
                 let Ok(msg) = item else {
-                    continue;
+                    break;
                 };
                 tracing::debug!(?msg, "recv a msg, try echo back");
                 if send.send(msg).await.is_err() {
@@ -1545,5 +1607,39 @@ pub mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(condition().await, "Timeout")
+    }
+
+
+    #[cfg(all(test, target_os = "linux"))]
+    #[tokio::test]
+    async fn tcp_socket_buffers_are_inherited_without_shrinking() {
+        let listener = super::bind::<tokio::net::TcpSocket>()
+            .addr("127.0.0.1:0".parse().unwrap())
+            .call()
+            .unwrap();
+        let socket = socket2::SockRef::from(&listener);
+        let before = (
+            socket.recv_buffer_size().unwrap(),
+            socket.send_buffer_size().unwrap(),
+        );
+        super::size_tcp_socket_buffers(&socket);
+        let after = (
+            socket.recv_buffer_size().unwrap(),
+            socket.send_buffer_size().unwrap(),
+        );
+        assert!(after.0 >= before.0);
+        assert!(after.1 >= before.1);
+        drop(socket);
+        let listener = listener.listen(1024).unwrap();
+        let (client, accepted) = tokio::join!(
+            tokio::net::TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept(),
+        );
+        let _client = client.unwrap();
+        let (accepted, _) = accepted.unwrap();
+        let accepted = socket2::SockRef::from(&accepted);
+        assert!(accepted.recv_buffer_size().unwrap() >= after.0);
+        assert!(accepted.send_buffer_size().unwrap() >= after.1);
+        println!("TCP socket buffers: before={before:?}, after={after:?}");
     }
 }

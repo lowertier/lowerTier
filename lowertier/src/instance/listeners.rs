@@ -112,6 +112,8 @@ pub fn create_listener_by_url(
                 let mut l = TcpTunnelListener::new(l.clone());
                 l.set_socket_mark(socket_mark);
                 l.set_underlay_policy(global_ctx.get_underlay_policy());
+                #[cfg(feature = "quic")]
+                l.set_flags(global_ctx.get_flags());
                 l.boxed()
             }
             IpScheme::Udp => {

@@ -276,7 +276,12 @@ pub async fn create_connector_by_url(
             let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
             effective_connector_ip_version = resolved_addr.ip_version;
             let mut connector: Box<dyn TunnelConnector> = match scheme {
-                IpScheme::Tcp => TcpTunnelConnector::new(url).boxed(),
+                IpScheme::Tcp => {
+                    let mut connector = TcpTunnelConnector::new(url);
+                    #[cfg(feature = "quic")]
+                    connector.set_flags(global_ctx.get_flags());
+                    connector.boxed()
+                }
                 IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
                 #[cfg(feature = "quic")]
                 IpScheme::Quic => {

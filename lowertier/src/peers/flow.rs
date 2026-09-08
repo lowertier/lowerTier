@@ -393,7 +393,7 @@ pub(crate) fn classify_packet_flow(packet: &ZCPacket) -> PacketFlow {
     classify_payload_flow(packet.payload(), packet_type)
 }
 
-fn classify_payload_flow(payload: &[u8], packet_type: u8) -> PacketFlow {
+pub(crate) fn classify_payload_flow(payload: &[u8], packet_type: u8) -> PacketFlow {
     let mut hasher = StableFlowHasher::new();
     hasher.write_u8(packet_type);
     let parsed = if packet_type == PacketType::Ethernet as u8 {
