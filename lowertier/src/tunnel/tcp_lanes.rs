@@ -544,6 +544,19 @@ impl LaneWriter {
                 }
             }
         }
+        if pending && !flush {
+            // A blocked lane must not strand buffered ACK/control frames on
+            // its siblings. Readiness still does not wait for their flushes.
+            for index in 0..self.lanes.len() {
+                if self.closed[index] || !self.pending[index].is_empty() {
+                    continue;
+                }
+                if let Poll::Ready(Err(error)) = self.lanes[index].as_mut().poll_flush(cx) {
+                    self.state.fail();
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
         if pending {
             Poll::Pending
         } else {

@@ -226,6 +226,30 @@ fn writer(probes: &[Arc<Probe>; 2]) -> LaneWriter {
 }
 
 #[test]
+fn blocked_readiness_flushes_buffered_sibling_without_a_global_barrier() {
+    let probes = [Arc::new(Probe::default()), Arc::new(Probe::default())];
+    let mut writer = writer(&probes);
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(Pin::new(&mut writer).poll_ready(&mut cx).is_ready());
+    probes[0].blocked.store(true, Ordering::Release);
+    probes[1].flush_blocked.store(true, Ordering::Release);
+    let mut batch = PacketBatch::new();
+    batch.try_push(packet(0, 0)).unwrap();
+    batch.try_push(packet(1, 1)).unwrap();
+    Pin::new(&mut writer).start_send(batch).unwrap();
+    assert!(Pin::new(&mut writer).poll_ready(&mut cx).is_pending());
+    assert_eq!(probes[1].received.lock().unwrap().len(), 1);
+    assert!(probes[1].flushes.load(Ordering::Relaxed) > 0);
+    probes[0].blocked.store(false, Ordering::Release);
+    probes[0].waker.wake();
+    assert!(Pin::new(&mut writer).poll_ready(&mut cx).is_ready());
+    assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
+    probes[1].flush_blocked.store(false, Ordering::Release);
+    assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_ready());
+}
+
+#[test]
 fn blocked_lane_does_not_prevent_sibling_submission_or_copy_payloads() {
     let probes = [Arc::new(Probe::default()), Arc::new(Probe::default())];
     probes[0].blocked.store(true, Ordering::Release);
