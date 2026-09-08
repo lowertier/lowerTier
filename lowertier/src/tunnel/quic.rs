@@ -58,6 +58,7 @@ use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket, ZCPacketType};
 
 pub(crate) mod adaptive;
 pub(crate) mod brutal;
+mod h3;
 #[cfg(test)]
 pub(crate) mod quic_config;
 pub(crate) mod tunnel_cc;
@@ -69,12 +70,12 @@ use self::tunnel_cc::TunnelConfig;
 
 const QUIC_INITIAL_MTU: u16 = 1452;
 const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize;
-const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 512 * 1024;
+const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 768 * 1024;
 const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u64 = 512 * 1024;
 const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 1024 * 1024;
 const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 512 * 1024;
 const QUIC_PENDING_ACCEPT_BUFFER_BYTES: u64 = 256 * 1024;
-const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 1792 * 1024;
+const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 2048 * 1024;
 const QUIC_RELIABLE_INITIAL_BUFFER_SIZE: usize = 4500;
 /// Bound reliable frame allocation even though the wire length field is 32-bit.
 const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 64 * 1024;
@@ -355,14 +356,14 @@ mod tls {
     use hmac::{Hmac, Mac};
     use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
     use rustls::{
-        CertificateError, DigitallySignedStruct, DistinguishedName, SignatureScheme,
+        CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
         client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
         pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
         server::danger::{ClientCertVerified, ClientCertVerifier},
     };
     use sha2::Sha256;
 
-    use crate::{common::config::NetworkIdentity, tunnel::TunnelError};
+    use crate::{common::config::{Flags, NetworkIdentity}, tunnel::TunnelError};
 
     const NETWORK_IDENTITY_LABEL: &[u8] = b"lowertier QUIC network identity v1";
     const ED25519_PKCS8_PREFIX: [u8; 16] = [
@@ -664,6 +665,55 @@ mod tls {
             .map_err(Into::into)
     }
 
+    pub(super) fn browser_server_crypto(flags: &Flags) -> Result<QuicServerConfig, TunnelError> {
+        let (certs, key) = crate::tunnel::stealth_tls::server_identity(flags)?;
+        let provider = Arc::new(crate::tunnel::stealth_tls::browser_like_provider());
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .context("configure HTTP/3 TLS 1.3 server")?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .context("configure HTTP/3 server identity")?;
+        config.alpn_protocols = vec![b"h3".to_vec()];
+        QuicServerConfig::try_from(config)
+            .context("convert HTTP/3 server config to Quinn")
+            .map_err(Into::into)
+    }
+
+    pub(super) fn browser_client_crypto(flags: &Flags) -> Result<QuicClientConfig, TunnelError> {
+        let provider = Arc::new(crate::tunnel::stealth_tls::browser_like_provider());
+        let builder = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .context("configure HTTP/3 TLS 1.3 client")?;
+        let mut config = if crate::tunnel::stealth_tls::skip_server_verification(flags) {
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(
+                    crate::tunnel::stealth_tls::NoiseAuthenticatedPeerVerifier::new(),
+                )
+                .with_no_client_auth()
+        } else {
+            let native = rustls_native_certs::load_native_certs();
+            if native.certs.is_empty() {
+                return Err(TunnelError::InternalError(format!(
+                    "load native HTTP/3 TLS roots: {:?}", native.errors
+                )));
+            }
+            let mut roots = RootCertStore::empty();
+            let (added, ignored) = roots.add_parsable_certificates(native.certs);
+            if added == 0 {
+                return Err(TunnelError::InternalError(format!(
+                    "no valid native HTTP/3 TLS roots; ignored {ignored} certificates"
+                )));
+            }
+            builder.with_root_certificates(roots).with_no_client_auth()
+        };
+        config.alpn_protocols = vec![b"h3".to_vec()];
+        QuicClientConfig::try_from(config)
+            .context("convert HTTP/3 client config to Quinn")
+            .map_err(Into::into)
+    }
+
     pub(super) fn network_client_crypto(
         identity: &NetworkIdentity,
     ) -> Result<QuicClientConfig, TunnelError> {
@@ -702,9 +752,9 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
     .map_err(|error| TunnelError::InternalError(error.to_string()))?;
 
     config
-        .max_concurrent_bidi_streams(1_u8.into())
-        .max_concurrent_uni_streams(0u8.into())
-        .keep_alive_interval(Some(Duration::from_secs(5)))
+        .max_concurrent_bidi_streams(100_u8.into())
+        .max_concurrent_uni_streams(3_u8.into())
+        .keep_alive_interval(None)
         .initial_mtu(QUIC_INITIAL_MTU)
         .min_mtu(1200)
         .enable_segmentation_offload(true)
@@ -754,15 +804,20 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
 }
 
 pub fn server_config(flags: &Flags) -> Result<ServerConfig, TunnelError> {
-    let mut config = ServerConfig::with_crypto(Arc::new(tls::server_crypto()?));
+    let mut config = ServerConfig::with_crypto(Arc::new(tls::browser_server_crypto(flags)?));
     config.transport_config(transport_config(flags)?);
     configure_server_admission(&mut config);
     Ok(config)
 }
 
 pub fn client_config(flags: &Flags) -> Result<ClientConfig, TunnelError> {
-    let mut config = ClientConfig::new(Arc::new(tls::client_crypto()?));
+    use quinn_proto::{ConnectionIdGenerator as _, RandomConnectionIdGenerator};
+
+    let mut config = ClientConfig::new(Arc::new(tls::browser_client_crypto(flags)?));
     config.transport_config(transport_config(flags)?);
+    config.initial_dst_cid_provider(Arc::new(|| {
+        RandomConnectionIdGenerator::new(8).generate_cid()
+    }));
     Ok(config)
 }
 
@@ -1008,8 +1063,6 @@ static QUIC_ENDPOINT_MANAGERS: OnceLock<
 #[derive(Clone, Copy)]
 struct QuicConnectSecurity<'a> {
     flags: &'a Flags,
-    identity: &'a crate::common::config::NetworkIdentity,
-    allow_noise_protected_transport: bool,
 }
 
 impl QuicEndpointManager {
@@ -1174,10 +1227,7 @@ impl QuicEndpointManager {
         })?;
 
         let endpoint = endpoint.expect("server endpoint creation should not return None");
-        endpoint.set_server_config(Some(server_config_for_network(
-            &mgr.flags,
-            &global_ctx.get_network_identity(),
-        )?));
+        endpoint.set_server_config(Some(server_config(&mgr.flags)?));
         mgr.servers.insert(endpoint.local_addr()?, endpoint.clone());
 
         Ok(endpoint)
@@ -1300,15 +1350,8 @@ impl QuicEndpointManager {
             IpVersion::V6
         };
         let flags = manager.flags.clone();
-        let identity = global_ctx.get_network_identity();
-        let allow_noise_protected_transport = global_ctx
-            .config
-            .get_secure_mode()
-            .is_some_and(|config| config.enabled);
         let security = QuicConnectSecurity {
             flags: flags.as_ref(),
-            identity: &identity,
-            allow_noise_protected_transport,
         };
         let socket_mark = flags.socket_mark;
         ensure_remote_allowed(&policy, addr)?;
@@ -1353,9 +1396,13 @@ impl QuicEndpointManager {
 
         loop {
             let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy)?;
-            let server_name = addr.ip().to_string();
+            let server_name = if security.flags.quic_server_name.is_empty() {
+                addr.ip().to_string()
+            } else {
+                security.flags.quic_server_name.clone()
+            };
             let connecting = match endpoint.connect_with(
-                client_config_for_network(security.flags, security.identity)?,
+                client_config(security.flags)?,
                 addr,
                 &server_name,
             ) {
@@ -1376,32 +1423,12 @@ impl QuicEndpointManager {
                         .into());
                 }
             };
-            let connection = match connecting.await {
-                Ok(connection) => connection,
-                Err(authentication_error) if security.allow_noise_protected_transport => {
-                    tracing::debug!(
-                        ?authentication_error,
-                        %addr,
-                        "network identity unavailable; using Noise-protected QUIC"
-                    );
-                    endpoint
-                        .connect_with(client_config(security.flags)?, addr, &server_name)
-                        .with_context(|| format!("failed to start Noise-protected QUIC to {addr}"))?
-                        .await
-                        .with_context(|| {
-                            format!("failed to connect Noise-protected QUIC to {addr}")
-                        })?
-                }
-                Err(error) => {
-                    return Err(anyhow::Error::new(error)
-                        .context(format!("failed to authenticate QUIC connection to {addr}"))
-                        .into());
-                }
-            };
+            let connection = connecting
+                .await
+                .with_context(|| format!("failed to establish HTTP/3 QUIC to {addr}"))?;
             ensure_local_allowed(&policy, endpoint.local_addr()?)?;
             ensure_remote_allowed(&policy, connection.remote_address())?;
-            let authenticated = connection_has_network_identity(&connection, security.identity);
-            return Ok((endpoint, connection, authenticated));
+            return Ok((endpoint, connection, false));
         }
     }
 
@@ -1417,9 +1444,13 @@ impl QuicEndpointManager {
 
         loop {
             let endpoint = self.client_endpoint(ip_version, socket_mark)?;
-            let server_name = addr.ip().to_string();
+            let server_name = if security.flags.quic_server_name.is_empty() {
+                addr.ip().to_string()
+            } else {
+                security.flags.quic_server_name.clone()
+            };
             let connecting = match endpoint.connect_with(
-                client_config_for_network(security.flags, security.identity)?,
+                client_config(security.flags)?,
                 addr,
                 &server_name,
             ) {
@@ -1447,31 +1478,10 @@ impl QuicEndpointManager {
                         .into());
                 }
             };
-            let connection = match connecting.await {
-                Ok(connection) => connection,
-                Err(authentication_error) if security.allow_noise_protected_transport => {
-                    tracing::debug!(
-                        ?authentication_error,
-                        %addr,
-                        "network identity unavailable; using Noise-protected QUIC"
-                    );
-                    endpoint
-                        .connect_with(client_config(security.flags)?, addr, &server_name)
-                        .with_context(|| format!("failed to start Noise-protected QUIC to {addr}"))?
-                        .await
-                        .with_context(|| {
-                            format!("failed to connect Noise-protected QUIC to {addr}")
-                        })?
-                }
-                Err(error) => {
-                    return Err(anyhow::Error::new(error)
-                        .context(format!("failed to authenticate QUIC connection to {addr}"))
-                        .into());
-                }
-            };
-
-            let authenticated = connection_has_network_identity(&connection, security.identity);
-            return Ok((endpoint, connection, authenticated));
+            let connection = connecting
+                .await
+                .with_context(|| format!("failed to establish HTTP/3 QUIC to {addr}"))?;
+            return Ok((endpoint, connection, false));
         }
     }
 }
@@ -1623,44 +1633,21 @@ enum QuicDelivery {
     ReliableStream,
 }
 
-fn select_quic_delivery(packet: &ZCPacket, max_datagram_size: Option<usize>) -> QuicDelivery {
+fn select_quic_delivery(packet: &ZCPacket, _max_datagram_size: Option<usize>) -> QuicDelivery {
     let critical_l2 = packet
         .peer_manager_header()
         .is_some_and(|header| header.is_critical_l2_control());
-    let fits_datagram =
-        max_datagram_size.is_some_and(|maximum| packet.tunnel_payload().len() <= maximum);
-    if packet.is_lossy() && !critical_l2 && fits_datagram {
+    if packet.is_lossy() && !critical_l2 {
         return QuicDelivery::PlainDatagram;
     }
     QuicDelivery::ReliableStream
 }
 
-fn encode_quic_datagram(packet: ZCPacket) -> Bytes {
-    packet.convert_type(ZCPacketType::DummyTunnel).into_bytes()
-}
-
-fn decode_quic_datagram(bytes: Bytes) -> Result<ZCPacket, TunnelError> {
-    if bytes.len() < PEER_MANAGER_HEADER_SIZE {
-        return Err(TunnelError::InvalidPacket(format!(
-            "QUIC DATAGRAM is too short: {} < {}",
-            bytes.len(),
-            PEER_MANAGER_HEADER_SIZE
-        )));
-    }
-
-    // Quinn hands ownership of a Bytes allocation to the application. Reuse
-    // it directly when unique and copy only if another reference exists.
-    let bytes = bytes
-        .try_into_mut()
-        .unwrap_or_else(|bytes| BytesMut::from(bytes.as_ref()));
-    Ok(ZCPacket::new_from_buf(bytes, ZCPacketType::DummyTunnel))
-}
-
-fn decode_received_quic_datagram(bytes: Bytes) -> Option<ZCPacket> {
-    match decode_quic_datagram(bytes) {
+fn decode_received_quic_datagram(bytes: Bytes, connect_stream_id: u64) -> Option<ZCPacket> {
+    match h3::decode_datagram(bytes, connect_stream_id) {
         Ok(packet) => Some(packet),
         Err(error) => {
-            tracing::debug!(?error, "dropping malformed QUIC DATAGRAM");
+            tracing::debug!(?error, "dropping malformed CONNECT-IP DATAGRAM");
             None
         }
     }
@@ -1673,11 +1660,16 @@ struct QuicHybridReader {
     reliable: mpsc::Receiver<BatchStreamItem>,
     connection: Arc<ConnWrapper>,
     datagrams: Pin<Box<quinn::ReadDatagrams>>,
+    connect_stream_id: u64,
     poll_datagram_first: bool,
 }
 
 impl QuicHybridReader {
-    fn new(reliable: mpsc::Receiver<BatchStreamItem>, connection: Arc<ConnWrapper>) -> Self {
+    fn new(
+        reliable: mpsc::Receiver<BatchStreamItem>,
+        connection: Arc<ConnWrapper>,
+        connect_stream_id: u64,
+    ) -> Self {
         let batch_limit = packet_batch_limit();
         let datagrams = Box::pin(
             connection
@@ -1688,6 +1680,7 @@ impl QuicHybridReader {
             reliable,
             connection,
             datagrams,
+            connect_stream_id,
             poll_datagram_first: true,
         }
     }
@@ -1704,7 +1697,7 @@ impl QuicHybridReader {
                 });
         let mut batch = PacketBatch::with_capacity(datagrams.len());
         for bytes in datagrams.drain(..) {
-            if let Some(packet) = decode_received_quic_datagram(bytes) {
+            if let Some(packet) = decode_received_quic_datagram(bytes, self.connect_stream_id) {
                 batch
                     .try_push(packet)
                     .expect("the QUIC receive batch has a fixed bound");
@@ -1778,6 +1771,7 @@ struct QuicHybridWriter {
     reliable_task: Option<JoinHandle<Result<(), TunnelError>>>,
     graceful_close: bool,
     adaptive_signals: Option<Arc<adaptive::signals::AdaptiveSignals>>,
+    connect_stream_id: u64,
 }
 
 struct ReliableWriteRequest {
@@ -2181,6 +2175,7 @@ impl QuicHybridWriter {
         reliable_tx: mpsc::Sender<ReliableWriteRequest>,
         reliable_task: JoinHandle<Result<(), TunnelError>>,
         connection: Arc<ConnWrapper>,
+        connect_stream_id: u64,
     ) -> Self {
         let adaptive_signals = adaptive::quinn::signals_from_connection(&connection.conn);
         Self {
@@ -2195,6 +2190,7 @@ impl QuicHybridWriter {
             reliable_task: Some(reliable_task),
             graceful_close: false,
             adaptive_signals,
+            connect_stream_id,
         }
     }
 
@@ -2443,7 +2439,18 @@ impl Sink<PacketBatch> for QuicHybridWriter {
 
         for packet in batch {
             match select_quic_delivery(&packet, maximum) {
-                QuicDelivery::PlainDatagram => datagrams.push_back(encode_quic_datagram(packet)),
+                QuicDelivery::PlainDatagram => {
+                    let datagram = h3::encode_datagram(packet, writer.connect_stream_id);
+                    if maximum.is_some_and(|maximum| datagram.len() <= maximum) {
+                        datagrams.push_back(datagram);
+                    } else {
+                        tracing::debug!(
+                            len = datagram.len(),
+                            ?maximum,
+                            "drop CONNECT-IP packet above the current QUIC DATAGRAM PMTU"
+                        );
+                    }
+                }
                 QuicDelivery::ReliableStream => reliable
                     .try_push(packet)
                     .expect("the reliable subset cannot exceed its input batch"),
@@ -2630,8 +2637,75 @@ fn build_quic_hybrid_tunnel_with_manager(
         BatchTunnelWrapper::new_with_transport_authentication_and_datagram_size_budget_and_binding(
             // The exporter binding is created before the QUIC connection is
             // wrapped and before either half is split.
-            QuicHybridReader::new(reliable_rx, connection.clone()),
-            QuicHybridWriter::new(reliable_tx, writer_task, connection),
+            QuicHybridReader::new(reliable_rx, connection.clone(), 0),
+            QuicHybridWriter::new(reliable_tx, writer_task, connection, 0),
+            Some(info),
+            transport_authenticated,
+            Some(datagram_size_budget),
+            Some(transport_binding),
+        ),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_connect_ip_tunnel(
+    connection: Connection,
+    stream: Box<dyn h3::RequestStream>,
+    connect_stream_id: u64,
+    info: TunnelInfo,
+    transport_authenticated: bool,
+    memory_permit: Option<ProcessMemoryPermit>,
+    endpoint_manager: Option<Arc<QuicEndpointManager>>,
+    endpoint_owner: Option<Endpoint>,
+    telemetry: Option<Arc<DataplaneTelemetry>>,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    let transport_binding = derive_transport_binding(&connection)?;
+    let connection = Arc::new(ConnWrapper {
+        conn: connection,
+        telemetry: telemetry.unwrap_or_else(|| Arc::new(DataplaneTelemetry::new())),
+        io_observed: QuicIoObserved::default(),
+        _memory_permit: memory_permit,
+        _source_permit: None,
+        _endpoint_manager: endpoint_manager,
+        _endpoint_owner: endpoint_owner,
+    });
+    let datagram_size_budget: DatagramSizeBudget = {
+        let connection = connection.conn.clone();
+        Arc::new(move || {
+            connection
+                .max_datagram_size()
+                .and_then(|size| size.checked_sub(h3::datagram_overhead(connect_stream_id)))
+        })
+    };
+    observe_quic_path(&connection);
+    let (reliable_tx, reliable_outgoing) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
+    let (reliable_incoming, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
+    let (writer_done_tx, writer_done_rx) = oneshot::channel();
+    let supervisor_connection = connection.conn.clone();
+    tokio::spawn(async move {
+        let result = h3::run_reliable_lane(
+            supervisor_connection,
+            stream,
+            reliable_outgoing,
+            reliable_incoming.clone(),
+            writer_done_tx,
+        )
+        .await;
+        if let Err(error) = result {
+            send_reliable_lane_error(reliable_incoming, error).await;
+        }
+    });
+    let writer_task = tokio::spawn(async move {
+        writer_done_rx.await.unwrap_or_else(|_| {
+            Err(TunnelError::InternalError(
+                "CONNECT-IP supervisor stopped".to_owned(),
+            ))
+        })
+    });
+    Ok(Box::new(
+        BatchTunnelWrapper::new_with_transport_authentication_and_datagram_size_budget_and_binding(
+            QuicHybridReader::new(reliable_rx, connection.clone(), connect_stream_id),
+            QuicHybridWriter::new(reliable_tx, writer_task, connection, connect_stream_id),
             Some(info),
             transport_authenticated,
             Some(datagram_size_budget),
@@ -2686,20 +2760,25 @@ impl QuicTunnelListener {
             .await
             .context("accept QUIC connection timed out")?
             .with_context(|| "accept QUIC connection failed")?;
-        let transport_authenticated =
-            connection_has_network_identity(&conn, &global_ctx.get_network_identity());
-        if !transport_authenticated {
-            conn.close(VarInt::from_u32(1), b"network identity is required");
-            return Err(TunnelError::InternalError(
-                "QUIC network identity authentication failed".to_owned(),
-            ));
-        }
+        let transport_authenticated = false;
         let remote_addr = conn.remote_address();
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), remote_addr)?;
-        let (w, r) = match accept_activated_reliable_lane(&conn).await {
-            Ok(lane) => lane,
+        let flags = global_ctx.config.get_flags();
+        let admission = crate::tunnel::stealth_tls::ConnectIpAdmission::from_global_ctx(&global_ctx);
+        let fallback_root = match flags.quic_fallback_root.as_str() {
+            "" => None,
+            root => Some(std::path::PathBuf::from(root)),
+        };
+        let request = tokio::time::timeout(
+            Duration::from_secs(5),
+            h3::accept_request(&conn, admission.as_ref(), fallback_root),
+        )
+        .await
+        .context("accept CONNECT-IP request timed out")?;
+        let (connect_stream, connect_stream_id) = match request {
+            Ok(request) => request,
             Err(error) => {
-                conn.close(VarInt::from_u32(1), b"reliable lane activation failed");
+                conn.close(VarInt::from_u32(1), b"CONNECT-IP activation failed");
                 return Err(error);
             }
         };
@@ -2715,22 +2794,20 @@ impl QuicTunnelListener {
             ),
         };
 
-        let flags = global_ctx.config.get_flags();
         // The process-wide source permit protects handshake activation only.
         // Keeping it on the live tunnel would allow one established peer to
         // block every other peer behind the same NAT/source IP indefinitely.
         drop(source_permit);
-        build_quic_hybrid_tunnel_with_memory_permit(
+        build_connect_ip_tunnel(
             conn,
-            w,
-            r,
-            ReliableLaneRole::Acceptor,
-            QUIC_RELIABLE_MAX_PACKET_SIZE,
+            connect_stream,
+            connect_stream_id,
             info,
-            &flags,
             transport_authenticated,
-            memory_permit,
-            global_ctx.dataplane_telemetry().clone(),
+            Some(memory_permit),
+            None,
+            None,
+            Some(global_ctx.dataplane_telemetry().clone()),
         )
     }
 
@@ -2939,8 +3016,18 @@ impl TunnelConnector for QuicTunnelConnector {
         self.endpoint_manager = Some(endpoint_manager);
 
         let local_addr = endpoint.local_addr()?;
-
-        let (w, r) = open_activated_reliable_lane(&connection).await?;
+        let flags = self.global_ctx.config.get_flags();
+        let authority = if flags.quic_server_name.is_empty() {
+            self.addr
+                .host_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| addr.ip().to_string())
+        } else {
+            flags.quic_server_name.clone()
+        };
+        let bearer = h3::bearer(&self.global_ctx);
+        let (connect_stream, connect_stream_id) =
+            h3::open_request(&connection, &authority, bearer.as_deref()).await?;
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -2954,18 +3041,13 @@ impl TunnelConnector for QuicTunnelConnector {
             ),
         };
 
-        let flags = self.global_ctx.config.get_flags();
-        build_quic_hybrid_tunnel_with_manager(
+        build_connect_ip_tunnel(
             connection,
-            w,
-            r,
-            ReliableLaneRole::Initiator,
-            QUIC_RELIABLE_MAX_PACKET_SIZE,
+            connect_stream,
+            connect_stream_id,
             info,
-            &flags,
             transport_authenticated,
             Some(memory_permit),
-            None,
             self.endpoint_manager.clone(),
             Some(endpoint),
             Some(self.global_ctx.dataplane_telemetry().clone()),
@@ -3062,7 +3144,7 @@ mod tests {
             while receiver.recv().await.is_some() {}
             Ok(())
         });
-        QuicHybridWriter::new(sender, task, connection)
+        QuicHybridWriter::new(sender, task, connection, 0)
     }
 
     #[test]
@@ -3333,7 +3415,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let tunnel = listener.accept().await.unwrap();
                 let (mut recv, mut send) = tunnel.split();
-                for _ in 0..3 {
+                for _ in 0..2 {
                     let packet = recv.next().await.unwrap().unwrap();
                     send.send(packet).await.unwrap();
                     send.flush().await.unwrap();
@@ -3361,7 +3443,7 @@ mod tests {
             let mut oversized = ZCPacket::new_with_payload(&[0x5a; 9000]);
             oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 
-            for expected in [normal, critical, oversized] {
+            for expected in [normal, critical] {
                 send.send(PacketBatch::singleton(expected.clone()))
                     .await
                     .unwrap();
@@ -3385,6 +3467,15 @@ mod tests {
                         .is_critical_l2_control()
                 );
             }
+
+            send.send(PacketBatch::singleton(oversized)).await.unwrap();
+            send.flush().await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), recv.next())
+                    .await
+                    .is_err(),
+                "an oversized lossy packet must not fall back to the reliable CONNECT stream"
+            );
 
             send.close().await.unwrap();
             received_tx.send(()).unwrap();
@@ -3933,25 +4024,22 @@ mod tests {
                 QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
             listener.listen().await.unwrap();
             let server_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let remote = listener.local_url();
             let accepting = tokio::spawn(async move { listener.accept().await });
 
-            let identity = test_identity();
             let mut first_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            first_endpoint
-                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
+            first_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let first = first_endpoint
                 .connect(server_addr, &server_addr.ip().to_string())
                 .unwrap()
                 .await
                 .unwrap();
-            let (_stalled_send, _stalled_recv) = first.open_bi().await.unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             // The per-peer pending-activation bound refuses a second
             // connection from the same address while the first one stalls.
             let mut refused_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            refused_endpoint
-                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
+            refused_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let refused = refused_endpoint
                 .connect(server_addr, &server_addr.ip().to_string())
                 .unwrap()
@@ -3961,31 +4049,16 @@ mod tests {
                 "a stalled pending peer must bound new ones"
             );
 
-            // Once the stalled activation times out, a later connection from
-            // the same address activates and is accepted.
-            let mut second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            second_endpoint
-                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
-            let second = tokio::time::timeout(Duration::from_secs(12), async {
-                loop {
-                    if let Ok(conn) = second_endpoint
-                        .connect(server_addr, &server_addr.ip().to_string())
-                        .unwrap()
-                        .await
-                    {
-                        break conn;
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            })
-            .await
-            .unwrap();
-            let activated = tokio::time::timeout(
-                Duration::from_secs(2),
-                open_activated_reliable_lane(&second),
-            )
-            .await;
-            assert!(matches!(activated, Ok(Ok(_))));
+            // Wait past the bounded activation deadline, then prove a single
+            // normal CONNECT-IP client from the same address can be accepted.
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            let mut connector = QuicTunnelConnector::new(remote, global_ctx());
+            let second = tokio::time::timeout(Duration::from_secs(3), connector.connect())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(first);
+            drop(second);
 
             let accepted = tokio::time::timeout(Duration::from_secs(2), accepting).await;
             assert!(matches!(accepted, Ok(Ok(Ok(_)))));
@@ -4149,18 +4222,12 @@ mod tests {
             assert!(mgr.contains_local_addr(stopped_addr_a));
             assert!(mgr.contains_local_addr(stopped_addr_b));
             let flags = gen_default_flags();
-            let identity = crate::common::config::NetworkIdentity::default();
-
             let err = mgr
                 .connect_with_ip_version(
                     "127.0.0.1:0".parse().unwrap(),
                     IpVersion::V4,
                     None,
-                    QuicConnectSecurity {
-                        flags: &flags,
-                        identity: &identity,
-                        allow_noise_protected_transport: false,
-                    },
+                    QuicConnectSecurity { flags: &flags },
                 )
                 .await
                 .unwrap_err();
@@ -4223,7 +4290,7 @@ mod tests {
         );
         assert_eq!(
             select_quic_delivery(&oversized, Some(1200)),
-            QuicDelivery::ReliableStream
+            QuicDelivery::PlainDatagram
         );
 
         let mut control = ZCPacket::new_with_payload(b"rpc");
@@ -4240,10 +4307,10 @@ mod tests {
         packet.fill_peer_manager_hdr(7, 9, crate::tunnel::packet_def::PacketType::Data as u8);
         let expected = packet.tunnel_payload().to_vec();
 
-        let encoded = encode_quic_datagram(packet);
-        assert_eq!(encoded.as_ref(), expected);
+        let encoded = h3::encode_datagram(packet, 0);
+        assert_eq!(&encoded[h3::datagram_overhead(0)..], expected);
 
-        let decoded = decode_quic_datagram(encoded).unwrap();
+        let decoded = h3::decode_datagram(encoded, 0).unwrap();
         assert_eq!(decoded.tunnel_payload(), expected);
         assert!(decoded.is_lossy());
     }
@@ -4305,7 +4372,7 @@ mod tests {
 
     #[test]
     fn malformed_plain_datagram_is_dropped() {
-        assert!(decode_received_quic_datagram(Bytes::from_static(b"short")).is_none());
+        assert!(decode_received_quic_datagram(Bytes::from_static(b"short"), 0).is_none());
     }
 
     #[test]
@@ -4335,7 +4402,7 @@ mod tests {
             let client_handshake = handshake
                 .downcast_ref::<quinn::crypto::rustls::HandshakeData>()
                 .expect("QUIC must use rustls TLS 1.3");
-            assert_eq!(client_handshake.protocol, None);
+            assert_eq!(client_handshake.protocol, Some(b"h3".to_vec()));
 
             let server_handshake = server.handshake_data().unwrap();
             let server_handshake = server_handshake
@@ -4446,7 +4513,10 @@ mod tests {
                 _source_permit: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
-            let payload = vec![0x5a; maximum - PEER_MANAGER_HEADER_SIZE];
+            let payload = vec![
+                0x5a;
+                maximum - h3::datagram_overhead(0) - PEER_MANAGER_HEADER_SIZE
+            ];
             let mut packet = ZCPacket::new_with_payload(&payload);
             packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 
@@ -4465,7 +4535,7 @@ mod tests {
                 loop {
                     let datagram = server.read_datagram().await.unwrap();
                     if datagram
-                        .get(PEER_MANAGER_HEADER_SIZE)
+                        .get(h3::datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE)
                         .is_some_and(|byte| *byte == 0x5a)
                     {
                         break;
@@ -4537,7 +4607,7 @@ mod tests {
             assert_eq!(
                 received
                     .iter()
-                    .map(|datagram| datagram[PEER_MANAGER_HEADER_SIZE])
+                    .map(|datagram| datagram[h3::datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE])
                     .collect::<Vec<_>>(),
                 (0..8_u8).collect::<Vec<_>>()
             );
@@ -4639,7 +4709,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_quic_tunnel_reports_network_authentication() {
+    fn direct_quic_tunnel_defers_peer_authentication_to_noise() {
         RUNTIME.block_on(async {
             let server_ctx = global_ctx();
             let client_ctx = global_ctx();
@@ -4653,8 +4723,8 @@ mod tests {
             let client = connector.connect().await.unwrap();
             let server = server.await.unwrap();
 
-            assert!(client.is_transport_authenticated());
-            assert!(server.is_transport_authenticated());
+            assert!(!client.is_transport_authenticated());
+            assert!(!server.is_transport_authenticated());
             assert_eq!(client.transport_binding(), server.transport_binding());
             assert_eq!(
                 client.transport_binding().map(|binding| binding.kind),
@@ -4792,12 +4862,8 @@ mod tests {
     fn secure_protocol_defers_network_secret_rejection_to_noise() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
-            let server_identity = crate::common::config::NetworkIdentity::new(
-                "test-network".to_owned(),
-                "server-secret".to_owned(),
-            );
             let server_endpoint = Endpoint::server(
-                server_config_for_network(&flags, &server_identity).unwrap(),
+                server_config(&flags).unwrap(),
                 "127.0.0.1:0".parse().unwrap(),
             )
             .unwrap();

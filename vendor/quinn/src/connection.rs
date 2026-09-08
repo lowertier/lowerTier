@@ -1464,11 +1464,11 @@ pub enum SendDatagramError {
 ///
 /// This limits the amount of CPU resources consumed by datagram generation,
 /// and allows other tasks (like receiving ACKs) to run in between.
-const MAX_TRANSMIT_DATAGRAMS: usize = 20;
+const MAX_TRANSMIT_DATAGRAMS: usize = 256;
 /// Process one endpoint batch before application wakeups.
 ///
 /// One endpoint batch fits inside the default application datagram buffer.
-const MAX_CONNECTION_EVENT_BATCHES_PER_POLL: usize = 1;
+const MAX_CONNECTION_EVENT_BATCHES_PER_POLL: usize = 8;
 /// Bound one GSO burst below the platform maximum.
 ///
 /// Some software bridges advertise 64 segments but drop that full burst before

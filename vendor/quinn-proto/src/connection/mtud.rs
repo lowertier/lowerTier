@@ -398,9 +398,8 @@ impl BlackHoleDetector {
     }
 
     fn on_non_probe_acked(&mut self, pn: u64, len: u16) {
-        if len <= self.acked_mtu {
-            // We've already seen a larger packet since the most recent suspicious loss burst;
-            // nothing to do.
+        if len < self.acked_mtu {
+            // A smaller ACK adds no evidence beyond the larger packet already observed.
             return;
         }
         self.acked_mtu = len;
@@ -592,6 +591,23 @@ mod tests {
         let mut mtud = default_mtud();
         assert!(!mtud.black_hole_detected(Instant::now()));
         assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
+    }
+
+    #[test]
+    fn black_hole_detector_equal_size_ack_clears_random_loss_burst() {
+        let mut mtud = MtuDiscovery::disabled(1_452, 1_200);
+        let now = Instant::now();
+        mtud.on_acked(SpaceId::Data, 1, 1_452);
+
+        for burst in 0..4 {
+            let lost_pn = 2 + burst * 2;
+            mtud.on_non_probe_lost(lost_pn, 1_452);
+            assert!(!mtud.black_hole_detected(now));
+            mtud.on_acked(SpaceId::Data, lost_pn + 1, 1_452);
+            assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
+        }
+
+        assert_eq!(mtud.current_mtu(), 1_452);
     }
 
     #[test]

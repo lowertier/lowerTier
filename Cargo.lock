@@ -2413,6 +2413,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3"
+version = "0.0.8"
+source = "git+https://github.com/ferneast/masque-tunnel.git?rev=771c29a3bb554562930cb17e73d56d33991185ef#771c29a3bb554562930cb17e73d56d33991185ef"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "http",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "h3-quinn"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4"
+dependencies = [
+ "bytes",
+ "futures",
+ "h3",
+ "quinn",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3484,6 +3511,8 @@ dependencies = [
  "globwalk",
  "guarden",
  "h2",
+ "h3",
+ "h3-quinn",
  "hickory-client",
  "hickory-proto",
  "hickory-resolver",

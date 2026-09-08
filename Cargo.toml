@@ -23,6 +23,7 @@ exclude = [
 quincy-tun = { path = "vendor/quincy-tun" }
 quinn = { path = "vendor/quinn" }
 quinn-proto = { path = "vendor/quinn-proto" }
+h3 = { git = "https://github.com/ferneast/masque-tunnel.git", rev = "771c29a3bb554562930cb17e73d56d33991185ef" }
 
 [workspace.package]
 edition = "2024"
