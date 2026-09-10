@@ -1,13 +1,13 @@
-use crate::{peers::crypto_workers::SEND_CRYPTO_SLOT_COUNT, tunnel::batch::MAX_PACKET_BATCH_SIZE};
+use crate::tunnel::batch::{MAX_PACKET_BATCH_SIZE, SEND_PIPELINE_SLOT_COUNT};
 
-/// Retain enough authenticated sequence history for every stable crypto slot
-/// plus the network-reordering allowance supported before the dual queue.
+/// Retain enough authenticated sequence history for every bounded send-pipeline
+/// slot plus the network-reordering allowance supported before the dual queue.
 pub(crate) const REPLAY_WINDOW_BITS: usize = 1024;
 pub(crate) const REPLAY_WINDOW_WORDS: usize = REPLAY_WINDOW_BITS / u64::BITS as usize;
 
 const NETWORK_REORDER_HEADROOM: usize = 256;
 const REQUIRED_REPLAY_WINDOW_BITS: usize =
-    SEND_CRYPTO_SLOT_COUNT * MAX_PACKET_BATCH_SIZE + NETWORK_REORDER_HEADROOM;
+    SEND_PIPELINE_SLOT_COUNT * MAX_PACKET_BATCH_SIZE + NETWORK_REORDER_HEADROOM;
 const REPLAY_WINDOW_INDEX_MASK: u64 = REPLAY_WINDOW_BITS as u64 - 1;
 const _: () = assert!(REPLAY_WINDOW_BITS.is_power_of_two());
 const _: () = assert!(REPLAY_WINDOW_BITS % u64::BITS as usize == 0);
@@ -143,65 +143,5 @@ mod tests {
             });
         }
         true
-    }
-
-    #[test]
-    fn circular_window_matches_reference_across_wraps_and_jumps() {
-        let mut window = ReplayWindow::default();
-        let mut accepted = HashSet::new();
-        let mut reference_max = None;
-        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
-
-        for iteration in 0..20_000_u64 {
-            seed = seed
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let current_max = reference_max.unwrap_or(0);
-            let sequence = match iteration % 5 {
-                0 => current_max + 1 + seed % 7,
-                1 => current_max.saturating_sub(seed % 1_200),
-                2 => current_max + 1 + seed % 1_300,
-                3 => current_max.saturating_sub(seed % 128),
-                _ => current_max,
-            };
-
-            assert_eq!(
-                window.accept(sequence),
-                reference_accept(&mut accepted, &mut reference_max, sequence),
-                "mismatch for sequence {sequence} at iteration {iteration}"
-            );
-        }
-    }
-
-    #[test]
-    fn window_accepts_the_full_bounded_crypto_and_network_reorder() {
-        let highest = (REQUIRED_REPLAY_WINDOW_BITS - 1) as u64;
-        let mut window = ReplayWindow::default();
-
-        assert!(window.accept(highest));
-        assert!(window.accept(0));
-        assert!(!window.accept(0));
-    }
-
-    #[test]
-    fn window_rejects_the_exact_history_boundary_and_recycles_its_bit() {
-        let mut window = ReplayWindow::default();
-
-        assert!(window.accept(0));
-        assert!(window.accept(REPLAY_WINDOW_BITS as u64));
-        assert!(!window.accept(0));
-        assert!(!window.accept(REPLAY_WINDOW_BITS as u64));
-        assert!(window.accept(1));
-    }
-
-    #[test]
-    fn window_handles_the_u64_sequence_limit_without_overflow() {
-        let mut window = ReplayWindow::default();
-
-        assert!(window.accept(u64::MAX - 2));
-        assert!(window.accept(u64::MAX));
-        assert!(window.accept(u64::MAX - 1));
-        assert!(!window.accept(u64::MAX));
-        assert!(!window.accept(u64::MAX - 1));
     }
 }

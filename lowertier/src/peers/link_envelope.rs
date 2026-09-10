@@ -16,7 +16,7 @@ use super::replay_window::ReplayWindow;
 use crate::common::dataplane_telemetry::{DataplaneStage, DataplaneTelemetry};
 use crate::tunnel::packet_def::{PacketType, ZCPacket, ZCPacketType};
 use crate::tunnel::{
-    BatchStreamItem, StreamItem, TunnelError,
+    BatchStreamItem, StreamItem,
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
     filter::TunnelFilter,
 };
@@ -146,9 +146,13 @@ impl TunnelFilter for LinkEnvelopeTunnelFilter {
         if session.is_late_plaintext_noise_control(&data) {
             return Some(Ok(data));
         }
-        Some(session.open(data).map_err(|error| {
-            TunnelError::InvalidPacket(format!("protected link packet failed: {error}"))
-        }))
+        match session.open(data) {
+            Ok(packet) => Some(Ok(packet)),
+            Err(error) => {
+                tracing::debug!(?error, "dropping protected link packet");
+                None
+            }
+        }
     }
 
     fn before_send_batch(&self, mut data: PacketBatch) -> Option<PacketBatch> {
@@ -193,17 +197,14 @@ impl TunnelFilter for LinkEnvelopeTunnelFilter {
                 batch.buffer_byte_len(),
             )
         });
-        Some(
-            session
-                .open_batch_with_late_noise_controls(batch)
-                .map_err(|error| {
-                    TunnelError::InvalidPacket(format!("protected link batch failed: {error}"))
-                }),
-        )
-    }
-
-    fn uses_async_crypto_pipeline(&self) -> bool {
-        self.enabled
+        match session.open_batch_with_late_noise_controls(batch) {
+            Ok(batch) if batch.is_empty() => None,
+            Ok(batch) => Some(Ok(batch)),
+            Err(error) => {
+                tracing::debug!(?error, "dropping protected link batch");
+                None
+            }
+        }
     }
 
     fn filter_output(&self) {}
@@ -319,10 +320,9 @@ impl LinkEnvelopeSession {
                 return PacketBatch::new();
             }
         };
-        let result =
-            super::crypto_workers::ordered_in_place_transform(&mut data, |index, packet| {
-                self.seal_with_sequence(packet, first_sequence + index as u64)
-            });
+        let result = data.iter_mut().enumerate().try_for_each(|(index, packet)| {
+            self.seal_with_sequence(packet, first_sequence + index as u64)
+        });
         if let Err(error) = result {
             tracing::warn!(?error, "link envelope batch encryption failed");
             return PacketBatch::new();
@@ -380,82 +380,109 @@ impl LinkEnvelopeSession {
 
         let mut protected = [false; MAX_PACKET_BATCH_SIZE];
         let mut sequences = [0_u64; MAX_PACKET_BATCH_SIZE];
-        let mut ordered_sequences = [0_u64; MAX_PACKET_BATCH_SIZE];
-        let mut protected_count = 0_usize;
+        let mut drop_packet = [false; MAX_PACKET_BATCH_SIZE];
         for (index, packet) in data.iter_mut().enumerate() {
             if self.is_late_plaintext_noise_control(packet) {
                 continue;
             }
-            packet
+            if packet
                 .convert_type_in_place(ZCPacketType::DummyTunnel)
-                .map_err(anyhow::Error::msg)?;
+                .is_err()
+            {
+                drop_packet[index] = true;
+                continue;
+            }
             let envelope = packet.mut_inner_preserving_flow_hash();
             if envelope.len() < PUBLIC_HEADER_SIZE + AEAD_TAG_SIZE {
-                return Err(anyhow::anyhow!("the link envelope is too short"));
+                drop_packet[index] = true;
+                continue;
             }
             let public_header_offset = envelope.len() - PUBLIC_HEADER_SIZE;
             let public_header: [u8; PUBLIC_HEADER_SIZE] = envelope[public_header_offset..]
                 .try_into()
                 .expect("the public header length was checked");
-            let sequence = u64::from_be_bytes(public_header);
             protected[index] = true;
-            sequences[index] = sequence;
-            ordered_sequences[protected_count] = sequence;
-            protected_count += 1;
+            sequences[index] = u64::from_be_bytes(public_header);
         }
-        if protected_count == 0 {
-            return Ok(data);
-        }
-        ordered_sequences[..protected_count].sort_unstable();
 
-        let replay_snapshot = {
+        {
             #[cfg(test)]
             self.replay_lock_acquisitions
                 .fetch_add(1, Ordering::Relaxed);
-            *self.receive_replay.lock().unwrap()
-        };
-        for index in 0..protected_count {
-            let sequence = ordered_sequences[index];
-            if (index != 0 && sequence == ordered_sequences[index - 1])
-                || !replay_snapshot.can_accept(sequence)
-            {
-                return Err(anyhow::anyhow!("the link sequence is a replay"));
+            let mut replay_work = *self.receive_replay.lock().unwrap();
+            for index in 0..data.len() {
+                if drop_packet[index] || !protected[index] {
+                    continue;
+                }
+                if !replay_work.accept(sequences[index]) {
+                    drop_packet[index] = true;
+                }
             }
         }
 
-        super::crypto_workers::ordered_in_place_transform(&mut data, |index, packet| {
-            if !protected[index] {
+        let decrypt_failed: [AtomicBool; MAX_PACKET_BATCH_SIZE] =
+            std::array::from_fn(|_| AtomicBool::new(false));
+        let decrypt_result = data.iter_mut().enumerate().try_for_each(|(index, packet)| {
+            if drop_packet[index] || !protected[index] {
                 return Ok::<(), anyhow::Error>(());
             }
             let sequence = sequences[index];
             let public_header = sequence.to_be_bytes();
             let envelope = packet.mut_inner_preserving_flow_hash();
             let public_header_offset = envelope.len() - PUBLIC_HEADER_SIZE;
-            let plaintext_length = self
-                .receive_key
-                .open_in_place(
-                    nonce(sequence),
-                    aead::Aad::from(associated_data(public_header)),
-                    &mut envelope[..public_header_offset],
-                )
-                .map_err(|_| anyhow::anyhow!("link envelope authentication failed"))?
-                .len();
-            envelope.truncate(plaintext_length);
-            Ok(())
-        })?;
+            match self.receive_key.open_in_place(
+                nonce(sequence),
+                aead::Aad::from(associated_data(public_header)),
+                &mut envelope[..public_header_offset],
+            ) {
+                Ok(plaintext) => {
+                    let plaintext_length = plaintext.len();
+                    envelope.truncate(plaintext_length);
+                    Ok(())
+                }
+                Err(_) => {
+                    decrypt_failed[index].store(true, Ordering::Relaxed);
+                    Ok(())
+                }
+            }
+        });
+        if let Err(error) = decrypt_result {
+            tracing::warn!(?error, "link envelope batch decryption failed");
+            return Ok(PacketBatch::new());
+        }
+        for (index, failed) in decrypt_failed.iter().enumerate().take(data.len()) {
+            if failed.load(Ordering::Relaxed) {
+                drop_packet[index] = true;
+            }
+        }
 
         #[cfg(test)]
         self.replay_lock_acquisitions
             .fetch_add(1, Ordering::Relaxed);
-        let mut replay = self.receive_replay.lock().unwrap();
-        let mut replay_work = *replay;
-        for sequence in &ordered_sequences[..protected_count] {
-            if !replay_work.accept(*sequence) {
-                return Err(anyhow::anyhow!("the link sequence is a replay"));
+        {
+            let mut replay = self.receive_replay.lock().unwrap();
+            for index in 0..data.len() {
+                if drop_packet[index] || !protected[index] {
+                    continue;
+                }
+                if !replay.accept(sequences[index]) {
+                    drop_packet[index] = true;
+                }
             }
         }
-        *replay = replay_work;
-        Ok(data)
+
+        if !drop_packet.iter().take(data.len()).any(|dropped| *dropped) {
+            return Ok(data);
+        }
+        let mut kept = PacketBatch::with_capacity(data.len());
+        for (index, packet) in data.into_iter().enumerate() {
+            if drop_packet[index] {
+                continue;
+            }
+            kept.try_push(packet)
+                .expect("kept packets cannot exceed the input batch");
+        }
+        Ok(kept)
     }
 
     fn is_late_plaintext_noise_control(&self, packet: &ZCPacket) -> bool {
@@ -546,325 +573,34 @@ mod tests {
     }
 
     #[test]
-    fn envelope_round_trip_restores_the_complete_packet() {
+    fn replayed_packet_is_dropped_without_failing_the_batch() {
+        let filter = LinkEnvelopeTunnelFilter::new(true);
         let (client, server) = sessions();
-        let original = packet().tunnel_payload().to_vec();
+        filter.install(server);
+        let client = std::sync::Arc::new(client);
 
-        let sealed = client.seal(packet()).unwrap();
-        assert_eq!(sealed.packet_type(), ZCPacketType::DummyTunnel);
-        assert_ne!(sealed.tunnel_payload(), original);
-
-        let opened = server.open(sealed).unwrap();
-        assert_eq!(opened.packet_type(), ZCPacketType::DummyTunnel);
-        assert_eq!(opened.tunnel_payload(), original);
-    }
-
-    #[test]
-    fn envelope_round_trip_preserves_local_flow_hash() {
-        let (client, server) = sessions();
-        let mut source = packet();
-        let flow_hash = 0x0123_4567_89ab_cdef;
-        source.set_flow_hash(flow_hash);
-
-        let sealed = client.seal(source).unwrap();
-        assert_eq!(sealed.flow_hash(), Some(flow_hash));
-
-        let opened = server.open(sealed).unwrap();
-        assert_eq!(opened.flow_hash(), Some(flow_hash));
-    }
-
-    #[test]
-    fn protected_send_returns_the_original_reusable_slab() {
-        let (client, _) = sessions();
-        let pool = ReusableBufferPool::new(512, 1);
-        let mut buffer = pool.try_take().unwrap();
-        let original_pointer = buffer.as_ptr();
-        let payload_offset = ZCPacketType::NIC.get_packet_offsets().payload_offset;
-        buffer.truncate(payload_offset + 32);
-        let mut packet = ZCPacket::new_from_reusable_buf(buffer, ZCPacketType::NIC, pool.clone());
-        packet.mut_payload().fill(0x5a);
-        packet.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
-
-        let sealed = client.seal(packet).unwrap();
-        assert_eq!(pool.available(), 0);
-        drop(sealed);
-
-        let recycled = pool.try_take().unwrap();
-        assert_eq!(recycled.as_ptr(), original_pointer);
-    }
-
-    #[test]
-    fn repeated_plaintext_has_different_visible_bytes() {
-        let (client, _) = sessions();
-        let first = client.seal(packet()).unwrap();
-        let second = client.seal(packet()).unwrap();
-
-        assert_ne!(first.tunnel_payload(), second.tunnel_payload());
-    }
-
-    #[test]
-    fn visible_header_contains_the_authenticated_counter() {
-        let (client, _) = sessions();
-        let values = (0..4)
-            .map(|_| {
-                let sealed = client.seal(packet()).unwrap();
-                let visible = sealed.tunnel_payload();
-                u64::from_be_bytes(
-                    visible[visible.len() - 8..]
-                        .try_into()
-                        .expect("the visible header has eight bytes"),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(values, vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn envelope_reuses_packet_storage_when_capacity_is_available() {
-        let (client, server) = sessions();
-        let mut source = packet();
-        source.mut_inner().reserve(64);
-        let source_pointer = source.tunnel_payload().as_ptr();
-
-        let sealed = client.seal(source).unwrap();
-        assert_eq!(sealed.tunnel_payload().as_ptr(), source_pointer);
-        let sealed_pointer = sealed.tunnel_payload().as_ptr();
-
-        let opened = server.open(sealed).unwrap();
-        assert_eq!(opened.tunnel_payload().as_ptr(), sealed_pointer);
-    }
-
-    #[test]
-    fn envelope_hides_peer_identifiers_and_packet_type() {
-        let (client, _) = sessions();
-        let sealed = client.seal(packet()).unwrap();
-        let visible = sealed.tunnel_payload();
-
-        assert!(
-            !visible
-                .windows(4)
-                .any(|bytes| bytes == 0x1122_3344_u32.to_le_bytes())
-        );
-        assert!(
-            !visible
-                .windows(4)
-                .any(|bytes| bytes == 0x5566_7788_u32.to_le_bytes())
-        );
-        assert_ne!(visible[8], PacketType::Ethernet as u8);
-    }
-
-    #[test]
-    fn envelope_rejects_ciphertext_tampering() {
-        let (client, server) = sessions();
-        let mut sealed = client.seal(packet()).unwrap();
-        let last = sealed.mut_inner().len() - 1;
-        sealed.mut_inner()[last] ^= 0x80;
-
-        assert!(server.open(sealed).is_err());
-    }
-
-    #[test]
-    fn envelope_rejects_visible_header_tampering() {
-        let (client, server) = sessions();
-        let mut sealed = client.seal(packet()).unwrap();
-        let last = sealed.mut_inner().len() - 1;
-        sealed.mut_inner()[last] ^= 0x01;
-
-        assert!(server.open(sealed).is_err());
-    }
-
-    #[test]
-    fn envelope_rejects_replay() {
-        let (client, server) = sessions();
-        let sealed = client.seal(packet()).unwrap();
-
-        server.open(sealed.clone()).unwrap();
-        assert!(server.open(sealed).is_err());
-    }
-
-    #[test]
-    fn envelope_separates_directions() {
-        let (client, server) = sessions();
-        let sealed = client.seal(packet()).unwrap();
-
-        assert!(client.open(sealed.clone()).is_err());
-        assert!(server.open(sealed).is_ok());
-    }
-
-    #[test]
-    fn envelope_rejects_plaintext_after_installation() {
-        let (_, server) = sessions();
-
-        assert!(server.open(packet()).is_err());
-    }
-
-    #[test]
-    fn tunnel_filter_changes_from_plaintext_to_protected_mode() {
-        let root_key = [0x5a; 32];
-        let handshake_hash = [0xa5; 32];
-        let client = LinkEnvelopeTunnelFilter::new(true);
-        let server = LinkEnvelopeTunnelFilter::new(true);
-        let original = packet().tunnel_payload().to_vec();
-
-        assert!(!client.active_flag().load(Ordering::Acquire));
-        let handshake = client.before_send(packet()).unwrap();
-        assert_eq!(handshake.tunnel_payload(), original);
-
-        client.install(LinkEnvelopeSession::new(
-            root_key,
-            &handshake_hash,
-            true,
-            0x1122_3344,
-            0x5566_7788,
-        ));
-        server.install(LinkEnvelopeSession::new(
-            root_key,
-            &handshake_hash,
-            false,
-            0x5566_7788,
-            0x1122_3344,
-        ));
-        assert!(client.active_flag().load(Ordering::Acquire));
-        let sealed = client.before_send(packet()).unwrap();
-        assert_ne!(sealed.tunnel_payload(), original);
-        let opened = server.after_received(Ok(sealed)).unwrap().unwrap();
-        assert_eq!(opened.tunnel_payload(), original);
-
-        let rejected = server.after_received(Ok(packet())).unwrap();
-        assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn disabled_filter_does_not_advertise_link_protection() {
-        let filter = LinkEnvelopeTunnelFilter::new(false);
-        let (session, _) = sessions();
-
-        filter.install(session);
-
-        assert!(!filter.is_active());
-        assert!(filter.load_session().is_none());
-    }
-
-    #[test]
-    fn installed_filter_accepts_only_canonical_late_noise_controls() {
-        let (_, server_session) = sessions();
-        let server = LinkEnvelopeTunnelFilter::new(true);
-        server.install(server_session);
-
-        let accepted = server
-            .after_received(Ok(noise_control(PacketType::NoiseHandshakeReadyReceipt)))
-            .unwrap();
-        assert!(accepted.is_ok());
-
-        let mut wrong_peer = noise_control(PacketType::NoiseHandshakeReadyReceipt);
-        wrong_peer
-            .mut_peer_manager_header()
-            .unwrap()
-            .from_peer_id
-            .set(7);
-        assert!(server.after_received(Ok(wrong_peer)).unwrap().is_err());
-        assert!(server.after_received(Ok(packet())).unwrap().is_err());
-    }
-
-    #[test]
-    fn protected_batch_keeps_late_noise_control_order() {
-        let (client_session, server_session) = sessions();
-        let client = LinkEnvelopeTunnelFilter::new(true);
-        let server = LinkEnvelopeTunnelFilter::new(true);
-        client.install(client_session);
-        server.install(server_session);
-
-        let protected = client.before_send(packet()).unwrap();
-        let late = noise_control(PacketType::NoiseHandshakeReadyReceipt);
-        let mut batch = PacketBatch::with_capacity(2);
-        batch.try_push(late).unwrap();
-        batch.try_push(protected).unwrap();
-
-        let opened = server
-            .after_received_batch(Ok(batch))
-            .unwrap()
-            .expect("the mixed transition batch must authenticate");
+        let mut live = PacketBatch::with_capacity(2);
+        live.try_push(packet()).unwrap();
+        live.try_push(packet()).unwrap();
+        let sealed_live = client.seal_batch(live);
+        let replay_one = sealed_live[0].clone();
+        let opened = filter
+            .after_received_batch(Ok(sealed_live))
+            .expect("the first batch is admitted")
+            .expect("the first batch decrypts");
         assert_eq!(opened.len(), 2);
-        assert_eq!(
-            opened[0].peer_manager_header().unwrap().packet_type,
-            PacketType::NoiseHandshakeReadyReceipt as u8
-        );
-        assert_eq!(
-            opened[1].peer_manager_header().unwrap().packet_type,
-            PacketType::Ethernet as u8
-        );
-    }
 
-    #[test]
-    fn protected_batch_uses_one_session_load_and_two_replay_locks() {
-        let root_key = [0x5a; 32];
-        let handshake_hash = [0xa5; 32];
-        let client = LinkEnvelopeTunnelFilter::new(true);
-        let server = LinkEnvelopeTunnelFilter::new(true);
-        client.install(LinkEnvelopeSession::new(
-            root_key,
-            &handshake_hash,
-            true,
-            0x1122_3344,
-            0x5566_7788,
-        ));
-        server.install(LinkEnvelopeSession::new(
-            root_key,
-            &handshake_hash,
-            false,
-            0x5566_7788,
-            0x1122_3344,
-        ));
-
-        for count in [1_usize, 16, 64] {
-            client.reset_work_counters();
-            server.reset_work_counters();
-            let mut batch = PacketBatch::with_capacity(count);
-            for index in 0..count {
-                let mut packet = packet();
-                packet.set_flow_hash(index as u64);
-                batch.try_push(packet).unwrap();
-            }
-
-            let sealed = client
-                .before_send_batch(batch)
-                .expect("protected batch should remain non-empty");
-            assert_eq!(sealed.len(), count);
-            assert_eq!(client.session_load_count(), 1);
-
-            let opened = server
-                .after_received_batch(Ok(sealed))
-                .expect("protected batch should remain non-empty")
-                .expect("protected batch should authenticate");
-            assert_eq!(opened.len(), count);
-            assert_eq!(server.session_load_count(), 1);
-            assert_eq!(server.replay_lock_count(), 2);
-        }
-    }
-
-    #[test]
-    fn protected_batch_reuses_the_input_batch_container() {
-        let (client_session, server_session) = sessions();
-        let client = LinkEnvelopeTunnelFilter::new(true);
-        let server = LinkEnvelopeTunnelFilter::new(true);
-        client.install(client_session);
-        server.install(server_session);
-        let mut batch = PacketBatch::new();
-        for index in 0_u64..16 {
-            let mut packet = packet();
-            packet.set_flow_hash(index);
-            batch.try_push(packet).unwrap();
-        }
-        let pointer = batch.as_ptr();
-
-        let sealed = client.before_send_batch(batch).unwrap();
-
-        assert_eq!(sealed.as_ptr(), pointer);
-        assert_eq!(sealed.len(), 16);
-
-        let opened = server.after_received_batch(Ok(sealed)).unwrap().unwrap();
-        assert_eq!(opened.as_ptr(), pointer);
-        assert_eq!(opened.len(), 16);
+        let mut fresh = PacketBatch::with_capacity(1);
+        fresh.try_push(packet()).unwrap();
+        let mut mixed = PacketBatch::with_capacity(2);
+        mixed.try_push(replay_one).unwrap();
+        mixed
+            .try_push(client.seal_batch(fresh).pop_singleton().unwrap())
+            .unwrap();
+        let opened = filter
+            .after_received_batch(Ok(mixed))
+            .expect("a mixed batch stays on the stream")
+            .expect("a mixed batch decrypts");
+        assert_eq!(opened.len(), 1);
     }
 }

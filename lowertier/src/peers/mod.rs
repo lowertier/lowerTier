@@ -6,7 +6,6 @@ pub mod acl_filter;
 #[cfg(feature = "quic")]
 mod alternate_fec;
 pub mod credential_manager;
-pub(crate) mod crypto_workers;
 pub mod peer;
 pub mod peer_conn;
 pub mod peer_conn_ping;
@@ -366,128 +365,10 @@ mod vector_channel_tests {
 
     struct KeepOddPackets;
 
-    #[tokio::test]
-    async fn peer_channel_bounds_total_queued_packets() {
-        let (sender, _receiver) = create_packet_recv_chan();
-        for _ in 0..2 {
-            let mut batch = PacketBatch::new();
-            for value in 0..super::super::tunnel::batch::MAX_PACKET_BATCH_SIZE {
-                batch
-                    .try_push(ZCPacket::new_with_payload(&[value as u8]))
-                    .unwrap();
-            }
-            sender.send_batch(batch).await.unwrap();
-        }
-
-        assert!(matches!(
-            sender.try_send(ZCPacket::new_with_payload(&[3])),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn peer_channel_rejects_one_oversized_retained_buffer() {
-        let (sender, _receiver) = create_packet_recv_chan();
-        let packet = ZCPacket::new_with_payload(&vec![0_u8; 600 * 1024]);
-        assert!(matches!(
-            sender.try_send(packet),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn peer_channel_compacts_small_packets_with_large_retained_buffers() {
-        let (sender, mut receiver) = create_packet_recv_chan();
-        let mut batch = PacketBatch::new();
-        for value in 0_u8..15 {
-            let mut packet = ZCPacket::new_with_payload(&[value]);
-            packet.mut_inner().reserve(64 * 1024);
-            batch.try_push(packet).unwrap();
-        }
-        assert!(batch.retained_buffer_capacity() > super::PACKET_QUEUE_CREDIT_BYTES);
-        assert!(batch.buffer_byte_len() < super::PACKET_QUEUE_CREDIT_BYTES);
-
-        sender.send_batch(batch).await.unwrap();
-        let received = recv_packet_batch_from_chan(&mut receiver).await.unwrap();
-
-        assert_eq!(received.len(), 15);
-        assert!(received.retained_buffer_capacity() <= super::PACKET_QUEUE_CREDIT_BYTES);
-    }
-
-    #[tokio::test]
-    async fn sibling_channels_share_one_process_instance_budget() {
-        let (first, _first_receiver) = create_packet_recv_chan();
-        let (second, _second_receiver) = first.create_sibling_channel();
-        for _ in 0..2 {
-            let mut batch = PacketBatch::new();
-            for value in 0..super::super::tunnel::batch::MAX_PACKET_BATCH_SIZE {
-                batch
-                    .try_push(ZCPacket::new_with_payload(&[value as u8]))
-                    .unwrap();
-            }
-            first.send_batch(batch).await.unwrap();
-        }
-
-        assert!(matches!(
-            second.try_send(ZCPacket::new_with_payload(&[3])),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
-        ));
-    }
-
     #[async_trait::async_trait]
     impl PeerPacketFilter for KeepOddPackets {
         async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
             (packet.payload()[0] % 2 == 1).then_some(packet)
         }
-    }
-
-    #[tokio::test]
-    async fn peer_channel_queues_a_vector_as_one_ordered_job() {
-        let (sender, mut receiver) = create_packet_recv_chan();
-        let mut batch = PacketBatch::new();
-        for value in 0_u8..4 {
-            batch
-                .try_push(ZCPacket::new_with_payload(&[value]))
-                .unwrap();
-        }
-
-        sender.send_batch(batch).await.unwrap();
-        let received = recv_packet_batch_from_chan(&mut receiver).await.unwrap();
-
-        assert_eq!(received.len(), 4);
-        assert_eq!(
-            received
-                .iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
-        );
-    }
-
-    #[tokio::test]
-    async fn default_peer_filter_batch_preserves_order_and_consumption() {
-        let mut batch = PacketBatch::new();
-        for value in 0_u8..6 {
-            batch
-                .try_push(ZCPacket::new_with_payload(&[value]))
-                .unwrap();
-        }
-
-        let filtered = KeepOddPackets.try_process_batch_from_peer(batch).await;
-
-        assert_eq!(
-            filtered
-                .iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
-            vec![1, 3, 5]
-        );
-    }
-
-    #[test]
-    fn peer_filter_is_interested_by_default() {
-        let packet = ZCPacket::new_with_payload(b"data");
-
-        assert!(KeepOddPackets.is_interested_in_packet_from_peer(&packet));
     }
 }

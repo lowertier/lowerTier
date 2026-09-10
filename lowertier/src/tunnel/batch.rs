@@ -12,7 +12,6 @@ use std::{
 use crossbeam::queue::ArrayQueue;
 use futures::{Sink, Stream, StreamExt, ready};
 use pin_project_lite::pin_project;
-use rayon::prelude::*;
 use smallvec::SmallVec;
 
 use super::{TunnelError, packet_def::ZCPacket};
@@ -29,28 +28,10 @@ pub(crate) const SEND_PIPELINE_SLOT_COUNT: usize = 8;
 /// Maximum packet count for one unflushed kernel I/O operation.
 pub(crate) const IO_FLUSH_PACKET_BUDGET: usize = 8;
 
-pub const PARALLEL_CRYPTO_MIN_BATCH_SIZE: usize = 32;
 const RETAINED_PACKET_BATCH_CONTAINERS: usize = 32;
-
-static PARALLEL_CRYPTO_ENABLED: OnceLock<bool> = OnceLock::new();
-static PACKET_BATCH_LIMIT: OnceLock<usize> = OnceLock::new();
-
-fn packet_batch_limit_from(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|limit| (1..=MAX_PACKET_BATCH_SIZE).contains(limit))
-        .unwrap_or(MAX_PACKET_BATCH_SIZE)
-}
-
-/// Runtime batch cap used by controlled performance-model sweeps.
-///
-/// Production defaults to the compile-time maximum. Producers never wait to
-/// reach this cap; it only limits how many already-ready packets are grouped.
-pub(crate) fn packet_batch_limit() -> usize {
-    *PACKET_BATCH_LIMIT.get_or_init(|| {
-        let value = std::env::var("LOWTIER_PACKET_BATCH_LIMIT").ok();
-        packet_batch_limit_from(value.as_deref())
-    })
+#[inline]
+pub(crate) const fn packet_batch_limit() -> usize {
+    MAX_PACKET_BATCH_SIZE
 }
 
 pub(crate) fn drain_ready_count<F>(
@@ -151,34 +132,6 @@ where
     (result, prefetched)
 }
 
-fn parallel_crypto_configured(
-    batch_size: usize,
-    explicitly_enabled: bool,
-    explicitly_disabled: bool,
-) -> bool {
-    explicitly_enabled && batch_size >= PARALLEL_CRYPTO_MIN_BATCH_SIZE && !explicitly_disabled
-}
-
-pub fn parallel_crypto_enabled(batch_size: usize) -> bool {
-    let enabled = *PARALLEL_CRYPTO_ENABLED.get_or_init(|| {
-        std::env::var_os("LOWTIER_ENABLE_PARALLEL_CRYPTO").is_some()
-            && std::env::var_os("LOWTIER_DEBUG_DISABLE_PARALLEL_CRYPTO").is_none()
-    });
-    parallel_crypto_configured(batch_size, enabled, false)
-}
-
-/// Runs independent packet work in parallel while retaining the owning
-/// vector and its original packet order. Rayon may finish entries in any
-/// order, but each worker mutates only its existing indexed slot.
-pub fn ordered_parallel_try_for_each<T, E, F>(items: &mut [T], operation: F) -> Result<(), E>
-where
-    T: Send,
-    E: Send,
-    F: Fn(&mut T) -> Result<(), E> + Sync + Send,
-{
-    items.par_iter_mut().try_for_each(operation)
-}
-
 struct PacketBatchPool {
     containers: ArrayQueue<Vec<ZCPacket>>,
 }
@@ -218,14 +171,12 @@ fn packet_batch_pool() -> &'static PacketBatchPool {
 #[derive(Debug)]
 pub struct PacketBatch {
     packets: Vec<ZCPacket>,
-    prefer_inline_crypto: bool,
 }
 
 impl PacketBatch {
     pub fn new() -> Self {
         Self {
             packets: packet_batch_pool().take(),
-            prefer_inline_crypto: false,
         }
     }
 
@@ -236,7 +187,6 @@ impl PacketBatch {
         }
         Self {
             packets: Vec::with_capacity(capacity),
-            prefer_inline_crypto: false,
         }
     }
 
@@ -250,10 +200,7 @@ impl PacketBatch {
 
     pub(crate) fn from_vec(packets: Vec<ZCPacket>) -> Self {
         assert!(packets.len() <= MAX_PACKET_BATCH_SIZE);
-        Self {
-            packets,
-            prefer_inline_crypto: false,
-        }
+        Self { packets }
     }
 
     pub(crate) fn into_vec(mut self) -> Vec<ZCPacket> {
@@ -281,17 +228,8 @@ impl PacketBatch {
         if self.packets.len() + other.packets.len() > MAX_PACKET_BATCH_SIZE {
             return Err(other);
         }
-        self.prefer_inline_crypto |= other.prefer_inline_crypto;
         self.packets.append(&mut other.packets);
         Ok(())
-    }
-
-    pub(crate) fn mark_inline_crypto(&mut self) {
-        self.prefer_inline_crypto = true;
-    }
-
-    pub(crate) fn prefers_inline_crypto(&self) -> bool {
-        self.prefer_inline_crypto
     }
 
     pub fn len(&self) -> usize {
@@ -306,7 +244,6 @@ impl PacketBatch {
         debug_assert!(at <= self.packets.len());
         Self {
             packets: self.packets.split_off(at),
-            prefer_inline_crypto: self.prefer_inline_crypto,
         }
     }
 
@@ -749,84 +686,6 @@ mod batch_interface_tests {
     fn packet(value: u8) -> ZCPacket {
         ZCPacket::new_with_payload(&[value])
     }
-
-    #[tokio::test]
-    async fn scalar_stream_returns_all_ready_packets_in_one_owned_batch() {
-        let source = stream::iter([Ok(packet(1)), Ok(packet(2)), Ok(packet(3))]);
-        let mut stream = ScalarToBatchStream::new(source);
-
-        let batch = stream.next().await.unwrap().unwrap();
-
-        assert_eq!(batch.len(), 3);
-        assert_eq!(batch[0].payload(), &[1]);
-        assert_eq!(batch[1].payload(), &[2]);
-        assert_eq!(batch[2].payload(), &[3]);
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn scalar_stream_respects_its_local_batch_limit() {
-        let source = stream::iter([
-            Ok(packet(1)),
-            Ok(packet(2)),
-            Ok(packet(3)),
-            Ok(packet(4)),
-            Ok(packet(5)),
-        ]);
-        let mut stream = ScalarToBatchStream::new_with_max_batch_size(source, 2);
-
-        assert_eq!(stream.next().await.unwrap().unwrap().len(), 2);
-        assert_eq!(stream.next().await.unwrap().unwrap().len(), 2);
-        assert_eq!(stream.next().await.unwrap().unwrap().len(), 1);
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn batch_stream_scalar_adapter_preserves_packet_order() {
-        let mut batch = PacketBatch::new();
-        batch.try_push(packet(4)).unwrap();
-        batch.try_push(packet(5)).unwrap();
-        let source = stream::iter([Ok(batch)]);
-        let mut stream = BatchToScalarStream::new(source);
-
-        assert_eq!(stream.next().await.unwrap().unwrap().payload(), &[4]);
-        assert_eq!(stream.next().await.unwrap().unwrap().payload(), &[5]);
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn scalar_sink_adapter_delivers_each_packet_from_one_batch() {
-        let (sink, mut receiver) = mpsc::unbounded();
-        let sink = sink.sink_map_err(|_| crate::tunnel::TunnelError::Shutdown);
-        let mut sink = ScalarToBatchSink::new(sink);
-        let mut batch = PacketBatch::new();
-        batch.try_push(packet(6)).unwrap();
-        batch.try_push(packet(7)).unwrap();
-
-        sink.send(batch).await.unwrap();
-        sink.close().await.unwrap();
-
-        assert_eq!(receiver.next().await.unwrap().payload(), &[6]);
-        assert_eq!(receiver.next().await.unwrap().payload(), &[7]);
-        assert!(receiver.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn tunnel_split_transfers_one_owned_batch_without_scalar_calls() {
-        let (left, right) = create_ring_tunnel_pair();
-        let (_left_reader, mut left_writer) = left.split();
-        let (mut right_reader, _right_writer) = right.split();
-        let mut sent = PacketBatch::new();
-        sent.try_push(packet(8)).unwrap();
-        sent.try_push(packet(9)).unwrap();
-
-        left_writer.send(sent).await.unwrap();
-        let received = right_reader.next().await.unwrap().unwrap();
-
-        assert_eq!(received.len(), 2);
-        assert_eq!(received[0].payload(), &[8]);
-        assert_eq!(received[1].payload(), &[9]);
-    }
 }
 
 impl<'a> IntoIterator for &'a mut PacketBatch {
@@ -844,167 +703,5 @@ mod tests {
 
     use futures::StreamExt;
 
-    use super::{
-        MAX_PACKET_BATCH_SIZE, PARALLEL_CRYPTO_MIN_BATCH_SIZE, PacketBatch, PacketBatchPool,
-        ordered_parallel_try_for_each, packet_batch_limit_from, parallel_crypto_configured,
-    };
-
-    #[test]
-    fn packet_batch_limit_is_strict_and_fails_safe() {
-        assert_eq!(packet_batch_limit_from(None), MAX_PACKET_BATCH_SIZE);
-        assert_eq!(packet_batch_limit_from(Some("1")), 1);
-        assert_eq!(packet_batch_limit_from(Some("16")), 16);
-        assert_eq!(packet_batch_limit_from(Some("64")), 64);
-        assert_eq!(packet_batch_limit_from(Some("0")), MAX_PACKET_BATCH_SIZE);
-        assert_eq!(packet_batch_limit_from(Some("65")), MAX_PACKET_BATCH_SIZE);
-        assert_eq!(
-            packet_batch_limit_from(Some("invalid")),
-            MAX_PACKET_BATCH_SIZE
-        );
-    }
-
-    #[test]
-    fn packet_batch_vector_round_trip_preserves_the_container() {
-        let mut batch = PacketBatch::new();
-        batch
-            .try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&[1]))
-            .unwrap();
-        batch
-            .try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&[2]))
-            .unwrap();
-        let pointer = batch.as_ptr();
-
-        let packets = batch.into_vec();
-        let restored = PacketBatch::from_vec(packets);
-
-        assert_eq!(restored.as_ptr(), pointer);
-        assert_eq!(restored.len(), 2);
-    }
-
-    #[test]
-    fn packet_batch_split_preserves_order() {
-        let mut batch = super::PacketBatch::new();
-        for value in 0_u8..6 {
-            batch
-                .try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&[
-                    value,
-                ]))
-                .unwrap();
-        }
-
-        let tail = batch.split_off(2);
-
-        assert_eq!(
-            batch
-                .iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
-            vec![0, 1]
-        );
-        assert_eq!(
-            tail.iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
-            vec![2, 3, 4, 5]
-        );
-    }
-
-    #[test]
-    fn ready_drain_fills_one_bounded_batch() {
-        let mut ready_counts = [1_usize, 2, 60].into_iter();
-        let (count, error) = super::drain_ready_count(1, 64, |_| {
-            ready_counts
-                .next()
-                .map(Ok)
-                .unwrap_or_else(|| Err(std::io::ErrorKind::WouldBlock.into()))
-        });
-
-        assert_eq!(count, 64);
-        assert!(error.is_none());
-    }
-
-    #[test]
-    fn ready_drain_stops_cleanly_on_would_block() {
-        let (count, error) =
-            super::drain_ready_count(3, 64, |_| Err(std::io::ErrorKind::WouldBlock.into()));
-
-        assert_eq!(count, 3);
-        assert!(error.is_none());
-    }
-
-    #[tokio::test]
-    async fn bounded_prefetch_stops_at_the_configured_limit() {
-        let mut stream = futures::stream::iter([10_u8, 11, 12, 13]);
-        let (release, wait) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
-            release.send(()).unwrap();
-        });
-
-        let (delivery, prefetched, stream_ended) = super::wait_for_delivery_with_bounded_prefetch(
-            &mut stream,
-            async { wait.await.map_err(|_| ()) },
-            2,
-        )
-        .await;
-
-        assert!(delivery.is_ok());
-        assert!(!stream_ended);
-        assert_eq!(prefetched.len(), 2);
-        assert_eq!(prefetched.front().copied(), Some(10));
-        assert_eq!(stream.next().await, Some(12));
-    }
-
-    #[test]
-    fn batch_container_pool_reuses_one_fixed_vector() {
-        let pool = PacketBatchPool::new(1);
-        let first = pool.take();
-        let first_pointer = first.as_ptr();
-        assert_eq!(first.capacity(), MAX_PACKET_BATCH_SIZE);
-
-        pool.recycle(first);
-        let second = pool.take();
-
-        assert_eq!(second.as_ptr(), first_pointer);
-        assert_eq!(second.capacity(), MAX_PACKET_BATCH_SIZE);
-    }
-
-    #[test]
-    fn parallel_crypto_is_opt_in_for_large_vectors_and_can_be_disabled() {
-        assert!(!parallel_crypto_configured(
-            PARALLEL_CRYPTO_MIN_BATCH_SIZE,
-            false,
-            false
-        ));
-        assert!(!parallel_crypto_configured(
-            PARALLEL_CRYPTO_MIN_BATCH_SIZE - 1,
-            true,
-            false
-        ));
-        assert!(parallel_crypto_configured(
-            PARALLEL_CRYPTO_MIN_BATCH_SIZE,
-            true,
-            false
-        ));
-        assert!(!parallel_crypto_configured(
-            PARALLEL_CRYPTO_MIN_BATCH_SIZE,
-            true,
-            true
-        ));
-    }
-
-    #[test]
-    fn ordered_parallel_work_keeps_vector_order_when_completion_reverses() {
-        let mut values = (0_u8..8).collect::<Vec<_>>();
-
-        ordered_parallel_try_for_each(&mut values, |value| {
-            std::thread::sleep(Duration::from_millis((7 - *value) as u64));
-            *value += 10;
-            Ok::<_, ()>(())
-        })
-        .unwrap();
-
-        assert_eq!(values, (10_u8..18).collect::<Vec<_>>());
-    }
+    use super::{MAX_PACKET_BATCH_SIZE, PacketBatch, PacketBatchPool};
 }

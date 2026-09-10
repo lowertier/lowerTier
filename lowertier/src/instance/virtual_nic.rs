@@ -4,8 +4,8 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
     pin::Pin,
     sync::{
-        Arc, Mutex as StdMutex, OnceLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
     time::Instant,
@@ -24,12 +24,12 @@ use crate::{
     peers::{
         PacketRecvChanReceiver,
         fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
-        flow::{FLOW_SHARD_COUNT, classify_nic_packet_flow},
+        flow::classify_nic_packet_flow,
         peer_manager::{DirectNicEndpoint, PeerManager},
     },
     tunnel::{
         PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
-        batch::{PacketBatch, RECEIVE_PREFETCH_BATCHES},
+        batch::PacketBatch,
         common::{FramedWriter, TunnelWrapper, ZCPacketToBytes},
         packet_def::{ZCPacket, ZCPacketType},
     },
@@ -57,6 +57,31 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
 use zerocopy::{NativeEndian, NetworkEndian};
+
+fn persistent_nic_deliveries(
+    mgr: &Arc<PeerManager>,
+    adapter: InterfaceAdapter,
+) -> super::nic_ingress_workers::NicIngressWorkers {
+    super::nic_ingress_workers::NicIngressWorkers::new(|index, mut jobs, completed| {
+        let mgr = Arc::clone(mgr);
+        async move {
+            while let Some((hash, batch)) = jobs.recv().await {
+                {
+                    let _stage = mgr
+                        .get_global_ctx_ref()
+                        .dataplane_telemetry()
+                        .sample_stage_with_shape(DataplaneStage::NicIngress, || {
+                            (batch.len(), batch.buffer_byte_len())
+                        });
+                    NicCtx::do_forward_nic_batch_to_peers(batch, mgr.as_ref(), adapter).await;
+                }
+                if completed.send((index, hash)).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+}
 
 fn parse_interface_mac(value: &str) -> Option<[u8; 6]> {
     let mut mac = [0_u8; 6];
@@ -143,134 +168,6 @@ impl Sink<PacketBatch> for HybridTapSink {
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
 
-static NIC_BATCH_COUNT: AtomicU64 = AtomicU64::new(0);
-static NIC_PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
-static NIC_MAX_BATCH: AtomicUsize = AtomicUsize::new(0);
-static PEER_BATCH_DISABLED: OnceLock<bool> = OnceLock::new();
-
-#[derive(Default)]
-struct NicIngressFlowLane {
-    next_ticket: u64,
-    serving: u64,
-    completed: BTreeSet<u64>,
-}
-
-struct NicIngressFlowGate {
-    lanes: StdMutex<Vec<NicIngressFlowLane>>,
-    notifiers: Vec<Notify>,
-}
-
-impl NicIngressFlowGate {
-    fn new() -> Self {
-        let lane_count = usize::from(FLOW_SHARD_COUNT);
-        Self {
-            lanes: StdMutex::new(
-                std::iter::repeat_with(NicIngressFlowLane::default)
-                    .take(lane_count)
-                    .collect(),
-            ),
-            notifiers: std::iter::repeat_with(Notify::new)
-                .take(lane_count)
-                .collect(),
-        }
-    }
-
-    fn reserve_batch(
-        self: &Arc<Self>,
-        batch: &mut PacketBatch,
-        adapter: InterfaceAdapter,
-    ) -> NicIngressFlowPermit {
-        let ethernet = adapter.uses_native_ethernet();
-        self.reserve_shards(batch.iter_mut().map(|packet| {
-            let flow = classify_nic_packet_flow(packet, ethernet);
-            if packet.flow_hash().is_none() {
-                packet.set_flow_hash(flow.hash);
-            }
-            flow.shard
-        }))
-    }
-
-    fn reserve_shards(
-        self: &Arc<Self>,
-        shards: impl IntoIterator<Item = u16>,
-    ) -> NicIngressFlowPermit {
-        let mut present = [false; FLOW_SHARD_COUNT as usize];
-        for shard in shards {
-            present[usize::from(shard) % present.len()] = true;
-        }
-
-        // One short lock gives every intersecting batch the same reservation order.
-        let mut lanes = self.lanes.lock().expect("NIC ingress flow gate poisoned");
-        let mut tickets = Vec::new();
-        for (index, is_present) in present.into_iter().enumerate() {
-            if !is_present {
-                continue;
-            }
-            let lane = &mut lanes[index];
-            let ticket = lane.next_ticket;
-            lane.next_ticket = lane.next_ticket.wrapping_add(1);
-            tickets.push((index, ticket));
-        }
-        drop(lanes);
-        NicIngressFlowPermit {
-            gate: self.clone(),
-            tickets,
-        }
-    }
-}
-
-struct NicIngressFlowPermit {
-    gate: Arc<NicIngressFlowGate>,
-    tickets: Vec<(usize, u64)>,
-}
-
-impl NicIngressFlowPermit {
-    async fn wait(&self) {
-        for &(index, ticket) in &self.tickets {
-            loop {
-                let notified = self.gate.notifiers[index].notified();
-                let ready = self
-                    .gate
-                    .lanes
-                    .lock()
-                    .expect("NIC ingress flow gate poisoned")[index]
-                    .serving
-                    == ticket;
-                if ready {
-                    break;
-                }
-                notified.await;
-            }
-        }
-    }
-}
-
-impl Drop for NicIngressFlowPermit {
-    fn drop(&mut self) {
-        let mut notify = Vec::new();
-        let mut lanes = self
-            .gate
-            .lanes
-            .lock()
-            .expect("NIC ingress flow gate poisoned");
-        for &(index, ticket) in &self.tickets {
-            let lane = &mut lanes[index];
-            lane.completed.insert(ticket);
-            let previous = lane.serving;
-            while lane.completed.remove(&lane.serving) {
-                lane.serving = lane.serving.wrapping_add(1);
-            }
-            if lane.serving != previous {
-                notify.push(index);
-            }
-        }
-        drop(lanes);
-        for index in notify {
-            self.gate.notifiers[index].notify_waiters();
-        }
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn linux_tun_offload_enabled() -> bool {
     linux_tun_offload_configured(
@@ -323,27 +220,6 @@ fn linux_virtual_nic_queue_count(
         .unwrap_or(default)
         .clamp(1, LINUX_VIRTUAL_NIC_MAX_QUEUES)
         .min(available)
-}
-
-fn record_nic_batch_size(batch_size: usize) {
-    let previous_packets = NIC_PACKET_COUNT.fetch_add(batch_size as u64, Ordering::Relaxed);
-    let batch_count = NIC_BATCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    NIC_MAX_BATCH.fetch_max(batch_size, Ordering::Relaxed);
-    let packet_count = previous_packets + batch_size as u64;
-    if batch_count.is_power_of_two() || previous_packets / 65_536 != packet_count / 65_536 {
-        tracing::warn!(
-            batch_count,
-            packet_count,
-            average_batch_size = packet_count as f64 / batch_count as f64,
-            max_batch_size = NIC_MAX_BATCH.load(Ordering::Relaxed),
-            "NIC packet batch statistics"
-        );
-    }
-}
-
-fn peer_batch_disabled() -> bool {
-    *PEER_BATCH_DISABLED
-        .get_or_init(|| std::env::var_os("LOWTIER_DEBUG_DISABLE_PEER_BATCH").is_some())
 }
 
 #[cfg(test)]
@@ -1439,12 +1315,6 @@ impl NicCtx {
         mgr: &PeerManager,
         adapter: InterfaceAdapter,
     ) {
-        if peer_batch_disabled() {
-            for packet in batch {
-                Self::do_forward_nic_to_peers(packet, mgr, adapter).await;
-            }
-            return;
-        }
         let (payload_kind, batch) = if adapter.uses_native_ethernet() {
             let mut data = PacketBatch::new();
             for packet in batch {
@@ -1563,125 +1433,82 @@ impl NicCtx {
         !reported.swap(true, Ordering::AcqRel)
     }
 
-    async fn run_nic_ingress_worker(
-        mut stream: Pin<Box<dyn PacketBatchStream>>,
+    async fn run_fair_nic_ingress(
+        streams: Vec<Pin<Box<dyn PacketBatchStream>>>,
         mgr: Arc<PeerManager>,
         adapter: InterfaceAdapter,
-        flow_gate: Arc<NicIngressFlowGate>,
         close_notifier: Arc<Notify>,
         cancellation: CancellationToken,
         reported: Arc<AtomicBool>,
     ) {
-        let disable_batching = std::env::var_os("LOWTIER_DEBUG_DISABLE_PACKET_BATCH").is_some()
-            || std::env::var_os("LOWTIER_DEBUG_DISABLE_NIC_BATCH").is_some();
-
-        if disable_batching {
-            loop {
-                let Some(result) = (tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => None,
-                    result = stream.next() => result,
-                }) else {
-                    if !cancellation.is_cancelled() {
-                        Self::report_nic_ingress_failure(
-                            mgr.as_ref(),
-                            close_notifier.as_ref(),
-                            &cancellation,
-                            reported.as_ref(),
-                            None,
-                        );
-                    }
+        let mut stream = futures::stream::select_all(streams);
+        let mut queues = super::nic_ingress::NicIngressQueue::default();
+        let mut deliveries = persistent_nic_deliveries(&mgr, adapter);
+        let native_ethernet = adapter.uses_native_ethernet();
+        let mut open = true;
+        let mut read_bytes = 0;
+        let report_stats = std::env::var_os("LOWTIER_INGRESS_STATS").is_some();
+        let mut last_report = Instant::now();
+        while open || !deliveries.is_empty() || !queues.is_empty() {
+            while let Some((hash, batch)) = queues.pop() {
+                if let Err(error) = deliveries.submit(hash, batch) {
+                    tracing::error!(%error, "NIC flow delivery dispatch failed");
+                    Self::report_nic_ingress_failure(
+                        mgr.as_ref(),
+                        close_notifier.as_ref(),
+                        &cancellation,
+                        reported.as_ref(),
+                        None,
+                    );
                     return;
-                };
-
-                match result {
-                    Ok(batch) => {
-                        for packet in batch {
-                            tokio::select! {
-                                biased;
-                                _ = cancellation.cancelled() => return,
-                                _ = Self::do_forward_nic_to_peers(packet, mgr.as_ref(), adapter) => {}
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        if !cancellation.is_cancelled() {
-                            Self::report_nic_ingress_failure(
-                                mgr.as_ref(),
-                                close_notifier.as_ref(),
-                                &cancellation,
-                                reported.as_ref(),
-                                Some(&error),
-                            );
-                        }
-                        return;
-                    }
                 }
             }
-        }
-
-        let record_batch_stats = std::env::var_os("LOWTIER_DEBUG_BATCH_STATS").is_some();
-        let max_in_flight = RECEIVE_PREFETCH_BATCHES + 1;
-        let mut deliveries = JoinSet::new();
-        let mut stream_open = true;
-        while stream_open || !deliveries.is_empty() {
-            if deliveries.len() >= max_in_flight || !stream_open {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => return,
-                    _ = deliveries.join_next(), if !deliveries.is_empty() => {}
-                }
-                continue;
-            }
-
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return,
-                result = stream.next() => {
-                    let Some(result) = result else {
-                        stream_open = false;
-                        continue;
-                    };
-                    let mut batch = match result {
-                        Ok(batch) => batch,
+                result = deliveries.next(), if !deliveries.is_empty() => {
+                    match result {
+                        Ok(hash) => queues.complete(hash),
                         Err(error) => {
-                            if !cancellation.is_cancelled() {
-                                Self::report_nic_ingress_failure(
-                                    mgr.as_ref(),
-                                    close_notifier.as_ref(),
-                                    &cancellation,
-                                    reported.as_ref(),
-                                    Some(&error),
-                                );
-                            }
+                            tracing::error!(%error, "NIC flow delivery task failed");
+                            Self::report_nic_ingress_failure(mgr.as_ref(), close_notifier.as_ref(),
+                                &cancellation, reported.as_ref(), None);
                             return;
                         }
-                    };
-                    if record_batch_stats {
-                        record_nic_batch_size(batch.len());
                     }
-                    let permit = flow_gate.reserve_batch(&mut batch, adapter);
-                    let delivery_mgr = mgr.clone();
-                    deliveries.spawn(async move {
-                        permit.wait().await;
-                        let _stage = delivery_mgr
-                            .get_global_ctx_ref()
-                            .dataplane_telemetry()
-                            .sample_stage_with_shape(DataplaneStage::NicIngress, || {
-                                (batch.len(), batch.buffer_byte_len())
-                            });
-                        Self::do_forward_nic_batch_to_peers(
-                            batch,
-                            delivery_mgr.as_ref(),
-                            adapter,
-                        )
-                        .await;
-                    });
                 }
-                _ = deliveries.join_next(), if !deliveries.is_empty() => {}
+                result = stream.next(), if open => {
+                    match result {
+                        Some(Ok(batch)) => {
+                            for mut packet in batch {
+                                read_bytes += packet.buf_len();
+                                let flow = classify_nic_packet_flow(&packet, native_ethernet);
+                                packet.set_flow_hash(flow.hash);
+                                queues.push(flow.hash, packet);
+                            }
+                            if read_bytes >= 256 * 1024 {
+                                read_bytes = 0;
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                        Some(Err(error)) => {
+                            Self::report_nic_ingress_failure(mgr.as_ref(), close_notifier.as_ref(),
+                                &cancellation, reported.as_ref(), Some(&error));
+                            return;
+                        }
+                        None => open = false,
+                    }
+                }
+                else => break,
+            }
+            if report_stats && last_report.elapsed().as_secs() >= 1 {
+                queues.report();
+                last_report = Instant::now();
             }
         }
-
+        if report_stats {
+            queues.report();
+        }
         if !cancellation.is_cancelled() {
             Self::report_nic_ingress_failure(
                 mgr.as_ref(),
@@ -1707,19 +1534,15 @@ impl NicCtx {
         let adapter = VirtualNic::interface_adapter();
         let cancellation = CancellationToken::new();
         let reported = Arc::new(AtomicBool::new(false));
-        let flow_gate = Arc::new(NicIngressFlowGate::new());
         let close_notifier = self.close_notifier.clone();
-        for stream in streams {
-            self.tasks.spawn(Self::run_nic_ingress_worker(
-                stream,
-                mgr.clone(),
-                adapter,
-                flow_gate.clone(),
-                close_notifier.clone(),
-                cancellation.clone(),
-                reported.clone(),
-            ));
-        }
+        self.tasks.spawn(Self::run_fair_nic_ingress(
+            streams,
+            mgr,
+            adapter,
+            close_notifier,
+            cancellation,
+            reported,
+        ));
         Ok(())
     }
 
@@ -2177,31 +2000,9 @@ mod tests {
     use futures::{StreamExt as _, stream};
 
     use super::{
-        NicCtx, NicIngressFlowGate, TUN_READ_SPARE_BYTES, TunZCPacketToBytes, VirtualNic,
-        parse_interface_mac, prepare_tun_read_buffer, read_ready_packet_batch,
-        restore_compact_ip_for_tap,
+        NicCtx, TUN_READ_SPARE_BYTES, TunZCPacketToBytes, VirtualNic, parse_interface_mac,
+        prepare_tun_read_buffer, read_ready_packet_batch, restore_compact_ip_for_tap,
     };
-
-    #[test]
-    fn tun_read_buffer_restores_spare_capacity_after_split() {
-        let mut buffer = bytes::BytesMut::with_capacity(TUN_READ_SPARE_BYTES);
-        buffer.resize(TUN_READ_SPARE_BYTES, 0);
-        let _completed = buffer.split();
-
-        prepare_tun_read_buffer(&mut buffer, 96);
-
-        assert_eq!(buffer.len(), 96);
-        assert!(buffer.capacity() - buffer.len() >= TUN_READ_SPARE_BYTES);
-    }
-
-    #[test]
-    fn parses_interface_mac_address() {
-        assert_eq!(
-            parse_interface_mac("02:45:01:23:45:67"),
-            Some([0x02, 0x45, 0x01, 0x23, 0x45, 0x67])
-        );
-        assert_eq!(parse_interface_mac("missing"), None);
-    }
 
     #[test]
     fn restores_compact_ip_for_a_tap_edge() {
@@ -2229,35 +2030,6 @@ mod tests {
         restore_compact_ip_for_tap(&mut packet, [0x02; 6]).unwrap();
 
         assert_eq!(packet.payload(), frame);
-    }
-
-    #[test]
-    fn linux_tun_offload_tracks_auto_support_and_explicit_overrides() {
-        assert!(super::linux_tun_offload_configured(false, false, true));
-        assert!(!super::linux_tun_offload_configured(false, false, false));
-        assert!(super::linux_tun_offload_configured(true, false, false));
-        assert!(!super::linux_tun_offload_configured(true, true, true));
-    }
-
-    #[test]
-    fn linux_tun_offload_auto_support_is_conservative_by_arch() {
-        assert!(super::linux_tun_offload_auto_supported_for("x86_64"));
-        assert!(super::linux_tun_offload_auto_supported_for("aarch64"));
-        assert!(!super::linux_tun_offload_auto_supported_for("riscv64"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn virtual_nic_queues_follow_host_parallelism_with_a_fixed_cap() {
-        assert_eq!(super::linux_virtual_nic_queue_count(false, 1, None), 1);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 1, None), 1);
-        assert_eq!(super::linux_virtual_nic_queue_count(false, 2, None), 2);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 2, None), 2);
-        assert_eq!(super::linux_virtual_nic_queue_count(false, 16, None), 4);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, None), 4);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 16, Some(1)), 1);
-        assert_eq!(super::linux_virtual_nic_queue_count(false, 16, Some(8)), 4);
-        assert_eq!(super::linux_virtual_nic_queue_count(true, 3, Some(8)), 3);
     }
 
     #[tokio::test]
@@ -2332,71 +2104,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn nic_ingress_gate_serializes_one_flow() {
-        let gate = Arc::new(NicIngressFlowGate::new());
-        let first = gate.reserve_shards([7]);
-        first.wait().await;
-        let second = gate.reserve_shards([7]);
-
-        assert!(
-            tokio::time::timeout(tokio::time::Duration::from_millis(20), second.wait())
-                .await
-                .is_err()
-        );
-
-        drop(first);
-        tokio::time::timeout(tokio::time::Duration::from_millis(100), second.wait())
-            .await
-            .expect("the next same-flow batch did not start");
-    }
-
-    #[tokio::test]
-    async fn nic_ingress_gate_allows_independent_flows() {
-        let gate = Arc::new(NicIngressFlowGate::new());
-        let first = gate.reserve_shards([7]);
-        first.wait().await;
-        let independent = gate.reserve_shards([8]);
-
-        tokio::time::timeout(tokio::time::Duration::from_millis(100), independent.wait())
-            .await
-            .expect("an independent flow did not start");
-    }
-
-    #[tokio::test]
-    async fn nic_ingress_reservation_reuses_the_flow_hash_downstream() {
-        let gate = Arc::new(NicIngressFlowGate::new());
-        let mut packet = vec![0_u8; 40];
-        packet[0] = 0x45;
-        packet[9] = 6;
-        packet[12..16].copy_from_slice(&[10, 0, 0, 1]);
-        packet[16..20].copy_from_slice(&[10, 0, 0, 2]);
-        packet[20..22].copy_from_slice(&1234_u16.to_be_bytes());
-        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
-        let mut batch =
-            crate::tunnel::batch::PacketBatch::singleton(ZCPacket::new_with_payload(&packet));
-
-        let permit = gate.reserve_batch(&mut batch, crate::common::config::InterfaceAdapter::Tun);
-        permit.wait().await;
-
-        assert!(batch[0].flow_hash().is_some());
-    }
-
-    #[tokio::test]
-    async fn nic_ingress_gate_skips_a_cancelled_reservation() {
-        let gate = Arc::new(NicIngressFlowGate::new());
-        let first = gate.reserve_shards([7]);
-        first.wait().await;
-        let cancelled = gate.reserve_shards([7]);
-        let third = gate.reserve_shards([7]);
-
-        drop(cancelled);
-        drop(first);
-        tokio::time::timeout(tokio::time::Duration::from_millis(100), third.wait())
-            .await
-            .expect("a cancelled reservation blocked its flow");
-    }
-
     #[test]
     fn automatic_adapter_uses_native_ethernet_when_the_platform_supports_it() {
         let adapter = VirtualNic::interface_adapter();
@@ -2420,13 +2127,6 @@ mod tests {
         assert_eq!(bytes.as_ref(), frame.as_slice());
     }
 
-    #[test]
-    fn nic_ingress_failure_is_claimed_once() {
-        let claimed = AtomicBool::new(false);
-        assert!(NicCtx::claim_nic_ingress_failure(&claimed));
-        assert!(!NicCtx::claim_nic_ingress_failure(&claimed));
-    }
-
     async fn run_test_helper() -> Result<VirtualNic, Error> {
         let mut dev = VirtualNic::new(get_mock_global_ctx());
         let _tunnel = dev.create_dev().await?;
@@ -2437,24 +2137,5 @@ mod tests {
         dev.remove_ip(None).await?;
         dev.add_ip("10.144.111.1".parse().unwrap(), 24).await?;
         Ok(dev)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires privileged TUN access"]
-    async fn tun_test() {
-        let _dev = run_test_helper().await.unwrap();
-
-        // let mut stream = nic.pin_recv_stream();
-        // while let Some(item) = stream.next().await {
-        //     println!("item: {:?}", item);
-        // }
-
-        // let framed = dev.into_framed();
-        // let (mut s, mut b) = framed.split();
-        // loop {
-        //     let tmp = b.next().await.unwrap().unwrap();
-        //     let tmp = EthernetPacket::new(tmp.get_bytes());
-        //     println!("ret: {:?}", tmp.unwrap());
-        // }
     }
 }

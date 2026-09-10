@@ -1,10 +1,7 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -29,6 +26,9 @@ const DIRECT_PACKET_OVERHEAD: usize = std::mem::size_of::<ZCPacket>();
 const MAX_CONSECUTIVE_CONTROL_SENDS: usize = 8;
 // A scalar producer can fill every packet position in the stable job window.
 const DIRECT_INFLIGHT_RUN_CAPACITY: usize = DIRECT_DATA_PACKET_BUDGET;
+
+#[cfg(test)]
+mod admission_tests;
 
 type BoxedPacketBatchSink = Pin<Box<dyn PacketBatchSink>>;
 
@@ -58,11 +58,16 @@ struct AdmissionBudget {
     packet_capacity: usize,
     byte_capacity: usize,
     run_capacity: Option<usize>,
-    packets_in_use: AtomicUsize,
-    bytes_in_use: AtomicUsize,
-    runs_in_use: AtomicUsize,
+    usage: parking_lot::Mutex<AdmissionUsage>,
     wake: Notify,
     process_memory: Option<Arc<ProcessMemoryGovernor>>,
+}
+
+#[derive(Default)]
+struct AdmissionUsage {
+    packets: usize,
+    bytes: usize,
+    runs: usize,
 }
 
 struct AdmissionPermit {
@@ -144,9 +149,7 @@ impl AdmissionBudget {
             packet_capacity,
             byte_capacity,
             run_capacity,
-            packets_in_use: AtomicUsize::new(0),
-            bytes_in_use: AtomicUsize::new(0),
-            runs_in_use: AtomicUsize::new(0),
+            usage: parking_lot::Mutex::new(AdmissionUsage::default()),
             wake: Notify::new(),
             process_memory,
         }
@@ -161,117 +164,52 @@ impl AdmissionBudget {
             return None;
         }
 
+        // Reserve all local dimensions together. A failed reservation must
+        // neither expose partial ownership nor wake its own parked retry.
+        let mut usage = self.usage.lock();
+        let packets = usage.packets.checked_add(packet_count)?;
+        let bytes = usage.bytes.checked_add(byte_count)?;
+        let run_count = usize::from(self.run_capacity.is_some());
+        let runs = usage.runs.checked_add(run_count)?;
+        if packets > self.packet_capacity
+            || bytes > self.byte_capacity
+            || self.run_capacity.is_some_and(|limit| runs > limit)
+        {
+            return None;
+        }
         let process_memory = if byte_count == 0 {
             None
-        } else if let Some(governor) = self.process_memory.as_ref() {
+        } else if let Some(governor) = &self.process_memory {
             Some(governor.try_reserve_owned(byte_count)?)
         } else {
             None
         };
-
-        loop {
-            let current_packets = self.packets_in_use.load(Ordering::Acquire);
-            let next_packets = current_packets.checked_add(packet_count)?;
-            if next_packets > self.packet_capacity {
-                return None;
-            }
-            if self
-                .packets_in_use
-                .compare_exchange(
-                    current_packets,
-                    next_packets,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                continue;
-            }
-
-            let current_bytes = self.bytes_in_use.load(Ordering::Acquire);
-            let Some(next_bytes) = current_bytes.checked_add(byte_count) else {
-                self.packets_in_use
-                    .fetch_sub(packet_count, Ordering::AcqRel);
-                self.wake.notify_one();
-                return None;
-            };
-            if next_bytes > self.byte_capacity {
-                self.packets_in_use
-                    .fetch_sub(packet_count, Ordering::AcqRel);
-                self.wake.notify_one();
-                return None;
-            }
-            if self
-                .bytes_in_use
-                .compare_exchange(
-                    current_bytes,
-                    next_bytes,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                let run_count = if let Some(run_capacity) = self.run_capacity {
-                    loop {
-                        let current_runs = self.runs_in_use.load(Ordering::Acquire);
-                        let Some(next_runs) = current_runs.checked_add(1) else {
-                            self.packets_in_use
-                                .fetch_sub(packet_count, Ordering::AcqRel);
-                            self.bytes_in_use.fetch_sub(byte_count, Ordering::AcqRel);
-                            return None;
-                        };
-                        if next_runs > run_capacity {
-                            self.packets_in_use
-                                .fetch_sub(packet_count, Ordering::AcqRel);
-                            self.bytes_in_use.fetch_sub(byte_count, Ordering::AcqRel);
-                            return None;
-                        }
-                        if self
-                            .runs_in_use
-                            .compare_exchange(
-                                current_runs,
-                                next_runs,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
-                            .is_ok()
-                        {
-                            break 1;
-                        }
-                    }
-                } else {
-                    0
-                };
-                return Some(AdmissionPermit {
-                    budget: self.clone(),
-                    packet_count,
-                    byte_count,
-                    run_count,
-                    _process_memory: process_memory,
-                });
-            }
-
-            self.packets_in_use
-                .fetch_sub(packet_count, Ordering::AcqRel);
-            self.wake.notify_one();
-        }
+        *usage = AdmissionUsage {
+            packets,
+            bytes,
+            runs,
+        };
+        Some(AdmissionPermit {
+            budget: self.clone(),
+            packet_count,
+            byte_count,
+            run_count,
+            _process_memory: process_memory,
+        })
     }
 }
 
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
-        self.budget
-            .packets_in_use
-            .fetch_sub(self.packet_count, Ordering::AcqRel);
-        self.budget
-            .bytes_in_use
-            .fetch_sub(self.byte_count, Ordering::AcqRel);
-        if self.run_count != 0 {
-            self.budget
-                .runs_in_use
-                .fetch_sub(self.run_count, Ordering::AcqRel);
+        {
+            let mut usage = self.budget.usage.lock();
+            usage.packets -= self.packet_count;
+            usage.bytes -= self.byte_count;
+            usage.runs -= self.run_count;
         }
-        self.budget.wake.notify_one();
+        drop(self._process_memory.take());
+        // Different-sized requests can become eligible on the same release.
+        self.budget.wake.notify_waiters();
     }
 }
 
@@ -671,6 +609,7 @@ pub(crate) fn is_data_packet(packet: &ZCPacket) -> bool {
             || x == PacketType::KcpDst as u8
             || x == PacketType::QuicSrc as u8
             || x == PacketType::QuicDst as u8
+            || x == PacketType::OverlayStream as u8
             || x == PacketType::Ethernet as u8
             || x == PacketType::AlternateFecSource as u8
             || x == PacketType::AlternateFecParity as u8
@@ -752,6 +691,12 @@ async fn acquire_budget_or_terminal(
             return Err(state.terminal_error_value());
         }
 
+        // Construct both notifications before observing capacity. The shared
+        // governor can be released by a different lane with no local permit.
+        let memory_wake = budget
+            .process_memory
+            .as_ref()
+            .map(|governor| governor.release_notified());
         let wake = budget.wake.notified();
         tokio::pin!(wake);
         enable_admission_waiter(wake.as_mut());
@@ -762,7 +707,13 @@ async fn acquire_budget_or_terminal(
         tokio::select! {
             biased;
             _ = terminal.changed() => return Err(state.terminal_error_value()),
-            _ = &mut wake => {}
+            _ = &mut wake => {},
+            _ = async {
+                match memory_wake {
+                    Some(wake) => wake.await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
         }
     }
 }
@@ -796,7 +747,11 @@ where
 
 fn set_terminal_error(state: &DirectSinkState, terminal: String) {
     if state.terminal_error.set(terminal.clone()).is_ok() {
-        tracing::warn!(error = %terminal, "direct tunnel entered a terminal state");
+        tracing::warn!(
+            target: "CORE",
+            error = %terminal,
+            "direct tunnel entered a terminal state"
+        );
         state.terminal_tx.send_replace(());
     }
 }
@@ -834,108 +789,6 @@ mod tests {
 
     use super::{DirectTunnel, MAX_PACKET_BATCH_SIZE, is_data_packet};
 
-    #[test]
-    fn direct_batch_plan_preserves_lane_and_exact_accounting() {
-        let mut data = sized_batch(PacketType::Data, 4, 128);
-        let expected_data_bytes = super::batch_budget_bytes(&data);
-        let data_plan = super::plan_direct_batch(&mut data).unwrap();
-        assert!(!data_plan.control);
-        assert_eq!(data_plan.packet_count, 4);
-        assert_eq!(data_plan.byte_count, expected_data_bytes);
-
-        let mut control = sized_batch(PacketType::Ping, 2, 128);
-        let expected_control_bytes = super::batch_budget_bytes(&control);
-        let control_plan = super::plan_direct_batch(&mut control).unwrap();
-        assert!(control_plan.control);
-        assert_eq!(control_plan.packet_count, 2);
-        assert_eq!(control_plan.byte_count, expected_control_bytes);
-
-        let mut mixed = PacketBatch::new();
-        mixed.try_push(control_packet(1)).unwrap();
-        mixed
-            .try_push(sized_batch(PacketType::Data, 1, 1).pop_singleton().unwrap())
-            .unwrap();
-        assert!(!super::plan_direct_batch(&mut mixed).unwrap().control);
-    }
-
-    #[tokio::test]
-    async fn direct_batch_send_preserves_order() {
-        let (tunnel, peer) = create_ring_tunnel_pair();
-        let mut direct = DirectTunnel::new(tunnel, None);
-        let sender = direct.get_sink();
-        let mut receiver = peer.split().0;
-        let mut batch = PacketBatch::new();
-        for value in 1..=4_u8 {
-            batch
-                .try_push(ZCPacket::new_with_payload(&[value]))
-                .unwrap();
-        }
-
-        sender.send_batch(batch).await.unwrap();
-
-        let received = receiver
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_iter()
-            .map(|packet| packet.payload()[0])
-            .collect::<Vec<_>>();
-        assert_eq!(received, vec![1, 2, 3, 4]);
-        let _stream = direct.get_stream();
-    }
-
-    #[tokio::test]
-    async fn direct_control_send_compacts_oversized_receive_slab() {
-        let (tunnel, peer) = create_ring_tunnel_pair();
-        let mut direct = DirectTunnel::new(tunnel, None);
-        let sender = direct.get_sink();
-        let mut receiver = peer.split().0;
-        let mut packet = control_packet(7);
-        packet.mut_inner().reserve(64 * 1024);
-        assert!(
-            packet.retained_buffer_capacity() + super::DIRECT_PACKET_OVERHEAD
-                > super::DIRECT_CONTROL_BYTE_BUDGET
-        );
-        assert!(
-            packet.buf_len() + super::DIRECT_PACKET_OVERHEAD <= super::DIRECT_CONTROL_BYTE_BUDGET
-        );
-
-        sender.send(packet).await.unwrap();
-
-        let received = receiver
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .pop_singleton()
-            .unwrap();
-        assert_eq!(received.payload(), &[7]);
-        assert!(
-            received.retained_buffer_capacity() + super::DIRECT_PACKET_OVERHEAD
-                <= super::DIRECT_CONTROL_BYTE_BUDGET
-        );
-        let _stream = direct.get_stream();
-    }
-
-    #[tokio::test]
-    async fn direct_control_send_still_rejects_genuinely_oversized_packet() {
-        let (tunnel, _peer) = create_ring_tunnel_pair();
-        let direct = DirectTunnel::new(tunnel, None);
-        let sender = direct.get_sink();
-        let payload_len = super::DIRECT_CONTROL_BYTE_BUDGET;
-        let error = sender
-            .send_batch(sized_batch(PacketType::Ping, 1, payload_len))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            crate::tunnel::TunnelError::ExceedMaxPacketSize(limit, actual)
-                if limit == super::DIRECT_CONTROL_BYTE_BUDGET && actual > limit
-        ));
-    }
-
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum WriteKind {
         Data,
@@ -961,43 +814,6 @@ mod tests {
         batches: UnboundedSender<Vec<u16>>,
         release_ready: Option<oneshot::Receiver<()>>,
         release_flush: Option<oneshot::Receiver<()>>,
-    }
-
-    struct InlineHintRecordingSink {
-        hints: UnboundedSender<bool>,
-    }
-
-    impl Sink<PacketBatch> for InlineHintRecordingSink {
-        type Error = crate::tunnel::TunnelError;
-
-        fn poll_ready(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
-            self.get_mut()
-                .hints
-                .send(batch.prefers_inline_crypto())
-                .unwrap();
-            Ok(())
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_close(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
     }
 
     impl Sink<PacketBatch> for CoalescingSink {
@@ -1192,397 +1008,5 @@ mod tests {
             batch.try_push(packet).unwrap();
         }
         batch
-    }
-
-    #[tokio::test]
-    async fn full_data_batch_is_one_complete_sink_run() {
-        let start_send_count = Arc::new(AtomicUsize::new(0));
-        let flush_count = Arc::new(AtomicUsize::new(0));
-        let sink = Box::pin(CountingSink {
-            start_send_count: start_send_count.clone(),
-            flush_count: flush_count.clone(),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-
-        sender
-            .send_batch(sized_batch(PacketType::Data, MAX_PACKET_BATCH_SIZE, 1))
-            .await
-            .unwrap();
-
-        crate::tunnel::common::tests::wait_for_condition(
-            || async {
-                start_send_count.load(Ordering::Acquire) == 1
-                    && flush_count.load(Ordering::Acquire) == 1
-            },
-            std::time::Duration::from_secs(1),
-        )
-        .await;
-        assert_eq!(start_send_count.load(Ordering::Acquire), 1);
-        assert_eq!(flush_count.load(Ordering::Acquire), 1);
-    }
-
-    #[tokio::test]
-    async fn coalesced_full_batch_remains_eligible_for_crypto_workers() {
-        let (hints_tx, mut hints_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut sink =
-            Box::pin(InlineHintRecordingSink { hints: hints_tx }) as Pin<Box<dyn PacketBatchSink>>;
-        let mut pending_batch = None;
-        let mut pending_deadline = None;
-        let half = MAX_PACKET_BATCH_SIZE / 2;
-
-        super::accumulate_direct_data_batch(
-            &mut sink,
-            &mut pending_batch,
-            &mut pending_deadline,
-            sized_batch(PacketType::Data, half, 1),
-            None,
-        )
-        .await
-        .unwrap();
-        super::accumulate_direct_data_batch(
-            &mut sink,
-            &mut pending_batch,
-            &mut pending_deadline,
-            sized_batch(PacketType::Data, half, 1),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(hints_rx.recv().await, Some(false));
-    }
-
-    #[tokio::test]
-    async fn control_run_precedes_a_waiting_data_run() {
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (release_data, release_data_rx) = oneshot::channel();
-        let sink = Box::pin(BlockedDataSink {
-            events: events_tx,
-            pending: None,
-            release_data: Some(release_data_rx),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-
-        sender.send(data_packet(1)).await.unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-
-        sender.send(data_packet(3)).await.unwrap();
-        sender.send(control_packet(2)).await.unwrap();
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), events_rx.recv())
-                .await
-                .is_err()
-        );
-        release_data.send(()).unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Control));
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-    }
-
-    #[tokio::test]
-    async fn control_reserve_admits_when_data_run_window_is_full() {
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (release_data, release_data_rx) = oneshot::channel();
-        let sink = Box::pin(BlockedDataSink {
-            events: events_tx,
-            pending: None,
-            release_data: Some(release_data_rx),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-
-        sender.send(data_packet(1)).await.unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        for _ in 1..super::DIRECT_INFLIGHT_RUN_CAPACITY {
-            sender.send(data_packet(2)).await.unwrap();
-        }
-
-        let mut waiter = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send(data_packet(3)).await }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
-                .await
-                .is_err()
-        );
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            sender.send(control_packet(4)),
-        )
-        .await
-        .expect("the control reserve must admit while data runs are saturated")
-        .unwrap();
-
-        release_data.send(()).unwrap();
-        assert!(waiter.await.unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn admitted_data_runs_have_bounded_batch_ownership() {
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (release_data, release_data_rx) = oneshot::channel();
-        let sink = Box::pin(BlockedDataSink {
-            events: events_tx,
-            pending: None,
-            release_data: Some(release_data_rx),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-
-        let run_capacity = super::DIRECT_INFLIGHT_RUN_CAPACITY;
-        sender.send(data_packet(1)).await.unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        for _ in 1..run_capacity {
-            sender.send(data_packet(2)).await.unwrap();
-        }
-
-        // A further complete run waits for released ownership.
-        let mut second = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send(data_packet(3)).await }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
-                .await
-                .is_err()
-        );
-
-        release_data.send(()).unwrap();
-        assert!(second.await.unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn admission_waiters_keep_one_wake_for_each_released_run() {
-        let budget = Arc::new(super::AdmissionBudget::with_process(2, 2, None));
-        let first_owner = budget.try_acquire(1, 1).unwrap();
-        let second_owner = budget.try_acquire(1, 1).unwrap();
-        let first_wait = budget.wake.notified();
-        let second_wait = budget.wake.notified();
-        tokio::pin!(first_wait);
-        tokio::pin!(second_wait);
-        super::enable_admission_waiter(first_wait.as_mut());
-        super::enable_admission_waiter(second_wait.as_mut());
-
-        drop(first_owner);
-        drop(second_owner);
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            tokio::join!(first_wait, second_wait);
-        })
-        .await
-        .expect("each released run must wake one registered waiter");
-    }
-
-    #[tokio::test]
-    async fn data_runs_share_one_total_packet_budget() {
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (release_data, release_data_rx) = oneshot::channel();
-        let sink = Box::pin(BlockedDataSink {
-            events: events_tx,
-            pending: None,
-            release_data: Some(release_data_rx),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-
-        sender
-            .send_batch(sized_batch(
-                PacketType::Data,
-                super::MAX_PACKET_BATCH_SIZE,
-                1,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-        for _ in 1..super::SEND_PIPELINE_SLOT_COUNT {
-            sender
-                .send_batch(sized_batch(
-                    PacketType::Data,
-                    super::MAX_PACKET_BATCH_SIZE,
-                    1,
-                ))
-                .await
-                .unwrap();
-        }
-
-        let mut excess = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send(data_packet(3)).await }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut excess)
-                .await
-                .is_err()
-        );
-
-        release_data.send(()).unwrap();
-        assert!(excess.await.unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn scalar_window_coalesces_into_eight_ordered_batches_until_flush() {
-        let (batches_tx, mut batches_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (release_ready, release_ready_rx) = oneshot::channel();
-        let (release_flush, release_flush_rx) = oneshot::channel();
-        let sink = Box::pin(CoalescingSink {
-            batches: batches_tx,
-            release_ready: Some(release_ready_rx),
-            release_flush: Some(release_flush_rx),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state: state.clone(),
-            send_timeout: None,
-        };
-
-        for value in 0..super::DIRECT_DATA_PACKET_BUDGET as u16 {
-            sender.send(indexed_data_packet(value)).await.unwrap();
-        }
-        assert_eq!(
-            state.ownership_budget.runs_in_use.load(Ordering::Acquire),
-            super::DIRECT_INFLIGHT_RUN_CAPACITY
-        );
-
-        let mut excess = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                sender
-                    .send(indexed_data_packet(super::DIRECT_DATA_PACKET_BUDGET as u16))
-                    .await
-            }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut excess)
-                .await
-                .is_err()
-        );
-
-        release_ready.send(()).unwrap();
-        let mut observed = Vec::with_capacity(super::DIRECT_DATA_PACKET_BUDGET);
-        for _ in 0..super::SEND_PIPELINE_SLOT_COUNT {
-            let batch = tokio::time::timeout(std::time::Duration::from_secs(1), batches_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(batch.len(), super::MAX_PACKET_BATCH_SIZE);
-            observed.extend(batch);
-        }
-        assert_eq!(
-            observed,
-            (0..super::DIRECT_DATA_PACKET_BUDGET as u16).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            state.ownership_budget.runs_in_use.load(Ordering::Acquire),
-            super::DIRECT_INFLIGHT_RUN_CAPACITY
-        );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut excess)
-                .await
-                .is_err()
-        );
-
-        release_flush.send(()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut excess)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let final_batch =
-            tokio::time::timeout(std::time::Duration::from_secs(1), batches_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(final_batch, vec![super::DIRECT_DATA_PACKET_BUDGET as u16]);
-    }
-
-    #[tokio::test]
-    async fn queued_batch_admission_does_not_wait_for_previous_flush() {
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (release_data, release_data_rx) = oneshot::channel();
-        let sink = Box::pin(BlockedDataSink {
-            events: events_tx,
-            pending: None,
-            release_data: Some(release_data_rx),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-        let half_batch = MAX_PACKET_BATCH_SIZE / 2;
-
-        sender
-            .send_batch(sized_batch(PacketType::Data, half_batch, 1))
-            .await
-            .unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-
-        let mut second = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                sender
-                    .send_batch(sized_batch(PacketType::Data, half_batch, 1))
-                    .await
-            }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
-                .await
-                .expect("the second run should enter the fixed window")
-                .unwrap()
-                .is_ok()
-        );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), events_rx.recv())
-                .await
-                .is_err()
-        );
-
-        release_data.send(()).unwrap();
-        assert_eq!(events_rx.recv().await, Some(WriteKind::Data));
-    }
-
-    #[tokio::test]
-    async fn terminal_write_failure_rejects_later_admission_and_closes_once() {
-        let close_count = Arc::new(AtomicUsize::new(0));
-        let sink = Box::pin(FailingSink {
-            close_count: close_count.clone(),
-        }) as Pin<Box<dyn PacketBatchSink>>;
-        let state = super::DirectSinkState::new(sink, None, None);
-        let sender = super::DirectTunnelSender {
-            state,
-            send_timeout: None,
-        };
-
-        // A batch accepted by the sink is acknowledged before the failing
-        // flush makes the tunnel terminal.
-        assert!(sender.send(data_packet(1)).await.is_ok());
-        crate::tunnel::common::tests::wait_for_condition(
-            || async { close_count.load(Ordering::Acquire) == 1 },
-            std::time::Duration::from_secs(1),
-        )
-        .await;
-
-        assert!(sender.send(control_packet(2)).await.is_err());
-        assert!(sender.send(data_packet(3)).await.is_err());
-        assert_eq!(close_count.load(Ordering::Acquire), 1);
     }
 }

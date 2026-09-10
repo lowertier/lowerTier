@@ -72,7 +72,6 @@ chrono = { version = "0.4.37", features = ["serde"] }
 
 guarden = "0.2"
 quanta = "0.12"
-rayon = "1.12.0"
 
 delegate = "0.13.5"
 
