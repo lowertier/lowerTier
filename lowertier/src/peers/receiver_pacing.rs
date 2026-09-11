@@ -366,12 +366,6 @@ pub(crate) fn paced_packet_bytes(packet: &ZCPacket) -> usize {
         packet_type
             if packet_type == PacketType::Data as u8
                 || packet_type == PacketType::ForeignNetworkPacket as u8
-                || packet_type == PacketType::KcpSrc as u8
-                || packet_type == PacketType::KcpDst as u8
-                || packet_type == PacketType::QuicSrc as u8
-                || packet_type == PacketType::QuicDst as u8
-                || packet_type == PacketType::DataWithKcpSrcModified as u8
-                || packet_type == PacketType::DataWithQuicSrcModified as u8
                 || packet_type == PacketType::Ethernet as u8
                 || packet_type == PacketType::AlternateFecSource as u8
                 || packet_type == PacketType::AlternateFecParity as u8

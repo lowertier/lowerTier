@@ -3,7 +3,6 @@ mod graph_algo;
 pub mod l2_fabric;
 
 pub mod acl_filter;
-#[cfg(feature = "quic")]
 mod alternate_fec;
 pub mod credential_manager;
 pub mod peer;

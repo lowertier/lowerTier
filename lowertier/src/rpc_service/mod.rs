@@ -10,7 +10,6 @@ mod port_forward_manage;
 pub(crate) mod protected_port;
 mod proxy;
 mod stats;
-mod vpn_portal;
 
 pub mod api;
 pub mod instance_manage;
@@ -34,11 +33,6 @@ pub trait InstanceRpcService: Sync + Send {
     fn get_mapped_listener_manage_service(
         &self,
     ) -> &dyn crate::proto::api::instance::MappedListenerManageRpc<
-        Controller = crate::proto::rpc_types::controller::BaseController,
-    >;
-    fn get_vpn_portal_service(
-        &self,
-    ) -> &dyn crate::proto::api::instance::VpnPortalRpc<
         Controller = crate::proto::rpc_types::controller::BaseController,
     >;
     fn get_proxy_service(

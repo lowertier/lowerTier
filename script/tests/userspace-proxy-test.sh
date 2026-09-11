@@ -39,7 +39,7 @@ if [[ ! -x "$core" ]]; then
         -p lowertier \
         --bin lowertier-core \
         --no-default-features \
-        --features socks5,quic
+        --features socks5
 fi
 
 read -r underlay_port proxy_port tcp_port udp_port http_port server_rpc_port client_rpc_port < <(

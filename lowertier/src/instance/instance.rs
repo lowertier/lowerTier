@@ -26,10 +26,6 @@ use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
 use crate::connector::udp_hole_punch::UdpHolePunchConnector;
-#[cfg(feature = "kcp")]
-use crate::gateway::kcp_proxy::{KcpProxyDst, KcpProxyDstRpcService, KcpProxySrc};
-#[cfg(feature = "quic")]
-use crate::gateway::quic_proxy::{QuicProxy, QuicProxyDstRpcService};
 use crate::gateway::tcp_proxy::TcpProxyRpcService;
 use crate::peer_center::instance::{PeerCenterInstance, PeerCenterInstanceService};
 use crate::peers::peer_conn::PeerConnId;
@@ -44,10 +40,9 @@ use crate::proto::api::config::{
 };
 use crate::proto::api::instance::{
     GetPrometheusStatsRequest, GetPrometheusStatsResponse, GetStatsRequest, GetStatsResponse,
-    GetVpnPortalInfoRequest, GetVpnPortalInfoResponse, ListMappedListenerRequest,
-    ListMappedListenerResponse, ListPortForwardRequest, ListPortForwardResponse, MappedListener,
-    MappedListenerManageRpc, MetricSnapshot, PortForwardManageRpc, StatsRpc, VpnPortalInfo,
-    VpnPortalRpc,
+    ListMappedListenerRequest, ListMappedListenerResponse, ListPortForwardRequest,
+    ListPortForwardResponse, MappedListener, MappedListenerManageRpc, MetricSnapshot,
+    PortForwardManageRpc, StatsRpc,
 };
 use crate::proto::api::manage::NetworkConfig;
 use crate::proto::common::{PortForwardConfigPb, TunnelInfo};
@@ -57,7 +52,6 @@ use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::rpc_service::InstanceRpcService;
 use crate::utils::weak_upgrade;
-use crate::vpn_portal::{self, VpnPortal};
 
 #[cfg(feature = "magic-dns")]
 use super::dns_server::{MAGIC_DNS_FAKE_IP, runner::DnsRunner};
@@ -609,17 +603,7 @@ pub struct Instance {
 
     ip_proxy: Option<IpProxy>,
 
-    #[cfg(feature = "kcp")]
-    kcp_proxy_src: Option<KcpProxySrc>,
-    #[cfg(feature = "kcp")]
-    kcp_proxy_dst: Option<KcpProxyDst>,
-
-    #[cfg(feature = "quic")]
-    quic_proxy: Option<QuicProxy>,
-
     peer_center: Arc<PeerCenterInstance>,
-
-    vpn_portal: Arc<Mutex<Box<dyn VpnPortal>>>,
 
     #[cfg(feature = "socks5")]
     socks5_server: Arc<Socks5Server>,
@@ -673,11 +657,6 @@ impl Instance {
 
         let peer_center = Arc::new(PeerCenterInstance::new(peer_manager.clone()));
 
-        #[cfg(feature = "wireguard")]
-        let vpn_portal_inst = vpn_portal::wireguard::WireGuard::default();
-        #[cfg(not(feature = "wireguard"))]
-        let vpn_portal_inst = vpn_portal::NullVpnPortal;
-
         #[cfg(feature = "socks5")]
         let socks5_server = Socks5Server::new(global_ctx.clone(), peer_manager.clone(), None);
 
@@ -697,17 +676,8 @@ impl Instance {
             tcp_hole_puncher,
 
             ip_proxy: None,
-            #[cfg(feature = "kcp")]
-            kcp_proxy_src: None,
-            #[cfg(feature = "kcp")]
-            kcp_proxy_dst: None,
-
-            #[cfg(feature = "quic")]
-            quic_proxy: None,
 
             peer_center,
-
-            vpn_portal: Arc::new(Mutex::new(Box::new(vpn_portal_inst))),
 
             #[cfg(feature = "socks5")]
             socks5_server,
@@ -1036,31 +1006,6 @@ impl Instance {
             self.check_dhcp_ip_conflict();
         }
 
-        #[cfg(feature = "kcp")]
-        if self.global_ctx.get_flags().enable_kcp_proxy {
-            let src_proxy = KcpProxySrc::new(self.get_peer_manager()).await;
-            src_proxy.start().await;
-            self.kcp_proxy_src = Some(src_proxy);
-        }
-
-        #[cfg(feature = "kcp")]
-        if !self.global_ctx.get_flags().disable_kcp_input {
-            let mut dst_proxy = KcpProxyDst::new(self.get_peer_manager()).await;
-            dst_proxy.start().await;
-            self.kcp_proxy_dst = Some(dst_proxy);
-        }
-
-        #[cfg(feature = "quic")]
-        {
-            let quic_src = self.global_ctx.get_flags().enable_quic_proxy;
-            let quic_dst = !self.global_ctx.get_flags().disable_quic_input;
-            if quic_src || quic_dst {
-                let mut quic_proxy = QuicProxy::new(self.get_peer_manager());
-                quic_proxy.run(quic_src, quic_dst).await;
-                self.quic_proxy = Some(quic_proxy);
-            }
-        }
-
         self.global_ctx
             .get_acl_filter()
             .reload_rules(AclRuleBuilder::build(&self.global_ctx)?.as_ref());
@@ -1090,19 +1035,8 @@ impl Instance {
         );
         self.proxy_cidrs_monitor = Some(monitor.start());
 
-        if self.global_ctx.get_vpn_portal_cidr().is_some() {
-            self.run_vpn_portal().await?;
-        }
-
         #[cfg(feature = "socks5")]
-        self.socks5_server
-            .run(
-                #[cfg(feature = "kcp")]
-                self.kcp_proxy_src
-                    .as_ref()
-                    .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
-            )
-            .await?;
+        self.socks5_server.run().await?;
 
         Ok(())
     }
@@ -1112,18 +1046,6 @@ impl Instance {
             return Err(anyhow::anyhow!("ip proxy not enabled.").into());
         }
         self.ip_proxy.as_ref().unwrap().start().await?;
-        Ok(())
-    }
-
-    pub async fn run_vpn_portal(&mut self) -> Result<(), Error> {
-        if self.global_ctx.get_vpn_portal_cidr().is_none() {
-            return Err(anyhow::anyhow!("vpn portal cidr not set.").into());
-        }
-        self.vpn_portal
-            .lock()
-            .await
-            .start(self.get_global_ctx(), self.get_peer_manager())
-            .await?;
         Ok(())
     }
 
@@ -1158,51 +1080,6 @@ impl Instance {
 
     pub fn peer_id(&self) -> PeerId {
         self.peer_manager.my_peer_id()
-    }
-
-    fn get_vpn_portal_rpc_service(
-        &self,
-    ) -> impl VpnPortalRpc<Controller = BaseController> + Clone + use<> {
-        #[derive(Clone)]
-        struct VpnPortalRpcService {
-            peer_mgr: Weak<PeerManager>,
-            vpn_portal: Weak<Mutex<Box<dyn VpnPortal>>>,
-        }
-
-        #[async_trait::async_trait]
-        impl VpnPortalRpc for VpnPortalRpcService {
-            type Controller = BaseController;
-
-            async fn get_vpn_portal_info(
-                &self,
-                _: BaseController,
-                _request: GetVpnPortalInfoRequest,
-            ) -> Result<GetVpnPortalInfoResponse, rpc_types::error::Error> {
-                let Some(vpn_portal) = self.vpn_portal.upgrade() else {
-                    return Err(anyhow::anyhow!("vpn portal not available").into());
-                };
-
-                let Some(peer_mgr) = self.peer_mgr.upgrade() else {
-                    return Err(anyhow::anyhow!("peer manager not available").into());
-                };
-
-                let vpn_portal = vpn_portal.lock().await;
-                let ret = GetVpnPortalInfoResponse {
-                    vpn_portal_info: Some(VpnPortalInfo {
-                        vpn_type: vpn_portal.name(),
-                        client_config: vpn_portal.dump_client_config(peer_mgr).await,
-                        connected_clients: vpn_portal.list_clients().await,
-                    }),
-                };
-
-                Ok(ret)
-            }
-        }
-
-        VpnPortalRpcService {
-            peer_mgr: Arc::downgrade(&self.peer_manager),
-            vpn_portal: Arc::downgrade(&self.vpn_portal),
-        }
     }
 
     fn get_mapped_listener_manager_rpc_service(
@@ -1382,11 +1259,10 @@ impl Instance {
         use crate::proto::api::instance::*;
 
         #[derive(Clone)]
-        struct ApiRpcServiceImpl<A, B, C, D, E, F, G, H> {
+        struct ApiRpcServiceImpl<A, B, C, E, F, G, H> {
             peer_mgr_rpc_service: A,
             connector_mgr_rpc_service: B,
             mapped_listener_mgr_rpc_service: C,
-            vpn_portal_rpc_service: D,
             tcp_proxy_rpc_services: dashmap::DashMap<
                 String,
                 Arc<dyn TcpProxyRpc<Controller = BaseController> + Send + Sync>,
@@ -1404,12 +1280,11 @@ impl Instance {
             A: PeerManageRpc<Controller = BaseController> + Send + Sync,
             B: ConnectorManageRpc<Controller = BaseController> + Send + Sync,
             C: MappedListenerManageRpc<Controller = BaseController> + Send + Sync,
-            D: VpnPortalRpc<Controller = BaseController> + Send + Sync,
             E: AclManageRpc<Controller = BaseController> + Send + Sync,
             F: PortForwardManageRpc<Controller = BaseController> + Send + Sync,
             G: StatsRpc<Controller = BaseController> + Send + Sync,
             H: ConfigRpc<Controller = BaseController> + Send + Sync,
-        > InstanceRpcService for ApiRpcServiceImpl<A, B, C, D, E, F, G, H>
+        > InstanceRpcService for ApiRpcServiceImpl<A, B, C, E, F, G, H>
         {
             fn get_peer_manage_service(&self) -> &dyn PeerManageRpc<Controller = BaseController> {
                 &self.peer_mgr_rpc_service
@@ -1425,10 +1300,6 @@ impl Instance {
                 &self,
             ) -> &dyn MappedListenerManageRpc<Controller = BaseController> {
                 &self.mapped_listener_mgr_rpc_service
-            }
-
-            fn get_vpn_portal_service(&self) -> &dyn VpnPortalRpc<Controller = BaseController> {
-                &self.vpn_portal_rpc_service
             }
 
             fn get_proxy_service(
@@ -1478,7 +1349,6 @@ impl Instance {
                 &self.conn_manager,
             )),
             mapped_listener_mgr_rpc_service: self.get_mapped_listener_manager_rpc_service(),
-            vpn_portal_rpc_service: self.get_vpn_portal_rpc_service(),
             tcp_proxy_rpc_services: {
                 let tcp_proxy_rpc_services: dashmap::DashMap<
                     String,
@@ -1490,38 +1360,6 @@ impl Instance {
                         "tcp".to_string(),
                         Arc::new(TcpProxyRpcService::new(ip_proxy.tcp_proxy())),
                     );
-                }
-                #[cfg(feature = "kcp")]
-                if let Some(kcp_proxy) = self.kcp_proxy_src.as_ref() {
-                    tcp_proxy_rpc_services.insert(
-                        "kcp_src".to_string(),
-                        Arc::new(TcpProxyRpcService::new(kcp_proxy.get_tcp_proxy())),
-                    );
-                }
-
-                #[cfg(feature = "kcp")]
-                if let Some(kcp_proxy) = self.kcp_proxy_dst.as_ref() {
-                    tcp_proxy_rpc_services.insert(
-                        "kcp_dst".to_string(),
-                        Arc::new(KcpProxyDstRpcService::new(kcp_proxy)),
-                    );
-                }
-
-                #[cfg(feature = "quic")]
-                if let Some(quic_proxy) = self.quic_proxy.as_ref() {
-                    if let Some(quic_src) = quic_proxy.src() {
-                        tcp_proxy_rpc_services.insert(
-                            "quic_src".to_string(),
-                            Arc::new(TcpProxyRpcService::new(quic_src.get_tcp_proxy())),
-                        );
-                    }
-
-                    if let Some(quic_dst) = quic_proxy.dst() {
-                        tcp_proxy_rpc_services.insert(
-                            "quic_dst".to_string(),
-                            Arc::new(QuicProxyDstRpcService::new(quic_dst)),
-                        );
-                    }
                 }
 
                 tcp_proxy_rpc_services
@@ -1537,10 +1375,6 @@ impl Instance {
 
     pub fn get_global_ctx(&self) -> ArcGlobalCtx {
         self.global_ctx.clone()
-    }
-
-    pub fn get_vpn_portal_inst(&self) -> Arc<Mutex<Box<dyn VpnPortal>>> {
-        self.vpn_portal.clone()
     }
 
     #[cfg(feature = "tun")]

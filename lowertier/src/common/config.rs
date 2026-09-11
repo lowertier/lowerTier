@@ -26,7 +26,7 @@ use crate::{
         common::{CompressionAlgoPb, PortForwardConfigPb, SecureModeConfig, SocketType},
         peer_rpc::CredentialBundle,
     },
-    tunnel::{IpScheme, TunnelScheme, generate_digest_from_str},
+    tunnel::{IpScheme, generate_digest_from_str},
 };
 
 use super::env_parser;
@@ -58,16 +58,8 @@ pub fn gen_default_flags() -> Flags {
         multi_thread: true,
         data_compress_algo: CompressionAlgoPb::None.into(),
         bind_device: true,
-        enable_kcp_proxy: false,
-        disable_kcp_input: false,
-        disable_relay_kcp: false,
-        enable_relay_foreign_network_kcp: false,
         accept_dns: false,
         private_mode: false,
-        enable_quic_proxy: false,
-        disable_quic_input: false,
-        disable_relay_quic: false,
-        enable_relay_foreign_network_quic: false,
         foreign_relay_bps_limit: u64::MAX,
         multi_thread_count: 2,
         encryption_algorithm: EncryptionAlgorithm::default().to_string(),
@@ -343,10 +335,7 @@ fn flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, serde_json:
 }
 
 fn mapped_listener_allows_implicit_port(url: &url::Url) -> bool {
-    TunnelScheme::try_from(url)
-        .ok()
-        .and_then(|scheme| IpScheme::try_from(scheme).ok())
-        .is_some()
+    IpScheme::try_from(url).is_ok()
 }
 
 pub fn validate_mapped_listener_url(url: &url::Url) -> Result<(), anyhow::Error> {
@@ -454,9 +443,6 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_mapped_listeners(&self) -> Vec<url::Url>;
     fn set_mapped_listeners(&self, listeners: Option<Vec<url::Url>>);
-
-    fn get_vpn_portal_config(&self) -> Option<VpnPortalConfig>;
-    fn set_vpn_portal_config(&self, config: VpnPortalConfig);
 
     fn get_flags(&self) -> Flags;
     fn set_flags(&self, flags: Flags);
@@ -764,12 +750,6 @@ impl LoggingConfigLoader for &LoggingConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct VpnPortalConfig {
-    pub client_cidr: cidr::Ipv4Cidr,
-    pub wireguard_listen: SocketAddr,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct PortForwardConfig {
     pub bind_addr: SocketAddr,
@@ -930,8 +910,6 @@ struct Config {
 
     peer: Option<Vec<PeerConfig>>,
     proxy_network: Option<Vec<ProxyNetworkConfig>>,
-
-    vpn_portal_config: Option<VpnPortalConfig>,
 
     routes: Option<Vec<cidr::Ipv4Cidr>>,
 
@@ -1385,13 +1363,6 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_mapped_listeners(&self, listeners: Option<Vec<url::Url>>) {
         self.config.lock().unwrap().mapped_listeners = listeners;
-    }
-
-    fn get_vpn_portal_config(&self) -> Option<VpnPortalConfig> {
-        self.config.lock().unwrap().vpn_portal_config.clone()
-    }
-    fn set_vpn_portal_config(&self, config: VpnPortalConfig) {
-        self.config.lock().unwrap().vpn_portal_config = Some(config);
     }
 
     fn get_flags(&self) -> Flags {
@@ -2132,7 +2103,6 @@ quic_brutal_send_bps = 0
         let cfg = TomlConfigLoader::default();
         let mut flags = gen_default_flags();
         flags.dev_name = "et_test".to_string();
-        flags.enable_quic_proxy = true;
         flags.disable_tcp_hole_punching = true;
         flags.disable_sym_hole_punching = true;
         flags.multi_thread = false;
@@ -2146,7 +2116,6 @@ quic_brutal_send_bps = 0
         let dumped = cfg.dump();
 
         assert!(dumped.contains("dev_name = \"et_test\""));
-        assert!(dumped.contains("enable_quic_proxy = true"));
         assert!(dumped.contains("disable_tcp_hole_punching = true"));
         assert!(dumped.contains("disable_sym_hole_punching = true"));
         assert!(dumped.contains("multi_thread = false"));
@@ -2159,7 +2128,6 @@ quic_brutal_send_bps = 0
         let reloaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
         let reloaded_flags = reloaded.get_flags();
         assert_eq!(reloaded_flags.dev_name, "et_test");
-        assert!(reloaded_flags.enable_quic_proxy);
         assert!(reloaded_flags.disable_tcp_hole_punching);
         assert!(reloaded_flags.disable_sym_hole_punching);
         assert!(!reloaded_flags.multi_thread);
@@ -2357,7 +2325,6 @@ enabled = true
         assert!(secure_mode.local_public_key.is_some());
     }
 
-    #[cfg(feature = "websocket")]
     #[test]
     fn test_parse_mapped_listener_urls_allows_ws_without_port() {
         let parsed = parse_mapped_listener_urls(&[
@@ -2384,7 +2351,7 @@ enabled = true
 
     #[test]
     fn test_parse_mapped_listener_urls_requires_port_for_non_ip_scheme() {
-        let err = parse_mapped_listener_urls(&["ring://peer-id".to_string()]).unwrap_err();
+        let err = parse_mapped_listener_urls(&["https://peer-id".to_string()]).unwrap_err();
 
         assert!(err.to_string().contains("mapped listener port is missing"));
     }

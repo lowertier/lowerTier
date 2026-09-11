@@ -300,30 +300,23 @@ impl fmt::Display for Url {
     }
 }
 
-fn split_tunnel_scheme(raw_scheme: &str) -> Option<(&str, &'static str, bool)> {
+fn split_tunnel_scheme(raw_scheme: &str) -> Option<(&'static str, bool)> {
     for scheme in IpScheme::VARIANTS {
         let scheme: &'static str = scheme.into();
-        if let Some(base) = raw_scheme.strip_suffix('6')
-            && let Some(prefix) = base.strip_suffix(scheme)
-            && (prefix.is_empty() || prefix.ends_with('-'))
-        {
-            return Some((prefix, scheme, true));
+        if raw_scheme == scheme {
+            return Some((scheme, false));
         }
-
-        if let Some(prefix) = raw_scheme.strip_suffix(scheme)
-            && (prefix.is_empty() || prefix.ends_with('-'))
-        {
-            return Some((prefix, scheme, false));
+        if raw_scheme.strip_suffix('6') == Some(scheme) {
+            return Some((scheme, true));
         }
     }
-
     None
 }
 
 fn normalize_tunnel_scheme(raw_scheme: &str, is_ipv6: bool) -> Option<String> {
-    let (prefix, scheme, had_ipv6_suffix) = split_tunnel_scheme(raw_scheme)?;
+    let (scheme, had_ipv6_suffix) = split_tunnel_scheme(raw_scheme)?;
     let suffix = if is_ipv6 || had_ipv6_suffix { "6" } else { "" };
-    Some(format!("{prefix}{scheme}{suffix}"))
+    Some(format!("{scheme}{suffix}"))
 }
 
 fn infer_tunnel_ipv6(raw: &str) -> Option<bool> {
@@ -574,36 +567,11 @@ mod tests {
         assert_ipv6_tunnel_normalization("tcp", 11010);
         assert_ipv6_tunnel_normalization("udp", 11010);
 
-        #[cfg(feature = "wireguard")]
-        assert_ipv6_tunnel_normalization("wg", 11011);
-
-        #[cfg(feature = "quic")]
         assert_ipv6_tunnel_normalization("quic", 11012);
 
-        #[cfg(feature = "websocket")]
         assert_ipv6_tunnel_normalization("ws", 80);
 
-        #[cfg(feature = "websocket")]
         assert_ipv6_tunnel_normalization("wss", 443);
-
-        #[cfg(feature = "faketcp")]
-        assert_ipv6_tunnel_normalization("faketcp", 11013);
-    }
-
-    #[test]
-    fn normalize_composite_ipv6_tunnel_url() {
-        assert_eq!(
-            normalize_tunnel_url("txt-tcp://[2001:db8::1]:11010", None).as_deref(),
-            Some("txt-tcp6://[2001:db8::1]:11010")
-        );
-    }
-
-    #[test]
-    fn recover_malformed_composite_ipv6_tunnel_url() {
-        assert_eq!(
-            normalize_tunnel_url("txt-tcp://[2001:db8::1]:110106", None).as_deref(),
-            Some("txt-tcp6://[2001:db8::1]:11010")
-        );
     }
 
     #[test]
@@ -631,23 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_info_display_tunnel_type_preserves_composite_prefix() {
-        let tunnel = TunnelInfo {
-            tunnel_type: "txt-tcp://[2001:db8::2]:110106".to_string(),
-            local_addr: None,
-            remote_addr: Some(Url {
-                url: "txt://et.example.com".to_string(),
-            }),
-            resolved_remote_addr: None,
-        };
-
-        assert_eq!(
-            tunnel.display_tunnel_type(),
-            "txt-tcp6://[2001:db8::2]:11010"
-        );
-    }
-
-    #[test]
     fn tunnel_info_display_tunnel_type_uses_remote_addr_fallback() {
         let tunnel = TunnelInfo {
             tunnel_type: "tcp".to_string(),
@@ -668,17 +619,17 @@ mod tests {
     #[test]
     fn tunnel_info_prefers_resolved_remote_addr() {
         let tunnel = TunnelInfo {
-            tunnel_type: "txt-tcp".to_string(),
+            tunnel_type: "tcp".to_string(),
             local_addr: None,
             remote_addr: Some(Url {
-                url: "txt://et.example.com".to_string(),
+                url: "tcp://et.example.com:11010".to_string(),
             }),
             resolved_remote_addr: Some(Url {
                 url: "tcp://[2001:db8::3]:11010".to_string(),
             }),
         };
 
-        assert_eq!(tunnel.display_tunnel_type(), "txt-tcp6");
+        assert_eq!(tunnel.display_tunnel_type(), "tcp6");
         assert_eq!(
             tunnel.display_remote_addr().as_deref(),
             Some("tcp6://[2001:db8::3]:11010")

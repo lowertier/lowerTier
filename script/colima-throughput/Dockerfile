@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --quiet --locked --release -p lowertier \
         --bin lowertier-core --bin lowertier-cli \
-        --no-default-features --features tun,quic \
+        --no-default-features --features tun \
     && cp target/release/lowertier-core /tmp/lowertier-core \
     && cp target/release/lowertier-cli /tmp/lowertier-cli
 

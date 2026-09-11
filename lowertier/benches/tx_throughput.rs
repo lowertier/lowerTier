@@ -23,7 +23,7 @@ use lowertier::{
     tunnel::{
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         packet_def::ZCPacket,
-        ring::RingTunnelConnector,
+        ring::create_ring_tunnel_pair,
         tcp::TcpTunnelConnector,
         udp::UdpTunnelConnector,
     },
@@ -412,11 +412,23 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
         .await;
 
     match tunnel {
-        TunnelKind::Ring => inst_b
-            .get_conn_manager()
-            .add_connector(RingTunnelConnector::new(
-                format!("ring://{}", inst_a.id()).parse().unwrap(),
-            )),
+        TunnelKind::Ring => {
+            let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+            let client = inst_b.get_peer_manager();
+            tokio::spawn(async move {
+                client
+                    .add_client_tunnel(client_tunnel, false)
+                    .await
+                    .expect("ring benchmark client tunnel");
+            });
+            let server = inst_a.get_peer_manager();
+            tokio::spawn(async move {
+                server
+                    .add_tunnel_as_server(server_tunnel, true)
+                    .await
+                    .expect("ring benchmark server tunnel");
+            });
+        }
         TunnelKind::Tcp => inst_b
             .get_conn_manager()
             .add_connector(TcpTunnelConnector::new(

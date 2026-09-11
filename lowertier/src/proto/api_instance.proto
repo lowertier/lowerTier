@@ -281,26 +281,6 @@ service MappedListenerManageRpc {
       returns (ListMappedListenerResponse);
 }
 
-message VpnPortalInfo {
-  string vpn_type = 1;
-  string client_config = 2;
-  repeated string connected_clients = 3;
-}
-
-message GetVpnPortalInfoRequest { InstanceIdentifier instance = 1; }
-message GetVpnPortalInfoResponse { VpnPortalInfo vpn_portal_info = 1; }
-
-service VpnPortalRpc {
-  rpc GetVpnPortalInfo(GetVpnPortalInfoRequest)
-      returns (GetVpnPortalInfoResponse);
-}
-
-enum TcpProxyEntryTransportType {
-  TCP = 0;
-  KCP = 1;
-  QUIC = 2;
-}
-
 enum TcpProxyEntryState {
   Unknown = 0;
   // receive syn packet but not start connecting to dst
@@ -322,7 +302,7 @@ message TcpProxyEntry {
   common.SocketAddr dst = 2;
   uint64 start_time = 3;
   TcpProxyEntryState state = 4;
-  TcpProxyEntryTransportType transport_type = 5;
+  reserved 5;
 }
 
 message ListTcpProxyEntryRequest { InstanceIdentifier instance = 1; }

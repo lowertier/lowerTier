@@ -37,14 +37,7 @@ impl ProxyCidrsMonitor {
             routes.into_iter().collect()
         } else {
             // Collect proxy_cidrs from routes
-            let mut proxy_cidrs = peer_mgr.list_proxy_cidrs().await;
-
-            // Add VPN portal cidr to proxy_cidrs
-            if let Some(vpn_cfg) = global_ctx.config.get_vpn_portal_config() {
-                proxy_cidrs.insert(vpn_cfg.client_cidr);
-            }
-
-            proxy_cidrs
+            peer_mgr.list_proxy_cidrs().await
         };
 
         // Calculate diff

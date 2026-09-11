@@ -22,7 +22,9 @@ use crate::tunnel::{
     common::{BatchTunnelWrapper, FramedReader},
 };
 use anyhow::Context;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+#[cfg(test)]
+use bytes::BytesMut;
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
 use futures::{Future, FutureExt, Sink, Stream, StreamExt};
@@ -54,7 +56,9 @@ use tokio::{
 
 #[cfg(test)]
 use super::common::TcpZCPacketToBytes;
-use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket, ZCPacketType};
+#[cfg(test)]
+use super::packet_def::ZCPacketType;
+use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
 
 pub(crate) mod adaptive;
 pub(crate) mod brutal;
@@ -363,7 +367,10 @@ mod tls {
     };
     use sha2::Sha256;
 
-    use crate::{common::config::{Flags, NetworkIdentity}, tunnel::TunnelError};
+    use crate::{
+        common::config::{Flags, NetworkIdentity},
+        tunnel::TunnelError,
+    };
 
     const NETWORK_IDENTITY_LABEL: &[u8] = b"lowertier QUIC network identity v1";
     const ED25519_PKCS8_PREFIX: [u8; 16] = [
@@ -696,7 +703,8 @@ mod tls {
             let native = rustls_native_certs::load_native_certs();
             if native.certs.is_empty() {
                 return Err(TunnelError::InternalError(format!(
-                    "load native HTTP/3 TLS roots: {:?}", native.errors
+                    "load native HTTP/3 TLS roots: {:?}",
+                    native.errors
                 )));
             }
             let mut roots = RootCertStore::empty();
@@ -1207,11 +1215,7 @@ impl QuicEndpointManager {
     ///
     /// # Arguments
     /// * `addr`: listen address
-    fn server(
-        global_ctx: &ArcGlobalCtx,
-        mgr: &Arc<Self>,
-        addr: SocketAddr,
-    ) -> Result<Endpoint, TunnelError> {
+    fn server(mgr: &Arc<Self>, addr: SocketAddr) -> Result<Endpoint, TunnelError> {
         let socket_mark = mgr.flags.socket_mark;
 
         let (_pool, endpoint) = mgr.create(socket_mark, |mgr| {
@@ -1334,11 +1338,10 @@ impl QuicEndpointManager {
         policy: Arc<UnderlayPolicy>,
     ) -> Result<(Endpoint, Connection, bool), TunnelError> {
         let manager = Self::load(global_ctx);
-        Self::connect_with_manager(global_ctx, &manager, addr, bind_addrs, policy).await
+        Self::connect_with_manager(&manager, addr, bind_addrs, policy).await
     }
 
     async fn connect_with_manager(
-        global_ctx: &ArcGlobalCtx,
         manager: &Arc<Self>,
         addr: SocketAddr,
         bind_addrs: &[SocketAddr],
@@ -1401,28 +1404,25 @@ impl QuicEndpointManager {
             } else {
                 security.flags.quic_server_name.clone()
             };
-            let connecting = match endpoint.connect_with(
-                client_config(security.flags)?,
-                addr,
-                &server_name,
-            ) {
-                Ok(connecting) => connecting,
-                Err(ConnectError::EndpointStopping) => {
-                    self.remove_endpoint(&endpoint);
-                    endpoint_stopping_retries += 1;
-                    if endpoint_stopping_retries > max_endpoint_stopping_retries {
-                        return Err(anyhow::Error::new(ConnectError::EndpointStopping)
+            let connecting =
+                match endpoint.connect_with(client_config(security.flags)?, addr, &server_name) {
+                    Ok(connecting) => connecting,
+                    Err(ConnectError::EndpointStopping) => {
+                        self.remove_endpoint(&endpoint);
+                        endpoint_stopping_retries += 1;
+                        if endpoint_stopping_retries > max_endpoint_stopping_retries {
+                            return Err(anyhow::Error::new(ConnectError::EndpointStopping)
+                                .context(format!("failed to create connection to {}", addr))
+                                .into());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(anyhow::Error::new(error)
                             .context(format!("failed to create connection to {}", addr))
                             .into());
                     }
-                    continue;
-                }
-                Err(error) => {
-                    return Err(anyhow::Error::new(error)
-                        .context(format!("failed to create connection to {}", addr))
-                        .into());
-                }
-            };
+                };
             let connection = connecting
                 .await
                 .with_context(|| format!("failed to establish HTTP/3 QUIC to {addr}"))?;
@@ -1449,35 +1449,32 @@ impl QuicEndpointManager {
             } else {
                 security.flags.quic_server_name.clone()
             };
-            let connecting = match endpoint.connect_with(
-                client_config(security.flags)?,
-                addr,
-                &server_name,
-            ) {
-                Ok(connecting) => connecting,
-                Err(ConnectError::EndpointStopping) => {
-                    let local_addr = endpoint.local_addr().ok();
-                    let removed = self.remove_endpoint(&endpoint);
-                    endpoint_stopping_retries += 1;
-                    tracing::warn!(
-                        ?addr,
-                        ?local_addr,
-                        removed,
-                        "removed stopped quic endpoint and retry connect"
-                    );
-                    if endpoint_stopping_retries > max_endpoint_stopping_retries {
-                        return Err(anyhow::Error::new(ConnectError::EndpointStopping)
+            let connecting =
+                match endpoint.connect_with(client_config(security.flags)?, addr, &server_name) {
+                    Ok(connecting) => connecting,
+                    Err(ConnectError::EndpointStopping) => {
+                        let local_addr = endpoint.local_addr().ok();
+                        let removed = self.remove_endpoint(&endpoint);
+                        endpoint_stopping_retries += 1;
+                        tracing::warn!(
+                            ?addr,
+                            ?local_addr,
+                            removed,
+                            "removed stopped quic endpoint and retry connect"
+                        );
+                        if endpoint_stopping_retries > max_endpoint_stopping_retries {
+                            return Err(anyhow::Error::new(ConnectError::EndpointStopping)
+                                .context(format!("failed to create connection to {}", addr))
+                                .into());
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e)
                             .context(format!("failed to create connection to {}", addr))
                             .into());
                     }
-                    continue;
-                }
-                Err(e) => {
-                    return Err(anyhow::Error::new(e)
-                        .context(format!("failed to create connection to {}", addr))
-                        .into());
-                }
-            };
+                };
             let connection = connecting
                 .await
                 .with_context(|| format!("failed to establish HTTP/3 QUIC to {addr}"))?;
@@ -2764,7 +2761,8 @@ impl QuicTunnelListener {
         let remote_addr = conn.remote_address();
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), remote_addr)?;
         let flags = global_ctx.config.get_flags();
-        let admission = crate::tunnel::stealth_tls::ConnectIpAdmission::from_global_ctx(&global_ctx);
+        let admission =
+            crate::tunnel::stealth_tls::ConnectIpAdmission::from_global_ctx(&global_ctx);
         let fallback_root = match flags.quic_fallback_root.as_str() {
             "" => None,
             root => Some(std::path::PathBuf::from(root)),
@@ -2902,7 +2900,7 @@ impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
         let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
-        let endpoint = QuicEndpointManager::server(&self.global_ctx, &endpoint_manager, addr)?;
+        let endpoint = QuicEndpointManager::server(&endpoint_manager, addr)?;
         self.addr
             .set_port(Some(endpoint.local_addr()?.port()))
             .unwrap();
@@ -3006,7 +3004,6 @@ impl TunnelConnector for QuicTunnelConnector {
         let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
         let (endpoint, connection, transport_authenticated) =
             QuicEndpointManager::connect_with_manager(
-                &self.global_ctx,
                 &endpoint_manager,
                 addr,
                 &self.bind_addrs,
@@ -4513,10 +4510,7 @@ mod tests {
                 _source_permit: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
-            let payload = vec![
-                0x5a;
-                maximum - h3::datagram_overhead(0) - PEER_MANAGER_HEADER_SIZE
-            ];
+            let payload = vec![0x5a; maximum - h3::datagram_overhead(0) - PEER_MANAGER_HEADER_SIZE];
             let mut packet = ZCPacket::new_with_payload(&payload);
             packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 

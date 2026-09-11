@@ -41,7 +41,7 @@ use super::{
     create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
     udp_hole_punch,
 };
-use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
+use crate::tunnel::{FromUrl, IpScheme};
 use anyhow::Context;
 use rand::Rng;
 use socket2::Protocol;
@@ -159,12 +159,8 @@ async fn bind_direct_udp_socket(
 }
 
 fn mapped_listener_port(url: &url::Url) -> Option<u16> {
-    url.port().or_else(|| {
-        TunnelScheme::try_from(url)
-            .ok()
-            .and_then(|scheme| IpScheme::try_from(scheme).ok())
-            .map(IpScheme::default_port)
-    })
+    url.port()
+        .or_else(|| IpScheme::try_from(url).ok().map(IpScheme::default_port))
 }
 
 async fn resolve_mapped_listener_addrs(listener: &url::Url) -> Result<Vec<SocketAddr>, Error> {
@@ -327,7 +323,7 @@ impl DirectConnectorManagerData {
         preferred_src_ipv6: Option<Ipv6Addr>,
         remote_url: &url::Url,
     ) -> Result<(), Error> {
-        if !matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp)) {
+        if !matches!(IpScheme::try_from(remote_url), Ok(IpScheme::Udp)) {
             return Err(anyhow::anyhow!(
                 "udp hole punch packet only applies to udp listener: {}",
                 remote_url
@@ -482,7 +478,7 @@ impl DirectConnectorManagerData {
     async fn do_try_connect_to_ip(&self, dst_peer_id: PeerId, addr: String) -> Result<(), Error> {
         let connector = create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both).await?;
         let remote_url = connector.remote_url();
-        let (peer_id, conn_id) = if matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp)) {
+        let (peer_id, conn_id) = if matches!(IpScheme::try_from(&remote_url), Ok(IpScheme::Udp)) {
             match remote_url.host() {
                 Some(Host::Ipv6(_)) => {
                     self.connect_to_public_ipv6(dst_peer_id, &remote_url)
@@ -1034,7 +1030,7 @@ mod tests {
             wait_route_appear_with_cost,
         },
         proto::peer_rpc::GetIpListResponse,
-        tunnel::{IpScheme, TunnelScheme, matches_scheme},
+        tunnel::IpScheme,
     };
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -1135,7 +1131,7 @@ mod tests {
     fn udp_ipv6_url_matches_hole_punch_branch_condition() {
         let remote_url: url::Url = "udp://[2001:db8::1]:11010".parse().unwrap();
         let takes_udp_ipv6_hole_punch_branch =
-            matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp))
+            matches!(IpScheme::try_from(&remote_url), Ok(IpScheme::Udp))
                 && matches!(remote_url.host(), Some(url::Host::Ipv6(_)));
 
         assert!(takes_udp_ipv6_hole_punch_branch);
@@ -1143,7 +1139,6 @@ mod tests {
 
     #[test]
     fn mapped_listener_port_uses_ip_scheme_defaults() {
-        #[cfg(feature = "websocket")]
         {
             assert_eq!(
                 mapped_listener_port(&"ws://example.com".parse().unwrap()),
@@ -1166,7 +1161,6 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_mapped_listener_addrs_uses_default_ports() {
-        #[cfg(feature = "websocket")]
         {
             let wss_addrs = resolve_mapped_listener_addrs(&"wss://127.0.0.1".parse().unwrap())
                 .await
@@ -1279,7 +1273,7 @@ mod tests {
         dm_a.run_as_client();
         dm_c.run_as_server();
 
-        let port = if proto == "wg" { 11040 } else { 11041 };
+        let port = 11041;
         if !ipv6 {
             p_c.get_global_ctx().config.set_listeners(vec![
                 format!("{}://0.0.0.0:{}", proto, port).parse().unwrap(),
@@ -1309,13 +1303,6 @@ mod tests {
         #[values("true", "false")] ipv6: bool,
     ) {
         run_direct_connector_basic_test(proto, ipv6).await;
-    }
-
-    #[cfg(feature = "wireguard")]
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn direct_connector_wireguard_basic_test(#[values("true", "false")] ipv6: bool) {
-        run_direct_connector_basic_test("wg", ipv6).await;
     }
 
     #[tokio::test]

@@ -213,7 +213,10 @@ async fn origin_file(root: &Path, uri_path: &str) -> Option<(Bytes, &'static str
     Some((Bytes::from(body), content_type))
 }
 
-async fn normal_origin_response(request: &http::Request<()>, root: Option<&Path>) -> OriginResponse {
+async fn normal_origin_response(
+    request: &http::Request<()>,
+    root: Option<&Path>,
+) -> OriginResponse {
     let method_allows_body = matches!(*request.method(), http::Method::GET | http::Method::HEAD);
     if method_allows_body
         && let Some(root) = root
@@ -428,9 +431,10 @@ pub(super) fn decode_datagram(bytes: Bytes, stream_id: u64) -> Result<ZCPacket, 
     let (quarter_stream_id, quarter_length) = decode_varint(&bytes).ok_or_else(|| {
         TunnelError::InvalidPacket("HTTP/3 DATAGRAM has no Quarter Stream ID".to_owned())
     })?;
-    let (context_id, context_length) = decode_varint(&bytes[quarter_length..]).ok_or_else(|| {
-        TunnelError::InvalidPacket("CONNECT-IP DATAGRAM has no Context ID".to_owned())
-    })?;
+    let (context_id, context_length) =
+        decode_varint(&bytes[quarter_length..]).ok_or_else(|| {
+            TunnelError::InvalidPacket("CONNECT-IP DATAGRAM has no Context ID".to_owned())
+        })?;
     if quarter_stream_id != stream_id / 4 || context_id != DATAGRAM_CONTEXT_ID {
         return Err(TunnelError::InvalidPacket(
             "CONNECT-IP DATAGRAM has an unexpected request context".to_owned(),

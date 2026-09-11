@@ -10,14 +10,10 @@ use std::{
 };
 
 use crossbeam::atomic::AtomicCell;
-#[cfg(feature = "kcp")]
-use kcp_sys::{endpoint::KcpEndpoint, stream::KcpStream};
 use quanta::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
-#[cfg(feature = "kcp")]
-use crate::gateway::kcp_proxy::NatDstKcpConnector;
 use crate::{
     common::{config::PortForwardConfig, global_ctx::GlobalCtxEvent, join_joinset_background},
     gateway::{
@@ -51,8 +47,6 @@ use tokio::{
     time::timeout,
 };
 
-#[cfg(feature = "kcp")]
-use super::tcp_proxy::NatDstConnector as _;
 use crate::tunnel::common::bind;
 use crate::{
     common::{error::Error, global_ctx::GlobalCtx},
@@ -93,8 +87,6 @@ impl SocksUdpSocket {
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
-    #[cfg(feature = "kcp")]
-    Kcp(KcpStream),
 }
 
 impl AsyncRead for SocksTcpStream {
@@ -106,8 +98,6 @@ impl AsyncRead for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -121,8 +111,6 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
         }
     }
 
@@ -133,8 +121,6 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
         }
     }
 
@@ -145,8 +131,6 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -338,41 +322,7 @@ impl Drop for SmolTcpConnector {
     }
 }
 
-#[cfg(feature = "kcp")]
-struct Socks5KcpConnector {
-    kcp_endpoint: Weak<KcpEndpoint>,
-    peer_mgr: Weak<PeerManager>,
-    src_addr: SocketAddr,
-}
-
-#[cfg(feature = "kcp")]
-#[async_trait::async_trait]
-impl AsyncTcpConnector for Socks5KcpConnector {
-    type S = SocksTcpStream;
-
-    async fn tcp_connect(
-        &self,
-        addr: SocketAddr,
-        _timeout_s: u64,
-    ) -> crate::gateway::fast_socks5::Result<SocksTcpStream> {
-        let Some(kcp_endpoint) = self.kcp_endpoint.upgrade() else {
-            return Err(anyhow::anyhow!("kcp endpoint is not ready").into());
-        };
-        let c = NatDstKcpConnector {
-            kcp_endpoint,
-            peer_mgr: self.peer_mgr.clone(),
-        };
-        let ret = c
-            .connect(self.src_addr, addr)
-            .await
-            .map_err(super::fast_socks5::SocksError::Other)?;
-        Ok(SocksTcpStream::Kcp(ret))
-    }
-}
-
 struct Socks5AutoConnector {
-    #[cfg(feature = "kcp")]
-    kcp_endpoint: Option<Weak<KcpEndpoint>>,
     peer_mgr: Weak<PeerManager>,
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
@@ -638,43 +588,6 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             ));
         }
 
-        let dst_allow_kcp = peer_mgr_arc.check_allow_kcp_to_dst(&addr.ip()).await;
-        tracing::debug!("dst_allow_kcp: {:?}", dst_allow_kcp);
-
-        #[cfg(feature = "kcp")]
-        let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync> =
-            match (&self.kcp_endpoint, dst_allow_kcp) {
-                (Some(kcp_endpoint), true) => {
-                    tracing::trace!(
-                        ?addr,
-                        src_addr = ?self.src_addr,
-                        dst_peer_count = dst_peers.map(Vec::len),
-                        "socks5 auto connector selected kcp"
-                    );
-                    Box::new(Socks5KcpConnector {
-                        kcp_endpoint: kcp_endpoint.clone(),
-                        peer_mgr: self.peer_mgr.clone(),
-                        src_addr: self.src_addr,
-                    })
-                }
-                (_, _) => {
-                    tracing::trace!(
-                        ?addr,
-                        src_addr = ?self.src_addr,
-                        dst_peer_count = dst_peers.map(Vec::len),
-                        dst_allow_kcp,
-                        has_kcp_endpoint = self.kcp_endpoint.is_some(),
-                        "socks5 auto connector selected smoltcp"
-                    );
-                    Box::new(SmolTcpConnector {
-                        net: self.smoltcp_net.clone().unwrap(),
-                        entries: self.entries.clone(),
-                        entry_count: self.entry_count.clone(),
-                        current_entry: std::sync::Mutex::new(None),
-                    })
-                }
-            };
-        #[cfg(not(feature = "kcp"))]
         let connector = {
             tracing::trace!(
                 ?addr,
@@ -1003,9 +916,6 @@ pub struct Socks5Server {
     udp_client_map: Arc<DashMap<UdpClientKey, Arc<UdpClientInfo>>>,
     udp_forward_task: Arc<DashMap<UdpClientKey, AbortOnDropHandle<()>>>,
 
-    #[cfg(feature = "kcp")]
-    kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
-
     userspace_proxy_enabled: Arc<AtomicBool>,
     #[cfg(feature = "ffi-dataplane")]
     data_plane_refs: Arc<AtomicUsize>,
@@ -1025,14 +935,9 @@ impl PeerPacketFilter for Socks5Server {
     }
 
     fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
-        packet.peer_manager_header().is_some_and(|header| {
-            matches!(
-                header.packet_type,
-                x if x == PacketType::Data as u8
-                    || x == PacketType::DataWithKcpSrcModified as u8
-                    || x == PacketType::DataWithQuicSrcModified as u8
-            )
-        })
+        packet
+            .peer_manager_header()
+            .is_some_and(|header| header.packet_type == PacketType::Data as u8)
     }
 
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
@@ -1041,12 +946,7 @@ impl PeerPacketFilter for Socks5Server {
         if entry_count == 0 && !userspace_proxy_enabled && self.entries.is_empty() {
             if tracing::enabled!(tracing::Level::TRACE)
                 && let Some(hdr) = packet.peer_manager_header()
-                && matches!(
-                    hdr.packet_type,
-                    x if x == PacketType::Data as u8
-                        || x == PacketType::DataWithKcpSrcModified as u8
-                        || x == PacketType::DataWithQuicSrcModified as u8
-                )
+                && hdr.packet_type == PacketType::Data as u8
             {
                 if let Some(ipv4) = Ipv4Packet::new(packet.payload()) {
                     let (tcp_src_port, tcp_dst_port, tcp_flags) =
@@ -1091,21 +991,7 @@ impl PeerPacketFilter for Socks5Server {
             return Some(packet);
         }
         let hdr = packet.peer_manager_header().unwrap();
-        let is_modified_src_packet = matches!(
-            hdr.packet_type,
-            x if x == PacketType::DataWithKcpSrcModified as u8
-                || x == PacketType::DataWithQuicSrcModified as u8
-        );
-        if hdr.packet_type != PacketType::Data as u8 && !is_modified_src_packet {
-            return Some(packet);
-        }
-        if is_modified_src_packet && hdr.from_peer_id != hdr.to_peer_id {
-            tracing::trace!(
-                packet_type = hdr.packet_type,
-                from_peer_id = hdr.from_peer_id.get(),
-                to_peer_id = hdr.to_peer_id.get(),
-                "socks5 passed non-loopback modified-source packet from peer"
-            );
+        if hdr.packet_type != PacketType::Data as u8 {
             return Some(packet);
         }
 
@@ -1281,15 +1167,7 @@ impl Socks5Server {
         let Some(header) = packet.peer_manager_header() else {
             return StackPacketAction::Pass;
         };
-        let modified_source = matches!(
-            header.packet_type,
-            value if value == PacketType::DataWithKcpSrcModified as u8
-                || value == PacketType::DataWithQuicSrcModified as u8
-        );
-        if header.packet_type != PacketType::Data as u8 && !modified_source {
-            return StackPacketAction::Pass;
-        }
-        if modified_source && header.from_peer_id != header.to_peer_id {
+        if header.packet_type != PacketType::Data as u8 {
             return StackPacketAction::Pass;
         }
         let Some(ipv4) = Ipv4Packet::new(packet.payload()) else {
@@ -1377,9 +1255,6 @@ impl Socks5Server {
 
             udp_client_map: Arc::new(DashMap::new()),
             udp_forward_task: Arc::new(DashMap::new()),
-
-            #[cfg(feature = "kcp")]
-            kcp_endpoint: Mutex::new(None),
 
             userspace_proxy_enabled: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "ffi-dataplane")]
@@ -1508,14 +1383,7 @@ impl Socks5Server {
         });
     }
 
-    pub async fn run(
-        self: &Arc<Self>,
-        #[cfg(feature = "kcp")] kcp_endpoint: Option<Weak<KcpEndpoint>>,
-    ) -> Result<(), Error> {
-        #[cfg(feature = "kcp")]
-        {
-            *self.kcp_endpoint.lock().await = kcp_endpoint.clone();
-        }
+    pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
         let proxy_listeners = plan_proxy_listeners(
             self.global_ctx.config.get_socks5_portal(),
             self.global_ctx.config.get_outbound_http_proxy(),
@@ -1539,8 +1407,6 @@ impl Socks5Server {
                 let peer_manager = self.peer_manager.clone();
                 let net = self.net.clone();
                 let protocols = proxy_listener.protocols;
-                #[cfg(feature = "kcp")]
-                let listener_kcp_endpoint = kcp_endpoint.clone();
                 self.tasks.lock().unwrap().spawn(async move {
                     loop {
                         match listener.accept().await {
@@ -1553,8 +1419,6 @@ impl Socks5Server {
                                         .as_ref()
                                         .map(|net| net.smoltcp_net.clone()),
                                     entries: entries.clone(),
-                                    #[cfg(feature = "kcp")]
-                                    kcp_endpoint: listener_kcp_endpoint.clone(),
                                     peer_mgr: peer_manager.clone(),
                                     src_addr: addr,
                                     inner_connector: parking_lot::Mutex::new(None),
@@ -1689,8 +1553,6 @@ impl Socks5Server {
         let tasks = Arc::new(std::sync::Mutex::new(JoinSet::new()));
         join_joinset_background(tasks.clone(), "tcp port forward".to_string());
         let forward_tasks = tasks;
-        #[cfg(feature = "kcp")]
-        let kcp_endpoint = self.kcp_endpoint.lock().await.clone();
         let peer_mgr = self.peer_manager.clone();
         let cancel_token = CancellationToken::new();
         self.cancel_tokens
@@ -1740,8 +1602,6 @@ impl Socks5Server {
                 );
 
                 let connector = Socks5AutoConnector {
-                    #[cfg(feature = "kcp")]
-                    kcp_endpoint: kcp_endpoint.clone(),
                     peer_mgr: peer_mgr.clone(),
                     entries: entries.clone(),
                     smoltcp_net,
@@ -2100,144 +1960,6 @@ mod tests {
         }
 
         buf
-    }
-
-    #[tokio::test]
-    async fn socks5_consumes_modified_data_when_entry_matches() {
-        let peer_manager = create_mock_peer_manager().await;
-        let server = Socks5Server::new(peer_manager.get_global_ctx(), peer_manager, None);
-
-        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40000);
-        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22);
-        let entry = Socks5Entry {
-            src: local,
-            dst: remote,
-            entry_type: TCP_ENTRY,
-        };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        insert_entry_and_increment_count(
-            &server.entries,
-            &server.entry_count,
-            entry,
-            Socks5EntryData::Tcp(listener),
-        );
-
-        for packet_type in [
-            PacketType::DataWithKcpSrcModified,
-            PacketType::DataWithQuicSrcModified,
-        ] {
-            let mut packet = ZCPacket::new_with_payload(&build_tcp_packet(remote, local));
-            packet.fill_peer_manager_hdr(1, 1, packet_type as u8);
-
-            let result = server.try_process_packet_from_peer(packet).await;
-            assert!(result.is_none());
-
-            let mut receiver = server.packet_recv.lock().await;
-            let received = receiver.try_recv().unwrap();
-            assert_eq!(
-                received[0].peer_manager_header().unwrap().packet_type,
-                packet_type as u8
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn socks5_delivers_matching_input_as_one_owned_batch() {
-        let peer_manager = create_mock_peer_manager().await;
-        let server = Socks5Server::new(peer_manager.get_global_ctx(), peer_manager, None);
-        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40000);
-        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        insert_entry_and_increment_count(
-            &server.entries,
-            &server.entry_count,
-            Socks5Entry {
-                src: local,
-                dst: remote,
-                entry_type: TCP_ENTRY,
-            },
-            Socks5EntryData::Tcp(listener),
-        );
-        let mut batch = PacketBatch::new();
-        for packet_type in [
-            PacketType::DataWithKcpSrcModified,
-            PacketType::DataWithQuicSrcModified,
-        ] {
-            let mut packet = ZCPacket::new_with_payload(&build_tcp_packet(remote, local));
-            packet.fill_peer_manager_hdr(1, 1, packet_type as u8);
-            batch.try_push(packet).unwrap();
-        }
-
-        let remaining = server.try_process_batch_from_peer(batch).await;
-
-        assert!(remaining.is_empty());
-        let mut receiver = server.packet_recv.lock().await;
-        let received = receiver.try_recv().unwrap();
-        assert_eq!(received.len(), 2);
-        assert!(receiver.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn socks5_passes_through_unmatched_or_malformed_modified_data() {
-        let peer_manager = create_mock_peer_manager().await;
-        let server = Socks5Server::new(peer_manager.get_global_ctx(), peer_manager, None);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        insert_entry_and_increment_count(
-            &server.entries,
-            &server.entry_count,
-            Socks5Entry {
-                src: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40000),
-                dst: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22),
-                entry_type: TCP_ENTRY,
-            },
-            Socks5EntryData::Tcp(listener),
-        );
-
-        let unmatched_local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40001);
-        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22);
-        let mut unmatched_packet =
-            ZCPacket::new_with_payload(&build_tcp_packet(remote, unmatched_local));
-        unmatched_packet.fill_peer_manager_hdr(1, 2, PacketType::DataWithKcpSrcModified as u8);
-        let result = server.try_process_packet_from_peer(unmatched_packet).await;
-        assert!(result.is_some());
-
-        let mut malformed_packet = ZCPacket::new_with_payload(&[0u8; 8]);
-        malformed_packet.fill_peer_manager_hdr(1, 2, PacketType::DataWithQuicSrcModified as u8);
-        let result = server.try_process_packet_from_peer(malformed_packet).await;
-        assert!(result.is_some());
-
-        let mut receiver = server.packet_recv.lock().await;
-        assert!(receiver.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn socks5_passes_through_non_loopback_modified_data_even_when_entry_matches() {
-        let peer_manager = create_mock_peer_manager().await;
-        let server = Socks5Server::new(peer_manager.get_global_ctx(), peer_manager, None);
-
-        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40000);
-        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22);
-        let entry = Socks5Entry {
-            src: local,
-            dst: remote,
-            entry_type: TCP_ENTRY,
-        };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        insert_entry_and_increment_count(
-            &server.entries,
-            &server.entry_count,
-            entry,
-            Socks5EntryData::Tcp(listener),
-        );
-
-        let mut packet = ZCPacket::new_with_payload(&build_tcp_packet(remote, local));
-        packet.fill_peer_manager_hdr(1, 2, PacketType::DataWithKcpSrcModified as u8);
-
-        let result = server.try_process_packet_from_peer(packet).await;
-        assert!(result.is_some());
-
-        let mut receiver = server.packet_recv.lock().await;
-        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

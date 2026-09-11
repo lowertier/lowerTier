@@ -5,7 +5,10 @@
 //! - Credential nodes use X25519 keypairs to authenticate without network_secret
 //! - Credentials can be revoked and propagate across the network
 
+use base64::{Engine as _, prelude::BASE64_STANDARD};
+use rand::rngs::OsRng;
 use std::time::Duration;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{
     common::{
@@ -15,7 +18,6 @@ use crate::{
     instance::instance::Instance,
     peers::credential_manager::CredentialManager,
     proto::common::SecureModeConfig,
-    tests::three_node::generate_secure_mode_config,
     tunnel::{common::tests::wait_for_condition, tcp::TcpTunnelConnector, udp::UdpTunnelConnector},
 };
 
@@ -26,6 +28,19 @@ use rstest::rstest;
 const PUBLIC_SERVER_NETWORK_NAME: &str = "__public_server__";
 const PUBLIC_SERVER_SHARED_SECRET: &str = "public-server-shared-secret";
 const NEED_P2P_ADMIN_NETWORK_NAME: &str = "need_p2p_credential_test_network";
+
+fn generate_secure_mode_config() -> SecureModeConfig {
+    let private = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&private);
+    SecureModeConfig {
+        enabled: true,
+        local_private_key: Some(BASE64_STANDARD.encode(private.as_bytes())),
+        local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
+        credential_bundle: None,
+        credential_root_fingerprint: Vec::new(),
+        credential_certificate: Vec::new(),
+    }
+}
 
 /// Prepare network namespaces for credential tests
 /// Topology:
@@ -409,7 +424,6 @@ async fn credential_peers_p2p_to_need_p2p_admin_through_public_server(
     run_credential_peers_p2p_to_need_p2p_admin_through_public_server(admin_listener_scheme).await;
 }
 
-#[cfg(feature = "websocket")]
 #[tokio::test]
 #[serial_test::serial]
 async fn credential_peers_p2p_to_need_p2p_admin_through_public_server_wss() {

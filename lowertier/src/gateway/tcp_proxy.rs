@@ -32,7 +32,7 @@ use crate::peers::peer_manager::PeerManager;
 use crate::peers::{NicPacketFilter, PeerPacketFilter};
 use crate::proto::api::instance::{
     ListTcpProxyEntryRequest, ListTcpProxyEntryResponse, TcpProxyEntry, TcpProxyEntryState,
-    TcpProxyEntryTransportType, TcpProxyRpc,
+    TcpProxyRpc,
 };
 use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
@@ -44,76 +44,6 @@ use super::CidrSet;
 
 #[cfg(feature = "smoltcp")]
 use super::tokio_smoltcp::{self, Net, NetConfig, channel_device};
-
-#[async_trait::async_trait]
-pub(crate) trait NatDstConnector: Send + Sync + Clone + 'static {
-    type DstStream: AsyncRead + AsyncWrite + Unpin + Send;
-
-    async fn connect(&self, src: SocketAddr, dst: SocketAddr) -> anyhow::Result<Self::DstStream>;
-    fn check_packet_from_peer_fast(&self, cidr_set: &CidrSet, global_ctx: &GlobalCtx) -> bool;
-    fn check_packet_from_peer(
-        &self,
-        cidr_set: &CidrSet,
-        global_ctx: &GlobalCtx,
-        hdr: &PeerManagerHeader,
-        ipv4: &Ipv4Addr,
-        real_dst_ip: &mut Ipv4Addr,
-    ) -> bool;
-    fn transport_type(&self) -> TcpProxyEntryTransportType;
-}
-
-#[derive(Debug, Clone)]
-pub struct NatDstTcpConnector;
-
-#[async_trait::async_trait]
-impl NatDstConnector for NatDstTcpConnector {
-    type DstStream = TcpStream;
-    async fn connect(
-        &self,
-        _src: SocketAddr,
-        nat_dst: SocketAddr,
-    ) -> anyhow::Result<Self::DstStream> {
-        let socket = TcpSocket::new_v4()
-            .inspect_err(|error| log::error!(?error, "create v4 socket failed"))?;
-
-        let stream = timeout(Duration::from_secs(10), socket.connect(nat_dst))
-            .await?
-            .with_context(|| format!("connect to nat dst failed: {:?}", nat_dst))?;
-
-        prepare_kernel_tcp_socket(&stream)?;
-
-        Ok(stream)
-    }
-
-    fn check_packet_from_peer_fast(&self, cidr_set: &CidrSet, global_ctx: &GlobalCtx) -> bool {
-        !cidr_set.is_empty() || global_ctx.enable_exit_node() || global_ctx.no_tun()
-    }
-
-    fn check_packet_from_peer(
-        &self,
-        cidr_set: &CidrSet,
-        global_ctx: &GlobalCtx,
-        hdr: &PeerManagerHeader,
-        ipv4: &Ipv4Addr,
-        real_dst_ip: &mut Ipv4Addr,
-    ) -> bool {
-        let is_exit_node = hdr.is_exit_node();
-
-        if !(cidr_set.contains_v4(*ipv4, real_dst_ip)
-            || is_exit_node
-            || global_ctx.no_tun()
-                && Some(*ipv4) == global_ctx.get_ipv4().as_ref().map(Ipv4Inet::address))
-        {
-            return false;
-        }
-
-        true
-    }
-
-    fn transport_type(&self) -> TcpProxyEntryTransportType {
-        TcpProxyEntryTransportType::Tcp
-    }
-}
 
 type NatDstEntryState = TcpProxyEntryState;
 
@@ -143,13 +73,12 @@ impl NatDstEntry {
         }
     }
 
-    fn parse_as_pb(&self, transport_type: TcpProxyEntryTransportType) -> TcpProxyEntry {
+    fn parse_as_pb(&self) -> TcpProxyEntry {
         TcpProxyEntry {
             src: Some(self.src.into()),
             dst: Some(self.real_dst.into()),
             start_time: self.start_time_local.timestamp() as u64,
             state: self.state.load().into(),
-            transport_type: transport_type.into(),
         }
     }
 }
@@ -318,7 +247,7 @@ type ConnSockMap = Arc<DashMap<uuid::Uuid, ArcNatDstEntry>>;
 type AddrConnSockMap = Arc<DashMap<SocketAddr, ArcNatDstEntry>>;
 
 #[derive(Debug)]
-pub struct TcpProxy<C: NatDstConnector> {
+pub struct TcpProxy {
     global_ctx: Arc<GlobalCtx>,
     peer_manager: Weak<PeerManager>,
     local_port: AtomicU16,
@@ -338,15 +267,12 @@ pub struct TcpProxy<C: NatDstConnector> {
     #[cfg(feature = "smoltcp")]
     smoltcp_listener_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<SmolTcpAcceptResult>>>,
     enable_smoltcp: Arc<AtomicBool>,
-
-    connector: C,
 }
 
 #[async_trait::async_trait]
-impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
+impl PeerPacketFilter for TcpProxy {
     fn is_interested_in_direct_nic_batch(&self, batch: &crate::tunnel::batch::PacketBatch) -> bool {
-        self.connector
-            .check_packet_from_peer_fast(&self.cidr_set, &self.global_ctx)
+        Self::check_packet_from_peer_fast(&self.cidr_set, &self.global_ctx)
             && batch.first().is_some_and(|packet| {
                 packet
                     .peer_manager_header()
@@ -355,14 +281,9 @@ impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
     }
 
     fn is_interested_in_packet_from_peer(&self, packet: &ZCPacket) -> bool {
-        packet.peer_manager_header().is_some_and(|header| {
-            matches!(
-                header.packet_type,
-                x if x == PacketType::Data as u8
-                    || x == PacketType::DataWithKcpSrcModified as u8
-                    || x == PacketType::DataWithQuicSrcModified as u8
-            )
-        })
+        packet
+            .peer_manager_header()
+            .is_some_and(|header| header.packet_type == PacketType::Data as u8)
     }
 
     async fn try_process_packet_from_peer(&self, mut packet: ZCPacket) -> Option<ZCPacket> {
@@ -385,7 +306,7 @@ impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
 }
 
 #[async_trait::async_trait]
-impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
+impl NicPacketFilter for TcpProxy {
     async fn try_process_packet_from_nic(&self, zc_packet: &mut ZCPacket) -> bool {
         let Some(my_ipv4_inet) = self.get_local_inet() else {
             return false;
@@ -412,7 +333,6 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
         ));
         let mut need_transform_dst = false;
 
-        // for kcp proxy, the src ip of nat entry will be converted from my ip to fake ip
         // here we need to convert it back
         if !self.is_smoltcp_enabled() && dst_addr.ip() == Self::get_fake_local_ipv4(&my_ipv4_inet) {
             dst_addr.set_ip(IpAddr::V4(my_ipv4));
@@ -464,8 +384,36 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
     }
 }
 
-impl<C: NatDstConnector> TcpProxy<C> {
-    pub fn new(peer_manager: Arc<PeerManager>, connector: C) -> Arc<Self> {
+impl TcpProxy {
+    async fn connect_nat_dst(nat_dst: SocketAddr) -> anyhow::Result<TcpStream> {
+        let socket = TcpSocket::new_v4()
+            .inspect_err(|error| log::error!(?error, "create v4 socket failed"))?;
+        let stream = timeout(Duration::from_secs(10), socket.connect(nat_dst))
+            .await?
+            .with_context(|| format!("connect to nat dst failed: {:?}", nat_dst))?;
+        prepare_kernel_tcp_socket(&stream)?;
+        Ok(stream)
+    }
+
+    fn check_packet_from_peer_fast(cidr_set: &CidrSet, global_ctx: &GlobalCtx) -> bool {
+        !cidr_set.is_empty() || global_ctx.enable_exit_node() || global_ctx.no_tun()
+    }
+
+    fn check_packet_from_peer(
+        cidr_set: &CidrSet,
+        global_ctx: &GlobalCtx,
+        hdr: &PeerManagerHeader,
+        ipv4: &Ipv4Addr,
+        real_dst_ip: &mut Ipv4Addr,
+    ) -> bool {
+        let is_exit_node = hdr.is_exit_node();
+        cidr_set.contains_v4(*ipv4, real_dst_ip)
+            || is_exit_node
+            || global_ctx.no_tun()
+                && Some(*ipv4) == global_ctx.get_ipv4().as_ref().map(Ipv4Inet::address)
+    }
+
+    pub fn new(peer_manager: Arc<PeerManager>) -> Arc<Self> {
         let (smoltcp_stack_sender, smoltcp_stack_receiver) = mpsc::channel::<ZCPacket>(1000);
         let global_ctx = peer_manager.get_global_ctx();
 
@@ -491,8 +439,6 @@ impl<C: NatDstConnector> TcpProxy<C> {
             smoltcp_listener_tx: std::sync::Mutex::new(None),
 
             enable_smoltcp: Arc::new(AtomicBool::new(true)),
-
-            connector,
         })
     }
 
@@ -677,7 +623,6 @@ impl<C: NatDstConnector> TcpProxy<C> {
         let syn_map = self.syn_map.clone();
         let conn_map = self.conn_map.clone();
         let addr_conn_map = self.addr_conn_map.clone();
-        let connector = self.connector.clone();
         let accept_task = async move {
             let conn_map = conn_map.clone();
             loop {
@@ -730,7 +675,6 @@ impl<C: NatDstConnector> TcpProxy<C> {
                 };
 
                 tasks.lock().unwrap().spawn(Self::connect_to_nat_dst(
-                    connector.clone(),
                     global_ctx.clone(),
                     tcp_stream,
                     conn_map.clone(),
@@ -763,7 +707,6 @@ impl<C: NatDstConnector> TcpProxy<C> {
     }
 
     async fn connect_to_nat_dst(
-        connector: C,
         global_ctx: ArcGlobalCtx,
         src_tcp_stream: ProxyTcpStream,
         conn_map: ConnSockMap,
@@ -798,9 +741,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
             .get_counter(
                 MetricName::TcpProxyConnect,
                 LabelSet::new()
-                    .with_label_type(LabelType::Protocol(
-                        connector.transport_type().as_str_name().to_string(),
-                    ))
+                    .with_label_type(LabelType::Protocol("TCP".to_string()))
                     .with_label_type(LabelType::DstIp(nat_dst.ip().to_string()))
                     .with_label_type(LabelType::MappedDstIp(
                         nat_entry.mapped_dst.ip().to_string(),
@@ -809,7 +750,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
             .inc();
 
         let _guard = global_ctx.net_ns.guard();
-        let Ok(dst_tcp_stream) = connector.connect(nat_entry.src, nat_dst).await else {
+        let Ok(dst_tcp_stream) = Self::connect_nat_dst(nat_dst).await else {
             tracing::error!("connect to dst failed: {:?}", nat_entry);
             nat_entry.state.store(NatDstEntryState::Closed);
             Self::remove_entry_from_all_conn_map(conn_map, addr_conn_map, nat_entry);
@@ -834,7 +775,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
     async fn handle_nat_connection(
         mut src_tcp_stream: ProxyTcpStream,
-        mut dst_tcp_stream: C::DstStream,
+        mut dst_tcp_stream: TcpStream,
         conn_map: ConnSockMap,
         addr_conn_map: AddrConnSockMap,
         nat_entry: ArcNatDstEntry,
@@ -900,10 +841,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
     }
 
     async fn try_handle_peer_packet(&self, packet: &mut ZCPacket) -> Option<()> {
-        if !self
-            .connector
-            .check_packet_from_peer_fast(&self.cidr_set, &self.global_ctx)
-        {
+        if !Self::check_packet_from_peer_fast(&self.cidr_set, &self.global_ctx) {
             return None;
         }
 
@@ -911,11 +849,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
         let ipv4_addr = ipv4_inet.address();
         {
             let hdr = packet.peer_manager_header().unwrap();
-            if (hdr.packet_type != PacketType::Data as u8
-                && hdr.packet_type != PacketType::DataWithKcpSrcModified as u8
-                && hdr.packet_type != PacketType::DataWithQuicSrcModified as u8)
-                || hdr.is_no_proxy()
-            {
+            if hdr.packet_type != PacketType::Data as u8 || hdr.is_no_proxy() {
                 return None;
             };
         }
@@ -934,7 +868,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
         let mut real_dst_ip = origin_ip;
         let hdr = packet.mut_peer_manager_header().unwrap();
 
-        if !self.connector.check_packet_from_peer(
+        if !Self::check_packet_from_peer(
             &self.cidr_set,
             &self.global_ctx,
             hdr,
@@ -1013,28 +947,23 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
     pub fn list_proxy_entries(&self) -> Vec<TcpProxyEntry> {
         let mut entries: Vec<TcpProxyEntry> = Vec::new();
-        let transport_type = self.connector.transport_type();
         for entry in self.syn_map.iter() {
-            entries.push(entry.value().as_ref().parse_as_pb(transport_type));
+            entries.push(entry.value().as_ref().parse_as_pb());
         }
         for entry in self.conn_map.iter() {
-            entries.push(entry.value().as_ref().parse_as_pb(transport_type));
+            entries.push(entry.value().as_ref().parse_as_pb());
         }
         entries
-    }
-
-    pub fn get_transport_type(&self) -> TcpProxyEntryTransportType {
-        self.connector.transport_type()
     }
 }
 
 #[derive(Clone)]
-pub struct TcpProxyRpcService<C: NatDstConnector> {
-    tcp_proxy: Weak<TcpProxy<C>>,
+pub struct TcpProxyRpcService {
+    tcp_proxy: Weak<TcpProxy>,
 }
 
 #[async_trait::async_trait]
-impl<C: NatDstConnector> TcpProxyRpc for TcpProxyRpcService<C> {
+impl TcpProxyRpc for TcpProxyRpcService {
     type Controller = BaseController;
     async fn list_tcp_proxy_entry(
         &self,
@@ -1049,8 +978,8 @@ impl<C: NatDstConnector> TcpProxyRpc for TcpProxyRpcService<C> {
     }
 }
 
-impl<C: NatDstConnector> TcpProxyRpcService<C> {
-    pub fn new(tcp_proxy: Arc<TcpProxy<C>>) -> Self {
+impl TcpProxyRpcService {
+    pub fn new(tcp_proxy: Arc<TcpProxy>) -> Self {
         Self {
             tcp_proxy: Arc::downgrade(&tcp_proxy),
         }

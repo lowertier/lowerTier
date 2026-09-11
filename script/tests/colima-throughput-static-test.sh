@@ -62,7 +62,7 @@ grep -q 'rsync -a --relative' "$builder"
 ! grep -qE '(^|[[:space:]])target([[:space:]\\]|$)' "$builder"
 grep -q 'iperf3' "$dockerfile"
 grep -q 'ethtool' "$dockerfile"
-grep -q -- '--features tun,quic' "$dockerfile"
+grep -q -- '--features tun' "$dockerfile"
 grep -q 'substrate' "$readme"
 grep -q '10GbE' "$readme"
 

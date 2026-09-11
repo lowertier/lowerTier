@@ -222,10 +222,10 @@ pub fn client_server_name(
     ServerName::try_from(name).map_err(|_| TunnelError::InvalidProtocol("Invalid SNI".to_string()))
 }
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::common::global_ctx::ArcGlobalCtx;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD};
 use hmac::Mac as _;
-use crate::common::global_ctx::ArcGlobalCtx;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const QUIC_ROUTING_CID_BYTES: usize = 8;
 const QUIC_ROUTING_NONCE_BYTES: usize = 4;
@@ -275,7 +275,6 @@ pub(crate) fn valid_routing_cid_bytes(cid: &[u8], secret: &[u8], now: SystemTime
         .is_ok()
     })
 }
-
 
 #[derive(Clone)]
 pub(crate) struct ConnectIpAdmission {
@@ -348,7 +347,6 @@ impl ConnectIpAdmission {
         .is_ok()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

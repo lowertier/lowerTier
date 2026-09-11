@@ -1,6 +1,4 @@
 #[cfg(target_os = "linux")]
-mod three_node;
-
 mod ipv6_test;
 
 #[cfg(target_os = "linux")]

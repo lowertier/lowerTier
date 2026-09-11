@@ -256,10 +256,6 @@ pub enum GlobalCtxEvent {
     Connecting(url::Url),
     ConnectError(String, String, String), // (dst, ip version, error message)
 
-    VpnPortalStarted(String),                    // (portal)
-    VpnPortalClientConnected(String, String),    // (portal, client ip)
-    VpnPortalClientDisconnected(String, String), // (portal, client ip)
-
     DhcpIpv4Changed(Option<cidr::Ipv4Inet>, Option<cidr::Ipv4Inet>), // (old, new)
     DhcpIpv4Conflicted(Option<cidr::Ipv4Inet>),
     PublicIpv6Changed(Option<cidr::Ipv6Inet>, Option<cidr::Ipv6Inet>), // (old, new)
@@ -651,11 +647,7 @@ impl GlobalCtx {
     }
 
     fn derive_feature_flags(flags: &Flags, mut feature_flags: PeerFeatureFlag) -> PeerFeatureFlag {
-        feature_flags.kcp_input = !flags.disable_kcp_input;
-        feature_flags.no_relay_kcp = flags.disable_relay_kcp;
         feature_flags.support_conn_list_sync = true;
-        feature_flags.quic_input = !flags.disable_quic_input;
-        feature_flags.no_relay_quic = flags.disable_relay_quic;
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
         let interface_adapter = InterfaceAdapter::automatic();
@@ -1137,10 +1129,6 @@ impl GlobalCtx {
         }
     }
 
-    pub fn get_vpn_portal_cidr(&self) -> Option<cidr::Ipv4Cidr> {
-        self.config.get_vpn_portal_config().map(|x| x.client_cidr)
-    }
-
     pub fn get_flags(&self) -> Flags {
         self.flags.load().as_ref().clone()
     }
@@ -1410,7 +1398,7 @@ impl GlobalCtx {
         // then try bind this ip, if succ means it is local ip
         let dst_is_local_et_ip = self.is_ip_local_virtual_ip(&ip);
         // this is an expensive operation, should be called sparingly
-        // 1. tcp/kcp/quic call this only after proxy conn is established
+        // 1. tcp/quic call this only after proxy conn is established
         // 2. udp cache the result in nat entry
         let dst_is_local_phy_ip = std::net::UdpSocket::bind(format!("{}:0", ip)).is_ok();
 

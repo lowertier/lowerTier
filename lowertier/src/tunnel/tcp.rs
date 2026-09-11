@@ -1,8 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use super::FromUrl;
-#[cfg(not(feature = "quic"))]
-use super::TunnelInfo;
 use crate::{
     common::underlay_policy::UnderlayPolicy,
     tunnel::common::{
@@ -13,23 +11,15 @@ use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
-#[cfg(not(feature = "quic"))]
-use super::common::{FramedReader, FramedWriter, TunnelWrapper};
 use super::{IpVersion, Tunnel, TunnelError, TunnelListener, common::wait_for_connect_futures};
-
-#[cfg(not(feature = "quic"))]
-const TCP_MTU_BYTES: usize = 2000;
 
 pub struct TcpTunnelListener {
     addr: url::Url,
     listener: Option<TcpListener>,
     socket_mark: Option<u32>,
     underlay_policy: Arc<UnderlayPolicy>,
-    #[cfg(feature = "quic")]
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    #[cfg(feature = "quic")]
     lanes: tokio::sync::Mutex<super::tcp_lanes::LaneListener>,
-    #[cfg(feature = "quic")]
     flags: crate::common::config::Flags,
 }
 
@@ -50,16 +40,11 @@ impl TcpTunnelListener {
             listener: None,
             socket_mark: None,
             underlay_policy: Arc::new(UnderlayPolicy::default()),
-            #[cfg(feature = "quic")]
             tls_acceptor: None,
-            #[cfg(feature = "quic")]
             lanes: tokio::sync::Mutex::default(),
-            #[cfg(feature = "quic")]
             flags: crate::common::config::gen_default_flags(),
         }
     }
-
-    #[cfg(feature = "quic")]
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
         self.flags = flags;
     }
@@ -77,50 +62,19 @@ impl TcpTunnelListener {
         let (stream, _) = listener.accept().await?;
         ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)
             .map_err(std::io::Error::other)?;
-
-        #[cfg(feature = "quic")]
+        let acceptor = self
+            .tls_acceptor
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("HTTP/2 TCP listener has no TLS acceptor"))?;
+        match super::http2::accept(stream, acceptor, self.local_url(), &self.flags)
+            .await
+            .map_err(std::io::Error::other)?
         {
-            let acceptor = self
-                .tls_acceptor
-                .as_ref()
-                .ok_or_else(|| std::io::Error::other("HTTP/2 TCP listener has no TLS acceptor"))?;
-            return match super::http2::accept(stream, acceptor, self.local_url(), &self.flags)
-                .await
-                .map_err(std::io::Error::other)?
-            {
-                Some(tunnel) => Ok(tunnel),
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionAborted,
-                    "HTTP/2 TCP connection was passed through to the decoy upstream",
-                )),
-            };
-        }
-
-        #[cfg(not(feature = "quic"))]
-        {
-            if let Err(e) = stream.set_nodelay(true) {
-                tracing::warn!(?e, "set_nodelay fail in accept");
-            }
-
-            let info = TunnelInfo {
-                tunnel_type: "tcp".to_owned(),
-                local_addr: Some(self.local_url().into()),
-                remote_addr: Some(
-                    super::build_url_from_socket_addr(&stream.peer_addr()?.to_string(), "tcp")
-                        .into(),
-                ),
-                resolved_remote_addr: Some(
-                    super::build_url_from_socket_addr(&stream.peer_addr()?.to_string(), "tcp")
-                        .into(),
-                ),
-            };
-
-            let (r, w) = stream.into_split();
-            Ok(Box::new(TunnelWrapper::new(
-                FramedReader::new(r, TCP_MTU_BYTES),
-                FramedWriter::new(w),
-                Some(info),
-            )))
+            Some(tunnel) => Ok(tunnel),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "HTTP/2 TCP connection was passed through to the decoy upstream",
+            )),
         }
     }
 }
@@ -129,7 +83,6 @@ impl TcpTunnelListener {
 impl TunnelListener for TcpTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         self.listener = None;
-        #[cfg(feature = "quic")]
         {
             super::tcp_lanes::requested(&self.addr)?;
             *self.lanes.get_mut() = Default::default();
@@ -147,7 +100,6 @@ impl TunnelListener for TcpTunnelListener {
         self.addr
             .set_port(Some(listener.local_addr()?.port()))
             .unwrap();
-        #[cfg(feature = "quic")]
         {
             self.tls_acceptor = Some(super::http2::tls_acceptor(&self.flags)?);
         }
@@ -157,12 +109,9 @@ impl TunnelListener for TcpTunnelListener {
     }
 
     async fn accept(&mut self) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        #[cfg(feature = "quic")]
         let lane_count = super::tcp_lanes::requested(&self.addr)?;
         loop {
-            #[cfg(feature = "quic")]
             self.lanes.get_mut().expire();
-            #[cfg(feature = "quic")]
             let result = if lane_count > 1 {
                 match tokio::time::timeout(super::tcp_lanes::JOIN_TIMEOUT, self.do_accept()).await {
                     Ok(result) => result,
@@ -171,11 +120,8 @@ impl TunnelListener for TcpTunnelListener {
             } else {
                 self.do_accept().await
             };
-            #[cfg(not(feature = "quic"))]
-            let result = self.do_accept().await;
             match result {
                 Ok(ret) => {
-                    #[cfg(feature = "quic")]
                     if lane_count > 1 {
                         match self.lanes.get_mut().accept(ret, lane_count).await {
                             Ok(Some(tunnel)) => return Ok(tunnel),
@@ -212,37 +158,9 @@ impl TunnelListener for TcpTunnelListener {
 async fn get_tunnel_with_tcp_stream(
     stream: TcpStream,
     remote_url: url::Url,
-    #[cfg(feature = "quic")] flags: &crate::common::config::Flags,
+    flags: &crate::common::config::Flags,
 ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-    #[cfg(feature = "quic")]
-    {
-        return super::http2::connect(stream, remote_url, flags).await;
-    }
-
-    #[cfg(not(feature = "quic"))]
-    {
-        if let Err(e) = stream.set_nodelay(true) {
-            tracing::warn!(?e, "set_nodelay fail in get_tunnel_with_tcp_stream");
-        }
-
-        let info = TunnelInfo {
-            tunnel_type: "tcp".to_owned(),
-            local_addr: Some(
-                super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "tcp").into(),
-            ),
-            remote_addr: Some(remote_url.into()),
-            resolved_remote_addr: Some(
-                super::build_url_from_socket_addr(&stream.peer_addr()?.to_string(), "tcp").into(),
-            ),
-        };
-
-        let (r, w) = stream.into_split();
-        Ok(Box::new(TunnelWrapper::new(
-            FramedReader::new(r, TCP_MTU_BYTES),
-            FramedWriter::new(w),
-            Some(info),
-        )))
-    }
+    super::http2::connect(stream, remote_url, flags).await
 }
 
 #[derive(Debug)]
@@ -254,7 +172,6 @@ pub struct TcpTunnelConnector {
     resolved_addr: Option<SocketAddr>,
     socket_mark: Option<u32>,
     underlay_policy: Arc<UnderlayPolicy>,
-    #[cfg(feature = "quic")]
     flags: crate::common::config::Flags,
 }
 
@@ -267,12 +184,9 @@ impl TcpTunnelConnector {
             resolved_addr: None,
             socket_mark: None,
             underlay_policy: Arc::new(UnderlayPolicy::default()),
-            #[cfg(feature = "quic")]
             flags: crate::common::config::gen_default_flags(),
         }
     }
-
-    #[cfg(feature = "quic")]
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
         self.flags = flags;
     }
@@ -293,13 +207,7 @@ impl TcpTunnelConnector {
         ensure_local_allowed(&self.underlay_policy, stream.local_addr()?)?;
         ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)?;
         tracing::info!(url = ?self.addr, ?addr, "connect tcp succ");
-        get_tunnel_with_tcp_stream(
-            stream,
-            self.addr.clone(),
-            #[cfg(feature = "quic")]
-            &self.flags,
-        )
-        .await
+        get_tunnel_with_tcp_stream(stream, self.addr.clone(), &self.flags).await
     }
 
     async fn connect_with_custom_bind(
@@ -331,13 +239,7 @@ impl TcpTunnelConnector {
         let stream = wait_for_connect_futures(futures).await?;
         ensure_local_allowed(&self.underlay_policy, stream.local_addr()?)?;
         ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)?;
-        get_tunnel_with_tcp_stream(
-            stream,
-            self.addr.clone(),
-            #[cfg(feature = "quic")]
-            &self.flags,
-        )
-        .await
+        get_tunnel_with_tcp_stream(stream, self.addr.clone(), &self.flags).await
     }
 }
 
@@ -357,7 +259,6 @@ impl super::TunnelConnector for TcpTunnelConnector {
                 self.connect_with_custom_bind(addr, &bind_addrs).await
             }
         };
-        #[cfg(feature = "quic")]
         {
             let count = super::tcp_lanes::requested(&self.addr)?;
             if count > 1 {
@@ -460,13 +361,14 @@ mod tests {
 
     #[tokio::test]
     async fn ipv6_domain_pingpong() {
-        use futures::{SinkExt, StreamExt};
         use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
+        use futures::{SinkExt, StreamExt};
         for (host, version) in [("[::1]", IpVersion::V6), ("127.0.0.1", IpVersion::V4)] {
             let mut listener = TcpTunnelListener::new(format!("tcp://{host}:0").parse().unwrap());
             listener.listen().await.unwrap();
             let port = listener.local_url().port().unwrap();
-            let mut connector = TcpTunnelConnector::new(format!("tcp://localhost:{port}").parse().unwrap());
+            let mut connector =
+                TcpTunnelConnector::new(format!("tcp://localhost:{port}").parse().unwrap());
             connector.set_ip_version(version);
             let server = tokio::spawn(async move {
                 let tunnel = listener.accept().await.unwrap();
@@ -474,14 +376,25 @@ mod tests {
             });
             let tunnel = connector.connect().await.unwrap();
             let (mut recv, mut send) = tunnel.split();
-            send.send(PacketBatch::singleton(ZCPacket::new_with_payload(b"domain echo"))).await.unwrap();
-            let echoed = tokio::time::timeout(std::time::Duration::from_secs(3), recv.next()).await.unwrap().unwrap().unwrap();
+            send.send(PacketBatch::singleton(ZCPacket::new_with_payload(
+                b"domain echo",
+            )))
+            .await
+            .unwrap();
+            let echoed = tokio::time::timeout(std::time::Duration::from_secs(3), recv.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             assert_eq!(echoed.pop_singleton().unwrap().payload(), b"domain echo");
             send.close().await.unwrap();
             drop(send);
             drop(recv);
             drop(tunnel);
-            tokio::time::timeout(std::time::Duration::from_secs(3), server).await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), server)
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 
@@ -553,8 +466,6 @@ mod tests {
         assert!(port > 0);
     }
 
-
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn tcp_http2_exports_a_tls_binding() {
         use crate::tunnel::TransportBindingKind;
@@ -575,7 +486,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn tcp_http2_carries_a_framed_packet() {
         use crate::tunnel::{Tunnel, batch::PacketBatch, packet_def::ZCPacket};
@@ -621,7 +531,6 @@ mod tests {
         assert_eq!(got.payload(), &payload[..]);
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn tcp_http2_preserves_coalesced_frames() {
         use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
@@ -678,7 +587,6 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn http2_skips_the_routing_prefix_behind_sni_passthrough() {
         use crate::tunnel::TransportBindingKind;
@@ -707,7 +615,6 @@ mod tests {
         assert_eq!(client.transport_binding(), server.transport_binding());
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn unmarked_tcp_is_passed_through_to_decoy() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -757,7 +664,6 @@ mod tests {
         decoy_task.abort();
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     #[ignore = "requires external DNS and HTTPS connectivity"]
     async fn live_challenges_cloudflare_probe_through_tcp_passthrough() {
@@ -814,7 +720,6 @@ mod tests {
         drop(proxy);
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn http2_keeps_delivery_through_tcp_passthrough() {
         use crate::tunnel::{
@@ -920,10 +825,8 @@ mod tests {
             );
         }
     }
-    #[cfg(feature = "quic")]
     const CAMOUFLAGE_HOST: &str = "challenges.cloudflare.com";
 
-    #[cfg(feature = "quic")]
     struct TcpPassthrough {
         public: SocketAddr,
         _nginx: Option<std::process::Child>,
@@ -931,7 +834,6 @@ mod tests {
         _dir: Option<tempfile::TempDir>,
     }
 
-    #[cfg(feature = "quic")]
     impl Drop for TcpPassthrough {
         fn drop(&mut self) {
             if let Some(child) = &mut self._nginx {
@@ -944,7 +846,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "quic")]
     fn nginx_binary() -> Option<std::path::PathBuf> {
         for candidate in [
             "/opt/homebrew/opt/nginx/bin/nginx",
@@ -959,7 +860,6 @@ mod tests {
         None
     }
 
-    #[cfg(feature = "quic")]
     fn start_nginx_tcp_passthrough(backend: SocketAddr) -> Option<TcpPassthrough> {
         let nginx = nginx_binary()?;
         let dir = tempfile::tempdir().ok()?;
@@ -1007,7 +907,6 @@ mod tests {
         None
     }
 
-    #[cfg(feature = "quic")]
     async fn start_tokio_tcp_passthrough(backend: SocketAddr) -> TcpPassthrough {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let public = listener.local_addr().unwrap();
@@ -1032,12 +931,10 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "quic")]
     async fn start_tcp_passthrough(backend: SocketAddr) -> TcpPassthrough {
         if let Some(proxy) = start_nginx_tcp_passthrough(backend) {
             return proxy;
         }
         start_tokio_tcp_passthrough(backend).await
     }
-
 }

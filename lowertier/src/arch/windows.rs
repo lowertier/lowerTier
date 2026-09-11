@@ -199,7 +199,7 @@ pub fn do_add_self_to_firewall_allowlist(inbound: bool) -> anyhow::Result<()> {
         exe_path,
         if inbound { "Inbound" } else { "Outbound" }
     ));
-    let desc = BSTR::from("Allow LowTier to do subnet proxy and kcp proxy");
+    let desc = BSTR::from("Allow LowTier to do subnet proxy");
     let app_path = BSTR::from(&exe_path);
 
     unsafe {

@@ -18,7 +18,10 @@
 use super::{
     TransportBinding, TransportBindingKind, Tunnel, TunnelError, TunnelInfo,
     common::{FramedReader, FramedWriter, TunnelWrapper},
-    stealth_tls::{self, ConnectIpAdmission, QUIC_ROUTING_CID_BYTES, routing_cid_bytes, valid_routing_cid_bytes},
+    stealth_tls::{
+        self, ConnectIpAdmission, QUIC_ROUTING_CID_BYTES, routing_cid_bytes,
+        valid_routing_cid_bytes,
+    },
 };
 use crate::common::config::Flags;
 use bytes::{Bytes, BytesMut};
@@ -481,17 +484,32 @@ pub async fn connect(
     }
     let server_name = stealth_tls::client_server_name(flags, &url)?;
     let tls = super::browser_tls::connect(
-        stream, &server_name.to_str(), &[HTTP2_ALPN, HTTP11_ALPN],
+        stream,
+        &server_name.to_str(),
+        &[HTTP2_ALPN, HTTP11_ALPN],
         !stealth_tls::skip_server_verification(flags),
-    ).await?;
+    )
+    .await?;
     if tls.get_ref().ssl().selected_alpn_protocol() != Some(HTTP2_ALPN) {
-        return Err(TunnelError::InvalidProtocol("HTTP/2 ALPN was not negotiated".into()));
+        return Err(TunnelError::InvalidProtocol(
+            "HTTP/2 ALPN was not negotiated".into(),
+        ));
     }
     let mut bytes = [0; 32];
-    tls.get_ref().ssl().export_keying_material(
-        &mut bytes, "EXPORTER-LowTier-Http2-PeerConn-v1", Some(HTTP2_TRANSPORT_BINDING_CONTEXT),
-    ).map_err(|error| TunnelError::InternalError(format!("derive HTTP/2 transport binding: {error}")))?;
-    let binding = TransportBinding { kind: TransportBindingKind::Http2TlsExporterV1, bytes };
+    tls.get_ref()
+        .ssl()
+        .export_keying_material(
+            &mut bytes,
+            "EXPORTER-LowTier-Http2-PeerConn-v1",
+            Some(HTTP2_TRANSPORT_BINDING_CONTEXT),
+        )
+        .map_err(|error| {
+            TunnelError::InternalError(format!("derive HTTP/2 transport binding: {error}"))
+        })?;
+    let binding = TransportBinding {
+        kind: TransportBindingKind::Http2TlsExporterV1,
+        bytes,
+    };
 
     let (stream_window, conn_window) = window_sizes();
     let mut client = h2::client::Builder::new();

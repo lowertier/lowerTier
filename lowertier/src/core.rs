@@ -6,7 +6,7 @@ use crate::{
         config::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
             FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
-            TomlConfigLoader, VpnPortalConfig, load_config_from_file, parse_mapped_listener_urls,
+            TomlConfigLoader, load_config_from_file, parse_mapped_listener_urls,
             process_secure_mode_cfg, validate_flags,
         },
         constants::LOWTIER_VERSION,
@@ -278,13 +278,6 @@ struct NetworkOptions {
         help = t!("core_clap.instance_name").to_string(),
     )]
     instance_name: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_VPN_PORTAL",
-        help = t!("core_clap.vpn_portal").to_string()
-    )]
-    vpn_portal: Option<String>,
 
     #[arg(
         long,
@@ -713,42 +706,6 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_ENABLE_KCP_PROXY",
-        help = t!("core_clap.enable_kcp_proxy").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_kcp_proxy: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_KCP_INPUT",
-        help = t!("core_clap.disable_kcp_input").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_kcp_input: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_ENABLE_QUIC_PROXY",
-        help = t!("core_clap.enable_quic_proxy").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_quic_proxy: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_QUIC_INPUT",
-        help = t!("core_clap.disable_quic_input").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_quic_input: Option<bool>,
-
-    #[arg(
-        long,
         env = "ET_PORT_FORWARD",
         value_delimiter = ',',
         help = t!("core_clap.port_forward").to_string(),
@@ -805,42 +762,6 @@ struct NetworkOptions {
         num_args = 0..
     )]
     udp_whitelist: Vec<String>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_RELAY_KCP",
-        help = t!("core_clap.disable_relay_kcp").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_relay_kcp: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_RELAY_QUIC",
-        help = t!("core_clap.disable_relay_quic").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_relay_quic: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_ENABLE_RELAY_FOREIGN_NETWORK_KCP",
-        help = t!("core_clap.enable_relay_foreign_network_kcp").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_relay_foreign_network_kcp: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_ENABLE_RELAY_FOREIGN_NETWORK_QUIC",
-        help = t!("core_clap.enable_relay_foreign_network_quic").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_relay_foreign_network_quic: Option<bool>,
 
     #[arg(
         long,
@@ -1255,26 +1176,6 @@ impl NetworkOptions {
             cfg.set_inst_name(inst_name.clone());
         }
 
-        if let Some(vpn_portal) = self.vpn_portal.as_ref() {
-            let url: url::Url = vpn_portal
-                .parse()
-                .with_context(|| format!("failed to parse vpn portal url: {}", vpn_portal))?;
-            let host = url
-                .host_str()
-                .ok_or_else(|| anyhow::anyhow!("vpn portal url missing host"))?;
-            let port = url
-                .port()
-                .ok_or_else(|| anyhow::anyhow!("vpn portal url missing port"))?;
-            let client_cidr = url.path()[1..].parse().with_context(|| {
-                format!("failed to parse vpn portal client cidr: {}", url.path())
-            })?;
-            let wireguard_listen: SocketAddr = format!("{}:{}", host, port).parse().unwrap();
-            cfg.set_vpn_portal_config(VpnPortalConfig {
-                wireguard_listen,
-                client_cidr,
-            });
-        }
-
         if let Some(manual_routes) = self.manual_routes.as_ref() {
             let mut routes = Vec::<cidr::Ipv4Cidr>::with_capacity(manual_routes.len());
             for r in manual_routes {
@@ -1476,10 +1377,6 @@ impl NetworkOptions {
         f.quic_datagram_alternate_path_parity = self
             .quic_datagram_alternate_path_parity
             .unwrap_or(f.quic_datagram_alternate_path_parity);
-        f.enable_kcp_proxy = self.enable_kcp_proxy.unwrap_or(f.enable_kcp_proxy);
-        f.disable_kcp_input = self.disable_kcp_input.unwrap_or(f.disable_kcp_input);
-        f.enable_quic_proxy = self.enable_quic_proxy.unwrap_or(f.enable_quic_proxy);
-        f.disable_quic_input = self.disable_quic_input.unwrap_or(f.disable_quic_input);
         f.accept_dns = self.accept_dns.unwrap_or(f.accept_dns);
         f.private_mode = self.private_mode.unwrap_or(f.private_mode);
         f.foreign_relay_bps_limit = self
@@ -1489,14 +1386,6 @@ impl NetworkOptions {
             .instance_recv_bps_limit
             .unwrap_or(f.instance_recv_bps_limit);
         f.multi_thread_count = self.multi_thread_count.unwrap_or(f.multi_thread_count);
-        f.disable_relay_kcp = self.disable_relay_kcp.unwrap_or(f.disable_relay_kcp);
-        f.disable_relay_quic = self.disable_relay_quic.unwrap_or(f.disable_relay_quic);
-        f.enable_relay_foreign_network_kcp = self
-            .enable_relay_foreign_network_kcp
-            .unwrap_or(f.enable_relay_foreign_network_kcp);
-        f.enable_relay_foreign_network_quic = self
-            .enable_relay_foreign_network_quic
-            .unwrap_or(f.enable_relay_foreign_network_quic);
         f.disable_sym_hole_punching = self
             .disable_sym_hole_punching
             .unwrap_or(f.disable_sym_hole_punching);

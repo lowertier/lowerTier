@@ -13,7 +13,7 @@ use crate::{
     connector::create_connector_by_url,
     instance_manager::{DaemonGuard, NetworkInstanceManager},
     proto::common::NatType,
-    tunnel::{IpVersion, Tunnel, TunnelConnector, TunnelError, TunnelScheme},
+    tunnel::{IpScheme, IpVersion, Tunnel, TunnelConnector, TunnelError},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -251,7 +251,7 @@ pub async fn run_web_client(
             .with_context(|| "failed to parse config server URL")?,
     };
 
-    TunnelScheme::try_from(&config_server_url).map_err(|_| {
+    IpScheme::try_from(&config_server_url).map_err(|_| {
         anyhow::anyhow!(
             "unsupported config server scheme: {}",
             config_server_url.scheme()
@@ -313,7 +313,7 @@ mod tests {
         let manager = Arc::new(NetworkInstanceManager::new());
         let temp_dir = tempfile::tempdir().unwrap();
         let client = super::run_web_client(
-            format!("ring://{}/test", uuid::Uuid::new_v4()).as_str(),
+            "https://127.0.0.1:9/test",
             MachineIdOptions {
                 explicit_machine_id: None,
                 state_dir: Some(temp_dir.path().to_path_buf()),

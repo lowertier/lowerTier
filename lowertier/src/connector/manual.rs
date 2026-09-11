@@ -20,7 +20,7 @@ use crate::{
         },
         rpc_types::{self, controller::BaseController},
     },
-    tunnel::{IpVersion, TunnelConnector, TunnelScheme, matches_scheme},
+    tunnel::{IpVersion, TunnelConnector},
     utils::weak_upgrade,
 };
 
@@ -89,15 +89,14 @@ impl ManualConnectorManager {
 
     fn reconnect_timeout(dead_url: &url::Url) -> Duration {
         let multiple_tcp_lanes = dead_url.scheme() == "tcp"
-            && dead_url.query_pairs().any(|(key, value)| key == "lanes" && matches!(value.as_ref(), "2" | "4"));
+            && dead_url
+                .query_pairs()
+                .any(|(key, value)| key == "lanes" && matches!(value.as_ref(), "2" | "4"));
         // Sequential TCP/TLS joins must leave time for the final Noise exchange.
         if dead_url.scheme() == "quic" || multiple_tcp_lanes {
             return Duration::from_secs(10);
         }
-        let use_long_timeout = matches_scheme!(
-            dead_url,
-            TunnelScheme::Http | TunnelScheme::Https | TunnelScheme::Txt | TunnelScheme::Srv
-        ) || matches!(dead_url.scheme(), "ws" | "wss");
+        let use_long_timeout = matches!(dead_url.scheme(), "ws" | "wss");
 
         Duration::from_secs(if use_long_timeout { 20 } else { 2 })
     }
@@ -374,11 +373,6 @@ impl ManualConnectorManager {
                 ?dead_url,
                 "strict reconnect skipped preflight DNS resolution"
             );
-        } else if matches_scheme!(
-            dead_url,
-            TunnelScheme::Ring | TunnelScheme::Txt | TunnelScheme::Srv
-        ) {
-            ip_versions.push(IpVersion::Both);
         } else {
             let converted_dead_url =
                 match crate::common::idn::convert_idn_to_ascii(dead_url.clone()) {
@@ -582,9 +576,27 @@ mod tests {
 
     #[test]
     fn multi_lane_tcp_has_time_for_noise_after_tls_joins() {
-        for (url, seconds) in [("tcp://localhost?lanes=4", 10), ("tcp://localhost?lanes=2", 10), ("tcp://localhost", 2), ("tcp://localhost?lanes=1", 2), ("quic://localhost", 10), ("wss://localhost?lanes=4", 20)] {
-            assert_eq!(ManualConnectorManager::reconnect_timeout(&url.parse().unwrap()), Duration::from_secs(seconds), "{url}");
+        for (url, seconds) in [
+            ("tcp://localhost?lanes=4", 10),
+            ("tcp://localhost?lanes=2", 10),
+            ("tcp://localhost", 2),
+            ("tcp://localhost?lanes=1", 2),
+            ("quic://localhost", 10),
+            ("wss://localhost?lanes=4", 20),
+        ] {
+            assert_eq!(
+                ManualConnectorManager::reconnect_timeout(&url.parse().unwrap()),
+                Duration::from_secs(seconds),
+                "{url}"
+            );
         }
-        assert!(ManualConnectorManager::remaining_budget(Instant::now() - Duration::from_millis(1800), Duration::from_secs(10)).unwrap() > Duration::from_secs(8));
+        assert!(
+            ManualConnectorManager::remaining_budget(
+                Instant::now() - Duration::from_millis(1800),
+                Duration::from_secs(10)
+            )
+            .unwrap()
+                > Duration::from_secs(8)
+        );
     }
 }

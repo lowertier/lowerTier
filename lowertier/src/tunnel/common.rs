@@ -1003,8 +1003,7 @@ fn setup_socket2_ext(
 /// — including `Some(0)`, which is a legitimate mark. On non-Linux platforms
 /// this is unconditionally a no-op.
 ///
-/// Exposed so transports that bypass [`bind`] (currently the WebSocket
-/// default-bind path and FakeTCP) can apply the same mark.
+/// Exposed so the WebSocket default-bind path can apply the same mark.
 pub fn apply_socket_mark(
     socket: &socket2::Socket,
     socket_mark: Option<u32>,
@@ -1434,11 +1433,6 @@ pub mod tests {
         let tunnel = c_netns.run_async(|| connector.connect()).await.unwrap();
         println!("connect: {:?}", tunnel.info());
 
-        if connector.remote_url().scheme() == "faketcp" {
-            // listener need some time to start capturing packet
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
         assert_eq!(
             url::Url::from(tunnel.info().unwrap().remote_addr.unwrap()),
             connector.remote_url(),
@@ -1469,7 +1463,7 @@ pub mod tests {
         drop(send);
         drop(recv);
 
-        if ["udp", "wg"].contains(&connector.remote_url().scheme()) {
+        if connector.remote_url().scheme() == "udp" {
             lis.abort();
         } else {
             // lis should finish in 1 second
@@ -1608,7 +1602,6 @@ pub mod tests {
         }
         assert!(condition().await, "Timeout")
     }
-
 
     #[cfg(all(test, target_os = "linux"))]
     #[tokio::test]

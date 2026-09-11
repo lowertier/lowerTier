@@ -425,7 +425,7 @@ message HandshakeRequest {
   bytes network_secret_digest = 6;
 }
 
-message KcpConnData {
+message QuicConnData {
   common.SocketAddr src = 1;
   common.SocketAddr dst = 4;
 }

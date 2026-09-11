@@ -20,8 +20,7 @@ use crate::{
     },
     peers::peer_manager::PeerManager,
     tunnel::{
-        self, IpScheme, Tunnel, TunnelListener, TunnelScheme, ring::RingTunnelListener,
-        tcp::TcpTunnelListener, udp::UdpTunnelListener,
+        self, IpScheme, Tunnel, TunnelListener, tcp::TcpTunnelListener, udp::UdpTunnelListener,
     },
     utils::BoxExt,
 };
@@ -70,7 +69,7 @@ fn expand_strict_listener_urls(
     match host {
         IpAddr::V4(_) => {
             addresses.extend(allowed_ipv4s.iter().copied().map(IpAddr::V4));
-            if enable_ipv6 && listener.scheme() != "faketcp" {
+            if enable_ipv6 {
                 addresses.extend(allowed_ipv6s.iter().copied().map(IpAddr::V6));
             }
         }
@@ -106,51 +105,30 @@ pub fn create_listener_by_url(
 ) -> Result<Box<dyn TunnelListener>, Error> {
     use crate::common::config::ConfigLoader;
     let socket_mark = global_ctx.config.get_flags().socket_mark;
-    Ok(match l.try_into()? {
-        TunnelScheme::Ip(scheme) => match scheme {
-            IpScheme::Tcp => {
-                let mut l = TcpTunnelListener::new(l.clone());
-                l.set_socket_mark(socket_mark);
-                l.set_underlay_policy(global_ctx.get_underlay_policy());
-                #[cfg(feature = "quic")]
-                l.set_flags(global_ctx.get_flags());
-                l.boxed()
-            }
-            IpScheme::Udp => {
-                let mut l = UdpTunnelListener::new(l.clone());
-                l.set_socket_mark(socket_mark);
-                l.set_underlay_policy(global_ctx.get_underlay_policy());
-                l.boxed()
-            }
-            #[cfg(feature = "wireguard")]
-            IpScheme::Wg => {
-                use crate::tunnel::wireguard::{WgConfig, WgTunnelListener};
-                let nid = global_ctx.get_network_identity();
-                let wg_config = WgConfig::new_from_network_identity(
-                    &nid.network_name,
-                    &nid.network_secret.unwrap_or_default(),
-                );
-                let mut l = WgTunnelListener::new(l.clone(), wg_config);
-                l.set_socket_mark(socket_mark);
-                l.boxed()
-            }
-            #[cfg(feature = "quic")]
-            IpScheme::Quic => {
-                // QUIC reads socket_mark from global_ctx in QuicEndpointManager
-                tunnel::quic::QuicTunnelListener::new(l.clone(), global_ctx.clone()).boxed()
-            }
-            #[cfg(feature = "websocket")]
-            IpScheme::Ws | IpScheme::Wss => {
-                let mut l = tunnel::websocket::WsTunnelListener::new(l.clone());
-                l.set_socket_mark(socket_mark);
-                l.boxed()
-            }
-            #[cfg(feature = "faketcp")]
-            IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelListener::new(l.clone()).boxed(),
-        },
-        #[cfg(unix)]
-        TunnelScheme::Unix => tunnel::unix::UnixSocketTunnelListener::new(l.clone()).boxed(),
-        _ => return Err(Error::InvalidUrl(l.to_string())),
+    let scheme = IpScheme::try_from(l)?;
+    Ok(match scheme {
+        IpScheme::Tcp => {
+            let mut l = TcpTunnelListener::new(l.clone());
+            l.set_socket_mark(socket_mark);
+            l.set_underlay_policy(global_ctx.get_underlay_policy());
+            l.set_flags(global_ctx.get_flags());
+            l.boxed()
+        }
+        IpScheme::Udp => {
+            let mut l = UdpTunnelListener::new(l.clone());
+            l.set_socket_mark(socket_mark);
+            l.set_underlay_policy(global_ctx.get_underlay_policy());
+            l.boxed()
+        }
+        IpScheme::Quic => {
+            // QUIC reads socket_mark from global_ctx in QuicEndpointManager
+            tunnel::quic::QuicTunnelListener::new(l.clone(), global_ctx.clone()).boxed()
+        }
+        IpScheme::Ws | IpScheme::Wss => {
+            let mut l = tunnel::websocket::WsTunnelListener::new(l.clone());
+            l.set_socket_mark(socket_mark);
+            l.boxed()
+        }
     })
 }
 
@@ -289,17 +267,6 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
     }
 
     pub async fn prepare_listeners(&mut self) -> Result<(), Error> {
-        let self_id = self.global_ctx.get_id();
-        self.add_listener(
-            move || {
-                Box::new(RingTunnelListener::new(
-                    format!("ring://{}", self_id).parse().unwrap(),
-                ))
-            },
-            true,
-        )
-        .await?;
-
         let policy = self.global_ctx.get_underlay_policy();
         let flags = self.global_ctx.get_flags();
         let (allowed_ipv4s, allowed_ipv6s) = if policy.is_active() {
@@ -361,8 +328,8 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
             if self.global_ctx.config.get_flags().enable_ipv6
                 && !is_url_host_ipv6(&l)
                 && is_url_host_unspecified(&l)
-                // quic enables dual-stack by default, may conflict with v4 listener
-                && l.scheme() != "quic" && l.scheme() != "faketcp"
+                // QUIC enables dual-stack by default and may conflict with a v4 listener.
+                && l.scheme() != "quic"
             {
                 let mut ipv6_listener = l.clone();
                 ipv6_listener
@@ -517,12 +484,11 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
 mod tests {
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    use futures::{SinkExt, StreamExt};
-    use tokio::time::timeout;
+    use futures::SinkExt;
 
     use crate::{
         common::global_ctx::tests::get_mock_global_ctx,
-        tunnel::{TunnelConnector, TunnelError, packet_def::ZCPacket, ring::RingTunnelConnector},
+        tunnel::{TunnelError, packet_def::ZCPacket},
     };
 
     use super::*;
@@ -602,50 +568,6 @@ mod tests {
                 .unwrap();
             Err(Error::Unknown)
         }
-    }
-
-    #[tokio::test]
-    async fn handle_error_in_accept() {
-        let handler = Arc::new(MockListenerHandler {});
-        let mut listener_mgr = ListenerManager::new(get_mock_global_ctx(), handler.clone());
-
-        let ring_id = format!("ring://{}", uuid::Uuid::new_v4());
-
-        let ring_id_clone = ring_id.clone();
-        listener_mgr
-            .add_listener(
-                move || Box::new(RingTunnelListener::new(ring_id_clone.parse().unwrap())),
-                true,
-            )
-            .await
-            .unwrap();
-        listener_mgr.run().await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        let connect_once = |ring_id| async move {
-            let tunnel = RingTunnelConnector::new(ring_id).connect().await.unwrap();
-            let (mut recv, _send) = tunnel.split();
-            assert_eq!(
-                recv.next()
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .pop_singleton()
-                    .expect("the mock listener sends one packet")
-                    .payload(),
-                "abc".as_bytes()
-            );
-            tunnel
-        };
-
-        timeout(std::time::Duration::from_secs(1), async move {
-            connect_once(ring_id.parse().unwrap()).await;
-            // handle tunnel fail should not impact the second connect
-            connect_once(ring_id.parse().unwrap()).await;
-        })
-        .await
-        .unwrap();
     }
 
     #[test]

@@ -12,8 +12,8 @@ use crate::rpc_service::InstanceRpcService;
 use crate::{
     common::{
         config::{
-            ConfigLoader, NetworkIdentity, PeerConfig, TomlConfigLoader, VpnPortalConfig,
-            gen_default_flags, validate_flags,
+            ConfigLoader, NetworkIdentity, PeerConfig, TomlConfigLoader, gen_default_flags,
+            validate_flags,
         },
         constants::LOWTIER_VERSION,
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
@@ -393,15 +393,6 @@ impl NetworkInstance {
             .await?
             .node_info
             .ok_or_else(|| anyhow::anyhow!("failed to get my node info"))?;
-        let vpn_portal_cfg = api_service
-            .get_vpn_portal_service()
-            .get_vpn_portal_info(
-                ctrl.clone(),
-                api::instance::GetVpnPortalInfoRequest::default(),
-            )
-            .await?
-            .vpn_portal_info
-            .map(|i| i.client_config);
         let routes = api_service
             .get_peer_manage_service()
             .list_route(ctrl.clone(), api::instance::ListRouteRequest::default())
@@ -442,7 +433,6 @@ impl NetworkInstance {
                     .into_iter()
                     .map(|s| s.parse::<url::Url>().unwrap().into())
                     .collect(),
-                vpn_portal_cfg,
                 peer_id: my_info.peer_id,
             }),
             events: launcher
@@ -851,32 +841,6 @@ impl NetworkConfig {
             );
         }
 
-        if self.enable_vpn_portal.unwrap_or_default() {
-            let cidr = format!(
-                "{}/{}",
-                self.vpn_portal_client_network_addr
-                    .clone()
-                    .unwrap_or_default(),
-                self.vpn_portal_client_network_len.unwrap_or(24)
-            );
-            cfg.set_vpn_portal_config(VpnPortalConfig {
-                client_cidr: cidr
-                    .parse()
-                    .with_context(|| format!("failed to parse vpn portal client cidr: {}", cidr))?,
-                wireguard_listen: format!(
-                    "0.0.0.0:{}",
-                    self.vpn_portal_listen_port.unwrap_or_default()
-                )
-                .parse()
-                .with_context(|| {
-                    format!(
-                        "failed to parse vpn portal wireguard listen port. {:?}",
-                        self.vpn_portal_listen_port
-                    )
-                })?,
-            });
-        }
-
         if self.enable_manual_routes.unwrap_or_default() {
             let mut routes = Vec::<cidr::Ipv4Cidr>::with_capacity(self.routes.len());
             for route in self.routes.iter() {
@@ -986,22 +950,6 @@ impl NetworkConfig {
 
         if let Some(disable_ipv6) = self.disable_ipv6 {
             flags.enable_ipv6 = !disable_ipv6;
-        }
-
-        if let Some(enable_kcp_proxy) = self.enable_kcp_proxy {
-            flags.enable_kcp_proxy = enable_kcp_proxy;
-        }
-
-        if let Some(disable_kcp_input) = self.disable_kcp_input {
-            flags.disable_kcp_input = disable_kcp_input;
-        }
-
-        if let Some(enable_quic_proxy) = self.enable_quic_proxy {
-            flags.enable_quic_proxy = enable_quic_proxy;
-        }
-
-        if let Some(disable_quic_input) = self.disable_quic_input {
-            flags.disable_quic_input = disable_quic_input;
         }
 
         if let Some(disable_p2p) = self.disable_p2p {
@@ -1244,16 +1192,6 @@ impl NetworkConfig {
                 .collect();
         }
 
-        if let Some(vpn_config) = config.get_vpn_portal_config() {
-            result.enable_vpn_portal = Some(true);
-
-            let cidr = vpn_config.client_cidr;
-            result.vpn_portal_client_network_addr = Some(cidr.first_address().to_string());
-            result.vpn_portal_client_network_len = Some(cidr.network_length() as i32);
-
-            result.vpn_portal_listen_port = Some(vpn_config.wireguard_listen.port() as i32);
-        }
-
         if let Some(routes) = config.get_routes()
             && !routes.is_empty()
         {
@@ -1298,10 +1236,6 @@ impl NetworkConfig {
         result.dev_name = Some(flags.dev_name.clone());
         result.use_smoltcp = Some(flags.use_smoltcp);
         result.disable_ipv6 = Some(!flags.enable_ipv6);
-        result.enable_kcp_proxy = Some(flags.enable_kcp_proxy);
-        result.disable_kcp_input = Some(flags.disable_kcp_input);
-        result.enable_quic_proxy = Some(flags.enable_quic_proxy);
-        result.disable_quic_input = Some(flags.disable_quic_input);
         result.disable_p2p = Some(flags.disable_p2p);
         result.p2p_only = Some(flags.p2p_only);
         result.lazy_p2p = Some(flags.lazy_p2p);
@@ -1609,7 +1543,6 @@ mod tests {
             peer_urls: vec!["tcp://1.2.3.4:11010".to_string()],
             listener_urls: vec!["tcp://0.0.0.0:11010".to_string()],
             dev_name: Some("et_test".to_string()),
-            enable_quic_proxy: Some(true),
             disable_tcp_hole_punching: Some(true),
             disable_sym_hole_punching: Some(true),
             ..Default::default()
@@ -1618,7 +1551,6 @@ mod tests {
         let dumped = network_config.gen_config()?.dump();
 
         assert!(dumped.contains("dev_name = \"et_test\""));
-        assert!(dumped.contains("enable_quic_proxy = true"));
         assert!(dumped.contains("disable_tcp_hole_punching = true"));
         assert!(dumped.contains("disable_sym_hole_punching = true"));
         Ok(())
@@ -1766,21 +1698,6 @@ mod tests {
                 }
             }
 
-            if rng.gen_bool(0.5) {
-                let vpn_network = format!(
-                    "{}.{}.{}.0/{}",
-                    rng.gen_range(10..173),
-                    rng.gen_range(0..255),
-                    rng.gen_range(0..255),
-                    rng.gen_range(24..30)
-                );
-                let vpn_port = rng.gen_range(10000..60000);
-                config.set_vpn_portal_config(crate::common::config::VpnPortalConfig {
-                    client_cidr: vpn_network.parse().unwrap(),
-                    wireguard_listen: format!("0.0.0.0:{}", vpn_port).parse().unwrap(),
-                });
-            }
-
             if rng.gen_bool(0.6) {
                 let route_count = rng.gen_range(1..3);
                 let mut routes = Vec::new();
@@ -1858,10 +1775,6 @@ mod tests {
                 flags.dev_name = format!("etun{}", rng.gen_range(0..10));
                 flags.use_smoltcp = rng.gen_bool(0.3);
                 flags.enable_ipv6 = rng.gen_bool(0.8);
-                flags.enable_kcp_proxy = rng.gen_bool(0.5);
-                flags.disable_kcp_input = rng.gen_bool(0.3);
-                flags.enable_quic_proxy = rng.gen_bool(0.5);
-                flags.disable_quic_input = rng.gen_bool(0.3);
                 flags.disable_p2p = rng.gen_bool(0.2);
                 flags.p2p_only = rng.gen_bool(0.2);
                 flags.lazy_p2p = rng.gen_bool(0.3);

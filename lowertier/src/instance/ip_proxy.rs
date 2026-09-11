@@ -7,17 +7,13 @@ use anyhow::Context;
 
 use crate::{
     common::{error::Error, global_ctx::ArcGlobalCtx},
-    gateway::{
-        icmp_proxy::IcmpProxy,
-        tcp_proxy::{NatDstTcpConnector, TcpProxy},
-        udp_proxy::UdpProxy,
-    },
+    gateway::{icmp_proxy::IcmpProxy, tcp_proxy::TcpProxy, udp_proxy::UdpProxy},
     peers::peer_manager::PeerManager,
 };
 
 #[derive(Clone)]
 pub(super) struct IpProxy {
-    tcp_proxy: Arc<TcpProxy<NatDstTcpConnector>>,
+    tcp_proxy: Arc<TcpProxy>,
     icmp_proxy: Arc<IcmpProxy>,
     udp_proxy: Arc<UdpProxy>,
     global_ctx: ArcGlobalCtx,
@@ -29,7 +25,7 @@ impl IpProxy {
         global_ctx: ArcGlobalCtx,
         peer_manager: Arc<PeerManager>,
     ) -> Result<Self, Error> {
-        let tcp_proxy = TcpProxy::new(peer_manager.clone(), NatDstTcpConnector {});
+        let tcp_proxy = TcpProxy::new(peer_manager.clone());
         let icmp_proxy = IcmpProxy::new(global_ctx.clone(), peer_manager.clone())
             .with_context(|| "create icmp proxy failed")?;
         let udp_proxy = UdpProxy::new(global_ctx.clone(), peer_manager)
@@ -43,7 +39,7 @@ impl IpProxy {
         })
     }
 
-    pub(super) fn tcp_proxy(&self) -> Arc<TcpProxy<NatDstTcpConnector>> {
+    pub(super) fn tcp_proxy(&self) -> Arc<TcpProxy> {
         self.tcp_proxy.clone()
     }
 

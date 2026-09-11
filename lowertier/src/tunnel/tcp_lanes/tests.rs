@@ -515,7 +515,6 @@ async fn transfer(
     .unwrap();
 }
 
-#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn h2_and_wss_pairs_preserve_frames_and_bind_both_connections() {
     use crate::tunnel::{
@@ -650,7 +649,6 @@ async fn authenticated_pair_delivers_delayed_lane_after_2048_sibling_packets() {
     .unwrap();
 }
 
-#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn h2_and_wss_pairs_authenticate_and_deliver_through_one_peer_connection() {
     use crate::{
@@ -822,7 +820,6 @@ fn four_lanes_balance_new_shards_without_moving_existing_flows() {
     }
 }
 
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn wss_listener_rejects_oversized_join_without_poisoning_next_group() {
     use crate::tunnel::{

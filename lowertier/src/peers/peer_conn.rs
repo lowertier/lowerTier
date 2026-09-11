@@ -30,7 +30,6 @@ use tracing::Instrument;
 
 use snow::{HandshakeState, TransportState, params::NoiseParams};
 
-#[cfg(feature = "quic")]
 use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet_with_stats};
 use super::{
     PacketRecvChan,
@@ -50,7 +49,6 @@ use super::{
     },
     traffic_metrics::{AggregateTrafficMetrics, SpeedProbeMetrics},
 };
-#[cfg(feature = "quic")]
 use crate::common::dataplane_telemetry::DataplaneFec;
 use crate::{
     common::{
@@ -92,17 +90,13 @@ use crate::{
     use_global_var,
 };
 
-#[cfg(feature = "quic")]
 use super::link_envelope::LINK_ENVELOPE_OVERHEAD;
-#[cfg(feature = "quic")]
 use crate::tunnel::DatagramSizeBudget;
 
 pub type PeerConnId = uuid::Uuid;
 
-#[cfg(feature = "quic")]
 const ALTERNATE_FEC_CONSERVATIVE_DATAGRAM_BUDGET: usize = 1200;
 
-#[cfg(feature = "quic")]
 fn alternate_fec_wire_len(
     record_len: usize,
     session_outer_encrypted: bool,
@@ -131,10 +125,8 @@ const MAX_PENDING_HANDSHAKE_BYTES: usize =
     MAX_PENDING_HANDSHAKE_PACKETS * (4096 + PEER_MANAGER_HEADER_SIZE);
 pub(crate) const SPEED_ROUTING_FEATURE: &str = "speed-routing-v2";
 
-#[cfg(feature = "quic")]
 pub(crate) const ALTERNATE_FEC_RX_V1: u64 = 1 << 0;
 
-#[cfg(feature = "quic")]
 fn alternate_fec_negotiated(
     local_transmit_enabled: bool,
     remote_receive_capabilities: u64,
@@ -637,7 +629,6 @@ fn tls_exporter_tunnel(tunnel_type: Option<&str>) -> bool {
     if value.eq_ignore_ascii_case("quic") || value.eq_ignore_ascii_case("wss") {
         return true;
     }
-    #[cfg(feature = "quic")]
     if value.eq_ignore_ascii_case("tcp") {
         return true;
     }
@@ -760,9 +751,7 @@ struct NoiseHandshakeResult {
 
     my_encrypt_algo: String,
     remote_encrypt_algo: String,
-    #[cfg(feature = "quic")]
     alternate_fec_enabled: bool,
-    #[cfg(feature = "quic")]
     alternate_fec_remote_receive_capabilities: u64,
 }
 
@@ -912,7 +901,6 @@ impl PeerSessionTunnelFilter {
         self.encrypt_packet_with_session(data, my_peer_id, peer_id, &session)
     }
 
-    #[cfg(feature = "quic")]
     fn encrypt_alternate_fec_source(&self, data: &mut ZCPacket) -> Result<(), anyhow::Error> {
         let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
             return Ok(());
@@ -929,7 +917,6 @@ impl PeerSessionTunnelFilter {
         session.encrypt_fec_payload(my_peer_id, peer_id, data)
     }
 
-    #[cfg(feature = "quic")]
     fn decrypt_recovered_alternate_fec_packet(
         &self,
         data: &mut ZCPacket,
@@ -976,7 +963,6 @@ impl PeerSessionTunnelFilter {
         session.decrypt_fec_payload(from_peer_id, my_peer_id, data)
     }
 
-    #[cfg(feature = "quic")]
     fn alternate_fec_session_invalidated(&self) -> bool {
         self.session
             .load_full()
@@ -1447,15 +1433,10 @@ pub struct PeerConn {
     peer_session_store: Arc<PeerSessionStore>,
     my_encrypt_algo: String,
 
-    #[cfg(feature = "quic")]
     alternate_fec_decoder: Option<Arc<parking_lot::Mutex<AlternateFecDecoder>>>,
-    #[cfg(feature = "quic")]
     alternate_fec_offer: bool,
-    #[cfg(feature = "quic")]
     alternate_fec_enabled: bool,
-    #[cfg(feature = "quic")]
     alternate_fec_remote_receive_capabilities: u64,
-    #[cfg(feature = "quic")]
     alternate_fec_datagram_size_budget: Option<DatagramSizeBudget>,
 }
 
@@ -1502,7 +1483,6 @@ impl PeerConn {
         let tunnel_info = tunnel.info();
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
-        #[cfg(feature = "quic")]
         let alternate_fec_datagram_size_budget = tunnel.datagram_size_budget();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
         let (speed_ack_sender, _speed_ack_receiver) = broadcast::channel(8);
@@ -1540,7 +1520,6 @@ impl PeerConn {
 
         let conn_id = PeerConnId::new_v4();
         let my_encrypt_algo = flags.encryption_algorithm;
-        #[cfg(feature = "quic")]
         let alternate_fec_offer = flags.quic_datagram_alternate_path_parity
             && matches!(flags.quic_datagram_fec_parity, 2 | 3);
 
@@ -1591,15 +1570,10 @@ impl PeerConn {
             peer_session_store,
             my_encrypt_algo,
 
-            #[cfg(feature = "quic")]
             alternate_fec_decoder: None,
-            #[cfg(feature = "quic")]
             alternate_fec_offer,
-            #[cfg(feature = "quic")]
             alternate_fec_enabled: false,
-            #[cfg(feature = "quic")]
             alternate_fec_remote_receive_capabilities: 0,
-            #[cfg(feature = "quic")]
             alternate_fec_datagram_size_budget,
         }
     }
@@ -1789,7 +1763,6 @@ impl PeerConn {
         })
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn encrypt_alternate_fec_source(
         &self,
         packet: &mut ZCPacket,
@@ -1797,7 +1770,6 @@ impl PeerConn {
         self.session_filter.encrypt_alternate_fec_source(packet)
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn decrypt_recovered_alternate_fec_packet(
         &self,
         packet: &mut ZCPacket,
@@ -1806,7 +1778,6 @@ impl PeerConn {
             .decrypt_recovered_alternate_fec_packet(packet)
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn set_alternate_fec_decoder(
         &mut self,
         decoder: Option<Arc<parking_lot::Mutex<AlternateFecDecoder>>>,
@@ -1814,17 +1785,14 @@ impl PeerConn {
         self.alternate_fec_decoder = decoder;
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn alternate_fec_enabled(&self) -> bool {
         self.alternate_fec_enabled
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn alternate_fec_remote_receive_ready(&self) -> bool {
         (self.alternate_fec_remote_receive_capabilities & ALTERNATE_FEC_RX_V1) != 0
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn alternate_fec_datagram_budget(&self) -> usize {
         self.alternate_fec_datagram_size_budget
             .as_ref()
@@ -1832,7 +1800,6 @@ impl PeerConn {
             .unwrap_or(ALTERNATE_FEC_CONSERVATIVE_DATAGRAM_BUDGET)
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn alternate_fec_source_payload_len(&self, packet: &ZCPacket) -> Option<usize> {
         let payload_len = packet.tunnel_payload().len();
         let header = packet.peer_manager_header()?;
@@ -1848,7 +1815,6 @@ impl PeerConn {
         payload_len.checked_add(crate::tunnel::packet_def::StandardAeadTail::SIZE)
     }
 
-    #[cfg(feature = "quic")]
     pub(crate) fn alternate_fec_record_fits(&self, record_len: usize) -> bool {
         alternate_fec_wire_len(
             record_len,
@@ -1859,16 +1825,11 @@ impl PeerConn {
     }
 
     fn local_receive_capabilities(&self) -> u64 {
-        #[cfg(feature = "quic")]
         {
             return self
                 .alternate_fec_offer
                 .then_some(ALTERNATE_FEC_RX_V1)
                 .unwrap_or(0);
-        }
-        #[cfg(not(feature = "quic"))]
-        {
-            0
         }
     }
 
@@ -2307,7 +2268,6 @@ impl PeerConn {
         let selected_protection = PeerConnDataProtectionPb::try_from(msg2_pb.data_protection)
             .map_err(|_| Error::WaitRespError("invalid data protection mode".to_owned()))?;
         validate_data_protection_mode(local_data_protection, selected_protection)?;
-        #[cfg(feature = "quic")]
         let alternate_fec_enabled =
             alternate_fec_negotiated(self.alternate_fec_offer, msg2_pb.transmit_capabilities);
         if msg2_pb.a_conn_id_echo != Some(a_conn_id.into()) {
@@ -3093,9 +3053,7 @@ impl PeerConn {
 
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg2_pb.server_encryption_algorithm.clone(),
-            #[cfg(feature = "quic")]
             alternate_fec_enabled,
-            #[cfg(feature = "quic")]
             alternate_fec_remote_receive_capabilities: msg2_pb.receive_capabilities,
         })
     }
@@ -3214,7 +3172,6 @@ impl PeerConn {
         )?;
         validate_protocol_version(msg1_pb.version)?;
         validate_encryption_algorithm(&msg1_pb.client_encryption_algorithm)?;
-        #[cfg(feature = "quic")]
         let alternate_fec_enabled =
             alternate_fec_negotiated(self.alternate_fec_offer, msg1_pb.transmit_capabilities);
         let remote_network_name = msg1_pb.a_network_name.clone();
@@ -4162,9 +4119,7 @@ impl PeerConn {
 
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg1_pb.client_encryption_algorithm.clone(),
-            #[cfg(feature = "quic")]
             alternate_fec_enabled,
-            #[cfg(feature = "quic")]
             alternate_fec_remote_receive_capabilities: msg1_pb.receive_capabilities,
         })
     }
@@ -4241,7 +4196,6 @@ impl PeerConn {
             self.my_peer_id,
             noise.peer_id,
         ));
-        #[cfg(feature = "quic")]
         {
             self.alternate_fec_enabled = noise.alternate_fec_enabled;
             self.alternate_fec_remote_receive_capabilities =
@@ -4280,7 +4234,6 @@ impl PeerConn {
             noise.peer_id,
         ));
 
-        #[cfg(feature = "quic")]
         {
             self.alternate_fec_enabled = noise.alternate_fec_enabled;
             self.alternate_fec_remote_receive_capabilities =
@@ -4383,13 +4336,9 @@ impl PeerConn {
             conn_info_for_instrument.network_name.clone(),
             probe_peer_id,
         );
-        #[cfg(feature = "quic")]
         let alternate_fec_decoder = self.alternate_fec_decoder.clone();
-        #[cfg(feature = "quic")]
         let alternate_fec_telemetry = self.global_ctx.dataplane_telemetry().clone();
-        #[cfg(feature = "quic")]
         let alternate_fec_session_filter = self.session_filter.clone();
-        #[cfg(feature = "quic")]
         let alternate_fec_enabled = self.alternate_fec_enabled;
 
         let is_foreign_network = conn_info_for_instrument.network_name
@@ -4615,9 +4564,7 @@ impl PeerConn {
                     }
 
                     let mut data = PacketBatch::with_capacity(incoming.len());
-                    #[cfg(feature = "quic")]
                     let mut fec_send_failed = false;
-                    #[cfg(feature = "quic")]
                     let mut fec_session_invalidated = false;
                     for mut zc_packet in incoming {
                         let buf_len = zc_packet.buf_len() as u64;
@@ -4629,7 +4576,6 @@ impl PeerConn {
                             continue;
                         };
 
-                        #[cfg(feature = "quic")]
                         if peer_mgr_hdr.packet_type == PacketType::AlternateFecSource as u8
                             || peer_mgr_hdr.packet_type == PacketType::AlternateFecParity as u8
                         {
@@ -4825,7 +4771,6 @@ impl PeerConn {
                         }
                     }
 
-                    #[cfg(feature = "quic")]
                     if fec_send_failed || fec_session_invalidated {
                         break;
                     }
@@ -5337,7 +5282,6 @@ pub mod tests {
         time::Duration,
     };
 
-    #[cfg(feature = "quic")]
     use bytes::Bytes;
     use futures::Sink;
 
@@ -5385,7 +5329,6 @@ pub mod tests {
             .0,
             1
         );
-        #[cfg(feature = "quic")]
         {
             let tcp_binding = TransportBinding {
                 kind: TransportBindingKind::Http2TlsExporterV1,

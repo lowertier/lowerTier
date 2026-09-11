@@ -470,30 +470,6 @@ fn handle_event(
                         );
                     }
 
-                    GlobalCtxEvent::VpnPortalStarted(portal) => {
-                        event!(info, portal, "[{}] vpn portal started", instance_id);
-                    }
-
-                    GlobalCtxEvent::VpnPortalClientConnected(portal, client_addr) => {
-                        event!(
-                            info,
-                            portal,
-                            client_addr,
-                            "[{}] vpn portal client connected",
-                            instance_id
-                        );
-                    }
-
-                    GlobalCtxEvent::VpnPortalClientDisconnected(portal, client_addr) => {
-                        event!(
-                            info,
-                            portal,
-                            client_addr,
-                            "[{}] vpn portal client disconnected",
-                            instance_id
-                        );
-                    }
-
                     GlobalCtxEvent::DhcpIpv4Changed(old, new) => {
                         event!(info, ?old, ?new, "[{}] dhcp ip changed", instance_id);
                     }

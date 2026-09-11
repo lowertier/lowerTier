@@ -2,24 +2,19 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::{
     common::{dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx, idn},
-    connector::dns_connector::DnsTunnelConnector,
     proto::common::PeerFeatureFlag,
     tunnel::{
-        self, IpScheme, IpVersion, TunnelConnector, TunnelError, TunnelScheme,
-        ring::RingTunnelConnector, tcp::TcpTunnelConnector, udp::UdpTunnelConnector,
+        self, IpScheme, IpVersion, TunnelConnector, TunnelError, tcp::TcpTunnelConnector,
+        udp::UdpTunnelConnector,
     },
     utils::BoxExt,
 };
-use http_connector::HttpTunnelConnector;
 use rand::seq::SliceRandom;
 
 pub mod direct;
 pub mod manual;
 pub mod tcp_hole_punch;
 pub mod udp_hole_punch;
-
-pub mod dns_connector;
-pub mod http_connector;
 
 fn url_has_ip_literal_host(url: &url::Url) -> bool {
     url.host_str().is_some_and(|host| {
@@ -106,10 +101,7 @@ struct ResolvedConnectorAddr {
 }
 
 fn connector_default_port(url: &url::Url) -> Option<u16> {
-    url.try_into()
-        .ok()
-        .and_then(|s: TunnelScheme| s.try_into().ok())
-        .map(IpScheme::default_port)
+    IpScheme::try_from(url).ok().map(IpScheme::default_port)
 }
 
 fn addr_matches_ip_version(addr: &SocketAddr, ip_version: IpVersion) -> bool {
@@ -260,79 +252,34 @@ pub async fn create_connector_by_url(
 ) -> Result<Box<dyn TunnelConnector + 'static>, Error> {
     let url = url::Url::parse(url).map_err(|_| Error::InvalidUrl(url.to_owned()))?;
     let url = idn::convert_idn_to_ascii(url)?;
-    let scheme = (&url)
-        .try_into()
+    let scheme = IpScheme::try_from(&url)
         .map_err(|_| TunnelError::InvalidProtocol(url.scheme().to_owned()))?;
-    let mut effective_connector_ip_version = ip_version;
+    let underlay_policy = global_ctx.get_underlay_policy();
+    if underlay_policy.is_active() && !url_has_ip_literal_host(&url) {
+        return Err(TunnelError::UnderlayPolicyDenied(format!(
+            "strict underlay policy requires a literal IP peer address: {url}"
+        ))
+        .into());
+    }
+    let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
+    let effective_connector_ip_version = resolved_addr.ip_version;
     let mut connector: Box<dyn TunnelConnector + 'static> = match scheme {
-        TunnelScheme::Ip(scheme) => {
-            let underlay_policy = global_ctx.get_underlay_policy();
-            if underlay_policy.is_active() && !url_has_ip_literal_host(&url) {
-                return Err(TunnelError::UnderlayPolicyDenied(format!(
-                    "strict underlay policy requires a literal IP peer address: {url}"
-                ))
-                .into());
-            }
-            let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
-            effective_connector_ip_version = resolved_addr.ip_version;
-            let mut connector: Box<dyn TunnelConnector> = match scheme {
-                IpScheme::Tcp => {
-                    let mut connector = TcpTunnelConnector::new(url);
-                    #[cfg(feature = "quic")]
-                    connector.set_flags(global_ctx.get_flags());
-                    connector.boxed()
-                }
-                IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
-                #[cfg(feature = "quic")]
-                IpScheme::Quic => {
-                    tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed()
-                }
-                #[cfg(feature = "wireguard")]
-                IpScheme::Wg => {
-                    use crate::tunnel::wireguard::{WgConfig, WgTunnelConnector};
-                    let nid = global_ctx.get_network_identity();
-                    let wg_config = WgConfig::new_from_network_identity(
-                        &nid.network_name,
-                        &nid.network_secret.unwrap_or_default(),
-                    );
-                    WgTunnelConnector::new(url, wg_config).boxed()
-                }
-                #[cfg(feature = "websocket")]
-                IpScheme::Ws | IpScheme::Wss => {
-                    tunnel::websocket::WsTunnelConnector::new(url).boxed()
-                }
-                #[cfg(feature = "faketcp")]
-                IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
-            };
-            connector.set_resolved_addr(resolved_addr.addr);
-            connector.set_socket_mark(global_ctx.config.get_flags().socket_mark);
-            connector.set_underlay_policy(underlay_policy.clone());
-            if global_ctx.config.get_flags().bind_device || underlay_policy.is_active() {
-                set_bind_addr_for_peer_connector(
-                    &mut connector,
-                    resolved_addr.addr.is_ipv4(),
-                    global_ctx,
-                )
-                .await;
-            }
-            connector
+        IpScheme::Tcp => {
+            let mut connector = TcpTunnelConnector::new(url);
+            connector.set_flags(global_ctx.get_flags());
+            connector.boxed()
         }
-        #[cfg(unix)]
-        TunnelScheme::Unix => tunnel::unix::UnixSocketTunnelConnector::new(url).boxed(),
-        TunnelScheme::Http | TunnelScheme::Https => {
-            HttpTunnelConnector::new(url, global_ctx.clone()).boxed()
-        }
-        TunnelScheme::Ring => RingTunnelConnector::new(url).boxed(),
-        TunnelScheme::Txt | TunnelScheme::Srv => {
-            if url.host_str().is_none() {
-                return Err(Error::InvalidUrl(format!(
-                    "host should not be empty in txt or srv url: {}",
-                    url
-                )));
-            }
-            DnsTunnelConnector::new(url, global_ctx.clone()).boxed()
-        }
+        IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
+        IpScheme::Quic => tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed(),
+        IpScheme::Ws | IpScheme::Wss => tunnel::websocket::WsTunnelConnector::new(url).boxed(),
     };
+    connector.set_resolved_addr(resolved_addr.addr);
+    connector.set_socket_mark(global_ctx.config.get_flags().socket_mark);
+    connector.set_underlay_policy(underlay_policy.clone());
+    if global_ctx.config.get_flags().bind_device || underlay_policy.is_active() {
+        set_bind_addr_for_peer_connector(&mut connector, resolved_addr.addr.is_ipv4(), global_ctx)
+            .await;
+    }
     connector.set_ip_version(effective_connector_ip_version);
 
     Ok(connector)

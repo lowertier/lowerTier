@@ -564,7 +564,6 @@ impl RoutePeerInfo {
                 .get_proxy_cidrs()
                 .iter()
                 .map(|x| x.mapped_cidr.unwrap_or(x.cidr))
-                .chain(global_ctx.get_vpn_portal_cidr())
                 .map(|x| x.to_string())
                 .collect()
         };

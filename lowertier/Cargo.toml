@@ -102,21 +102,21 @@ pin-project-lite = "0.2.13"
 
 atomic_refcell = "0.1.13"
 
-quinn = { version = "0.11.11", optional = true, features = ["ring"] }
-quinn-proto = { version = "0.11.16", optional = true }
-h3 = { version = "0.0.8", optional = true }
-h3-quinn = { version = "0.0.10", optional = true }
-h2 = { version = "0.4", optional = true }
-reed-solomon-simd = { version = "3.1.0", optional = true }
+quinn = { version = "0.11.11", features = ["ring"] }
+quinn-proto = { version = "0.11.16" }
+h3 = { version = "0.0.8" }
+h3-quinn = { version = "0.0.10" }
+h2 = { version = "0.4" }
+reed-solomon-simd = { version = "3.1.0" }
 rustls = { version = "0.23.0", features = [
     "ring", "tls12"
-], default-features = false, optional = true }
-rcgen = { version = "0.12.1", optional = true }
-rustls-native-certs = { version = "0.8", optional = true }
-rustls-pemfile = { version = "2", optional = true }
+], default-features = false }
+rcgen = { version = "0.12.1" }
+rustls-native-certs = { version = "0.8" }
+rustls-pemfile = { version = "2" }
 
 # for websocket
-tokio-websockets = { version = "0.13.2", path = "../vendor/tokio-websockets", optional = true, features = [
+tokio-websockets = { version = "0.13.2", path = "../vendor/tokio-websockets", features = [
     "rustls-webpki-roots",
     "client",
     "server",
@@ -125,14 +125,14 @@ tokio-websockets = { version = "0.13.2", path = "../vendor/tokio-websockets", op
 ] }
 http = { version = "1", default-features = false, features = [
     "std",
-], optional = true }
-forwarded-header-value = { version = "0.1.1", optional = true }
-tokio-rustls = { version = "0.26", default-features = false, optional = true }
-boring = { version = "5.2", optional = true }
-boring-sys = { version = "5.2", optional = true }
-foreign-types = { version = "0.5", optional = true }
-tokio-boring = { version = "5.2", optional = true }
-brotli-decompressor = { version = "5", optional = true }
+] }
+forwarded-header-value = { version = "0.1.1" }
+tokio-rustls = { version = "0.26", default-features = false }
+boring = { version = "5.2" }
+boring-sys = { version = "5.2" }
+foreign-types = { version = "0.5" }
+tokio-boring = { version = "5.2" }
+brotli-decompressor = { version = "5" }
 
 # for tap device
 tun = { package = "tun-lowertier", path = "../vendor/rust-tun", features = [
@@ -205,8 +205,6 @@ network-interface = "2.0"
 petgraph = "0.8.1"
 ordered_hash_map = "0.5.0"
 
-# for wireguard
-boringtun = { package = "boringtun-lowertier", path = "../vendor/boringtun-lowertier", optional = true }
 
 # for encryption
 ring = "0.17"
@@ -259,12 +257,6 @@ service-manager = { path = "../vendor/service-manager-rs" }
 
 zstd = { version = "0.13", optional = true }
 
-kcp-sys = { path = "../vendor/kcp-sys", optional = true }
-
-# for http connector
-http_req = { path = "../vendor/http_req", default-features = false, features = [
-    "rust-tls",
-] }
 
 # for dns connector
 hickory-resolver = "0.25.2"
@@ -286,7 +278,6 @@ sha2 = "0.10.8"
 shellexpand = "3.1.1"
 
 # for fake tcp
-flume = { version = "0.12", optional = true }
 igd-next = { version = "0.17.0", features = ["aio_tokio"] }
 natpmp = "0.5.0"
 
@@ -377,63 +368,23 @@ tempfile = "3.22.0"
 ctor = "0.8.0"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-defguard_wireguard_rs = "0.4.2"
 tokio-socks = "0.5.2"
 
 
 [features]
 default = ["lean"]
-lean = ["tun", "socks5", "quic"]
+lean = ["tun", "socks5"]
 full = [
     "lean",
-    "websocket",
-    "wireguard",
     "aes-gcm",
     "openssl-crypto", # This feature requires OpenSSL development files.
-    "kcp",
-    "faketcp",
     "magic-dns",
     "zstd",
 ]
-wireguard = ["dep:boringtun"]
-quic = [
-    "dep:quinn",
-    "dep:quinn-proto",
-    "dep:h3",
-    "dep:h3-quinn",
-    "dep:h2",
-    "dep:reed-solomon-simd",
-    "dep:rustls",
-    "dep:rcgen",
-    "dep:rustls-native-certs",
-    "dep:rustls-pemfile",
-    "dep:http",
-    "dep:tokio-rustls",
-    "dep:boring",
-    "dep:boring-sys",
-    "dep:foreign-types",
-    "dep:tokio-boring",
-    "dep:brotli-decompressor",
-]
-kcp = ["dep:kcp-sys"]
 mimalloc = ["dep:mimalloc"]
 aes-gcm = ["dep:aes-gcm"]
 openssl-crypto = ["dep:openssl"]
 tun = ["dep:tun", "dep:quincy-tun", "dep:io-uring"]
-websocket = [
-    "dep:tokio-websockets",
-    "dep:http",
-    "dep:forwarded-header-value",
-    "dep:tokio-rustls",
-    "dep:boring",
-    "dep:boring-sys",
-    "dep:foreign-types",
-    "dep:tokio-boring",
-    "dep:brotli-decompressor",
-    "dep:rustls",
-    "dep:rcgen",
-    "dep:rustls-native-certs",
-]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]
 ffi-dataplane = ["socks5"]
@@ -447,7 +398,6 @@ jemalloc-prof = [
 ]
 tracing = ["tokio/tracing", "dep:console-subscriber"]
 magic-dns = ["dep:hickory-client", "dep:hickory-server"]
-faketcp = ["dep:flume"]
 zstd = ["dep:zstd"]
 # For Network Extension on macOS
 macos-ne = []

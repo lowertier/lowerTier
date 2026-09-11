@@ -123,13 +123,7 @@ pub(crate) fn packet_supports_speed_first(packet: &ZCPacket) -> bool {
         packet_type
             if packet_type == PacketType::Data as u8
                 || packet_type == PacketType::ForeignNetworkPacket as u8
-                || packet_type == PacketType::KcpSrc as u8
-                || packet_type == PacketType::KcpDst as u8
-                || packet_type == PacketType::QuicSrc as u8
-                || packet_type == PacketType::QuicDst as u8
                 || packet_type == PacketType::OverlayStream as u8
-                || packet_type == PacketType::DataWithKcpSrcModified as u8
-                || packet_type == PacketType::DataWithQuicSrcModified as u8
                 || packet_type == PacketType::Ethernet as u8
                 || packet_type == PacketType::AlternateFecSource as u8
                 || packet_type == PacketType::AlternateFecParity as u8
@@ -150,14 +144,7 @@ fn apply_local_route_policy(packet: &mut ZCPacket, speed_first: bool, latency_fi
 
 fn suppress_local_tun_delivery(header: &mut crate::tunnel::packet_def::PeerManagerHeader) {
     header.set_not_send_to_tun(true);
-    if !matches!(
-        header.packet_type,
-        packet_type
-            if packet_type == PacketType::DataWithKcpSrcModified as u8
-                || packet_type == PacketType::DataWithQuicSrcModified as u8
-    ) {
-        header.set_no_proxy(true);
-    }
+    header.set_no_proxy(true);
 }
 
 fn ordered_probe_indexes(candidates: &[(PeerId, PeerConnId, bool)], rotation: usize) -> Vec<usize> {
@@ -2349,7 +2336,7 @@ impl PeerManager {
         };
 
         // if no-tun is enabled, the src ip of packet in virtual network is converted to loopback address
-        // we already filter out the connection in tcp/quic/kcp proxy so no need check here.
+        // we already filter out the connection in tcp/quic proxy so no need check here.
         if addr.ip().is_loopback() {
             // allow other loopback address, good for conn from cdn/l4 connection
             return Ok(());
@@ -3062,8 +3049,6 @@ impl PeerManager {
 
                                 if packet_type == PacketType::Data as u8
                                     || packet_type == PacketType::Ethernet as u8
-                                    || packet_type == PacketType::KcpSrc as u8
-                                    || packet_type == PacketType::KcpDst as u8
                                     || packet_type == PacketType::OverlayStream as u8
                                 {
                                     let _ = Self::try_compress(compress_algo, &mut ret);
@@ -7041,98 +7026,6 @@ impl PeerManager {
         ret
     }
 
-    pub async fn check_allow_kcp_to_dst(&self, dst_ip: &IpAddr) -> bool {
-        let route = self.get_route();
-        let Some(dst_peer_id) = route.get_peer_id_by_ip(dst_ip).await else {
-            return false;
-        };
-        let Some(peer_info) = route.get_peer_info(dst_peer_id).await else {
-            return false;
-        };
-
-        // check dst allow kcp input
-        if !peer_info.feature_flag.map(|x| x.kcp_input).unwrap_or(false) {
-            return false;
-        }
-
-        let next_hop_policy = self.get_local_data_policy();
-        // check relay node allow relay kcp.
-        let Some(next_hop_id) = route
-            .get_next_hop_with_policy(dst_peer_id, next_hop_policy)
-            .await
-        else {
-            return false;
-        };
-
-        if next_hop_id == dst_peer_id {
-            // dst p2p, no need to relay
-            return true;
-        }
-
-        let Some(next_hop_info) = route.get_peer_info(next_hop_id).await else {
-            return false;
-        };
-
-        // check next hop allow kcp relay
-        if next_hop_info
-            .feature_flag
-            .map(|x| x.no_relay_kcp)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-
-        true
-    }
-
-    pub async fn check_allow_quic_to_dst(&self, dst_ip: &IpAddr) -> bool {
-        let route = self.get_route();
-        let Some(dst_peer_id) = route.get_peer_id_by_ip(dst_ip).await else {
-            return false;
-        };
-        let Some(peer_info) = route.get_peer_info(dst_peer_id).await else {
-            return false;
-        };
-
-        // check dst allow quic input
-        if !peer_info
-            .feature_flag
-            .map(|x| x.quic_input)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-
-        let next_hop_policy = self.get_local_data_policy();
-        // check relay node allow relay quic.
-        let Some(next_hop_id) = route
-            .get_next_hop_with_policy(dst_peer_id, next_hop_policy)
-            .await
-        else {
-            return false;
-        };
-
-        if next_hop_id == dst_peer_id {
-            // dst p2p, no need to relay
-            return true;
-        }
-
-        let Some(next_hop_info) = route.get_peer_info(next_hop_id).await else {
-            return false;
-        };
-
-        // check next hop allow quic relay
-        if next_hop_info
-            .feature_flag
-            .map(|x| x.no_relay_quic)
-            .unwrap_or(false)
-        {
-            return false;
-        }
-
-        true
-    }
-
     pub async fn update_exit_nodes(&self) {
         let exit_nodes = self.global_ctx.config.get_exit_nodes();
         self.exit_nodes.store(Arc::new(exit_nodes));
@@ -7226,21 +7119,7 @@ mod tests {
     };
 
     #[test]
-    fn local_wrapped_proxy_packets_skip_tun_but_remain_proxyable() {
-        for packet_type in [
-            PacketType::DataWithKcpSrcModified,
-            PacketType::DataWithQuicSrcModified,
-        ] {
-            let mut packet = ZCPacket::new_with_payload(&[]);
-            packet.fill_peer_manager_hdr(1, 1, packet_type as u8);
-            let header = packet.mut_peer_manager_header().unwrap();
-
-            super::suppress_local_tun_delivery(header);
-
-            assert!(header.is_not_send_to_tun());
-            assert!(!header.is_no_proxy());
-        }
-
+    fn locally_suppressed_data_is_not_reproxied() {
         let mut packet = ZCPacket::new_with_payload(&[]);
         packet.fill_peer_manager_hdr(1, 1, PacketType::Data as u8);
         let header = packet.mut_peer_manager_header().unwrap();

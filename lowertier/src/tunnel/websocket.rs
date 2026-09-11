@@ -117,14 +117,16 @@ fn browser_ws_client(addr: &url::Url) -> Result<ClientBuilder<'_>, TunnelError> 
     let origin = websocket_origin(addr);
     let origin = http::HeaderValue::from_str(&origin)
         .map_err(|_| TunnelError::InvalidAddr(format!("invalid websocket origin for {addr}")))?;
-    let mut client = ClientBuilder::from_uri(http::Uri::try_from(ws_http_url(addr).to_string()).unwrap());
+    let mut client =
+        ClientBuilder::from_uri(http::Uri::try_from(ws_http_url(addr).to_string()).unwrap());
     if super::tcp_lanes::requested(addr)? > 1 {
         // Explicit batch flushes still send small/control messages immediately.
         client = client
             .config(WebSocketConfig::default().flush_threshold(64 * 1024))
             .limits(Limits::default().max_payload_len(Some(super::tcp_lanes::MAX_PENDING_BYTES)));
     }
-    client.max_headers(128)
+    client
+        .max_headers(128)
         .add_header(http::header::ORIGIN, origin)?
         .add_header(
             http::header::USER_AGENT,
@@ -263,7 +265,9 @@ impl WsTunnelListener {
         if super::tcp_lanes::requested(&self.addr)? > 1 {
             server = server
                 .config(WebSocketConfig::default().flush_threshold(64 * 1024))
-                .limits(Limits::default().max_payload_len(Some(super::tcp_lanes::MAX_PENDING_BYTES)));
+                .limits(
+                    Limits::default().max_payload_len(Some(super::tcp_lanes::MAX_PENDING_BYTES)),
+                );
         }
         let (request, stream) = server.max_headers(128).accept(stream).await?;
 
@@ -357,7 +361,9 @@ impl TunnelListener for WsTunnelListener {
             stream.set_nodelay(true).unwrap();
             match timeout(Duration::from_secs(3), self.try_accept(stream)).await {
                 Ok(Ok(tunnel)) => {
-                    if lane_count == 1 { return Ok(tunnel); }
+                    if lane_count == 1 {
+                        return Ok(tunnel);
+                    }
                     match self.lanes.get_mut().accept(tunnel, lane_count).await {
                         Ok(Some(tunnel)) => return Ok(tunnel),
                         Ok(None) => continue,
@@ -434,15 +440,27 @@ impl WsTunnelConnector {
         if is_wss {
             let via_cdn = ws_via_cdn(&addr);
             let name = addr.domain().unwrap_or("localhost");
-            let stream = super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
+            let stream =
+                super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
             let binding = if via_cdn {
                 None
             } else {
                 let mut bytes = [0; 32];
-                stream.get_ref().ssl().export_keying_material(
-                    &mut bytes, "EXPORTER-LowTier-Wss-PeerConn-v1", Some(WSS_TRANSPORT_BINDING_CONTEXT),
-                ).map_err(|error| TunnelError::InternalError(format!("derive WSS transport binding: {error}")))?;
-                Some(TransportBinding { kind: TransportBindingKind::WssTlsExporterV1, bytes })
+                stream
+                    .get_ref()
+                    .ssl()
+                    .export_keying_material(
+                        &mut bytes,
+                        "EXPORTER-LowTier-Wss-PeerConn-v1",
+                        Some(WSS_TRANSPORT_BINDING_CONTEXT),
+                    )
+                    .map_err(|error| {
+                        TunnelError::InternalError(format!("derive WSS transport binding: {error}"))
+                    })?;
+                Some(TransportBinding {
+                    kind: TransportBindingKind::WssTlsExporterV1,
+                    bytes,
+                })
             };
             Self::connect_stream(&addr, stream, info, binding).await
         } else {
@@ -451,14 +469,21 @@ impl WsTunnelConnector {
     }
 
     async fn connect_stream<S>(
-        addr: &url::Url, stream: S, info: TunnelInfo, binding: Option<TransportBinding>,
+        addr: &url::Url,
+        stream: S,
+        info: TunnelInfo,
+        binding: Option<TransportBinding>,
     ) -> Result<Box<dyn Tunnel>, TunnelError>
-    where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let (client, _) = browser_ws_client(addr)?.connect_on(stream).await?;
         let (write, read) = client.split();
         Ok(Box::new(TunnelWrapper::new_with_transport_binding(
-            read.filter_map(map_from_ws_message), write.with(sink_from_zc_packet), Some(info), binding,
+            read.filter_map(map_from_ws_message),
+            write.with(sink_from_zc_packet),
+            Some(info),
+            binding,
         )))
     }
 
@@ -691,31 +716,59 @@ pub mod tests {
         let _tunnel = server_task.await.unwrap();
     }
 
-
     #[tokio::test]
     async fn server_frames_keep_vectored_writes() {
-        use std::{pin::Pin, sync::atomic::{AtomicUsize, Ordering}, task::{Context as TaskContext, Poll}};
+        use std::{
+            pin::Pin,
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{Context as TaskContext, Poll},
+        };
         use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-        struct CountWrites { inner: TcpStream, vectored: Arc<AtomicUsize> }
+        struct CountWrites {
+            inner: TcpStream,
+            vectored: Arc<AtomicUsize>,
+        }
         impl AsyncRead for CountWrites {
-            fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Pin::new(&mut self.inner).poll_read(cx, buf)
             }
         }
         impl AsyncWrite for CountWrites {
-            fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
                 Pin::new(&mut self.inner).poll_write(cx, buf)
             }
-            fn poll_write_vectored(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, bufs: &[std::io::IoSlice<'_>]) -> Poll<std::io::Result<usize>> {
-                if bufs.len() > 1 { self.vectored.fetch_add(1, Ordering::Relaxed); }
+            fn poll_write_vectored(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+                bufs: &[std::io::IoSlice<'_>],
+            ) -> Poll<std::io::Result<usize>> {
+                if bufs.len() > 1 {
+                    self.vectored.fetch_add(1, Ordering::Relaxed);
+                }
                 Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
             }
-            fn is_write_vectored(&self) -> bool { self.inner.is_write_vectored() }
-            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+            fn is_write_vectored(&self) -> bool {
+                self.inner.is_write_vectored()
+            }
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Pin::new(&mut self.inner).poll_flush(cx)
             }
-            fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut TaskContext<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Pin::new(&mut self.inner).poll_shutdown(cx)
             }
         }
@@ -727,7 +780,10 @@ pub mod tests {
             let url: url::Url = format!("ws://{addr}/ws").parse().unwrap();
             let ws_listener = WsTunnelListener::new(url.clone());
             let vectored = Arc::new(AtomicUsize::new(0));
-            let server_io = CountWrites { inner: server_io, vectored: vectored.clone() };
+            let server_io = CountWrites {
+                inner: server_io,
+                vectored: vectored.clone(),
+            };
             let client_builder = browser_ws_client(&url).unwrap();
             let (server, client) = tokio::join!(
                 ws_listener.accept_stream(server_io, None, peer),
@@ -738,14 +794,27 @@ pub mod tests {
             let (_read, mut write) = server.split();
             vectored.store(0, Ordering::Relaxed);
             let mut batch = crate::tunnel::batch::PacketBatch::new();
-            for _ in 0..64 { batch.try_push(ZCPacket::new_with_payload(&[7; 128])).unwrap(); }
-            let send = async { write.send(batch).await.unwrap(); };
+            for _ in 0..64 {
+                batch
+                    .try_push(ZCPacket::new_with_payload(&[7; 128]))
+                    .unwrap();
+            }
+            let send = async {
+                write.send(batch).await.unwrap();
+            };
             let receive = async {
-                for _ in 0..64 { assert!(client.next().await.unwrap().unwrap().is_binary()); }
+                for _ in 0..64 {
+                    assert!(client.next().await.unwrap().unwrap().is_binary());
+                }
             };
             tokio::join!(send, receive);
-            assert!(vectored.load(Ordering::Relaxed) > 0, "WebSocket frame writes lost their vectored path");
-        }).await.unwrap();
+            assert!(
+                vectored.load(Ordering::Relaxed) > 0,
+                "WebSocket frame writes lost their vectored path"
+            );
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

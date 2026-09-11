@@ -7,7 +7,7 @@ use crate::{
             config::ConfigRpc,
             instance::{
                 AclManageRpc, ConnectorManageRpc, CredentialManageRpc, MappedListenerManageRpc,
-                PeerManageRpc, PortForwardManageRpc, StatsRpc, TcpProxyRpc, VpnPortalRpc,
+                PeerManageRpc, PortForwardManageRpc, StatsRpc, TcpProxyRpc,
             },
             logger::LoggerRpc,
         },
@@ -23,7 +23,7 @@ use crate::{
         logger::LoggerRpcService, mapped_listener_manage::MappedListenerManageRpcService,
         peer_center::PeerCenterManageRpcService, peer_manage::PeerManageRpcService,
         port_forward_manage::PortForwardManageRpcService, proxy::TcpProxyRpcService,
-        stats::StatsRpcService, vpn_portal::VpnPortalRpcService,
+        stats::StatsRpcService,
     },
 };
 
@@ -41,10 +41,6 @@ fn tcp_proxy_domain(domain_name: Option<&str>) -> Result<&'static str> {
     match domain_name {
         None | Some("") => Ok("tcp"),
         Some("tcp") => Ok("tcp"),
-        Some("kcp_src") => Ok("kcp_src"),
-        Some("kcp_dst") => Ok("kcp_dst"),
-        Some("quic_src") => Ok("quic_src"),
-        Some("quic_dst") => Ok("quic_dst"),
         Some(domain) => {
             Err(anyhow::anyhow!("invalid TcpProxyRpcService domain_name: {}", domain).into())
         }
@@ -79,11 +75,6 @@ pub async fn call_json_rpc(
         }
         "api.instance.MappedListenerManageRpcService" => {
             MappedListenerManageRpcService::new(instance_manager.clone())
-                .json_call_method(ctrl, method_name, payload)
-                .await
-        }
-        "api.instance.VpnPortalRpcService" => {
-            VpnPortalRpcService::new(instance_manager.clone())
                 .json_call_method(ctrl, method_name, payload)
                 .await
         }

@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-#[cfg(feature = "quic")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crossbeam::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
-#[cfg(feature = "quic")]
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 
@@ -13,7 +11,6 @@ use tokio::{select, sync::mpsc};
 
 use tracing::Instrument;
 
-#[cfg(feature = "quic")]
 use super::alternate_fec::{
     AlternateFecDecoder, AlternateFecEncoder, CompletedAlternateFecBlock, FEC_FLUSH_DELAY,
     parity_packets, source_metadata, wrap_source_packet,
@@ -24,7 +21,6 @@ use super::{
     peer_conn::{PeerConn, PeerConnId},
     route_trait::NextHopPolicy,
 };
-#[cfg(feature = "quic")]
 use crate::{
     common::dataplane_telemetry::{DataplaneFec, DataplaneTelemetry},
     tunnel::packet_def::PacketType,
@@ -44,10 +40,8 @@ use tokio_util::task::AbortOnDropHandle;
 pub(crate) type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
 
-#[cfg(feature = "quic")]
 const ALTERNATE_FEC_PARITY_QUEUE_CAPACITY: usize = 32;
 
-#[cfg(feature = "quic")]
 struct AlternateFecParityWork {
     conn: ArcPeerConn,
     local_peer_id: PeerId,
@@ -76,23 +70,15 @@ pub struct Peer {
     origin_auth_update: Arc<RwLock<OriginAuthUpdate>>,
     default_conn_refresh_task: AbortOnDropHandle<()>,
 
-    #[cfg(feature = "quic")]
     alternate_fec_encoder: Option<Arc<Mutex<AlternateFecEncoder>>>,
-    #[cfg(feature = "quic")]
     alternate_fec_decoder: Option<Arc<Mutex<AlternateFecDecoder>>>,
-    #[cfg(feature = "quic")]
     alternate_fec_primary: Arc<AtomicCell<PeerConnId>>,
-    #[cfg(feature = "quic")]
     alternate_fec_local_peer_id: Arc<AtomicU32>,
-    #[cfg(feature = "quic")]
     alternate_fec_notify: Option<Arc<tokio::sync::Notify>>,
-    #[cfg(feature = "quic")]
     alternate_fec_parity_sender: Option<mpsc::Sender<AlternateFecParityWork>>,
-    #[cfg(feature = "quic")]
     alternate_fec_worker_task: Option<AbortOnDropHandle<()>>,
 }
 
-#[cfg(feature = "quic")]
 fn select_alternate_conn(conns: &ConnMap, primary: &ArcPeerConn) -> Option<ArcPeerConn> {
     conns
         .iter()
@@ -110,7 +96,6 @@ fn select_alternate_conn(conns: &ConnMap, primary: &ArcPeerConn) -> Option<ArcPe
         .map(|candidate| candidate.clone())
 }
 
-#[cfg(feature = "quic")]
 fn is_alternate_fec_source(packet: &ZCPacket, peer_node_id: PeerId) -> bool {
     packet.peer_manager_header().is_some_and(|header| {
         header.packet_type == PacketType::Ethernet as u8
@@ -119,7 +104,6 @@ fn is_alternate_fec_source(packet: &ZCPacket, peer_node_id: PeerId) -> bool {
     })
 }
 
-#[cfg(feature = "quic")]
 fn alternate_fec_capture_allowed(
     primary: &ArcPeerConn,
     alternate: &ArcPeerConn,
@@ -138,7 +122,6 @@ fn alternate_fec_capture_allowed(
         && alternate.alternate_fec_record_fits(parity_record_len)
 }
 
-#[cfg(feature = "quic")]
 async fn send_alternate_parity(
     remote_peer_id: PeerId,
     work: AlternateFecParityWork,
@@ -184,7 +167,6 @@ async fn send_alternate_parity(
     }
 }
 
-#[cfg(feature = "quic")]
 fn enqueue_alternate_parity(
     sender: &mpsc::Sender<AlternateFecParityWork>,
     work: AlternateFecParityWork,
@@ -206,7 +188,6 @@ fn enqueue_alternate_parity(
     }
 }
 
-#[cfg(feature = "quic")]
 fn timer_alternate_parity_work(
     conns: &ConnMap,
     primary_id: &Arc<AtomicCell<PeerConnId>>,
@@ -223,7 +204,6 @@ fn timer_alternate_parity_work(
     })
 }
 
-#[cfg(feature = "quic")]
 async fn run_alternate_fec_owner(
     encoder: Arc<Mutex<AlternateFecEncoder>>,
     mut parity_receiver: mpsc::Receiver<AlternateFecParityWork>,
@@ -283,7 +263,6 @@ async fn run_alternate_fec_owner(
     }
 }
 
-#[cfg(feature = "quic")]
 async fn wait_for_alternate_fec_deadline(
     encoder: Arc<Mutex<AlternateFecEncoder>>,
     notify: Arc<tokio::sync::Notify>,
@@ -407,7 +386,6 @@ impl Peer {
             }
         }));
 
-        #[cfg(feature = "quic")]
         let (alternate_fec_encoder, alternate_fec_decoder) = {
             let flags = global_ctx.get_flags();
             if flags.quic_datagram_alternate_path_parity
@@ -430,15 +408,11 @@ impl Peer {
                 (None, None)
             }
         };
-        #[cfg(feature = "quic")]
         let alternate_fec_primary = Arc::new(AtomicCell::new(PeerConnId::default()));
-        #[cfg(feature = "quic")]
         let alternate_fec_local_peer_id = Arc::new(AtomicU32::new(0));
-        #[cfg(feature = "quic")]
         let alternate_fec_notify = alternate_fec_encoder
             .as_ref()
             .map(|_| Arc::new(tokio::sync::Notify::new()));
-        #[cfg(feature = "quic")]
         let (alternate_fec_parity_sender, alternate_fec_parity_receiver) =
             if alternate_fec_encoder.is_some() {
                 let (sender, receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
@@ -446,7 +420,6 @@ impl Peer {
             } else {
                 (None, None)
             };
-        #[cfg(feature = "quic")]
         let alternate_fec_worker_task = match (
             alternate_fec_encoder.clone(),
             alternate_fec_parity_receiver,
@@ -493,19 +466,12 @@ impl Peer {
             origin_auth_update,
             default_conn_refresh_task,
 
-            #[cfg(feature = "quic")]
             alternate_fec_encoder,
-            #[cfg(feature = "quic")]
             alternate_fec_decoder,
-            #[cfg(feature = "quic")]
             alternate_fec_primary,
-            #[cfg(feature = "quic")]
             alternate_fec_local_peer_id,
-            #[cfg(feature = "quic")]
             alternate_fec_notify,
-            #[cfg(feature = "quic")]
             alternate_fec_parity_sender,
-            #[cfg(feature = "quic")]
             alternate_fec_worker_task,
         }
     }
@@ -543,7 +509,6 @@ impl Peer {
             }
         }
 
-        #[cfg(feature = "quic")]
         conn.set_alternate_fec_decoder(self.alternate_fec_decoder.clone());
         conn.start_recv_loop(self.packet_recv_chan.clone()).await;
         conn.start_pingpong();
@@ -697,7 +662,6 @@ impl Peer {
         let Some(conn) = self.select_conn_for_flow(policy, flow_hash) else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
-        #[cfg(feature = "quic")]
         if let Some(encoder) = self.alternate_fec_encoder.as_ref()
             && conn.alternate_fec_remote_receive_ready()
             && is_alternate_fec_source(&msg, self.peer_node_id)
@@ -777,7 +741,6 @@ impl Peer {
         conn: ArcPeerConn,
         batch: PacketBatch,
     ) -> Result<(), Error> {
-        #[cfg(feature = "quic")]
         if let Some(encoder) = self.alternate_fec_encoder.as_ref()
             && conn.alternate_fec_remote_receive_ready()
             && batch
@@ -1034,12 +997,10 @@ mod tests {
     use base64::prelude::{BASE64_STANDARD, Engine as _};
     use rand::rngs::OsRng;
     use std::{sync::Arc, time::Duration};
-    #[cfg(feature = "quic")]
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
     use crate::proto::common::TunnelInfo;
-    #[cfg(feature = "quic")]
     use crate::tunnel::{
         batch::PacketBatch,
         packet_def::{PacketType, ZCPacket},
@@ -1062,15 +1023,12 @@ mod tests {
     };
 
     use super::Peer;
-    #[cfg(feature = "quic")]
     use super::{
         ALTERNATE_FEC_PARITY_QUEUE_CAPACITY, AlternateFecParityWork, enqueue_alternate_parity,
         is_alternate_fec_source, wait_for_alternate_fec_deadline,
     };
-    #[cfg(feature = "quic")]
     use crate::peers::alternate_fec::CompletedAlternateFecBlock;
 
-    #[cfg(feature = "quic")]
     #[test]
     fn critical_l2_control_bypasses_alternate_fec() {
         let mut frame = vec![0_u8; 14 + 28];
@@ -1082,7 +1040,6 @@ mod tests {
         assert!(!is_alternate_fec_source(&packet, 22));
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn alternate_fec_waiter_stays_idle_until_data_arrives() {
         let now = std::time::Instant::now();
@@ -1104,7 +1061,6 @@ mod tests {
         assert_eq!(wait.await, now + delay);
     }
 
-    #[cfg(feature = "quic")]
     fn parity_work(
         conn: Arc<PeerConn>,
         block_id: u64,
@@ -1121,7 +1077,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn alternate_fec_primary_enqueue_does_not_wait_for_blocked_sink() {
         let global_ctx = get_mock_global_ctx();
@@ -1138,7 +1093,6 @@ mod tests {
         assert!(result.is_ok(), "primary enqueue waited for the parity sink");
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn alternate_fec_parity_queue_preserves_block_order() {
         let global_ctx = get_mock_global_ctx();
@@ -1158,7 +1112,6 @@ mod tests {
         assert_eq!(received, vec![1, 2, 3]);
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn alternate_fec_parity_queue_is_bounded_and_releases_work_on_shutdown() {
         let global_ctx = get_mock_global_ctx();
@@ -1195,7 +1148,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "quic")]
     #[tokio::test]
     async fn l2_parity_uses_the_distinct_authenticated_connection() {
         let peer_a_id = new_peer_id();

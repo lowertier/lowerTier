@@ -603,12 +603,6 @@ pub(crate) fn is_data_packet(packet: &ZCPacket) -> bool {
     matches!(
         packet_type,
         x if x == PacketType::Data as u8
-            || x == PacketType::DataWithKcpSrcModified as u8
-            || x == PacketType::DataWithQuicSrcModified as u8
-            || x == PacketType::KcpSrc as u8
-            || x == PacketType::KcpDst as u8
-            || x == PacketType::QuicSrc as u8
-            || x == PacketType::QuicDst as u8
             || x == PacketType::OverlayStream as u8
             || x == PacketType::Ethernet as u8
             || x == PacketType::AlternateFecSource as u8

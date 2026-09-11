@@ -167,11 +167,9 @@ impl Compressor for DefaultCompressor {
 
         // Compaction may have changed the packet encoding since its cached hash
         // was computed. Preserve the current cleartext flow across compression.
-        let flow_hash = crate::peers::flow::classify_payload_flow(
-            zc_packet.payload(),
-            pm_header.packet_type,
-        )
-        .hash;
+        let flow_hash =
+            crate::peers::flow::classify_payload_flow(zc_packet.payload(), pm_header.packet_type)
+                .hash;
         zc_packet.set_flow_hash(flow_hash);
         zc_packet
             .mut_peer_manager_header()

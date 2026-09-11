@@ -46,19 +46,17 @@ use lowertier::{
                 ConnectorManageRpcClientFactory, CredentialManageRpc,
                 CredentialManageRpcClientFactory, DumpRouteRequest, ForeignNetworkEntryPb,
                 GenerateCredentialRequest, GetAclStatsRequest, GetPrometheusStatsRequest,
-                GetStatsRequest, GetVpnPortalInfoRequest, GetWhitelistRequest,
-                GetWhitelistResponse, InstanceIdentifier, ListConnectorRequest,
-                ListCredentialsRequest, ListCredentialsResponse, ListForeignNetworkRequest,
-                ListGlobalForeignNetworkRequest, ListMappedListenerRequest, ListPeerRequest,
-                ListPeerResponse, ListPortForwardRequest, ListPortForwardResponse,
-                ListPublicIpv6InfoRequest, ListPublicIpv6InfoResponse, ListRouteRequest,
-                ListRouteResponse, MappedListener, MappedListenerManageRpc,
-                MappedListenerManageRpcClientFactory, MetricSnapshot, NodeInfo, PeerManageRpc,
-                PeerManageRpcClientFactory, PortForwardManageRpc,
+                GetStatsRequest, GetWhitelistRequest, GetWhitelistResponse, InstanceIdentifier,
+                ListConnectorRequest, ListCredentialsRequest, ListCredentialsResponse,
+                ListForeignNetworkRequest, ListGlobalForeignNetworkRequest,
+                ListMappedListenerRequest, ListPeerRequest, ListPeerResponse,
+                ListPortForwardRequest, ListPortForwardResponse, ListPublicIpv6InfoRequest,
+                ListPublicIpv6InfoResponse, ListRouteRequest, ListRouteResponse, MappedListener,
+                MappedListenerManageRpc, MappedListenerManageRpcClientFactory, MetricSnapshot,
+                NodeInfo, PeerManageRpc, PeerManageRpcClientFactory, PortForwardManageRpc,
                 PortForwardManageRpcClientFactory, RevokeCredentialRequest, Route as ApiRoute,
                 ShowNodeInfoRequest, StatsRpc, StatsRpcClientFactory, TcpProxyEntryState,
-                TcpProxyEntryTransportType, TcpProxyRpc, TcpProxyRpcClientFactory,
-                TrustedKeySourcePb, VpnPortalInfo, VpnPortalRpc, VpnPortalRpcClientFactory,
+                TcpProxyRpc, TcpProxyRpcClientFactory, TrustedKeySourcePb,
                 instance_identifier::{InstanceSelector, Selector},
                 list_global_foreign_network_response, list_peer_route_pair,
             },
@@ -76,7 +74,7 @@ use lowertier::{
         rpc_impl::standalone::StandAloneClient,
         rpc_types::{controller::BaseController, error::Error as RpcError},
     },
-    tunnel::{TunnelScheme, tcp::TcpTunnelConnector},
+    tunnel::{IpScheme, tcp::TcpTunnelConnector},
     utils::{PeerRoutePair, string::cost_to_str},
 };
 
@@ -141,13 +139,11 @@ enum SubCommand {
     Route(RouteArgs),
     #[command(about = "show global peers info")]
     PeerCenter,
-    #[command(about = "show vpn portal (wireguard) info")]
-    VpnPortal,
     #[command(about = "inspect self lowertier-core status")]
     Node(NodeArgs),
     #[command(about = "manage lowertier-core as a system service")]
     Service(ServiceArgs),
-    #[command(about = "show tcp/kcp proxy status")]
+    #[command(about = "show tcp/quic proxy status")]
     Proxy,
     #[command(about = "show ACL rules statistics")]
     Acl(AclArgs),
@@ -867,18 +863,6 @@ impl<'a> CommandHandler<'a> {
             .with_context(|| "failed to get peer center client")?)
     }
 
-    async fn get_vpn_portal_client(
-        &self,
-    ) -> Result<Box<dyn VpnPortalRpc<Controller = BaseController>>, Error> {
-        Ok(self
-            .client
-            .lock()
-            .await
-            .scoped_client::<VpnPortalRpcClientFactory<BaseController>>("".to_string())
-            .await
-            .with_context(|| "failed to get vpn portal client")?)
-    }
-
     async fn get_acl_manager_client(
         &self,
     ) -> Result<Box<dyn AclManageRpc<Controller = BaseController>>, Error> {
@@ -1246,21 +1230,6 @@ impl<'a> CommandHandler<'a> {
             .collect())
     }
 
-    async fn fetch_vpn_portal_info(&self) -> Result<VpnPortalInfo, Error> {
-        Ok(self
-            .get_vpn_portal_client()
-            .await?
-            .get_vpn_portal_info(
-                BaseController::default(),
-                GetVpnPortalInfoRequest {
-                    instance: Some(self.instance_selector.clone()),
-                },
-            )
-            .await?
-            .vpn_portal_info
-            .unwrap_or_default())
-    }
-
     async fn fetch_stats(&self) -> Result<Vec<MetricSnapshot>, Error> {
         Ok(self
             .get_stats_client()
@@ -1291,7 +1260,7 @@ impl<'a> CommandHandler<'a> {
 
     fn connector_validate_url(url: &str) -> Result<url::Url, Error> {
         let url = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid url ({url}): {e}"))?;
-        TunnelScheme::try_from(&url).map_err(|_| {
+        IpScheme::try_from(&url).map_err(|_| {
             anyhow::anyhow!("unsupported scheme \"{}\" in url ({url})", url.scheme())
         })?;
         Ok(url)
@@ -2538,30 +2507,6 @@ impl<'a> CommandHandler<'a> {
         })
     }
 
-    async fn handle_vpn_portal(&self) -> Result<(), Error> {
-        let results = self
-            .collect_instance_results(|handler| Box::pin(handler.fetch_vpn_portal_info()))
-            .await?;
-
-        if *self.output_format == OutputFormat::Json {
-            return self.print_json_results(results);
-        }
-
-        self.print_results(&results, |resp| {
-            println!("portal_name: {}", resp.vpn_type);
-            println!(
-                r#"
-############### client_config_start ###############
-{}
-############### client_config_end ###############
-"#,
-                resp.client_config
-            );
-            println!("connected_clients:\n{:#?}", resp.connected_clients);
-            Ok(())
-        })
-    }
-
     async fn handle_node(&self, sub_command: Option<&NodeSubCommand>) -> Result<(), Error> {
         let results = self
             .collect_instance_results(|handler| Box::pin(handler.fetch_node_info()))
@@ -3070,9 +3015,6 @@ async fn main() -> Result<(), Error> {
         SubCommand::PeerCenter => {
             handler.handle_peer_center().await?;
         }
-        SubCommand::VpnPortal => {
-            handler.handle_vpn_portal().await?;
-        }
         SubCommand::Node(sub_cmd) => {
             handler.handle_node(sub_cmd.sub_command.as_ref()).await?;
         }
@@ -3153,13 +3095,11 @@ async fn main() -> Result<(), Error> {
         SubCommand::Proxy => {
             let mut entries = vec![];
 
-            for client_type in &["tcp", "kcp_src", "kcp_dst", "quic_src", "quic_dst"] {
-                let client = handler.get_tcp_proxy_client(client_type).await?;
-                let ret = client
-                    .list_tcp_proxy_entry(BaseController::default(), Default::default())
-                    .await;
-                entries.extend(ret.unwrap_or_default().entries);
-            }
+            let client = handler.get_tcp_proxy_client("tcp").await?;
+            let ret = client
+                .list_tcp_proxy_entry(BaseController::default(), Default::default())
+                .await;
+            entries.extend(ret.unwrap_or_default().entries);
 
             if cli.verbose {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -3172,7 +3112,6 @@ async fn main() -> Result<(), Error> {
                 dst: String,
                 start_time: String,
                 state: String,
-                transport_type: String,
             }
 
             let table_rows = entries
@@ -3188,18 +3127,14 @@ async fn main() -> Result<(), Error> {
                     .format("%Y-%m-%d %H:%M:%S")
                     .to_string(),
                     state: format!("{:?}", TcpProxyEntryState::try_from(e.state).unwrap()),
-                    transport_type: format!(
-                        "{:?}",
-                        TcpProxyEntryTransportType::try_from(e.transport_type).unwrap()
-                    ),
                 })
                 .collect::<Vec<_>>();
 
             print_output(
                 &table_rows,
                 &cli.output_format,
-                &["start_time", "state", "transport_type"],
-                &["start_time", "state", "transport_type"],
+                &["start_time", "state"],
+                &["start_time", "state"],
                 cli.no_trunc,
             )?;
         }

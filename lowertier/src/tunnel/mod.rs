@@ -11,7 +11,6 @@ use crate::{
     proto::common::TunnelInfo,
 };
 use async_trait::async_trait;
-use derive_more::{From, TryInto};
 use futures::{Sink, Stream};
 use socket2::Protocol;
 use std::fmt::Debug;
@@ -21,6 +20,7 @@ use tokio::time::error::Elapsed;
 use self::packet_def::ZCPacket;
 
 pub mod batch;
+mod browser_tls;
 pub mod buf;
 pub mod common;
 pub mod direct;
@@ -30,37 +30,20 @@ pub mod packet_def;
 pub mod ring;
 pub mod stats;
 pub mod tcp;
-#[cfg(any(feature = "quic", feature = "websocket"))]
 mod tcp_lanes;
-#[cfg(any(feature = "quic", feature = "websocket"))]
-mod browser_tls;
 pub mod udp;
 pub(crate) mod udp_src;
 pub(crate) mod udp_vector_io;
 
-#[cfg(feature = "faketcp")]
-pub mod fake_tcp;
-
-#[cfg(feature = "wireguard")]
-pub mod wireguard;
-
-#[cfg(feature = "quic")]
 pub mod quic;
 
-#[cfg(feature = "quic")]
 pub mod http2;
 
-#[cfg(feature = "quic")]
 pub(crate) mod stealth_tls;
 
-#[cfg(feature = "websocket")]
 pub mod websocket;
 
-#[cfg(any(feature = "quic", feature = "websocket"))]
 pub mod insecure_tls;
-
-#[cfg(unix)]
-pub mod unix;
 
 #[derive(thiserror::Error, Debug)]
 pub enum TunnelError {
@@ -99,7 +82,6 @@ pub enum TunnelError {
     #[error("underlay policy denied path: {0}")]
     UnderlayPolicyDenied(String),
 
-    #[cfg(feature = "websocket")]
     #[error("websocket error: {0}")]
     WebSocketError(#[from] tokio_websockets::Error),
 
@@ -352,11 +334,7 @@ pub(crate) trait FromUrl {
 impl FromUrl for SocketAddr {
     async fn from_url(url: url::Url, ip_version: IpVersion) -> Result<Self, TunnelError> {
         let addrs = socket_addrs(&url, || {
-            (&url)
-                .try_into()
-                .ok()
-                .and_then(|s: TunnelScheme| s.try_into().ok())
-                .map(IpScheme::default_port)
+            IpScheme::try_from(&url).ok().map(IpScheme::default_port)
         })
         .await
         .map_err(|e| {
@@ -450,16 +428,9 @@ struct IpSchemeAttributes {
 pub enum IpScheme {
     Tcp,
     Udp,
-    #[cfg(feature = "wireguard")]
-    Wg,
-    #[cfg(feature = "quic")]
     Quic,
-    #[cfg(feature = "websocket")]
     Ws,
-    #[cfg(feature = "websocket")]
     Wss,
-    #[cfg(feature = "faketcp")]
-    FakeTcp,
 }
 
 impl IpScheme {
@@ -467,16 +438,9 @@ impl IpScheme {
         let (protocol, port_offset) = match self {
             Self::Tcp => (Protocol::TCP, 0),
             Self::Udp => (Protocol::UDP, 0),
-            #[cfg(feature = "wireguard")]
-            Self::Wg => (Protocol::UDP, 1),
-            #[cfg(feature = "quic")]
             Self::Quic => (Protocol::UDP, 2),
-            #[cfg(feature = "websocket")]
             Self::Ws => (Protocol::TCP, 1),
-            #[cfg(feature = "websocket")]
             Self::Wss => (Protocol::TCP, 2),
-            #[cfg(feature = "faketcp")]
-            Self::FakeTcp => (Protocol::TCP, 3),
         };
         IpSchemeAttributes {
             protocol,
@@ -493,62 +457,26 @@ impl IpScheme {
 
     pub const fn default_port(self) -> u16 {
         match self {
-            #[cfg(feature = "websocket")]
             Self::Ws => 80,
-            #[cfg(feature = "websocket")]
             Self::Wss => 443,
             _ => 11010 + self.port_offset(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, EnumString, From, TryInto)]
-#[strum(serialize_all = "lowercase")]
-pub enum TunnelScheme {
-    #[strum(disabled)]
-    Ip(IpScheme),
-    #[cfg(unix)]
-    Unix,
-    // Only for connector
-    Http,
-    Https,
-    Ring,
-    Txt,
-    Srv,
-}
-
-impl TryFrom<&url::Url> for TunnelScheme {
+impl TryFrom<&url::Url> for IpScheme {
     type Error = Error;
 
     fn try_from(value: &url::Url) -> Result<Self, Self::Error> {
-        let scheme = value.scheme();
-        scheme.parse().or_else(|_| {
-            Ok(TunnelScheme::Ip(
-                scheme
-                    .parse()
-                    .map_err(|_| Error::InvalidUrl(value.to_string()))?,
-            ))
-        })
+        value
+            .scheme()
+            .parse()
+            .map_err(|_| Error::InvalidUrl(value.to_string()))
     }
 }
 
-pub(crate) fn get_scheme_by_url(l: &url::Url) -> Result<TunnelScheme, Error> {
-    l.try_into()
-}
-
-macro_rules! __matches_scheme__ {
-    ($url:expr, $( $pattern:pat_param )|+ ) => {
-        matches!($crate::tunnel::get_scheme_by_url(&$url), Ok($( $pattern )|+))
-    };
-}
-
-pub(crate) use __matches_scheme__ as matches_scheme;
-
 pub fn get_protocol_by_url(l: &url::Url) -> Result<Protocol, Error> {
-    let TunnelScheme::Ip(scheme) = l.try_into()? else {
-        return Err(Error::InvalidUrl(l.to_string()));
-    };
-    Ok(scheme.protocol())
+    Ok(IpScheme::try_from(l)?.protocol())
 }
 
 macro_rules! __matches_protocol__ {
@@ -561,23 +489,14 @@ pub(crate) use __matches_protocol__ as matches_protocol;
 
 #[cfg(test)]
 mod tests {
-    use super::{IpScheme, TunnelScheme, matches_scheme};
+    use super::IpScheme;
 
     #[test]
-    fn matches_scheme_accepts_owned_url() {
+    fn ip_scheme_parses_from_url() {
         let url: url::Url = "udp://[2001:db8::1]:11010".parse().unwrap();
-
-        assert!(matches_scheme!(url, TunnelScheme::Ip(IpScheme::Udp)));
-    }
-
-    #[test]
-    fn matches_scheme_accepts_borrowed_url() {
-        let url: url::Url = "udp://[2001:db8::1]:11010".parse().unwrap();
-
-        assert!(matches_scheme!(&url, TunnelScheme::Ip(IpScheme::Udp)));
+        assert_eq!(IpScheme::try_from(&url).unwrap(), IpScheme::Udp);
     }
 }
 
-
-#[cfg(all(test, feature = "quic", feature = "websocket"))]
+#[cfg(test)]
 mod caddy_tcp_tests;

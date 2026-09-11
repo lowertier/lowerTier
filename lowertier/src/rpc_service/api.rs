@@ -12,7 +12,7 @@ use crate::{
             instance::{
                 AclManageRpcServer, ConnectorManageRpcServer, CredentialManageRpcServer,
                 MappedListenerManageRpcServer, PeerManageRpcServer, PortForwardManageRpcServer,
-                StatsRpcServer, TcpProxyRpcServer, VpnPortalRpcServer,
+                StatsRpcServer, TcpProxyRpcServer,
             },
             logger::LoggerRpcServer,
             manage::WebClientServiceServer,
@@ -28,7 +28,7 @@ use crate::{
         mapped_listener_manage::MappedListenerManageRpcService,
         peer_center::PeerCenterManageRpcService, peer_manage::PeerManageRpcService,
         port_forward_manage::PortForwardManageRpcService, protected_port,
-        proxy::TcpProxyRpcService, stats::StatsRpcService, vpn_portal::VpnPortalRpcService,
+        proxy::TcpProxyRpcService, stats::StatsRpcService,
     },
     tunnel::{TunnelListener, tcp::TcpTunnelListener},
     web_client::{DefaultHooks, WebClientHooks},
@@ -120,19 +120,9 @@ pub fn register_api_rpc_service(
     );
 
     registry.register(
-        VpnPortalRpcServer::new(VpnPortalRpcService::new(instance_manager.clone())),
-        "",
+        TcpProxyRpcServer::new(TcpProxyRpcService::new(instance_manager.clone(), "tcp")),
+        "tcp",
     );
-
-    for client_type in ["tcp", "kcp_src", "kcp_dst", "quic_src", "quic_dst"] {
-        registry.register(
-            TcpProxyRpcServer::new(TcpProxyRpcService::new(
-                instance_manager.clone(),
-                client_type,
-            )),
-            client_type,
-        );
-    }
 
     registry.register(
         AclManageRpcServer::new(AclManageRpcService::new(instance_manager.clone())),

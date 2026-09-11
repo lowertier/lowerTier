@@ -14,7 +14,6 @@ mod arch;
 mod gateway;
 pub mod instance;
 mod peer_center;
-mod vpn_portal;
 
 pub mod common;
 pub mod connector;

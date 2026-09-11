@@ -7,9 +7,6 @@ members = [
 ]
 default-members = ["lowertier"]
 exclude = [
-    "vendor/boringtun-lowertier",
-    "vendor/http_req",
-    "vendor/kcp-sys",
     "vendor/quinn-proto",
     "vendor/rust-tun",
     "vendor/service-manager-rs",

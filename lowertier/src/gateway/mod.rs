@@ -18,13 +18,6 @@ pub mod http_proxy;
 #[cfg(feature = "socks5")]
 pub mod socks5;
 
-#[cfg(feature = "kcp")]
-pub mod kcp_proxy;
-mod wrapped_proxy;
-
-#[cfg(feature = "quic")]
-pub mod quic_proxy;
-
 #[derive(Debug)]
 pub(crate) struct CidrSet {
     global_ctx: ArcGlobalCtx,
