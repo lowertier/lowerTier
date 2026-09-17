@@ -3252,28 +3252,38 @@ impl PeerConn {
                 }
             }
         } else if let Some(expected_transition_id) = pending_responder_proof {
-            let supplied_transition_id = optional_transition_id_from_wire(
-                &msg1_pb.acknowledged_transition_id,
-            )?
-            .ok_or_else(|| {
-                Error::WaitRespError(
-                    "missing acknowledgement for committed responder transition".to_owned(),
-                )
-            })?;
-            if supplied_transition_id != expected_transition_id {
-                return Err(Error::WaitRespError(
-                    "responder transition acknowledgement mismatch".to_owned(),
-                ));
-            }
-            ResponderTransitionPlan::Prepared {
-                prepared: store.prepare_responder_session_with_recovery_proof(
-                    &session_key,
-                    supplied_transition_id,
-                    algo.clone(),
-                    msg1_pb.client_encryption_algorithm.clone(),
-                    None,
-                )?,
-                recovery_active: false,
+            match optional_transition_id_from_wire(&msg1_pb.acknowledged_transition_id)? {
+                Some(supplied_transition_id)
+                    if supplied_transition_id == expected_transition_id =>
+                {
+                    ResponderTransitionPlan::Prepared {
+                        prepared: store.prepare_responder_session_with_recovery_proof(
+                            &session_key,
+                            supplied_transition_id,
+                            algo.clone(),
+                            msg1_pb.client_encryption_algorithm.clone(),
+                            None,
+                        )?,
+                        recovery_active: false,
+                    }
+                }
+                Some(_) => {
+                    return Err(Error::WaitRespError(
+                        "responder transition acknowledgement mismatch".to_owned(),
+                    ));
+                }
+                None => {
+                    store.abandon_unacknowledged_responder_recovery(&session_key);
+                    ResponderTransitionPlan::Prepared {
+                        prepared: store.prepare_responder_session(
+                            &session_key,
+                            algo.clone(),
+                            msg1_pb.client_encryption_algorithm.clone(),
+                            None,
+                        )?,
+                        recovery_active: false,
+                    }
+                }
             }
         } else {
             // A stale acknowledgement is harmless after its shape is valid.

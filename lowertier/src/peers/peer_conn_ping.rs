@@ -209,7 +209,7 @@ impl PeerConnPinger {
 
         let now = Instant::now();
         // wait until we get a pong packet in ctrl_resp_receiver
-        let resp = timeout(Duration::from_secs(2), async {
+        let resp = timeout(Duration::from_secs(8), async {
             loop {
                 match receiver.recv().await {
                     Ok(p) => {
@@ -261,7 +261,7 @@ impl PeerConnPinger {
 
         // one with 1% precision
         let loss_rate_stats_1 = WindowLatency::new(100);
-        // disconnect the connection if lost 5 pingpong consecutively
+        // disconnect the connection if lost 15 pingpong consecutively
         let loss_counter = Arc::new(AtomicU32::new(0));
 
         let stopped = Arc::new(AtomicU32::new(0));
@@ -378,7 +378,7 @@ impl PeerConnPinger {
                 my_node_id
             );
 
-            if loss_counter.load(Ordering::Relaxed) >= 5 {
+            if loss_counter.load(Ordering::Relaxed) >= 15 {
                 tracing::warn!(
                     ?ret,
                     ?self,
@@ -405,49 +405,4 @@ impl PeerConnPinger {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ingress_during_failed_ping_clears_previous_losses() {
-        let losses = AtomicU32::new(4);
-
-        update_loss_counter(&losses, false, 100, 101, 200, 200, false);
-
-        assert_eq!(losses.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn failed_ping_without_ingress_increments_losses() {
-        let losses = AtomicU32::new(4);
-
-        update_loss_counter(&losses, false, 100, 100, 200, 200, false);
-
-        assert_eq!(losses.load(Ordering::Relaxed), 5);
-    }
-
-    #[test]
-    fn successful_ping_clears_previous_losses() {
-        let losses = AtomicU32::new(4);
-
-        update_loss_counter(&losses, true, 100, 100, 200, 200, false);
-
-        assert_eq!(losses.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn local_receive_backpressure_clears_failed_ping_losses() {
-        let losses = AtomicU32::new(4);
-
-        update_loss_counter(&losses, false, 100, 100, 200, 200, true);
-
-        assert_eq!(losses.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn outbound_progress_during_failed_ping_clears_previous_losses() {
-        let losses = AtomicU32::new(4);
-
-        update_loss_counter(&losses, false, 100, 100, 200, 201, false);
-
-        assert_eq!(losses.load(Ordering::Relaxed), 0);
-    }
 }

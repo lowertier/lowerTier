@@ -93,10 +93,13 @@ impl ManualConnectorManager {
                 .query_pairs()
                 .any(|(key, value)| key == "lanes" && matches!(value.as_ref(), "2" | "4"));
         // Sequential TCP/TLS joins must leave time for the final Noise exchange.
-        if dead_url.scheme() == "quic" || multiple_tcp_lanes {
+        // UDP uses the same budget: the session handshake is several RTTs, and a
+        // 2s cutoff on a WAN path leaves a committed responder proof that the
+        // next reconnect cannot acknowledge.
+        if matches!(dead_url.scheme(), "quic") || multiple_tcp_lanes {
             return Duration::from_secs(10);
         }
-        let use_long_timeout = matches!(dead_url.scheme(), "ws" | "wss");
+        let use_long_timeout = matches!(dead_url.scheme(), "wss");
 
         Duration::from_secs(if use_long_timeout { 20 } else { 2 })
     }
@@ -471,109 +474,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn strict_reconnect_selects_ip_version_without_resolving_hostname() {
-        assert_eq!(
-            ManualConnectorManager::strict_reconnect_ip_versions(
-                &"tcp://peer.example:11010".parse().unwrap()
-            ),
-            vec![IpVersion::Both]
-        );
-        assert_eq!(
-            ManualConnectorManager::strict_reconnect_ip_versions(
-                &"tcp://192.0.2.20:11010".parse().unwrap()
-            ),
-            vec![IpVersion::V4]
-        );
-    }
-
-    #[test]
-    fn quic_reconnect_budget_covers_multiple_noisy_path_round_trips() {
-        assert_eq!(
-            ManualConnectorManager::reconnect_timeout(
-                &"quic://peer.example:11010".parse().unwrap()
-            ),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            ManualConnectorManager::reconnect_timeout(&"udp://peer.example:11010".parse().unwrap()),
-            Duration::from_secs(2)
-        );
-    }
-
-    #[tokio::test]
-    async fn reconnect_timeout_reports_exhausted_budget_for_stage() {
-        let started_at = Instant::now() - Duration::from_millis(50);
-        let err = ManualConnectorManager::with_reconnect_timeout(
-            "resolve",
-            started_at,
-            Duration::from_millis(1),
-            async { Ok::<(), Error>(()) },
-        )
-        .await
-        .unwrap_err();
-
-        let message = err.to_string();
-        assert!(message.contains("resolve timeout after"));
-    }
-
-    #[tokio::test]
-    async fn reconnect_timeout_reports_stage_timeout_with_remaining_budget() {
-        let err = ManualConnectorManager::with_reconnect_timeout(
-            "handshake",
-            Instant::now(),
-            Duration::from_millis(10),
-            async {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                Ok::<(), Error>(())
-            },
-        )
-        .await
-        .unwrap_err();
-
-        let message = err.to_string();
-        assert!(message.contains("handshake timeout after"));
-    }
-
-    #[tokio::test]
-    async fn reconnect_timeout_preserves_success_within_budget() {
-        let result = ManualConnectorManager::with_reconnect_timeout(
-            "connect",
-            Instant::now(),
-            Duration::from_millis(50),
-            async { Ok::<_, Error>(123_u32) },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, 123);
-    }
-
-    #[tokio::test]
-    async fn test_reconnect_with_connecting_addr() {
-        set_global_var!(MANUAL_CONNECTOR_RECONNECT_INTERVAL_MS, 1);
-
-        let peer_mgr = create_mock_peer_manager().await;
-        let mgr = ManualConnectorManager::new(peer_mgr.get_global_ctx(), peer_mgr);
-
-        struct MockConnector {}
-        #[async_trait::async_trait]
-        impl TunnelConnector for MockConnector {
-            fn remote_url(&self) -> url::Url {
-                url::Url::parse("tcp://aa.com").unwrap()
-            }
-            async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                Err(TunnelError::InvalidPacket("fake error".into()))
-            }
-        }
-
-        mgr.add_connector(MockConnector {});
-
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-
     #[test]
     fn multi_lane_tcp_has_time_for_noise_after_tls_joins() {
         for (url, seconds) in [

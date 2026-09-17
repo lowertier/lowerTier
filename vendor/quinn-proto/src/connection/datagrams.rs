@@ -6,8 +6,8 @@ use tracing::{debug, trace};
 
 use super::Connection;
 use crate::{
-    frame::{Datagram, FrameStruct},
     DatagramReceiveDropPolicy, TransportError,
+    frame::{Datagram, FrameStruct},
 };
 
 /// API to control datagram traffic
@@ -108,6 +108,7 @@ pub(super) struct DatagramState {
     pub(super) outgoing: VecDeque<Datagram>,
     pub(super) outgoing_total: usize,
     pub(super) send_blocked: bool,
+    pub(super) fast_send_blocked: bool,
 }
 
 impl DatagramState {

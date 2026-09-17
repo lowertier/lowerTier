@@ -77,7 +77,7 @@ jobs:
         with:
           name: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
           body: |
-            This release contains only the lean lowertier command-line programs.
+            This release contains the lowertier command-line programs.
 
             Each archive contains `lowertier-core` and `lowertier-cli`.
             Windows archives also contain required driver files.

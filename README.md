@@ -14,7 +14,7 @@ It does not cover a web interface or graphical client.
 - An Ethernet overlay with an IP-only TUN edge on macOS and Windows.
 - Routed TUN mode for lower packet overhead.
 - Unprivileged SOCKS5 and HTTP proxy mode without TUN or TAP.
-- UDP, QUIC, and TCP underlay transports in published builds.
+- QUIC/HTTP/3 underlay by default (stealth DATAGRAM fabric). UDP and TCP remain available.
 - Peer discovery, NAT traversal, subnet routes, exit nodes, ACLs, and port forwarding.
 - ChaCha20-Poly1305 authenticated encryption by default.
 - An optional secure mode with Noise authentication and replay protection.
@@ -41,7 +41,7 @@ TAP, TUN, or local proxy
         |
 LowTier route and Ethernet fabric
         |
-Encrypted UDP, QUIC, or TCP link
+Encrypted QUIC/HTTP/3, UDP, or TCP link
         |
 Remote LowTier peer
 ```
@@ -74,16 +74,14 @@ Then build only the command-line package.
 ```bash
 git clone https://github.com/lowertier/lowerTier.git
 cd lowertier
-cargo build --release --locked -p lowertier --bins \
-  --no-default-features --features lean
+cargo build --release --locked -p lowertier --bins
 ```
 
-The external transport set is fixed: UDP, H2/TCP, H3/QUIC, WS, and WSS.
-The `lean` feature enables TAP/TUN and unprivileged proxy support while leaving optional services, compression, and alternate crypto backends disabled.
+The default build includes TAP/TUN, QUIC/H2/WSS, unprivileged proxy support, and mimalloc so process RSS can fall after load.
 The release profile uses fat LTO, optimization level 3, one code generation unit, symbol stripping, and aborting panics.
 Development and test builds retain panic unwinding for diagnostics.
 
-Use `--features full` only when the deployment requires optional services, compression, or alternate crypto backends; it does not change transport availability.
+Use `--features full` only when the deployment requires Magic DNS, Zstandard, or alternate crypto backends; it does not change transport availability.
 
 The build creates these files.
 
@@ -125,7 +123,7 @@ sudo lowertier-core \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --listeners udp://0.0.0.0:11010
+  --listeners quic://0.0.0.0:11012
 ```
 
 Start node B.
@@ -136,11 +134,11 @@ sudo lowertier-core \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --peers udp://192.0.2.10:11010
+  --peers quic://192.0.2.10:11012
 ```
 
 Replace `192.0.2.10` with the reachable address of node A.
-Permit UDP port `11010` through the host and network firewalls.
+Permit UDP port `11012` through the host and network firewalls.
 
 Check the network from either node.
 
@@ -175,7 +173,7 @@ sudo lowertier-core \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --peers udp://192.0.2.10:11010
+  --peers quic://192.0.2.10:11012
 ```
 
 The macOS edge carries IP through the fabric protocol.
@@ -191,7 +189,7 @@ lowertier-core \
   --tun=userspace-networking \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
-  --peers udp://192.0.2.10:11010 \
+  --peers quic://192.0.2.10:11012 \
   --socks5-server 127.0.0.1:1055 \
   --outbound-http-proxy-listen 127.0.0.1:1055
 ```
@@ -229,9 +227,9 @@ instance_name = "office"
 hostname = "node-a"
 ipv4 = "10.44.0.1/24"
 listeners = [
-  "udp://0.0.0.0:11010",
   "quic://0.0.0.0:11012",
   "tcp://0.0.0.0:11010",
+  "wss://0.0.0.0:11013",
 ]
 
 [network_identity]
@@ -239,13 +237,13 @@ network_name = "office-l2"
 network_secret = "${LOWTIER_NETWORK_SECRET}"
 
 [[peer]]
-uri = "udp://192.0.2.11:11010"
+uri = "quic://192.0.2.11:11012"
 
 [secure_mode]
 enabled = true
 
 [flags]
-default_protocol = "udp"
+default_protocol = "quic"
 enable_encryption = true
 encryption_algorithm = "chacha20-poly1305"
 mtu = 1380
@@ -254,7 +252,6 @@ latency_first = true
 l2_fdb_capacity = 16384
 l2_fdb_age_seconds = 300
 l2_flood_bps = 67108864
-quic_congestion = "bbr"
 quic_datagram_fec_parity = 0
 quic_datagram_alternate_path_parity = false
 ```
@@ -335,7 +332,7 @@ Add one `peer` table for each initial connector.
 
 ```toml
 [[peer]]
-uri = "udp://192.0.2.10:11010"
+uri = "quic://192.0.2.10:11012"
 peer_public_key = "<base64-x25519-public-key>"
 ```
 
@@ -344,8 +341,9 @@ peer_public_key = "<base64-x25519-public-key>"
 | `uri` | Yes | Selects the peer address and transport or discovery method. |
 | `peer_public_key` | No | Pins the peer X25519 public key in secure mode. |
 
-All builds expose the same peer transport schemes: `udp`, `tcp`, `quic`, `ws`, and `wss`.
-`tcp` carries H2/TLS, while `quic` carries H3/QUIC. Discovery-only and local-only schemes are not accepted as peer URLs.
+Peer schemes are `quic` (HTTP/3), `tcp` (HTTP/2), and `wss`.
+Connector-only discovery schemes are `http`, `https`, `txt`, and `srv`.
+Unix builds also support `unix` sockets.
 
 ### Listeners
 
@@ -353,24 +351,28 @@ Use explicit URLs when predictable firewall rules are required.
 
 ```toml
 listeners = [
-  "udp://0.0.0.0:11010",
   "quic://0.0.0.0:11012",
   "tcp://0.0.0.0:11010",
+  "wss://0.0.0.0:11013",
 ]
 ```
 
-All builds support UDP, H2/TCP, H3/QUIC, WS, and WSS listeners.
+Listeners are QUIC/HTTP/3, H2/TCP, and WSS.
 
 | Scheme | Network protocol | Default port from base `11010` |
 | --- | --- | ---: |
 | `udp` | UDP | 11010 |
-| `quic` | UDP + QUIC + H3 | 11012 |
-| `tcp` | TCP + TLS + H2 | 11010 |
-| `ws` | TCP + WebSocket | 11011 |
-| `wss` | TCP + TLS + WebSocket | 11012 |
+| `quic` | UDP | 11012 |
+| `tcp` | TCP | 11010 |
+| `ws` (full) | TCP | 11011 |
+| `wss` (full) | TCP with TLS | 11012 |
 
-`--listeners 11010` creates all five retained listeners using the base-port offsets. Explicit `ws://` and `wss://` URLs without ports use 80 and 443.
+`--listeners 11010` creates every compiled IP listener with its standard offset.
 `--no-listener` creates an outbound-only node.
+
+The default QUIC listener is `11012`, not `443`. HTTP/3 does not require port 443.
+Bind `quic://0.0.0.0:443` only when a network allows UDP/443 and blocks other UDP.
+That bind needs root or `CAP_NET_BIND_SERVICE`, and it collides with a local HTTPS server.
 
 ### Subnet proxy
 
@@ -490,7 +492,7 @@ The table includes every supported flag.
 
 | Field | Default | Purpose | CLI option |
 | --- | --- | --- | --- |
-| `default_protocol` | `udp` | Select the preferred direct transport. | `--default-protocol` |
+| `default_protocol` | `quic` | Select the preferred direct transport: `quic` (HTTP/3), `tcp` (HTTP/2), or `wss`. | `--default-protocol` |
 | `dev_name` | empty | Set the TUN or TAP interface name. | `--dev-name` or `--tun` |
 | `enable_encryption` | `true` | Encrypt peer payloads. | `--disable-encryption false` |
 | `enable_ipv6` | `true` | Enable overlay IPv6. | `--disable-ipv6 false` |
@@ -525,11 +527,12 @@ The table includes every supported flag.
 | `socket_mark` | unset | Apply Linux `SO_MARK` to underlay sockets. | `--socket-mark` on Linux |
 | `underlay_deny_interfaces` | empty | Deny exact local interface names for underlay traffic. | `--underlay-deny-interfaces` |
 | `underlay_deny_cidrs` | empty | Deny local sources and remote destinations in listed CIDRs. | `--underlay-deny-cidrs` |
-| `quic_congestion` | `bbr` | Select `adaptive`, `bbr`, or `brutal`. | `--quic-congestion` |
-| `quic_brutal_send_bps` | `0` | Set the Brutal target send rate in bits per second. | `--quic-brutal-send-bps` |
-| `quic_brutal_loss_compensation` | `true` | Add bounded Brutal attempts for measured loss. | `--quic-brutal-loss-compensation` |
 | `quic_initial_receive_window` | `1250000` | Set the QUIC initial per-stream receive window. | `--quic-initial-receive-window` |
 | `quic_receive_window` | `2^62-1` | Set the QUIC connection receive window. | `--quic-receive-window` |
+| `quic_admission_secret` | empty | Set a shared HTTP/3 CONNECT-IP admission secret. | `--quic-admission-secret` |
+| `quic_fallback_root` | empty | Serve this static website for ordinary HTTP/3 requests. | `--quic-fallback-root` |
+| `quic_decoy_upstream` | empty | Forward unmarked QUIC datagrams and splice unmarked TCP to this host. | `--quic-decoy-upstream` |
+| `quic_sni_passthrough` | `false` | Admit QUIC clients whose TLS SNI matches `quic_server_name`. Other UDP still goes to `quic_decoy_upstream`. | `--quic-sni-passthrough` |
 | `l2_fdb_capacity` | `16384` | Limit learned source MAC entries. | `--l2-fdb-capacity` |
 | `l2_fdb_age_seconds` | `300` | Expire idle MAC entries after this interval. | `--l2-fdb-age-seconds` |
 | `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
@@ -542,7 +545,109 @@ LowTier selects TUN on other systems.
 `l2_fdb_capacity` accepts values from 1 through 1,048,576.
 `l2_fdb_age_seconds` accepts values from 1 through 86,400.
 `quic_receive_window` must not be smaller than `quic_initial_receive_window`.
-Brutal mode requires a positive `quic_brutal_send_bps` value.
+
+Tests, demos, and examples use `challenges.cloudflare.com` because that
+host is reachable. Peers connect to your public IP on port 443 with that
+SNI. Nginx stream-passthroughs TCP and UDP to LowTier. Marked LowTier
+clients become a VPN hop. Unmarked probes are spliced to the real
+Cloudflare host and complete TLS with Cloudflare's certificate.
+
+Configure the same `quic_admission_secret` on credential peers. Secret-based
+networks use `network_secret` when `quic_admission_secret` is empty. LowTier
+rotates the encrypted admission token every five minutes.
+
+```toml
+listeners = ["tcp://127.0.0.1:8443", "quic://127.0.0.1:8443"]
+mapped_listeners = ["tcp://0.0.0.0:443", "quic://0.0.0.0:443"]
+
+[flags]
+quic_server_name = "challenges.cloudflare.com"
+quic_decoy_upstream = "challenges.cloudflare.com:443"
+quic_admission_secret = "replace-with-a-random-shared-secret"
+```
+
+```nginx
+stream {
+    server {
+        listen 443 reuseport;
+        proxy_pass 127.0.0.1:8443;
+        proxy_timeout 1d;
+    }
+    server {
+        listen 443 udp reuseport;
+        proxy_pass 127.0.0.1:8443;
+        proxy_timeout 1d;
+    }
+}
+```
+
+Do not enable `ssl_preread` on that TCP listener. Marked HTTP/2 clients send a
+tiny TLS handshake record before the real ClientHello so shallow DPI still
+sees `16 03 01`. Preread would parse that record as a ClientHello and fail.
+Nginx only forwards bytes. LowTier distinguishes peers from probes.
+
+The upstream must support HTTP/3 on UDP port 443. This decoy path currently
+supports IPv4 listeners and IPv4 upstream endpoints. Marked packets enter the
+local QUIC endpoint through the public socket and do not use a loopback UDP
+relay. TCP listeners use the same flags. A client with a valid routing prefix
+reaches local HTTP/2. Every other TCP flow is spliced to
+`quic_decoy_upstream`. TCP does not serve `quic_fallback_root`. The local
+LowTier path uses Noise authentication and does not require a certificate for
+the upstream name.
+
+To serve your own static site instead of a Cloudflare decoy, set
+`quic_fallback_root` and omit `quic_decoy_upstream`. LowTier then terminates
+TLS for `quic_server_name` and loads
+`/etc/letsencrypt/live/<quic_server_name>/fullchain.pem` and `privkey.pem`
+unless you set explicit certificate paths.
+
+```toml
+[flags]
+quic_server_name = "vpn.example.com"
+quic_admission_secret = "replace-with-a-random-shared-secret"
+quic_fallback_root = "/var/www/vpn.example.com"
+```
+
+Leave `quic_sni_passthrough` off for this camouflage. Peers and probes
+share the `challenges.cloudflare.com` SNI, so Nginx cannot split TCP by
+name. HTTP/2 is still Nginx-forwardable: use the dumb stream block above,
+not `ssl_preread`. Marked clients send a tiny TLS record then ClientHello;
+Nginx forwards bytes; LowTier splices unmarked TCP to Cloudflare.
+
+A TLS-terminating CDN (Cloudflare orange-cloud, Nginx `location`) cannot
+carry CONNECT-IP or HTTP/3 DATAGRAMs. Use WebSocket there. Listen with
+cleartext `ws` on localhost and connect with `wss://…?via=cdn`. The query
+is a client flag only and is stripped from the HTTP upgrade. The CDN owns
+TLS. LowTier keeps Noise and does not bind a TLS exporter to the CDN hop.
+
+```toml
+listeners = ["ws://127.0.0.1:11011/ws"]
+
+[[peer]]
+uri = "wss://your.domain.example/ws?via=cdn"
+```
+
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:11011;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 1d;
+    proxy_send_timeout 1d;
+}
+```
+
+Speed vs deploy cost, cheapest ops first:
+
+1. WebSocket through a CDN. No UDP/443, works on orange-cloud. Inner
+   Noise AEAD stays. Use this when you cannot own port 443.
+2. HTTP/2 plus HTTP/3 camouflage as `challenges.cloudflare.com` behind
+   Nginx stream. The TLS exporter skips inner AEAD. Unmarked probes
+   complete TLS with Cloudflare. The extra stream hop was about 8
+   percent on loopback. This is the layout tests and examples use.
 
 ## Complete `lowertier-core` startup reference
 
@@ -659,7 +764,7 @@ Use the root options to select another RPC portal or instance.
 | `node info` | Show local node information. |
 | `node config` | Show the active node configuration. |
 | `stun` | Run a STUN test. |
-| `proxy` | Show TCP proxy status. |
+| `proxy` | Show TCP and QUIC proxy status. |
 | `acl stats` | Show ACL rule counters. |
 | `stats show` | Show general counters. |
 | `stats prometheus` | Print counters in Prometheus text format. |
@@ -822,22 +927,15 @@ Restart the instance after an underlay policy change.
 
 ## QUIC on lossy links
 
-Use BBR when available capacity is unknown.
-Use Brutal only when measured capacity is stable and known.
+Inner transports own congestion control. QUIC only provides packet protection.
 
 ```toml
 [flags]
-quic_congestion = "brutal"
-quic_brutal_send_bps = 50000000
-quic_brutal_loss_compensation = true
 quic_initial_receive_window = 8388608
 quic_receive_window = 33554432
 quic_datagram_fec_parity = 0
 quic_datagram_alternate_path_parity = false
 ```
-
-Set the Brutal rate at or below measured available capacity.
-An excessive value increases queueing, loss, and wasted traffic.
 
 Alternate-path parity `2` uses a 16+2 profile.
 Parity `3` uses the higher-overhead 16+3 profile.

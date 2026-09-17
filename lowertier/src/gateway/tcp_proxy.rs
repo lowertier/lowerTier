@@ -11,7 +11,7 @@ use pnet::packet::tcp::{MutableTcpPacket, TcpPacket, ipv4_checksum};
 use quanta::Instant;
 use socket2::{SockRef, TcpKeepalive};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicBool, AtomicU16};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, copy_bidirectional};
@@ -267,6 +267,8 @@ pub struct TcpProxy {
     #[cfg(feature = "smoltcp")]
     smoltcp_listener_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<SmolTcpAcceptResult>>>,
     enable_smoltcp: Arc<AtomicBool>,
+    runtime_started: AtomicBool,
+    runtime_lock: Mutex<()>,
 }
 
 #[async_trait::async_trait]
@@ -385,7 +387,7 @@ impl NicPacketFilter for TcpProxy {
 }
 
 impl TcpProxy {
-    async fn connect_nat_dst(nat_dst: SocketAddr) -> anyhow::Result<TcpStream> {
+    pub(crate) async fn connect_nat_dst(nat_dst: SocketAddr) -> anyhow::Result<TcpStream> {
         let socket = TcpSocket::new_v4()
             .inspect_err(|error| log::error!(?error, "create v4 socket failed"))?;
         let stream = timeout(Duration::from_secs(10), socket.connect(nat_dst))
@@ -439,6 +441,8 @@ impl TcpProxy {
             smoltcp_listener_tx: std::sync::Mutex::new(None),
 
             enable_smoltcp: Arc::new(AtomicBool::new(true)),
+            runtime_started: AtomicBool::new(false),
+            runtime_lock: Mutex::new(()),
         })
     }
 
@@ -463,8 +467,6 @@ impl TcpProxy {
     }
 
     pub async fn start(self: &Arc<Self>, add_pipeline: bool) -> Result<()> {
-        self.run_syn_map_cleaner().await?;
-        self.run_listener().await?;
         if add_pipeline {
             let peer_manager = self
                 .get_peer_manager()
@@ -476,8 +478,34 @@ impl TcpProxy {
                 .add_nic_packet_process_pipeline(Box::new(self.clone()))
                 .await;
         }
-        join_joinset_background(self.tasks.clone(), "TcpProxy".to_owned());
 
+        Ok(())
+    }
+
+    async fn ensure_runtime(&self) -> bool {
+        if self.runtime_started.load(Ordering::Acquire) {
+            return true;
+        }
+        let _guard = self.runtime_lock.lock().await;
+        if self.runtime_started.load(Ordering::Acquire) {
+            return true;
+        }
+        match self.start_runtime().await {
+            Ok(()) => {
+                self.runtime_started.store(true, Ordering::Release);
+                true
+            }
+            Err(error) => {
+                tracing::error!(?error, "tcp proxy runtime start failed");
+                false
+            }
+        }
+    }
+
+    async fn start_runtime(&self) -> Result<()> {
+        self.run_syn_map_cleaner().await?;
+        self.run_listener().await?;
+        join_joinset_background(self.tasks.clone(), "TcpProxy".to_owned());
         Ok(())
     }
 
@@ -845,8 +873,6 @@ impl TcpProxy {
             return None;
         }
 
-        let ipv4_inet = self.get_local_inet()?;
-        let ipv4_addr = ipv4_inet.address();
         {
             let hdr = packet.peer_manager_header().unwrap();
             if hdr.packet_type != PacketType::Data as u8 || hdr.is_no_proxy() {
@@ -877,6 +903,13 @@ impl TcpProxy {
         ) {
             return None;
         }
+
+        if !self.ensure_runtime().await {
+            return None;
+        }
+
+        let ipv4_inet = self.get_local_inet()?;
+        let ipv4_addr = ipv4_inet.address();
 
         // restore to data packet
         hdr.packet_type = PacketType::Data as u8;

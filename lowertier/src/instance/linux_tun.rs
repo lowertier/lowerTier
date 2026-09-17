@@ -32,6 +32,9 @@ use crate::{
 };
 
 const MAX_TUN_PACKET_SIZE: usize = u16::MAX as usize;
+/// Pipeline depth only. In-flight overlay Bytes hold TUN slabs via
+/// `from_owner` until ACK; preallocating a WAN window here pinned ~20 MiB
+/// per queue and blew the 20 MiB process RSS budget.
 const TUN_BUFFER_BATCHES_PER_QUEUE: usize = 2;
 
 fn tun_segment_capacity(mtu: usize) -> (usize, usize) {

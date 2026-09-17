@@ -7,7 +7,7 @@ use super::{
     pacing::Pacer,
     spaces::{PacketSpace, SentPacket},
 };
-use crate::{congestion, packet::SpaceId, Duration, Instant, TransportConfig, TIMER_GRANULARITY};
+use crate::{Duration, Instant, TIMER_GRANULARITY, TransportConfig, congestion, packet::SpaceId};
 
 #[cfg(feature = "qlog")]
 use qlog::events::quic::MetricsUpdated;

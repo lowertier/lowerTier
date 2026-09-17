@@ -7064,10 +7064,7 @@ mod tests {
             },
             stats_manager::{LabelSet, LabelType, MetricName},
         },
-        connector::{
-            create_connector_by_url, direct::PeerManagerForDirectConnector,
-            udp_hole_punch::tests::create_mock_peer_manager_with_mock_stun,
-        },
+        connector::{create_connector_by_url, direct::PeerManagerForDirectConnector},
         instance::listeners::create_listener_by_url,
         peers::{
             NicPacketFilter, PacketRecvChanReceiver, PeerPacketFilter, create_packet_recv_chan,
@@ -7084,7 +7081,8 @@ mod tests {
             service_route::{ServiceRoute, ServiceRouteAction},
             tests::{
                 connect_peer_manager, create_mock_peer_manager, create_mock_peer_manager_secure,
-                wait_route_appear, wait_route_appear_with_cost,
+                create_mock_peer_manager_with_mock_stun, wait_route_appear,
+                wait_route_appear_with_cost,
             },
         },
         proto::{

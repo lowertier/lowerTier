@@ -44,8 +44,10 @@ const TCP_ROUTING_RECORD_LEN: usize = 5 + QUIC_ROUTING_CID_BYTES;
 const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/%2A/%2A/";
 const HTTP2_TRANSPORT_BINDING_LABEL: &[u8] = b"EXPORTER-LowTier-Http2-PeerConn-v1";
 const HTTP2_TRANSPORT_BINDING_CONTEXT: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256|peerconn-v3|h2";
-const HTTP2_STREAM_WINDOW: u32 = 16 * 1024 * 1024;
-const HTTP2_CONN_WINDOW: u32 = 32 * 1024 * 1024;
+// 8 ms * 650 Mbit is 0.65 MiB. Unique from_owner slabs in a 16 MiB
+// window blow the 20 MiB process RSS cap. 2 MiB is still 3x that BDP.
+const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
+const HTTP2_CONN_WINDOW: u32 = 4 * 1024 * 1024;
 const HTTP2_MAX_FRAME: u32 = 256 * 1024;
 // h2 flushes TLS after every DATA frame. Match the TLS record / SETTINGS
 // default so each flush carries a full record instead of one overlay packet.
@@ -490,17 +492,17 @@ pub async fn connect(
         !stealth_tls::skip_server_verification(flags),
     )
     .await?;
-    if tls.get_ref().ssl().selected_alpn_protocol() != Some(HTTP2_ALPN) {
+    if tls.get_ref().1.alpn_protocol() != Some(HTTP2_ALPN) {
         return Err(TunnelError::InvalidProtocol(
             "HTTP/2 ALPN was not negotiated".into(),
         ));
     }
     let mut bytes = [0; 32];
     tls.get_ref()
-        .ssl()
+        .1
         .export_keying_material(
             &mut bytes,
-            "EXPORTER-LowTier-Http2-PeerConn-v1",
+            HTTP2_TRANSPORT_BINDING_LABEL,
             Some(HTTP2_TRANSPORT_BINDING_CONTEXT),
         )
         .map_err(|error| {

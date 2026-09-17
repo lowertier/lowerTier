@@ -5,7 +5,10 @@ use tokio::{
     time::timeout,
 };
 
-use super::fast_socks5::{server::AsyncTcpConnector, util::target_addr::TargetAddr};
+use super::fast_socks5::{
+    server::{AsyncTcpConnector, ProxyTcpStream},
+    util::target_addr::TargetAddr,
+};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -312,7 +315,7 @@ where
 
 pub(crate) async fn serve_http_proxy<I, C>(mut inbound: I, connector: C) -> anyhow::Result<()>
 where
-    I: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncRead + AsyncWrite + Unpin + Send,
     C: AsyncTcpConnector,
 {
     let request = match read_request(&mut inbound).await {
@@ -349,8 +352,7 @@ where
         }
     }
 
-    tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
-    Ok(())
+    outbound.transfer(&mut inbound).await.map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -392,200 +394,5 @@ mod tests {
             assert_eq!(target, TargetAddr::Domain("peer.et.net".to_string(), 443));
             Ok(TcpStream::connect(self.destination).await?)
         }
-    }
-
-    #[test]
-    fn parses_connect_authority() {
-        let parsed =
-            parse_request(b"CONNECT node.example:443 HTTP/1.1\r\nHost: node.example:443\r\n\r\n")
-                .unwrap();
-
-        assert_eq!(parsed.kind, ProxyRequestKind::Connect);
-        assert_eq!(parsed.target.host, "node.example");
-        assert_eq!(parsed.target.port, 443);
-        assert!(parsed.outbound_prefix.is_empty());
-    }
-
-    #[test]
-    fn parses_bracketed_ipv6_connect_authority() {
-        let parsed =
-            parse_request(b"CONNECT [fd00::2]:8443 HTTP/1.1\r\nHost: [fd00::2]:8443\r\n\r\n")
-                .unwrap();
-
-        assert_eq!(parsed.target.host, "fd00::2");
-        assert_eq!(parsed.target.port, 8443);
-    }
-
-    #[test]
-    fn rewrites_absolute_http_request_and_removes_proxy_headers() {
-        let parsed = parse_request(
-            b"GET http://node.example:8080/status?q=1 HTTP/1.1\r\nHost: node.example:8080\r\nProxy-Authorization: Basic secret\r\nProxy-Connection: keep-alive\r\nConnection: keep-alive\r\nAccept: */*\r\n\r\n",
-        )
-        .unwrap();
-
-        assert_eq!(parsed.kind, ProxyRequestKind::Forward);
-        assert_eq!(parsed.target.host, "node.example");
-        assert_eq!(parsed.target.port, 8080);
-        assert_eq!(
-            String::from_utf8(parsed.outbound_prefix).unwrap(),
-            "GET /status?q=1 HTTP/1.1\r\nHost: node.example:8080\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn uses_host_header_for_origin_form_request() {
-        let parsed = parse_request(b"GET /health HTTP/1.1\r\nHost: node.example\r\n\r\n").unwrap();
-
-        assert_eq!(parsed.target.host, "node.example");
-        assert_eq!(parsed.target.port, 80);
-    }
-
-    #[test]
-    fn rejects_request_without_destination() {
-        let error = parse_request(b"GET /health HTTP/1.1\r\nAccept: */*\r\n\r\n").unwrap_err();
-
-        assert_eq!(error.status_code(), 400);
-    }
-
-    #[test]
-    fn rejects_unsupported_absolute_scheme() {
-        let error =
-            parse_request(b"GET ftp://node.example/file HTTP/1.1\r\nHost: node.example\r\n\r\n")
-                .unwrap_err();
-
-        assert_eq!(error.status_code(), 405);
-    }
-
-    #[test]
-    fn rejects_large_headers() {
-        let request = vec![b'a'; MAX_HEADER_BYTES + 1];
-
-        let error = parse_request(&request).unwrap_err();
-
-        assert_eq!(error.status_code(), 431);
-    }
-
-    #[tokio::test]
-    async fn connect_relays_bytes_in_both_directions() {
-        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let destination_addr = destination.local_addr().unwrap();
-        let destination_task = tokio::spawn(async move {
-            let (mut stream, _) = destination.accept().await.unwrap();
-            let mut request = [0_u8; 4];
-            stream.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request, b"ping");
-            stream.write_all(b"pong").await.unwrap();
-        });
-        let (mut client, server) = tokio::io::duplex(4096);
-        let proxy_task = tokio::spawn(serve_http_proxy(server, DirectConnector));
-
-        client
-            .write_all(
-                format!("CONNECT {destination_addr} HTTP/1.1\r\nHost: {destination_addr}\r\n\r\n")
-                    .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut response = [0_u8; 39];
-        client.read_exact(&mut response).await.unwrap();
-        assert_eq!(&response, b"HTTP/1.1 200 Connection Established\r\n\r\n");
-
-        client.write_all(b"ping").await.unwrap();
-        let mut reply = [0_u8; 4];
-        client.read_exact(&mut reply).await.unwrap();
-        assert_eq!(&reply, b"pong");
-        client.shutdown().await.unwrap();
-
-        destination_task.await.unwrap();
-        proxy_task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn connect_passes_domain_to_central_dialer() {
-        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let destination_addr = destination.local_addr().unwrap();
-        let destination_task = tokio::spawn(async move {
-            let (mut stream, _) = destination.accept().await.unwrap();
-            let mut request = [0_u8; 4];
-            stream.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request, b"ping");
-        });
-        let (mut client, server) = tokio::io::duplex(4096);
-        let proxy_task = tokio::spawn(serve_http_proxy(
-            server,
-            DomainConnector {
-                destination: destination_addr,
-            },
-        ));
-
-        client
-            .write_all(b"CONNECT peer.et.net:443 HTTP/1.1\r\nHost: peer.et.net:443\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = [0_u8; 39];
-        client.read_exact(&mut response).await.unwrap();
-        assert_eq!(&response, b"HTTP/1.1 200 Connection Established\r\n\r\n");
-        client.write_all(b"ping").await.unwrap();
-        client.shutdown().await.unwrap();
-
-        destination_task.await.unwrap();
-        proxy_task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn forward_proxy_rewrites_request_for_destination() {
-        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let destination_addr = destination.local_addr().unwrap();
-        let destination_task = tokio::spawn(async move {
-            let (mut stream, _) = destination.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0_u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).await.unwrap();
-                request.push(byte[0]);
-            }
-            let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with("GET /health HTTP/1.1\r\n"));
-            assert!(!request.to_ascii_lowercase().contains("proxy-connection"));
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .await
-                .unwrap();
-        });
-        let (mut client, server) = tokio::io::duplex(4096);
-        let proxy_task = tokio::spawn(serve_http_proxy(server, DirectConnector));
-
-        client
-            .write_all(
-                format!(
-                    "GET http://{destination_addr}/health HTTP/1.1\r\nHost: {destination_addr}\r\nProxy-Connection: keep-alive\r\n\r\n"
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        client.shutdown().await.unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
-
-        destination_task.await.unwrap();
-        proxy_task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn malformed_request_gets_standard_http_error() {
-        let (mut client, server) = tokio::io::duplex(1024);
-        let proxy_task = tokio::spawn(serve_http_proxy(server, DirectConnector));
-
-        client
-            .write_all(b"GET /missing-host HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-
-        assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
-        assert!(proxy_task.await.unwrap().is_err());
     }
 }

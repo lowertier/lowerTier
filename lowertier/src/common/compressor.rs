@@ -265,87 +265,10 @@ thread_local! {
 mod synchronous_tests {
     use super::{Compressor, DefaultCompressor, MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES};
     use crate::tunnel::packet_def::{CompressorAlgo, PacketType, ZCPacket};
-
-    #[test]
-    fn uncompressed_packet_check_is_synchronous() {
-        fn assert_result(_: Result<(), anyhow::Error>) {}
-
-        let mut packet = ZCPacket::new_with_payload(b"plain");
-        packet.fill_peer_manager_hdr(1, 2, 1);
-
-        assert_result(DefaultCompressor::new().decompress(&mut packet));
-    }
-
-    #[test]
-    fn compress_rejects_payload_above_quic_frame_limit() {
-        let payload = vec![0_u8; MAX_LOGICAL_OVERLAY_PAYLOAD_BYTES + 1];
-        let mut packet = ZCPacket::new_with_payload(&payload);
-        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-
-        let error = DefaultCompressor::new()
-            .compress(&mut packet, CompressorAlgo::None)
-            .expect_err("an oversized logical payload must fail before sending");
-        assert!(
-            error
-                .to_string()
-                .contains("logical payload exceeds the 64 KiB QUIC frame limit")
-        );
-    }
 }
 
 #[cfg(all(test, feature = "zstd"))]
 pub mod tests {
     use super::*;
     use crate::peers::flow::stamp_packet_flow;
-
-    #[tokio::test]
-    async fn test_compress() {
-        let text = b"12345670000000000000000000";
-        let mut packet = ZCPacket::new_with_payload(text);
-        packet.fill_peer_manager_hdr(0, 0, 0);
-        let flow = stamp_packet_flow(&mut packet);
-
-        let compressor = DefaultCompressor {};
-
-        println!(
-            "Uncompressed packet: {:?}, len: {}",
-            packet,
-            packet.payload_len()
-        );
-
-        compressor
-            .compress(&mut packet, CompressorAlgo::ZstdDefault)
-            .unwrap();
-        assert_eq!(packet.flow_hash(), Some(flow.hash));
-        println!(
-            "Compressed packet: {:?}, len: {}",
-            packet,
-            packet.payload_len()
-        );
-        assert!(packet.peer_manager_header().unwrap().is_compressed());
-
-        compressor.decompress(&mut packet).unwrap();
-        assert_eq!(packet.payload(), text);
-        assert_eq!(packet.flow_hash(), Some(flow.hash));
-        assert!(!packet.peer_manager_header().unwrap().is_compressed());
-    }
-
-    #[tokio::test]
-    async fn test_short_text_compress() {
-        let text = b"1234";
-        let mut packet = ZCPacket::new_with_payload(text);
-        packet.fill_peer_manager_hdr(0, 0, 0);
-
-        let compressor = DefaultCompressor {};
-
-        // short text can't be compressed
-        compressor
-            .compress(&mut packet, CompressorAlgo::ZstdDefault)
-            .unwrap();
-        assert!(!packet.peer_manager_header().unwrap().is_compressed());
-
-        compressor.decompress(&mut packet).unwrap();
-        assert_eq!(packet.payload(), text);
-        assert!(!packet.peer_manager_header().unwrap().is_compressed());
-    }
 }

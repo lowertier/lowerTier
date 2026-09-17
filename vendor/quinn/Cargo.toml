@@ -195,7 +195,7 @@ default-features = false
 
 [dependencies.udp]
 version = "0.5"
-features = ["tracing"]
+features = ["tracing", "fast-apple-datapath"]
 default-features = false
 package = "quinn-udp"
 

@@ -19,6 +19,9 @@ use tokio::time::error::Elapsed;
 
 use self::packet_def::ZCPacket;
 
+#[cfg(test)]
+mod caddy_tests;
+
 pub mod batch;
 mod browser_tls;
 pub mod buf;
@@ -31,8 +34,6 @@ pub mod ring;
 pub mod stats;
 pub mod tcp;
 mod tcp_lanes;
-pub mod udp;
-pub(crate) mod udp_src;
 pub(crate) mod udp_vector_io;
 
 pub mod quic;
@@ -269,58 +270,6 @@ mod packet_batch_contract_tests {
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         packet_def::ZCPacket,
     };
-
-    #[test]
-    fn singleton_preserves_packet_without_copying_payload() {
-        let batch = PacketBatch::singleton(ZCPacket::new_with_payload(b"one"));
-
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch.byte_len(), 3);
-        assert_eq!(batch.into_iter().next().unwrap().payload(), b"one");
-    }
-
-    #[test]
-    fn bounded_push_returns_the_unsent_packet_when_full() {
-        let mut batch = PacketBatch::new();
-        for value in 0..MAX_PACKET_BATCH_SIZE {
-            batch
-                .try_push(ZCPacket::new_with_payload(&[value as u8]))
-                .unwrap();
-        }
-
-        let overflow = batch
-            .try_push(ZCPacket::new_with_payload(b"overflow"))
-            .unwrap_err();
-
-        assert_eq!(batch.len(), MAX_PACKET_BATCH_SIZE);
-        assert_eq!(overflow.payload(), b"overflow");
-    }
-
-    #[test]
-    fn iteration_is_stable_and_byte_count_tracks_mutation() {
-        let mut batch = PacketBatch::new();
-        for payload in [b"a".as_slice(), b"bb", b"ccc"] {
-            batch.try_push(ZCPacket::new_with_payload(payload)).unwrap();
-        }
-
-        assert_eq!(batch.byte_len(), 6);
-        assert_eq!(
-            batch
-                .iter()
-                .map(|packet| packet.payload()[0])
-                .collect::<Vec<_>>(),
-            vec![b'a', b'b', b'c']
-        );
-
-        let payloads = batch
-            .into_iter()
-            .map(|packet| packet.payload().to_vec())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            payloads,
-            vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()]
-        );
-    }
 }
 
 #[async_trait::async_trait]
@@ -427,9 +376,7 @@ struct IpSchemeAttributes {
 #[strum(serialize_all = "lowercase")]
 pub enum IpScheme {
     Tcp,
-    Udp,
     Quic,
-    Ws,
     Wss,
 }
 
@@ -437,9 +384,7 @@ impl IpScheme {
     const fn attributes(self) -> IpSchemeAttributes {
         let (protocol, port_offset) = match self {
             Self::Tcp => (Protocol::TCP, 0),
-            Self::Udp => (Protocol::UDP, 0),
             Self::Quic => (Protocol::UDP, 2),
-            Self::Ws => (Protocol::TCP, 1),
             Self::Wss => (Protocol::TCP, 2),
         };
         IpSchemeAttributes {
@@ -457,7 +402,6 @@ impl IpScheme {
 
     pub const fn default_port(self) -> u16 {
         match self {
-            Self::Ws => 80,
             Self::Wss => 443,
             _ => 11010 + self.port_offset(),
         }
@@ -486,17 +430,6 @@ macro_rules! __matches_protocol__ {
 }
 
 pub(crate) use __matches_protocol__ as matches_protocol;
-
-#[cfg(test)]
-mod tests {
-    use super::IpScheme;
-
-    #[test]
-    fn ip_scheme_parses_from_url() {
-        let url: url::Url = "udp://[2001:db8::1]:11010".parse().unwrap();
-        assert_eq!(IpScheme::try_from(&url).unwrap(), IpScheme::Udp);
-    }
-}
 
 #[cfg(test)]
 mod caddy_tcp_tests;

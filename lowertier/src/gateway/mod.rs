@@ -18,6 +18,8 @@ pub mod http_proxy;
 #[cfg(feature = "socks5")]
 pub mod socks5;
 
+pub mod overlay_stream;
+
 #[derive(Debug)]
 pub(crate) struct CidrSet {
     global_ctx: ArcGlobalCtx,

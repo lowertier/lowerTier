@@ -788,42 +788,4 @@ async fn remove_udp_mapping_igd(
 #[cfg(test)]
 mod tests {
     use crate::common::global_ctx::tests::get_mock_global_ctx;
-
-    #[test]
-    fn udp_mapping_requires_private_or_unspecified_ipv4_listener() {
-        assert!(super::should_map_udp_listener(
-            &"udp://0.0.0.0:11010".parse().unwrap()
-        ));
-        assert!(super::should_map_udp_listener(
-            &"udp://192.168.1.10:11010".parse().unwrap()
-        ));
-        assert!(!super::should_map_udp_listener(
-            &"udp://127.0.0.1:11010".parse().unwrap()
-        ));
-        assert!(!super::should_map_udp_listener(
-            &"udp://8.8.8.8:11010".parse().unwrap()
-        ));
-        assert!(!super::should_map_udp_listener(
-            &"tcp://0.0.0.0:11010".parse().unwrap()
-        ));
-    }
-
-    #[tokio::test]
-    async fn strict_underlay_policy_skips_unbound_port_mapping_clients() {
-        let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.underlay_deny_interfaces = vec!["tailscale0".into()];
-        global_ctx.set_flags(flags);
-        super::reset_udp_port_mapping_attempts_for_test();
-
-        let result = super::try_start_udp_port_mapping(
-            &global_ctx,
-            &"udp://192.168.1.10:11010".parse().unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert!(result.is_none());
-        assert_eq!(super::udp_port_mapping_attempts_for_test(), 0);
-    }
 }

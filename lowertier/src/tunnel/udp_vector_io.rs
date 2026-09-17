@@ -17,6 +17,7 @@ const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 const MAX_UDP_GRO_PAYLOAD: usize = u16::MAX as usize;
 static UDP_SEND_VECTOR_DISABLED: OnceLock<bool> = OnceLock::new();
 static UDP_RECV_VECTOR_DISABLED: OnceLock<bool> = OnceLock::new();
+static UDP_GSO_RUNTIME_DISABLED: OnceLock<bool> = OnceLock::new();
 
 fn udp_send_vector_disabled() -> bool {
     *UDP_SEND_VECTOR_DISABLED.get_or_init(|| {
@@ -67,16 +68,22 @@ fn compatible_gso_prefix(buffers: &[Bytes]) -> usize {
     buffers.len().min(MAX_PACKET_BATCH_SIZE)
 }
 
-fn split_gro_buffer(mut buffer: BytesMut, stride: usize) -> io::Result<Vec<BytesMut>> {
+fn split_gro_buffer(buffer: BytesMut, stride: usize) -> io::Result<Vec<BytesMut>> {
     if stride == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "UDP GRO returned a zero segment size",
         ));
     }
+    // Copy each datagram into its own allocation. `split_to` would leave every
+    // segment pinning the 64 KiB GRO slab; encrypt/freeze then unique-copies
+    // that slab, and musl keeps the 64 KiB bins after free.
     let mut segments = Vec::with_capacity(buffer.len().div_ceil(stride));
-    while !buffer.is_empty() {
-        segments.push(buffer.split_to(buffer.len().min(stride)));
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let end = (offset + stride).min(buffer.len());
+        segments.push(BytesMut::from(&buffer[offset..end]));
+        offset = end;
     }
     Ok(segments)
 }
@@ -311,6 +318,10 @@ pub(crate) fn poll_send_batch_with_gso(
                     )));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) if udp_send_buffer_busy(&error) => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
                 Err(error) => return Poll::Ready(Err(error)),
             }
             continue;
@@ -328,6 +339,10 @@ pub(crate) fn poll_send_batch_with_gso(
             }
             Ok(sent) => *completed += sent,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) if udp_send_buffer_busy(&error) => {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             Err(error) => return Poll::Ready(Err(error)),
         }
     }
@@ -787,9 +802,28 @@ fn try_recv_batch(
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn try_send_batch(
+pub(crate) fn try_send_batch(
     socket: &UdpSocket,
     destination: SocketAddr,
+    buffers: &[Bytes],
+    send_gso: bool,
+) -> io::Result<usize> {
+    try_send_batch_apple(socket, Some(destination), buffers, send_gso)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) fn try_send_batch_connected(
+    socket: &UdpSocket,
+    buffers: &[Bytes],
+    send_gso: bool,
+) -> io::Result<usize> {
+    try_send_batch_apple(socket, None, buffers, send_gso)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn try_send_batch_apple(
+    socket: &UdpSocket,
+    destination: Option<SocketAddr>,
     buffers: &[Bytes],
     _send_gso: bool,
 ) -> io::Result<usize> {
@@ -822,7 +856,7 @@ fn try_send_batch(
     if buffers.is_empty() {
         return Ok(0);
     }
-    let destination = socket2::SockAddr::from(destination);
+    let destination = destination.map(socket2::SockAddr::from);
     let mut iovecs: [libc::iovec; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| libc::iovec {
         iov_base: ptr::null_mut(),
         iov_len: 0,
@@ -844,9 +878,13 @@ fn try_send_batch(
         msg_datalen: 0,
     });
     for (message, iovec) in messages.iter_mut().zip(&mut iovecs).take(buffers.len()) {
+        let (msg_name, msg_namelen) = destination
+            .as_ref()
+            .map(|destination| (destination.as_ptr().cast_mut().cast(), destination.len()))
+            .unwrap_or((ptr::null_mut(), 0));
         *message = MsgHdrX {
-            msg_name: destination.as_ptr().cast_mut().cast(),
-            msg_namelen: destination.len(),
+            msg_name,
+            msg_namelen,
             msg_iov: iovec,
             msg_iovlen: 1,
             msg_control: ptr::null_mut(),
@@ -866,9 +904,8 @@ fn try_send_batch(
     };
     checked_message_count(result, buffers.len())
 }
-
 #[cfg(target_os = "linux")]
-fn try_send_batch(
+pub(crate) fn try_send_batch(
     socket: &UdpSocket,
     destination: SocketAddr,
     buffers: &[Bytes],
@@ -883,10 +920,12 @@ fn try_send_batch(
         return Ok(0);
     }
     let gso_prefix = compatible_gso_prefix(buffers);
-    if gso_prefix >= 2 && send_gso && std::env::var_os("LOWTIER_DEBUG_DISABLE_UDP_GSO").is_none() {
+    if gso_prefix >= 2 && send_gso && udp_gso_enabled() {
         match try_send_gso(socket, destination, &buffers[..gso_prefix]) {
             Ok(()) => return Ok(gso_prefix),
-            Err(error) if udp_gso_is_unsupported(&error) => {}
+            Err(error) if udp_gso_is_unsupported(&error) => {
+                let _ = UDP_GSO_RUNTIME_DISABLED.set(true);
+            }
             Err(error) => return Err(error),
         }
     }
@@ -1009,10 +1048,33 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
     Ok(())
 }
 
+fn udp_gso_enabled() -> bool {
+    std::env::var_os("LOWTIER_DEBUG_DISABLE_UDP_GSO").is_none()
+        && !UDP_GSO_RUNTIME_DISABLED.get().copied().unwrap_or(false)
+}
+
+pub(crate) fn udp_send_buffer_busy(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(code) if code == nix::libc::ENOBUFS || code == nix::libc::ENOMEM
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn udp_gso_is_unsupported(error: &io::Error) -> bool {
     use nix::libc;
 
+    // EMSGSIZE is what Linux UDP GSO returns when netem or the device
+    // cannot take the super-packet. Falling back to sendmmsg keeps the
+    // overlay up; treating it as fatal tears the peer down on WAN.
     matches!(
         error.raw_os_error(),
         Some(code)
@@ -1020,11 +1082,12 @@ fn udp_gso_is_unsupported(error: &io::Error) -> bool {
                 || code == libc::ENOPROTOOPT
                 || code == libc::EOPNOTSUPP
                 || code == libc::EIO
+                || code == libc::EMSGSIZE
     )
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
-fn try_send_batch(
+pub(crate) fn try_send_batch(
     socket: &UdpSocket,
     destination: SocketAddr,
     buffers: &[Bytes],
@@ -1093,13 +1156,24 @@ mod tests {
         assert_eq!(compatible_gso_prefix(&payloads), 63);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn gro_stride_restores_individual_datagrams_without_copying() {
+    fn gso_emsgsize_falls_back_instead_of_failing_the_send() {
+        let error = std::io::Error::from_raw_os_error(nix::libc::EMSGSIZE);
+        assert!(super::udp_gso_is_unsupported(&error));
+        assert!(!super::udp_send_buffer_busy(&error));
+    }
+
+    #[test]
+    fn gro_stride_restores_individual_datagrams_without_sharing_the_slab() {
         let parts = split_gro_buffer(BytesMut::from(&b"aabbc"[..]), 2).unwrap();
         assert_eq!(
             parts.iter().map(|part| part.as_ref()).collect::<Vec<_>>(),
             vec![b"aa".as_slice(), b"bb", b"c"]
         );
+        for part in &parts {
+            assert_eq!(part.capacity(), part.len());
+        }
         assert!(split_gro_buffer(BytesMut::from(&b"abc"[..]), 0).is_err());
     }
 
@@ -1116,6 +1190,7 @@ mod tests {
         assert_eq!(parts.len(), super::MAX_PACKET_BATCH_SIZE);
         for (tag, part) in parts.iter().enumerate() {
             assert_eq!(part.len(), stride);
+            assert_eq!(part.capacity(), stride);
             assert!(part.iter().all(|byte| *byte == tag as u8));
         }
     }

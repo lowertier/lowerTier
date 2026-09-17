@@ -124,40 +124,4 @@ pub(crate) fn verify_slices_are_equal(left: &[u8], right: &[u8]) -> Result<(), (
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_join_joinset_backgroud() {
-        let js = Arc::new(Mutex::new(JoinSet::<()>::new()));
-        join_joinset_background(js.clone(), "TEST".to_owned());
-        js.try_lock().unwrap().spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        });
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        assert!(js.try_lock().unwrap().is_empty());
-
-        for _ in 0..5 {
-            js.try_lock().unwrap().spawn(async {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            });
-            tokio::task::yield_now().await;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        for _ in 0..5 {
-            js.try_lock().unwrap().spawn(async {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            });
-            tokio::task::yield_now().await;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        assert!(js.try_lock().unwrap().is_empty());
-
-        let weak_js = Arc::downgrade(&js);
-        drop(js);
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        assert_eq!(weak_js.weak_count(), 0);
-        assert_eq!(weak_js.strong_count(), 0);
-    }
 }

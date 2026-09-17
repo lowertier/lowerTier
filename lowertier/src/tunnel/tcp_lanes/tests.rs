@@ -34,7 +34,7 @@ fn lane_options_are_explicit_and_require_tls() {
     for value in [
         "wss://localhost",
         "wss://localhost?lanes=1",
-        "ws://localhost",
+        "tcp://localhost",
     ] {
         assert_eq!(requested(&value.parse().unwrap()).unwrap(), 1);
     }
@@ -47,7 +47,6 @@ fn lane_options_are_explicit_and_require_tls() {
         4
     );
     for value in [
-        "ws://localhost?lanes=2",
         "wss://localhost?via=cdn&lanes=2",
         "wss://localhost?via=PROXY&lanes=4",
         "wss://localhost?via=CDN&lanes=2",

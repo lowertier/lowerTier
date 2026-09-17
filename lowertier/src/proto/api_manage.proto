@@ -99,9 +99,8 @@ message NetworkConfig {
   repeated NetworkPeerConfig peers = 68;
   repeated string underlay_deny_interfaces = 69;
   repeated string underlay_deny_cidrs = 70;
-  optional string quic_congestion = 71;
-  optional uint64 quic_brutal_send_bps = 72;
-  optional bool quic_brutal_loss_compensation = 73;
+  reserved 71, 72, 73;
+  reserved "quic_congestion", "quic_brutal_send_bps", "quic_brutal_loss_compensation";
   optional uint64 quic_initial_receive_window = 74;
   optional uint64 quic_receive_window = 75;
   reserved 76;
@@ -121,6 +120,13 @@ message NetworkConfig {
   optional bool enable_bridge = 88;
   reserved 89;
   reserved "interface_adapter";
+  optional string quic_tls_cert = 90;
+  optional string quic_tls_key = 91;
+  optional string quic_server_name = 92;
+  optional string quic_admission_secret = 93;
+  optional string quic_fallback_root = 94;
+  optional string quic_decoy_upstream = 95;
+  optional bool quic_sni_passthrough = 96;
 }
 
 message NetworkPeerConfig {

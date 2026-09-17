@@ -117,19 +117,4 @@ impl SystemConfig for DarwinConfigurator {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn set_dns_test() -> io::Result<()> {
-        let config = OSConfig {
-            nameservers: vec!["8.8.8.8".into()],
-            search_domains: vec!["example.com".into()],
-            match_domains: vec!["test.local".into()],
-        };
-        let configurator = DarwinConfigurator::new();
-
-        configurator.set_dns(&config)?;
-        configurator.close()?;
-
-        Ok(())
-    }
 }

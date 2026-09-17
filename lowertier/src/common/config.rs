@@ -38,7 +38,7 @@ const MAX_SPEED_PROBE_INTERVAL_SECONDS: u64 = 300;
 pub fn gen_default_flags() -> Flags {
     #[allow(deprecated)]
     Flags {
-        default_protocol: "udp".to_string(),
+        default_protocol: "quic".to_string(),
         dev_name: "".to_string(),
         enable_encryption: true,
         enable_ipv6: true,
@@ -74,11 +74,8 @@ pub fn gen_default_flags() -> Flags {
         socket_mark: None,
         underlay_deny_interfaces: Vec::new(),
         underlay_deny_cidrs: Vec::new(),
-        quic_congestion: "bbr".to_string(),
-        quic_brutal_send_bps: 0,
-        quic_brutal_loss_compensation: true,
-        quic_initial_receive_window: 512 * 1024,
-        quic_receive_window: 1024 * 1024,
+        quic_initial_receive_window: 2 * 1024 * 1024,
+        quic_receive_window: 4 * 1024 * 1024,
         quic_datagram_fec_parity: 0,
         quic_datagram_alternate_path_parity: false,
         speed_first: false,
@@ -161,17 +158,11 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
         anyhow::bail!("l2_fdb_age_seconds must be between 1 and 86400");
     }
 
-    match flags.quic_congestion.as_str() {
-        "adaptive" | "bbr" => {}
-        "brutal" if flags.quic_brutal_send_bps > 0 => {}
-        "brutal" => {
+    match flags.default_protocol.as_str() {
+        "quic" | "tcp" | "wss" => {}
+        protocol => {
             anyhow::bail!(
-                "quic_brutal_send_bps must be greater than zero when quic_congestion is brutal"
-            )
-        }
-        controller => {
-            anyhow::bail!(
-                "unsupported quic_congestion {controller:?}; expected \"adaptive\", \"bbr\", or \"brutal\""
+                "unsupported default_protocol {protocol:?}; expected \"quic\", \"tcp\", or \"wss\""
             )
         }
     }
@@ -1894,7 +1885,7 @@ socket_mark = 66
     fn underlay_and_quic_flags_have_safe_defaults() {
         let flags = gen_default_flags();
 
-        assert_eq!(flags.default_protocol, "udp");
+        assert_eq!(flags.default_protocol, "quic");
         assert!(flags.interface_adapter.is_empty());
         assert!(flags.port_mode.is_empty());
         assert!(!flags.enable_bridge);
@@ -1903,13 +1894,17 @@ socket_mark = 66
         assert_eq!(flags.l2_flood_bps, 64 * 1024 * 1024);
         assert!(flags.underlay_deny_interfaces.is_empty());
         assert!(flags.underlay_deny_cidrs.is_empty());
-        assert_eq!(flags.quic_congestion, "bbr");
-        assert_eq!(flags.quic_brutal_send_bps, 0);
-        assert!(flags.quic_brutal_loss_compensation);
-        assert_eq!(flags.quic_initial_receive_window, 512 * 1024);
-        assert_eq!(flags.quic_receive_window, 1024 * 1024);
+        assert_eq!(flags.quic_initial_receive_window, 2 * 1024 * 1024);
+        assert_eq!(flags.quic_receive_window, 4 * 1024 * 1024);
         assert_eq!(flags.quic_datagram_fec_parity, 0);
         assert!(!flags.quic_datagram_alternate_path_parity);
+        assert!(flags.quic_tls_cert.is_empty());
+        assert!(flags.quic_tls_key.is_empty());
+        assert!(flags.quic_server_name.is_empty());
+        assert!(flags.quic_admission_secret.is_empty());
+        assert!(flags.quic_fallback_root.is_empty());
+        assert!(flags.quic_decoy_upstream.is_empty());
+        assert!(!flags.quic_sni_passthrough);
         assert!(!flags.speed_first);
         assert_eq!(flags.speed_probe_interval_seconds, 30);
         assert_eq!(flags.speed_probe_budget_bps, 0);
@@ -1923,6 +1918,39 @@ socket_mark = 66
         let error = validate_flags(&flags).unwrap_err();
 
         assert!(error.to_string().contains("speed_probe_budget_bps"));
+    }
+
+    #[test]
+    fn quic_decoy_requires_and_accepts_complete_routing_configuration() {
+        let mut flags = gen_default_flags();
+        flags.quic_server_name = "challenges.cloudflare.com".to_owned();
+        flags.quic_decoy_upstream = "challenges.cloudflare.com:443".to_owned();
+
+        let error = validate_flags(&flags).unwrap_err();
+        assert!(error.to_string().contains("quic_admission_secret"));
+
+        flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+        validate_flags(&flags).unwrap();
+
+        flags.quic_sni_passthrough = true;
+        validate_flags(&flags).unwrap();
+        flags.quic_decoy_upstream.clear();
+        let error = validate_flags(&flags).unwrap_err();
+        assert!(error.to_string().contains("quic_sni_passthrough"));
+    }
+
+    #[test]
+    fn rejects_an_unknown_encryption_algorithm() {
+        let mut flags = gen_default_flags();
+        flags.encryption_algorithm = "unknown-cipher".to_owned();
+
+        let error = validate_flags(&flags).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported encryption_algorithm")
+        );
     }
 
     #[test]
@@ -2004,9 +2032,6 @@ l2_fdb_age_seconds = 600
 l2_flood_bps = 134217728
 underlay_deny_interfaces = ["utun5"]
 underlay_deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
-quic_congestion = "brutal"
-quic_brutal_send_bps = 50000000
-quic_brutal_loss_compensation = false
 quic_initial_receive_window = 8388608
 quic_receive_window = 33554432
 quic_datagram_fec_parity = 3
@@ -2024,9 +2049,6 @@ quic_datagram_alternate_path_parity = false
             flags.underlay_deny_cidrs,
             ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
         );
-        assert_eq!(flags.quic_congestion, "brutal");
-        assert_eq!(flags.quic_brutal_send_bps, 50_000_000);
-        assert!(!flags.quic_brutal_loss_compensation);
         assert_eq!(flags.quic_initial_receive_window, 8_388_608);
         assert_eq!(flags.quic_receive_window, 33_554_432);
         assert_eq!(flags.quic_datagram_fec_parity, 3);
@@ -2035,28 +2057,6 @@ quic_datagram_alternate_path_parity = false
         let dumped = cfg.dump();
         let reloaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
         assert_eq!(reloaded.get_flags(), flags);
-    }
-
-    #[test]
-    fn rejects_unknown_quic_congestion_controller() {
-        let err = TomlConfigLoader::new_from_str(
-            r#"
-[flags]
-quic_congestion = "turbo"
-"#,
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("quic_congestion"));
-        assert!(err.to_string().contains("turbo"));
-    }
-
-    #[test]
-    fn accepts_adaptive_quic_congestion_controller() {
-        let mut flags = gen_default_flags();
-        flags.quic_congestion = "adaptive".to_owned();
-
-        validate_flags(&flags).unwrap();
     }
 
     #[test]
@@ -2082,20 +2082,6 @@ quic_congestion = "turbo"
                 "expected error for {key}={value}, got {err}"
             );
         }
-    }
-
-    #[test]
-    fn brutal_requires_positive_send_rate() {
-        let err = TomlConfigLoader::new_from_str(
-            r#"
-[flags]
-quic_congestion = "brutal"
-quic_brutal_send_bps = 0
-"#,
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("quic_brutal_send_bps"));
     }
 
     #[test]
@@ -2326,18 +2312,12 @@ enabled = true
     }
 
     #[test]
-    fn test_parse_mapped_listener_urls_allows_ws_without_port() {
-        let parsed = parse_mapped_listener_urls(&[
-            "ws://example.com".to_string(),
-            "wss://example.com/path".to_string(),
-        ])
-        .unwrap();
+    fn test_parse_mapped_listener_urls_allows_wss_without_port() {
+        let parsed = parse_mapped_listener_urls(&["wss://example.com/path".to_string()]).unwrap();
 
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].scheme(), "ws");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].scheme(), "wss");
         assert_eq!(parsed[0].port(), None);
-        assert_eq!(parsed[1].scheme(), "wss");
-        assert_eq!(parsed[1].port(), None);
     }
 
     #[test]
@@ -2472,7 +2452,7 @@ source = "user"
 instance_name = "default"
 instance_id = "87ede5a2-9c3d-492d-9bbe-989b9d07e742"
 ipv4 = "10.144.144.10"
-listeners = [ "tcp://0.0.0.0:11010", "udp://0.0.0.0:11010" ]
+listeners = [ "tcp://0.0.0.0:11010", "quic://0.0.0.0:11012" ]
 routes = [ "192.168.0.0/16" ]
 
 [network_identity]
@@ -2483,7 +2463,7 @@ network_secret = "test-secret"
 uri = "tcp://public.kkrainbow.top:11010"
 
 [[peer]]
-uri = "udp://192.168.94.33:11010"
+uri = "quic://192.168.94.33:11012"
 
 [[proxy_network]]
 cidr = "10.147.223.0/24"
@@ -2518,7 +2498,7 @@ proto = "tcp"
         assert_eq!("10.144.144.10/24", ret.get_ipv4().unwrap().to_string());
 
         assert_eq!(
-            vec!["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"],
+            vec!["tcp://0.0.0.0:11010", "quic://0.0.0.0:11012"],
             ret.get_listener_uris()
                 .iter()
                 .map(|u| u.to_string())

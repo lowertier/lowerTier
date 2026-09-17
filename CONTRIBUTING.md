@@ -190,8 +190,8 @@ sudo modprobe br_netfilter
 sudo sysctl net.bridge.bridge-nf-call-iptables=0
 sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
 
-# Run tests
-cargo test --no-default-features --features=full --verbose
+# Run the maintained core/CLI suite
+cargo test -p lowertier --lib --verbose
 ```
 
 ### Test Requirements
@@ -200,14 +200,13 @@ Keep tests minimal. A test stays in the tree only if it locks a real invariant: 
 
 Do not add scalar-plus-batch copies of the same assertion. Do not add combinatorial matrices unless each cell is a different invariant. Do not put ignored perf benches in `src/`.
 
-CI runs the essential nextest filter in `.github/workflows/test.yml`. New tests belong there only when they are critical.
+Only the maintained core/CLI suite is kept in the tree; GUI and other unmaintained surfaces are outside the test scope. Keep the core suite at or below 500 tests.
 
 ```bash
-# Full local suite
-cargo test -p lowertier --offline --lib
+cargo test -p lowertier --lib
 ```
 
-CI runs a smaller essential filter defined in `.github/workflows/test.yml`.
+CI runs this complete essential suite and enforces the 500-test budget.
 
 ## Pull Request Guidelines
 

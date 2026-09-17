@@ -10,11 +10,14 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
 
-use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
+    Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
+    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
+    TransportErrorCode, VarInt,
     cid_generator::ConnectionIdGenerator,
     cid_queue::CidQueue,
     coding::BufMutExt,
@@ -32,9 +35,6 @@ use crate::{
     },
     token::{ResetToken, Token, TokenPayload},
     transport_parameters::TransportParameters,
-    Dir, Duration, EndpointConfig, Frame, Instant, Side, StreamId, TokenStore, Transmit,
-    TransportError, TransportErrorCode, VarInt, INITIAL_MTU, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, TIMER_GRANULARITY,
 };
 
 mod ack_frequency;
@@ -234,6 +234,8 @@ pub struct Connection {
     local_cid_state: CidState,
     /// State of the unreliable datagram extension
     datagrams: DatagramState,
+    /// Reusable UDP payload buffers for [`Self::seal_application_datagrams`].
+    seal_bufs: Vec<Vec<u8>>,
     /// Connection level statistics
     stats: ConnectionStats,
     /// QUIC version used for the connection.
@@ -350,6 +352,7 @@ impl Connection {
                 config.stream_receive_window,
             ),
             datagrams: DatagramState::default(),
+            seal_bufs: Vec::new(),
             config,
             rem_cids: CidQueue::new(rem_cid),
             rng,
@@ -613,6 +616,7 @@ impl Connection {
                     }
 
                     // Check whether the next datagram is blocked by pacing
+                    self.path.pacing.set_rate(self.path.congestion.metrics().pacing_rate);
                     let smoothed_rtt = self.path.rtt.get();
                     if let Some(delay) = self.path.pacing.delay(
                         smoothed_rtt,
@@ -937,7 +941,8 @@ impl Connection {
             );
         }
 
-        self.app_limited = buf.is_empty() && !congestion_blocked;
+        self.app_limited =
+            buf.is_empty() && !congestion_blocked && !self.datagrams.fast_send_blocked;
 
         // Send MTU probe if necessary
         if buf.is_empty() && self.state.is_established() {
@@ -1202,7 +1207,10 @@ impl Connection {
                     self.path.challenge = None;
                     self.path.challenge_pending = false;
                 }
-                Timer::Pacing => trace!("pacing timer expired"),
+                Timer::Pacing => {
+                    trace!("pacing timer expired");
+                    self.maybe_unblock_fast_datagrams();
+                }
                 Timer::PushNewCid => {
                     // Update `retire_prior_to` field in NEW_CONNECTION_ID frame
                     let num_new_cid = self.local_cid_state.on_cid_timeout().into();
@@ -1264,9 +1272,226 @@ impl Connection {
         let mut stats = self.stats;
         stats.path.rtt = self.path.rtt.get();
         stats.path.cwnd = self.path.congestion.window();
+        stats.path.in_flight = self.path.in_flight.bytes;
         stats.path.current_mtu = self.path.mtud.current_mtu();
 
         stats
+    }
+
+    /// Count UDP datagrams sent outside [`poll_transmit`].
+    ///
+    /// A dataplane that seals 1-RTT packets itself still reports those
+    /// datagrams here so path statistics stay complete.
+    pub fn record_udp_transmit(&mut self, datagrams: u64, bytes: u64, ios: u64) {
+        self.stats.udp_tx.datagrams += datagrams;
+        self.stats.udp_tx.bytes += bytes;
+        self.stats.udp_tx.ios += ios;
+    }
+
+    /// Seal application DATAGRAM payloads as 1-RTT short-header packets.
+    ///
+    /// Each payload becomes one UDP datagram with a DATAGRAM frame. A pending
+    /// ACK is packed into leftover MTU when it fits so ACK-only packets are not
+    /// sent separately. The congestion window and pacer bound flight and bursts;
+    /// the DATAGRAM send-buffer size only limits queued payloads. Sent packets
+    /// remain tracked for ACK/loss handling.
+    /// Payloads that cannot be sealed stay in `payloads`. Oversized payloads
+    /// are dropped.
+    pub fn seal_application_datagrams(
+        &mut self,
+        now: Instant,
+        payloads: &mut VecDeque<Bytes>,
+        packets: &mut Vec<Bytes>,
+    ) -> bool {
+        if !self.state.is_established()
+            || self.state.is_closed()
+            || self.spaces[SpaceId::Data].crypto.is_none()
+            || self.config.datagram_receive_buffer_size.is_none()
+            || self.peer_params.max_datagram_frame_size.is_none()
+        {
+            return false;
+        }
+
+        let Some(max_payload) = self.application_datagram_max_payload() else {
+            return false;
+        };
+        let mtu = usize::from(self.path.current_mtu());
+        let in_flight_limit = self.path.congestion.window();
+        self.path.pacing.set_rate(self.path.congestion.metrics().pacing_rate);
+        let mut blocked = false;
+        let mut last_packet_number = None;
+        let mut sent_bytes = 0;
+        let first_packet = packets.len();
+        packets.reserve(payloads.len());
+
+        while let Some(data) = payloads.pop_front() {
+            if self.path.in_flight.bytes.saturating_add(mtu as u64) > in_flight_limit {
+                self.datagrams.fast_send_blocked = true;
+                payloads.push_front(data);
+                blocked = true;
+                break;
+            }
+            if data.len() > max_payload {
+                trace!(
+                    len = data.len(),
+                    max_payload, "dropping oversized application datagram"
+                );
+                continue;
+            }
+
+            if let Some(deadline) = self.path.pacing.delay(
+                self.path.rtt.get(),
+                mtu as u64,
+                self.path.current_mtu(),
+                in_flight_limit,
+                now,
+            ) {
+                self.timers.set(Timer::Pacing, deadline);
+                self.datagrams.fast_send_blocked = true;
+                payloads.push_front(data);
+                blocked = true;
+                break;
+            }
+
+            let mut buf = self.take_seal_buf(mtu);
+            let Some(builder) = PacketBuilder::new(
+                now,
+                SpaceId::Data,
+                self.rem_cids.active(),
+                &mut buf,
+                mtu,
+                0,
+                true,
+                self,
+            ) else {
+                self.store_seal_buf(buf);
+                payloads.push_front(data);
+                break;
+            };
+
+            let datagram = Datagram { data };
+            if buf.len() + datagram.size(true) > builder.max_size {
+                self.store_seal_buf(buf);
+                payloads.push_front(datagram.data);
+                break;
+            }
+
+            datagram.encode(true, &mut buf);
+            self.stats.frame_tx.datagram += 1;
+            let mut sent = SentFrames {
+                non_retransmits: true,
+                ..SentFrames::default()
+            };
+            self.maybe_append_ack(now, &mut buf, builder.max_size, &mut sent);
+            let acked = sent.largest_acked.is_some();
+            last_packet_number = Some(builder.exact_number);
+            builder.finish_and_track(now, self, Some(sent), &mut buf);
+            sent_bytes += buf.len() as u64;
+            if acked {
+                self.spaces[SpaceId::Data].pending_acks.acks_sent();
+                self.timers.stop(Timer::MaxAckDelay);
+            }
+            self.path.total_sent = self.path.total_sent.saturating_add(buf.len() as u64);
+            packets.push(Bytes::from(buf));
+        }
+
+        if let Some(last_packet_number) = last_packet_number {
+            self.path.congestion.on_sent(now, sent_bytes, last_packet_number);
+            self.stats.udp_tx.datagrams += (packets.len() - first_packet) as u64;
+            self.stats.udp_tx.bytes += sent_bytes;
+        }
+        blocked
+    }
+
+    fn fast_datagram_budget_available(&self) -> bool {
+        let mtu = u64::from(self.path.current_mtu());
+        self.path.in_flight.bytes.saturating_add(mtu) <= self.path.congestion.window()
+    }
+
+    fn maybe_unblock_fast_datagrams(&mut self) {
+        if self.datagrams.fast_send_blocked && self.fast_datagram_budget_available() {
+            self.datagrams.fast_send_blocked = false;
+            self.events.push_back(Event::DatagramsUnblocked);
+        }
+    }
+
+    fn take_seal_buf(&mut self, mtu: usize) -> Vec<u8> {
+        let mut buf = self
+            .seal_bufs
+            .pop()
+            .filter(|buf| buf.capacity() >= mtu)
+            .unwrap_or_else(|| Vec::with_capacity(mtu));
+        buf.clear();
+        buf
+    }
+
+    fn store_seal_buf(&mut self, mut buf: Vec<u8>) {
+        buf.clear();
+        if self.seal_bufs.len() < SEAL_BUF_POOL && buf.capacity() >= 1200 {
+            self.seal_bufs.push(buf);
+        }
+    }
+
+    /// Return UDP payloads from [`Self::seal_application_datagrams`] to the
+    /// seal buffer pool after the kernel has accepted them.
+    pub fn recycle_sealed_buffers(&mut self, packets: Vec<Bytes>) {
+        for packet in packets {
+            let Ok(buf) = packet.try_into_mut() else {
+                continue;
+            };
+            self.store_seal_buf(Vec::from(buf));
+        }
+    }
+
+    fn maybe_append_ack(
+        &mut self,
+        now: Instant,
+        buf: &mut Vec<u8>,
+        max_size: usize,
+        sent: &mut SentFrames,
+    ) {
+        self.spaces[SpaceId::Data]
+            .pending_acks
+            .maybe_ack_non_eliciting();
+        if !self.spaces[SpaceId::Data].pending_acks.can_send() {
+            return;
+        }
+        let bound = ack_frame_size_bound(
+            self.spaces[SpaceId::Data].pending_acks.ranges().len(),
+            self.receiving_ecn,
+        );
+        if buf.len().saturating_add(bound) > max_size {
+            return;
+        }
+        let start = buf.len();
+        Self::populate_acks(
+            now,
+            self.receiving_ecn,
+            sent,
+            &mut self.spaces[SpaceId::Data],
+            buf,
+            &mut self.stats,
+        );
+        if buf.len() > max_size {
+            buf.truncate(start);
+            sent.largest_acked = None;
+            self.stats.frame_tx.acks = self.stats.frame_tx.acks.saturating_sub(1);
+        }
+    }
+
+    fn application_datagram_max_payload(&self) -> Option<usize> {
+        if self.config.datagram_receive_buffer_size.is_none() {
+            return None;
+        }
+        let max_size = usize::from(self.path.current_mtu())
+            .saturating_sub(self.predict_1rtt_overhead(None))
+            .saturating_sub(Datagram::SIZE_BOUND);
+        let limit = self
+            .peer_params
+            .max_datagram_frame_size?
+            .into_inner()
+            .saturating_sub(Datagram::SIZE_BOUND as u64);
+        Some(limit.min(max_size as u64) as usize)
     }
 
     /// Ping the remote endpoint
@@ -1501,6 +1726,7 @@ impl Connection {
             self.app_limited,
             self.spaces[space].largest_acked_packet,
         );
+        self.maybe_unblock_fast_datagrams();
 
         if new_largest && ack_eliciting_acked {
             let ack_delay = if space != SpaceId::Data {
@@ -1737,8 +1963,7 @@ impl Connection {
             self.stats.path.lost_bytes += size_of_lost_packets;
             trace!(
                 "packets lost: {:?}, bytes lost: {}",
-                lost_packets,
-                size_of_lost_packets
+                lost_packets, size_of_lost_packets
             );
 
             for &packet in &lost_packets {
@@ -3684,13 +3909,12 @@ impl Connection {
     /// Update counters to account for a packet becoming acknowledged, lost, or abandoned
     fn remove_in_flight(&mut self, packet: &SentPacket) {
         // Visit known paths from newest to oldest to find the one `packet` was sent on
-        for path in [&mut self.path]
+        let removed = [&mut self.path]
             .into_iter()
             .chain(self.prev_path.as_mut().map(|(_, data)| data))
-        {
-            if path.remove_in_flight(packet) {
-                return;
-            }
+            .any(|path| path.remove_in_flight(packet));
+        if removed {
+            self.maybe_unblock_fast_datagrams();
         }
     }
 
@@ -4028,6 +4252,16 @@ const MAX_HANDSHAKE_OR_0RTT_HEADER_SIZE: usize =
 ///
 /// Chosen arbitrarily, intended to be large enough to prevent spurious connection loss.
 const KEY_UPDATE_MARGIN: u64 = 10_000;
+const SEAL_BUF_POOL: usize = 64;
+
+fn ack_frame_size_bound(range_count: usize, ecn: bool) -> usize {
+    1 + 8
+        + 8
+        + 8
+        + 8
+        + range_count.saturating_sub(1).saturating_mul(16)
+        + if ecn { 24 } else { 0 }
+}
 
 #[derive(Default)]
 struct SentFrames {

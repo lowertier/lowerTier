@@ -76,10 +76,15 @@ impl Default for LowTierData {
     }
 }
 
+enum InstanceJoin {
+    Thread(std::thread::JoinHandle<()>),
+    Task(tokio::task::JoinHandle<()>),
+}
+
 pub struct LowTierLauncher {
     instance_alive: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
-    thread_handle: Option<std::thread::JoinHandle<()>>,
+    instance_join: Option<InstanceJoin>,
     api_service: ArcMutApiService,
     running_cfg: String,
     error_msg: Arc<RwLock<Option<String>>>,
@@ -91,7 +96,7 @@ impl LowTierLauncher {
         let instance_alive = Arc::new(AtomicBool::new(false));
         Self {
             instance_alive,
-            thread_handle: None,
+            instance_join: None,
             api_service: Arc::new(RwLock::new(None)),
             error_msg: Arc::new(RwLock::new(None)),
             running_cfg: String::new(),
@@ -224,8 +229,21 @@ impl LowTierLauncher {
 
         let data = self.data.clone();
         let api_service = self.api_service.clone();
+        let attach_to_current =
+            !cfg.get_flags().multi_thread && tokio::runtime::Handle::try_current().is_ok();
+        if attach_to_current {
+            self.instance_join = Some(InstanceJoin::Task(tokio::spawn(Self::run_until_stopped(
+                cfg,
+                stop_flag,
+                api_service,
+                data,
+                error_msg,
+                instance_alive,
+            ))));
+            return;
+        }
 
-        self.thread_handle = Some(std::thread::spawn(move || {
+        self.instance_join = Some(InstanceJoin::Thread(std::thread::spawn(move || {
             let rt = if cfg.get_flags().multi_thread {
                 let worker_threads = 2.max(cfg.get_flags().multi_thread_count as usize);
                 tokio::runtime::Builder::new_multi_thread()
@@ -238,38 +256,50 @@ impl LowTierLauncher {
                     .build()
             }
             .unwrap();
-
-            #[cfg(feature = "ffi-dataplane")]
-            {
-                let (lock, cvar) = &data.runtime_handle;
-                *lock.lock() = Some(rt.handle().clone());
-                cvar.notify_all();
-            }
-
-            let stop_notifier = Arc::new(tokio::sync::Notify::new());
-
-            let stop_notifier_clone = stop_notifier.clone();
-            rt.spawn(async move {
-                while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                stop_notifier_clone.notify_one();
-            });
-
-            let notifier = data.instance_stop_notifier.clone();
-            let ret = rt.block_on(Self::lowertier_routine(
+            rt.block_on(Self::run_until_stopped(
                 cfg,
-                stop_notifier,
+                stop_flag,
                 api_service,
                 data,
+                error_msg,
+                instance_alive,
             ));
-            if let Err(e) = ret {
-                error_msg.write().unwrap().replace(format!("{:?}", e));
-            }
-            instance_alive.store(false, std::sync::atomic::Ordering::Relaxed);
-            notifier.notify_one();
             rt.shutdown_background();
-        }));
+        })));
+    }
+
+    async fn run_until_stopped(
+        cfg: TomlConfigLoader,
+        stop_flag: Arc<AtomicBool>,
+        api_service: ArcMutApiService,
+        data: Arc<LowTierData>,
+        error_msg: Arc<RwLock<Option<String>>>,
+        instance_alive: Arc<AtomicBool>,
+    ) {
+        #[cfg(feature = "ffi-dataplane")]
+        {
+            let (lock, cvar) = &data.runtime_handle;
+            *lock.lock() = Some(tokio::runtime::Handle::current());
+            cvar.notify_all();
+        }
+
+        let stop_notifier = Arc::new(tokio::sync::Notify::new());
+        let stop_notifier_clone = stop_notifier.clone();
+        let stop_watch = tokio::spawn(async move {
+            while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            stop_notifier_clone.notify_one();
+        });
+
+        let notifier = data.instance_stop_notifier.clone();
+        let ret = Self::lowertier_routine(cfg, stop_notifier, api_service, data).await;
+        stop_watch.abort();
+        if let Err(e) = ret {
+            error_msg.write().unwrap().replace(format!("{:?}", e));
+        }
+        instance_alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        notifier.notify_one();
     }
 
     pub fn error_msg(&self) -> Option<String> {
@@ -344,10 +374,14 @@ impl Drop for LowTierLauncher {
     fn drop(&mut self) {
         self.stop_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(handle) = self.thread_handle.take()
-            && let Err(e) = handle.join()
-        {
-            println!("Error when joining thread: {:?}", e);
+        match self.instance_join.take() {
+            Some(InstanceJoin::Thread(handle)) => {
+                if let Err(e) = handle.join() {
+                    println!("Error when joining thread: {:?}", e);
+                }
+            }
+            Some(InstanceJoin::Task(handle)) => handle.abort(),
+            None => {}
         }
     }
 }
@@ -990,20 +1024,32 @@ impl NetworkConfig {
         if let Some(enable_bridge) = self.enable_bridge {
             flags.enable_bridge = enable_bridge;
         }
-        if let Some(quic_congestion) = &self.quic_congestion {
-            flags.quic_congestion = quic_congestion.clone();
-        }
-        if let Some(quic_brutal_send_bps) = self.quic_brutal_send_bps {
-            flags.quic_brutal_send_bps = quic_brutal_send_bps;
-        }
-        if let Some(quic_brutal_loss_compensation) = self.quic_brutal_loss_compensation {
-            flags.quic_brutal_loss_compensation = quic_brutal_loss_compensation;
-        }
         if let Some(quic_initial_receive_window) = self.quic_initial_receive_window {
             flags.quic_initial_receive_window = quic_initial_receive_window;
         }
         if let Some(quic_receive_window) = self.quic_receive_window {
             flags.quic_receive_window = quic_receive_window;
+        }
+        if let Some(cert) = &self.quic_tls_cert {
+            flags.quic_tls_cert = cert.clone();
+        }
+        if let Some(key) = &self.quic_tls_key {
+            flags.quic_tls_key = key.clone();
+        }
+        if let Some(server_name) = &self.quic_server_name {
+            flags.quic_server_name = server_name.clone();
+        }
+        if let Some(secret) = &self.quic_admission_secret {
+            flags.quic_admission_secret = secret.clone();
+        }
+        if let Some(root) = &self.quic_fallback_root {
+            flags.quic_fallback_root = root.clone();
+        }
+        if let Some(upstream) = &self.quic_decoy_upstream {
+            flags.quic_decoy_upstream = upstream.clone();
+        }
+        if let Some(quic_sni_passthrough) = self.quic_sni_passthrough {
+            flags.quic_sni_passthrough = quic_sni_passthrough;
         }
         if let Some(quic_datagram_fec_parity) = self.quic_datagram_fec_parity {
             flags.quic_datagram_fec_parity = quic_datagram_fec_parity;
@@ -1251,20 +1297,27 @@ impl NetworkConfig {
             (flags.l2_flood_bps != default_flags.l2_flood_bps).then_some(flags.l2_flood_bps);
         result.enable_bridge =
             (flags.enable_bridge != default_flags.enable_bridge).then_some(flags.enable_bridge);
-        result.quic_congestion = (flags.quic_congestion != default_flags.quic_congestion)
-            .then_some(flags.quic_congestion.clone());
-        result.quic_brutal_send_bps = (flags.quic_brutal_send_bps
-            != default_flags.quic_brutal_send_bps)
-            .then_some(flags.quic_brutal_send_bps);
-        result.quic_brutal_loss_compensation = (flags.quic_brutal_loss_compensation
-            != default_flags.quic_brutal_loss_compensation)
-            .then_some(flags.quic_brutal_loss_compensation);
         result.quic_initial_receive_window = (flags.quic_initial_receive_window
             != default_flags.quic_initial_receive_window)
             .then_some(flags.quic_initial_receive_window);
         result.quic_receive_window = (flags.quic_receive_window
             != default_flags.quic_receive_window)
             .then_some(flags.quic_receive_window);
+        result.quic_tls_cert =
+            (!flags.quic_tls_cert.is_empty()).then_some(flags.quic_tls_cert.clone());
+        result.quic_tls_key =
+            (!flags.quic_tls_key.is_empty()).then_some(flags.quic_tls_key.clone());
+        result.quic_server_name =
+            (!flags.quic_server_name.is_empty()).then_some(flags.quic_server_name.clone());
+        result.quic_admission_secret = (!flags.quic_admission_secret.is_empty())
+            .then_some(flags.quic_admission_secret.clone());
+        result.quic_fallback_root =
+            (!flags.quic_fallback_root.is_empty()).then_some(flags.quic_fallback_root.clone());
+        result.quic_decoy_upstream =
+            (!flags.quic_decoy_upstream.is_empty()).then_some(flags.quic_decoy_upstream.clone());
+        result.quic_sni_passthrough = (flags.quic_sni_passthrough
+            != default_flags.quic_sni_passthrough)
+            .then_some(flags.quic_sni_passthrough);
         result.quic_datagram_fec_parity = (flags.quic_datagram_fec_parity
             != default_flags.quic_datagram_fec_parity)
             .then_some(flags.quic_datagram_fec_parity);
@@ -1341,9 +1394,6 @@ mod tests {
         let mut flags = config.get_flags();
         flags.underlay_deny_interfaces = vec!["utun5".into(), "tailscale0".into()];
         flags.underlay_deny_cidrs = vec!["100.64.0.0/10".into(), "fd7a:115c:a1e0::/48".into()];
-        flags.quic_congestion = "brutal".into();
-        flags.quic_brutal_send_bps = 100_000_000;
-        flags.quic_brutal_loss_compensation = false;
         flags.quic_initial_receive_window = 8 * 1024 * 1024;
         flags.quic_receive_window = 32 * 1024 * 1024;
         flags.quic_datagram_fec_parity = 3;
@@ -1359,8 +1409,6 @@ mod tests {
             network_config.underlay_deny_interfaces,
             ["utun5", "tailscale0"]
         );
-        assert_eq!(network_config.quic_congestion.as_deref(), Some("brutal"));
-        assert_eq!(network_config.quic_brutal_send_bps, Some(100_000_000));
         assert_eq!(network_config.quic_datagram_fec_parity, Some(3));
         assert_eq!(network_config.quic_datagram_alternate_path_parity, None);
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
@@ -1377,15 +1425,6 @@ mod tests {
         assert_eq!(
             regenerated_flags.underlay_deny_cidrs,
             flags.underlay_deny_cidrs
-        );
-        assert_eq!(regenerated_flags.quic_congestion, flags.quic_congestion);
-        assert_eq!(
-            regenerated_flags.quic_brutal_send_bps,
-            flags.quic_brutal_send_bps
-        );
-        assert_eq!(
-            regenerated_flags.quic_brutal_loss_compensation,
-            flags.quic_brutal_loss_compensation
         );
         assert_eq!(
             regenerated_flags.quic_initial_receive_window,
@@ -1592,7 +1631,7 @@ mod tests {
             peer_urls: vec![
                 " tcp://1.2.3.4:11010 ".to_string(),
                 "  ".to_string(),
-                "\tudp://5.6.7.8:11010\n".to_string(),
+                "\tquic://5.6.7.8:11012\n".to_string(),
             ],
             ..Default::default()
         };
@@ -1602,7 +1641,7 @@ mod tests {
 
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].uri.as_str(), "tcp://1.2.3.4:11010");
-        assert_eq!(peers[1].uri.as_str(), "udp://5.6.7.8:11010");
+        assert_eq!(peers[1].uri.as_str(), "quic://5.6.7.8:11012");
         Ok(())
     }
 

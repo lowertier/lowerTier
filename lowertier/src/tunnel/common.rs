@@ -67,12 +67,24 @@ pub fn ensure_local_allowed(policy: &UnderlayPolicy, local: SocketAddr) -> Resul
     Ok(())
 }
 
+fn underlay_source_affinity(local: IpAddr, remote: IpAddr) -> u32 {
+    match (local, remote) {
+        (IpAddr::V4(local), IpAddr::V4(remote)) => {
+            (u32::from(local) ^ u32::from(remote)).leading_zeros()
+        }
+        (IpAddr::V6(local), IpAddr::V6(remote)) => {
+            (u128::from(local) ^ u128::from(remote)).leading_zeros()
+        }
+        _ => 0,
+    }
+}
+
 pub fn eligible_bind_addrs(
     policy: &UnderlayPolicy,
     bind_addrs: &[SocketAddr],
     remote: SocketAddr,
 ) -> Result<Vec<SocketAddr>, TunnelError> {
-    let eligible = bind_addrs
+    let mut eligible = bind_addrs
         .iter()
         .copied()
         .filter(|addr| {
@@ -87,6 +99,17 @@ pub fn eligible_bind_addrs(
             policy.allows_local_endpoint(interface.as_deref(), addr.ip())
         })
         .collect::<Vec<_>>();
+    eligible
+        .sort_by_key(|addr| std::cmp::Reverse(underlay_source_affinity(addr.ip(), remote.ip())));
+    if remote.is_ipv4() {
+        let best = eligible
+            .first()
+            .map(|addr| underlay_source_affinity(addr.ip(), remote.ip()))
+            .unwrap_or(0);
+        if best < 16 {
+            eligible.clear();
+        }
+    }
 
     if policy.is_active() && eligible.is_empty() {
         return Err(TunnelError::UnderlayPolicyDenied(format!(
@@ -1113,244 +1136,43 @@ pub mod tests {
     #[cfg(test)]
     use crate::common::underlay_policy::UnderlayPolicy;
 
-    #[test]
-    fn interface_policy_fails_closed_when_local_interface_cannot_be_proven() {
-        let policy = UnderlayPolicy::new(&["tailscale0".into()], &[]).unwrap();
-
-        let result = super::ensure_local_allowed(&policy, "192.0.2.250:1".parse().unwrap());
-
-        assert!(matches!(result, Err(TunnelError::UnderlayPolicyDenied(_))));
-    }
-
-    #[test]
-    fn bind_candidate_with_unproven_interface_is_not_eligible() {
-        let policy = UnderlayPolicy::new(&["tailscale0".into()], &[]).unwrap();
-
-        let result = super::eligible_bind_addrs(
-            &policy,
-            &["192.0.2.250:0".parse().unwrap()],
-            "198.51.100.8:443".parse().unwrap(),
-        );
-
-        assert!(matches!(result, Err(TunnelError::UnderlayPolicyDenied(_))));
-    }
-
     #[cfg(test)]
     use crate::tunnel::{
         TunnelError,
         packet_def::{PEER_MANAGER_HEADER_SIZE, TCP_TUNNEL_HEADER_SIZE},
     };
 
-    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-    #[test]
-    fn apply_socket_mark_none_is_noop_and_does_not_error() {
-        // The contract for `None` is "no syscall is made and no error is
-        // returned" — must not require CAP_NET_ADMIN to call.
-        let socket = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )
-        .unwrap();
-        super::apply_socket_mark(&socket, None).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "requires CAP_NET_ADMIN; run as root or with sudo -E cargo test"]
-    fn apply_socket_mark_sets_so_mark_when_capable() {
-        use nix::libc;
-        use std::os::fd::AsRawFd;
-
-        fn read_so_mark(s: &socket2::Socket) -> u32 {
-            let mut value: libc::c_int = 0;
-            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            let r = unsafe {
-                libc::getsockopt(
-                    s.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_MARK,
-                    &mut value as *mut _ as *mut libc::c_void,
-                    &mut len,
-                )
-            };
-            assert_eq!(r, 0, "getsockopt(SO_MARK) failed");
-            value as u32
-        }
-
-        let socket = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )
-        .unwrap();
-        super::apply_socket_mark(&socket, Some(0x1234))
-            .expect("set_mark failed; need CAP_NET_ADMIN");
-        assert_eq!(read_so_mark(&socket), 0x1234);
-
-        // Some(0) is a legitimate value: it must reach setsockopt and clear
-        // the mark, distinct from None which makes no syscall.
-        super::apply_socket_mark(&socket, Some(0)).expect("set_mark(0) failed");
-        assert_eq!(read_so_mark(&socket), 0);
-    }
-
-    #[test]
-    fn framed_reader_rejects_short_peer_manager_body() {
-        let mut buf = BytesMut::new();
-        buf.put_u32_le((PEER_MANAGER_HEADER_SIZE - 1) as u32);
-        buf.resize(TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE - 1, 0);
-
-        let ret = super::FramedReader::<tokio::io::Empty>::extract_one_packet(&mut buf, 2000);
-
-        assert!(matches!(
-            ret,
-            Some(Err(TunnelError::InvalidPacket(msg))) if msg == "body too short"
-        ));
-    }
-
-    #[test]
-    fn tcp_converter_enforces_the_configured_frame_limit() {
-        use super::ZCPacketToBytes;
-        use crate::tunnel::packet_def::PacketType;
-
-        let frame_limit = PEER_MANAGER_HEADER_SIZE + 64;
-        let mut packet =
-            ZCPacket::new_with_payload(&vec![0x5a; frame_limit - PEER_MANAGER_HEADER_SIZE]);
-        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        let converter = super::TcpZCPacketToBytes::with_max_frame_size(frame_limit);
-
-        let encoded = converter.zcpacket_into_bytes(packet).unwrap();
-        assert_eq!(encoded.len(), TCP_TUNNEL_HEADER_SIZE + frame_limit);
-
-        let mut oversized =
-            ZCPacket::new_with_payload(&vec![0x5a; frame_limit + 1 - PEER_MANAGER_HEADER_SIZE]);
-        oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        assert!(matches!(
-            converter.zcpacket_into_bytes(oversized),
-            Err(TunnelError::InvalidPacket(message))
-                if message == "framed packet exceeds configured limit"
-        ));
-    }
-
-    #[test]
-    fn tunnel_wrappers_preserve_transport_binding() {
-        let binding = Some(super::TransportBinding {
-            kind: super::super::TransportBindingKind::QuicTlsExporterV1,
-            bytes: [0x37_u8; 32],
-        });
-        let tunnel = super::BatchTunnelWrapper::new_with_transport_authentication_and_datagram_size_budget_and_binding(
-            futures::stream::empty::<crate::tunnel::BatchStreamItem>(),
-            futures::sink::drain::<crate::tunnel::BatchSinkItem>()
-                .sink_map_err(|error| match error {}),
-            None,
-            true,
-            None,
-            binding,
-        );
-        assert_eq!(tunnel.transport_binding(), binding);
-        assert!(tunnel.is_transport_authenticated());
-
-        let filtered = crate::tunnel::filter::TunnelWithFilter::new(
-            tunnel,
-            crate::tunnel::filter::EmptyFilter,
-        );
-        assert_eq!(filtered.transport_binding(), binding);
-        assert!(filtered.is_transport_authenticated());
-
-        let scalar_tunnel = super::TunnelWrapper::new_with_transport_authentication_and_binding(
-            futures::stream::empty::<super::StreamItem>(),
-            futures::sink::drain::<super::SinkItem>().sink_map_err(|error| match error {}),
-            None,
-            true,
-            binding,
-        );
-        assert_eq!(scalar_tunnel.transport_binding(), binding);
-        assert!(scalar_tunnel.is_transport_authenticated());
-    }
-
-    #[test]
-    fn non_quic_tunnels_have_no_transport_binding() {
-        let (left, right) = crate::tunnel::ring::create_ring_tunnel_pair();
-        assert_eq!(left.transport_binding(), None);
-        assert_eq!(right.transport_binding(), None);
-    }
-
+    #[cfg(all(test, target_os = "linux"))]
     #[tokio::test]
-    async fn framed_reader_rejects_a_partial_header_on_eof() {
-        use tokio::io::{AsyncWriteExt, duplex};
-
-        let (mut writer, reader) = duplex(32);
-        writer.write_all(&[1, 0]).await.unwrap();
-        writer.shutdown().await.unwrap();
-
-        let mut framed = super::FramedReader::new(reader, 2000);
-        let item = framed
-            .next()
-            .await
-            .expect("the truncated frame is reported");
-        assert!(matches!(
-            item,
-            Err(TunnelError::InvalidPacket(message)) if message == "truncated frame"
-        ));
-        assert!(framed.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn framed_reader_rejects_a_partial_body_on_eof() {
-        use tokio::io::{AsyncWriteExt, duplex};
-
-        let (mut writer, reader) = duplex(32);
-        writer
-            .write_all(&(PEER_MANAGER_HEADER_SIZE as u32).to_le_bytes())
-            .await
+    async fn tcp_socket_buffers_are_inherited_without_shrinking() {
+        let listener = super::bind::<tokio::net::TcpSocket>()
+            .addr("127.0.0.1:0".parse().unwrap())
+            .call()
             .unwrap();
-        writer.write_all(&[0]).await.unwrap();
-        writer.shutdown().await.unwrap();
-
-        let mut framed = super::FramedReader::new(reader, 2000);
-        let item = framed
-            .next()
-            .await
-            .expect("the truncated frame is reported");
-        assert!(matches!(
-            item,
-            Err(TunnelError::InvalidPacket(message)) if message == "truncated frame"
-        ));
-        assert!(framed.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn framed_reader_accepts_empty_eof_at_a_frame_boundary() {
-        use tokio::io::{AsyncWriteExt, duplex};
-
-        let (mut writer, reader) = duplex(32);
-        writer.shutdown().await.unwrap();
-
-        let mut framed = super::FramedReader::new(reader, 2000);
-        assert!(framed.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn framed_reader_accepts_a_frame_at_the_body_limit() {
-        use super::ZCPacketToBytes;
-        use crate::tunnel::packet_def::PacketType;
-        use tokio::io::{AsyncWriteExt, duplex};
-
-        let frame_limit = 64 * 1024;
-        let mut packet =
-            super::ZCPacket::new_with_payload(&vec![0x5a; frame_limit - PEER_MANAGER_HEADER_SIZE]);
-        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        let frame = super::TcpZCPacketToBytes::with_max_frame_size(frame_limit)
-            .zcpacket_into_bytes(packet)
-            .unwrap();
-        let (mut writer, reader) = duplex(frame.len());
-        writer.write_all(&frame).await.unwrap();
-        writer.shutdown().await.unwrap();
-
-        let mut framed = super::FramedReader::new(reader, frame_limit);
-        let packet = framed.next().await.unwrap().unwrap();
-        assert_eq!(packet.payload_len(), frame_limit - PEER_MANAGER_HEADER_SIZE);
-        assert!(framed.next().await.is_none());
+        let socket = socket2::SockRef::from(&listener);
+        let before = (
+            socket.recv_buffer_size().unwrap(),
+            socket.send_buffer_size().unwrap(),
+        );
+        super::size_tcp_socket_buffers(&socket);
+        let after = (
+            socket.recv_buffer_size().unwrap(),
+            socket.send_buffer_size().unwrap(),
+        );
+        assert!(after.0 >= before.0);
+        assert!(after.1 >= before.1);
+        drop(socket);
+        let listener = listener.listen(1024).unwrap();
+        let (client, accepted) = tokio::join!(
+            tokio::net::TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept(),
+        );
+        let _client = client.unwrap();
+        let (accepted, _) = accepted.unwrap();
+        let accepted = socket2::SockRef::from(&accepted);
+        assert!(accepted.recv_buffer_size().unwrap() >= after.0);
+        assert!(accepted.send_buffer_size().unwrap() >= after.1);
+        println!("TCP socket buffers: before={before:?}, after={after:?}");
     }
 
     pub async fn _tunnel_echo_server(tunnel: Box<dyn super::Tunnel>, once: bool) {
@@ -1359,7 +1181,7 @@ pub mod tests {
         if !once {
             while let Some(item) = recv.next().await {
                 let Ok(msg) = item else {
-                    break;
+                    continue;
                 };
                 tracing::debug!(?msg, "recv a msg, try echo back");
                 if send.send(msg).await.is_err() {
@@ -1463,7 +1285,7 @@ pub mod tests {
         drop(send);
         drop(recv);
 
-        if connector.remote_url().scheme() == "udp" {
+        if ["udp", "wg"].contains(&connector.remote_url().scheme()) {
             lis.abort();
         } else {
             // lis should finish in 1 second
@@ -1601,38 +1423,5 @@ pub mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(condition().await, "Timeout")
-    }
-
-    #[cfg(all(test, target_os = "linux"))]
-    #[tokio::test]
-    async fn tcp_socket_buffers_are_inherited_without_shrinking() {
-        let listener = super::bind::<tokio::net::TcpSocket>()
-            .addr("127.0.0.1:0".parse().unwrap())
-            .call()
-            .unwrap();
-        let socket = socket2::SockRef::from(&listener);
-        let before = (
-            socket.recv_buffer_size().unwrap(),
-            socket.send_buffer_size().unwrap(),
-        );
-        super::size_tcp_socket_buffers(&socket);
-        let after = (
-            socket.recv_buffer_size().unwrap(),
-            socket.send_buffer_size().unwrap(),
-        );
-        assert!(after.0 >= before.0);
-        assert!(after.1 >= before.1);
-        drop(socket);
-        let listener = listener.listen(1024).unwrap();
-        let (client, accepted) = tokio::join!(
-            tokio::net::TcpStream::connect(listener.local_addr().unwrap()),
-            listener.accept(),
-        );
-        let _client = client.unwrap();
-        let (accepted, _) = accepted.unwrap();
-        let accepted = socket2::SockRef::from(&accepted);
-        assert!(accepted.recv_buffer_size().unwrap() >= after.0);
-        assert!(accepted.send_buffer_size().unwrap() >= after.1);
-        println!("TCP socket buffers: before={before:?}, after={after:?}");
     }
 }

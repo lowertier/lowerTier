@@ -818,6 +818,16 @@ impl PeerSessionStore {
         self.responder_recoveries.contains_key(key)
     }
 
+    /// Drop a committed responder proof when the initiator reconnects without it.
+    ///
+    /// A timed-out client never received the token, so the next handshake cannot
+    /// acknowledge it. The live session stays; the next prepare Syncs or Creates.
+    pub fn abandon_unacknowledged_responder_recovery(&self, key: &SessionKey) {
+        self.expire_responder_recoveries();
+        let _guard = self.creation_lock.lock().unwrap();
+        self.responder_recoveries.remove(key);
+    }
+
     pub fn has_pending_create(&self, key: &SessionKey) -> bool {
         self.pending_creates.contains_key(key)
     }
@@ -3130,6 +3140,50 @@ mod tests {
         assert!(store.responder_recoveries.contains_key(&key));
         assert!(store.acknowledge_responder_recovery(&key, transition_id));
         assert!(!store.responder_recoveries.contains_key(&key));
+    }
+
+    #[test]
+    fn unacked_reconnect_abandons_recovery_and_syncs() {
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("reconnect".to_string(), 19);
+        let first = store
+            .prepare_responder_session(
+                &key,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        first
+            .session
+            .reserve_peer_static_pubkey(Some([0x19; 32]))
+            .unwrap();
+        store
+            .commit_prepared_responder_transition(&key, &first)
+            .unwrap();
+        assert!(store.has_responder_recovery(&key));
+        assert!(
+            store
+                .prepare_responder_session(
+                    &key,
+                    "aes-256-gcm".to_string(),
+                    "aes-256-gcm".to_string(),
+                    None
+                )
+                .is_err()
+        );
+        store.abandon_unacknowledged_responder_recovery(&key);
+        assert!(!store.has_responder_recovery(&key));
+        let retry = store
+            .prepare_responder_session(
+                &key,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(retry.action, PeerSessionAction::Sync);
+        retry.cancel();
     }
 
     #[test]

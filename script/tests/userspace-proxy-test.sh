@@ -37,9 +37,7 @@ if [[ ! -x "$core" ]]; then
         --manifest-path "$repo_root/Cargo.toml" \
         --locked \
         -p lowertier \
-        --bin lowertier-core \
-        --no-default-features \
-        --features socks5
+        --bin lowertier-core
 fi
 
 read -r underlay_port proxy_port tcp_port udp_port http_port server_rpc_port client_rpc_port < <(

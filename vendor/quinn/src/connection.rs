@@ -7,10 +7,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
-    task::{Context, Poll, Waker, ready},
+    task::{ready, Context, Poll, Waker},
 };
 
 use bytes::Bytes;
@@ -18,23 +18,21 @@ use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::sync::{
-    Notify,
     futures::{Notified, OwnedNotified},
-    mpsc, oneshot,
+    mpsc, oneshot, Notify,
 };
-use tracing::{Instrument, Span, debug_span};
+use tracing::{debug_span, Instrument, Span};
 
 use crate::{
-    ConnectionEvent, Duration, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPoller},
     send_stream::SendStream,
-    udp_transmit,
+    udp_transmit, ConnectionEvent, Duration, Instant, VarInt,
 };
 use proto::{
-    ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
-    StreamId, congestion::Controller,
+    congestion::Controller, ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent,
+    Side, StreamEvent, StreamId,
 };
 
 /// In-progress connection attempt future
@@ -473,6 +471,102 @@ impl Connection {
                 TooLarge => SendDatagramError::TooLarge,
             }),
         }
+    }
+
+    /// Queue `data` as an unreliable datagram without waking the connection driver.
+    ///
+    /// A tunnel dataplane that will call [`drive_transmit_now`](Self::drive_transmit_now)
+    /// on the same thread should use this so send is not ACK-clocked.
+    pub fn queue_datagram(&self, data: Bytes) -> Result<(), SendDatagramError> {
+        let conn = &mut *self.0.state.lock("queue_datagram");
+        if let Some(ref x) = conn.error {
+            return Err(SendDatagramError::ConnectionLost(x.clone()));
+        }
+        use proto::SendDatagramError::*;
+        match conn.inner.datagrams().send(data, true) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(match e {
+                Blocked(..) => unreachable!(),
+                UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
+                Disabled => SendDatagramError::Disabled,
+                TooLarge => SendDatagramError::TooLarge,
+            }),
+        }
+    }
+
+    /// Pack queued DATAGRAMs into UDP datagrams and send them now.
+    ///
+    /// Returns after the send queue is empty, the socket would block, or a
+    /// bounded number of packets have been sent. The connection driver still
+    /// handles receive, ACK, and timers.
+    pub fn drive_transmit_now(&self) -> io::Result<usize> {
+        let conn = &mut *self.0.state.lock("drive_transmit_now");
+        let transmitted = conn.drive_transmit_eager()?;
+        conn.wake();
+        Ok(transmitted)
+    }
+
+    /// Seal application DATAGRAM payloads as 1-RTT short-header packets.
+    ///
+    /// Handshake, ACK, and receive stay on the connection driver. A tunnel
+    /// dataplane can send the returned UDP payloads with `sendmmsg` / GSO.
+    /// Payloads that cannot be sealed yet remain in `payloads`.
+    pub fn seal_application_datagrams(&self, payloads: &mut VecDeque<Bytes>) -> Vec<Bytes> {
+        let conn = &mut *self.0.state.lock("seal_application_datagrams");
+        if conn.error.is_some() {
+            return Vec::new();
+        }
+        let now = conn.runtime.now();
+        let mut packets = Vec::new();
+        let blocked = conn
+            .inner
+            .seal_application_datagrams(now, payloads, &mut packets);
+        if blocked || !packets.is_empty() {
+            conn.wake();
+        }
+        packets
+    }
+
+    /// Poll the fast DATAGRAM sealer, waiting for flight credit or its pacing timer.
+    pub fn poll_seal_application_datagrams(
+        &self,
+        cx: &mut Context<'_>,
+        payloads: &mut VecDeque<Bytes>,
+    ) -> Poll<Vec<Bytes>> {
+        let conn = &mut *self.0.state.lock("poll_seal_application_datagrams");
+        if conn.error.is_some() {
+            return Poll::Ready(Vec::new());
+        }
+        let now = conn.runtime.now();
+        let mut packets = Vec::new();
+        let blocked = conn
+            .inner
+            .seal_application_datagrams(now, payloads, &mut packets);
+        if !packets.is_empty() {
+            conn.wake();
+            return Poll::Ready(packets);
+        }
+        if !blocked {
+            return Poll::Ready(packets);
+        }
+        *self.0.shared.fast_datagrams_unblocked.lock().unwrap() = Some(cx.waker().clone());
+        // A new pacing deadline must reach the driver's runtime timer even if
+        // no packet was produced by this poll.
+        conn.wake();
+        Poll::Pending
+    }
+
+    /// Count UDP datagrams sent outside the connection driver.
+    pub fn record_udp_send(&self, datagrams: u64, bytes: u64, ios: u64) {
+        let conn = &mut *self.0.state.lock("record_udp_send");
+        conn.inner.record_udp_transmit(datagrams, bytes, ios);
+    }
+
+    /// Return UDP payloads from [`Self::seal_application_datagrams`] to the
+    /// connection buffer pool after the kernel has accepted them.
+    pub fn recycle_sealed_buffers(&self, packets: Vec<Bytes>) {
+        let conn = &mut *self.0.state.lock("recycle_sealed_buffers");
+        conn.inner.recycle_sealed_buffers(packets);
     }
 
     /// Transmit `data` as an unreliable, unordered application datagram
@@ -1113,6 +1207,7 @@ pub(crate) struct Shared {
     stream_incoming: [Notify; 2],
     datagram_received: Arc<Notify>,
     datagrams_unblocked: Notify,
+    fast_datagrams_unblocked: std::sync::Mutex<Option<Waker>>,
     closed: Notify,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
     ref_count: AtomicUsize,
@@ -1208,6 +1303,57 @@ impl State {
         Ok(false)
     }
 
+    /// Send queued packets without waiting for the driver or socket writability.
+    ///
+    /// Stops when `poll_transmit` yields nothing, the socket would block, or
+    /// `MAX_EAGER_TRANSMIT_DATAGRAMS` have been sent. The caller must `wake()`
+    /// so timers and leftover datagrams still run on the driver.
+    fn drive_transmit_eager(&mut self) -> io::Result<usize> {
+        let now = self.runtime.now();
+        let mut transmitted = 0usize;
+        let max_datagrams = transmit_segment_capacity(self.socket.max_transmit_segments());
+
+        loop {
+            let t = match self.buffered_transmit.take() {
+                Some(t) => t,
+                None => {
+                    self.send_buffer.clear();
+                    self.send_buffer.reserve(self.inner.current_mtu() as usize);
+                    match self
+                        .inner
+                        .poll_transmit(now, max_datagrams, &mut self.send_buffer)
+                    {
+                        Some(t) => t,
+                        None => break,
+                    }
+                }
+            };
+            let len = t.size;
+            let segments = match t.segment_size {
+                None => 1,
+                Some(s) => t.size.div_ceil(s),
+            };
+            match self
+                .socket
+                .try_send(&udp_transmit(&t, &self.send_buffer[..len]))
+            {
+                Ok(()) => {
+                    transmitted = transmitted.saturating_add(segments);
+                    if transmitted >= MAX_EAGER_TRANSMIT_DATAGRAMS {
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.buffered_transmit = Some(t);
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(transmitted)
+    }
+
     fn forward_endpoint_events(&mut self) {
         while let Some(event) = self.inner.poll_endpoint_events() {
             // If the endpoint driver is gone, noop.
@@ -1292,6 +1438,10 @@ impl State {
                 }
                 DatagramsUnblocked => {
                     shared.datagrams_unblocked.notify_waiters();
+                    let waker = shared.fast_datagrams_unblocked.lock().unwrap().take();
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
                 }
                 Stream(StreamEvent::Readable { id }) => wake_stream(id, &mut self.blocked_readers),
                 Stream(StreamEvent::Available { dir }) => {
@@ -1371,6 +1521,10 @@ impl State {
         shared.stream_incoming[Dir::Bi as usize].notify_waiters();
         shared.datagram_received.notify_waiters();
         shared.datagrams_unblocked.notify_waiters();
+        let waker = shared.fast_datagrams_unblocked.lock().unwrap().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
         if let Some(x) = self.on_connected.take() {
             let _ = x.send(false);
         }
@@ -1462,8 +1616,9 @@ pub enum SendDatagramError {
 
 /// The maximum amount of datagrams which will be produced in a single `drive_transmit` call
 ///
-/// This limits the amount of CPU resources consumed by datagram generation,
-/// and allows other tasks (like receiving ACKs) to run in between.
+/// This limits CPU spent generating datagrams so ACK processing can run in
+/// between. 20 was enough on LAN and too small on a 200 ms path: tokio
+/// cooperative yield after each 20-packet GSO left the UDP socket idle.
 const MAX_TRANSMIT_DATAGRAMS: usize = 256;
 /// Process one endpoint batch before application wakeups.
 ///
@@ -1474,6 +1629,8 @@ const MAX_CONNECTION_EVENT_BATCHES_PER_POLL: usize = 8;
 /// Some software bridges advertise 64 segments but drop that full burst before
 /// the receiving QUIC task can drain it.
 const MAX_TRANSMIT_SEGMENTS: usize = 20;
+/// Cap a TAP-thread send so ACK processing is not starved forever.
+const MAX_EAGER_TRANSMIT_DATAGRAMS: usize = 4096;
 
 /// Use the bounded GSO burst that the platform supports.
 fn transmit_segment_capacity(platform_capacity: usize) -> usize {
@@ -1482,7 +1639,7 @@ fn transmit_segment_capacity(platform_capacity: usize) -> usize {
 
 #[cfg(test)]
 mod transmit_segment_tests {
-    use super::{MAX_TRANSMIT_SEGMENTS, transmit_segment_capacity};
+    use super::{transmit_segment_capacity, MAX_TRANSMIT_SEGMENTS};
 
     #[test]
     fn respects_transmit_segment_limit() {

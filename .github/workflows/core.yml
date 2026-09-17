@@ -93,8 +93,7 @@ jobs:
       - name: Build CLI binaries
         run: >-
           cargo build --locked --release --target "$TARGET"
-          --package lowertier --bins --no-default-features
-          --features lean
+          --package lowertier --bins
 
       - name: Collect binaries
         run: |

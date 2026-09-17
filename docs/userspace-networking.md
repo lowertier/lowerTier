@@ -17,7 +17,7 @@ lowertier-core \
   --outbound-http-proxy-listen=127.0.0.1:1055 \
   --network-name=example \
   --network-secret='replace-this-secret' \
-  --peers=udp://192.0.2.10:11010
+  --peers=quic://192.0.2.10:11012
 ```
 
 Replace the example network values before use.

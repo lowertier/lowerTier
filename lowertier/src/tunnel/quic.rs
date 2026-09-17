@@ -3,6 +3,9 @@
 //! rustls/ring supplies standard TLS 1.3 QUIC packet protection. LowTier's
 //! inner Noise session remains responsible for authenticated peer identity.
 
+pub(crate) use super::stealth_tls::{
+    ConnectIpAdmission, QUIC_ROUTING_CID_BYTES, routing_cid_bytes, valid_routing_cid_bytes,
+};
 use super::{
     BatchStreamItem, DatagramSizeBudget, FromUrl, IpVersion, SinkError, TransportBinding,
     TransportBindingKind, Tunnel, TunnelConnector, TunnelError, TunnelListener,
@@ -22,33 +25,33 @@ use crate::tunnel::{
     common::{BatchTunnelWrapper, FramedReader},
 };
 use anyhow::Context;
-use bytes::Bytes;
-#[cfg(test)]
-use bytes::BytesMut;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
 use futures::{Future, FutureExt, Sink, Stream, StreamExt};
-use parking_lot::RwLock;
+use parking_lot::{Mutex as ParkingMutex, RwLock};
 use quinn::{
-    ClientConfig, ConnectError, Connection, DatagramReceiveDropPolicy, Endpoint, EndpointConfig,
-    Incoming, RecvStream, SendStream, ServerConfig, TransportConfig, VarInt, congestion::BbrConfig,
-    default_runtime,
+    AckFrequencyConfig, AsyncUdpSocket, ClientConfig, ConnectError, Connection, ConnectionId,
+    DatagramReceiveDropPolicy, Endpoint, EndpointConfig, Incoming, RecvStream, SendStream,
+    ServerConfig, TransportConfig, VarInt,
 };
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
     OnceLock, Weak,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use std::{
+    io::IoSliceMut,
     net::SocketAddr,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     task::{Context as TaskContext, Poll},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::AsyncWriteExt as _,
+    io::{AsyncWriteExt as _, Interest},
     net::UdpSocket,
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -56,30 +59,39 @@ use tokio::{
 
 #[cfg(test)]
 use super::common::TcpZCPacketToBytes;
-#[cfg(test)]
 use super::packet_def::ZCPacketType;
 use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
 
-pub(crate) mod adaptive;
-pub(crate) mod brutal;
-mod h3;
-#[cfg(test)]
-pub(crate) mod quic_config;
+#[cfg(target_os = "linux")]
+mod runtime;
+mod sni;
+#[cfg(target_os = "linux")]
+use self::runtime::default_runtime;
+#[cfg(not(target_os = "linux"))]
+use quinn::default_runtime;
 pub(crate) mod tunnel_cc;
-#[cfg(test)]
-pub(crate) mod wire_profile;
 
-use self::adaptive::{AdaptiveConfig, AdaptiveFactory};
+use self::sni::quic_initial_sni_eq;
 use self::tunnel_cc::TunnelConfig;
 
 const QUIC_INITIAL_MTU: u16 = 1452;
-const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize;
-const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 768 * 1024;
-const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u64 = 512 * 1024;
-const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 1024 * 1024;
-const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 512 * 1024;
+const DATAGRAM_CONTEXT_WHOLE: u64 = 0;
+const DATAGRAM_CONTEXT_FRAGMENT: u64 = 1;
+const DATAGRAM_FRAGMENT_HEADER_LEN: usize = 6;
+const DATAGRAM_FRAGMENT_MAX_PENDING: usize = 64;
+// One packet batch (~93 KiB) is smaller than the WAN BDP we bench
+// (100 ms each way at ~130 Mbit ≈ 3.3 MB). send_datagrams_wait blocks
+// when this queue is full, so inner TCP BBR sees a tiny path.
+// DATAGRAM send is drop-oldest (UDP-like). Keep this small so inner TCP
+// BBR sees path delay, not a userspace queue. Receive stays large so a
+// brief drain stall does not drop a WAN BDP.
+const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = 1024 * 1024;
+const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
+const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
+const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 const QUIC_PENDING_ACCEPT_BUFFER_BYTES: u64 = 256 * 1024;
-const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 2048 * 1024;
+const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 4 * 1024 * 1024;
 const QUIC_RELIABLE_INITIAL_BUFFER_SIZE: usize = 4500;
 /// Bound reliable frame allocation even though the wire length field is 32-bit.
 const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 64 * 1024;
@@ -92,13 +104,15 @@ struct QuicSourcePermit {
 }
 
 static QUIC_SOURCES: OnceLock<std::sync::Mutex<HashMap<IpAddr, usize>>> = OnceLock::new();
+const MAX_PENDING_QUIC_ACCEPTS_PER_IP_PROCESS_WIDE: usize = 32;
 
 fn try_acquire_quic_source(ip: IpAddr) -> Option<QuicSourcePermit> {
     let mut sources = QUIC_SOURCES
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
         .lock()
         .unwrap();
-    if sources.get(&ip).copied().unwrap_or_default() >= 1 {
+    if sources.get(&ip).copied().unwrap_or_default() >= MAX_PENDING_QUIC_ACCEPTS_PER_IP_PROCESS_WIDE
+    {
         return None;
     }
     *sources.entry(ip).or_default() += 1;
@@ -189,6 +203,83 @@ fn force_linux_quic_socket_buffer(
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+fn send_socket_from_endpoint(
+    endpoint_manager: Option<&Arc<QuicEndpointManager>>,
+    endpoint: Option<&Endpoint>,
+) -> Option<Arc<UdpSocket>> {
+    let local_addr = endpoint?.local_addr().ok()?;
+    endpoint_manager?.send_socket_for(local_addr)
+}
+
+fn poll_send_sealed_packets(
+    socket: &UdpSocket,
+    send: &mut PendingSealedSend,
+    cx: &mut TaskContext<'_>,
+) -> Poll<std::io::Result<()>> {
+    while send.completed < send.packets.len() {
+        std::task::ready!(socket.poll_send_ready(cx))?;
+        match socket.try_io(Interest::WRITABLE, || {
+            #[cfg(target_os = "macos")]
+            if socket.peer_addr().is_ok() {
+                return super::udp_vector_io::try_send_batch_connected(
+                    socket,
+                    &send.packets[send.completed..],
+                    true,
+                );
+            }
+            super::udp_vector_io::try_send_batch(
+                socket,
+                send.destination,
+                &send.packets[send.completed..],
+                true,
+            )
+        }) {
+            Ok(0) => {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "vector UDP send completed zero datagrams",
+                )));
+            }
+            Ok(sent) => {
+                send.completed += sent;
+                send.ios += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) if super::udp_vector_io::udp_send_buffer_busy(&error) => {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Err(error) => return Poll::Ready(Err(error)),
+        }
+    }
+    Poll::Ready(Ok(()))
+}
+
+fn clone_udp_send_socket(
+    socket: UdpSocket,
+    destination: Option<SocketAddr>,
+) -> Result<(std::net::UdpSocket, Arc<UdpSocket>), TunnelError> {
+    let std_socket = socket.into_std()?;
+    std_socket.set_nonblocking(true)?;
+    if let Some(destination) = destination {
+        let destination = match (std_socket.local_addr()?, destination) {
+            (SocketAddr::V6(_), SocketAddr::V4(destination)) => {
+                SocketAddr::V6(std::net::SocketAddrV6::new(
+                    destination.ip().to_ipv6_mapped(),
+                    destination.port(),
+                    0,
+                    0,
+                ))
+            }
+            (_, destination) => destination,
+        };
+        std_socket.connect(destination)?;
+    }
+    let send_std = std_socket.try_clone()?;
+    send_std.set_nonblocking(true)?;
+    Ok((std_socket, Arc::new(UdpSocket::from_std(send_std)?)))
 }
 
 fn configure_quic_socket_buffers(socket: &UdpSocket) {
@@ -322,376 +413,453 @@ async fn activate_reliable_lane(
     Ok(())
 }
 
-async fn accept_activated_reliable_lane(
-    connection: &Connection,
-) -> Result<(SendStream, RecvStream), TunnelError> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let (mut send, mut recv) = connection
-            .accept_bi()
-            .await
-            .with_context(|| "accept reliable QUIC lane")?;
-        activate_reliable_lane(&mut send, &mut recv, false).await?;
-        Ok::<_, TunnelError>((send, recv))
-    })
-    .await
-    .context("accept reliable QUIC lane timed out")?
+type H3ClientStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+type H3ServerStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+#[async_trait::async_trait]
+trait ConnectIpRequestStream: Send {
+    async fn send_data(&mut self, data: Bytes) -> Result<(), TunnelError>;
+    async fn recv_data(&mut self) -> Result<Option<Bytes>, TunnelError>;
+    async fn finish(&mut self) -> Result<(), TunnelError>;
 }
 
-async fn open_activated_reliable_lane(
-    connection: &Connection,
-) -> Result<(SendStream, RecvStream), TunnelError> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let (mut send, mut recv) = connection
-            .open_bi()
+#[async_trait::async_trait]
+impl ConnectIpRequestStream for H3ClientStream {
+    async fn send_data(&mut self, data: Bytes) -> Result<(), TunnelError> {
+        H3ClientStream::send_data(self, data)
             .await
-            .with_context(|| "open reliable QUIC lane")?;
-        activate_reliable_lane(&mut send, &mut recv, true).await?;
-        Ok::<_, TunnelError>((send, recv))
-    })
-    .await
-    .context("open reliable QUIC lane timed out")?
+            .map_err(|error| TunnelError::InternalError(format!("send HTTP/3 DATA: {error}")))
+    }
+
+    async fn recv_data(&mut self) -> Result<Option<Bytes>, TunnelError> {
+        H3ClientStream::recv_data(self)
+            .await
+            .map(|data| data.map(|mut data| data.copy_to_bytes(data.remaining())))
+            .map_err(|error| TunnelError::InternalError(format!("receive HTTP/3 DATA: {error}")))
+    }
+
+    async fn finish(&mut self) -> Result<(), TunnelError> {
+        H3ClientStream::finish(self)
+            .await
+            .map_err(|error| TunnelError::InternalError(format!("finish HTTP/3 request: {error}")))
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectIpRequestStream for H3ServerStream {
+    async fn send_data(&mut self, data: Bytes) -> Result<(), TunnelError> {
+        H3ServerStream::send_data(self, data)
+            .await
+            .map_err(|error| TunnelError::InternalError(format!("send HTTP/3 DATA: {error}")))
+    }
+
+    async fn recv_data(&mut self) -> Result<Option<Bytes>, TunnelError> {
+        H3ServerStream::recv_data(self)
+            .await
+            .map(|data| data.map(|mut data| data.copy_to_bytes(data.remaining())))
+            .map_err(|error| TunnelError::InternalError(format!("receive HTTP/3 DATA: {error}")))
+    }
+
+    async fn finish(&mut self) -> Result<(), TunnelError> {
+        H3ServerStream::finish(self)
+            .await
+            .map_err(|error| TunnelError::InternalError(format!("finish HTTP/3 response: {error}")))
+    }
+}
+
+fn connect_ip_stream_id(id: h3::quic::StreamId) -> u64 {
+    id.index() * 4
+}
+
+async fn open_connect_ip_request(
+    connection: &Connection,
+    authority: &str,
+    bearer: Option<&str>,
+) -> Result<(Box<dyn ConnectIpRequestStream>, u64), TunnelError> {
+    let mut builder = h3::client::builder();
+    builder.enable_extended_connect(true).enable_datagram(true);
+    let (mut driver, mut requests) = builder
+        .build::<h3_quinn::Connection, h3_quinn::OpenStreams, Bytes>(h3_quinn::Connection::new(
+            connection.clone(),
+        ))
+        .await
+        .map_err(|error| TunnelError::InternalError(format!("start HTTP/3 client: {error}")))?;
+    tokio::spawn(async move {
+        let _ = driver.wait_idle().await;
+    });
+
+    let uri = format!("https://{authority}{CONNECT_IP_PATH}")
+        .parse::<http::Uri>()
+        .context("build CONNECT-IP URI")?;
+    let mut request = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri(uri)
+        .header("capsule-protocol", "?1");
+    if let Some(bearer) = bearer {
+        request = request.header("proxy-authorization", format!("Bearer {bearer}"));
+    }
+    let request = request
+        .extension(h3::ext::Protocol::CONNECT_IP)
+        .body(())
+        .context("build CONNECT-IP request")?;
+    let mut stream = requests
+        .send_request(request)
+        .await
+        .map_err(|error| TunnelError::InternalError(format!("send CONNECT-IP request: {error}")))?;
+    let response = stream.recv_response().await.map_err(|error| {
+        TunnelError::InternalError(format!("receive CONNECT-IP response: {error}"))
+    })?;
+    let capsule_enabled = response
+        .headers()
+        .get("capsule-protocol")
+        .and_then(|value| value.to_str().ok())
+        == Some("?1");
+    if !response.status().is_success() || !capsule_enabled {
+        return Err(TunnelError::InternalError(format!(
+            "CONNECT-IP returned an invalid response with HTTP status {}",
+            response.status(),
+        )));
+    }
+    let stream_id = connect_ip_stream_id(stream.id());
+    let guard_connection = connection.clone();
+    tokio::spawn(async move {
+        let _requests = requests;
+        let _ = guard_connection.closed().await;
+    });
+    Ok((Box::new(stream), stream_id))
+}
+
+const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/%2A/%2A/";
+// 8 bytes matches browser QUIC Initials (RFC 9000 §7.2 minimum, Chrome's size).
+// 20-byte DCIDs fingerprint as quinn/rust, not a browser talking to Cloudflare.
+const MAX_HTTP3_ORIGIN_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const DEFAULT_ORIGIN_BODY: &[u8] = b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Welcome</title></head><body><main><h1>Welcome</h1></main></body></html>";
+const NOT_FOUND_BODY: &[u8] = b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Not Found</title></head><body><h1>Not Found</h1></body></html>";
+
+fn quic_routing_cid(secret: &[u8], now: SystemTime) -> ConnectionId {
+    ConnectionId::new(&routing_cid_bytes(secret, now))
+}
+
+fn quic_initial_dcid(packet: &[u8]) -> Option<&[u8]> {
+    if packet.len() < 6 || packet[0] & 0xf0 != 0xc0 || packet[1..5] != 1_u32.to_be_bytes() {
+        return None;
+    }
+    let length = packet[5] as usize;
+    (length <= 20 && packet.len() >= 6 + length).then_some(&packet[6..6 + length])
+}
+
+fn valid_quic_routing_marker(
+    packet: &[u8],
+    secret: &[u8],
+    now: SystemTime,
+) -> Option<[u8; QUIC_ROUTING_CID_BYTES]> {
+    let Some(cid) = quic_initial_dcid(packet).filter(|cid| cid.len() == QUIC_ROUTING_CID_BYTES)
+    else {
+        return None;
+    };
+    valid_routing_cid_bytes(cid, secret, now)
+        .then(|| cid.try_into().expect("routing CID length was checked"))
+}
+
+fn has_valid_quic_routing_marker(packet: &[u8], secret: &[u8], now: SystemTime) -> bool {
+    valid_quic_routing_marker(packet, secret, now).is_some()
+}
+
+struct OriginResponse {
+    status: http::StatusCode,
+    content_type: &'static str,
+    body: Bytes,
+    cache_control: &'static str,
+}
+
+fn origin_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("gif") => "image/gif",
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("ico") => "image/x-icon",
+        Some("jpeg" | "jpg") => "image/jpeg",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("svg") => "image/svg+xml",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("webp") => "image/webp",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn origin_file(root: &Path, uri_path: &str) -> Option<(Bytes, &'static str)> {
+    if !uri_path.starts_with('/')
+        || uri_path.contains('%')
+        || uri_path.contains('\\')
+        || uri_path.split('/').any(|segment| segment == "..")
+    {
+        return None;
+    }
+    let relative = if uri_path == "/" {
+        Path::new("index.html")
+    } else {
+        Path::new(uri_path.trim_start_matches('/'))
+    };
+    let canonical_root = tokio::fs::canonicalize(root).await.ok()?;
+    let mut candidate = tokio::fs::canonicalize(canonical_root.join(relative))
+        .await
+        .ok()?;
+    if !candidate.starts_with(&canonical_root) {
+        return None;
+    }
+    let mut metadata = tokio::fs::metadata(&candidate).await.ok()?;
+    if metadata.is_dir() {
+        candidate = tokio::fs::canonicalize(candidate.join("index.html"))
+            .await
+            .ok()?;
+        if !candidate.starts_with(&canonical_root) {
+            return None;
+        }
+        metadata = tokio::fs::metadata(&candidate).await.ok()?;
+    }
+    if !metadata.is_file() || metadata.len() > MAX_HTTP3_ORIGIN_FILE_BYTES {
+        return None;
+    }
+    let content_type = origin_content_type(&candidate);
+    let body = tokio::fs::read(candidate).await.ok()?;
+    Some((Bytes::from(body), content_type))
+}
+
+async fn normal_origin_response(
+    request: &http::Request<()>,
+    root: Option<&Path>,
+) -> OriginResponse {
+    let method_allows_body = matches!(*request.method(), http::Method::GET | http::Method::HEAD);
+    if method_allows_body
+        && let Some(root) = root
+        && let Some((body, content_type)) = origin_file(root, request.uri().path()).await
+    {
+        return OriginResponse {
+            status: http::StatusCode::OK,
+            content_type,
+            body,
+            cache_control: "public, max-age=300",
+        };
+    }
+    if method_allows_body && request.uri().path() == "/" {
+        return OriginResponse {
+            status: http::StatusCode::OK,
+            content_type: "text/html; charset=utf-8",
+            body: Bytes::from_static(DEFAULT_ORIGIN_BODY),
+            cache_control: "public, max-age=60",
+        };
+    }
+    OriginResponse {
+        status: http::StatusCode::NOT_FOUND,
+        content_type: "text/html; charset=utf-8",
+        body: Bytes::from_static(NOT_FOUND_BODY),
+        cache_control: "no-cache",
+    }
+}
+
+async fn send_normal_http3_response(
+    request: http::Request<()>,
+    mut stream: H3ServerStream,
+    root: Option<PathBuf>,
+) -> Result<(), TunnelError> {
+    let response_body = normal_origin_response(&request, root.as_deref()).await;
+    let send_body = request.method() != http::Method::HEAD;
+    let response = http::Response::builder()
+        .status(response_body.status)
+        .header("content-type", response_body.content_type)
+        .header("content-length", response_body.body.len().to_string())
+        .header("cache-control", response_body.cache_control)
+        .header("x-content-type-options", "nosniff")
+        .body(())
+        .context("build HTTP/3 response")?;
+    stream
+        .send_response(response)
+        .await
+        .map_err(|error| TunnelError::InternalError(format!("send HTTP/3 response: {error}")))?;
+    if send_body && !response_body.body.is_empty() {
+        stream
+            .send_data(response_body.body)
+            .await
+            .map_err(|error| TunnelError::InternalError(format!("send HTTP/3 body: {error}")))?;
+    }
+    stream
+        .finish()
+        .await
+        .map_err(|error| TunnelError::InternalError(format!("finish HTTP/3 response: {error}")))
+}
+
+async fn serve_additional_http3_requests(
+    mut connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
+    fallback_root: Option<PathBuf>,
+) {
+    loop {
+        let resolver = match connection.accept().await {
+            Ok(Some(resolver)) => resolver,
+            Ok(None) | Err(_) => return,
+        };
+        match resolver.resolve_request().await {
+            Ok((request, stream)) => {
+                let fallback_root = fallback_root.clone();
+                tokio::spawn(async move {
+                    let _ = send_normal_http3_response(request, stream, fallback_root).await;
+                });
+            }
+            Err(error) => tracing::debug!(?error, "reject malformed HTTP/3 request"),
+        }
+    }
+}
+
+async fn accept_connect_ip_request(
+    connection: &Connection,
+    admission: Option<&ConnectIpAdmission>,
+    fallback_root: Option<PathBuf>,
+) -> Result<(Box<dyn ConnectIpRequestStream>, u64), TunnelError> {
+    let mut builder = h3::server::builder();
+    builder.enable_extended_connect(true).enable_datagram(true);
+    let mut h3 = builder
+        .build::<h3_quinn::Connection, Bytes>(h3_quinn::Connection::new(connection.clone()))
+        .await
+        .map_err(|error| TunnelError::InternalError(format!("start HTTP/3 server: {error}")))?;
+
+    loop {
+        let resolver = h3
+            .accept()
+            .await
+            .map_err(|error| TunnelError::InternalError(format!("accept HTTP/3 request: {error}")))?
+            .ok_or_else(|| TunnelError::InternalError("HTTP/3 connection closed".to_owned()))?;
+        let (request, mut stream) = resolver.resolve_request().await.map_err(|error| {
+            TunnelError::InternalError(format!("resolve HTTP/3 request: {error}"))
+        })?;
+        let is_connect_ip = request.method() == http::Method::CONNECT
+            && request
+                .extensions()
+                .get::<h3::ext::Protocol>()
+                .is_some_and(|protocol| protocol.as_str() == "connect-ip")
+            && request.uri().path() == CONNECT_IP_PATH;
+        let authorized = match admission {
+            Some(admission) => request
+                .headers()
+                .get("proxy-authorization")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| admission.verify_header(value)),
+            None => false,
+        };
+        if !is_connect_ip || !authorized {
+            let fallback_root = fallback_root.clone();
+            tokio::spawn(async move {
+                let _ = send_normal_http3_response(request, stream, fallback_root).await;
+            });
+            continue;
+        }
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header("capsule-protocol", "?1")
+            .body(())
+            .context("build CONNECT-IP response")?;
+        stream.send_response(response).await.map_err(|error| {
+            TunnelError::InternalError(format!("send CONNECT-IP response: {error}"))
+        })?;
+        let stream_id = connect_ip_stream_id(stream.id());
+        tokio::spawn(serve_additional_http3_requests(h3, fallback_root));
+        return Ok((
+            Box::new(stream) as Box<dyn ConnectIpRequestStream>,
+            stream_id,
+        ));
+    }
+}
+
+fn connect_ip_bearer(global_ctx: &ArcGlobalCtx) -> Option<String> {
+    ConnectIpAdmission::from_global_ctx(global_ctx).map(|admission| admission.current_token())
 }
 
 // region config
 mod tls {
-    use std::sync::Arc;
+    use std::{path::PathBuf, sync::Arc};
 
     use anyhow::Context as _;
-    use hmac::{Hmac, Mac};
     use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
     use rustls::{
-        CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
-        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
-        server::danger::{ClientCertVerified, ClientCertVerifier},
-    };
-    use sha2::Sha256;
-
-    use crate::{
-        common::config::{Flags, NetworkIdentity},
-        tunnel::TunnelError,
+        RootCertStore,
+        pki_types::{CertificateDer, PrivateKeyDer},
     };
 
-    const NETWORK_IDENTITY_LABEL: &[u8] = b"lowertier QUIC network identity v1";
-    const ED25519_PKCS8_PREFIX: [u8; 16] = [
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
-        0x20,
-    ];
+    use crate::{common::config::Flags, tunnel::TunnelError};
 
-    pub(super) struct NetworkTlsIdentity {
-        pub(super) certificate: CertificateDer<'static>,
-        pub(super) private_key: PrivateKeyDer<'static>,
+    const HTTP3_ALPN: &[u8] = b"h3";
+
+    fn server_identity_paths(flags: &Flags) -> Option<(PathBuf, PathBuf)> {
+        crate::tunnel::stealth_tls::server_identity_paths(flags)
     }
 
-    pub(super) fn network_identity(
-        identity: &NetworkIdentity,
-    ) -> Result<Option<NetworkTlsIdentity>, TunnelError> {
-        let Some(secret) = identity.network_secret.as_deref() else {
-            return Ok(None);
-        };
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-            .context("initialize QUIC network identity derivation")?;
-        mac.update(NETWORK_IDENTITY_LABEL);
-        mac.update(identity.network_name.as_bytes());
-        let seed = mac.finalize().into_bytes();
-
-        let mut key_der = Vec::with_capacity(ED25519_PKCS8_PREFIX.len() + seed.len());
-        key_der.extend_from_slice(&ED25519_PKCS8_PREFIX);
-        key_der.extend_from_slice(seed.as_slice());
-        let key_pair = rcgen::KeyPair::from_der_and_sign_algo(&key_der, &rcgen::PKCS_ED25519)
-            .context("create QUIC network identity key")?;
-        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]);
-        params.alg = &rcgen::PKCS_ED25519;
-        params.key_pair = Some(key_pair);
-        let certificate = rcgen::Certificate::from_params(params)
-            .context("create QUIC network identity certificate")?;
-        let certificate_der = CertificateDer::from(
-            certificate
-                .serialize_der()
-                .context("serialize QUIC network identity certificate")?,
-        );
-        let private_key = PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der()).into();
-        Ok(Some(NetworkTlsIdentity {
-            certificate: certificate_der,
-            private_key,
-        }))
+    fn server_identity(
+        flags: &Flags,
+    ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TunnelError> {
+        crate::tunnel::stealth_tls::server_identity(flags)
     }
 
-    /// QUIC supplies standard TLS 1.3 AEAD, header protection, and key updates.
-    /// LowTier's authenticated Noise session remains the peer identity layer,
-    /// so the ephemeral self-signed transport certificate is intentionally not
-    /// treated as an identity credential.
-    #[derive(Debug)]
-    struct NoiseAuthenticatedPeerVerifier(Arc<rustls::crypto::CryptoProvider>);
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::common::config::gen_default_flags;
 
-    impl NoiseAuthenticatedPeerVerifier {
-        fn new() -> Arc<Self> {
-            Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
-        }
-    }
+        #[test]
+        fn certificate_paths_follow_server_name_without_manual_paths() {
+            let mut flags = gen_default_flags();
+            flags.quic_server_name = "challenges.cloudflare.com".to_owned();
 
-    #[derive(Debug)]
-    struct NetworkCertificateVerifier {
-        certificate: CertificateDer<'static>,
-        provider: Arc<rustls::crypto::CryptoProvider>,
-        root_hints: Vec<DistinguishedName>,
-    }
+            let paths = server_identity_paths(&flags).unwrap();
 
-    impl NetworkCertificateVerifier {
-        fn new(certificate: CertificateDer<'static>) -> Arc<Self> {
-            Arc::new(Self {
-                certificate,
-                provider: Arc::new(rustls::crypto::ring::default_provider()),
-                root_hints: Vec::new(),
-            })
+            assert_eq!(
+                paths.0,
+                PathBuf::from("/etc/letsencrypt/live/challenges.cloudflare.com/fullchain.pem")
+            );
+            assert_eq!(
+                paths.1,
+                PathBuf::from("/etc/letsencrypt/live/challenges.cloudflare.com/privkey.pem")
+            );
         }
 
-        fn verify_certificate(
-            &self,
-            end_entity: &CertificateDer<'_>,
-            intermediates: &[CertificateDer<'_>],
-        ) -> Result<(), rustls::Error> {
-            if intermediates.is_empty() && end_entity.as_ref() == self.certificate.as_ref() {
-                Ok(())
-            } else {
-                Err(rustls::Error::InvalidCertificate(
-                    CertificateError::ApplicationVerificationFailure,
+        #[test]
+        fn explicit_certificate_paths_take_priority() {
+            let mut flags = gen_default_flags();
+            flags.quic_server_name = "challenges.cloudflare.com".to_owned();
+            flags.quic_tls_cert = "/run/cert.pem".to_owned();
+            flags.quic_tls_key = "/run/key.pem".to_owned();
+
+            assert_eq!(
+                server_identity_paths(&flags),
+                Some((
+                    PathBuf::from("/run/cert.pem"),
+                    PathBuf::from("/run/key.pem")
                 ))
-            }
-        }
-
-        fn verify_tls12(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls12_signature(
-                message,
-                cert,
-                signature,
-                &self.provider.signature_verification_algorithms,
-            )
-        }
-
-        fn verify_tls13(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls13_signature(
-                message,
-                cert,
-                signature,
-                &self.provider.signature_verification_algorithms,
-            )
-        }
-
-        fn schemes(&self) -> Vec<SignatureScheme> {
-            self.provider
-                .signature_verification_algorithms
-                .supported_schemes()
+            );
         }
     }
 
-    impl ServerCertVerifier for NetworkCertificateVerifier {
-        fn verify_server_cert(
-            &self,
-            end_entity: &CertificateDer<'_>,
-            intermediates: &[CertificateDer<'_>],
-            _server_name: &ServerName<'_>,
-            _ocsp: &[u8],
-            _now: UnixTime,
-        ) -> Result<ServerCertVerified, rustls::Error> {
-            self.verify_certificate(end_entity, intermediates)?;
-            Ok(ServerCertVerified::assertion())
-        }
+    pub(super) fn server_crypto(flags: &Flags) -> Result<QuicServerConfig, TunnelError> {
+        let (certs, key) = server_identity(flags)?;
 
-        fn verify_tls12_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            self.verify_tls12(message, cert, signature)
-        }
-
-        fn verify_tls13_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            self.verify_tls13(message, cert, signature)
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.schemes()
-        }
-    }
-
-    impl ClientCertVerifier for NetworkCertificateVerifier {
-        fn client_auth_mandatory(&self) -> bool {
-            false
-        }
-
-        fn root_hint_subjects(&self) -> &[DistinguishedName] {
-            &self.root_hints
-        }
-
-        fn verify_client_cert(
-            &self,
-            end_entity: &CertificateDer<'_>,
-            intermediates: &[CertificateDer<'_>],
-            _now: UnixTime,
-        ) -> Result<ClientCertVerified, rustls::Error> {
-            self.verify_certificate(end_entity, intermediates)?;
-            Ok(ClientCertVerified::assertion())
-        }
-
-        fn verify_tls12_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            self.verify_tls12(message, cert, signature)
-        }
-
-        fn verify_tls13_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            self.verify_tls13(message, cert, signature)
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.schemes()
-        }
-    }
-
-    impl ServerCertVerifier for NoiseAuthenticatedPeerVerifier {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &CertificateDer<'_>,
-            _intermediates: &[CertificateDer<'_>],
-            _server_name: &ServerName<'_>,
-            _ocsp: &[u8],
-            _now: UnixTime,
-        ) -> Result<ServerCertVerified, rustls::Error> {
-            Ok(ServerCertVerified::assertion())
-        }
-
-        fn verify_tls12_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls12_signature(
-                message,
-                cert,
-                signature,
-                &self.0.signature_verification_algorithms,
-            )
-        }
-
-        fn verify_tls13_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            signature: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls13_signature(
-                message,
-                cert,
-                signature,
-                &self.0.signature_verification_algorithms,
-            )
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.0.signature_verification_algorithms.supported_schemes()
-        }
-    }
-
-    pub(super) fn server_crypto() -> Result<QuicServerConfig, TunnelError> {
-        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
-            .context("generate ephemeral QUIC certificate")?;
-        let cert_der = CertificateDer::from(
-            certificate
-                .serialize_der()
-                .context("serialize ephemeral QUIC certificate")?,
-        );
-        let key_der = PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
-
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ServerConfig::builder_with_provider(provider)
+        let provider = crate::tunnel::stealth_tls::stealth_crypto_provider();
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .context("configure QUIC TLS 1.3 server")?
             .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der.into())
+            .with_single_cert(certs, key)
             .context("configure ephemeral QUIC server identity")?;
+        config.alpn_protocols = vec![HTTP3_ALPN.to_vec()];
         QuicServerConfig::try_from(config)
             .context("convert rustls server config to Quinn")
             .map_err(Into::into)
     }
 
-    pub(super) fn network_server_crypto(
-        identity: &NetworkIdentity,
-    ) -> Result<QuicServerConfig, TunnelError> {
-        let Some(identity) = network_identity(identity)? else {
-            return server_crypto();
-        };
-        let verifier = NetworkCertificateVerifier::new(identity.certificate.clone());
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .context("configure network-authenticated QUIC TLS 1.3 server")?
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(vec![identity.certificate], identity.private_key)
-            .context("configure QUIC network server identity")?;
-        QuicServerConfig::try_from(config)
-            .context("convert network rustls server config to Quinn")
-            .map_err(Into::into)
-    }
-
-    pub(super) fn client_crypto() -> Result<QuicClientConfig, TunnelError> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .context("configure QUIC TLS 1.3 client")?
-            .dangerous()
-            .with_custom_certificate_verifier(NoiseAuthenticatedPeerVerifier::new())
-            .with_no_client_auth();
-        QuicClientConfig::try_from(config)
-            .context("convert rustls client config to Quinn")
-            .map_err(Into::into)
-    }
-
-    pub(super) fn browser_server_crypto(flags: &Flags) -> Result<QuicServerConfig, TunnelError> {
-        let (certs, key) = crate::tunnel::stealth_tls::server_identity(flags)?;
-        let provider = Arc::new(crate::tunnel::stealth_tls::browser_like_provider());
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .context("configure HTTP/3 TLS 1.3 server")?
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .context("configure HTTP/3 server identity")?;
-        config.alpn_protocols = vec![b"h3".to_vec()];
-        QuicServerConfig::try_from(config)
-            .context("convert HTTP/3 server config to Quinn")
-            .map_err(Into::into)
-    }
-
-    pub(super) fn browser_client_crypto(flags: &Flags) -> Result<QuicClientConfig, TunnelError> {
-        let provider = Arc::new(crate::tunnel::stealth_tls::browser_like_provider());
+    pub(super) fn client_crypto(flags: &Flags) -> Result<QuicClientConfig, TunnelError> {
+        let provider = crate::tunnel::stealth_tls::stealth_crypto_provider();
         let builder = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .context("configure HTTP/3 TLS 1.3 client")?;
+            .context("configure QUIC TLS 1.3 client")?;
         let mut config = if crate::tunnel::stealth_tls::skip_server_verification(flags) {
             builder
                 .dangerous()
@@ -703,7 +871,7 @@ mod tls {
             let native = rustls_native_certs::load_native_certs();
             if native.certs.is_empty() {
                 return Err(TunnelError::InternalError(format!(
-                    "load native HTTP/3 TLS roots: {:?}",
+                    "load native QUIC TLS roots: {:?}",
                     native.errors
                 )));
             }
@@ -711,34 +879,14 @@ mod tls {
             let (added, ignored) = roots.add_parsable_certificates(native.certs);
             if added == 0 {
                 return Err(TunnelError::InternalError(format!(
-                    "no valid native HTTP/3 TLS roots; ignored {ignored} certificates"
+                    "no valid native QUIC TLS roots; ignored {ignored} certificates"
                 )));
             }
             builder.with_root_certificates(roots).with_no_client_auth()
         };
-        config.alpn_protocols = vec![b"h3".to_vec()];
+        config.alpn_protocols = vec![HTTP3_ALPN.to_vec()];
         QuicClientConfig::try_from(config)
-            .context("convert HTTP/3 client config to Quinn")
-            .map_err(Into::into)
-    }
-
-    pub(super) fn network_client_crypto(
-        identity: &NetworkIdentity,
-    ) -> Result<QuicClientConfig, TunnelError> {
-        let Some(identity) = network_identity(identity)? else {
-            return client_crypto();
-        };
-        let verifier = NetworkCertificateVerifier::new(identity.certificate.clone());
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .context("configure network-authenticated QUIC TLS 1.3 client")?
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_client_auth_cert(vec![identity.certificate], identity.private_key)
-            .context("configure QUIC network client identity")?;
-        QuicClientConfig::try_from(config)
-            .context("convert network rustls client config to Quinn")
+            .context("convert rustls client config to Quinn")
             .map_err(Into::into)
     }
 }
@@ -764,78 +912,54 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .max_concurrent_uni_streams(3_u8.into())
         .keep_alive_interval(None)
         .initial_mtu(QUIC_INITIAL_MTU)
-        .min_mtu(1200)
+        // Black-hole detection on random loss resets current_mtu to min_mtu.
+        // 1200 is below a 1360-byte TAP frame, so that reset splits every
+        // frame and doubles inner loss. Keep min_mtu at the Ethernet UDP
+        // payload we actually send. TooLarge still splits instead of STREAM.
+        .min_mtu(QUIC_INITIAL_MTU)
         .enable_segmentation_offload(true)
+        // A 160 Mbit * 200 ms pipe holds ~2800 packets. Quinn FACK with
+        // threshold 3 or 64 marks almost that whole window lost when one
+        // delayed ACK names a high packet number. DATAGRAMs are not
+        // retransmitted, so that is extra TAP loss. Only declare loss
+        // after a full BDP of later packets, or 3 RTTs.
+        .packet_threshold(4096)
+        .time_threshold(3.0)
+        .ack_frequency_config(Some({
+            let mut ack_frequency = AckFrequencyConfig::default();
+            ack_frequency.ack_eliciting_threshold(VarInt::from_u32(8));
+            // The initial ten-packet window must elicit an ACK without a timer.
+            ack_frequency.max_ack_delay(Some(Duration::from_millis(1)));
+            ack_frequency.reordering_threshold(VarInt::from_u32(4096));
+            ack_frequency
+        }))
         .datagram_receive_buffer_size(Some(QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES))
         .datagram_receive_drop_policy(DatagramReceiveDropPolicy::Newest)
         .datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_BYTES)
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
-        .receive_window(receive_window);
-
-    match flags.quic_congestion.as_str() {
-        "adaptive" => {
-            const MIB: u64 = 1024 * 1024;
-            let adaptive = AdaptiveFactory::new(AdaptiveConfig {
-                min_rate_bps: 128_000,
-                initial_rate_bps: 1_000_000,
-                max_rate_bps: 1_000_000_000,
-                target_wire_bps: Some(750_000_000),
-                max_cwnd_bytes: 128 * MIB,
-                probe_seed: 0x4554_5155_4943_0001,
-            })
-            .map_err(|error| TunnelError::InternalError(error.to_string()))?;
-            config.congestion_controller_factory(Arc::new(adaptive));
-        }
-        "bbr" => {
-            config.congestion_controller_factory(Arc::new(BbrConfig::default()));
-        }
-        "tunnel" => {
-            config.congestion_controller_factory(Arc::new(TunnelConfig));
-        }
-        "brutal" => {
-            let brutal = brutal::BrutalConfig::new(
-                flags.quic_brutal_send_bps,
-                flags.quic_brutal_loss_compensation,
-            )
-            .map_err(|error| TunnelError::InternalError(error.into()))?;
-            config.congestion_controller_factory(Arc::new(brutal));
-        }
-        controller => {
-            return Err(TunnelError::InternalError(format!(
-                "unsupported QUIC congestion controller {controller:?}"
-            )));
-        }
-    }
+        .receive_window(receive_window)
+        .congestion_controller_factory(Arc::new(TunnelConfig));
 
     Ok(Arc::new(config))
 }
 
 pub fn server_config(flags: &Flags) -> Result<ServerConfig, TunnelError> {
-    let mut config = ServerConfig::with_crypto(Arc::new(tls::browser_server_crypto(flags)?));
+    let mut config = ServerConfig::with_crypto(Arc::new(tls::server_crypto(flags)?));
     config.transport_config(transport_config(flags)?);
     configure_server_admission(&mut config);
     Ok(config)
 }
 
 pub fn client_config(flags: &Flags) -> Result<ClientConfig, TunnelError> {
-    use quinn_proto::{ConnectionIdGenerator as _, RandomConnectionIdGenerator};
-
-    let mut config = ClientConfig::new(Arc::new(tls::browser_client_crypto(flags)?));
+    let mut config = ClientConfig::new(Arc::new(tls::client_crypto(flags)?));
     config.transport_config(transport_config(flags)?);
-    config.initial_dst_cid_provider(Arc::new(|| {
-        RandomConnectionIdGenerator::new(8).generate_cid()
-    }));
-    Ok(config)
-}
-
-fn server_config_for_network(
-    flags: &Flags,
-    identity: &crate::common::config::NetworkIdentity,
-) -> Result<ServerConfig, TunnelError> {
-    let mut config = ServerConfig::with_crypto(Arc::new(tls::network_server_crypto(identity)?));
-    config.transport_config(transport_config(flags)?);
-    configure_server_admission(&mut config);
+    if !flags.quic_decoy_upstream.is_empty() {
+        let secret: Arc<[u8]> = Arc::from(flags.quic_admission_secret.clone().into_bytes());
+        config.initial_dst_cid_provider(Arc::new(move || {
+            quic_routing_cid(&secret, SystemTime::now())
+        }));
+    }
     Ok(config)
 }
 
@@ -845,38 +969,10 @@ fn configure_server_admission(config: &mut ServerConfig) {
     config.migration(false);
 }
 
-fn client_config_for_network(
-    flags: &Flags,
-    identity: &crate::common::config::NetworkIdentity,
-) -> Result<ClientConfig, TunnelError> {
-    let mut config = ClientConfig::new(Arc::new(tls::network_client_crypto(identity)?));
-    config.transport_config(transport_config(flags)?);
-    Ok(config)
-}
-
-fn connection_has_network_identity(
-    connection: &Connection,
-    identity: &crate::common::config::NetworkIdentity,
-) -> bool {
-    let Ok(Some(expected)) = tls::network_identity(identity) else {
-        return false;
-    };
-    let Some(peer_identity) = connection.peer_identity() else {
-        return false;
-    };
-    let Ok(certificates) =
-        peer_identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-    else {
-        return false;
-    };
-    certificates.len() == 1 && certificates[0].as_ref() == expected.certificate.as_ref()
-}
-
 pub fn endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::default();
-    // QUIC starts at the conservative 1200-byte MTU configured above and may
-    // probe upward. This ceiling lets local/Ethernet paths carry a normal VPN
-    // frame in one DATAGRAM after PMTU discovery.
+    // Allow IPv4 Ethernet UDP payloads. Oversized TAP frames split across
+    // DATAGRAMs instead of using STREAM.
     config.max_udp_payload_size(1500).unwrap();
     config
 }
@@ -1051,6 +1147,7 @@ pub struct QuicEndpointManager {
     ipv6: RwPool<Endpoint>,
     both: RwPool<Endpoint>,
     servers: dashmap::DashMap<SocketAddr, Endpoint>,
+    send_sockets: dashmap::DashMap<SocketAddr, Arc<UdpSocket>>,
     flags: Arc<Flags>,
 }
 
@@ -1078,24 +1175,43 @@ impl QuicEndpointManager {
         addr: SocketAddr,
         dual_stack: bool,
         socket_mark: Option<u32>,
-    ) -> Result<Endpoint, TunnelError> {
+    ) -> Result<(Endpoint, Arc<UdpSocket>), TunnelError> {
+        Self::try_create_for_peer(addr, dual_stack, socket_mark, None)
+    }
+
+    fn try_create_for_peer(
+        addr: SocketAddr,
+        dual_stack: bool,
+        socket_mark: Option<u32>,
+        destination: Option<SocketAddr>,
+    ) -> Result<(Endpoint, Arc<UdpSocket>), TunnelError> {
         let socket = bind::<UdpSocket>()
             .addr(addr)
             .only_v6(addr.is_ipv6() && !dual_stack)
             .maybe_socket_mark(socket_mark)
             .call()?;
         configure_quic_socket_buffers(&socket);
+        let (std_socket, send_socket) = clone_udp_send_socket(socket, destination)?;
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
         ))?;
-        let mut endpoint = Endpoint::new_with_abstract_socket(
-            endpoint_config(),
-            None,
-            runtime.wrap_udp_socket(socket.into_std()?)?,
-            runtime,
-        )?;
+        let socket = runtime.wrap_udp_socket(std_socket)?;
+        let mut endpoint =
+            Endpoint::new_with_abstract_socket(endpoint_config(), None, socket, runtime)?;
         endpoint.set_default_client_config(client_config(&gen_default_flags())?);
-        Ok(endpoint)
+        Ok((endpoint, send_socket))
+    }
+
+    fn register_send_socket(&self, endpoint: &Endpoint, send_socket: Arc<UdpSocket>) {
+        if let Ok(addr) = endpoint.local_addr() {
+            self.send_sockets.insert(addr, send_socket);
+        }
+    }
+
+    fn send_socket_for(&self, local_addr: SocketAddr) -> Option<Arc<UdpSocket>> {
+        self.send_sockets
+            .get(&local_addr)
+            .map(|socket| socket.clone())
     }
 
     fn create<F>(
@@ -1112,8 +1228,8 @@ impl QuicEndpointManager {
                 return Ok((pool, None));
             };
 
-            let endpoint = Self::try_create(addr, dual_stack, socket_mark);
-            if let Err(error) = endpoint.as_ref()
+            let created = Self::try_create(addr, dual_stack, socket_mark);
+            if let Err(error) = created.as_ref()
                 && dual_stack
             {
                 tracing::warn!(?error, "create dual stack quic endpoint failed");
@@ -1123,7 +1239,9 @@ impl QuicEndpointManager {
                 continue;
             }
 
-            return Ok((pool, Some(endpoint?)));
+            let (endpoint, send_socket) = created?;
+            self.register_send_socket(&endpoint, send_socket);
+            return Ok((pool, Some(endpoint)));
         }
     }
 }
@@ -1143,13 +1261,9 @@ impl QuicEndpointManager {
             ipv6,
             both,
             servers: dashmap::DashMap::new(),
+            send_sockets: dashmap::DashMap::new(),
             flags,
         }
-    }
-
-    fn manager_key(global_ctx: &ArcGlobalCtx) -> QuicEndpointManagerKey {
-        let flags = global_ctx.flags_arc();
-        Self::manager_key_for_flags(global_ctx, &flags)
     }
 
     fn manager_key_for_flags(global_ctx: &ArcGlobalCtx, flags: &Flags) -> QuicEndpointManagerKey {
@@ -1200,7 +1314,8 @@ impl QuicEndpointManager {
     fn client_pool(&self, ip_version: IpVersion) -> &RwPool<Endpoint> {
         let dual_stack = self.both.is_enabled();
         match ip_version {
-            IpVersion::V4 if !dual_stack => &self.ipv4,
+            IpVersion::V4 => &self.ipv4,
+            IpVersion::V6 if !dual_stack => &self.ipv6,
             _ => {
                 if dual_stack {
                     &self.both
@@ -1215,7 +1330,11 @@ impl QuicEndpointManager {
     ///
     /// # Arguments
     /// * `addr`: listen address
-    fn server(mgr: &Arc<Self>, addr: SocketAddr) -> Result<Endpoint, TunnelError> {
+    fn server(
+        _global_ctx: &ArcGlobalCtx,
+        mgr: &Arc<Self>,
+        addr: SocketAddr,
+    ) -> Result<Endpoint, TunnelError> {
         let socket_mark = mgr.flags.socket_mark;
 
         let (_pool, endpoint) = mgr.create(socket_mark, |mgr| {
@@ -1237,15 +1356,80 @@ impl QuicEndpointManager {
         Ok(endpoint)
     }
 
+    fn server_with_decoy(
+        mgr: &Arc<Self>,
+        addr: SocketAddr,
+        upstream: SocketAddr,
+        secret: Arc<[u8]>,
+        server_name: Option<Arc<str>>,
+    ) -> Result<Endpoint, TunnelError> {
+        if !addr.is_ipv4() || !upstream.is_ipv4() {
+            return Err(TunnelError::InternalError(
+                "QUIC decoy mode currently requires IPv4 addresses".to_owned(),
+            ));
+        }
+        let socket = bind::<UdpSocket>()
+            .addr(addr)
+            .only_v6(false)
+            .maybe_socket_mark(mgr.flags.socket_mark)
+            .call()?;
+        configure_quic_socket_buffers(&socket);
+        let (std_socket, send_socket) = clone_udp_send_socket(socket, None)?;
+        let runtime = default_runtime().ok_or(TunnelError::InternalError(
+            "no async runtime found".to_owned(),
+        ))?;
+        let socket = runtime.wrap_udp_socket(std_socket)?;
+        let socket =
+            QuicDecoySocket::new(socket, upstream, secret, mgr.flags.socket_mark, server_name);
+        let mut endpoint =
+            Endpoint::new_with_abstract_socket(endpoint_config(), None, socket, runtime)?;
+        endpoint.set_default_client_config(client_config(&gen_default_flags())?);
+        endpoint.set_server_config(Some(server_config(&mgr.flags)?));
+        let local_addr = endpoint.local_addr()?;
+        if local_addr == upstream {
+            endpoint.close(VarInt::from_u32(1), b"invalid decoy upstream");
+            return Err(TunnelError::InternalError(
+                "QUIC decoy upstream equals the listen address".to_owned(),
+            ));
+        }
+        mgr.register_send_socket(&endpoint, send_socket);
+        mgr.servers.insert(local_addr, endpoint.clone());
+        Ok(endpoint)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn client_endpoint(
+        &self,
+        _ip_version: IpVersion,
+        socket_mark: Option<u32>,
+        destination: SocketAddr,
+    ) -> Result<Endpoint, TunnelError> {
+        let addr = if destination.is_ipv4() {
+            (Ipv4Addr::UNSPECIFIED, 0).into()
+        } else {
+            (Ipv6Addr::UNSPECIFIED, 0).into()
+        };
+        let (endpoint, send_socket) =
+            Self::try_create_for_peer(addr, false, socket_mark, Some(destination))?;
+        self.register_send_socket(&endpoint, send_socket);
+        Ok(endpoint)
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn client_endpoint(
         &self,
         ip_version: IpVersion,
         socket_mark: Option<u32>,
+        _destination: SocketAddr,
     ) -> Result<Endpoint, TunnelError> {
         let (pool, endpoint) = self.create(socket_mark, |mgr| {
             let dual_stack = mgr.both.is_enabled();
             let (pool, addr) = match ip_version {
-                IpVersion::V4 if !dual_stack => (&mgr.ipv4, (Ipv4Addr::UNSPECIFIED, 0).into()),
+                IpVersion::V4 => {
+                    mgr.ipv4.enable();
+                    (&mgr.ipv4, (Ipv4Addr::UNSPECIFIED, 0).into())
+                }
+                IpVersion::V6 if !dual_stack => (&mgr.ipv6, (Ipv6Addr::UNSPECIFIED, 0).into()),
                 _ => {
                     let pool = if dual_stack { &mgr.both } else { &mgr.ipv6 };
                     (pool, (Ipv6Addr::UNSPECIFIED, 0).into())
@@ -1262,16 +1446,29 @@ impl QuicEndpointManager {
             pool.try_push(endpoint);
         }
 
-        Ok(pool.with_iter(|iter| iter.min_by_key(|e| e.open_connections()).unwrap().clone()))
+        pool.with_iter(|iter| iter.min_by_key(|e| e.open_connections()).cloned())
+            .ok_or_else(|| {
+                TunnelError::InternalError("no QUIC client endpoint available".to_owned())
+            })
     }
-
     fn client_endpoint_for_source(
         &self,
         source: SocketAddr,
         socket_mark: Option<u32>,
         policy: &UnderlayPolicy,
+        destination: SocketAddr,
     ) -> Result<Endpoint, TunnelError> {
         ensure_local_allowed(policy, source)?;
+        #[cfg(target_os = "macos")]
+        if source.port() == 0 {
+            let (endpoint, send_socket) =
+                Self::try_create_for_peer(source, false, socket_mark, Some(destination))?;
+            self.register_send_socket(&endpoint, send_socket);
+            return Ok(endpoint);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = destination;
+
         let pool = if source.is_ipv4() {
             &self.ipv4
         } else {
@@ -1291,7 +1488,8 @@ impl QuicEndpointManager {
             return Ok(endpoint);
         }
 
-        let endpoint = Self::try_create(source, false, socket_mark)?;
+        let (endpoint, send_socket) = Self::try_create(source, false, socket_mark)?;
+        self.register_send_socket(&endpoint, send_socket);
         Ok(self.retain_source_endpoint(endpoint))
     }
 
@@ -1315,12 +1513,12 @@ impl QuicEndpointManager {
         };
         self.remove_endpoint_by_local_addr(local_addr)
     }
-
     fn remove_endpoint_by_local_addr(&self, local_addr: SocketAddr) -> usize {
         let client_removed: usize = [&self.ipv4, &self.ipv6, &self.both]
             .into_iter()
             .map(|pool| pool.remove_by_local_addr(local_addr))
             .sum();
+        self.send_sockets.remove(&local_addr);
         client_removed + usize::from(self.servers.remove(&local_addr).is_some())
     }
 
@@ -1336,17 +1534,18 @@ impl QuicEndpointManager {
         addr: SocketAddr,
         bind_addrs: &[SocketAddr],
         policy: Arc<UnderlayPolicy>,
-    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
+    ) -> Result<(Endpoint, Connection, bool, bool), TunnelError> {
         let manager = Self::load(global_ctx);
-        Self::connect_with_manager(&manager, addr, bind_addrs, policy).await
+        Self::connect_with_manager(global_ctx, &manager, addr, bind_addrs, policy).await
     }
 
     async fn connect_with_manager(
+        _global_ctx: &ArcGlobalCtx,
         manager: &Arc<Self>,
         addr: SocketAddr,
         bind_addrs: &[SocketAddr],
         policy: Arc<UnderlayPolicy>,
-    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
+    ) -> Result<(Endpoint, Connection, bool, bool), TunnelError> {
         let ip_version = if addr.ip().is_ipv4() {
             IpVersion::V4
         } else {
@@ -1388,7 +1587,7 @@ impl QuicEndpointManager {
         socket_mark: Option<u32>,
         policy: Arc<UnderlayPolicy>,
         security: QuicConnectSecurity<'_>,
-    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
+    ) -> Result<(Endpoint, Connection, bool, bool), TunnelError> {
         let pool = if source.is_ipv4() {
             &self.ipv4
         } else {
@@ -1398,7 +1597,7 @@ impl QuicEndpointManager {
         let mut endpoint_stopping_retries = 0;
 
         loop {
-            let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy)?;
+            let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy, addr)?;
             let server_name = if security.flags.quic_server_name.is_empty() {
                 addr.ip().to_string()
             } else {
@@ -1425,10 +1624,11 @@ impl QuicEndpointManager {
                 };
             let connection = connecting
                 .await
-                .with_context(|| format!("failed to establish HTTP/3 QUIC to {addr}"))?;
+                .with_context(|| format!("failed to connect Noise-protected QUIC to {addr}"))?;
             ensure_local_allowed(&policy, endpoint.local_addr()?)?;
             ensure_remote_allowed(&policy, connection.remote_address())?;
-            return Ok((endpoint, connection, false));
+            let dedicated_socket = cfg!(target_os = "macos") && source.port() == 0;
+            return Ok((endpoint, connection, false, dedicated_socket));
         }
     }
 
@@ -1438,12 +1638,12 @@ impl QuicEndpointManager {
         ip_version: IpVersion,
         socket_mark: Option<u32>,
         security: QuicConnectSecurity<'_>,
-    ) -> Result<(Endpoint, Connection, bool), TunnelError> {
+    ) -> Result<(Endpoint, Connection, bool, bool), TunnelError> {
         let max_endpoint_stopping_retries = self.client_pool(ip_version).len().saturating_add(1);
         let mut endpoint_stopping_retries = 0;
 
         loop {
-            let endpoint = self.client_endpoint(ip_version, socket_mark)?;
+            let endpoint = self.client_endpoint(ip_version, socket_mark, addr)?;
             let server_name = if security.flags.quic_server_name.is_empty() {
                 addr.ip().to_string()
             } else {
@@ -1477,8 +1677,9 @@ impl QuicEndpointManager {
                 };
             let connection = connecting
                 .await
-                .with_context(|| format!("failed to establish HTTP/3 QUIC to {addr}"))?;
-            return Ok((endpoint, connection, false));
+                .with_context(|| format!("failed to connect Noise-protected QUIC to {addr}"))?;
+
+            return Ok((endpoint, connection, false, cfg!(target_os = "macos")));
         }
     }
 }
@@ -1527,6 +1728,7 @@ fn counter_delta(counter: &AtomicU64, current: u64) -> usize {
 
 struct ConnWrapper {
     conn: Connection,
+    send_socket: Option<Arc<UdpSocket>>,
     telemetry: Arc<DataplaneTelemetry>,
     io_observed: QuicIoObserved,
     _memory_permit: Option<ProcessMemoryPermit>,
@@ -1566,9 +1768,12 @@ fn quic_stats_interval_from(value: Option<&str>) -> Option<Duration> {
 }
 
 fn quic_stats_interval() -> Option<Duration> {
-    *QUIC_STATS_INTERVAL.get_or_init(|| {
-        let value = std::env::var("LOWTIER_QUIC_STATS_INTERVAL_MS").ok();
-        quic_stats_interval_from(value.as_deref())
+    *QUIC_STATS_INTERVAL.get_or_init(|| match std::env::var("LOWTIER_QUIC_STATS_INTERVAL_MS") {
+        Ok(value) if value.trim() == "0" => None,
+        Ok(value) => {
+            quic_stats_interval_from(Some(value.as_str())).or(Some(Duration::from_secs(2)))
+        }
+        Err(_) => Some(Duration::from_secs(2)),
     })
 }
 
@@ -1594,7 +1799,7 @@ fn observe_quic_path(connection: &Arc<ConnWrapper>) {
             let now = Instant::now();
             let should_log = next_log.is_some_and(|deadline| now >= deadline);
             if should_log {
-                tracing::info!(
+                tracing::warn!(
                     target: "CORE::TUNNEL::QUIC_PATH",
                     connection = connection.conn.stable_id(),
                     remote = %connection.conn.remote_address(),
@@ -1608,6 +1813,7 @@ fn observe_quic_path(connection: &Arc<ConnWrapper>) {
                     rx_frames = stats.frame_rx.datagram,
                     rtt_us = stats.path.rtt.as_micros(),
                     cwnd = stats.path.cwnd,
+                    in_flight = stats.path.in_flight,
                     congestion_events = stats.path.congestion_events,
                     lost_packets = stats.path.lost_packets,
                     lost_bytes = stats.path.lost_bytes,
@@ -1635,18 +1841,289 @@ fn select_quic_delivery(packet: &ZCPacket, _max_datagram_size: Option<usize>) ->
         .peer_manager_header()
         .is_some_and(|header| header.is_critical_l2_control());
     if packet.is_lossy() && !critical_l2 {
+        // Lossy TAP/IP must stay unordered. A PMTUD shrink must not move
+        // them onto the reliable CONNECT-IP STREAM (HOL + hidden loss).
+        // Oversized datagrams are dropped at send, like UDP.
         return QuicDelivery::PlainDatagram;
     }
     QuicDelivery::ReliableStream
 }
 
-fn decode_received_quic_datagram(bytes: Bytes, connect_stream_id: u64) -> Option<ZCPacket> {
-    match h3::decode_datagram(bytes, connect_stream_id) {
-        Ok(packet) => Some(packet),
-        Err(error) => {
-            tracing::debug!(?error, "dropping malformed CONNECT-IP DATAGRAM");
-            None
+fn put_quic_varint(buffer: &mut BytesMut, value: u64) {
+    let mut scratch = [0_u8; 8];
+    let length = put_quic_varint_at(&mut scratch, 0, value);
+    buffer.extend_from_slice(&scratch[..length]);
+}
+
+fn put_quic_varint_at(buffer: &mut [u8], offset: usize, value: u64) -> usize {
+    match value {
+        0..=63 => {
+            buffer[offset] = value as u8;
+            1
         }
+        64..=16_383 => {
+            let encoded = (value as u16) | 0x4000;
+            buffer[offset..offset + 2].copy_from_slice(&encoded.to_be_bytes());
+            2
+        }
+        16_384..=1_073_741_823 => {
+            let encoded = (value as u32) | 0x8000_0000;
+            buffer[offset..offset + 4].copy_from_slice(&encoded.to_be_bytes());
+            4
+        }
+        _ => {
+            let encoded = value | 0xc000_0000_0000_0000;
+            buffer[offset..offset + 8].copy_from_slice(&encoded.to_be_bytes());
+            8
+        }
+    }
+}
+
+fn decode_quic_varint(buffer: &[u8]) -> Option<(u64, usize)> {
+    let first = *buffer.first()?;
+    let length = 1_usize << (first >> 6);
+    if buffer.len() < length {
+        return None;
+    }
+    let value = match length {
+        1 => u64::from(first & 0x3f),
+        2 => u64::from(u16::from_be_bytes([buffer[0] & 0x3f, buffer[1]])),
+        4 => u64::from(u32::from_be_bytes([
+            buffer[0] & 0x3f,
+            buffer[1],
+            buffer[2],
+            buffer[3],
+        ])),
+        8 => u64::from_be_bytes([
+            buffer[0] & 0x3f,
+            buffer[1],
+            buffer[2],
+            buffer[3],
+            buffer[4],
+            buffer[5],
+            buffer[6],
+            buffer[7],
+        ]),
+        _ => unreachable!(),
+    };
+    Some((value, length))
+}
+
+fn connect_ip_datagram_overhead(stream_id: u64) -> usize {
+    let quarter_stream_id = stream_id / 4;
+    let quarter_length = match quarter_stream_id {
+        0..=63 => 1,
+        64..=16_383 => 2,
+        16_384..=1_073_741_823 => 4,
+        _ => 8,
+    };
+    quarter_length + 1
+}
+
+fn encode_quic_datagram_prefix(stream_id: u64, context_id: u64) -> ([u8; 18], usize) {
+    let mut prefix = [0_u8; 18];
+    let mut length = put_quic_varint_at(&mut prefix, 0, stream_id / 4);
+    length += put_quic_varint_at(&mut prefix, length, context_id);
+    (prefix, length)
+}
+
+fn encode_quic_datagram(packet: ZCPacket, stream_id: u64) -> Bytes {
+    let (prefix, length) = encode_quic_datagram_prefix(stream_id, DATAGRAM_CONTEXT_WHOLE);
+    packet.tunnel_payload_with_prefix_into_bytes(&prefix[..length])
+}
+
+fn encode_lossy_quic_datagrams(
+    packet: ZCPacket,
+    stream_id: u64,
+    max_size: Option<usize>,
+    out: &mut VecDeque<Bytes>,
+) {
+    let whole = encode_quic_datagram(packet, stream_id);
+    let Some(max_size) = max_size else {
+        out.push_back(whole);
+        return;
+    };
+    if whole.len() <= max_size {
+        out.push_back(whole);
+        return;
+    }
+    let whole_prefix = connect_ip_datagram_overhead(stream_id);
+    let payload = &whole[whole_prefix..];
+    let (frag_prefix, frag_prefix_len) =
+        encode_quic_datagram_prefix(stream_id, DATAGRAM_CONTEXT_FRAGMENT);
+    let chunk = max_size.saturating_sub(frag_prefix_len + DATAGRAM_FRAGMENT_HEADER_LEN);
+    if chunk == 0 {
+        return;
+    }
+    let total = payload.len().div_ceil(chunk);
+    if total == 0 || total > u8::MAX as usize {
+        return;
+    }
+    static FRAGMENT_ID: AtomicU32 = AtomicU32::new(1);
+    let id = FRAGMENT_ID.fetch_add(1, Ordering::Relaxed);
+    for (index, part) in payload.chunks(chunk).enumerate() {
+        let mut encoded =
+            BytesMut::with_capacity(frag_prefix_len + DATAGRAM_FRAGMENT_HEADER_LEN + part.len());
+        encoded.extend_from_slice(&frag_prefix[..frag_prefix_len]);
+        encoded.put_u32_le(id);
+        encoded.put_u8(index as u8);
+        encoded.put_u8(total as u8);
+        encoded.extend_from_slice(part);
+        out.push_back(encoded.freeze());
+    }
+}
+
+fn packet_from_tunnel_payload(bytes: Bytes, header_length: usize) -> Result<ZCPacket, TunnelError> {
+    if bytes.len().saturating_sub(header_length) < PEER_MANAGER_HEADER_SIZE {
+        return Err(TunnelError::InvalidPacket(format!(
+            "QUIC DATAGRAM is too short: {} < {}",
+            bytes.len().saturating_sub(header_length),
+            PEER_MANAGER_HEADER_SIZE
+        )));
+    }
+    let bytes = bytes
+        .try_into_mut()
+        .unwrap_or_else(|bytes| BytesMut::from(bytes.as_ref()));
+    Ok(ZCPacket::new_from_buf_with_prefix(
+        bytes,
+        header_length,
+        ZCPacketType::DummyTunnel,
+    ))
+}
+
+fn decode_quic_datagram(bytes: Bytes, stream_id: u64) -> Result<ZCPacket, TunnelError> {
+    match decode_quic_datagram_parts(bytes, stream_id)? {
+        DecodedDatagram::Whole(packet) => Ok(packet),
+        DecodedDatagram::Fragment { .. } => Err(TunnelError::InvalidPacket(
+            "CONNECT-IP DATAGRAM fragment needs reassembly".to_owned(),
+        )),
+    }
+}
+
+enum DecodedDatagram {
+    Whole(ZCPacket),
+    Fragment {
+        id: u32,
+        index: u8,
+        count: u8,
+        payload: Bytes,
+    },
+}
+
+fn decode_quic_datagram_parts(
+    bytes: Bytes,
+    stream_id: u64,
+) -> Result<DecodedDatagram, TunnelError> {
+    let (quarter_stream_id, quarter_length) = decode_quic_varint(&bytes).ok_or_else(|| {
+        TunnelError::InvalidPacket("HTTP/3 DATAGRAM has no Quarter Stream ID".to_owned())
+    })?;
+    let (context_id, context_length) =
+        decode_quic_varint(&bytes[quarter_length..]).ok_or_else(|| {
+            TunnelError::InvalidPacket("CONNECT-IP DATAGRAM has no Context ID".to_owned())
+        })?;
+    if quarter_stream_id != stream_id / 4 {
+        return Err(TunnelError::InvalidPacket(
+            "CONNECT-IP DATAGRAM has an unexpected request".to_owned(),
+        ));
+    }
+    let header_length = quarter_length + context_length;
+    match context_id {
+        DATAGRAM_CONTEXT_WHOLE => {
+            packet_from_tunnel_payload(bytes, header_length).map(DecodedDatagram::Whole)
+        }
+        DATAGRAM_CONTEXT_FRAGMENT => {
+            let body = bytes.get(header_length..).unwrap_or(&[]);
+            if body.len() < DATAGRAM_FRAGMENT_HEADER_LEN {
+                return Err(TunnelError::InvalidPacket(
+                    "CONNECT-IP DATAGRAM fragment is too short".to_owned(),
+                ));
+            }
+            let id = u32::from_le_bytes(body[..4].try_into().unwrap());
+            let index = body[4];
+            let count = body[5];
+            Ok(DecodedDatagram::Fragment {
+                id,
+                index,
+                count,
+                payload: bytes.slice(header_length + DATAGRAM_FRAGMENT_HEADER_LEN..),
+            })
+        }
+        _ => Err(TunnelError::InvalidPacket(
+            "CONNECT-IP DATAGRAM has an unexpected context".to_owned(),
+        )),
+    }
+}
+
+struct DatagramFragments {
+    pending: HashMap<u32, FragmentInProgress>,
+    order: VecDeque<u32>,
+}
+
+struct FragmentInProgress {
+    count: u8,
+    filled: u8,
+    parts: Vec<Option<Bytes>>,
+}
+
+impl DatagramFragments {
+    fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn ingest(&mut self, bytes: Bytes, stream_id: u64) -> Option<ZCPacket> {
+        match decode_quic_datagram_parts(bytes, stream_id) {
+            Ok(DecodedDatagram::Whole(packet)) => Some(packet),
+            Ok(DecodedDatagram::Fragment {
+                id,
+                index,
+                count,
+                payload,
+            }) => self.push_fragment(id, index, count, payload),
+            Err(error) => {
+                tracing::debug!(?error, "dropping malformed QUIC DATAGRAM");
+                None
+            }
+        }
+    }
+
+    fn push_fragment(&mut self, id: u32, index: u8, count: u8, payload: Bytes) -> Option<ZCPacket> {
+        if count == 0 || index >= count {
+            return None;
+        }
+        if !self.pending.contains_key(&id) && self.pending.len() >= DATAGRAM_FRAGMENT_MAX_PENDING {
+            if let Some(old) = self.order.pop_front() {
+                self.pending.remove(&old);
+            }
+        }
+        let entry = self.pending.entry(id).or_insert_with(|| {
+            self.order.push_back(id);
+            FragmentInProgress {
+                count,
+                filled: 0,
+                parts: vec![None; count as usize],
+            }
+        });
+        if entry.count != count || entry.parts.len() != count as usize {
+            return None;
+        }
+        if entry.parts[index as usize].is_some() {
+            return None;
+        }
+        entry.parts[index as usize] = Some(payload);
+        entry.filled = entry.filled.saturating_add(1);
+        if entry.filled != entry.count {
+            return None;
+        }
+        self.order.retain(|pending_id| *pending_id != id);
+        let assembled = self.pending.remove(&id)?;
+        let mut payload = BytesMut::new();
+        for part in assembled.parts {
+            payload.extend_from_slice(&part?);
+        }
+        packet_from_tunnel_payload(payload.freeze(), 0).ok()
     }
 }
 
@@ -1659,6 +2136,7 @@ struct QuicHybridReader {
     datagrams: Pin<Box<quinn::ReadDatagrams>>,
     connect_stream_id: u64,
     poll_datagram_first: bool,
+    fragments: DatagramFragments,
 }
 
 impl QuicHybridReader {
@@ -1679,10 +2157,11 @@ impl QuicHybridReader {
             datagrams,
             connect_stream_id,
             poll_datagram_first: true,
+            fragments: DatagramFragments::new(),
         }
     }
 
-    fn decode_datagram_batch(&self, datagrams: &mut Vec<Bytes>) -> Option<PacketBatch> {
+    fn decode_datagram_batch(&mut self, datagrams: &mut Vec<Bytes>) -> Option<PacketBatch> {
         let _stage =
             self.connection
                 .telemetry
@@ -1694,7 +2173,7 @@ impl QuicHybridReader {
                 });
         let mut batch = PacketBatch::with_capacity(datagrams.len());
         for bytes in datagrams.drain(..) {
-            if let Some(packet) = decode_received_quic_datagram(bytes, self.connect_stream_id) {
+            if let Some(packet) = self.fragments.ingest(bytes, self.connect_stream_id) {
                 batch
                     .try_push(packet)
                     .expect("the QUIC receive batch has a fixed bound");
@@ -1756,10 +2235,22 @@ impl Stream for QuicHybridReader {
     }
 }
 
+struct PendingSealedSend {
+    packets: Vec<Bytes>,
+    completed: usize,
+    ios: usize,
+    destination: SocketAddr,
+    started: Option<Instant>,
+    packet_count: usize,
+    byte_count: usize,
+}
+
 struct QuicHybridWriter {
     connection: Arc<ConnWrapper>,
     pending_datagrams: Option<VecDeque<Bytes>>,
     pending_datagram_send: Option<DatagramBatchSend>,
+    pending_sealed_send: Option<PendingSealedSend>,
+    fast_seal_blocked: bool,
     reliable_tx: Option<mpsc::Sender<ReliableWriteRequest>>,
     pending_reliable: Option<ReliableWriteRequest>,
     pending_reliable_since: Option<Instant>,
@@ -1767,7 +2258,6 @@ struct QuicHybridWriter {
     reliable_completion: Option<oneshot::Receiver<Result<(), TunnelError>>>,
     reliable_task: Option<JoinHandle<Result<(), TunnelError>>>,
     graceful_close: bool,
-    adaptive_signals: Option<Arc<adaptive::signals::AdaptiveSignals>>,
     connect_stream_id: u64,
 }
 
@@ -2167,6 +2657,134 @@ async fn run_reliable_lane(
     }
 }
 
+const LOWTIER_PACKET_CAPSULE_TYPE: u64 = 0x4554;
+
+fn encode_packet_capsule(packet: ZCPacket) -> Result<Bytes, TunnelError> {
+    let body = packet.tunnel_payload_into_bytes();
+    if body.len() < PEER_MANAGER_HEADER_SIZE || body.len() > QUIC_RELIABLE_MAX_PACKET_SIZE {
+        return Err(TunnelError::InvalidPacket(
+            "CONNECT-IP capsule packet has an invalid length".to_owned(),
+        ));
+    }
+    let mut capsule = BytesMut::with_capacity(16 + body.len());
+    put_quic_varint(&mut capsule, LOWTIER_PACKET_CAPSULE_TYPE);
+    put_quic_varint(&mut capsule, body.len() as u64);
+    capsule.extend_from_slice(&body);
+    Ok(capsule.freeze())
+}
+
+fn decode_packet_capsules(buffer: &mut BytesMut) -> Result<PacketBatch, TunnelError> {
+    let mut batch = PacketBatch::new();
+    while batch.len() < MAX_PACKET_BATCH_SIZE {
+        let Some((capsule_type, type_length)) = decode_quic_varint(buffer) else {
+            break;
+        };
+        let Some((payload_length, length_length)) = decode_quic_varint(&buffer[type_length..])
+        else {
+            break;
+        };
+        let payload_length = usize::try_from(payload_length).map_err(|_| {
+            TunnelError::InvalidPacket("CONNECT-IP capsule length is too large".to_owned())
+        })?;
+        if payload_length > QUIC_RELIABLE_MAX_PACKET_SIZE {
+            return Err(TunnelError::InvalidPacket(
+                "CONNECT-IP capsule exceeds the packet limit".to_owned(),
+            ));
+        }
+        let header_length = type_length + length_length;
+        let total_length = header_length.checked_add(payload_length).ok_or_else(|| {
+            TunnelError::InvalidPacket("CONNECT-IP capsule length overflow".to_owned())
+        })?;
+        if buffer.len() < total_length {
+            break;
+        }
+        buffer.advance(header_length);
+        let payload = buffer.split_to(payload_length);
+        if capsule_type != LOWTIER_PACKET_CAPSULE_TYPE {
+            continue;
+        }
+        if payload.len() < PEER_MANAGER_HEADER_SIZE {
+            return Err(TunnelError::InvalidPacket(
+                "CONNECT-IP packet capsule is too short".to_owned(),
+            ));
+        }
+        batch
+            .try_push(ZCPacket::new_from_buf(payload, ZCPacketType::DummyTunnel))
+            .expect("the CONNECT-IP capsule batch checks its bound");
+    }
+    Ok(batch)
+}
+
+async fn run_http3_reliable_lane(
+    connection: Connection,
+    mut stream: Box<dyn ConnectIpRequestStream>,
+    mut outgoing: mpsc::Receiver<ReliableWriteRequest>,
+    incoming: mpsc::Sender<BatchStreamItem>,
+    writer_done: oneshot::Sender<Result<(), TunnelError>>,
+) -> Result<(), TunnelError> {
+    let mut receive_buffer = BytesMut::with_capacity(QUIC_RELIABLE_INITIAL_BUFFER_SIZE);
+    let mut outgoing_open = true;
+    let mut writer_done = Some(writer_done);
+    loop {
+        tokio::select! {
+            request = outgoing.recv(), if outgoing_open => {
+                let Some(request) = request else {
+                    outgoing_open = false;
+                    let result = stream.finish().await;
+                    if let Some(done) = writer_done.take() {
+                        let _ = done.send(result.as_ref().map(|_| ()).map_err(clone_reliable_error));
+                    }
+                    result?;
+                    continue;
+                };
+                let mut result = Ok(());
+                for packet in request.batch {
+                    match encode_packet_capsule(packet) {
+                        Ok(capsule) => {
+                            if let Err(error) = stream.send_data(capsule).await {
+                                result = Err(error);
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    }
+                }
+                let failed = result.as_ref().err().map(clone_reliable_error);
+                let _ = request.completed.send(result);
+                if let Some(error) = failed {
+                    return Err(error);
+                }
+            }
+            data = stream.recv_data() => {
+                let Some(data) = data? else {
+                    return Ok(());
+                };
+                if receive_buffer.len().saturating_add(data.len())
+                    > QUIC_RELIABLE_MAX_PACKET_SIZE + 16
+                {
+                    return Err(TunnelError::InvalidPacket(
+                        "CONNECT-IP capsule receive buffer is full".to_owned(),
+                    ));
+                }
+                receive_buffer.extend_from_slice(&data);
+                let batch = decode_packet_capsules(&mut receive_buffer)?;
+                if !batch.is_empty() && incoming.send(Ok(batch)).await.is_err() {
+                    return Ok(());
+                }
+            }
+            error = connection.closed() => {
+                return Err(connection_closed_error(
+                    error,
+                    "QUIC connection closed during CONNECT-IP operation",
+                ));
+            }
+        }
+    }
+}
+
 impl QuicHybridWriter {
     fn new(
         reliable_tx: mpsc::Sender<ReliableWriteRequest>,
@@ -2174,11 +2792,12 @@ impl QuicHybridWriter {
         connection: Arc<ConnWrapper>,
         connect_stream_id: u64,
     ) -> Self {
-        let adaptive_signals = adaptive::quinn::signals_from_connection(&connection.conn);
         Self {
             connection,
             pending_datagrams: Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE)),
             pending_datagram_send: None,
+            pending_sealed_send: None,
+            fast_seal_blocked: false,
             reliable_tx: Some(reliable_tx),
             pending_reliable: None,
             pending_reliable_since: None,
@@ -2186,13 +2805,24 @@ impl QuicHybridWriter {
             reliable_completion: None,
             reliable_task: Some(reliable_task),
             graceful_close: false,
-            adaptive_signals,
             connect_stream_id,
         }
     }
 
-    fn begin_datagram_flush(&mut self) {
+    fn finish_sealed_send(&mut self, send: PendingSealedSend) {
+        self.connection.conn.recycle_sealed_buffers(send.packets);
+        self.connection.conn.record_udp_send(0, 0, send.ios as u64);
+        self.connection.telemetry.record_stage_sample(
+            DataplaneStage::QuicSend,
+            send.started,
+            send.packet_count,
+            send.byte_count,
+        );
+    }
+
+    fn begin_datagram_flush(&mut self, cx: &mut TaskContext<'_>) {
         if self.pending_datagram_send.is_some()
+            || self.pending_sealed_send.is_some()
             || self
                 .pending_datagrams
                 .as_ref()
@@ -2205,7 +2835,7 @@ impl QuicHybridWriter {
             .take()
             .expect("the pending QUIC batch is available before a flush");
         let batch_limit = packet_batch_limit();
-        let datagrams = if queued.len() <= batch_limit {
+        let mut datagrams = if queued.len() <= batch_limit {
             self.pending_datagrams = Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE));
             queued
         } else {
@@ -2214,8 +2844,60 @@ impl QuicHybridWriter {
             datagrams
         };
         let packet_count = datagrams.len();
-        let byte_count = datagrams.iter().map(|bytes| bytes.len()).sum::<usize>();
+        let byte_count = datagrams.iter().map(Bytes::len).sum::<usize>();
         let started = DataplaneTelemetry::sample_start();
+        if let Some(socket) = self.connection.send_socket.clone() {
+            let destination = self.connection.conn.remote_address();
+            let sealed = match self
+                .connection
+                .conn
+                .poll_seal_application_datagrams(cx, &mut datagrams)
+            {
+                Poll::Pending => {
+                    let pending = self
+                        .pending_datagrams
+                        .get_or_insert_with(|| VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE));
+                    for leftover in datagrams.into_iter().rev() {
+                        pending.push_front(leftover);
+                    }
+                    self.fast_seal_blocked = true;
+                    return;
+                }
+                Poll::Ready(sealed) => sealed,
+            };
+            if !sealed.is_empty() {
+                if !datagrams.is_empty() {
+                    let pending = self
+                        .pending_datagrams
+                        .get_or_insert_with(|| VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE));
+                    for leftover in datagrams.into_iter().rev() {
+                        pending.push_front(leftover);
+                    }
+                }
+                let mut send = PendingSealedSend {
+                    packets: sealed,
+                    completed: 0,
+                    ios: 0,
+                    destination,
+                    started,
+                    packet_count,
+                    byte_count,
+                };
+                match poll_send_sealed_packets(&socket, &mut send, cx) {
+                    Poll::Ready(Ok(())) => self.finish_sealed_send(send),
+                    Poll::Ready(Err(error)) => {
+                        tracing::warn!(?error, "QUIC TAP sendmmsg failed");
+                        self.finish_sealed_send(send);
+                    }
+                    Poll::Pending => {
+                        self.pending_sealed_send = Some(send);
+                    }
+                }
+                return;
+            }
+        }
+        // Handshake or missing send socket: Quinn packs DATAGRAMs and the
+        // connection driver transmits them.
         let connection = self.connection.conn.clone();
         self.pending_datagram_send = Some(Box::pin(async move {
             let (result, datagrams) = connection.send_datagrams_wait(datagrams).await;
@@ -2242,6 +2924,35 @@ impl QuicHybridWriter {
     }
 
     fn poll_datagram_queue(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), SinkError>> {
+        if self.fast_seal_blocked {
+            self.fast_seal_blocked = false;
+            return Poll::Pending;
+        }
+        if let Some(send) = self.pending_sealed_send.as_mut() {
+            let Some(socket) = self.connection.send_socket.clone() else {
+                if let Some(send) = self.pending_sealed_send.take() {
+                    self.finish_sealed_send(send);
+                }
+                return Poll::Ready(Ok(()));
+            };
+            match poll_send_sealed_packets(&socket, send, cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(())) => {
+                    let send = self
+                        .pending_sealed_send
+                        .take()
+                        .expect("sealed send finished");
+                    self.finish_sealed_send(send);
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Err(error)) => {
+                    if let Some(send) = self.pending_sealed_send.take() {
+                        self.finish_sealed_send(send);
+                    }
+                    return Poll::Ready(Err(TunnelError::IOError(error)));
+                }
+            }
+        }
         let Some(send) = self.pending_datagram_send.as_mut() else {
             return Poll::Ready(Ok(()));
         };
@@ -2289,10 +3000,11 @@ impl QuicHybridWriter {
             {
                 return Poll::Ready(Ok(()));
             }
-            self.begin_datagram_flush();
+            self.begin_datagram_flush(cx);
             match self.poll_datagram_queue(cx) {
                 Poll::Pending
-                    if self.pending_datagram_send.is_some()
+                    if (self.pending_datagram_send.is_some()
+                        || self.pending_sealed_send.is_some())
                         && self
                             .pending_datagrams
                             .as_ref()
@@ -2316,7 +3028,7 @@ impl QuicHybridWriter {
             Poll::Ready(Ok(())) => {}
         }
         loop {
-            self.begin_datagram_flush();
+            self.begin_datagram_flush(cx);
             match self.poll_datagram_queue(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -2325,7 +3037,10 @@ impl QuicHybridWriter {
                         .pending_datagrams
                         .as_ref()
                         .is_some_and(|datagrams| !datagrams.is_empty());
-                    if staged || self.pending_datagram_send.is_some() {
+                    if staged
+                        || self.pending_datagram_send.is_some()
+                        || self.pending_sealed_send.is_some()
+                    {
                         continue;
                     }
                     return self.poll_reliable_completion(cx);
@@ -2362,9 +3077,6 @@ impl QuicHybridWriter {
         }
         if self.reliable_reserve.is_none() {
             let Some(sender) = self.reliable_tx.as_ref() else {
-                if let Some(signals) = &self.adaptive_signals {
-                    signals.record_local_reliable_drop();
-                }
                 return Poll::Ready(Err(TunnelError::InternalError(
                     "reliable QUIC lane is closed".to_owned(),
                 )));
@@ -2376,20 +3088,11 @@ impl QuicHybridWriter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(permit)) => {
                 let request = self.pending_reliable.take().unwrap();
-                if let Some(since) = self.pending_reliable_since.take()
-                    && let Some(signals) = &self.adaptive_signals
-                {
-                    signals.set_queue_sojourn(since.elapsed());
-                }
+                let _ = self.pending_reliable_since.take();
                 permit.send(request);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(error)) => {
-                if let Some(signals) = &self.adaptive_signals {
-                    signals.record_local_reliable_drop();
-                }
-                Poll::Ready(Err(error))
-            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
     }
 }
@@ -2437,16 +3140,12 @@ impl Sink<PacketBatch> for QuicHybridWriter {
         for packet in batch {
             match select_quic_delivery(&packet, maximum) {
                 QuicDelivery::PlainDatagram => {
-                    let datagram = h3::encode_datagram(packet, writer.connect_stream_id);
-                    if maximum.is_some_and(|maximum| datagram.len() <= maximum) {
-                        datagrams.push_back(datagram);
-                    } else {
-                        tracing::debug!(
-                            len = datagram.len(),
-                            ?maximum,
-                            "drop CONNECT-IP packet above the current QUIC DATAGRAM PMTU"
-                        );
-                    }
+                    encode_lossy_quic_datagrams(
+                        packet,
+                        writer.connect_stream_id,
+                        maximum,
+                        datagrams,
+                    );
                 }
                 QuicDelivery::ReliableStream => reliable
                     .try_push(packet)
@@ -2480,14 +3179,9 @@ impl Sink<PacketBatch> for QuicHybridWriter {
                 }
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                if let Some(signals) = &writer.adaptive_signals {
-                    signals.record_local_reliable_drop();
-                }
-                Err(TunnelError::InternalError(
-                    "reliable QUIC lane stopped".to_owned(),
-                ))
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TunnelError::InternalError(
+                "reliable QUIC lane stopped".to_owned(),
+            )),
         }
     }
 
@@ -2525,62 +3219,6 @@ impl Sink<PacketBatch> for QuicHybridWriter {
     }
 }
 
-fn build_quic_hybrid_tunnel(
-    connection: Connection,
-    reliable_send: SendStream,
-    reliable_recv: RecvStream,
-    _reliable_role: ReliableLaneRole,
-    max_packet_size: usize,
-    info: TunnelInfo,
-    _flags: &Flags,
-    transport_authenticated: bool,
-) -> Result<Box<dyn Tunnel>, TunnelError> {
-    build_quic_hybrid_tunnel_with_manager(
-        connection,
-        reliable_send,
-        reliable_recv,
-        _reliable_role,
-        max_packet_size,
-        info,
-        _flags,
-        transport_authenticated,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-}
-
-fn build_quic_hybrid_tunnel_with_memory_permit(
-    connection: Connection,
-    reliable_send: SendStream,
-    reliable_recv: RecvStream,
-    reliable_role: ReliableLaneRole,
-    max_packet_size: usize,
-    info: TunnelInfo,
-    flags: &Flags,
-    transport_authenticated: bool,
-    memory_permit: ProcessMemoryPermit,
-    telemetry: Arc<DataplaneTelemetry>,
-) -> Result<Box<dyn Tunnel>, TunnelError> {
-    build_quic_hybrid_tunnel_with_manager(
-        connection,
-        reliable_send,
-        reliable_recv,
-        reliable_role,
-        max_packet_size,
-        info,
-        flags,
-        transport_authenticated,
-        Some(memory_permit),
-        None,
-        None,
-        None,
-        Some(telemetry),
-    )
-}
-
 fn build_quic_hybrid_tunnel_with_manager(
     connection: Connection,
     reliable_send: SendStream,
@@ -2597,8 +3235,10 @@ fn build_quic_hybrid_tunnel_with_manager(
     telemetry: Option<Arc<DataplaneTelemetry>>,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let transport_binding = derive_transport_binding(&connection)?;
+    let send_socket = send_socket_from_endpoint(endpoint_manager.as_ref(), endpoint_owner.as_ref());
     let connection = Arc::new(ConnWrapper {
         conn: connection,
+        send_socket,
         telemetry: telemetry.unwrap_or_else(|| Arc::new(DataplaneTelemetry::new())),
         io_observed: QuicIoObserved::default(),
         _memory_permit: memory_permit,
@@ -2608,7 +3248,11 @@ fn build_quic_hybrid_tunnel_with_manager(
     });
     let datagram_size_budget: DatagramSizeBudget = {
         let connection = connection.conn.clone();
-        Arc::new(move || connection.max_datagram_size())
+        Arc::new(move || {
+            connection
+                .max_datagram_size()
+                .and_then(|size| size.checked_sub(connect_ip_datagram_overhead(0)))
+        })
     };
     observe_quic_path(&connection);
     let (reliable_tx, reliable_outgoing) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
@@ -2647,22 +3291,27 @@ fn build_quic_hybrid_tunnel_with_manager(
 #[allow(clippy::too_many_arguments)]
 fn build_connect_ip_tunnel(
     connection: Connection,
-    stream: Box<dyn h3::RequestStream>,
+    stream: Box<dyn ConnectIpRequestStream>,
     connect_stream_id: u64,
     info: TunnelInfo,
     transport_authenticated: bool,
     memory_permit: Option<ProcessMemoryPermit>,
+    source_permit: Option<QuicSourcePermit>,
     endpoint_manager: Option<Arc<QuicEndpointManager>>,
     endpoint_owner: Option<Endpoint>,
+    send_socket_override: Option<Arc<UdpSocket>>,
     telemetry: Option<Arc<DataplaneTelemetry>>,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let transport_binding = derive_transport_binding(&connection)?;
+    let send_socket = send_socket_override
+        .or_else(|| send_socket_from_endpoint(endpoint_manager.as_ref(), endpoint_owner.as_ref()));
     let connection = Arc::new(ConnWrapper {
         conn: connection,
+        send_socket,
         telemetry: telemetry.unwrap_or_else(|| Arc::new(DataplaneTelemetry::new())),
         io_observed: QuicIoObserved::default(),
         _memory_permit: memory_permit,
-        _source_permit: None,
+        _source_permit: source_permit,
         _endpoint_manager: endpoint_manager,
         _endpoint_owner: endpoint_owner,
     });
@@ -2671,7 +3320,7 @@ fn build_connect_ip_tunnel(
         Arc::new(move || {
             connection
                 .max_datagram_size()
-                .and_then(|size| size.checked_sub(h3::datagram_overhead(connect_stream_id)))
+                .and_then(|size| size.checked_sub(connect_ip_datagram_overhead(connect_stream_id)))
         })
     };
     observe_quic_path(&connection);
@@ -2680,7 +3329,7 @@ fn build_connect_ip_tunnel(
     let (writer_done_tx, writer_done_rx) = oneshot::channel();
     let supervisor_connection = connection.conn.clone();
     tokio::spawn(async move {
-        let result = h3::run_reliable_lane(
+        let result = run_http3_reliable_lane(
             supervisor_connection,
             stream,
             reliable_outgoing,
@@ -2719,16 +3368,451 @@ pub struct QuicTunnelListener {
     pending_state: std::sync::Mutex<PendingQuicAcceptState>,
 }
 
+const MAX_QUIC_DECOY_FLOWS: usize = 4096;
+const QUIC_DECOY_FLOW_IDLE: Duration = Duration::from_secs(300);
+const QUIC_DECOY_PACKET_BYTES: usize = 65535;
+const QUIC_ROUTING_REPLAY_RETENTION: Duration = Duration::from_secs(900);
+const MAX_QUIC_ROUTING_REPLAYS: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuicSocketRoute {
+    Local,
+    Decoy,
+}
+
+#[derive(Debug)]
+struct QuicSocketRouteEntry {
+    route: QuicSocketRoute,
+    last_seen_seconds: AtomicU64,
+}
+
+#[derive(Debug)]
+struct QuicRoutingReplayState {
+    markers: HashMap<[u8; QUIC_ROUTING_CID_BYTES], Instant>,
+    last_cleanup: Instant,
+}
+
+#[derive(Debug)]
+struct QuicDecoyPacket {
+    client: SocketAddr,
+    server_ip: Option<IpAddr>,
+    bytes: Bytes,
+}
+
+#[derive(Debug)]
+struct QuicDecoySocket {
+    inner: Arc<dyn AsyncUdpSocket>,
+    routes: Arc<dashmap::DashMap<SocketAddr, QuicSocketRouteEntry>>,
+    secret: Arc<[u8]>,
+    server_name: Option<Arc<str>>,
+    replay: ParkingMutex<QuicRoutingReplayState>,
+    decoy_tx: mpsc::Sender<QuicDecoyPacket>,
+    last_route_cleanup_seconds: AtomicU64,
+}
+
+impl QuicDecoySocket {
+    fn new(
+        inner: Arc<dyn AsyncUdpSocket>,
+        upstream: SocketAddr,
+        secret: Arc<[u8]>,
+        socket_mark: Option<u32>,
+        server_name: Option<Arc<str>>,
+    ) -> Arc<Self> {
+        let routes = Arc::new(dashmap::DashMap::new());
+        let (decoy_tx, decoy_rx) = mpsc::channel(MAX_QUIC_DECOY_FLOWS);
+        tokio::spawn(run_quic_decoy_relays(
+            inner.clone(),
+            upstream,
+            socket_mark,
+            routes.clone(),
+            decoy_rx,
+        ));
+        Arc::new(Self {
+            inner,
+            routes,
+            secret,
+            server_name,
+            replay: ParkingMutex::new(QuicRoutingReplayState {
+                markers: HashMap::new(),
+                last_cleanup: Instant::now(),
+            }),
+            decoy_tx,
+            last_route_cleanup_seconds: AtomicU64::new(0),
+        })
+    }
+
+    fn now_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn route(&self, client: SocketAddr, packet: &[u8]) -> Option<QuicSocketRoute> {
+        let now_seconds = Self::now_seconds();
+        if let Some(entry) = self.routes.get(&client) {
+            entry
+                .last_seen_seconds
+                .store(now_seconds, Ordering::Relaxed);
+            return Some(entry.route);
+        }
+        let last_cleanup = self.last_route_cleanup_seconds.load(Ordering::Relaxed);
+        if now_seconds.saturating_sub(last_cleanup) >= 60
+            && self
+                .last_route_cleanup_seconds
+                .compare_exchange(
+                    last_cleanup,
+                    now_seconds,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            self.routes.retain(|_, entry| {
+                now_seconds.saturating_sub(entry.last_seen_seconds.load(Ordering::Relaxed))
+                    < QUIC_DECOY_FLOW_IDLE.as_secs()
+            });
+        }
+        if self.routes.len() >= MAX_QUIC_DECOY_FLOWS {
+            return None;
+        }
+
+        let marker = valid_quic_routing_marker(packet, &self.secret, SystemTime::now());
+        let route = if marker.is_some_and(|marker| self.admit_marker(marker)) {
+            QuicSocketRoute::Local
+        } else if self
+            .server_name
+            .as_deref()
+            .is_some_and(|name| quic_initial_sni_eq(packet, name))
+        {
+            QuicSocketRoute::Local
+        } else {
+            QuicSocketRoute::Decoy
+        };
+        self.routes.insert(
+            client,
+            QuicSocketRouteEntry {
+                route,
+                last_seen_seconds: AtomicU64::new(now_seconds),
+            },
+        );
+        Some(route)
+    }
+
+    fn admit_marker(&self, marker: [u8; QUIC_ROUTING_CID_BYTES]) -> bool {
+        let now = Instant::now();
+        let mut replay = self.replay.lock();
+        if now.saturating_duration_since(replay.last_cleanup) >= Duration::from_secs(60) {
+            replay.markers.retain(|_, seen| {
+                now.saturating_duration_since(*seen) < QUIC_ROUTING_REPLAY_RETENTION
+            });
+            replay.last_cleanup = now;
+        }
+        if replay.markers.len() >= MAX_QUIC_ROUTING_REPLAYS {
+            return false;
+        }
+        replay.markers.insert(marker, now).is_none()
+    }
+
+    fn forward_decoy(&self, meta: quinn::udp::RecvMeta, bytes: &[u8]) {
+        let stride = meta.stride.max(1);
+        for offset in (0..meta.len).step_by(stride) {
+            let end = (offset + stride).min(meta.len);
+            let packet = QuicDecoyPacket {
+                client: meta.addr,
+                server_ip: meta.dst_ip,
+                bytes: Bytes::copy_from_slice(&bytes[offset..end]),
+            };
+            if self.decoy_tx.try_send(packet).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+impl AsyncUdpSocket for QuicDecoySocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn quinn::UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+
+    fn try_send(&self, transmit: &quinn::udp::Transmit<'_>) -> std::io::Result<()> {
+        self.inner.try_send(transmit)
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut TaskContext<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> Poll<std::io::Result<usize>> {
+        const MAX_DECOY_BATCHES_PER_POLL: usize = 8;
+        for _ in 0..MAX_DECOY_BATCHES_PER_POLL {
+            let count = match self.inner.poll_recv(cx, bufs, meta) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(count)) => count,
+            };
+            let mut local_count = 0;
+            for index in 0..count {
+                let received = meta[index];
+                let first_datagram = received.stride.max(1).min(received.len);
+                let route = self.route(received.addr, &bufs[index][..first_datagram]);
+                match route {
+                    Some(QuicSocketRoute::Local) => {
+                        if local_count != index {
+                            let (before, after) = bufs.split_at_mut(index);
+                            before[local_count][..received.len]
+                                .copy_from_slice(&after[0][..received.len]);
+                            meta[local_count] = received;
+                        }
+                        local_count += 1;
+                    }
+                    Some(QuicSocketRoute::Decoy) => {
+                        self.forward_decoy(received, &bufs[index][..received.len])
+                    }
+                    None => {}
+                }
+            }
+            if local_count != 0 {
+                return Poll::Ready(Ok(local_count));
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.inner.max_receive_segments()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
+}
+
+async fn send_quic_decoy_response(
+    public: &Arc<dyn AsyncUdpSocket>,
+    poller: &mut Pin<Box<dyn quinn::UdpPoller>>,
+    client: SocketAddr,
+    server_ip: Option<IpAddr>,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let transmit = quinn::udp::Transmit {
+        destination: client,
+        ecn: None,
+        contents: bytes,
+        segment_size: None,
+        src_ip: server_ip,
+    };
+    loop {
+        match public.try_send(&transmit) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                futures::future::poll_fn(|cx| poller.as_mut().poll_writable(cx)).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn run_quic_decoy_flow(
+    public: Arc<dyn AsyncUdpSocket>,
+    upstream: SocketAddr,
+    socket_mark: Option<u32>,
+    client: SocketAddr,
+    server_ip: Option<IpAddr>,
+    mut incoming: mpsc::Receiver<Bytes>,
+    cleanup: mpsc::UnboundedSender<SocketAddr>,
+) {
+    let socket = bind::<UdpSocket>()
+        .addr((Ipv4Addr::UNSPECIFIED, 0).into())
+        .maybe_socket_mark(socket_mark)
+        .call();
+    let Ok(socket) = socket else {
+        let _ = cleanup.send(client);
+        return;
+    };
+    if socket.connect(upstream).await.is_err() {
+        let _ = cleanup.send(client);
+        return;
+    }
+    let mut poller = public.clone().create_io_poller();
+    let mut response = [0_u8; QUIC_DECOY_PACKET_BYTES];
+    loop {
+        let activity = tokio::time::timeout(QUIC_DECOY_FLOW_IDLE, async {
+            tokio::select! {
+                packet = incoming.recv() => {
+                    let Some(packet) = packet else {
+                        return false;
+                    };
+                    socket.send(&packet).await.is_ok()
+                }
+                received = socket.recv(&mut response) => {
+                    let Ok(length) = received else {
+                        return false;
+                    };
+                    send_quic_decoy_response(
+                        &public,
+                        &mut poller,
+                        client,
+                        server_ip,
+                        &response[..length],
+                    ).await.is_ok()
+                }
+            }
+        })
+        .await;
+        if !matches!(activity, Ok(true)) {
+            break;
+        }
+    }
+    let _ = cleanup.send(client);
+}
+
+async fn run_quic_decoy_relays(
+    public: Arc<dyn AsyncUdpSocket>,
+    upstream: SocketAddr,
+    socket_mark: Option<u32>,
+    routes: Arc<dashmap::DashMap<SocketAddr, QuicSocketRouteEntry>>,
+    mut packets: mpsc::Receiver<QuicDecoyPacket>,
+) {
+    let mut flows: HashMap<SocketAddr, mpsc::Sender<Bytes>> = HashMap::new();
+    let (cleanup_tx, mut cleanup_rx) = mpsc::unbounded_channel();
+    loop {
+        tokio::select! {
+            packet = packets.recv() => {
+                let Some(packet) = packet else {
+                    return;
+                };
+                if let Some(flow) = flows.get(&packet.client) {
+                    let _ = flow.try_send(packet.bytes);
+                    continue;
+                }
+                let (flow_tx, flow_rx) = mpsc::channel(64);
+                let _ = flow_tx.try_send(packet.bytes);
+                tokio::spawn(run_quic_decoy_flow(
+                    public.clone(),
+                    upstream,
+                    socket_mark,
+                    packet.client,
+                    packet.server_ip,
+                    flow_rx,
+                    cleanup_tx.clone(),
+                ));
+                flows.insert(packet.client, flow_tx);
+            }
+            Some(client) = cleanup_rx.recv() => {
+                flows.remove(&client);
+                routes.remove(&client);
+            }
+        }
+    }
+}
+
 struct PendingQuicAcceptState {
     pending_accepts: futures::stream::FuturesUnordered<PendingQuicAccept>,
     pending_by_ip: HashMap<IpAddr, usize>,
+    admission_limiter: QuicAdmissionLimiter,
 }
 
 type PendingQuicAccept =
     Pin<Box<dyn Future<Output = (IpAddr, Result<Box<dyn Tunnel>, TunnelError>)> + Send + 'static>>;
 
-const MAX_PENDING_QUIC_ACCEPTS: usize = 4;
+const MAX_PENDING_QUIC_ACCEPTS: usize = 32;
 const MAX_PENDING_QUIC_ACCEPTS_PER_IP: usize = 1;
+const MAX_QUIC_ADMISSIONS_PER_SECOND: u32 = 64;
+const MAX_QUIC_ADMISSIONS_PER_PREFIX_PER_SECOND: u32 = 16;
+const MAX_QUIC_ADMISSION_PREFIXES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum QuicSourcePrefix {
+    V4(u32),
+    V6(u64),
+}
+
+impl From<IpAddr> for QuicSourcePrefix {
+    fn from(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(ip) => Self::V4(u32::from(ip) & 0xffff_ff00),
+            IpAddr::V6(ip) => Self::V6((u128::from(ip) >> 64) as u64),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QuicAdmissionWindow {
+    started: Instant,
+    count: u32,
+}
+
+impl QuicAdmissionWindow {
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            count: 0,
+        }
+    }
+
+    fn admit(&mut self, now: Instant, limit: u32) -> bool {
+        if now.saturating_duration_since(self.started) >= Duration::from_secs(1) {
+            self.started = now;
+            self.count = 0;
+        }
+        if self.count >= limit {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct QuicAdmissionLimiter {
+    global: QuicAdmissionWindow,
+    prefixes: HashMap<QuicSourcePrefix, QuicAdmissionWindow>,
+    last_cleanup: Instant,
+}
+
+impl QuicAdmissionLimiter {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            global: QuicAdmissionWindow::new(now),
+            prefixes: HashMap::new(),
+            last_cleanup: now,
+        }
+    }
+
+    fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if now.saturating_duration_since(self.last_cleanup) >= Duration::from_secs(60) {
+            self.prefixes.retain(|_, window| {
+                now.saturating_duration_since(window.started) < Duration::from_secs(60)
+            });
+            self.last_cleanup = now;
+        }
+        if !self.global.admit(now, MAX_QUIC_ADMISSIONS_PER_SECOND) {
+            return false;
+        }
+        let prefix = QuicSourcePrefix::from(ip);
+        if !self.prefixes.contains_key(&prefix)
+            && self.prefixes.len() >= MAX_QUIC_ADMISSION_PREFIXES
+        {
+            return false;
+        }
+        self.prefixes
+            .entry(prefix)
+            .or_insert_with(|| QuicAdmissionWindow::new(now))
+            .admit(now, MAX_QUIC_ADMISSIONS_PER_PREFIX_PER_SECOND)
+    }
+}
 
 impl QuicTunnelListener {
     pub fn new(addr: url::Url, global_ctx: ArcGlobalCtx) -> Self {
@@ -2740,46 +3824,44 @@ impl QuicTunnelListener {
             pending_state: std::sync::Mutex::new(PendingQuicAcceptState {
                 pending_accepts: futures::stream::FuturesUnordered::new(),
                 pending_by_ip: HashMap::new(),
+                admission_limiter: QuicAdmissionLimiter::new(),
             }),
         }
     }
 
     async fn finish_accept(
         incoming: Incoming,
+        initial_remote: SocketAddr,
         global_ctx: ArcGlobalCtx,
         local_url: url::Url,
         memory_permit: ProcessMemoryPermit,
         source_permit: QuicSourcePermit,
+        endpoint_manager: Option<Arc<QuicEndpointManager>>,
+        endpoint_owner: Option<Endpoint>,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let initial_remote = incoming.remote_address();
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), initial_remote)?;
         let conn = tokio::time::timeout(Duration::from_secs(7), incoming)
             .await
             .context("accept QUIC connection timed out")?
             .with_context(|| "accept QUIC connection failed")?;
+        // Noise authenticates the peer after QUIC binds its transcript to the
+        // TLS exporter. The ephemeral TLS certificate is not a password verifier.
         let transport_authenticated = false;
-        let remote_addr = conn.remote_address();
+        let remote_addr = initial_remote;
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), remote_addr)?;
-        let flags = global_ctx.config.get_flags();
-        let admission =
-            crate::tunnel::stealth_tls::ConnectIpAdmission::from_global_ctx(&global_ctx);
-        let fallback_root = match flags.quic_fallback_root.as_str() {
-            "" => None,
-            root => Some(std::path::PathBuf::from(root)),
+        let admission = ConnectIpAdmission::from_global_ctx(&global_ctx);
+        let fallback_root = match global_ctx.config.get_flags().quic_fallback_root {
+            root if root.is_empty() => None,
+            root => Some(PathBuf::from(root)),
         };
-        let request = tokio::time::timeout(
-            Duration::from_secs(5),
-            h3::accept_request(&conn, admission.as_ref(), fallback_root),
-        )
-        .await
-        .context("accept CONNECT-IP request timed out")?;
-        let (connect_stream, connect_stream_id) = match request {
-            Ok(request) => request,
-            Err(error) => {
-                conn.close(VarInt::from_u32(1), b"CONNECT-IP activation failed");
-                return Err(error);
-            }
-        };
+        let (connect_stream, connect_stream_id) =
+            match accept_connect_ip_request(&conn, admission.as_ref(), fallback_root).await {
+                Ok(lane) => lane,
+                Err(error) => {
+                    conn.close(VarInt::from_u32(1), b"CONNECT-IP activation failed");
+                    return Err(error);
+                }
+            };
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -2804,6 +3886,8 @@ impl QuicTunnelListener {
             transport_authenticated,
             Some(memory_permit),
             None,
+            endpoint_manager,
+            endpoint_owner,
             None,
             Some(global_ctx.dataplane_telemetry().clone()),
         )
@@ -2820,8 +3904,8 @@ impl QuicTunnelListener {
         }
     }
 
-    fn start_pending_accept(&mut self, incoming: Incoming) {
-        let ip = incoming.remote_address().ip();
+    fn start_pending_accept(&mut self, incoming: Incoming, remote_addr: SocketAddr) {
+        let ip = remote_addr.ip();
         let Some(source_permit) = try_acquire_quic_source(ip) else {
             incoming.refuse();
             tracing::trace!(?ip, "reject QUIC connection because the source is active");
@@ -2841,6 +3925,8 @@ impl QuicTunnelListener {
             return;
         };
         let local_url = self.local_url();
+        let endpoint_manager = self.endpoint_manager.clone();
+        let endpoint_owner = self.endpoint.clone();
         let state = self.pending_state.get_mut().unwrap();
         let count = state.pending_by_ip.entry(ip).or_default();
         if *count >= MAX_PENDING_QUIC_ACCEPTS_PER_IP {
@@ -2855,10 +3941,13 @@ impl QuicTunnelListener {
         state.pending_accepts.push(Box::pin(async move {
             let result = Self::finish_accept(
                 incoming,
+                remote_addr,
                 global_ctx,
                 local_url,
                 memory_permit,
                 source_permit,
+                endpoint_manager,
+                endpoint_owner,
             )
             .await;
             (ip, result)
@@ -2900,7 +3989,30 @@ impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
         let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
-        let endpoint = QuicEndpointManager::server(&endpoint_manager, addr)?;
+        let flags = self.global_ctx.config.get_flags();
+        let endpoint = if flags.quic_decoy_upstream.is_empty() {
+            QuicEndpointManager::server(&self.global_ctx, &endpoint_manager, addr)?
+        } else {
+            let upstream = tokio::net::lookup_host(&flags.quic_decoy_upstream)
+                .await
+                .with_context(|| {
+                    format!("resolve QUIC decoy upstream {}", flags.quic_decoy_upstream)
+                })?
+                .find(SocketAddr::is_ipv4)
+                .ok_or_else(|| {
+                    TunnelError::InternalError("QUIC decoy upstream has no IPv4 address".to_owned())
+                })?;
+            ensure_remote_allowed(&self.global_ctx.get_underlay_policy(), upstream)?;
+            QuicEndpointManager::server_with_decoy(
+                &endpoint_manager,
+                addr,
+                upstream,
+                Arc::from(flags.quic_admission_secret.into_bytes()),
+                flags
+                    .quic_sni_passthrough
+                    .then(|| Arc::from(flags.quic_server_name.as_str())),
+            )?
+        };
         self.addr
             .set_port(Some(endpoint.local_addr()?.port()))
             .unwrap();
@@ -2936,12 +4048,33 @@ impl TunnelListener for QuicTunnelListener {
                         "QUIC endpoint stopped accepting connections".to_string(),
                     ));
                 };
-                if ensure_remote_allowed(
-                    &self.global_ctx.get_underlay_policy(),
-                    incoming.remote_address(),
-                )
-                .is_err()
+                let remote = incoming.remote_address();
+                if !incoming.remote_address_validated() {
+                    if let Err(error) = incoming.retry() {
+                        tracing::debug!(
+                            ?error,
+                            ?remote,
+                            "failed to require QUIC address validation"
+                        );
+                    }
+                    continue;
+                }
+                let remote_ip = remote.ip();
+                if !self
+                    .pending_state
+                    .get_mut()
+                    .unwrap()
+                    .admission_limiter
+                    .admit(remote_ip, Instant::now())
                 {
+                    tracing::warn!(
+                        ?remote_ip,
+                        "reject QUIC connection because the admission rate is full"
+                    );
+                    incoming.refuse();
+                    continue;
+                }
+                if ensure_remote_allowed(&self.global_ctx.get_underlay_policy(), remote).is_err() {
                     incoming.refuse();
                 } else if self.pending_state.get_mut().unwrap().pending_accepts.len()
                     >= MAX_PENDING_QUIC_ACCEPTS
@@ -2952,7 +4085,7 @@ impl TunnelListener for QuicTunnelListener {
                     );
                     incoming.refuse();
                 } else {
-                    self.start_pending_accept(incoming);
+                    self.start_pending_accept(incoming, remote);
                 }
             }
         }
@@ -3002,29 +4135,49 @@ impl TunnelConnector for QuicTunnelConnector {
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
         let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
-        let (endpoint, connection, transport_authenticated) =
+        let (endpoint, connection, transport_authenticated, dedicated_endpoint) =
             QuicEndpointManager::connect_with_manager(
+                &self.global_ctx,
                 &endpoint_manager,
                 addr,
                 &self.bind_addrs,
                 self.underlay_policy.clone(),
             )
             .await?;
+        let local_addr = endpoint.local_addr()?;
+        #[cfg(target_os = "macos")]
+        let dedicated_send_socket = if dedicated_endpoint {
+            let send_socket = endpoint_manager
+                .send_socket_for(local_addr)
+                .ok_or_else(|| {
+                    TunnelError::InternalError("missing dedicated QUIC send socket".to_owned())
+                })?;
+            endpoint_manager.send_sockets.remove(&local_addr);
+            Some(send_socket)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let dedicated_send_socket = None;
         self.endpoint_manager = Some(endpoint_manager);
 
-        let local_addr = endpoint.local_addr()?;
-        let flags = self.global_ctx.config.get_flags();
-        let authority = if flags.quic_server_name.is_empty() {
+        let authority = if self
+            .global_ctx
+            .config
+            .get_flags()
+            .quic_server_name
+            .is_empty()
+        {
             self.addr
                 .host_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| addr.ip().to_string())
         } else {
-            flags.quic_server_name.clone()
+            self.global_ctx.config.get_flags().quic_server_name
         };
-        let bearer = h3::bearer(&self.global_ctx);
+        let bearer = connect_ip_bearer(&self.global_ctx);
         let (connect_stream, connect_stream_id) =
-            h3::open_request(&connection, &authority, bearer.as_deref()).await?;
+            open_connect_ip_request(&connection, &authority, bearer.as_deref()).await?;
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -3045,8 +4198,10 @@ impl TunnelConnector for QuicTunnelConnector {
             info,
             transport_authenticated,
             Some(memory_permit),
+            None,
             self.endpoint_manager.clone(),
             Some(endpoint),
+            dedicated_send_socket,
             Some(self.global_ctx.dataplane_telemetry().clone()),
         )
     }
@@ -3088,24 +4243,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn quic_source_permit_is_reusable_after_pending_activation() {
-        let ip: IpAddr = "192.0.2.241".parse().unwrap();
-        let permit = try_acquire_quic_source(ip).expect("first pending source permit");
-        assert!(try_acquire_quic_source(ip).is_none());
-        drop(permit);
-        assert!(try_acquire_quic_source(ip).is_some());
-    }
-
-    #[test]
-    fn quic_data_plane_implements_owned_batch_interfaces() {
-        fn assert_reader<T: crate::tunnel::PacketBatchStream>() {}
-        fn assert_writer<T: crate::tunnel::PacketBatchSink>() {}
-
-        assert_reader::<QuicHybridReader>();
-        assert_writer::<QuicHybridWriter>();
-    }
-
     // Shared runtime for all tests to avoid endpoint invalidation across runtimes
     static RUNTIME: LazyLock<Runtime> =
         LazyLock::new(|| Builder::new_multi_thread().enable_all().build().unwrap());
@@ -3123,15 +4260,184 @@ mod tests {
         get_mock_global_ctx_with_network(Some(test_identity()))
     }
 
-    fn brutal_global_ctx() -> ArcGlobalCtx {
-        let global_ctx = global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.quic_congestion = "brutal".into();
-        flags.quic_brutal_send_bps = 100_000_000;
-        flags.quic_initial_receive_window = 8 * 1024 * 1024;
-        flags.quic_receive_window = 32 * 1024 * 1024;
-        global_ctx.set_flags(flags);
-        global_ctx
+    const CAMOUFLAGE_HOST: &str = "challenges.cloudflare.com";
+
+    struct UdpPassthrough {
+        public: SocketAddr,
+        _nginx: Option<NginxUdpProxy>,
+        _task: Option<tokio::task::JoinHandle<()>>,
+        _dir: Option<tempfile::TempDir>,
+    }
+
+    impl Drop for UdpPassthrough {
+        fn drop(&mut self) {
+            if let Some(task) = &self._task {
+                task.abort();
+            }
+        }
+    }
+
+    struct NginxUdpProxy {
+        child: std::process::Child,
+    }
+
+    impl Drop for NginxUdpProxy {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn nginx_binary() -> Option<std::path::PathBuf> {
+        for candidate in [
+            "/opt/homebrew/opt/nginx/bin/nginx",
+            "/usr/sbin/nginx",
+            "/usr/bin/nginx",
+        ] {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn reserve_udp_port() -> SocketAddr {
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    fn start_nginx_udp_passthrough(backend: SocketAddr) -> Option<UdpPassthrough> {
+        let nginx = nginx_binary()?;
+        let dir = tempfile::tempdir().ok()?;
+        let public = reserve_udp_port();
+        let conf = dir.path().join("nginx.conf");
+        let error = dir.path().join("error.log");
+        let pid = dir.path().join("nginx.pid");
+        std::fs::write(
+            &conf,
+            format!(
+                "daemon off;\nerror_log {};\npid {};\nevents {{ worker_connections 64; }}\nstream {{\n    server {{\n        listen {} udp;\n        proxy_pass {};\n        proxy_timeout 60s;\n    }}\n}}\n",
+                error.display(),
+                pid.display(),
+                public,
+                backend
+            ),
+        )
+        .ok()?;
+        let child = std::process::Command::new(nginx)
+            .arg("-c")
+            .arg(&conf)
+            .arg("-p")
+            .arg(dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        for _ in 0..50 {
+            if std::net::UdpSocket::bind(public).is_err() {
+                return Some(UdpPassthrough {
+                    public,
+                    _nginx: Some(NginxUdpProxy { child }),
+                    _task: None,
+                    _dir: Some(dir),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(NginxUdpProxy { child });
+        None
+    }
+
+    async fn start_tokio_udp_passthrough(backend: SocketAddr) -> UdpPassthrough {
+        let front = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let public = front.local_addr().unwrap();
+        let task = tokio::spawn(run_tokio_udp_passthrough(front, backend));
+        UdpPassthrough {
+            public,
+            _nginx: None,
+            _task: Some(task),
+            _dir: None,
+        }
+    }
+
+    async fn start_udp_passthrough(backend: SocketAddr) -> UdpPassthrough {
+        if let Some(proxy) = start_nginx_udp_passthrough(backend) {
+            return proxy;
+        }
+        start_tokio_udp_passthrough(backend).await
+    }
+
+    async fn run_tokio_udp_passthrough(front: UdpSocket, backend: SocketAddr) {
+        let front = Arc::new(front);
+        let (cleanup_tx, mut cleanup_rx) = mpsc::unbounded_channel();
+        let mut sessions = HashMap::<SocketAddr, mpsc::Sender<Bytes>>::new();
+        let mut buf = vec![0_u8; 2048];
+        loop {
+            tokio::select! {
+                recv = front.recv_from(&mut buf) => {
+                    let Ok((n, client)) = recv else { return };
+                    if let Some(tx) = sessions.get(&client) {
+                        let _ = tx.try_send(Bytes::copy_from_slice(&buf[..n]));
+                        continue;
+                    }
+                    let (tx, rx) = mpsc::channel(64);
+                    let _ = tx.try_send(Bytes::copy_from_slice(&buf[..n]));
+                    sessions.insert(client, tx);
+                    tokio::spawn(tokio_udp_passthrough_session(
+                        front.clone(),
+                        backend,
+                        client,
+                        rx,
+                        cleanup_tx.clone(),
+                    ));
+                }
+                Some(client) = cleanup_rx.recv() => {
+                    sessions.remove(&client);
+                }
+            }
+        }
+    }
+
+    async fn tokio_udp_passthrough_session(
+        front: Arc<UdpSocket>,
+        backend: SocketAddr,
+        client: SocketAddr,
+        mut incoming: mpsc::Receiver<Bytes>,
+        cleanup: mpsc::UnboundedSender<SocketAddr>,
+    ) {
+        let Ok(up) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
+            let _ = cleanup.send(client);
+            return;
+        };
+        if up.connect(backend).await.is_err() {
+            let _ = cleanup.send(client);
+            return;
+        }
+        let mut buf = vec![0_u8; 2048];
+        loop {
+            tokio::select! {
+                packet = incoming.recv() => {
+                    let Some(packet) = packet else { break };
+                    if up.send(&packet).await.is_err() {
+                        break;
+                    }
+                }
+                result = up.recv(&mut buf) => {
+                    let Ok(n) = result else { break };
+                    if front.send_to(&buf[..n], client).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = cleanup.send(client);
+    }
+
+    fn camouflage_url(port: u16) -> url::Url {
+        format!("quic://127.0.0.1:{port}").parse().unwrap()
     }
 
     fn hybrid_writer_without_reliable_io(connection: Arc<ConnWrapper>) -> QuicHybridWriter {
@@ -3144,176 +4450,12 @@ mod tests {
         QuicHybridWriter::new(sender, task, connection, 0)
     }
 
-    #[test]
-    fn adaptive_transport_config_builds() {
-        let mut flags = gen_default_flags();
-        flags.quic_congestion = "adaptive".to_owned();
-
-        transport_config(&flags).unwrap();
-    }
-
-    #[test]
-    fn quic_socket_buffer_matches_the_high_rate_datagram_path() {
-        assert_eq!(quic_socket_buffer_bytes(), 7 * 1024 * 1024);
-    }
-
-    #[test]
-    fn quic_socket_buffer_accounting_detects_linux_kernel_clamping() {
-        let target = 7 * 1024 * 1024;
-        assert_eq!(
-            quic_socket_buffer_reported_target(target, true),
-            14 * 1024 * 1024
-        );
-        assert_eq!(quic_socket_buffer_reported_target(target, false), target);
-
-        assert!(!quic_socket_buffer_target_is_met(
-            Some(425_984),
-            target,
-            true
-        ));
-        assert!(quic_socket_buffer_target_is_met(
-            Some(14 * 1024 * 1024),
-            target,
-            true
-        ));
-        assert!(quic_socket_buffer_target_is_met(
-            Some(target),
-            target,
-            false
-        ));
-        assert!(!quic_socket_buffer_target_is_met(None, target, true));
-    }
-
-    #[test]
-    fn quic_path_observer_uses_an_explicit_positive_interval() {
-        assert_eq!(quic_stats_interval_from(None), None);
-        assert_eq!(quic_stats_interval_from(Some("0")), None);
-        assert_eq!(quic_stats_interval_from(Some("invalid")), None);
-        assert_eq!(
-            quic_stats_interval_from(Some("250")),
-            Some(Duration::from_millis(250))
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_reliable_reservation_is_removed_before_another_poll() {
-        let (sender, receiver) = mpsc::channel::<ReliableWriteRequest>(1);
-        drop(receiver);
-        let mut reservation: Option<ReliableReserve> = Some(Box::pin(sender.reserve_owned()));
-
-        let result =
-            futures::future::poll_fn(|cx| poll_reliable_reservation(&mut reservation, cx)).await;
-
-        assert!(result.is_err());
-        assert!(reservation.is_none());
-    }
-
-    #[tokio::test]
-    async fn reliable_lane_error_waits_for_room_in_the_incoming_queue() {
-        let (incoming, mut receiver) = mpsc::channel::<BatchStreamItem>(1);
-        incoming
-            .send(Ok(PacketBatch::singleton(ZCPacket::new_with_payload(
-                b"queued",
-            ))))
-            .await
-            .unwrap();
-        let error = TunnelError::InternalError("lane failed".to_owned());
-        let sender = tokio::spawn(send_reliable_lane_error(incoming, error));
-
-        tokio::task::yield_now().await;
-        assert!(!sender.is_finished());
-        assert!(receiver.recv().await.unwrap().is_ok());
-        let terminal = receiver.recv().await.unwrap();
-        assert!(
-            matches!(terminal, Err(TunnelError::InternalError(message)) if message == "lane failed")
-        );
-        sender.await.unwrap();
-    }
-
-    #[test]
-    fn reliable_frame_limit_matches_the_reader_and_converter() {
-        let frame_limit = QUIC_RELIABLE_MAX_PACKET_SIZE;
-        let mut packet =
-            ZCPacket::new_with_payload(&vec![0x5a; frame_limit - PEER_MANAGER_HEADER_SIZE]);
-        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        let converter = TcpZCPacketToBytes::with_max_frame_size(frame_limit);
-        let encoded = converter.zcpacket_into_bytes(packet).unwrap();
-        let mut reader_buf = BytesMut::from(encoded.as_ref());
-        assert!(matches!(
-            FramedReader::<tokio::io::Empty>::extract_one_packet(
-                &mut reader_buf,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-            ),
-            Some(Ok(_))
-        ));
-
-        let mut oversized =
-            ZCPacket::new_with_payload(&vec![0x5a; frame_limit + 1 - PEER_MANAGER_HEADER_SIZE]);
-        oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        assert!(matches!(
-            converter.zcpacket_into_bytes(oversized),
-            Err(TunnelError::InvalidPacket(message))
-                if message == "framed packet exceeds configured limit"
-        ));
-    }
-
-    #[test]
-    fn reliable_frame_preserves_packet_bytes_without_payload_copy() {
-        let mut packet = ZCPacket::new_with_payload(b"reliable zero copy");
-        packet.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-        let mut packet = packet.convert_type(ZCPacketType::DummyTunnel);
-        let body_offset = packet
-            .packet_type()
-            .get_packet_offsets()
-            .peer_manager_header_offset;
-        let body_ptr = packet.mut_inner().as_ptr().wrapping_add(body_offset);
-        let expected_body = packet.tunnel_payload().to_vec();
-
-        let frame = encode_reliable_frame(packet, QUIC_RELIABLE_MAX_PACKET_SIZE).unwrap();
-
-        assert_eq!(
-            frame.header.as_ref(),
-            &(expected_body.len() as u32).to_le_bytes()
-        );
-        assert_eq!(frame.body.as_ref(), expected_body.as_slice());
-        assert_eq!(frame.body.as_ptr(), body_ptr);
-    }
-
-    #[test]
-    fn reliable_frame_batch_keeps_wire_order() {
-        let mut first = ZCPacket::new_with_payload(b"first reliable frame");
-        first.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-        let mut second = ZCPacket::new_with_payload(b"second reliable frame");
-        second.fill_peer_manager_hdr(1, 2, PacketType::RpcResp as u8);
-
-        let mut encoded = BytesMut::new();
-        for packet in [first, second] {
-            let frame = encode_reliable_frame(packet, QUIC_RELIABLE_MAX_PACKET_SIZE).unwrap();
-            encoded.extend_from_slice(&frame.header);
-            encoded.extend_from_slice(&frame.body);
-        }
-
-        let first = FramedReader::<tokio::io::Empty>::extract_one_packet(
-            &mut encoded,
-            QUIC_RELIABLE_MAX_PACKET_SIZE,
-        )
-        .unwrap()
-        .unwrap();
-        let second = FramedReader::<tokio::io::Empty>::extract_one_packet(
-            &mut encoded,
-            QUIC_RELIABLE_MAX_PACKET_SIZE,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(first.payload(), b"first reliable frame");
-        assert_eq!(second.payload(), b"second reliable frame");
-        assert!(encoded.is_empty());
-    }
-
     fn stopped_client_endpoint() -> (Endpoint, SocketAddr) {
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         let endpoint = rt.block_on(async {
-            QuicEndpointManager::try_create((Ipv4Addr::UNSPECIFIED, 0).into(), false, None).unwrap()
+            QuicEndpointManager::try_create((Ipv4Addr::UNSPECIFIED, 0).into(), false, None)
+                .unwrap()
+                .0
         });
         let local_addr = endpoint.local_addr().unwrap();
         drop(rt);
@@ -3324,76 +4466,6 @@ mod tests {
         (endpoint, local_addr)
     }
 
-    #[test]
-    fn client_endpoints_are_keyed_by_local_source_and_deny_policy() {
-        RUNTIME.block_on(async {
-            let mgr = QuicEndpointManager::new(4);
-            let policy = UnderlayPolicy::default();
-            let source_a: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let source_b: SocketAddr = "[::1]:0".parse().unwrap();
-
-            let endpoint_a = mgr
-                .client_endpoint_for_source(source_a, None, &policy)
-                .unwrap();
-            let endpoint_b = mgr
-                .client_endpoint_for_source(source_b, None, &policy)
-                .unwrap();
-
-            assert_eq!(endpoint_a.local_addr().unwrap().ip(), source_a.ip());
-            assert_eq!(endpoint_b.local_addr().unwrap().ip(), source_b.ip());
-            assert_ne!(
-                endpoint_a.local_addr().unwrap(),
-                endpoint_b.local_addr().unwrap()
-            );
-
-            let denied = UnderlayPolicy::new(&[], &["127.0.0.0/8".into()]).unwrap();
-            let result = mgr.client_endpoint_for_source(source_a, None, &denied);
-            assert!(matches!(result, Err(TunnelError::UnderlayPolicyDenied(_))));
-        });
-    }
-
-    #[test]
-    fn source_port_request_does_not_reuse_a_different_port() {
-        RUNTIME.block_on(async {
-            let mgr = QuicEndpointManager::new(4);
-            let policy = UnderlayPolicy::default();
-            let dynamic = mgr
-                .client_endpoint_for_source("127.0.0.1:0".parse().unwrap(), None, &policy)
-                .unwrap();
-            let dynamic_addr = dynamic.local_addr().unwrap();
-            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let requested_addr = reservation.local_addr().unwrap();
-            drop(reservation);
-
-            let requested = mgr
-                .client_endpoint_for_source(requested_addr, None, &policy)
-                .unwrap();
-
-            assert_eq!(requested.local_addr().unwrap(), requested_addr);
-            assert_ne!(requested.local_addr().unwrap(), dynamic_addr);
-        });
-    }
-
-    #[test]
-    fn source_bound_client_endpoints_remain_bounded() {
-        RUNTIME.block_on(async {
-            let mgr = QuicEndpointManager::new(1);
-
-            for _ in 0..3 {
-                let endpoint =
-                    QuicEndpointManager::try_create("127.0.0.1:0".parse().unwrap(), false, None)
-                        .unwrap();
-                let _connection_owner = mgr.retain_source_endpoint(endpoint);
-            }
-
-            assert_eq!(mgr.ipv4.len(), 1);
-        });
-    }
-
-    #[test]
-    fn quic_pingpong() {
-        RUNTIME.block_on(quic_pingpong_impl())
-    }
     async fn quic_pingpong_impl() {
         let listener = QuicTunnelListener::new("quic://[::]:21011".parse().unwrap(), global_ctx());
         let connector =
@@ -3412,7 +4484,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let tunnel = listener.accept().await.unwrap();
                 let (mut recv, mut send) = tunnel.split();
-                for _ in 0..2 {
+                for _ in 0..3 {
                     let packet = recv.next().await.unwrap().unwrap();
                     send.send(packet).await.unwrap();
                     send.flush().await.unwrap();
@@ -3440,7 +4512,7 @@ mod tests {
             let mut oversized = ZCPacket::new_with_payload(&[0x5a; 9000]);
             oversized.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 
-            for expected in [normal, critical] {
+            for expected in [normal, critical, oversized] {
                 send.send(PacketBatch::singleton(expected.clone()))
                     .await
                     .unwrap();
@@ -3465,15 +4537,6 @@ mod tests {
                 );
             }
 
-            send.send(PacketBatch::singleton(oversized)).await.unwrap();
-            send.flush().await.unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(250), recv.next())
-                    .await
-                    .is_err(),
-                "an oversized lossy packet must not fall back to the reliable CONNECT stream"
-            );
-
             send.close().await.unwrap();
             received_tx.send(()).unwrap();
             server.await.unwrap();
@@ -3481,7 +4544,7 @@ mod tests {
     }
 
     #[test]
-    fn reliable_lane_reset_reports_one_terminal_error() {
+    fn unrelated_http3_request_gets_a_normal_response() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_endpoint = Endpoint::server(
@@ -3492,13 +4555,10 @@ mod tests {
             let server_addr = server_endpoint.local_addr().unwrap();
             let server = tokio::spawn(async move {
                 let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-                activate_reliable_lane(&mut send, &mut recv, false)
-                    .await
-                    .unwrap();
-                send.reset(0_u32.into()).unwrap();
-                recv.stop(0_u32.into()).unwrap();
-                let _ = connection.closed().await;
+                let admission = ConnectIpAdmission {
+                    key: Arc::from(b"correct-test-admission-key".as_slice()),
+                };
+                let _ = accept_connect_ip_request(&connection, Some(&admission), None).await;
             });
 
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -3508,558 +4568,471 @@ mod tests {
                 .unwrap()
                 .await
                 .unwrap();
-            let (mut send_stream, mut recv_stream) = connection.open_bi().await.unwrap();
-            activate_reliable_lane(&mut send_stream, &mut recv_stream, true)
+            let mut builder = h3::client::builder();
+            builder.enable_extended_connect(true).enable_datagram(true);
+            let (mut driver, mut requests) = builder
+                .build::<h3_quinn::Connection, h3_quinn::OpenStreams, Bytes>(
+                    h3_quinn::Connection::new(connection),
+                )
                 .await
                 .unwrap();
-            let tunnel = build_quic_hybrid_tunnel(
-                connection,
-                send_stream,
-                recv_stream,
-                ReliableLaneRole::Initiator,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-                TunnelInfo::default(),
-                &flags,
-                false,
-            )
-            .unwrap();
-            let (mut reader, writer) = tunnel.split();
-            let first = tokio::time::timeout(Duration::from_secs(2), reader.next())
-                .await
-                .unwrap()
-                .expect("the reliable lane reports one terminal error");
-            assert!(first.is_err());
-            drop(writer);
-            server.await.unwrap();
+            let driver = tokio::spawn(async move {
+                let _ = driver.wait_idle().await;
+            });
+            let request = http::Request::builder()
+                .uri("https://example.com/")
+                .body(())
+                .unwrap();
+            let mut stream = requests.send_request(request).await.unwrap();
+            let response = stream.recv_response().await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(
+                response.headers().get("content-type").unwrap(),
+                "text/html; charset=utf-8"
+            );
+            let mut body = stream.recv_data().await.unwrap().unwrap();
+            assert!(
+                body.copy_to_bytes(body.remaining())
+                    .starts_with(b"<!doctype html>")
+            );
+
+            let request = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri(format!("https://example.com{CONNECT_IP_PATH}"))
+                .header("capsule-protocol", "?1")
+                .header("proxy-authorization", "Bearer invalid")
+                .extension(h3::ext::Protocol::CONNECT_IP)
+                .body(())
+                .unwrap();
+            let mut stream = requests.send_request(request).await.unwrap();
+            let response = stream.recv_response().await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+            drop(requests);
+            driver.abort();
+            server.abort();
         });
     }
 
     #[test]
-    fn reliable_lane_truncated_frames_close_the_connection() {
-        RUNTIME.block_on(async {
-            let mut truncated_frames = vec![vec![1, 0]];
-            let mut partial_body = (PEER_MANAGER_HEADER_SIZE as u32).to_le_bytes().to_vec();
-            partial_body.push(0);
-            truncated_frames.push(partial_body);
+    fn connect_ip_admission_tokens_rotate_and_reject_changes() {
+        let admission = ConnectIpAdmission {
+            key: Arc::from(b"test-admission-key-material".as_slice()),
+        };
+        let window = ConnectIpAdmission::window(SystemTime::now());
+        let token = admission.token_for_window(window);
 
-            for truncated_frame in truncated_frames {
-                let flags = gen_default_flags();
-                let server_endpoint = Endpoint::server(
-                    server_config(&flags).unwrap(),
-                    "127.0.0.1:0".parse().unwrap(),
-                )
-                .unwrap();
-                let server_addr = server_endpoint.local_addr().unwrap();
-                let server = tokio::spawn(async move {
-                    let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                    let (mut send, _recv) =
-                        accept_activated_reliable_lane(&connection).await.unwrap();
-                    send.write_all(&truncated_frame).await.unwrap();
-                    send.finish().unwrap();
-                    connection.closed().await
-                });
-
-                let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-                client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-                let connection = client_endpoint
-                    .connect(server_addr, &server_addr.ip().to_string())
-                    .unwrap()
-                    .await
-                    .unwrap();
-                let client_connection = connection.clone();
-                let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
-                let tunnel = build_quic_hybrid_tunnel(
-                    connection,
-                    send,
-                    recv,
-                    ReliableLaneRole::Initiator,
-                    QUIC_RELIABLE_MAX_PACKET_SIZE,
-                    TunnelInfo::default(),
-                    &flags,
-                    false,
-                )
-                .unwrap();
-                let (mut reader, mut writer) = tunnel.split();
-                let item = tokio::time::timeout(Duration::from_secs(2), reader.next())
-                    .await
-                    .unwrap()
-                    .expect("the truncated frame is reported");
-                assert!(item.is_err());
-
-                let close_result = tokio::time::timeout(Duration::from_secs(2), writer.close())
-                    .await
-                    .unwrap();
-                assert!(close_result.is_err());
-                tokio::time::timeout(Duration::from_secs(2), client_connection.closed())
-                    .await
-                    .unwrap();
-                server.await.unwrap();
-            }
-        });
+        assert!(admission.verify_header(&format!("Bearer {token}")));
+        assert!(!admission.verify_header(&format!("Bearer {token}x")));
+        assert!(!admission.verify_header("Bearer invalid"));
     }
 
     #[test]
-    fn reliable_lane_allows_outbound_after_remote_send_fin() {
+    fn routing_connection_ids_validate_and_reject_changes() {
+        let secret = b"routing-test-secret-material";
+        let now = UNIX_EPOCH + Duration::from_secs(1_800);
+        let cid = quic_routing_cid(secret, now);
+        let mut packet = vec![0xc0, 0, 0, 0, 1, cid.len() as u8];
+        packet.extend_from_slice(&cid);
+        packet.resize(1200, 0);
+
+        assert_eq!(cid.len(), QUIC_ROUTING_CID_BYTES);
+        let (prefix, length) = encode_quic_datagram_prefix(0, DATAGRAM_CONTEXT_WHOLE);
+        assert_eq!(length, 2);
+        assert_eq!(&prefix[..2], &[0, 0]);
+        assert!(has_valid_quic_routing_marker(&packet, secret, now));
+        packet[10] ^= 1;
+        assert!(!has_valid_quic_routing_marker(&packet, secret, now));
+    }
+
+    #[test]
+    fn probe_without_marker_is_passed_through_to_decoy() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
+            let upstream = Endpoint::server(
                 server_config(&flags).unwrap(),
                 "127.0.0.1:0".parse().unwrap(),
             )
             .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let (mut send, mut recv) =
-                    accept_activated_reliable_lane(&connection).await.unwrap();
-                send.finish().unwrap();
-                let _keep_initial_receive_open = &mut recv;
-
-                tokio::time::sleep(Duration::from_millis(200)).await;
+            let upstream_addr = upstream.local_addr().unwrap();
+            let upstream_task = tokio::spawn(async move {
+                let connection = upstream.accept().await.unwrap().await.unwrap();
+                let _ = accept_connect_ip_request(&connection, None, None).await;
             });
+            let global_ctx = global_ctx();
+            let mut listener_flags = global_ctx.get_flags();
+            listener_flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            listener_flags.quic_decoy_upstream = upstream_addr.to_string();
+            listener_flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            global_ctx.set_flags(listener_flags);
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
+            listener.listen().await.unwrap();
+            let backend = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let proxy = start_tokio_udp_passthrough(backend).await;
 
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
+            let mut probe = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            probe.set_default_client_config(client_config(&flags).unwrap());
+            let connection = probe
+                .connect(proxy.public, CAMOUFLAGE_HOST)
                 .unwrap()
                 .await
                 .unwrap();
-            let (send_stream, recv_stream) =
-                open_activated_reliable_lane(&connection).await.unwrap();
-            let tunnel = build_quic_hybrid_tunnel(
-                connection,
-                send_stream,
-                recv_stream,
-                ReliableLaneRole::Initiator,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-                TunnelInfo::default(),
-                &flags,
-                false,
-            )
-            .unwrap();
-            let (_recv, mut send) = tunnel.split();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut builder = h3::client::builder();
+            builder.enable_extended_connect(true).enable_datagram(true);
+            let (mut driver, mut requests) = builder
+                .build::<h3_quinn::Connection, h3_quinn::OpenStreams, Bytes>(
+                    h3_quinn::Connection::new(connection),
+                )
+                .await
+                .unwrap();
+            let driver_task = tokio::spawn(async move {
+                let _ = driver.wait_idle().await;
+            });
+            let request = http::Request::builder()
+                .uri(format!("https://{CAMOUFLAGE_HOST}/"))
+                .body(())
+                .unwrap();
+            let mut stream = requests.send_request(request).await.unwrap();
+            let response = stream.recv_response().await.unwrap();
 
-            let mut packet = ZCPacket::new_with_payload(b"after clean eof");
-            packet.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-            send.send(PacketBatch::singleton(packet)).await.unwrap();
-            send.flush().await.unwrap();
-            server.await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            driver_task.abort();
+            upstream_task.abort();
         });
     }
 
     #[test]
-    fn reliable_writer_survives_clean_reader_half_close_during_blocked_write() {
+    fn live_challenges_cloudflare_probe_through_udp_passthrough() {
         RUNTIME.block_on(async {
+            let upstream = tokio::net::lookup_host((CAMOUFLAGE_HOST, 443))
+                .await
+                .expect("resolve challenges.cloudflare.com")
+                .find(SocketAddr::is_ipv4)
+                .expect("challenges.cloudflare.com has IPv4");
+            let global_ctx = global_ctx();
+            let mut listener_flags = global_ctx.get_flags();
+            listener_flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            listener_flags.quic_decoy_upstream = upstream.to_string();
+            listener_flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            global_ctx.set_flags(listener_flags);
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
+            listener.listen().await.unwrap();
+            let backend = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let proxy = start_udp_passthrough(backend).await;
             let mut flags = gen_default_flags();
-            // Keep the peer receive window below one frame. The writer must then resume
-            // a partially written frame after the reader observes a clean FIN.
-            flags.quic_initial_receive_window = 16 * 1024;
-            flags.quic_receive_window = 16 * 1024;
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
+            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            let mut probe = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            probe.set_default_client_config(client_config(&flags).unwrap());
+            let connection = tokio::time::timeout(
+                Duration::from_secs(15),
+                probe.connect(proxy.public, CAMOUFLAGE_HOST).unwrap(),
             )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let (start_server_tx, start_server_rx) = oneshot::channel();
-            let (reader_progress_tx, reader_progress_rx) = oneshot::channel();
-            let (writer_closed_tx, writer_closed_rx) = oneshot::channel();
-            let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                // Keep the receive stream unpolled until the client observes the inbound
-                // reader event. This forces the independent client writer task to suspend
-                // on stream flow control while the client reader observes a clean FIN.
-                let (mut send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
-                start_server_rx.await.unwrap();
-                let mut inbound = ZCPacket::new_with_payload(b"reader progress");
-                inbound.fill_peer_manager_hdr(1, 2, PacketType::RpcResp as u8);
-                let converter =
-                    TcpZCPacketToBytes::with_max_frame_size(QUIC_RELIABLE_MAX_PACKET_SIZE);
-                let frame = converter.zcpacket_into_bytes(inbound).unwrap();
-                send.write_all(frame.as_ref()).await.unwrap();
-                send.finish().unwrap();
-
-                reader_progress_rx.await.unwrap();
-                let mut reader = FramedReader::new(recv, QUIC_RELIABLE_MAX_PACKET_SIZE);
-                let mut received = Vec::with_capacity(2);
-                while received.len() < 2 {
-                    let batch = tokio::time::timeout(Duration::from_secs(5), reader.next())
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .unwrap();
-                    received.push(batch);
-                }
-                let end = tokio::time::timeout(Duration::from_secs(5), reader.next())
-                    .await
-                    .unwrap();
-                assert!(end.is_none(), "the client frame must not be replayed");
-                writer_closed_rx.await.unwrap();
-                assert_eq!(received.len(), 2, "the client sent exactly two frames");
-                let second = received.pop().expect("the second client frame exists");
-                let first = received.pop().expect("the first client frame exists");
-                (first, second)
-            });
-
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
+            .await
+            .expect("probe handshake through passthrough")
+            .expect("probe TLS to challenges.cloudflare.com");
+            let (mut driver, mut requests) = h3::client::builder()
+                .build::<h3_quinn::Connection, h3_quinn::OpenStreams, Bytes>(
+                    h3_quinn::Connection::new(connection),
+                )
                 .await
                 .unwrap();
-            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
-            let tunnel = build_quic_hybrid_tunnel(
-                connection,
-                send,
-                recv,
-                ReliableLaneRole::Initiator,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-                TunnelInfo::default(),
-                &flags,
-                false,
-            )
-            .unwrap();
-            let (mut reader, mut writer) = tunnel.split();
-            let inbound = tokio::spawn(async move {
-                let packet = tokio::time::timeout(Duration::from_secs(5), reader.next())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap()
-                    .pop_singleton()
-                    .unwrap();
-                reader_progress_tx.send(()).unwrap();
-                let end = tokio::time::timeout(Duration::from_secs(5), reader.next())
-                    .await
-                    .unwrap();
-                assert!(end.is_none());
-                packet
+            let driver_task = tokio::spawn(async move {
+                let _ = driver.wait_idle().await;
             });
-
-            let frame_payload_len = 32 * 1024 - PEER_MANAGER_HEADER_SIZE;
-            let mut outbound = ZCPacket::new_with_payload(&vec![0xa5; frame_payload_len]);
-            outbound.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-            let mut outbound_second = ZCPacket::new_with_payload(&vec![0x5a; frame_payload_len]);
-            outbound_second.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-            let mut outbound_batch = PacketBatch::new();
-            outbound_batch.try_push(outbound.clone()).unwrap();
-            outbound_batch.try_push(outbound_second.clone()).unwrap();
-            writer.feed(outbound_batch).await.unwrap();
-            start_server_tx.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(5), writer.close())
-                .await
-                .unwrap()
+            let request = http::Request::builder()
+                .uri(format!("https://{CAMOUFLAGE_HOST}/"))
+                .header("user-agent", "lowertier-probe")
+                .body(())
                 .unwrap();
-            writer_closed_tx.send(()).unwrap();
-
-            let inbound = inbound.await.unwrap();
-            assert_eq!(inbound.payload(), b"reader progress");
-            let (received, received_second) = server.await.unwrap();
-            assert_eq!(received.payload(), outbound.payload());
-            assert_eq!(
-                received.peer_manager_header().unwrap().packet_type,
-                PacketType::RpcReq as u8
-            );
-            assert_eq!(received_second.payload(), outbound_second.payload());
-            assert_eq!(
-                received_second.peer_manager_header().unwrap().packet_type,
-                PacketType::RpcReq as u8
-            );
+            let mut stream = requests.send_request(request).await.unwrap();
+            let _ = stream.finish().await;
+            if let Ok(Ok(response)) =
+                tokio::time::timeout(Duration::from_secs(10), stream.recv_response()).await
+            {
+                assert!(
+                    response.status().is_success() || response.status().is_redirection(),
+                    "probe status {}",
+                    response.status()
+                );
+            }
+            driver_task.abort();
+            drop(proxy);
+            drop(listener);
         });
     }
 
     #[test]
-    fn reliable_close_delivers_the_final_queued_batch() {
+    fn marked_client_reaches_local_quic_listener() {
         RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server_flags = flags.clone();
+            let decoy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let global_ctx = global_ctx();
+            let mut flags = global_ctx.get_flags();
+            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            flags.quic_decoy_upstream = decoy.local_addr().unwrap().to_string();
+            flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            global_ctx.set_flags(flags);
+
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx.clone());
+            listener.listen().await.unwrap();
+            let remote = listener.local_url();
+            let (received_tx, received_rx) = oneshot::channel();
             let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let (send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
-                let tunnel = build_quic_hybrid_tunnel(
-                    connection,
-                    send,
-                    recv,
-                    ReliableLaneRole::Acceptor,
-                    QUIC_RELIABLE_MAX_PACKET_SIZE,
-                    TunnelInfo::default(),
-                    &server_flags,
-                    false,
-                )
-                .unwrap();
-                let (mut reader, _writer) = tunnel.split();
-                let packet = reader
-                    .next()
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .pop_singleton()
-                    .unwrap();
-                let _ = tokio::time::timeout(Duration::from_secs(5), reader.next()).await;
-                packet
+                let tunnel = listener.accept().await.unwrap();
+                let (mut recv, mut send) = tunnel.split();
+                let packet = recv.next().await.unwrap().unwrap();
+                send.send(packet).await.unwrap();
+                send.flush().await.unwrap();
+                received_rx.await.unwrap();
             });
 
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
+            let tunnel = QuicTunnelConnector::new(remote, global_ctx)
+                .connect()
                 .await
                 .unwrap();
-            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
-            let tunnel = build_quic_hybrid_tunnel(
-                connection,
-                send,
-                recv,
-                ReliableLaneRole::Initiator,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-                TunnelInfo::default(),
-                &flags,
-                false,
-            )
-            .unwrap();
-            let (_reader, mut writer) = tunnel.split();
-            let mut packet = ZCPacket::new_with_payload(b"final reliable batch");
-            packet.fill_peer_manager_hdr(1, 2, PacketType::RpcReq as u8);
-            writer
-                .feed(PacketBatch::singleton(packet.clone()))
+            let (mut recv, mut send) = tunnel.split();
+            let mut packet = ZCPacket::new_with_payload(b"marked route");
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+            send.send(PacketBatch::singleton(packet.clone()))
                 .await
                 .unwrap();
-            writer.close().await.unwrap();
-
-            let received = server.await.unwrap();
-            assert_eq!(received.payload(), packet.payload());
-        });
-    }
-
-    #[test]
-    fn local_reliable_close_does_not_cancel_inbound_frames() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server_flags = flags.clone();
-            let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let (send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
-                let tunnel = build_quic_hybrid_tunnel(
-                    connection,
-                    send,
-                    recv,
-                    ReliableLaneRole::Acceptor,
-                    QUIC_RELIABLE_MAX_PACKET_SIZE,
-                    TunnelInfo::default(),
-                    &server_flags,
-                    false,
-                )
-                .unwrap();
-                let (_reader, mut writer) = tunnel.split();
-                let mut packet = ZCPacket::new_with_payload(b"final inbound frame");
-                packet.fill_peer_manager_hdr(1, 2, PacketType::RpcResp as u8);
-                writer
-                    .send(PacketBatch::singleton(packet.clone()))
-                    .await
-                    .unwrap();
-                writer.flush().await.unwrap();
-                delivered_rx.await.unwrap();
-                packet
-            });
-
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await
-                .unwrap();
-            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
-            let tunnel = build_quic_hybrid_tunnel(
-                connection,
-                send,
-                recv,
-                ReliableLaneRole::Initiator,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-                TunnelInfo::default(),
-                &flags,
-                false,
-            )
-            .unwrap();
-            let (mut reader, mut writer) = tunnel.split();
-            writer.close().await.unwrap();
-
-            let received = tokio::time::timeout(Duration::from_secs(2), reader.next())
+            send.flush().await.unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(2), recv.next())
                 .await
                 .unwrap()
                 .unwrap()
                 .unwrap()
                 .pop_singleton()
                 .unwrap();
-            delivered_tx.send(()).unwrap();
-            let expected = server.await.unwrap();
-            assert_eq!(received.payload(), expected.payload());
-        });
-    }
 
-    #[test]
-    fn datagram_only_traffic_keeps_the_reliable_lane_alive() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server_flags = flags.clone();
-            let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let (send, recv) = accept_activated_reliable_lane(&connection).await.unwrap();
-                let tunnel = build_quic_hybrid_tunnel(
-                    connection,
-                    send,
-                    recv,
-                    ReliableLaneRole::Acceptor,
-                    QUIC_RELIABLE_MAX_PACKET_SIZE,
-                    TunnelInfo::default(),
-                    &server_flags,
-                    false,
-                )
-                .unwrap();
-                let (mut reader, _writer) = tunnel.split();
-                tokio::time::timeout(Duration::from_secs(12), reader.next())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap()
-            });
-
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await
-                .unwrap();
-            let (send, recv) = open_activated_reliable_lane(&connection).await.unwrap();
-            let tunnel = build_quic_hybrid_tunnel(
-                connection,
-                send,
-                recv,
-                ReliableLaneRole::Initiator,
-                QUIC_RELIABLE_MAX_PACKET_SIZE,
-                TunnelInfo::default(),
-                &flags,
-                false,
-            )
-            .unwrap();
-            let (_reader, mut writer) = tunnel.split();
-            tokio::time::sleep(Duration::from_secs(8)).await;
-
-            let mut packet = ZCPacket::new_with_payload(b"after idle");
-            packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-            writer
-                .send(PacketBatch::singleton(packet.clone()))
-                .await
-                .unwrap();
-            writer.flush().await.unwrap();
-
-            let received = server.await.unwrap().pop_singleton().unwrap();
             assert_eq!(received.payload(), packet.payload());
+            received_tx.send(()).unwrap();
+            server.await.unwrap();
         });
     }
 
     #[test]
-    fn reliable_lane_activation_has_an_internal_timeout() {
+    fn sni_without_a_routing_marker_reaches_local_when_passthrough() {
+        RUNTIME.block_on(async {
+            let decoy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let global_ctx = global_ctx();
+            let mut flags = global_ctx.get_flags();
+            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            flags.quic_decoy_upstream = decoy.local_addr().unwrap().to_string();
+            flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            flags.quic_sni_passthrough = true;
+            global_ctx.set_flags(flags);
+
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
+            listener.listen().await.unwrap();
+            let public_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let _server = tokio::spawn(async move {
+                let _ = listener.accept().await;
+            });
+
+            let mut probe = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            probe.set_default_client_config(client_config(&gen_default_flags()).unwrap());
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                probe.connect(public_addr, CAMOUFLAGE_HOST).unwrap(),
+            )
+            .await
+            .expect("QUIC handshake through SNI passthrough")
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn unmatched_sni_is_passed_through_when_passthrough() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
+            let upstream = Endpoint::server(
                 server_config(&flags).unwrap(),
                 "127.0.0.1:0".parse().unwrap(),
             )
             .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                accept_activated_reliable_lane(&connection)
-                    .await
-                    .map(|_| ())
+            let upstream_addr = upstream.local_addr().unwrap();
+            let upstream_task = tokio::spawn(async move {
+                let _ = upstream.accept().await.unwrap().await.unwrap();
             });
+            let global_ctx = global_ctx();
+            let mut listener_flags = global_ctx.get_flags();
+            listener_flags.quic_server_name = "lowertier.invalid".to_owned();
+            listener_flags.quic_decoy_upstream = upstream_addr.to_string();
+            listener_flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            listener_flags.quic_sni_passthrough = true;
+            global_ctx.set_flags(listener_flags);
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
+            listener.listen().await.unwrap();
+            let public_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
 
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
+            let mut probe = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            probe.set_default_client_config(client_config(&flags).unwrap());
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                probe.connect(public_addr, CAMOUFLAGE_HOST).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), upstream_task)
                 .await
+                .unwrap()
                 .unwrap();
-            let (_send, _recv) = connection.open_bi().await.unwrap();
-
-            let outcome = tokio::time::timeout(Duration::from_secs(6), server).await;
-            assert!(matches!(outcome, Ok(Ok(Err(_)))));
         });
     }
 
     #[test]
-    fn stalled_activation_does_not_block_a_later_connection() {
+    fn normal_origin_serves_configured_files_and_blocks_parent_paths() {
         RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let mut listener =
-                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
-            listener.listen().await.unwrap();
-            let server_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
-            let remote = listener.local_url();
-            let accepting = tokio::spawn(async move { listener.accept().await });
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("site");
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join("index.html"), b"site home").unwrap();
+            std::fs::write(directory.path().join("private.txt"), b"private").unwrap();
 
-            let mut first_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            first_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let first = first_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await
+            let request = http::Request::builder()
+                .uri("https://example.com/")
+                .body(())
                 .unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let response = normal_origin_response(&request, Some(&root)).await;
+            assert_eq!(response.status, http::StatusCode::OK);
+            assert_eq!(response.body, Bytes::from_static(b"site home"));
 
-            // The per-peer pending-activation bound refuses a second
-            // connection from the same address while the first one stalls.
-            let mut refused_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            refused_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let refused = refused_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await;
-            assert!(
-                refused.is_err(),
-                "a stalled pending peer must bound new ones"
-            );
-
-            // Wait past the bounded activation deadline, then prove a single
-            // normal CONNECT-IP client from the same address can be accepted.
-            tokio::time::sleep(Duration::from_secs(6)).await;
-            let mut connector = QuicTunnelConnector::new(remote, global_ctx());
-            let second = tokio::time::timeout(Duration::from_secs(3), connector.connect())
-                .await
-                .unwrap()
+            let request = http::Request::builder()
+                .uri("https://example.com/../private.txt")
+                .body(())
                 .unwrap();
-            drop(first);
-            drop(second);
-
-            let accepted = tokio::time::timeout(Duration::from_secs(2), accepting).await;
-            assert!(matches!(accepted, Ok(Ok(Ok(_)))));
+            let response = normal_origin_response(&request, Some(&root)).await;
+            assert_eq!(response.status, http::StatusCode::NOT_FOUND);
         });
+    }
+
+    #[test]
+    fn connect_ip_capsules_round_trip_reliable_packets() {
+        let mut packet = ZCPacket::new_with_payload(b"route-control");
+        packet.fill_peer_manager_hdr(3, 4, PacketType::RpcReq as u8);
+        let expected = packet.tunnel_payload().to_vec();
+        let capsule = encode_packet_capsule(packet).unwrap();
+        let mut buffer = BytesMut::from(capsule.as_ref());
+        let decoded = decode_packet_capsules(&mut buffer)
+            .unwrap()
+            .pop_singleton()
+            .unwrap();
+        assert_eq!(decoded.tunnel_payload(), expected);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn connect_ip_keeps_delivery_through_udp_passthrough() {
+        RUNTIME.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (direct_rate, direct_delivery, direct_elapsed) =
+                    measure_connect_ip(true, false).await;
+                let (proxy_rate, proxy_delivery, proxy_elapsed) = measure_connect_ip(true, true).await;
+                if std::env::var_os("LOWTIER_BENCH").is_some() {
+                    eprintln!(
+                        "CONNECT-IP camouflage direct: {direct_rate:.1} Mbit/s, {direct_delivery:.2}% in {direct_elapsed:?}"
+                    );
+                    eprintln!(
+                        "CONNECT-IP camouflage through UDP passthrough: {proxy_rate:.1} Mbit/s, {proxy_delivery:.2}% in {proxy_elapsed:?}"
+                    );
+                }
+                assert!(
+                    direct_delivery >= 99.5,
+                    "direct camouflage delivered {direct_delivery:.2}%"
+                );
+                assert!(
+                    proxy_delivery >= 99.5,
+                    "passthrough camouflage delivered {proxy_delivery:.2}%"
+                );
+            })
+            .await
+            .expect("CONNECT-IP delivery stalled");
+        });
+    }
+
+    async fn measure_connect_ip(camouflage: bool, passthrough: bool) -> (f64, f64, Duration) {
+        const PACKETS: usize = 20_000;
+        const PAYLOAD: usize = 1200;
+        let global_ctx = global_ctx();
+        let decoy = if camouflage {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let mut flags = global_ctx.get_flags();
+            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            flags.quic_decoy_upstream = socket.local_addr().unwrap().to_string();
+            flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            global_ctx.set_flags(flags);
+            Some(socket)
+        } else {
+            None
+        };
+        let mut listener =
+            QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx.clone());
+        listener.listen().await.unwrap();
+        let backend = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+        let proxy = if passthrough {
+            Some(start_udp_passthrough(backend).await)
+        } else {
+            None
+        };
+        let remote = match &proxy {
+            Some(proxy) => camouflage_url(proxy.public.port()),
+            None => listener.local_url(),
+        };
+        let server = tokio::spawn(async move {
+            let tunnel = listener.accept().await.unwrap();
+            let (mut receive, _send) = tunnel.split();
+            let mut received = 0;
+            let mut first = None;
+            let mut last = None;
+            while received < PACKETS {
+                let Ok(Some(Ok(batch))) =
+                    tokio::time::timeout(Duration::from_secs(2), receive.next()).await
+                else {
+                    break;
+                };
+                let now = Instant::now();
+                first.get_or_insert(now);
+                last = Some(now);
+                received += batch.len();
+            }
+            (received, last.unwrap().duration_since(first.unwrap()))
+        });
+        let tunnel = QuicTunnelConnector::new(remote, global_ctx)
+            .connect()
+            .await
+            .unwrap();
+        let (_receive, mut send) = tunnel.split();
+        let mut template = ZCPacket::new_with_payload(&vec![0x5a; PAYLOAD]);
+        template.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        let mut sent = 0;
+        while sent < PACKETS {
+            let count = (PACKETS - sent).min(MAX_PACKET_BATCH_SIZE);
+            let mut batch = PacketBatch::with_capacity(count);
+            for _ in 0..count {
+                batch.try_push(template.clone()).unwrap();
+            }
+            send.send(batch).await.unwrap();
+            sent += count;
+        }
+        send.flush().await.unwrap();
+        let (received, elapsed) = tokio::time::timeout(Duration::from_secs(30), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(received > 0);
+        drop(proxy);
+        drop(decoy);
+        let bits = (received * (PAYLOAD + PEER_MANAGER_HEADER_SIZE) * 8) as f64;
+        (
+            bits / elapsed.as_secs_f64() / 1_000_000.0,
+            received as f64 / PACKETS as f64 * 100.0,
+            elapsed,
+        )
     }
 
     #[test]
@@ -4078,24 +5051,10 @@ mod tests {
     }
 
     #[test]
-    fn quic_pingpong_with_brutal_controller() {
-        RUNTIME.block_on(async {
-            let listener = QuicTunnelListener::new(
-                "quic://127.0.0.1:21014".parse().unwrap(),
-                brutal_global_ctx(),
-            );
-            let connector = QuicTunnelConnector::new(
-                "quic://127.0.0.1:21014".parse().unwrap(),
-                brutal_global_ctx(),
-            );
-            _tunnel_pingpong(listener, connector).await;
-        });
-    }
-
-    #[test]
     fn ipv6_pingpong() {
         RUNTIME.block_on(ipv6_pingpong_impl())
     }
+
     async fn ipv6_pingpong_impl() {
         let listener = QuicTunnelListener::new("quic://[::1]:32015".parse().unwrap(), global_ctx());
         let connector =
@@ -4107,6 +5066,7 @@ mod tests {
     fn ipv6_domain_pingpong() {
         RUNTIME.block_on(ipv6_domain_pingpong_impl())
     }
+
     async fn ipv6_domain_pingpong_impl() {
         let listener = QuicTunnelListener::new("quic://[::1]:32016".parse().unwrap(), global_ctx());
         let mut connector =
@@ -4122,10 +5082,6 @@ mod tests {
         _tunnel_pingpong(listener, connector).await;
     }
 
-    #[test]
-    fn alloc_port() {
-        RUNTIME.block_on(alloc_port_impl())
-    }
     async fn alloc_port_impl() {
         // v4
         let mut listener =
@@ -4141,10 +5097,6 @@ mod tests {
         assert!(port > 0);
     }
 
-    #[test]
-    fn listener_drop_removes_persistent_endpoint() {
-        RUNTIME.block_on(listener_drop_removes_persistent_endpoint_impl())
-    }
     async fn listener_drop_removes_persistent_endpoint_impl() {
         let global_ctx = global_ctx();
         let endpoint_addr = {
@@ -4159,90 +5111,6 @@ mod tests {
         assert!(!QuicEndpointManager::load(&global_ctx).contains_local_addr(endpoint_addr));
     }
 
-    #[test]
-    fn endpoint_manager_key_changes_with_socket_policy() {
-        RUNTIME.block_on(async {
-            let global_ctx = global_ctx();
-            let first = QuicEndpointManager::manager_key(&global_ctx);
-            let mut flags = global_ctx.get_flags();
-            flags.socket_mark = Some(73);
-            global_ctx.set_flags(flags);
-            let second = QuicEndpointManager::manager_key(&global_ctx);
-
-            assert_ne!(first, second);
-        });
-    }
-
-    #[test]
-    fn endpoint_registry_does_not_keep_an_owner_alive() {
-        RUNTIME.block_on(async {
-            let global_ctx = global_ctx();
-            let manager = QuicEndpointManager::load(&global_ctx);
-            let weak = Arc::downgrade(&manager);
-
-            drop(manager);
-
-            assert!(weak.upgrade().is_none());
-        });
-    }
-
-    #[test]
-    fn endpoint_manager_does_not_reuse_an_old_policy_after_aba_update() {
-        RUNTIME.block_on(async {
-            let global_ctx = global_ctx();
-            let original_flags = global_ctx.get_flags();
-            let first = QuicEndpointManager::load(&global_ctx);
-
-            let mut changed_flags = original_flags.clone();
-            changed_flags.socket_mark = Some(81);
-            global_ctx.set_flags(changed_flags);
-            let second = QuicEndpointManager::load(&global_ctx);
-
-            global_ctx.set_flags(original_flags);
-            let third = QuicEndpointManager::load(&global_ctx);
-
-            assert!(!Arc::ptr_eq(&first, &second));
-            assert!(!Arc::ptr_eq(&first, &third));
-            assert!(!Arc::ptr_eq(&second, &third));
-        });
-    }
-
-    #[test]
-    fn connect_removes_stopped_endpoints_and_retries() {
-        let (stopped_endpoint_a, stopped_addr_a) = stopped_client_endpoint();
-        let (stopped_endpoint_b, stopped_addr_b) = stopped_client_endpoint();
-
-        RUNTIME.block_on(async move {
-            let mgr = QuicEndpointManager::new(2);
-            mgr.both.push(stopped_endpoint_a);
-            mgr.both.push(stopped_endpoint_b);
-            assert!(mgr.contains_local_addr(stopped_addr_a));
-            assert!(mgr.contains_local_addr(stopped_addr_b));
-            let flags = gen_default_flags();
-            let err = mgr
-                .connect_with_ip_version(
-                    "127.0.0.1:0".parse().unwrap(),
-                    IpVersion::V4,
-                    None,
-                    QuicConnectSecurity { flags: &flags },
-                )
-                .await
-                .unwrap_err();
-            let err = format!("{:?}", err);
-            assert!(
-                err.contains("invalid remote address"),
-                "unexpected error: {}",
-                err
-            );
-            assert!(!mgr.contains_local_addr(stopped_addr_a));
-            assert!(!mgr.contains_local_addr(stopped_addr_b));
-        });
-    }
-
-    #[test]
-    fn invalid_peer_addr() {
-        RUNTIME.block_on(invalid_peer_addr_impl())
-    }
     async fn invalid_peer_addr_impl() {
         let mut connector =
             QuicTunnelConnector::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
@@ -4279,15 +5147,34 @@ mod tests {
             QuicDelivery::ReliableStream
         );
 
-        let mut oversized = ZCPacket::new_with_payload(&[0x5a; 1500]);
-        oversized.fill_peer_manager_hdr(
+        let mut tap_frame = ZCPacket::new_with_payload(&[0x5a; 1360]);
+        tap_frame.fill_peer_manager_hdr(
             1,
             2,
             crate::tunnel::packet_def::PacketType::Ethernet as u8,
         );
         assert_eq!(
-            select_quic_delivery(&oversized, Some(1200)),
+            select_quic_delivery(&tap_frame, Some(1154)),
             QuicDelivery::PlainDatagram
+        );
+        let mut fragments = VecDeque::new();
+        encode_lossy_quic_datagrams(tap_frame, 0, Some(1154), &mut fragments);
+        assert!(
+            fragments.len() > 1,
+            "a TAP frame larger than the DATAGRAM ceiling must split"
+        );
+        let mut reassembly = DatagramFragments::new();
+        let mut assembled = None;
+        for fragment in fragments {
+            if let Some(packet) = reassembly.ingest(fragment, 0) {
+                assembled = Some(packet);
+            }
+        }
+        assert_eq!(
+            assembled
+                .expect("split TAP frame reassembles")
+                .payload_len(),
+            1360
         );
 
         let mut control = ZCPacket::new_with_payload(b"rpc");
@@ -4303,73 +5190,34 @@ mod tests {
         let mut packet = ZCPacket::new_with_payload(b"datagram-payload");
         packet.fill_peer_manager_hdr(7, 9, crate::tunnel::packet_def::PacketType::Data as u8);
         let expected = packet.tunnel_payload().to_vec();
+        let payload_pointer = packet.tunnel_payload().as_ptr();
 
-        let encoded = h3::encode_datagram(packet, 0);
-        assert_eq!(&encoded[h3::datagram_overhead(0)..], expected);
+        let encoded = encode_quic_datagram(packet, 0);
+        assert_eq!(&encoded[connect_ip_datagram_overhead(0)..], expected);
+        assert_eq!(
+            encoded[connect_ip_datagram_overhead(0)..].as_ptr(),
+            payload_pointer
+        );
 
-        let decoded = h3::decode_datagram(encoded, 0).unwrap();
+        let decoded = decode_quic_datagram(encoded, 0).unwrap();
         assert_eq!(decoded.tunnel_payload(), expected);
         assert!(decoded.is_lossy());
-    }
-
-    #[test]
-    fn datagram_queue_owns_at_most_one_packet_batch() {
+        let decoded_payload_pointer = decoded.tunnel_payload().as_ptr();
+        let reencoded = encode_quic_datagram(decoded, 0);
         assert_eq!(
-            QUIC_DATAGRAM_SEND_BUFFER_BYTES,
-            crate::tunnel::batch::MAX_PACKET_BATCH_SIZE * 1452
+            reencoded[connect_ip_datagram_overhead(0)..].as_ptr(),
+            decoded_payload_pointer
         );
     }
 
     #[test]
-    fn too_large_datagram_keeps_later_and_new_queue_arrivals() {
-        // Quinn returns only the datagrams after the offending mid-batch item.
-        let returned_by_quinn = VecDeque::from([Bytes::from_static(b"after-too-large")]);
-        let arrived_during_send = VecDeque::from([Bytes::from_static(b"new-arrival")]);
-
-        let (result, pending) = QuicHybridWriter::requeue_datagrams_after_send(
-            Err(quinn::SendDatagramError::TooLarge),
-            returned_by_quinn,
-            arrived_during_send,
+    fn datagram_receive_buffer_covers_a_delayed_path() {
+        const WAN_BDP_BYTES: usize = 2 * 1024 * 1024;
+        assert!(QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES >= WAN_BDP_BYTES);
+        assert!(
+            QUIC_DATAGRAM_SEND_BUFFER_BYTES >= MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize
         );
-
-        assert!(result.is_ok());
-        let payloads: Vec<&[u8]> = pending.iter().map(Bytes::as_ref).collect();
-        assert_eq!(payloads, [&b"after-too-large"[..], &b"new-arrival"[..]]);
-    }
-
-    #[test]
-    fn datagram_requeue_preserves_wire_order() {
-        let returned_by_quinn = VecDeque::from([
-            Bytes::from_static(b"unsent-one"),
-            Bytes::from_static(b"unsent-two"),
-        ]);
-        let arrived_during_send = VecDeque::from([
-            Bytes::from_static(b"new-one"),
-            Bytes::from_static(b"new-two"),
-        ]);
-
-        let (result, pending) = QuicHybridWriter::requeue_datagrams_after_send(
-            Ok(()),
-            returned_by_quinn,
-            arrived_during_send,
-        );
-
-        assert!(result.is_ok());
-        let payloads: Vec<&[u8]> = pending.iter().map(Bytes::as_ref).collect();
-        assert_eq!(
-            payloads,
-            [
-                &b"unsent-one"[..],
-                &b"unsent-two"[..],
-                &b"new-one"[..],
-                &b"new-two"[..]
-            ]
-        );
-    }
-
-    #[test]
-    fn malformed_plain_datagram_is_dropped() {
-        assert!(decode_received_quic_datagram(Bytes::from_static(b"short"), 0).is_none());
+        assert!(QUIC_DATAGRAM_SEND_BUFFER_BYTES < WAN_BDP_BYTES);
     }
 
     #[test]
@@ -4399,7 +5247,7 @@ mod tests {
             let client_handshake = handshake
                 .downcast_ref::<quinn::crypto::rustls::HandshakeData>()
                 .expect("QUIC must use rustls TLS 1.3");
-            assert_eq!(client_handshake.protocol, Some(b"h3".to_vec()));
+            assert_eq!(client_handshake.protocol.as_deref(), Some(b"h3".as_slice()));
 
             let server_handshake = server.handshake_data().unwrap();
             let server_handshake = server_handshake
@@ -4417,56 +5265,6 @@ mod tests {
                     .unwrap()
                     .unwrap(),
                 Bytes::from_static(b"after-key-update")
-            );
-        });
-    }
-
-    #[test]
-    fn quic_connection_drains_ready_datagrams_as_one_bounded_batch() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server =
-                tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
-
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let client = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await
-                .unwrap();
-            let server = server.await.unwrap();
-
-            for sequence in 0_u8..8 {
-                client
-                    .send_datagram(Bytes::from(vec![sequence; 32]))
-                    .unwrap();
-            }
-
-            let first = tokio::time::timeout(Duration::from_secs(2), server.read_datagram())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(first[0], 0);
-
-            let ready = tokio::time::timeout(
-                Duration::from_secs(2),
-                server.read_datagrams(Vec::with_capacity(7), 7),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-            assert_eq!(ready.len(), 7);
-            assert_eq!(
-                ready.iter().map(|datagram| datagram[0]).collect::<Vec<_>>(),
-                (1..8).collect::<Vec<_>>()
             );
         });
     }
@@ -4502,6 +5300,7 @@ mod tests {
 
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
+                send_socket: None,
                 telemetry: Arc::new(DataplaneTelemetry::new()),
                 io_observed: QuicIoObserved::default(),
                 _endpoint_manager: None,
@@ -4510,7 +5309,8 @@ mod tests {
                 _source_permit: None,
             });
             let mut writer = hybrid_writer_without_reliable_io(connection);
-            let payload = vec![0x5a; maximum - h3::datagram_overhead(0) - PEER_MANAGER_HEADER_SIZE];
+            let payload =
+                vec![0x5a; maximum - PEER_MANAGER_HEADER_SIZE - connect_ip_datagram_overhead(0)];
             let mut packet = ZCPacket::new_with_payload(&payload);
             packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
 
@@ -4529,7 +5329,7 @@ mod tests {
                 loop {
                     let datagram = server.read_datagram().await.unwrap();
                     if datagram
-                        .get(h3::datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE)
+                        .get(connect_ip_datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE)
                         .is_some_and(|byte| *byte == 0x5a)
                     {
                         break;
@@ -4538,6 +5338,81 @@ mod tests {
             })
             .await
             .unwrap();
+        });
+    }
+
+    #[test]
+    fn quic_writer_starts_staged_datagrams_before_accepting_another_batch() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let flags = gen_default_flags();
+            let server_endpoint = Endpoint::server(
+                server_config(&flags).unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let server_addr = server_endpoint.local_addr().unwrap();
+            let server_task =
+                tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
+
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let client = client_endpoint
+                .connect(server_addr, &server_addr.ip().to_string())
+                .unwrap()
+                .await
+                .unwrap();
+            let server = server_task.await.unwrap();
+            let maximum = client.max_datagram_size().unwrap();
+            let filler = Bytes::from(vec![0; maximum]);
+            while client.datagram_send_buffer_space() >= filler.len() {
+                client.send_datagram(filler.clone()).unwrap();
+            }
+
+            let connection = Arc::new(ConnWrapper {
+                conn: client,
+                send_socket: None,
+                telemetry: Arc::new(DataplaneTelemetry::new()),
+                io_observed: QuicIoObserved::default(),
+                _endpoint_manager: None,
+                _endpoint_owner: None,
+                _memory_permit: None,
+                _source_permit: None,
+            });
+            let mut writer = hybrid_writer_without_reliable_io(connection);
+            let packet = |marker| {
+                let mut packet = ZCPacket::new_with_payload(&[marker; 64]);
+                packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+                PacketBatch::singleton(packet)
+            };
+
+            Pin::new(&mut writer).start_send(packet(0xa1)).unwrap();
+            futures::future::poll_fn(|cx| Pin::new(&mut writer).poll_ready(cx))
+                .await
+                .unwrap();
+            Pin::new(&mut writer).start_send(packet(0xb2)).unwrap();
+            futures::future::poll_fn(|cx| Pin::new(&mut writer).poll_ready(cx))
+                .await
+                .unwrap();
+            Pin::new(&mut writer).start_send(packet(0xc3)).unwrap();
+            futures::future::poll_fn(|cx| Pin::new(&mut writer).poll_flush(cx))
+                .await
+                .unwrap();
+
+            let mut markers = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while markers.len() != 3 {
+                    let datagram = server.read_datagram().await.unwrap();
+                    let marker =
+                        datagram[connect_ip_datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE];
+                    if matches!(marker, 0xa1 | 0xb2 | 0xc3) {
+                        markers.push(marker);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(markers, vec![0xa1, 0xb2, 0xc3]);
         });
     }
 
@@ -4565,6 +5440,7 @@ mod tests {
             let server = server_task.await.unwrap();
             let connection = Arc::new(ConnWrapper {
                 conn: client.clone(),
+                send_socket: None,
                 telemetry: Arc::new(DataplaneTelemetry::new()),
                 io_observed: QuicIoObserved::default(),
                 _endpoint_manager: None,
@@ -4601,7 +5477,9 @@ mod tests {
             assert_eq!(
                 received
                     .iter()
-                    .map(|datagram| datagram[h3::datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE])
+                    .map(|datagram| {
+                        datagram[connect_ip_datagram_overhead(0) + PEER_MANAGER_HEADER_SIZE]
+                    })
                     .collect::<Vec<_>>(),
                 (0..8_u8).collect::<Vec<_>>()
             );
@@ -4609,42 +5487,11 @@ mod tests {
     }
 
     #[test]
-    fn quic_network_identity_is_deterministic_and_secret_bound() {
-        let first = crate::common::config::NetworkIdentity::new(
-            "test-network".to_owned(),
-            "first-secret".to_owned(),
-        );
-        let same = crate::common::config::NetworkIdentity::new(
-            "test-network".to_owned(),
-            "first-secret".to_owned(),
-        );
-        let different = crate::common::config::NetworkIdentity::new(
-            "test-network".to_owned(),
-            "different-secret".to_owned(),
-        );
-
-        let first = tls::network_identity(&first).unwrap().unwrap();
-        let same = tls::network_identity(&same).unwrap().unwrap();
-        let different = tls::network_identity(&different).unwrap().unwrap();
-
-        assert_eq!(first.certificate, same.certificate);
-        assert_eq!(
-            first.private_key.secret_der(),
-            same.private_key.secret_der()
-        );
-        assert_ne!(first.certificate, different.certificate);
-    }
-
-    #[test]
-    fn quic_network_identity_authenticates_both_endpoints() {
+    fn quic_transport_uses_an_ephemeral_identity() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
-            let identity = crate::common::config::NetworkIdentity::new(
-                "test-network".to_owned(),
-                "test-secret".to_owned(),
-            );
             let server_endpoint = Endpoint::server(
-                server_config_for_network(&flags, &identity).unwrap(),
+                server_config(&flags).unwrap(),
                 "127.0.0.1:0".parse().unwrap(),
             )
             .unwrap();
@@ -4653,8 +5500,7 @@ mod tests {
                 tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
 
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint
-                .set_default_client_config(client_config_for_network(&flags, &identity).unwrap());
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let client = client_endpoint
                 .connect(server_addr, &server_addr.ip().to_string())
                 .unwrap()
@@ -4662,48 +5508,26 @@ mod tests {
                 .unwrap();
             let server = server.await.unwrap();
 
-            assert!(connection_has_network_identity(&client, &identity));
-            assert!(connection_has_network_identity(&server, &identity));
+            assert!(client.peer_identity().is_some());
+            assert!(server.peer_identity().is_none());
         });
     }
 
     #[test]
-    fn quic_network_identity_rejects_a_different_secret() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_identity = crate::common::config::NetworkIdentity::new(
-                "test-network".to_owned(),
-                "server-secret".to_owned(),
-            );
-            let client_identity = crate::common::config::NetworkIdentity::new(
-                "test-network".to_owned(),
-                "client-secret".to_owned(),
-            );
-            let server_endpoint = Endpoint::server(
-                server_config_for_network(&flags, &server_identity).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server = tokio::spawn(async move { server_endpoint.accept().await.unwrap().await });
-
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(
-                client_config_for_network(&flags, &client_identity).unwrap(),
-            );
-            let client = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await;
-            let server = server.await.unwrap();
-
-            assert!(client.is_err());
-            assert!(server.is_err());
-        });
+    fn quic_admission_limiter_bounds_global_and_prefix_rates() {
+        let now = Instant::now();
+        let mut limiter = QuicAdmissionLimiter::new();
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        for host in 1..=MAX_QUIC_ADMISSIONS_PER_PREFIX_PER_SECOND {
+            let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, host as u8));
+            assert!(limiter.admit(ip, now));
+        }
+        assert!(!limiter.admit(first, now));
+        assert!(limiter.admit(first, now + Duration::from_secs(1)));
     }
 
     #[test]
-    fn direct_quic_tunnel_defers_peer_authentication_to_noise() {
+    fn direct_quic_tunnel_reports_noise_bound_transport() {
         RUNTIME.block_on(async {
             let server_ctx = global_ctx();
             let client_ctx = global_ctx();
@@ -4724,87 +5548,6 @@ mod tests {
                 client.transport_binding().map(|binding| binding.kind),
                 Some(TransportBindingKind::QuicTlsExporterV1)
             );
-        });
-    }
-
-    #[test]
-    fn quic_transport_binding_matches_peers_and_separates_connections() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let first = server_endpoint.accept().await.unwrap().await.unwrap();
-                let second = server_endpoint.accept().await.unwrap().await.unwrap();
-                (
-                    derive_transport_binding(&first).unwrap(),
-                    derive_transport_binding(&second).unwrap(),
-                )
-            });
-
-            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let first = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await
-                .unwrap();
-            let second = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
-                .unwrap()
-                .await
-                .unwrap();
-
-            let first_binding = derive_transport_binding(&first).unwrap();
-            let second_binding = derive_transport_binding(&second).unwrap();
-            let (server_first_binding, server_second_binding) = server.await.unwrap();
-
-            assert_eq!(first_binding, server_first_binding);
-            assert_eq!(second_binding, server_second_binding);
-            assert_ne!(first_binding, second_binding);
-
-            first.close(0_u32.into(), b"test complete");
-            second.close(0_u32.into(), b"test complete");
-        });
-    }
-
-    #[test]
-    fn secure_protocol_defers_quic_peer_authentication_to_noise() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let accept_endpoint = server_endpoint.clone();
-            let server = tokio::spawn(async move {
-                loop {
-                    let incoming = accept_endpoint.accept().await.unwrap();
-                    if let Ok(connection) = incoming.await {
-                        return connection;
-                    }
-                }
-            });
-
-            let context = global_ctx();
-            let result = QuicEndpointManager::connect(
-                &context,
-                server_addr,
-                &[],
-                Arc::new(UnderlayPolicy::default()),
-            )
-            .await;
-
-            let (_endpoint, connection, authenticated) = result.unwrap();
-            assert!(!authenticated);
-            connection.close(0_u32.into(), b"test complete");
-            let _ = server.await.unwrap();
         });
     }
 
@@ -4837,60 +5580,19 @@ mod tests {
                     local_public_key: None,
                     ..Default::default()
                 }));
-            let (_endpoint, connection, authenticated) = QuicEndpointManager::connect(
-                &context,
-                server_addr,
-                &[],
-                Arc::new(UnderlayPolicy::default()),
-            )
-            .await
-            .unwrap();
+            let (_endpoint, connection, authenticated, _dedicated_endpoint) =
+                QuicEndpointManager::connect(
+                    &context,
+                    server_addr,
+                    &[],
+                    Arc::new(UnderlayPolicy::default()),
+                )
+                .await
+                .unwrap();
             let _server = server.await.unwrap();
 
             assert!(!authenticated);
             connection.close(0_u32.into(), b"test complete");
-        });
-    }
-
-    #[test]
-    fn secure_protocol_defers_network_secret_rejection_to_noise() {
-        RUNTIME.block_on(async {
-            let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let accept_endpoint = server_endpoint.clone();
-            let server = tokio::spawn(async move {
-                loop {
-                    let incoming = accept_endpoint.accept().await.unwrap();
-                    if let Ok(connection) = incoming.await {
-                        return connection;
-                    }
-                }
-            });
-
-            let context = global_ctx();
-            context
-                .config
-                .set_network_identity(crate::common::config::NetworkIdentity::new(
-                    "test-network".to_owned(),
-                    "client-secret".to_owned(),
-                ));
-            let result = QuicEndpointManager::connect(
-                &context,
-                server_addr,
-                &[],
-                Arc::new(UnderlayPolicy::default()),
-            )
-            .await;
-
-            let (_endpoint, connection, authenticated) = result.unwrap();
-            assert!(!authenticated);
-            connection.close(0_u32.into(), b"test complete");
-            let _ = server.await.unwrap();
         });
     }
 }

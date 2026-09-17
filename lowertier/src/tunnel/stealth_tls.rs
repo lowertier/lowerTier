@@ -8,7 +8,7 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::Context as _;
@@ -40,7 +40,7 @@ pub struct NoiseAuthenticatedPeerVerifier(Arc<rustls::crypto::CryptoProvider>);
 
 impl NoiseAuthenticatedPeerVerifier {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
+        Arc::new(Self(stealth_crypto_provider()))
     }
 }
 
@@ -118,15 +118,26 @@ pub fn server_identity(
         return Ok((certs, key));
     }
 
-    let certificate = rcgen::Certificate::from_params(rcgen::CertificateParams::new(Vec::new()))
-        .context("generate ephemeral stealth TLS certificate")?;
-    let cert = CertificateDer::from(
-        certificate
-            .serialize_der()
-            .context("serialize ephemeral stealth TLS certificate")?,
-    );
-    let key = PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
-    Ok((vec![cert], key.into()))
+    Ok(shared_ephemeral_identity())
+}
+
+/// One process-wide self-signed identity for QUIC/H2/WSS when no cert files
+/// are configured. Listeners used to mint a new rcgen key each.
+pub(crate) fn shared_ephemeral_identity() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)
+{
+    static IDENTITY: OnceLock<(Vec<CertificateDer<'static>>, Vec<u8>)> = OnceLock::new();
+    let (certs, key) = IDENTITY.get_or_init(|| {
+        let certificate =
+            rcgen::Certificate::from_params(rcgen::CertificateParams::new(Vec::new()))
+                .expect("generate ephemeral stealth TLS certificate");
+        let cert = CertificateDer::from(
+            certificate
+                .serialize_der()
+                .expect("serialize ephemeral stealth TLS certificate"),
+        );
+        (vec![cert], certificate.serialize_private_key_der())
+    });
+    (certs.clone(), PrivatePkcs8KeyDer::from(key.clone()).into())
 }
 
 pub fn skip_server_verification(flags: &Flags) -> bool {
@@ -152,41 +163,63 @@ pub(crate) fn browser_like_provider() -> rustls::crypto::CryptoProvider {
     provider
 }
 
-fn stealth_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-    let provider = Arc::new(browser_like_provider());
-    let _ = rustls::crypto::CryptoProvider::install_default(browser_like_provider());
-    provider
+pub(crate) fn stealth_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    static PROVIDER: OnceLock<Arc<rustls::crypto::CryptoProvider>> = OnceLock::new();
+    PROVIDER
+        .get_or_init(|| {
+            let provider = browser_like_provider();
+            let _ = rustls::crypto::CryptoProvider::install_default(browser_like_provider());
+            Arc::new(provider)
+        })
+        .clone()
+}
+
+fn native_root_store() -> Result<&'static RootCertStore, TunnelError> {
+    static ROOTS: OnceLock<RootCertStore> = OnceLock::new();
+    if let Some(roots) = ROOTS.get() {
+        return Ok(roots);
+    }
+    let native = rustls_native_certs::load_native_certs();
+    if native.certs.is_empty() {
+        return Err(TunnelError::InternalError(format!(
+            "load native stealth TLS roots: {:?}",
+            native.errors
+        )));
+    }
+    let mut roots = RootCertStore::empty();
+    let (added, ignored) = roots.add_parsable_certificates(native.certs);
+    if added == 0 {
+        return Err(TunnelError::InternalError(format!(
+            "no valid native stealth TLS roots; ignored {ignored} certificates"
+        )));
+    }
+    Ok(ROOTS.get_or_init(|| roots))
 }
 
 pub fn rustls_client_config(
     flags: &Flags,
     alpn: &[&[u8]],
 ) -> Result<rustls::ClientConfig, TunnelError> {
+    rustls_client_config_for(alpn, !skip_server_verification(flags))
+}
+
+pub(crate) fn rustls_client_config_for(
+    alpn: &[&[u8]],
+    verify_certificate: bool,
+) -> Result<rustls::ClientConfig, TunnelError> {
     let provider = stealth_crypto_provider();
     let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
         .context("configure stealth TLS client")?;
-    let mut config = if skip_server_verification(flags) {
+    let mut config = if verify_certificate {
+        builder
+            .with_root_certificates(native_root_store()?.clone())
+            .with_no_client_auth()
+    } else {
         builder
             .dangerous()
             .with_custom_certificate_verifier(NoiseAuthenticatedPeerVerifier::new())
             .with_no_client_auth()
-    } else {
-        let native = rustls_native_certs::load_native_certs();
-        if native.certs.is_empty() {
-            return Err(TunnelError::InternalError(format!(
-                "load native stealth TLS roots: {:?}",
-                native.errors
-            )));
-        }
-        let mut roots = RootCertStore::empty();
-        let (added, ignored) = roots.add_parsable_certificates(native.certs);
-        if added == 0 {
-            return Err(TunnelError::InternalError(format!(
-                "no valid native stealth TLS roots; ignored {ignored} certificates"
-            )));
-        }
-        builder.with_root_certificates(roots).with_no_client_auth()
     };
     config.alpn_protocols = alpn.iter().map(|proto| proto.to_vec()).collect();
     Ok(config)
@@ -393,6 +426,14 @@ mod tests {
         flags.quic_decoy_upstream = "challenges.cloudflare.com:443".to_owned();
         assert!(server_identity_paths(&flags).is_none());
         assert!(skip_server_verification(&flags));
+    }
+
+    #[test]
+    fn stealth_crypto_provider_is_process_wide() {
+        assert!(std::sync::Arc::ptr_eq(
+            &stealth_crypto_provider(),
+            &stealth_crypto_provider()
+        ));
     }
 
     #[test]

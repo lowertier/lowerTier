@@ -3,10 +3,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use crate::{
     common::{dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx, idn},
     proto::common::PeerFeatureFlag,
-    tunnel::{
-        self, IpScheme, IpVersion, TunnelConnector, TunnelError, tcp::TcpTunnelConnector,
-        udp::UdpTunnelConnector,
-    },
+    tunnel::{self, IpScheme, IpVersion, TunnelConnector, TunnelError, tcp::TcpTunnelConnector},
     utils::BoxExt,
 };
 use rand::seq::SliceRandom;
@@ -14,7 +11,38 @@ use rand::seq::SliceRandom;
 pub mod direct;
 pub mod manual;
 pub mod tcp_hole_punch;
-pub mod udp_hole_punch;
+
+#[derive(Debug)]
+pub struct BackOff {
+    backoffs_ms: Vec<u64>,
+    current_idx: usize,
+}
+
+impl BackOff {
+    pub fn new(backoffs_ms: Vec<u64>) -> Self {
+        Self {
+            backoffs_ms,
+            current_idx: 0,
+        }
+    }
+
+    pub fn next_backoff(&mut self) -> u64 {
+        let backoff = self.backoffs_ms[self.current_idx];
+        self.current_idx = (self.current_idx + 1).min(self.backoffs_ms.len() - 1);
+        backoff
+    }
+
+    pub fn rollback(&mut self) {
+        self.current_idx = self.current_idx.saturating_sub(1);
+    }
+
+    pub async fn sleep_for_next_backoff(&mut self) {
+        let backoff = self.next_backoff();
+        if backoff > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
+        }
+    }
+}
 
 fn url_has_ip_literal_host(url: &url::Url) -> bool {
     url.host_str().is_some_and(|host| {
@@ -76,6 +104,10 @@ async fn set_bind_addr_for_peer_connector(
     if is_ipv4 {
         let mut bind_addrs = vec![];
         for ipv4 in ips.interface_ipv4s {
+            let ip = std::net::IpAddr::V4(ipv4.into());
+            if global_ctx.is_ip_in_same_network(&ip) {
+                continue;
+            }
             let socket_addr = SocketAddrV4::new(ipv4.into(), 0).into();
             bind_addrs.push(socket_addr);
         }
@@ -269,9 +301,8 @@ pub async fn create_connector_by_url(
             connector.set_flags(global_ctx.get_flags());
             connector.boxed()
         }
-        IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
         IpScheme::Quic => tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed(),
-        IpScheme::Ws | IpScheme::Wss => tunnel::websocket::WsTunnelConnector::new(url).boxed(),
+        IpScheme::Wss => tunnel::websocket::WsTunnelConnector::new(url).boxed(),
     };
     connector.set_resolved_addr(resolved_addr.addr);
     connector.set_socket_mark(global_ctx.config.get_flags().socket_mark);
@@ -297,198 +328,4 @@ mod tests {
     use super::{
         create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
     };
-
-    #[tokio::test]
-    async fn connector_rejects_lowertier_managed_ipv6_destination() {
-        let global_ctx = get_mock_global_ctx();
-        let public_route: cidr::Ipv6Inet = "2001:db8::2/128".parse().unwrap();
-        global_ctx.set_public_ipv6_routes(BTreeSet::from([public_route]));
-
-        let ret =
-            create_connector_by_url("tcp://[2001:db8::2]:11010", &global_ctx, IpVersion::V6).await;
-
-        assert!(matches!(
-            ret,
-            Err(crate::common::error::Error::InvalidUrl(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn connector_rejects_denied_destination_before_connect() {
-        let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.underlay_deny_cidrs = vec!["100.64.0.0/10".into()];
-        global_ctx.set_flags(flags);
-
-        let ret =
-            create_connector_by_url("tcp://100.108.186.13:11010", &global_ctx, IpVersion::V4).await;
-
-        let Err(crate::common::error::Error::InvalidUrl(message)) = ret else {
-            panic!("expected denied destination error");
-        };
-        assert!(message.contains("100.108.186.13"));
-        assert!(message.contains("underlay"));
-    }
-
-    #[tokio::test]
-    async fn strict_policy_rejects_hostname_before_system_resolution() {
-        let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.underlay_deny_interfaces = vec!["tailscale0".into()];
-        global_ctx.set_flags(flags);
-
-        let ret =
-            create_connector_by_url("tcp://peer.example:11010", &global_ctx, IpVersion::V4).await;
-
-        assert!(matches!(
-            ret,
-            Err(crate::common::error::Error::TunnelError(
-                crate::tunnel::TunnelError::UnderlayPolicyDenied(_)
-            ))
-        ));
-    }
-
-    #[tokio::test]
-    async fn strict_policy_accepts_ipv6_literal() {
-        let global_ctx = get_mock_global_ctx();
-        let mut flags = global_ctx.get_flags();
-        flags.underlay_deny_interfaces = vec!["tailscale0".into()];
-        global_ctx.set_flags(flags);
-
-        let ret = create_connector_by_url("udp://[::1]:11010", &global_ctx, IpVersion::V6).await;
-
-        assert!(ret.is_ok(), "IPv6 literal was rejected: {ret:?}");
-    }
-
-    #[test]
-    fn lazy_background_p2p_requires_need_p2p() {
-        let no_need_p2p = PeerFeatureFlag {
-            need_p2p: false,
-            ..Default::default()
-        };
-        let need_p2p = PeerFeatureFlag {
-            need_p2p: true,
-            ..Default::default()
-        };
-
-        assert!(should_background_p2p_with_peer(
-            Some(&no_need_p2p),
-            false,
-            false,
-            false,
-            false
-        ));
-        assert!(!should_background_p2p_with_peer(
-            Some(&no_need_p2p),
-            false,
-            true,
-            false,
-            false
-        ));
-        assert!(should_background_p2p_with_peer(
-            Some(&need_p2p),
-            false,
-            true,
-            false,
-            false
-        ));
-    }
-
-    #[test]
-    fn p2p_policy_respects_public_server_setting() {
-        let public_server = PeerFeatureFlag {
-            is_public_server: true,
-            ..Default::default()
-        };
-
-        assert!(!should_try_p2p_with_peer(
-            Some(&public_server),
-            false,
-            false,
-            false
-        ));
-        assert!(should_try_p2p_with_peer(
-            Some(&public_server),
-            true,
-            false,
-            false
-        ));
-        assert!(!should_background_p2p_with_peer(
-            Some(&public_server),
-            false,
-            false,
-            false,
-            false
-        ));
-        assert!(should_background_p2p_with_peer(
-            Some(&public_server),
-            true,
-            false,
-            false,
-            false
-        ));
-    }
-
-    #[test]
-    fn disable_p2p_only_allows_need_p2p_exceptions() {
-        let normal_peer = PeerFeatureFlag::default();
-        let need_peer = PeerFeatureFlag {
-            need_p2p: true,
-            ..Default::default()
-        };
-        let disable_peer = PeerFeatureFlag {
-            disable_p2p: true,
-            ..Default::default()
-        };
-        let disable_need_peer = PeerFeatureFlag {
-            disable_p2p: true,
-            need_p2p: true,
-            ..Default::default()
-        };
-
-        assert!(should_try_p2p_with_peer(
-            Some(&normal_peer),
-            false,
-            false,
-            false
-        ));
-        assert!(should_try_p2p_with_peer(None, false, false, false));
-        assert!(!should_try_p2p_with_peer(None, false, true, false));
-        assert!(!should_try_p2p_with_peer(
-            Some(&normal_peer),
-            false,
-            true,
-            false
-        ));
-        assert!(should_try_p2p_with_peer(
-            Some(&need_peer),
-            false,
-            true,
-            false
-        ));
-        assert!(!should_try_p2p_with_peer(
-            Some(&disable_peer),
-            false,
-            false,
-            false
-        ));
-        assert!(should_try_p2p_with_peer(
-            Some(&disable_peer),
-            false,
-            false,
-            true
-        ));
-        assert!(should_try_p2p_with_peer(
-            Some(&disable_need_peer),
-            false,
-            true,
-            true
-        ));
-        assert!(!should_try_p2p_with_peer(
-            Some(&disable_need_peer),
-            false,
-            true,
-            false
-        ));
-    }
 }

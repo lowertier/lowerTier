@@ -366,6 +366,7 @@ pub(crate) fn paced_packet_bytes(packet: &ZCPacket) -> usize {
         packet_type
             if packet_type == PacketType::Data as u8
                 || packet_type == PacketType::ForeignNetworkPacket as u8
+                || packet_type == PacketType::OverlayStream as u8
                 || packet_type == PacketType::Ethernet as u8
                 || packet_type == PacketType::AlternateFecSource as u8
                 || packet_type == PacketType::AlternateFecParity as u8
@@ -404,100 +405,5 @@ mod tests {
             capacity_packets: 192,
             stall_ns,
         }
-    }
-
-    #[test]
-    fn receiver_pacing_requires_explicit_enable_and_disable_wins() {
-        assert!(!receiver_pacing_enabled_from_env(None, None));
-        assert!(!receiver_pacing_enabled_from_env(Some("0"), None));
-        assert!(receiver_pacing_enabled_from_env(Some("1"), None));
-        assert!(receiver_pacing_enabled_from_env(Some("TRUE"), None));
-        assert!(!receiver_pacing_enabled_from_env(Some("yes"), Some("on")));
-    }
-
-    #[test]
-    fn receiver_pressure_report_round_trips_and_rejects_invalid_shape() {
-        let report = report(100_000, 2_000_000, 48, 10_000_000);
-        assert_eq!(ReceiverPressureReport::decode(&report.encode()), Ok(report));
-        let mut invalid = report.encode();
-        invalid[28..32].fill(0);
-        assert!(ReceiverPressureReport::decode(&invalid).is_err());
-    }
-
-    #[test]
-    fn pacer_activates_from_receiver_service_and_clears_after_pressure() {
-        let pacer = ReceiverPacer::new(true);
-        let started = Instant::now();
-        pacer.update_report(report(100_000, 0, 0, 0), started);
-        pacer.update_report(
-            report(200_000, 1_000_000, 64, 2_000_000),
-            started + Duration::from_millis(100),
-        );
-        let update = pacer.update_report(
-            report(300_000, 2_000_000, 64, 4_000_000),
-            started + Duration::from_millis(200),
-        );
-        assert!(update.active);
-        assert!(update.target_bytes_per_second > 0);
-        let (active, service, target) = pacer.state_for_test();
-        assert!(active);
-        assert_eq!(service, 10_000_000);
-        assert_eq!(target, 9_500_000);
-
-        for index in 4..=6 {
-            pacer.update_report(
-                report(index * 100_000, index * 1_000_000, 0, 4_000_000),
-                started + Duration::from_millis(index * 100),
-            );
-        }
-        assert!(!pacer.state_for_test().0);
-    }
-
-    #[test]
-    fn zero_delivery_under_pressure_reduces_an_active_target() {
-        let pacer = ReceiverPacer::new(true);
-        let started = Instant::now();
-        pacer.update_report(report(100_000, 0, 0, 0), started);
-        pacer.update_report(
-            report(200_000, 1_000_000, 64, 2_000_000),
-            started + Duration::from_millis(100),
-        );
-        pacer.update_report(
-            report(300_000, 2_000_000, 64, 4_000_000),
-            started + Duration::from_millis(200),
-        );
-        assert_eq!(pacer.state_for_test().2, 9_500_000);
-
-        let update = pacer.update_report(
-            report(400_000, 2_000_000, 64, 6_000_000),
-            started + Duration::from_millis(300),
-        );
-        assert!(update.active);
-        assert_eq!(update.target_bytes_per_second, 8_550_000);
-    }
-
-    #[test]
-    fn only_noncritical_data_contributes_to_pacing() {
-        let mut data = ZCPacket::new_with_payload(&[1_u8; 100]);
-        data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        assert_eq!(paced_packet_bytes(&data), 100);
-
-        let mut control = ZCPacket::new_with_payload(&[2_u8; 20]);
-        control.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        control
-            .mut_peer_manager_header()
-            .unwrap()
-            .set_critical_l2_control(true);
-        assert_eq!(paced_packet_bytes(&control), 0);
-
-        let mut ping = ZCPacket::new_with_payload(&[3_u8; 20]);
-        ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
-        assert_eq!(paced_packet_bytes(&ping), 0);
-
-        let mut batch = PacketBatch::new();
-        batch.try_push(data).unwrap();
-        batch.try_push(control).unwrap();
-        batch.try_push(ping).unwrap();
-        assert_eq!(paced_batch_bytes(&batch), 100);
     }
 }

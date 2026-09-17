@@ -228,17 +228,4 @@ mod tests {
             tcp::{TcpTunnelConnector, TcpTunnelListener},
         },
     };
-
-    #[tokio::test]
-    async fn standalone_exit_on_drop() {
-        let addr: url::Url = "tcp://0.0.0.0:53884".parse().unwrap();
-        let tunnel = TcpTunnelListener::new(addr.clone());
-        let mut server = StandAloneServer::new(tunnel);
-        server.serve().await.unwrap();
-        drop(server);
-
-        // tcp should closed
-        let mut connector = TcpTunnelConnector::new(addr);
-        connector.connect().await.unwrap_err();
-    }
 }

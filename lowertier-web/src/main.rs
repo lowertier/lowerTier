@@ -16,7 +16,7 @@ use lowertier::{
         log,
         network::{local_ipv4, local_ipv6},
     },
-    tunnel::{TunnelListener, tcp::TcpTunnelListener, udp::UdpTunnelListener},
+    tunnel::{TunnelListener, tcp::TcpTunnelListener},
     utils::panic::setup_panic_handler,
 };
 
@@ -233,9 +233,8 @@ impl LoggingConfigLoader for &Cli {
 pub fn get_listener_by_url(scheme: IpScheme, l: &url::Url) -> Option<Box<dyn TunnelListener>> {
     Some(match scheme {
         IpScheme::Tcp => TcpTunnelListener::new(l.clone()).boxed(),
-        IpScheme::Udp => UdpTunnelListener::new(l.clone()).boxed(),
-        IpScheme::Ws => WsTunnelListener::new(l.clone()).boxed(),
-        _ => return None,
+        IpScheme::Wss => WsTunnelListener::new(l.clone()).boxed(),
+        IpScheme::Quic => return None,
     })
 }
 
@@ -253,7 +252,7 @@ async fn get_dual_stack_listener(
         .parse()
         .map_err(|_| Error::InvalidUrl(protocol.to_string()))?;
     let v6_listener =
-        if local_ipv6().await.is_ok() && matches!(scheme, IpScheme::Tcp | IpScheme::Udp) {
+        if local_ipv6().await.is_ok() && matches!(scheme, IpScheme::Tcp) {
             get_listener_by_url(
                 scheme,
                 &format!("{protocol}://[::]:{port}").parse().unwrap(),

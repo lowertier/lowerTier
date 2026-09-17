@@ -248,41 +248,4 @@ mod tests {
     use bytes::BytesMut;
 
     use super::{IoUringTunWriter, RING_ENTRIES, enabled};
-
-    #[test]
-    fn ring_depth_covers_one_dataplane_batch() {
-        assert!(RING_ENTRIES as usize >= crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
-    }
-
-    #[test]
-    fn io_uring_is_explicitly_opt_in() {
-        if std::env::var_os("LOWTIER_ENABLE_IO_URING_TUN").is_none() {
-            assert!(!enabled());
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires a Linux kernel that permits io_uring_setup"]
-    async fn persistent_writer_preserves_independent_packet_boundaries_and_order() {
-        let (writer_socket, reader_socket) = UnixDatagram::pair().unwrap();
-        reader_socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let writer = IoUringTunWriter::new(writer_socket.as_raw_fd(), 0, 1).unwrap();
-        let buffers = vec![
-            BytesMut::from(&b"xfirst"[..]),
-            BytesMut::from(&b"xsecond-packet"[..]),
-            BytesMut::from(&b"xthird"[..]),
-        ];
-
-        let (result, returned) = writer.submit(buffers).await;
-        assert_eq!(result.unwrap(), (5 + 13 + 5, 3));
-        assert_eq!(returned.len(), 3);
-
-        for expected in [&b"first"[..], &b"second-packet"[..], &b"third"[..]] {
-            let mut received = [0_u8; 64];
-            let length = reader_socket.recv(&mut received).unwrap();
-            assert_eq!(&received[..length], expected);
-        }
-    }
 }

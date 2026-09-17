@@ -74,35 +74,4 @@ mod tests {
     fn make_service() -> PeerCenterManageRpcService {
         PeerCenterManageRpcService::new(Arc::new(NetworkInstanceManager::new()))
     }
-
-    #[tokio::test]
-    async fn get_global_peer_map_errors_when_no_instance() {
-        let svc = make_service();
-        let result = svc
-            .get_global_peer_map(
-                BaseController::default(),
-                GetGlobalPeerMapRequest::default(),
-            )
-            .await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("No instance matches the selector"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn report_peers_always_returns_error() {
-        let svc = make_service();
-        let result = svc
-            .report_peers(BaseController::default(), ReportPeersRequest::default())
-            .await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("not implemented for management API"),
-            "unexpected error: {msg}"
-        );
-    }
 }

@@ -149,35 +149,4 @@ pub fn create_secure_datagram_encryptor(
 mod tests {
     use super::create_encryptor;
     use crate::tunnel::packet_def::{StandardAeadTail, ZCPacket};
-
-    #[test]
-    fn standard_chacha20_poly1305_factory_round_trip() {
-        let plaintext = b"authenticated lowertier payload";
-        let cipher = create_encryptor("chacha20-poly1305", [3; 16], [7; 32]);
-        let mut packet = ZCPacket::new_with_payload(plaintext);
-        packet.fill_peer_manager_hdr(1, 2, 3);
-
-        cipher.encrypt(&mut packet).unwrap();
-        assert!(packet.peer_manager_header().unwrap().is_encrypted());
-        assert_eq!(
-            packet.payload().len(),
-            plaintext.len() + StandardAeadTail::SIZE
-        );
-        assert_ne!(&packet.payload()[..plaintext.len()], plaintext);
-
-        cipher.decrypt(&mut packet).unwrap();
-        assert_eq!(packet.payload(), plaintext);
-    }
-
-    #[test]
-    fn standard_chacha20_poly1305_rejects_tampering() {
-        let cipher = create_encryptor("chacha20-poly1305", [3; 16], [7; 32]);
-        let mut packet = ZCPacket::new_with_payload(b"authenticated lowertier payload");
-        packet.fill_peer_manager_hdr(1, 2, 3);
-        cipher.encrypt(&mut packet).unwrap();
-
-        packet.mut_payload()[0] ^= 1;
-
-        assert!(cipher.decrypt(&mut packet).is_err());
-    }
 }

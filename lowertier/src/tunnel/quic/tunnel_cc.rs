@@ -7,8 +7,8 @@ use quinn_proto::{
 
 /// Quinn disables its userspace pacer above this congestion window.
 ///
-/// Tunnel packets already contain transports with their own congestion rules.
-/// This controller keeps QUIC packet protection and removes the second controller.
+/// Overlay packets already contain transports with their own congestion rules.
+/// This controller keeps QUIC packet protection and removes a second pacer.
 const UNPACED_TUNNEL_WINDOW_BYTES: u64 = u32::MAX as u64 + 1;
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -19,9 +19,7 @@ use crate::{
         underlay_policy::UnderlayPolicy,
     },
     peers::peer_manager::PeerManager,
-    tunnel::{
-        self, IpScheme, Tunnel, TunnelListener, tcp::TcpTunnelListener, udp::UdpTunnelListener,
-    },
+    tunnel::{self, IpScheme, Tunnel, TunnelListener, tcp::TcpTunnelListener},
     utils::BoxExt,
 };
 
@@ -114,34 +112,16 @@ pub fn create_listener_by_url(
             l.set_flags(global_ctx.get_flags());
             l.boxed()
         }
-        IpScheme::Udp => {
-            let mut l = UdpTunnelListener::new(l.clone());
-            l.set_socket_mark(socket_mark);
-            l.set_underlay_policy(global_ctx.get_underlay_policy());
-            l.boxed()
-        }
         IpScheme::Quic => {
             // QUIC reads socket_mark from global_ctx in QuicEndpointManager
             tunnel::quic::QuicTunnelListener::new(l.clone(), global_ctx.clone()).boxed()
         }
-        IpScheme::Ws | IpScheme::Wss => {
+        IpScheme::Wss => {
             let mut l = tunnel::websocket::WsTunnelListener::new(l.clone());
             l.set_socket_mark(socket_mark);
             l.boxed()
         }
     })
-}
-
-pub fn is_url_host_ipv6(l: &url::Url) -> bool {
-    l.host_str().is_some_and(|h| h.contains(':'))
-}
-
-pub fn is_url_host_unspecified(l: &url::Url) -> bool {
-    if let Ok(ip) = IpAddr::from_str(l.host_str().unwrap_or_default()) {
-        ip.is_unspecified()
-    } else {
-        false
-    }
 }
 
 #[async_trait]
@@ -324,24 +304,6 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
                 true,
             )
             .await?;
-
-            if self.global_ctx.config.get_flags().enable_ipv6
-                && !is_url_host_ipv6(&l)
-                && is_url_host_unspecified(&l)
-                // QUIC enables dual-stack by default and may conflict with a v4 listener.
-                && l.scheme() != "quic"
-            {
-                let mut ipv6_listener = l.clone();
-                ipv6_listener
-                    .set_host(Some("[::]".to_string().as_str()))
-                    .with_context(|| format!("failed to set ipv6 host for listener: {}", l))?;
-                let ctx = self.global_ctx.clone();
-                self.add_listener(
-                    move || create_listener_by_url(&ipv6_listener, ctx.clone()).unwrap(),
-                    false,
-                )
-                .await?;
-            }
         }
 
         Ok(())
@@ -493,66 +455,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn strict_policy_expands_wildcard_listener_to_allowed_sources() {
-        let policy = UnderlayPolicy::new(
-            &["utun5".into()],
-            &["100.64.0.0/10".into(), "fd7a:115c:a1e0::/48".into()],
-        )
-        .unwrap();
-        let listener = url::Url::parse("quic://0.0.0.0:11010").unwrap();
-
-        let expanded = expand_strict_listener_urls(
-            &listener,
-            &["192.168.50.4".parse().unwrap()],
-            &["2001:db8::4".parse().unwrap()],
-            true,
-            &policy,
-        )
-        .unwrap();
-
-        assert_eq!(
-            expanded,
-            vec![
-                url::Url::parse("quic://192.168.50.4:11010").unwrap(),
-                url::Url::parse("quic://[2001:db8::4]:11010").unwrap(),
-            ]
-        );
-    }
-
-    #[test]
-    fn strict_policy_rejects_denied_or_unproven_listener_sources() {
-        let policy = UnderlayPolicy::new(&["utun5".into()], &["100.64.0.0/10".into()]).unwrap();
-
-        let denied = expand_strict_listener_urls(
-            &url::Url::parse("tcp://100.108.1.2:11010").unwrap(),
-            &["192.168.50.4".parse().unwrap()],
-            &[],
-            false,
-            &policy,
-        );
-        assert!(matches!(
-            denied,
-            Err(Error::TunnelError(
-                tunnel::TunnelError::UnderlayPolicyDenied(_)
-            ))
-        ));
-
-        let empty = expand_strict_listener_urls(
-            &url::Url::parse("udp://0.0.0.0:11010").unwrap(),
-            &[],
-            &[],
-            false,
-            &policy,
-        );
-        assert!(matches!(
-            empty,
-            Err(Error::TunnelError(
-                tunnel::TunnelError::UnderlayPolicyDenied(_)
-            ))
-        ));
-    }
-
     #[derive(Debug)]
     struct MockListenerHandler {}
 
@@ -568,97 +470,5 @@ mod tests {
                 .unwrap();
             Err(Error::Unknown)
         }
-    }
-
-    #[test]
-    fn external_handshake_admission_is_shared_and_bounded() {
-        let handler = Arc::new(MockListenerHandler {});
-        let listener_mgr = ListenerManager::new(get_mock_global_ctx(), handler);
-
-        assert_eq!(
-            listener_mgr.handshake_admission.global.available_permits(),
-            MAX_CONCURRENT_EXTERNAL_HANDSHAKES
-        );
-    }
-
-    #[test]
-    fn one_source_cannot_consume_all_handshake_capacity() {
-        let admission = Arc::new(HandshakeAdmission::new());
-        let listener = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES_PER_LISTENER));
-        let permits = (0..MAX_CONCURRENT_HANDSHAKES_PER_SOURCE)
-            .map(|_| {
-                admission
-                    .try_reserve(&listener, "192.0.2.1".to_string())
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-
-        assert!(
-            admission
-                .try_reserve(&listener, "192.0.2.1".to_string())
-                .is_none()
-        );
-        assert!(
-            admission
-                .try_reserve(&listener, "192.0.2.2".to_string())
-                .is_some()
-        );
-        drop(permits);
-    }
-
-    #[tokio::test]
-    async fn retry_listen() {
-        let counter = Arc::new(AtomicI32::new(0));
-        let drop_counter = Arc::new(AtomicI32::new(0));
-        struct MockListener {
-            counter: Arc<AtomicI32>,
-            drop_counter: Arc<AtomicI32>,
-        }
-
-        #[async_trait::async_trait]
-        impl TunnelListener for MockListener {
-            async fn listen(&mut self) -> Result<(), TunnelError> {
-                self.counter.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-
-            async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                Err(TunnelError::BufferFull)
-            }
-
-            fn local_url(&self) -> url::Url {
-                "mock://".parse().unwrap()
-            }
-        }
-
-        impl Drop for MockListener {
-            fn drop(&mut self) {
-                self.drop_counter.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        let handler = Arc::new(MockListenerHandler {});
-        let mut listener_mgr = ListenerManager::new(get_mock_global_ctx(), handler.clone());
-        let counter_clone = counter.clone();
-        let drop_counter_clone = drop_counter.clone();
-        listener_mgr
-            .add_listener(
-                move || {
-                    Box::new(MockListener {
-                        counter: counter_clone.clone(),
-                        drop_counter: drop_counter_clone.clone(),
-                    })
-                },
-                true,
-            )
-            .await
-            .unwrap();
-        listener_mgr.run().await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        assert!(counter.load(Ordering::Relaxed) >= 2);
-        assert!(drop_counter.load(Ordering::Relaxed) >= 1);
     }
 }

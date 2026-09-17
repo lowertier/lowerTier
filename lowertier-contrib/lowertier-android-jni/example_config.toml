@@ -11,10 +11,10 @@ network = "my_lowertier_network"
 # network_secret = "your_secret_key_here"
 
 # 监听地址 (可选)
-# listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
+# listeners = ["tcp://0.0.0.0:11010", "quic://0.0.0.0:11012"]
 
 # 对等节点地址 (可选)
-# peers = ["tcp://peer1.example.com:11010", "udp://peer2.example.com:11010"]
+# peers = ["tcp://peer1.example.com:11010", "quic://peer2.example.com:11012"]
 
 # 虚拟 IP 地址 (可选)
 # ipv4 = "10.144.144.1"
@@ -56,10 +56,6 @@ network = "my_lowertier_network"
 # underlay_deny_interfaces = ["tailscale0"]
 # underlay_deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 
-# QUIC 默认使用 BBR。Brutal 使用固定发送速率，必须按真实可用带宽保守设置。
-# quic_congestion = "brutal"
-# quic_brutal_send_bps = 50000000
-# quic_brutal_loss_compensation = true
 # quic_initial_receive_window = 8388608
 # quic_receive_window = 33554432
 

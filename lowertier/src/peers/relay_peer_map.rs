@@ -882,10 +882,6 @@ impl RelayPeerMap {
             .clone()
     }
 
-    fn set_send_phase(&self, peer_id: PeerId, phase: RelaySendPhase) {
-        self.ensure_send_state(peer_id, phase).set_phase(phase);
-    }
-
     fn set_confirmation_identity(
         &self,
         peer_id: PeerId,
@@ -987,21 +983,6 @@ impl RelayPeerMap {
             return Ok(());
         }
         self.bind_relay_session_auth(peer_id, session).map(|_| ())
-    }
-
-    fn validate_relay_session_auth(
-        &self,
-        peer_id: PeerId,
-        session: &PeerSession,
-        requires_bridge_grant: bool,
-    ) -> Result<(OriginAuthEntry, Option<OriginAuthGrant>), Error> {
-        let snapshot = self.peer_map.origin_auth_snapshot();
-        self.validate_relay_session_auth_from_snapshot(
-            peer_id,
-            session,
-            requires_bridge_grant,
-            &snapshot,
-        )
     }
 
     fn validate_relay_session_identity_from_snapshot(
@@ -1980,16 +1961,6 @@ impl RelayPeerMap {
         }
     }
 
-    async fn send_via_next_hop_batch(
-        &self,
-        batch: PacketBatch,
-        dst_peer_id: PeerId,
-        policy: NextHopPolicy,
-    ) -> Result<(), Error> {
-        self.send_via_next_hop_batch_at(batch, dst_peer_id, policy, None)
-            .await
-    }
-
     async fn send_via_next_hop_batch_at(
         &self,
         batch: PacketBatch,
@@ -2396,48 +2367,6 @@ impl RelayPeerMap {
             .await
     }
 
-    pub(crate) fn buffer_pending_packet(
-        &self,
-        dst_peer_id: PeerId,
-        pkt: ZCPacket,
-        policy: NextHopPolicy,
-    ) -> Result<(), Error> {
-        let state = self.ensure_send_state(dst_peer_id, RelaySendPhase::AwaitingSession);
-        if state.closed.load(Ordering::Acquire) {
-            return Err(Error::RouteError(Some(
-                "relay peer state is closed".to_string(),
-            )));
-        }
-        let authorization = self.packet_authorization_token(&pkt, dst_peer_id, None);
-        state.enqueue(pkt, policy, authorization).map(|_| ())
-    }
-
-    fn buffer_pending_batch(
-        &self,
-        dst_peer_id: PeerId,
-        batch: PacketBatch,
-        policy: NextHopPolicy,
-    ) -> Result<(), Error> {
-        let state = self.ensure_send_state(dst_peer_id, RelaySendPhase::AwaitingSession);
-        let authorization = batch.iter().any(|packet| {
-            packet
-                .peer_manager_header()
-                .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
-        });
-        let authorization =
-            authorization.then(|| self.full_ethernet_authorization_token(dst_peer_id, None));
-        state
-            .enqueue_batch(batch.into_iter().map(|packet| {
-                let token = packet
-                    .peer_manager_header()
-                    .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
-                    .then(|| authorization.clone())
-                    .flatten();
-                (packet, policy.clone(), token)
-            }))
-            .map(|_| ())
-    }
-
     pub(crate) async fn flush_pending_packets(
         self: &Arc<Self>,
         dst_peer_id: PeerId,
@@ -2616,12 +2545,6 @@ impl RelayPeerMap {
                 }
             }
         });
-    }
-
-    pub(crate) fn pending_packet_count(&self, dst_peer_id: PeerId) -> usize {
-        self.send_state(dst_peer_id)
-            .map(|state| state.packet_count())
-            .unwrap_or_default()
     }
 
     #[cfg(test)]

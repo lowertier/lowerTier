@@ -41,3 +41,10 @@ debug-assertions = false
 overflow-checks = false
 incremental = false
 rpath = false
+
+[profile.perf]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+strip = false
+incremental = true

@@ -1874,6 +1874,7 @@ fn tail_loss_respect_max_datagrams() {
     assert_eq!(client_stats.udp_tx.ios, client_stats.udp_tx.datagrams);
 }
 
+
 #[test]
 fn datagram_send_recv() {
     let _guard = subscribe();
@@ -1893,6 +1894,117 @@ fn datagram_send_recv() {
     );
     assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
     assert_matches!(pair.server_datagrams(server_ch).recv(), None);
+}
+
+#[test]
+fn datagram_fast_seal_keeps_queue_and_flight_budgets_separate() {
+    let mut pair = Pair::default();
+    pair.latency = Duration::from_millis(40);
+    let mut config = client_config();
+    config.transport = Arc::new(TransportConfig {
+        datagram_send_buffer_size: 1200,
+        ..TransportConfig::default()
+    });
+    let (client_ch, _) = pair.connect_with(config);
+    let now = pair.time;
+    let conn = pair.client_conn_mut(client_ch);
+    let mut payloads = (0..8u8)
+        .map(|value| Bytes::from(vec![value; 1000]))
+        .collect();
+    let mut packets = Vec::new();
+    assert!(!conn.seal_application_datagrams(now, &mut payloads, &mut packets));
+    assert!(payloads.is_empty());
+    assert_eq!(packets.len(), 8);
+    assert!(conn.stats().path.in_flight > 1200);
+    assert!(conn.stats().path.in_flight <= conn.stats().path.cwnd);
+    assert_eq!(conn.datagrams().send_buffer_space(), 1200);
+}
+
+#[test]
+fn datagram_fast_seal_pacing_timer_wakes_without_an_ack() {
+    let mut pair = Pair::default();
+    pair.latency = Duration::from_millis(40);
+    let mut congestion = congestion::BbrConfig::default();
+    congestion.initial_window(128 * 1200);
+    let mut config = client_config();
+    config.transport = Arc::new(TransportConfig {
+        congestion_controller_factory: Arc::new(congestion),
+        ..TransportConfig::default()
+    });
+    let (client_ch, _) = pair.connect_with(config);
+    let now = pair.time;
+    let conn = pair.client_conn_mut(client_ch);
+    let mut payloads = (0..64u8)
+        .map(|value| Bytes::from(vec![value; 1000]))
+        .collect();
+    let mut packets = Vec::new();
+    assert!(conn.seal_application_datagrams(now, &mut payloads, &mut packets));
+    assert!(!packets.is_empty());
+    assert!(conn.stats().path.in_flight < conn.stats().path.cwnd / 2);
+    let sent = packets.len();
+    assert_eq!(payloads.front().unwrap()[0], sent as u8);
+    let deadline = conn.poll_timeout().unwrap();
+    assert!(deadline > now);
+    assert!(deadline < now + Duration::from_millis(40));
+    // No packet or ACK is delivered before the next pacing deadline.
+    conn.handle_timeout(deadline);
+    let mut unblocked = false;
+    while let Some(event) = conn.poll() {
+        unblocked |= matches!(event, Event::DatagramsUnblocked);
+    }
+    assert!(unblocked);
+    packets.clear();
+    conn.seal_application_datagrams(deadline, &mut payloads, &mut packets);
+    assert!(!packets.is_empty());
+}
+
+#[test]
+fn datagram_fast_seal_unblocks_after_ack_or_loss() {
+    for drop_first in [false, true] {
+        let mut pair = Pair::default();
+        pair.latency = Duration::from_millis(40);
+        let (client_ch, server_ch) = pair.connect();
+        let now = pair.time;
+        let mut payloads = (0..128u8)
+            .map(|value| Bytes::from(vec![value; 1000]))
+            .collect();
+        let mut packets = Vec::new();
+        let conn = pair.client_conn_mut(client_ch);
+        assert!(conn.seal_application_datagrams(now, &mut payloads, &mut packets));
+        assert!(!packets.is_empty());
+        assert!(!payloads.is_empty());
+        assert!(conn.stats().path.in_flight <= conn.stats().path.cwnd);
+        let sent = packets.len();
+        assert_eq!(payloads.front().unwrap()[0], sent as u8);
+        for (index, packet) in packets.drain(..).enumerate() {
+            if drop_first && index == 0 {
+                continue;
+            }
+            pair.server.inbound.push_back((
+                now + pair.latency,
+                None,
+                BytesMut::from(packet.as_ref()),
+            ));
+        }
+        pair.drive();
+        let mut unblocked = false;
+        while let Some(event) = pair.client_conn_mut(client_ch).poll() {
+            unblocked |= matches!(event, Event::DatagramsUnblocked);
+        }
+        assert!(unblocked);
+        for value in usize::from(drop_first)..sent {
+            let data = pair.server_datagrams(server_ch).recv().unwrap();
+            assert_eq!(data.as_ref(), &[value as u8; 1000]);
+        }
+        assert!(pair.server_datagrams(server_ch).recv().is_none());
+        if drop_first {
+            assert!(pair.client_conn_mut(client_ch).stats().path.lost_packets > 0);
+        }
+        let now = pair.time;
+        pair.client_conn_mut(client_ch)
+            .seal_application_datagrams(now, &mut payloads, &mut packets);
+        assert!(!packets.is_empty());
+    }
 }
 
 #[test]

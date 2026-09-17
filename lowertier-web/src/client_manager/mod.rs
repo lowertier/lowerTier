@@ -383,13 +383,13 @@ mod tests {
         rpc_service::remote_client::Storage as RemoteStorage,
         tunnel::{
             common::tests::wait_for_condition,
-            udp::{UdpTunnelConnector, UdpTunnelListener},
+            tcp::{TcpTunnelConnector, TcpTunnelListener},
         },
         web_client::{WebClient, run_web_client},
     };
     use serde_json::json;
     use sqlx::Executor;
-    use tokio::net::UdpSocket;
+    use tokio::net::TcpListener;
 
     use crate::{
         FeatureFlags, client_manager::ClientManager, db::Db, webhook::ManagedNetworkConfig,
@@ -505,12 +505,12 @@ mod tests {
         )
     }
 
-    async fn add_random_udp_listener(mgr: &mut ClientManager) -> std::net::SocketAddr {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    async fn add_random_tcp_listener(mgr: &mut ClientManager) -> std::net::SocketAddr {
+        let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = socket.local_addr().unwrap();
-        let listener =
-            UdpTunnelListener::new_with_socket(format!("udp://{addr}").parse().unwrap(), socket);
-        mgr.add_listener(listener).await.unwrap();
+        drop(socket);
+        let listener = TcpTunnelListener::new(format!("tcp://{addr}").parse().unwrap());
+        mgr.add_listener(Box::new(listener)).await.unwrap();
         addr
     }
 
@@ -597,7 +597,7 @@ mod tests {
         manager: Arc<NetworkInstanceManager>,
     ) -> WebClient {
         run_web_client(
-            &format!("udp://{config_server_addr}/{MANAGED_CONFIG_TOKEN}"),
+            &format!("tcp://{config_server_addr}/{MANAGED_CONFIG_TOKEN}"),
             MachineIdOptions {
                 explicit_machine_id: Some(machine_id.to_string()),
                 state_dir: None,
@@ -812,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client() {
-        let listener = UdpTunnelListener::new("udp://0.0.0.0:54333".parse().unwrap());
+        let listener = TcpTunnelListener::new("tcp://0.0.0.0:54333".parse().unwrap());
         let mut mgr = ClientManager::new(
             Db::memory_db().await,
             None,
@@ -830,7 +830,7 @@ mod tests {
             .await
             .unwrap();
 
-        let connector = UdpTunnelConnector::new("udp://127.0.0.1:54333".parse().unwrap());
+        let connector = TcpTunnelConnector::new("tcp://127.0.0.1:54333".parse().unwrap());
         let _c = WebClient::new(
             connector,
             "test",
@@ -887,7 +887,7 @@ mod tests {
             Arc::new(FeatureFlags::default()),
             webhook_config,
         );
-        let config_server_addr = add_random_udp_listener(&mut mgr).await;
+        let config_server_addr = add_random_tcp_listener(&mut mgr).await;
 
         let machine_id = uuid::Uuid::new_v4();
         let instance_id = uuid::Uuid::new_v4();
@@ -1052,7 +1052,7 @@ mod tests {
             Arc::new(FeatureFlags::default()),
             webhook_config,
         );
-        let config_server_addr = add_random_udp_listener(&mut mgr).await;
+        let config_server_addr = add_random_tcp_listener(&mut mgr).await;
         let machine_id = uuid::Uuid::new_v4();
         let core_manager = Arc::new(NetworkInstanceManager::new());
         let client =

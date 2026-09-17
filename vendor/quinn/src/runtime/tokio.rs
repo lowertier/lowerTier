@@ -63,6 +63,18 @@ impl AsyncUdpSocket for UdpSocket {
     }
 
     fn try_send(&self, transmit: &udp::Transmit) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        if self.io.peer_addr().is_ok() {
+            let sent = self.io.try_send(transmit.contents)?;
+            return if sent == transmit.contents.len() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "connected UDP send was partial",
+                ))
+            };
+        }
         self.io.try_io(Interest::WRITABLE, || {
             self.inner.send((&self.io).into(), transmit)
         })
@@ -93,6 +105,10 @@ impl AsyncUdpSocket for UdpSocket {
     }
 
     fn max_transmit_segments(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        if self.io.peer_addr().is_ok() {
+            return 1;
+        }
         self.inner.max_gso_segments()
     }
 

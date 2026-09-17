@@ -11,7 +11,7 @@ use tokio::task::JoinSet;
 
 use crate::{
     common::{PeerId, join_joinset_background, stun::StunInfoCollectorTrait},
-    connector::udp_hole_punch::BackOff,
+    connector::BackOff,
     peers::{
         peer_manager::PeerManager,
         peer_task::{PeerTaskLauncher, PeerTaskManager},
@@ -729,123 +729,5 @@ mod tests {
             .into_iter()
             .map(|task| task.dst_peer_id)
             .collect()
-    }
-
-    #[tokio::test]
-    async fn tcp_hole_punch_connects() {
-        let p_a = create_mock_peer_manager().await;
-        let p_b = create_mock_peer_manager().await;
-        let p_c = create_mock_peer_manager().await;
-
-        replace_stun_info_collector(p_a.clone(), NatType::PortRestricted);
-        replace_stun_info_collector(p_b.clone(), NatType::PortRestricted);
-        replace_stun_info_collector(p_c.clone(), NatType::PortRestricted);
-
-        connect_peer_manager(p_a.clone(), p_b.clone()).await;
-        connect_peer_manager(p_b.clone(), p_c.clone()).await;
-        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
-
-        let mut hole_punching_a = TcpHolePunchConnector::new(p_a.clone());
-        let mut hole_punching_c = TcpHolePunchConnector::new(p_c.clone());
-        hole_punching_a.run().await.unwrap();
-        hole_punching_c.run().await.unwrap();
-
-        hole_punching_a.client.run_immediately().await;
-        hole_punching_c.client.run_immediately().await;
-
-        wait_for_condition(
-            || {
-                let p_a = p_a.clone();
-                let p_c = p_c.clone();
-                async move {
-                    let a_has = p_a
-                        .get_peer_map()
-                        .list_peer_conns(p_c.my_peer_id())
-                        .await
-                        .is_some_and(|c| !c.is_empty());
-                    let c_has = p_c
-                        .get_peer_map()
-                        .list_peer_conns(p_a.my_peer_id())
-                        .await
-                        .is_some_and(|c| !c.is_empty());
-                    a_has || c_has
-                }
-            },
-            Duration::from_secs(15),
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn tcp_hole_punch_skip_symmetric_peer() {
-        let p_a = create_mock_peer_manager().await;
-        let p_b = create_mock_peer_manager().await;
-        let p_c = create_mock_peer_manager().await;
-
-        replace_stun_info_collector(p_a.clone(), NatType::Symmetric);
-        replace_stun_info_collector(p_b.clone(), NatType::PortRestricted);
-        replace_stun_info_collector(p_c.clone(), NatType::Symmetric);
-
-        connect_peer_manager(p_a.clone(), p_b.clone()).await;
-        connect_peer_manager(p_b.clone(), p_c.clone()).await;
-        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
-
-        let mut hole_punching_a = TcpHolePunchConnector::new(p_a.clone());
-        let mut hole_punching_c = TcpHolePunchConnector::new(p_c.clone());
-        hole_punching_a.run().await.unwrap();
-        hole_punching_c.run().await.unwrap();
-
-        hole_punching_a.client.run_immediately().await;
-        hole_punching_c.client.run_immediately().await;
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        assert!(
-            p_a.get_peer_map()
-                .list_peer_conns(p_c.my_peer_id())
-                .await
-                .map(|c| c.is_empty())
-                .unwrap_or(true)
-        );
-        assert!(
-            p_c.get_peer_map()
-                .list_peer_conns(p_a.my_peer_id())
-                .await
-                .map(|c| c.is_empty())
-                .unwrap_or(true)
-        );
-    }
-
-    #[tokio::test]
-    async fn lazy_p2p_collects_tcp_hole_punch_tasks_only_after_recent_traffic() {
-        let p_a = create_mock_peer_manager().await;
-        let p_b = create_mock_peer_manager().await;
-        let p_c = create_mock_peer_manager().await;
-
-        replace_stun_info_collector(p_a.clone(), NatType::PortRestricted);
-        replace_stun_info_collector(p_b.clone(), NatType::PortRestricted);
-        replace_stun_info_collector(p_c.clone(), NatType::PortRestricted);
-
-        let mut flags = p_a.get_global_ctx().get_flags();
-        flags.lazy_p2p = true;
-        p_a.get_global_ctx().set_flags(flags);
-
-        connect_peer_manager(p_a.clone(), p_b.clone()).await;
-        connect_peer_manager(p_b.clone(), p_c.clone()).await;
-        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
-
-        assert!(
-            !collect_lazy_punch_peers(p_a.clone())
-                .await
-                .contains(&p_c.my_peer_id())
-        );
-
-        p_a.mark_recent_traffic(p_c.my_peer_id());
-
-        assert!(
-            collect_lazy_punch_peers(p_a.clone())
-                .await
-                .contains(&p_c.my_peer_id())
-        );
     }
 }

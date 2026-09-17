@@ -86,7 +86,7 @@ impl Bbr {
             prev_in_flight_count: 0,
             exit_probe_rtt_at: None,
             probe_rtt_last_started_at: None,
-            min_rtt: Default::default(),
+            min_rtt: Duration::MAX,
             exiting_quiescence: false,
             pacing_rate: 0,
             max_acked_packet_number: 0,
@@ -324,10 +324,14 @@ impl Bbr {
         // time.
         if self.is_at_full_bandwidth {
             self.cwnd = target_window.min(self.cwnd + bytes_acked);
-        } else if (self.cwnd_gain < target_window as f32) || (self.acked_bytes < self.init_cwnd) {
-            // If the connection is not yet out of startup phase, do not decrease
-            // the window.
-            self.cwnd += bytes_acked;
+        } else {
+            // Probe by increasing with every ACK. Capping to a delayed-ACK BDP
+            // estimate freezes the window at the initial flight (~1 Mbit/s at
+            // 80 ms) and never leaves startup.
+            let probe = target_window.max(self.init_cwnd.saturating_mul(2));
+            if self.cwnd < probe || self.acked_bytes < self.init_cwnd {
+                self.cwnd += bytes_acked;
+            }
         }
 
         // Enforce the limits on the congestion window.
@@ -373,6 +377,18 @@ impl Bbr {
         if app_limited {
             return;
         }
+        if self.cwnd <= self.init_cwnd {
+            // The path has not been probed beyond the initial flight.
+            return;
+        }
+        if self.min_rtt > Duration::ZERO && self.min_rtt < Duration::MAX {
+            let bdp = ((self.min_rtt.as_micros() as u64)
+                .saturating_mul(self.max_bandwidth.get_estimate()))
+                / 1_000_000;
+            if bdp < self.init_cwnd {
+                return;
+            }
+        }
         let target = (self.bw_at_last_round as f64 * K_STARTUP_GROWTH_TARGET as f64) as u64;
         let bw = self.max_bandwidth.get_estimate();
         if bw >= target {
@@ -393,6 +409,8 @@ impl Bbr {
 
 impl Controller for Bbr {
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {
+        // A fresh connection has no stale RTT measurement to probe.
+        self.probe_rtt_last_started_at.get_or_insert(now);
         self.max_sent_packet_number = last_packet_number;
         self.max_bandwidth.on_sent(now, bytes);
     }
@@ -427,7 +445,8 @@ impl Controller for Bbr {
             self.round_count,
             self.max_bandwidth.get_estimate(),
         );
-        self.max_bandwidth.end_acks(self.round_count, app_limited);
+        self.max_bandwidth
+            .end_acks(self.round_count, app_limited, in_flight, self.min_rtt);
         if let Some(largest_acked_packet) = largest_packet_num_acked {
             self.max_acked_packet_number = largest_acked_packet;
         }
@@ -473,6 +492,7 @@ impl Controller for Bbr {
         lost_bytes: u64,
     ) {
         self.loss_state.lost_bytes += lost_bytes;
+        self.max_bandwidth.on_loss(lost_bytes);
     }
 
     fn on_mtu_update(&mut self, new_mtu: u16) {
@@ -531,7 +551,7 @@ impl BbrConfig {
 impl Default for BbrConfig {
     fn default() -> Self {
         Self {
-            initial_window: K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
+            initial_window: K_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
         }
     }
 }
@@ -644,8 +664,61 @@ const K_PACING_GAIN: [f32; 8] = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 const K_STARTUP_GROWTH_TARGET: f32 = 1.25;
 const K_ROUND_TRIPS_WITHOUT_GROWTH_BEFORE_EXITING_STARTUP: u8 = 3;
 
-// Do not allow initial congestion window to be greater than 200 packets.
-const K_MAX_INITIAL_CONGESTION_WINDOW: u64 = 200;
+// Start with the recommended ten datagrams before measuring path capacity.
+const K_INITIAL_CONGESTION_WINDOW: u64 = 10;
 
 const PROBE_RTT_BASED_ON_BDP: bool = true;
 const DRAIN_TO_TARGET: bool = true;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_window_stops_growing_past_its_target() {
+        let mut controller = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        controller.min_rtt = Duration::from_millis(1);
+        controller.cwnd = 1_000_000;
+        controller.acked_bytes = controller.init_cwnd;
+        controller.calculate_cwnd(1200, 0);
+        assert_eq!(controller.window(), 1_000_000);
+    }
+
+    #[test]
+    fn delayed_ack_does_not_freeze_startup_at_the_initial_window() {
+        let mut controller = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        controller.min_rtt = Duration::from_millis(80);
+        let sent = Instant::now();
+        let acked = sent + Duration::from_millis(600);
+        let flight = controller.initial_window();
+        controller.on_sent(sent, flight, 1);
+        controller
+            .max_bandwidth
+            .on_ack(acked, sent, flight, 0, false);
+        controller.on_end_acks(acked, 0, false, Some(1));
+        assert_eq!(controller.mode, Mode::Startup);
+        assert!(!controller.is_at_full_bandwidth);
+        assert!(controller.window() > flight);
+        assert!(controller.max_bandwidth.get_estimate() >= 150_000);
+    }
+
+    #[test]
+    fn first_flight_starts_the_probe_interval() {
+        let mut controller = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        controller.min_rtt = Duration::from_millis(1);
+        let sent = Instant::now();
+        let acked = sent + Duration::from_millis(1);
+        controller.on_sent(sent, 1200, 1);
+        controller.max_bandwidth.on_ack(acked, sent, 1200, 0, false);
+        controller.on_end_acks(acked, 0, false, Some(1));
+        assert_eq!(controller.mode, Mode::Startup);
+        assert!(controller.window() >= controller.initial_window());
+
+        let sent = acked + Duration::from_secs(11);
+        let acked = sent + Duration::from_millis(1);
+        controller.on_sent(sent, 1200, 2);
+        controller.max_bandwidth.on_ack(acked, sent, 1200, 1, false);
+        controller.on_end_acks(acked, 0, false, Some(2));
+        assert_eq!(controller.mode, Mode::ProbeRtt);
+    }
+}

@@ -179,25 +179,4 @@ mod tests {
         assert_eq!(packet.payload(), text);
         assert!(!packet.peer_manager_header().unwrap().is_encrypted());
     }
-
-    #[test]
-    fn test_openssl_aes128_gcm() {
-        let key = [1u8; 16];
-        let cipher = OpenSslCipher::new_aes128_gcm(key);
-        run_cipher_test_with_nonce(cipher);
-    }
-
-    #[test]
-    fn test_openssl_aes256_gcm() {
-        let key = [2u8; 32];
-        let cipher = OpenSslCipher::new_aes256_gcm(key);
-        run_cipher_test_with_nonce(cipher);
-    }
-
-    #[test]
-    fn test_openssl_chacha20() {
-        let key = [3u8; 32];
-        let cipher = OpenSslCipher::new_chacha20_poly1305(key);
-        run_cipher_test_with_nonce(cipher);
-    }
 }

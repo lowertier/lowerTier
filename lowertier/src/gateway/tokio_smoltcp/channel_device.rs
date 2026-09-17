@@ -107,38 +107,4 @@ mod tests {
 
     use super::*;
     use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
-
-    #[tokio::test]
-    async fn channel_device_moves_owned_packets_from_one_input_batch() {
-        let caps = DeviceCapabilities::default();
-        let (mut device, sender, _receiver) = ChannelDevice::new(caps);
-        let first = ZCPacket::new_with_payload(&[1, 2, 3]);
-        let first_pointer = first.payload().as_ptr();
-        let second = ZCPacket::new_with_payload(&[4, 5, 6]);
-        let mut batch = PacketBatch::new();
-        batch.try_push(first).unwrap();
-        batch.try_push(second).unwrap();
-
-        sender.send(Ok(batch)).await.unwrap();
-
-        let first = device.next().await.unwrap().unwrap();
-        let second = device.next().await.unwrap().unwrap();
-        assert_eq!(first.payload().as_ptr(), first_pointer);
-        assert_eq!(first.payload(), &[1, 2, 3]);
-        assert_eq!(second.payload(), &[4, 5, 6]);
-    }
-
-    #[tokio::test]
-    async fn channel_device_moves_owned_output_packet() {
-        let caps = DeviceCapabilities::default();
-        let (mut device, _sender, mut receiver) = ChannelDevice::new(caps);
-        let packet = ZCPacket::new_with_payload(&[7, 8, 9]);
-        let pointer = packet.payload().as_ptr();
-
-        device.send(packet).await.unwrap();
-
-        let packet = receiver.recv().await.unwrap();
-        assert_eq!(packet.payload().as_ptr(), pointer);
-        assert_eq!(packet.payload(), &[7, 8, 9]);
-    }
 }

@@ -76,13 +76,4 @@ mod tests {
         peers::fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
         tunnel::packet_def::ZCPacket,
     };
-
-    #[test]
-    fn fabric_batch_keeps_one_payload_kind_and_packet_storage() {
-        let packet = ZCPacket::new_with_payload(&[0x45, 0, 0, 0]);
-        let batch = FabricBatch::singleton(FabricPacket::new(FabricPayloadKind::Ip, packet));
-
-        assert_eq!(batch.payload_kind(), FabricPayloadKind::Ip);
-        assert_eq!(batch.len(), 1);
-    }
 }

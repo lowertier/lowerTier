@@ -78,7 +78,7 @@ pub fn validate_config_server_client_options(
 
     let config_server_url = match url::Url::parse(config_server_url_s) {
         Ok(url) => url,
-        Err(_) => format!("udp://127.0.0.1:22020/{}", config_server_url_s)
+        Err(_) => format!("tcp://127.0.0.1:22020/{}", config_server_url_s)
             .parse()
             .map_err(|err| format!("failed to parse config server URL: {}", err))?,
     };

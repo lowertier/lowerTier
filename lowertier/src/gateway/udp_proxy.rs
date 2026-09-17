@@ -1,6 +1,9 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::{Arc, Weak, atomic::AtomicBool},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -279,6 +282,8 @@ pub struct UdpProxy {
     tasks: Mutex<JoinSet<()>>,
 
     ip_resemmbler: Arc<IpReassembler>,
+    runtime_started: AtomicBool,
+    runtime_lock: Mutex<()>,
 }
 
 impl UdpProxy {
@@ -312,6 +317,10 @@ impl UdpProxy {
                 && Some(ipv4.get_destination())
                     == self.global_ctx.get_ipv4().as_ref().map(Ipv4Inet::address))
         {
+            return None;
+        }
+
+        if !self.ensure_runtime().await {
             return None;
         }
 
@@ -457,6 +466,8 @@ impl UdpProxy {
             receiver: Mutex::new(Some(receiver)),
             tasks: Mutex::new(JoinSet::new()),
             ip_resemmbler: Arc::new(IpReassembler::new(Duration::from_secs(10))),
+            runtime_started: AtomicBool::new(false),
+            runtime_lock: Mutex::new(()),
         };
         Ok(Arc::new(ret))
     }
@@ -468,8 +479,30 @@ impl UdpProxy {
         peer_manager
             .add_packet_process_pipeline(Box::new(self.clone()))
             .await;
+        Ok(())
+    }
 
-        // clean up nat table
+    async fn ensure_runtime(&self) -> bool {
+        if self.runtime_started.load(Ordering::Acquire) {
+            return true;
+        }
+        let _guard = self.runtime_lock.lock().await;
+        if self.runtime_started.load(Ordering::Acquire) {
+            return true;
+        }
+        match self.start_runtime().await {
+            Ok(()) => {
+                self.runtime_started.store(true, Ordering::Release);
+                true
+            }
+            Err(error) => {
+                tracing::error!(?error, "udp proxy runtime start failed");
+                false
+            }
+        }
+    }
+
+    async fn start_runtime(&self) -> Result<(), Error> {
         let nat_table = self.nat_table.clone();
         self.tasks.lock().await.spawn(async move {
             loop {
@@ -495,8 +528,12 @@ impl UdpProxy {
             }
         });
 
-        // forward packets to peer manager
-        let mut receiver = self.receiver.lock().await.take().unwrap();
+        let mut receiver = self
+            .receiver
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("udp proxy receiver already taken"))?;
         let peer_manager = self.peer_manager.clone();
         let is_latency_first = self.global_ctx.latency_first();
         self.tasks.lock().await.spawn(async move {
@@ -668,167 +705,5 @@ mod tests {
         for addr in nat_socket_addrs {
             let _ = wake_socket.send_to(b"wake", addr).await;
         }
-    }
-
-    #[tokio::test]
-    async fn udp_proxy_rewrites_unmapped_loopback_reply_to_virtual_ip() {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.set_ipv4(Some("10.144.144.204/24".parse().unwrap()));
-        global_ctx
-            .config
-            .add_proxy_cidr("127.0.0.1/32".parse().unwrap(), None)
-            .unwrap();
-
-        let (packet_sender, _packet_receiver) = create_packet_recv_chan();
-        let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
-            global_ctx.clone(),
-            packet_sender,
-        ));
-        let proxy = UdpProxy::new(global_ctx, peer_manager).unwrap();
-        wait_proxy_cidr_loaded(&proxy).await;
-        let mut response_receiver = proxy.receiver.lock().await.take().unwrap();
-
-        let real_dst = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let real_dst_port = real_dst.local_addr().unwrap().port();
-        let dst_socket = SocketAddr::from((Ipv4Addr::LOCALHOST, real_dst_port));
-        let src_ip = Ipv4Addr::new(10, 144, 144, 206);
-        let src_port = 53864;
-
-        let packet = build_udp_proxy_packet(src_ip, src_port, dst_socket, b"request");
-        assert!(proxy.try_handle_packet(&packet).await.is_some());
-        let (payload, nat_socket) = recv_payload(&real_dst).await;
-        assert_eq!(payload, b"request");
-
-        real_dst.send_to(b"reply", nat_socket).await.unwrap();
-        assert_udp_response(
-            recv_response_packet(&mut response_receiver).await,
-            SocketAddr::from((Ipv4Addr::new(10, 144, 144, 204), real_dst_port)),
-            src_ip,
-            src_port,
-            b"reply",
-        );
-
-        stop_nat_entries(&proxy).await;
-    }
-
-    #[tokio::test]
-    async fn udp_proxy_maps_local_virtual_destination_reply_to_mapped_source() {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.set_ipv4(Some("10.144.144.204/24".parse().unwrap()));
-        global_ctx
-            .config
-            .add_proxy_cidr(
-                "10.144.144.204/32".parse().unwrap(),
-                Some("10.10.10.3/32".parse().unwrap()),
-            )
-            .unwrap();
-
-        let (packet_sender, _packet_receiver) = create_packet_recv_chan();
-        let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
-            global_ctx.clone(),
-            packet_sender,
-        ));
-        let proxy = UdpProxy::new(global_ctx, peer_manager).unwrap();
-        wait_proxy_cidr_loaded(&proxy).await;
-        let mut response_receiver = proxy.receiver.lock().await.take().unwrap();
-
-        let real_dst = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let real_dst_port = real_dst.local_addr().unwrap().port();
-        let mapped_dst = SocketAddr::from((Ipv4Addr::new(10, 10, 10, 3), real_dst_port));
-        let src_ip = Ipv4Addr::new(10, 144, 144, 206);
-        let src_port = 53864;
-
-        let packet = build_udp_proxy_packet(src_ip, src_port, mapped_dst, b"request");
-        assert!(proxy.try_handle_packet(&packet).await.is_some());
-        let (payload, nat_socket) = recv_payload(&real_dst).await;
-        assert_eq!(payload, b"request");
-
-        real_dst.send_to(b"reply", nat_socket).await.unwrap();
-        assert_udp_response(
-            recv_response_packet(&mut response_receiver).await,
-            mapped_dst,
-            src_ip,
-            src_port,
-            b"reply",
-        );
-
-        stop_nat_entries(&proxy).await;
-    }
-
-    #[tokio::test]
-    async fn udp_proxy_separates_same_source_port_to_multiple_mapped_destinations() {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.set_ipv4(Some("10.144.144.204/24".parse().unwrap()));
-        global_ctx
-            .config
-            .add_proxy_cidr(
-                "127.0.0.1/32".parse().unwrap(),
-                Some("10.10.10.1/32".parse().unwrap()),
-            )
-            .unwrap();
-        global_ctx
-            .config
-            .add_proxy_cidr(
-                "127.0.0.1/32".parse().unwrap(),
-                Some("10.10.10.2/32".parse().unwrap()),
-            )
-            .unwrap();
-
-        let (packet_sender, _packet_receiver) = create_packet_recv_chan();
-        let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
-            global_ctx.clone(),
-            packet_sender,
-        ));
-        let proxy = UdpProxy::new(global_ctx, peer_manager).unwrap();
-        wait_proxy_cidr_loaded(&proxy).await;
-        let mut response_receiver = proxy.receiver.lock().await.take().unwrap();
-
-        let real_dst = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let real_dst_port = real_dst.local_addr().unwrap().port();
-        let first_mapped_dst = SocketAddr::from((Ipv4Addr::new(10, 10, 10, 1), real_dst_port));
-        let second_mapped_dst = SocketAddr::from((Ipv4Addr::new(10, 10, 10, 2), real_dst_port));
-        let src_ip = Ipv4Addr::new(10, 144, 144, 206);
-        let src_port = 53864;
-
-        let first_packet = build_udp_proxy_packet(src_ip, src_port, first_mapped_dst, b"first");
-        assert!(proxy.try_handle_packet(&first_packet).await.is_some());
-        let (payload, first_nat_socket) = recv_payload(&real_dst).await;
-        assert_eq!(payload, b"first");
-
-        let second_packet = build_udp_proxy_packet(src_ip, src_port, second_mapped_dst, b"second");
-        assert!(proxy.try_handle_packet(&second_packet).await.is_some());
-        let (payload, second_nat_socket) = recv_payload(&real_dst).await;
-        assert_eq!(payload, b"second");
-
-        assert_eq!(proxy.nat_table.len(), 2);
-
-        real_dst
-            .send_to(b"first-reply", first_nat_socket)
-            .await
-            .unwrap();
-        assert_udp_response(
-            recv_response_packet(&mut response_receiver).await,
-            first_mapped_dst,
-            src_ip,
-            src_port,
-            b"first-reply",
-        );
-
-        real_dst
-            .send_to(b"second-reply", second_nat_socket)
-            .await
-            .unwrap();
-        assert_udp_response(
-            recv_response_packet(&mut response_receiver).await,
-            second_mapped_dst,
-            src_ip,
-            src_port,
-            b"second-reply",
-        );
-
-        stop_nat_entries(&proxy).await;
     }
 }

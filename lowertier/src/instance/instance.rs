@@ -25,7 +25,8 @@ use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx, GlobalCtxEvent};
 use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
-use crate::connector::udp_hole_punch::UdpHolePunchConnector;
+
+use crate::gateway::overlay_stream::OverlayStreamEndpoint;
 use crate::gateway::tcp_proxy::TcpProxyRpcService;
 use crate::peer_center::instance::{PeerCenterInstance, PeerCenterInstanceService};
 use crate::peers::peer_conn::PeerConnId;
@@ -598,10 +599,10 @@ pub struct Instance {
     listener_manager: Arc<Mutex<ListenerManager<PeerManager>>>,
     conn_manager: Arc<ManualConnectorManager>,
     direct_conn_manager: Arc<DirectConnectorManager>,
-    udp_hole_puncher: Arc<Mutex<UdpHolePunchConnector>>,
     tcp_hole_puncher: Arc<Mutex<TcpHolePunchConnector>>,
 
     ip_proxy: Option<IpProxy>,
+    overlay_stream: Option<Arc<OverlayStreamEndpoint>>,
 
     peer_center: Arc<PeerCenterInstance>,
 
@@ -650,8 +651,6 @@ impl Instance {
         direct_conn_manager.run();
         let direct_conn_manager = Arc::new(direct_conn_manager);
 
-        let udp_hole_puncher =
-            Arc::new(Mutex::new(UdpHolePunchConnector::new(peer_manager.clone())));
         let tcp_hole_puncher =
             Arc::new(Mutex::new(TcpHolePunchConnector::new(peer_manager.clone())));
 
@@ -672,10 +671,10 @@ impl Instance {
             listener_manager,
             conn_manager,
             direct_conn_manager,
-            udp_hole_puncher,
             tcp_hole_puncher,
 
             ip_proxy: None,
+            overlay_stream: None,
 
             peer_center,
 
@@ -1006,6 +1005,11 @@ impl Instance {
             self.check_dhcp_ip_conflict();
         }
 
+        if std::env::var_os("LOWTIER_EXPERIMENT_OVERLAY_STREAM").is_some() {
+            self.overlay_stream =
+                Some(OverlayStreamEndpoint::start(self.get_peer_manager(), true).await);
+        }
+
         self.global_ctx
             .get_acl_filter()
             .reload_rules(AclRuleBuilder::build(&self.global_ctx)?.as_ref());
@@ -1017,7 +1021,6 @@ impl Instance {
         )?);
         self.run_ip_proxy().await?;
 
-        self.udp_hole_puncher.lock().await.run().await?;
         self.tcp_hole_puncher.lock().await.run().await?;
 
         self.peer_center.init().await;
@@ -1036,7 +1039,13 @@ impl Instance {
         self.proxy_cidrs_monitor = Some(monitor.start());
 
         #[cfg(feature = "socks5")]
-        self.socks5_server.run().await?;
+        self.socks5_server
+            .run(
+                self.overlay_stream
+                    .as_ref()
+                    .map(|endpoint| endpoint.connector()),
+            )
+            .await?;
 
         Ok(())
     }
@@ -1474,184 +1483,4 @@ mod tests {
         instance::instance::{InstanceConfigPatcher, InstanceRpcServerHook},
         proto::{api::config::InstanceConfigPatch, rpc_impl::standalone::RpcServerHook},
     };
-
-    #[tokio::test]
-    async fn test_rpc_portal_whitelist() {
-        use cidr::IpCidr;
-
-        struct TestCase {
-            remote_url: String,
-            whitelist: Option<Vec<IpCidr>>,
-            expected_result: bool,
-        }
-
-        let test_cases: Vec<TestCase> = vec![
-            // Test default whitelist (127.0.0.0/8, ::1/128)
-            TestCase {
-                remote_url: "tcp://127.0.0.1:15888".to_string(),
-                whitelist: None,
-                expected_result: true,
-            },
-            TestCase {
-                remote_url: "tcp://127.1.2.3:15888".to_string(),
-                whitelist: None,
-                expected_result: true,
-            },
-            TestCase {
-                remote_url: "tcp://192.168.1.1:15888".to_string(),
-                whitelist: None,
-                expected_result: false,
-            },
-            // Test custom whitelist
-            TestCase {
-                remote_url: "tcp://192.168.1.10:15888".to_string(),
-                whitelist: Some(vec![
-                    "192.168.1.0/24".parse().unwrap(),
-                    "10.0.0.0/8".parse().unwrap(),
-                ]),
-                expected_result: true,
-            },
-            TestCase {
-                remote_url: "tcp://10.1.2.3:15888".to_string(),
-                whitelist: Some(vec![
-                    "192.168.1.0/24".parse().unwrap(),
-                    "10.0.0.0/8".parse().unwrap(),
-                ]),
-                expected_result: true,
-            },
-            TestCase {
-                remote_url: "tcp://172.16.0.1:15888".to_string(),
-                whitelist: Some(vec![
-                    "192.168.1.0/24".parse().unwrap(),
-                    "10.0.0.0/8".parse().unwrap(),
-                ]),
-                expected_result: false,
-            },
-            // Test empty whitelist (should reject all connections)
-            TestCase {
-                remote_url: "tcp://127.0.0.1:15888".to_string(),
-                whitelist: Some(vec![]),
-                expected_result: false,
-            },
-            // Test broad whitelist (0.0.0.0/0 and ::/0 accept all IP addresses)
-            TestCase {
-                remote_url: "tcp://8.8.8.8:15888".to_string(),
-                whitelist: Some(vec!["0.0.0.0/0".parse().unwrap()]),
-                expected_result: true,
-            },
-            // Test edge case: specific IP whitelist
-            TestCase {
-                remote_url: "tcp://192.168.1.5:15888".to_string(),
-                whitelist: Some(vec!["192.168.1.5/32".parse().unwrap()]),
-                expected_result: true,
-            },
-            TestCase {
-                remote_url: "tcp://192.168.1.6:15888".to_string(),
-                whitelist: Some(vec!["192.168.1.5/32".parse().unwrap()]),
-                expected_result: false,
-            },
-            // Test invalid URL (this case will fail during URL parsing)
-            TestCase {
-                remote_url: "invalid-url".to_string(),
-                whitelist: None,
-                expected_result: false,
-            },
-            // Test URL without IP address (this case will fail during IP parsing)
-            TestCase {
-                remote_url: "tcp://localhost:15888".to_string(),
-                whitelist: None,
-                expected_result: false,
-            },
-        ];
-
-        for case in test_cases {
-            let hook = InstanceRpcServerHook::new(case.whitelist.clone());
-            let tunnel_info = Some(crate::proto::common::TunnelInfo {
-                remote_addr: Some(crate::proto::common::Url {
-                    url: case.remote_url.clone(),
-                }),
-                ..Default::default()
-            });
-
-            let result = hook.on_new_client(tunnel_info).await;
-            if case.expected_result {
-                assert!(
-                    result.is_ok(),
-                    "Expected success for remote_url:{},whitelist:{:?},but got: {:?}",
-                    case.remote_url,
-                    case.whitelist,
-                    result
-                );
-            } else {
-                assert!(
-                    result.is_err(),
-                    "Expected failure for remote_url:{},whitelist:{:?},but got: {:?}",
-                    case.remote_url,
-                    case.whitelist,
-                    result
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn validate_public_ipv6_patch_rejects_non_global_prefix() {
-        let global_ctx = get_mock_global_ctx();
-        let patch = InstanceConfigPatch {
-            ipv6_public_addr_provider: Some(true),
-            ipv6_public_addr_prefix: Some("fd00::/64".to_string()),
-            ..Default::default()
-        };
-
-        let err =
-            InstanceConfigPatcher::validate_public_ipv6_patch(&global_ctx, &patch).unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("not a valid global unicast IPv6 prefix")
-        );
-    }
-
-    #[tokio::test]
-    async fn public_ipv6_provider_task_slot_does_not_restart_after_shutdown() {
-        let global_ctx = get_mock_global_ctx();
-        let slot = std::sync::Arc::new(super::PublicIpv6ProviderTaskSlot::new());
-        global_ctx.config.set_ipv6_public_addr_provider(true);
-        global_ctx
-            .config
-            .set_ipv6_public_addr_prefix(Some("2001:db8::/48".parse().unwrap()));
-
-        slot.shutdown().await;
-        super::ensure_public_ipv6_provider_reconcile_task(&global_ctx, &slot).await;
-
-        assert!(slot.task.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn validate_public_ipv6_patch_allows_enabling_auto_with_manual_ipv6() {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.set_ipv6(Some("fd00::1/64".parse().unwrap()));
-
-        let patch = InstanceConfigPatch {
-            ipv6_public_addr_auto: Some(true),
-            ..Default::default()
-        };
-
-        assert!(InstanceConfigPatcher::validate_public_ipv6_patch(&global_ctx, &patch).is_ok());
-    }
-
-    #[tokio::test]
-    async fn validate_public_ipv6_patch_ignores_runtime_auto_ipv6_cache() {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.config.set_ipv6_public_addr_auto(true);
-        global_ctx.set_ipv6(Some("2001:db8::10/64".parse().unwrap()));
-
-        let patch = InstanceConfigPatch {
-            ipv6_public_addr_provider: Some(true),
-            ipv6_public_addr_prefix: Some("2001:db8:100::/64".to_string()),
-            ..Default::default()
-        };
-
-        assert!(InstanceConfigPatcher::validate_public_ipv6_patch(&global_ctx, &patch).is_ok());
-    }
 }

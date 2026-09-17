@@ -1,11 +1,5 @@
 #[cfg(target_os = "linux")]
-mod ipv6_test;
-
-#[cfg(target_os = "linux")]
 mod credential_tests;
-
-#[cfg(target_os = "linux")]
-mod upnp_test;
 
 use crate::common::PeerId;
 use crate::peers::peer_manager::PeerManager;

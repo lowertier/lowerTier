@@ -694,8 +694,10 @@ impl GlobalCtx {
 
         if let Some(stun_servers) = config_fs.get_stun_servers_v6() {
             stun_info_collector.set_stun_servers_v6(stun_servers);
-        } else {
+        } else if config_fs.get_flags().enable_ipv6 {
             stun_info_collector.set_stun_servers_v6(StunInfoCollector::get_default_servers_v6());
+        } else {
+            stun_info_collector.set_stun_servers_v6(Vec::new());
         }
 
         let flags = config_fs.get_flags();

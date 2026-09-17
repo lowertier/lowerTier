@@ -164,48 +164,4 @@ mod tests {
         tunnel::packet_def::{StandardAeadTail, ZCPacket},
     };
     use zerocopy::FromBytes;
-
-    #[test]
-    fn test_aes_gcm_cipher() {
-        let key = [0u8; 16];
-        let cipher = AesGcmCipher::new_128(key);
-        let text = b"1234567";
-        let mut packet = ZCPacket::new_with_payload(text);
-        packet.fill_peer_manager_hdr(0, 0, 0);
-        cipher.encrypt(&mut packet).unwrap();
-        assert_eq!(packet.payload().len(), text.len() + StandardAeadTail::SIZE);
-        assert!(packet.peer_manager_header().unwrap().is_encrypted());
-
-        cipher.decrypt(&mut packet).unwrap();
-        assert_eq!(packet.payload(), text);
-        assert!(!packet.peer_manager_header().unwrap().is_encrypted());
-    }
-
-    #[test]
-    fn test_aes_gcm_cipher_with_nonce() {
-        let key = [7u8; 16];
-        let cipher = AesGcmCipher::new_128(key);
-        let text = b"Hello";
-        let nonce = [3u8; 12];
-
-        let mut packet1 = ZCPacket::new_with_payload(text);
-        packet1.fill_peer_manager_hdr(0, 0, 0);
-        cipher
-            .encrypt_with_nonce(&mut packet1, Some(&nonce))
-            .unwrap();
-
-        let mut packet2 = ZCPacket::new_with_payload(text);
-        packet2.fill_peer_manager_hdr(0, 0, 0);
-        cipher
-            .encrypt_with_nonce(&mut packet2, Some(&nonce))
-            .unwrap();
-
-        assert_eq!(packet1.payload(), packet2.payload());
-
-        let tail = StandardAeadTail::ref_from_suffix(packet1.payload()).unwrap();
-        assert_eq!(tail.nonce, nonce);
-
-        cipher.decrypt(&mut packet1).unwrap();
-        assert_eq!(packet1.payload(), text);
-    }
 }

@@ -23,9 +23,9 @@ use lowertier::{
     tunnel::{
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         packet_def::ZCPacket,
+        quic::QuicTunnelConnector,
         ring::create_ring_tunnel_pair,
         tcp::TcpTunnelConnector,
-        udp::UdpTunnelConnector,
     },
 };
 
@@ -43,7 +43,7 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
 enum TunnelKind {
     Ring,
     Tcp,
-    Udp,
+    Quic,
 }
 
 impl TunnelKind {
@@ -51,7 +51,7 @@ impl TunnelKind {
         match self {
             TunnelKind::Ring => "ring",
             TunnelKind::Tcp => "tcp",
-            TunnelKind::Udp => "udp",
+            TunnelKind::Quic => "quic",
         }
     }
 }
@@ -63,9 +63,9 @@ impl FromStr for TunnelKind {
         match value {
             "ring" => Ok(TunnelKind::Ring),
             "tcp" => Ok(TunnelKind::Tcp),
-            "udp" => Ok(TunnelKind::Udp),
+            "quic" => Ok(TunnelKind::Quic),
             other => Err(format!(
-                "unsupported TX_THROUGHPUT_TUNNEL={other:?}; expected ring, tcp, or udp"
+                "unsupported TX_THROUGHPUT_TUNNEL={other:?}; expected ring, tcp, or quic"
             )),
         }
     }
@@ -384,7 +384,7 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
     let tunnel_port = env_parse("TX_THROUGHPUT_TUNNEL_PORT", DEFAULT_TUNNEL_PORT);
     let docker = match tunnel {
         TunnelKind::Ring => None,
-        TunnelKind::Tcp | TunnelKind::Udp => Some(DockerNetns::create()),
+        TunnelKind::Tcp | TunnelKind::Quic => Some(DockerNetns::create()),
     };
 
     let (netns_a, netns_b) = match &docker {
@@ -393,7 +393,7 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
     };
     let listeners_a = match tunnel {
         TunnelKind::Ring => Vec::new(),
-        TunnelKind::Tcp | TunnelKind::Udp => vec![
+        TunnelKind::Tcp | TunnelKind::Quic => vec![
             format!("{}://0.0.0.0:{}", tunnel.as_str(), tunnel_port)
                 .parse()
                 .unwrap(),
@@ -440,16 +440,17 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
                 .parse()
                 .unwrap(),
             )),
-        TunnelKind::Udp => inst_b
+        TunnelKind::Quic => inst_b
             .get_conn_manager()
-            .add_connector(UdpTunnelConnector::new(
+            .add_connector(QuicTunnelConnector::new(
                 format!(
-                    "udp://{}:{}",
-                    docker.as_ref().expect("udp benchmark needs Docker").ip_a,
+                    "quic://{}:{}",
+                    docker.as_ref().expect("quic benchmark needs Docker").ip_a,
                     tunnel_port
                 )
                 .parse()
                 .unwrap(),
+                inst_b.get_global_ctx(),
             )),
     }
 

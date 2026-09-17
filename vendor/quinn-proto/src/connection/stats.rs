@@ -1,6 +1,6 @@
 //! Connection statistics
 
-use crate::{frame::Frame, Dir, Duration};
+use crate::{Dir, Duration, frame::Frame};
 
 /// Statistics about UDP datagrams transmitted or received on a connection
 ///
@@ -138,6 +138,8 @@ pub struct PathStats {
     pub rtt: Duration,
     /// Current congestion window of the connection
     pub cwnd: u64,
+    /// Bytes currently in flight on this path
+    pub in_flight: u64,
     /// Congestion events on the connection
     pub congestion_events: u64,
     /// The amount of packets lost on this path

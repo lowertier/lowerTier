@@ -887,7 +887,7 @@ mod tests {
                 "network_secret": "secret",
                 "networking_method": "Manual",
                 "peer_urls": ["http://console.example/peer"],
-                "listener_urls": ["udp://0.0.0.0:0"],
+                "listener_urls": ["tcp://0.0.0.0:0"],
                 "no_tun": true,
                 "relay_all_peer_rpc": true,
                 "disable_udp_hole_punching": true,

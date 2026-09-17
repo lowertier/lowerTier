@@ -459,6 +459,11 @@ pub const TAIL_RESERVED_SIZE: usize = max(
     LINK_ENVELOPE_RESERVED_SIZE,
 );
 
+/// Spare bytes that may stay behind a frozen TUN-pool packet. Larger leftover
+/// capacity is a GRO or poisoned slab and must be copied off before freeze so
+/// H2/QUIC/WSS windows cannot pin 64 KiB unique copies.
+const COMPACT_SPARE_THRESHOLD: usize = 512;
+
 #[derive(Default, Debug)]
 pub struct ZCPacketOffsets {
     pub payload_offset: usize,
@@ -588,11 +593,13 @@ impl ReusableBufferPool {
 
     pub(crate) fn take_or_allocate(&self) -> BytesMut {
         self.try_take()
-            .unwrap_or_else(|| zeroed_packet_buffer(self.inner.buffer_len))
+            .unwrap_or_else(|| packet_buffer(self.inner.buffer_len))
     }
 
     fn recycle(&self, mut buffer: BytesMut) {
-        if buffer.capacity() < self.inner.buffer_len {
+        if buffer.capacity() < self.inner.buffer_len
+            || buffer.capacity() > self.inner.buffer_len.saturating_mul(2)
+        {
             buffer = zeroed_packet_buffer(self.inner.buffer_len);
         } else {
             buffer.truncate(self.inner.buffer_len);
@@ -604,7 +611,9 @@ impl ReusableBufferPool {
     }
 
     fn recycle_initialized(&self, mut buffer: BytesMut, allocation_start: usize) {
-        if buffer.as_ptr() as usize != allocation_start || buffer.capacity() < self.inner.buffer_len
+        if buffer.as_ptr() as usize != allocation_start
+            || buffer.capacity() < self.inner.buffer_len
+            || buffer.capacity() > self.inner.buffer_len.saturating_mul(2)
         {
             self.replace_detached();
             return;
@@ -629,6 +638,13 @@ impl ReusableBufferPool {
 fn zeroed_packet_buffer(length: usize) -> BytesMut {
     let mut buffer = BytesMut::with_capacity(length);
     buffer.resize(length, 0);
+    buffer
+}
+
+/// Overflow slab for TUN/UDP recv. The kernel overwrites `[0, received)`.
+fn packet_buffer(length: usize) -> BytesMut {
+    let mut buffer = BytesMut::with_capacity(length);
+    unsafe { buffer.set_len(length) };
     buffer
 }
 
@@ -1277,6 +1293,12 @@ impl ZCPacket {
             .saturating_add(self.reusable_prefix.as_ref().map_or(0, BytesMut::capacity))
     }
 
+    fn should_release_spare_capacity(&self) -> bool {
+        self.retained_buffer_capacity()
+            .saturating_sub(self.inner.len())
+            > COMPACT_SPARE_THRESHOLD
+    }
+
     /// Copy the active packet bytes into a tight allocation and release any
     /// oversized receive slab retained behind this packet.
     ///
@@ -1471,6 +1493,12 @@ impl ZCPacket {
     }
 
     pub fn into_bytes(mut self) -> Bytes {
+        // Copy off GRO/poison slabs. Pool-sized TUN packets stay zero-copy so
+        // the freeze path does not memcpy every internet frame.
+        if self.should_release_spare_capacity() {
+            self.compact_retained_buffer();
+            return std::mem::take(&mut self.inner).freeze();
+        }
         if let Some(pool) = self.reusable_pool.take() {
             Bytes::from_owner(ReusableBytesOwner {
                 prefix: self.reusable_prefix.take(),
@@ -1487,7 +1515,11 @@ impl ZCPacket {
     }
 
     pub fn inner(mut self) -> BytesMut {
-        self.detach_reusable_buffer();
+        if self.should_release_spare_capacity() {
+            self.compact_retained_buffer();
+        } else {
+            self.detach_reusable_buffer();
+        }
         std::mem::take(&mut self.inner)
     }
 
@@ -1757,7 +1789,6 @@ mod tests {
         let transport_bytes = packet.into_bytes();
         assert_eq!(pool.available(), 1);
         drop(transport_bytes);
-
         assert_eq!(pool.available(), 2);
     }
 
@@ -1773,7 +1804,6 @@ mod tests {
         assert_eq!(payload.as_ref(), expected);
         assert_eq!(pool.available(), 0);
         drop(payload);
-
         assert_eq!(pool.available(), 1);
     }
 
@@ -2076,6 +2106,54 @@ mod tests {
             packet.fill_peer_manager_hdr(1, 2, packet_type as u8);
             assert!(packet.is_lossy());
         }
+    }
+
+    #[test]
+    fn into_bytes_drops_spare_capacity_before_freeze() {
+        let mut packet = ZCPacket::new_with_payload(&[7; 32]);
+        packet.mut_inner().reserve(8192);
+        let expected_len = packet.buf_len();
+        assert!(packet.retained_buffer_capacity() > expected_len + 1024);
+        let bytes = packet.into_bytes();
+        assert_eq!(bytes.len(), expected_len);
+    }
+
+    #[test]
+    fn oversized_pooled_slab_is_copied_off_before_freeze() {
+        let pool = ReusableBufferPool::new(256, 1);
+        let mut buffer = pool.try_take().unwrap();
+        buffer.reserve(8192);
+        buffer.truncate(96);
+        let packet = ZCPacket::new_from_reusable_buf(buffer, ZCPacketType::NIC, pool.clone());
+
+        let bytes = packet.into_bytes();
+        assert_eq!(pool.available(), 1);
+        drop(bytes);
+        let restored = pool.try_take().unwrap();
+        assert_eq!(restored.len(), 256);
+        assert!(restored.capacity() <= 512);
+    }
+
+    #[test]
+    fn inner_drops_spare_capacity() {
+        let mut packet = ZCPacket::new_with_payload(&[7; 32]);
+        packet.mut_inner().reserve(8192);
+        let expected_len = packet.buf_len();
+        let inner = packet.inner();
+        assert_eq!(inner.len(), expected_len);
+        assert!(inner.capacity() < 1024);
+    }
+
+    #[test]
+    fn recycle_drops_poisoned_oversize_slabs() {
+        let pool = ReusableBufferPool::new(256, 1);
+        let mut buffer = pool.try_take().unwrap();
+        buffer.reserve(8192);
+        assert!(buffer.capacity() > 512);
+        pool.recycle(buffer);
+        let restored = pool.try_take().unwrap();
+        assert_eq!(restored.len(), 256);
+        assert!(restored.capacity() <= 512);
     }
 
     #[test]

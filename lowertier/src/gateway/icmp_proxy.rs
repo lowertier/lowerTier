@@ -1,7 +1,10 @@
 use std::{
     mem::MaybeUninit,
     net::{IpAddr, Ipv4Addr, SocketAddrV4},
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -83,6 +86,8 @@ pub struct IcmpProxy {
 
     ip_resemmbler: Arc<IpReassembler>,
     icmp_sender: Arc<std::sync::Mutex<Option<UnboundedSender<ZCPacket>>>>,
+    runtime_started: AtomicBool,
+    runtime_lock: Mutex<()>,
 }
 
 fn socket_recv(
@@ -226,12 +231,14 @@ impl IcmpProxy {
 
             ip_resemmbler: Arc::new(IpReassembler::new(Duration::from_secs(10))),
             icmp_sender: Arc::new(std::sync::Mutex::new(None)),
+            runtime_started: AtomicBool::new(false),
+            runtime_lock: Mutex::new(()),
         };
 
         Ok(Arc::new(ret))
     }
 
-    fn create_raw_socket(self: &Arc<Self>) -> Result<Socket, Error> {
+    fn create_raw_socket(&self) -> Result<Socket, Error> {
         let _g = self.global_ctx.net_ns.guard();
         let socket = socket2::Socket::new(
             socket2::Domain::IPV4,
@@ -246,25 +253,40 @@ impl IcmpProxy {
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<(), Error> {
-        let socket = self.create_raw_socket();
-        match socket {
+        let Some(pm) = self.peer_manager.upgrade() else {
+            tracing::warn!("peer manager is gone, icmp proxy init failed");
+            return Err(anyhow::anyhow!("peer manager is gone").into());
+        };
+        pm.add_packet_process_pipeline(Box::new(self.clone())).await;
+        Ok(())
+    }
+
+    async fn ensure_runtime(&self) {
+        if self.runtime_started.load(Ordering::Acquire) {
+            return;
+        }
+        let _guard = self.runtime_lock.lock().await;
+        if self.runtime_started.load(Ordering::Acquire) {
+            return;
+        }
+        match self.create_raw_socket() {
             Ok(socket) => {
                 self.socket.lock().unwrap().replace(Arc::new(socket));
             }
             Err(e) => {
                 tracing::warn!("create icmp socket failed: {:?}", e);
-                if !self.global_ctx.no_tun() {
-                    return Err(anyhow::anyhow!("create icmp socket failed: {:?}", e).into());
-                }
             }
         }
-
-        self.start_icmp_proxy().await?;
-        self.start_nat_table_cleaner().await?;
-        Ok(())
+        if let Err(error) = self.start_icmp_proxy().await {
+            tracing::error!(?error, "start icmp proxy runtime failed");
+        }
+        if let Err(error) = self.start_nat_table_cleaner().await {
+            tracing::error!(?error, "start icmp nat cleaner failed");
+        }
+        self.runtime_started.store(true, Ordering::Release);
     }
 
-    async fn start_nat_table_cleaner(self: &Arc<Self>) -> Result<(), Error> {
+    async fn start_nat_table_cleaner(&self) -> Result<(), Error> {
         let nat_table = self.nat_table.clone();
         self.tasks.lock().await.spawn(
             async move {
@@ -279,7 +301,7 @@ impl IcmpProxy {
         Ok(())
     }
 
-    async fn start_icmp_proxy(self: &Arc<Self>) -> Result<(), Error> {
+    async fn start_icmp_proxy(&self) -> Result<(), Error> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         self.icmp_sender.lock().unwrap().replace(sender.clone());
         if let Some(socket) = self.socket.lock().unwrap().as_ref() {
@@ -319,12 +341,6 @@ impl IcmpProxy {
             }
         });
 
-        let Some(pm) = self.peer_manager.upgrade() else {
-            tracing::warn!("peer manager is gone, icmp proxy init failed");
-            return Err(anyhow::anyhow!("peer manager is gone").into());
-        };
-
-        pm.add_packet_process_pipeline(Box::new(self.clone())).await;
         Ok(())
     }
 
@@ -444,6 +460,8 @@ impl IcmpProxy {
             tracing::trace!("unsupported icmp type: {:?}", icmp_packet.get_icmp_type());
             return None;
         }
+
+        self.ensure_runtime().await;
 
         if self.global_ctx.no_tun()
             && Some(ipv4.get_destination())

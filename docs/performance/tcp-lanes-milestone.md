@@ -43,7 +43,7 @@ Each cell summarizes three valid trials. Nonzero workload exits, reported iperf 
 
 ## Loaded latency and resources
 
-CPU is estimated from differences in `/proc/stat` during each measured window, with `CLK_TCK=100`, using one node for the shared VM counters. It includes both endpoints, kernel networking, iperf and background VM work. Process CPU uses `/proc/<pid>/stat` deltas. Samples are approximately three seconds apart and endpoints are selected within the measurement window; whole-second iperf start timestamps introduce approximately one second of alignment uncertainty. Values below are the median per-trial busy-core-seconds per delivered Gbit. Lifetime `ps %cpu` is not used for these comparisons.
+CPU is estimated from differences in `/proc/stat` during each measured window, with `CLK_TCK=100`, using one node for the shared VM counters. It includes both endpoints, kernel networking, iperf and background VM work. Process CPU uses `/proc/<pid>/stat` deltas. Samples are approximately three seconds apart. The original analysis selected windows using the JSON control-connection timestamp plus the configured warm-up. Source verification against iperf 3.12 on 2026-09-08 shows that `iperf_on_connect` records this timestamp before stream creation and `TEST_START`; connection/setup delay can therefore add substantially more than one second of alignment error. The tabulated latency and CPU statistics use these nominal windows. Exact load-phase attribution requires separately timestamped interval evidence, particularly for delayed or interrupted trials. Values below are the median per-trial busy-core-seconds per delivered Gbit. Lifetime `ps %cpu` is not used for these comparisons.
 
 Latency is from timestamped ICMP probes every 200 ms. Probes are assigned to measured windows by estimated send time (reply timestamp minus reported RTT); quantiles pool the received probes in those windows. This does not count unreturned probes as finite RTTs. RSS uses 4096-byte pages from process stat samples. The two endpoint peaks are reported separately and need not occur simultaneously.
 
@@ -73,13 +73,13 @@ The send path partitions owned packet batches by the full flow hash. A bounded 2
 
 Only immediate direct TLS-protected data is eligible for striping. Session ciphertext, relayed data and control packets remain on the primary lane, preserving their existing replay domain. No replay bitmap was widened or disabled. Pending ownership is bounded to 64 packets and 256 KiB retained buffer capacity. Read and write polling visit siblings when one lane is pending; explicit flush is still a barrier. Shared admission, a full slow-lane queue and the final NIC remain real coupling points.
 
-The WSS server now preserves concrete TCP/TLS I/O types instead of passing them through an Either implementation that hid vectored writes. A regression observes actual multi-buffer writes. The BoringSSL client has bounded 64 KiB write coalescing to avoid fragmenting frames into tiny TLS writes through its scalar async adapter. Explicit flush still sends control and handshake traffic immediately.
+The WSS server now preserves concrete TCP/TLS I/O types instead of passing them through an Either implementation that hid vectored writes. A regression observes actual multi-buffer writes. H2/WSS clients use the same rustls connection as the servers.
 
 ## Chrome-family TLS verification
 
-The H2/WSS client uses BoringSSL 5.2 with TLS 1.2/1.3, Chromium-family cipher and signature preferences, X25519MLKEM768 plus X25519 key shares, GREASE, extension permutation, OCSP/SCT and bounded Brotli certificate decompression. Public-certificate paths retain native trust validation; direct peer paths retain the existing Noise-authenticated policy and exporter binding. QUIC and server-side TLS retain their existing implementations.
+The H2/WSS client uses the same rustls+ring provider as QUIC, with Chrome/Safari cipher order (AES-128, AES-256, ChaCha). Public-certificate paths retain native trust validation; direct peer paths retain Noise-authenticated policy and exporter binding. This is not a Chrome ClientHello clone (no GREASE, extension permutation, or ML-KEM).
 
-The reference was official Chrome for Testing 152.0.7977.82, run with an isolated profile against loopback HTTPS and WSS listeners. The archive SHA256 was `6a12c6e76fcd0dc44accc8d28e93caa44ead57b71b8e0cac891bc3152a709790`. No personal browser profile was used. `browser_tls/chrome-152.json` records the captured fields, and tests verify fresh randomness and nonconstant extension order.
+H2 and WSS clients use the same rustls+ring provider as QUIC. Cipher suite order follows Chrome/Safari (AES-128, AES-256, ChaCha). Tests lock a TLS handshake record and exporter binding, not a full Chrome ClientHello.
 
 | Captured property | Result |
 | --- | --- |

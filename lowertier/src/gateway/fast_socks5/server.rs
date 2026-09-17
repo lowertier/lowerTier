@@ -183,8 +183,25 @@ impl<A: Authentication> Config<A> {
 }
 
 #[async_trait::async_trait]
+pub trait ProxyTcpStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + Sized {
+    async fn transfer<I>(mut self, inbound: &mut I) -> Result<()>
+    where
+        I: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        match tokio::io::copy_bidirectional(inbound, &mut self).await {
+            Ok(result) => info!("transfer closed ({}, {})", result.0, result.1),
+            Err(error) => error!("transfer error: {:?}", error),
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProxyTcpStream for TcpStream {}
+
+#[async_trait::async_trait]
 pub trait AsyncTcpConnector: Send + Sync {
-    type S: AsyncRead + AsyncWrite + Unpin + Send + Sync;
+    type S: ProxyTcpStream;
 
     async fn tcp_connect(&self, addr: SocketAddr, timeout_s: u64) -> Result<Self::S>;
 
@@ -281,8 +298,11 @@ pub struct Socks5Socket<
     tcp_connector: C,
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector + AsyncUdpConnector>
-    Socks5Socket<T, A, C>
+impl<
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+    A: Authentication,
+    C: AsyncTcpConnector + AsyncUdpConnector,
+> Socks5Socket<T, A, C>
 {
     pub fn new(socket: T, config: Arc<Config<A>>, tcp_connector: C) -> Self {
         Socks5Socket {
@@ -692,7 +712,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector 
 
         debug!("Wrote success");
 
-        transfer(&mut self.inner, outbound).await
+        outbound.transfer(&mut self.inner).await
     }
 
     /// Bind to a random UDP port, wait for the traffic from
@@ -764,21 +784,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: AsyncTcpConnector 
     pub fn tcp_connector(&self) -> &C {
         &self.tcp_connector
     }
-}
-
-/// Copy data between two peers
-/// Using 2 different generators, because they could be different structs with same traits.
-async fn transfer<I, O>(mut inbound: I, mut outbound: O) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Unpin,
-    O: AsyncRead + AsyncWrite + Unpin,
-{
-    match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
-        Ok(res) => info!("transfer closed ({}, {})", res.0, res.1),
-        Err(err) => error!("transfer error: {:?}", err),
-    };
-
-    Ok(())
 }
 
 const MAX_UDP_ASSOCIATION_TARGETS: usize = 256;

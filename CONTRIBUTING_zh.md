@@ -198,8 +198,8 @@ sudo modprobe br_netfilter
 sudo sysctl net.bridge.bridge-nf-call-iptables=0
 sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
 
-# 运行测试
-cargo test --no-default-features --features=full --verbose
+# 运行维护中的核心/CLI 测试套件
+cargo test -p lowertier --lib --verbose
 ```
 
 ### 测试要求
@@ -208,7 +208,7 @@ cargo test --no-default-features --features=full --verbose
 
 不要为同一断言再写一份标量路径和一份批量路径。不要为同一条拒绝路径堆叠变体。不要把被 ignore 的性能基准放进 `src/`。
 
-CI 只跑 `.github/workflows/test.yml` 里的 essential nextest 过滤。新测试只有在确实关键时才加入该过滤。
+仓库只保留维护中的核心/CLI 测试；GUI 和其他暂不维护的界面不在测试范围内。核心测试总数必须不超过 500。CI 会运行完整的关键测试套件并检查这一上限。
 
 ## Pull Request 规范
 

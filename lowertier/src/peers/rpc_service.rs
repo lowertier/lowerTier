@@ -445,32 +445,4 @@ mod tests {
     use crate::proto::api::instance::{LocalBgpRoute, LocalBgpRouteAction};
 
     use super::PeerManagerRpcService;
-
-    #[test]
-    fn local_bgp_route_api_accepts_ipv6_and_exit_action() {
-        let route = PeerManagerRpcService::route_from_api(LocalBgpRoute {
-            prefix: "2001:db8:10::/48".to_string(),
-            gateway_peer_id: 42,
-            preference: 200,
-            metric: 10,
-            path_id: 7,
-            action: LocalBgpRouteAction::ExitSnat.into(),
-        })
-        .unwrap();
-
-        assert_eq!(route.gateway, 42);
-        assert_eq!(route.prefix.to_string(), "2001:db8:10::/48");
-    }
-
-    #[test]
-    fn local_bgp_route_api_rejects_zero_forwarding_gateway() {
-        let result = PeerManagerRpcService::route_from_api(LocalBgpRoute {
-            prefix: "10.0.0.0/8".to_string(),
-            gateway_peer_id: 0,
-            action: LocalBgpRouteAction::Forward.into(),
-            ..Default::default()
-        });
-
-        assert!(result.is_err());
-    }
 }

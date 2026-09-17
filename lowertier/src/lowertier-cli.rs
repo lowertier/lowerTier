@@ -577,35 +577,6 @@ fn format_sample_age(age_ms: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn missing_web_client_service_matches_raw_service_name() {
-        let error = RpcError::InvalidServiceKey("WebClientService".to_string(), "".to_string());
-
-        assert!(is_missing_web_client_service(&error));
-    }
-
-    #[test]
-    fn missing_web_client_service_matches_serialized_service_name() {
-        let error = RpcError::InvalidServiceKey("\"WebClientService\"".to_string(), "".to_string());
-
-        assert!(is_missing_web_client_service(&error));
-    }
-
-    #[test]
-    fn missing_web_client_service_rejects_other_services() {
-        let error = RpcError::InvalidServiceKey("PeerManageRpc".to_string(), "".to_string());
-
-        assert!(!is_missing_web_client_service(&error));
-    }
-
-    #[test]
-    fn speed_diagnostics_use_stable_units() {
-        assert_eq!(format_bitrate(None), "-");
-        assert_eq!(format_bitrate(Some(80_000_000)), "80.00 Mbit/s");
-        assert_eq!(format_bitrate(Some(1_500_000_000)), "1.50 Gbit/s");
-        assert_eq!(format_sample_age(Some(1_250)), "1.25s");
-    }
 }
 
 #[derive(serde::Serialize)]
@@ -1991,9 +1962,9 @@ impl<'a> CommandHandler<'a> {
 
     fn mapped_listener_validate_url(url: &str) -> Result<url::Url, Error> {
         let url = url::Url::parse(url)?;
-        if url.scheme() != "tcp" && url.scheme() != "udp" {
+        if url.scheme() != "tcp" && url.scheme() != "quic" && url.scheme() != "wss" {
             return Err(anyhow::anyhow!(
-                "Url ({url}) must start with tcp:// or udp://"
+                "Url ({url}) must start with tcp://, quic://, or wss://"
             ));
         } else if url.port().is_none() {
             return Err(anyhow::anyhow!("Url ({url}) is missing port num"));

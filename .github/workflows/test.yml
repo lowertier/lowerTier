@@ -80,57 +80,20 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Enforce core test budget
+        run: |
+          test_count="$(grep -R -E '^[[:space:]]*#\[(tokio::)?test' lowertier/src vendor/quincy-tun/src | wc -l)"
+          echo "Core tests: $test_count / 500"
+          test "$test_count" -le 500
+
       - name: Build test archive
         run: >-
           cargo nextest archive --locked
           --package lowertier --package quincy-tun
-          --no-default-features --features lean
           --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
 
       - name: Run essential tests
-        env:
-          LOWERTIER_ESSENTIAL_TESTS: >-
-            package(quincy-tun)
-            | test(common::acl_processor::tests)
-            | test(common::config::tests)
-            | test(launcher::tests)
-            | test(instance::l2_tun::tests)
-            | test(instance::virtual_nic::tests::l2_)
-            | test(instance::virtual_nic::tests::native_tap_)
-            | test(instance::virtual_nic::tests::tap_port_mode)
-            | test(instance::linux_tun::tests)
-            | test(peers::l2_fabric::tests)
-            | test(peers::alternate_fec::tests)
-            | test(peers::flow::tests)
-            | test(peers::peer::tests::alternate_fec_)
-            | test(peers::peer::tests::critical_l2_)
-            | test(peers::peer::tests::l2_parity_)
-            | test(peers::peer_manager::tests::ethernet_)
-            | test(peers::peer_manager::tests::l2_)
-            | test(peers::peer_session::tests)
-            | test(peers::secure_datagram::tests)
-            | test(tests::credential_tests::credential_basic_connectivity)
-            | test(tests::credential_tests::credential_non_reusable_)
-            | test(tunnel::packet_def::tests)
-            | test(tunnel::quic::tests::different_network_secrets_)
-            | test(tunnel::quic::tests::datagram_queue_)
-            | test(tunnel::quic::tests::direct_quic_)
-            | test(tunnel::quic::tests::full_queue_)
-            | test(tunnel::quic::tests::normal_data_uses_plain_datagrams_)
-            | test(tunnel::quic::tests::path_mtu_shrink_)
-            | test(tunnel::quic::tests::plain_datagram_)
-            | test(tunnel::quic::tests::quic_datagram_)
-            | test(tunnel::quic::tests::quic_hybrid_lanes_)
-            | test(tunnel::quic::tests::quic_network_identity_)
-            | test(tunnel::quic::tests::secure_mode_allows_)
-            | test(tunnel::quic::tests::stalled_datagram_)
-            | test(tunnel::quic::tests::quic_transport_uses_tls13)
-            | test(tunnel::quic::tests::quic_writer_)
-            | test(tunnel::udp::tests::platform_udp_)
-            | test(tunnel::udp::tests::protected_udp_)
-            | test(tunnel::udp_vector_io::tests)
         run: >-
           sudo -E env "PATH=$PATH" cargo nextest run
           --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
-          -E "$LOWERTIER_ESSENTIAL_TESTS"
           --test-threads 1 --no-fail-fast

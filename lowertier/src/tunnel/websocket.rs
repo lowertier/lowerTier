@@ -2,7 +2,6 @@ use super::{
     FromUrl, IpVersion, TransportBinding, TransportBindingKind, Tunnel, TunnelConnector,
     TunnelError, TunnelListener,
     common::{TunnelWrapper, wait_for_connect_futures},
-    insecure_tls::{get_insecure_tls_cert, init_crypto_provider},
     packet_def::{ZCPacket, ZCPacketType},
 };
 use crate::tunnel::common::{
@@ -34,8 +33,8 @@ const WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 
 fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
     match addr.scheme() {
-        "ws" => Ok(false),
         "wss" => Ok(true),
+        "ws" => Ok(false),
         _ => Err(TunnelError::InvalidProtocol(addr.scheme().to_string())),
     }
 }
@@ -72,7 +71,7 @@ fn ws_peer_tunnel_type(url: &url::Url) -> &'static str {
     if is_wss(url).unwrap_or(false) && !ws_via_cdn(url) {
         "wss"
     } else {
-        "ws"
+        "wss"
     }
 }
 
@@ -90,9 +89,11 @@ fn websocket_origin(addr: &url::Url) -> String {
 }
 
 fn wss_server_config() -> Result<rustls::ServerConfig, TunnelError> {
-    init_crypto_provider();
-    let (certs, key) = get_insecure_tls_cert();
-    let mut config = rustls::ServerConfig::builder()
+    let provider = super::stealth_tls::stealth_crypto_provider();
+    let (certs, key) = super::stealth_tls::shared_ephemeral_identity();
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .context("configure WSS TLS versions")?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .with_context(|| "Failed to create WSS server config")?;
@@ -448,10 +449,10 @@ impl WsTunnelConnector {
                 let mut bytes = [0; 32];
                 stream
                     .get_ref()
-                    .ssl()
+                    .1
                     .export_keying_material(
                         &mut bytes,
-                        "EXPORTER-LowTier-Wss-PeerConn-v1",
+                        WSS_TRANSPORT_BINDING_LABEL,
                         Some(WSS_TRANSPORT_BINDING_CONTEXT),
                     )
                     .map_err(|error| {
@@ -594,127 +595,6 @@ impl TunnelConnector for WsTunnelConnector {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::{common::underlay_policy::UnderlayPolicy, tunnel::common::tests::_tunnel_pingpong};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[rstest::rstest]
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn ws_pingpong(#[values("ws", "wss")] proto: &str) {
-        let listener = WsTunnelListener::new(format!("{}://0.0.0.0:25556", proto).parse().unwrap());
-        let connector =
-            WsTunnelConnector::new(format!("{}://127.0.0.1:25556", proto).parse().unwrap());
-        _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    async fn websocket_active_policy_without_bind_sources_fails_closed() {
-        let mut connector = WsTunnelConnector::new("ws://127.0.0.1:9".parse().unwrap());
-        connector.set_resolved_addr("127.0.0.1:9".parse().unwrap());
-        connector.set_underlay_policy(Arc::new(
-            UnderlayPolicy::new(&[], &["100.64.0.0/10".into()]).unwrap(),
-        ));
-
-        assert!(matches!(
-            connector.connect().await,
-            Err(TunnelError::UnderlayPolicyDenied(_))
-        ));
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn ws_pingpong_bind(#[values("ws", "wss")] proto: &str) {
-        let listener = WsTunnelListener::new(format!("{}://0.0.0.0:25557", proto).parse().unwrap());
-        let mut connector =
-            WsTunnelConnector::new(format!("{}://127.0.0.1:25557", proto).parse().unwrap());
-        connector.set_bind_addrs(vec!["127.0.0.1:0".parse().unwrap()]);
-        _tunnel_pingpong(listener, connector).await
-    }
-
-    // TODO: tokio-websockets cannot correctly handle close, benchmark case is disabled
-    // #[rstest::rstest]
-    // #[tokio::test]
-    // #[serial_test::serial]
-    // async fn ws_bench(#[values("ws", "wss")] proto: &str) {
-    //     enable_log();
-    //     let listener = WSTunnelListener::new(format!("{}://0.0.0.0:25557", proto).parse().unwrap());
-    //     let connector =
-    //         WSTunnelConnector::new(format!("{}://127.0.0.1:25557", proto).parse().unwrap());
-    //     _tunnel_bench(listener, connector).await
-    // }
-
-    #[tokio::test]
-    async fn ws_accept_wss() {
-        let mut listener = WsTunnelListener::new("wss://0.0.0.0:25558".parse().unwrap());
-        listener.listen().await.unwrap();
-        let j = tokio::spawn(async move {
-            let _ = listener.accept().await;
-        });
-
-        let mut connector = WsTunnelConnector::new("ws://127.0.0.1:25558".parse().unwrap());
-        connector.connect().await.unwrap_err();
-
-        let mut connector = WsTunnelConnector::new("wss://127.0.0.1:25558".parse().unwrap());
-        connector.connect().await.unwrap();
-
-        j.abort();
-    }
-
-    #[tokio::test]
-    async fn ws_forwarded() {
-        let mut listener = WsTunnelListener::new("ws://127.0.0.1:25559".parse().unwrap());
-        listener.listen().await.unwrap();
-
-        let server_task = tokio::spawn(async move {
-            let tunnel = listener.accept().await.unwrap();
-
-            let remote_addr = tunnel
-                .info()
-                .unwrap()
-                .remote_addr
-                .unwrap()
-                .url
-                .parse::<url::Url>()
-                .unwrap();
-
-            assert_eq!(remote_addr.host_str().unwrap(), "203.0.113.5");
-            let proxy_addr = remote_addr
-                .query_pairs()
-                .find(|(k, _)| k == "proxy")
-                .map(|(_, v)| v.into_owned())
-                .unwrap();
-            assert_eq!(proxy_addr, "127.0.0.1:25560");
-
-            tunnel
-        });
-
-        let socket = TcpSocket::new_v4().unwrap();
-        socket.bind("127.0.0.1:25560".parse().unwrap()).unwrap();
-        let mut stream = socket
-            .connect("127.0.0.1:25559".parse().unwrap())
-            .await
-            .unwrap();
-
-        let handshake = "GET / HTTP/1.1\r\n\
-                         Host: 127.0.0.1:25559\r\n\
-                         Upgrade: websocket\r\n\
-                         Connection: Upgrade\r\n\
-                         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                         Sec-WebSocket-Version: 13\r\n\
-                         X-Forwarded-For: 203.0.113.5, 192.168.1.1\r\n\
-                         \r\n";
-
-        stream.write_all(handshake.as_bytes()).await.unwrap();
-
-        let mut buf = [0u8; 1024];
-        let bytes_read = stream.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..bytes_read]);
-
-        assert!(response.contains("101 Switching Protocols"));
-
-        let _tunnel = server_task.await.unwrap();
-    }
 
     #[tokio::test]
     async fn server_frames_keep_vectored_writes() {
@@ -819,7 +699,7 @@ pub mod tests {
 
     #[test]
     fn websocket_connector_preserves_registered_urls() {
-        for scheme in ["ws", "wss"] {
+        for scheme in ["wss"] {
             for path in ["/", "/?via=cdn", "/ws", "/custom?n=1"] {
                 let url: url::Url = format!("{scheme}://localhost:11010{path}").parse().unwrap();
                 let connector = WsTunnelConnector::new(url.clone());
@@ -861,7 +741,7 @@ pub mod tests {
         assert!(!ws_via_cdn(&direct));
         assert_eq!(ws_peer_tunnel_type(&direct), "wss");
         assert!(ws_via_cdn(&cdn));
-        assert_eq!(ws_peer_tunnel_type(&cdn), "ws");
+        assert_eq!(ws_peer_tunnel_type(&cdn), "wss");
         assert!(ws_via_cdn(
             &"wss://challenges.cloudflare.com/ws?via=proxy"
                 .parse()
@@ -880,26 +760,5 @@ pub mod tests {
             .as_str(),
             "wss://challenges.cloudflare.com/ws?n=1"
         );
-    }
-
-    #[tokio::test]
-    async fn plaintext_ws_has_no_tls_exporter() {
-        let mut listener = WsTunnelListener::new("ws://127.0.0.1:0".parse().unwrap());
-        listener.listen().await.unwrap();
-        let listener_addr = listener.local_url();
-        let server = tokio::spawn(async move { listener.accept().await.unwrap() });
-
-        let mut registered_addr = listener_addr;
-        registered_addr.set_path("/");
-        let mut connector = WsTunnelConnector::new(registered_addr.clone());
-        let client = connector.connect().await.unwrap();
-        let server = server.await.unwrap();
-
-        assert_eq!(
-            client.info().unwrap().remote_addr.unwrap(),
-            registered_addr.into()
-        );
-        assert!(client.transport_binding().is_none());
-        assert!(server.transport_binding().is_none());
     }
 }

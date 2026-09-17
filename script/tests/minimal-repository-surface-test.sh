@@ -90,10 +90,15 @@ if grep -Eiq 'mips|riscv|loongarch|armv7|i686|freebsd|magisk|build_web|lowertier
 fi
 
 grep -Fq -- '--package lowertier --bins' "$core_workflow"
-grep -Fq -- '--no-default-features' "$core_workflow"
-grep -Fq -- '--features lean' "$core_workflow"
-grep -Fq 'default = ["lean"]' "$repo_root/lowertier/Cargo.toml"
-grep -Fq 'lean = [' "$repo_root/lowertier/Cargo.toml"
+if grep -Fq -- '--features lean' "$core_workflow" "$test_workflow" "$repo_root/lowertier/Cargo.toml"; then
+  echo "the lean build route is still present" >&2
+  exit 1
+fi
+if grep -Fq -- '--no-default-features' "$core_workflow" "$test_workflow"; then
+  echo "the core/test workflow still disables default features" >&2
+  exit 1
+fi
+grep -Fq 'default = ["tun", "socks5", "mimalloc"]' "$repo_root/lowertier/Cargo.toml"
 
 if grep -Eq 'pre_job|pre-test|test_matrix|upload-artifact|download-artifact' "$test_workflow"; then
   echo "the test workflow contains a duplicate or transfer-only job" >&2

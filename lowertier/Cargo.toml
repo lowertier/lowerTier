@@ -128,11 +128,6 @@ http = { version = "1", default-features = false, features = [
 ] }
 forwarded-header-value = { version = "0.1.1" }
 tokio-rustls = { version = "0.26", default-features = false }
-boring = { version = "5.2" }
-boring-sys = { version = "5.2" }
-foreign-types = { version = "0.5" }
-tokio-boring = { version = "5.2" }
-brotli-decompressor = { version = "5" }
 
 # for tap device
 tun = { package = "tun-lowertier", path = "../vendor/rust-tun", features = [
@@ -205,7 +200,6 @@ network-interface = "2.0"
 petgraph = "0.8.1"
 ordered_hash_map = "0.5.0"
 
-
 # for encryption
 ring = "0.17"
 subtle = "2.6"
@@ -257,7 +251,6 @@ service-manager = { path = "../vendor/service-manager-rs" }
 
 zstd = { version = "0.13", optional = true }
 
-
 # for dns connector
 hickory-resolver = "0.25.2"
 hickory-proto = "0.25.2"
@@ -277,7 +270,6 @@ hmac = "0.12.1"
 sha2 = "0.10.8"
 shellexpand = "3.1.1"
 
-# for fake tcp
 igd-next = { version = "0.17.0", features = ["aio_tokio"] }
 natpmp = "0.5.0"
 
@@ -321,7 +313,7 @@ winreg = "0.52"
 windows-service = "0.7.0"
 winapi = { version = "0.3.9", features = ["impl-default"] }
 
-[target.'cfg(not(windows))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 jemallocator = { package = "tikv-jemallocator", version = "0.6.0", optional = true, features = [
     "unprefixed_malloc_on_supported_platforms",
 ] }
@@ -329,7 +321,7 @@ jemalloc-ctl = { package = "tikv-jemalloc-ctl", version = "0.6.0", optional = tr
     "use_std",
 ] }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 jemalloc-sys = { package = "tikv-jemalloc-sys", version = "0.6.0", features = [
     "background_threads_runtime_support",
     "background_threads",
@@ -372,10 +364,8 @@ tokio-socks = "0.5.2"
 
 
 [features]
-default = ["lean"]
-lean = ["tun", "socks5"]
+default = ["tun", "socks5", "mimalloc"]
 full = [
-    "lean",
     "aes-gcm",
     "openssl-crypto", # This feature requires OpenSSL development files.
     "magic-dns",

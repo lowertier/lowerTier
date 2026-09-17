@@ -198,9 +198,9 @@ fn linux_tun_offload_configured(
     !explicitly_disabled && (explicitly_enabled || automatically_supported)
 }
 
-/// Maximum Linux TUN/TAP queues. Each queue is one character device FD with
-/// independent read and write completion. More than four queues adds memory
-/// without helping the single-core receive pump.
+/// Maximum Linux TUN/TAP queues. Each queue has a two-batch receive pool
+/// and a 64 KiB GRO scratch. virtio GSO/GRO needs more than one queue for
+/// reverse throughput; `LOWTIER_TUN_QUEUES` can still override.
 #[cfg(target_os = "linux")]
 const LINUX_VIRTUAL_NIC_MAX_QUEUES: usize = 4;
 
@@ -2050,6 +2050,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_virtual_nic_caps_default_queues_at_four() {
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 8, None), 4);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 1, None), 1);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 8, Some(3)), 3);
+        assert_eq!(super::linux_virtual_nic_queue_count(false, 1, Some(4)), 1);
     }
 
     #[tokio::test]

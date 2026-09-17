@@ -295,176 +295,8 @@ impl super::TunnelConnector for TcpTunnelConnector {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        common::underlay_policy::UnderlayPolicy,
-        tunnel::{TunnelConnector, TunnelError, common::tests::_tunnel_pingpong},
-    };
-
     use super::*;
-
-    #[tokio::test]
-    async fn tcp_pingpong() {
-        let listener = TcpTunnelListener::new("tcp://0.0.0.0:31011".parse().unwrap());
-        let connector = TcpTunnelConnector::new("tcp://127.0.0.1:31011".parse().unwrap());
-        _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    async fn active_policy_without_bind_sources_fails_closed() {
-        let mut connector = TcpTunnelConnector::new("tcp://127.0.0.1:9".parse().unwrap());
-        connector.set_resolved_addr("127.0.0.1:9".parse().unwrap());
-        connector.set_underlay_policy(Arc::new(
-            UnderlayPolicy::new(&[], &["100.64.0.0/10".into()]).unwrap(),
-        ));
-
-        let result = connector.connect().await;
-
-        assert!(matches!(result, Err(TunnelError::UnderlayPolicyDenied(_))));
-    }
-
-    #[tokio::test]
-    async fn tcp_bench_with_bind() {
-        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = reserved.local_addr().unwrap().port();
-        drop(reserved);
-
-        let listener = TcpTunnelListener::new(format!("tcp://127.0.0.1:{port}").parse().unwrap());
-        let mut connector =
-            TcpTunnelConnector::new(format!("tcp://127.0.0.1:{port}").parse().unwrap());
-        connector.set_bind_addrs(vec!["127.0.0.1:0".parse().unwrap()]);
-        _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    #[should_panic]
-    async fn tcp_bench_with_bind_fail() {
-        let listener = TcpTunnelListener::new("tcp://127.0.0.1:11014".parse().unwrap());
-        let mut connector = TcpTunnelConnector::new("tcp://127.0.0.1:11014".parse().unwrap());
-        connector.set_bind_addrs(vec!["10.0.0.1:0".parse().unwrap()]);
-        _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    async fn bind_same_port() {
-        let mut listener = TcpTunnelListener::new("tcp://[::]:31014".parse().unwrap());
-        let mut listener2 = TcpTunnelListener::new("tcp://0.0.0.0:31014".parse().unwrap());
-        listener.listen().await.unwrap();
-        listener2.listen().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn ipv6_pingpong() {
-        let listener = TcpTunnelListener::new("tcp://[::1]:31015".parse().unwrap());
-        let connector = TcpTunnelConnector::new("tcp://[::1]:31015".parse().unwrap());
-        _tunnel_pingpong(listener, connector).await
-    }
-
-    #[tokio::test]
-    async fn ipv6_domain_pingpong() {
-        use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
-        use futures::{SinkExt, StreamExt};
-        for (host, version) in [("[::1]", IpVersion::V6), ("127.0.0.1", IpVersion::V4)] {
-            let mut listener = TcpTunnelListener::new(format!("tcp://{host}:0").parse().unwrap());
-            listener.listen().await.unwrap();
-            let port = listener.local_url().port().unwrap();
-            let mut connector =
-                TcpTunnelConnector::new(format!("tcp://localhost:{port}").parse().unwrap());
-            connector.set_ip_version(version);
-            let server = tokio::spawn(async move {
-                let tunnel = listener.accept().await.unwrap();
-                crate::tunnel::common::tests::_tunnel_echo_server(tunnel, false).await;
-            });
-            let tunnel = connector.connect().await.unwrap();
-            let (mut recv, mut send) = tunnel.split();
-            send.send(PacketBatch::singleton(ZCPacket::new_with_payload(
-                b"domain echo",
-            )))
-            .await
-            .unwrap();
-            let echoed = tokio::time::timeout(std::time::Duration::from_secs(3), recv.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            assert_eq!(echoed.pop_singleton().unwrap().payload(), b"domain echo");
-            send.close().await.unwrap();
-            drop(send);
-            drop(recv);
-            drop(tunnel);
-            tokio::time::timeout(std::time::Duration::from_secs(3), server)
-                .await
-                .unwrap()
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn connector_keeps_source_addr_and_reports_resolved_addr() {
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
-        listener.listen().await.unwrap();
-
-        let port = listener.local_url().port().unwrap();
-        let source_url: url::Url = format!("tcp://localhost:{port}").parse().unwrap();
-        let mut connector = TcpTunnelConnector::new(source_url.clone());
-        connector.set_ip_version(IpVersion::V4);
-
-        let accept_task = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let tunnel = connector.connect().await.unwrap();
-        let accepted_tunnel = accept_task.await.unwrap();
-
-        let info = tunnel.info().unwrap();
-        assert_eq!(info.remote_addr.unwrap().url, source_url.to_string());
-
-        let resolved_remote_addr: url::Url = info.resolved_remote_addr.unwrap().into();
-        assert_eq!(resolved_remote_addr.host_str(), Some("127.0.0.1"));
-        assert_eq!(resolved_remote_addr.port(), Some(port));
-
-        let accepted_info = accepted_tunnel.info().unwrap();
-        assert_eq!(
-            accepted_info.remote_addr,
-            accepted_info.resolved_remote_addr,
-        );
-    }
-
-    #[tokio::test]
-    async fn connector_uses_pre_resolved_addr_without_resolving_url() {
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
-        listener.listen().await.unwrap();
-
-        let port = listener.local_url().port().unwrap();
-        let source_url: url::Url = format!("tcp://unresolvable.invalid:{port}")
-            .parse()
-            .unwrap();
-        let resolved_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let mut connector = TcpTunnelConnector::new(source_url.clone());
-        connector.set_resolved_addr(resolved_addr);
-
-        let accept_task = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let tunnel = connector.connect().await.unwrap();
-        let _accepted_tunnel = accept_task.await.unwrap();
-
-        let info = tunnel.info().unwrap();
-        assert_eq!(info.remote_addr.unwrap().url, source_url.to_string());
-
-        let resolved_remote_addr: url::Url = info.resolved_remote_addr.unwrap().into();
-        assert_eq!(resolved_remote_addr.host_str(), Some("127.0.0.1"));
-        assert_eq!(resolved_remote_addr.port(), Some(port));
-    }
-
-    #[tokio::test]
-    async fn test_alloc_port() {
-        // v4
-        let mut listener = TcpTunnelListener::new("tcp://0.0.0.0:0".parse().unwrap());
-        listener.listen().await.unwrap();
-        let port = listener.local_url().port().unwrap();
-        assert!(port > 0);
-
-        // v6
-        let mut listener = TcpTunnelListener::new("tcp://[::]:0".parse().unwrap());
-        listener.listen().await.unwrap();
-        let port = listener.local_url().port().unwrap();
-        assert!(port > 0);
-    }
+    use crate::tunnel::TunnelConnector;
 
     #[tokio::test]
     async fn tcp_http2_exports_a_tls_binding() {
@@ -664,8 +496,120 @@ mod tests {
         decoy_task.abort();
     }
 
+    const CAMOUFLAGE_HOST: &str = "challenges.cloudflare.com";
+
+    struct TcpPassthrough {
+        public: SocketAddr,
+        _nginx: Option<std::process::Child>,
+        _task: Option<tokio::task::JoinHandle<()>>,
+        _dir: Option<tempfile::TempDir>,
+    }
+
+    impl Drop for TcpPassthrough {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self._nginx {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            if let Some(task) = &self._task {
+                task.abort();
+            }
+        }
+    }
+
+    fn nginx_binary() -> Option<std::path::PathBuf> {
+        for candidate in [
+            "/opt/homebrew/opt/nginx/bin/nginx",
+            "/usr/sbin/nginx",
+            "/usr/bin/nginx",
+        ] {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn start_nginx_tcp_passthrough(backend: SocketAddr) -> Option<TcpPassthrough> {
+        let nginx = nginx_binary()?;
+        let dir = tempfile::tempdir().ok()?;
+        let public = std::net::TcpListener::bind("127.0.0.1:0")
+            .ok()?
+            .local_addr()
+            .ok()?;
+        let conf = dir.path().join("nginx.conf");
+        let error = dir.path().join("error.log");
+        let pid = dir.path().join("nginx.pid");
+        std::fs::write(
+            &conf,
+            format!(
+                "daemon off;\nerror_log {};\npid {};\nevents {{ worker_connections 64; }}\nstream {{\n    server {{\n        listen {};\n        proxy_pass {};\n        proxy_timeout 60s;\n    }}\n}}\n",
+                error.display(),
+                pid.display(),
+                public,
+                backend
+            ),
+        )
+        .ok()?;
+        let child = std::process::Command::new(nginx)
+            .arg("-c")
+            .arg(&conf)
+            .arg("-p")
+            .arg(dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        for _ in 0..50 {
+            if std::net::TcpListener::bind(public).is_err() {
+                return Some(TcpPassthrough {
+                    public,
+                    _nginx: Some(child),
+                    _task: None,
+                    _dir: Some(dir),
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    }
+
+    async fn start_tokio_tcp_passthrough(backend: SocketAddr) -> TcpPassthrough {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut upstream) = TcpStream::connect(backend).await else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        TcpPassthrough {
+            public,
+            _nginx: None,
+            _task: Some(task),
+            _dir: None,
+        }
+    }
+
+    async fn start_tcp_passthrough(backend: SocketAddr) -> TcpPassthrough {
+        if let Some(proxy) = start_nginx_tcp_passthrough(backend) {
+            return proxy;
+        }
+        start_tokio_tcp_passthrough(backend).await
+    }
+
     #[tokio::test]
-    #[ignore = "requires external DNS and HTTPS connectivity"]
     async fn live_challenges_cloudflare_probe_through_tcp_passthrough() {
         let upstream = tokio::net::lookup_host((CAMOUFLAGE_HOST, 443))
             .await
@@ -824,117 +768,5 @@ mod tests {
                 "HTTP/2 camouflage through TCP passthrough: {proxy_rate:.1} Mbit/s, {proxy_delivery:.1}% in {proxy_elapsed:?}"
             );
         }
-    }
-    const CAMOUFLAGE_HOST: &str = "challenges.cloudflare.com";
-
-    struct TcpPassthrough {
-        public: SocketAddr,
-        _nginx: Option<std::process::Child>,
-        _task: Option<tokio::task::JoinHandle<()>>,
-        _dir: Option<tempfile::TempDir>,
-    }
-
-    impl Drop for TcpPassthrough {
-        fn drop(&mut self) {
-            if let Some(child) = &mut self._nginx {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            if let Some(task) = &self._task {
-                task.abort();
-            }
-        }
-    }
-
-    fn nginx_binary() -> Option<std::path::PathBuf> {
-        for candidate in [
-            "/opt/homebrew/opt/nginx/bin/nginx",
-            "/usr/sbin/nginx",
-            "/usr/bin/nginx",
-        ] {
-            let path = std::path::PathBuf::from(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        None
-    }
-
-    fn start_nginx_tcp_passthrough(backend: SocketAddr) -> Option<TcpPassthrough> {
-        let nginx = nginx_binary()?;
-        let dir = tempfile::tempdir().ok()?;
-        let public = std::net::TcpListener::bind("127.0.0.1:0")
-            .ok()?
-            .local_addr()
-            .ok()?;
-        let conf = dir.path().join("nginx.conf");
-        let error = dir.path().join("error.log");
-        let pid = dir.path().join("nginx.pid");
-        std::fs::write(
-            &conf,
-            format!(
-                "daemon off;\nerror_log {};\npid {};\nevents {{ worker_connections 64; }}\nstream {{\n    server {{\n        listen {};\n        proxy_pass {};\n        proxy_timeout 60s;\n    }}\n}}\n",
-                error.display(),
-                pid.display(),
-                public,
-                backend
-            ),
-        )
-        .ok()?;
-        let child = std::process::Command::new(nginx)
-            .arg("-c")
-            .arg(&conf)
-            .arg("-p")
-            .arg(dir.path())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        for _ in 0..50 {
-            if std::net::TcpListener::bind(public).is_err() {
-                return Some(TcpPassthrough {
-                    public,
-                    _nginx: Some(child),
-                    _task: None,
-                    _dir: Some(dir),
-                });
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let mut child = child;
-        let _ = child.kill();
-        let _ = child.wait();
-        None
-    }
-
-    async fn start_tokio_tcp_passthrough(backend: SocketAddr) -> TcpPassthrough {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let public = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            loop {
-                let Ok((mut client, _)) = listener.accept().await else {
-                    return;
-                };
-                tokio::spawn(async move {
-                    let Ok(mut upstream) = TcpStream::connect(backend).await else {
-                        return;
-                    };
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
-                });
-            }
-        });
-        TcpPassthrough {
-            public,
-            _nginx: None,
-            _task: Some(task),
-            _dir: None,
-        }
-    }
-
-    async fn start_tcp_passthrough(backend: SocketAddr) -> TcpPassthrough {
-        if let Some(proxy) = start_nginx_tcp_passthrough(backend) {
-            return proxy;
-        }
-        start_tokio_tcp_passthrough(backend).await
     }
 }

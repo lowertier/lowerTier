@@ -74,13 +74,15 @@ core_clap:
     zh-CN: "RPC门户白名单，仅允许这些地址访问RPC门户，例如：127.0.0.1/32,127.0.0.0/8,::1/128"
   listeners:
     en: |+
-        listeners to accept connections. Supported schemes: tcp (H2/TLS), udp, quic (H3), ws, and wss.
-        port number: <11010> expands the retained schemes using their base-port offsets.
-        url: <tcp://0.0.0.0:11010>. URLs and <proto:port> pairs may occur multiple times.
+        listeners to accept connections, allow format:
+        port number: <11010>. means tcp/udp will listen on 11010 and ws/wss use their standard offsets
+        url: <tcp://0.0.0.0:11010>. tcp can be tcp, udp, ring, ws, wss, or quic\n
+        proto & port pair: <proto:port>. for example quic:11012; url and proto:port can occur multiple times.
     zh-CN: |+
-      用于接受连接的监听器。支持协议：tcp（H2/TLS）、udp、quic（H3）、ws 和 wss。
-      端口号 <11010> 会按基础端口偏移展开这些保留协议。
-      URL 示例：<tcp://0.0.0.0:11010>。URL 和 <协议:端口> 可以多次出现。
+      监听器用于接受连接，允许以下格式：
+      端口号：<11010>，意味着tcp/udp将在11010端口监听，ws/wss使用其标准偏移端口。
+      url：<tcp://0.0.0.0:11010>，其中tcp可以是tcp、udp、ring、ws、wss或quic协议。
+      协议和端口对：<proto:port>，例如quic:11012。URL 和协议端口对可以多次出现。
   no_listener:
     en: "do not listen on any port, only connect to peers"
     zh-CN: "不监听任何端口，只连接到对等节点"
@@ -100,8 +102,8 @@ core_clap:
     en: "instance name to identify this vpn node in same machine"
     zh-CN: "实例名称，用于在同一台机器上标识此VPN节点"
   default_protocol:
-    en: "default protocol to use when connecting to peers"
-    zh-CN: "连接到对等节点时使用的默认协议"
+    en: "preferred peer transport: quic, tcp (HTTP/2), or wss"
+    zh-CN: "首选对等传输：quic、tcp（HTTP/2）或 wss"
   disable_encryption:
     en: "disable encryption for peers communication, default is false, must be same with peers"
     zh-CN: "禁用对等节点通信的加密，默认为false，必须与对等节点相同"
@@ -151,11 +153,11 @@ core_clap:
     en: "do not create TUN device, can use subnet proxy to access node"
     zh-CN: "不创建TUN设备，可以使用子网代理访问节点"
   use_smoltcp:
-    en: "enable smoltcp stack for subnet and userspace proxying"
-    zh-CN: "为子网代理和用户态代理启用 smoltcp 堆栈"
+    en: "enable smoltcp stack for subnet proxy"
+    zh-CN: "为子网代理启用smoltcp堆栈"
   manual_routes:
-    en: "assign routes cidr manually, replacing automatically propagated subnet routes. e.g.: 192.168.0.0/16"
-    zh-CN: "手动分配路由 CIDR，替换自动传播的子网路由。例如：192.168.0.0/16"
+    en: "assign routes cidr manually and disable propagated subnet-proxy routes. e.g.: 192.168.0.0/16"
+    zh-CN: "手动分配路由CIDR，并禁用对等节点传播的子网代理路由。例如：192.168.0.0/16"
   relay_network_whitelist:
     en: |+
         only forward traffic from the whitelist networks, supporting wildcard strings, multiple network names can be separated by spaces.
@@ -219,8 +221,8 @@ core_clap:
     en: "bind the connector socket to physical devices to avoid routing issues. e.g.: subnet proxy segment conflicts with a node's segment, after binding the physical device, it can communicate with the node normally."
     zh-CN: "将连接器的套接字绑定到物理设备以避免路由问题。比如子网代理网段与某节点的网段冲突，绑定物理设备后可以与该节点正常通信。"
   socket_mark:
-    en: "Linux only: set SO_MARK (fwmark) on LowTier underlay sockets for TCP/H2, UDP, QUIC/H3, WS, and WSS so policy routing and firewall rules can match them. Any value, including 0, is applied verbatim. Requires CAP_NET_ADMIN."
-    zh-CN: "仅 Linux：在 LowTier 的 TCP/H2、UDP、QUIC/H3、WS 和 WSS 底层套接字上设置 SO_MARK (fwmark)，便于策略路由和防火墙匹配。包括 0 在内的值都会原样应用。需要 CAP_NET_ADMIN。"
+    en: "Linux only: set SO_MARK (fwmark) on LowTier's TCP, UDP, QUIC, and WebSocket underlay sockets so the host can policy-route or filter them with 'ip rule fwmark ...', nftables ('meta mark'), or iptables ('-m mark'). Any value is applied verbatim (0 is valid); omit the flag to leave SO_MARK untouched. Requires CAP_NET_ADMIN."
+    zh-CN: "仅 Linux：在 LowTier 的 TCP、UDP、QUIC 和 WebSocket 底层套接字上设置 SO_MARK (fwmark)，使主机能用 'ip rule fwmark ...'、nftables ('meta mark') 或 iptables ('-m mark') 进行策略路由或过滤。任何值都会原样应用（0 也是合法值）；不传该参数即保持 SO_MARK 不变。需要 CAP_NET_ADMIN 权限。"
   underlay_deny_interfaces:
     en: "deny LowTier underlay traffic on these exact interface names; comma-separated values are accepted"
     zh-CN: "禁止 LowTier 底层流量使用这些精确的接口名称；支持逗号分隔多个值"
@@ -239,15 +241,6 @@ core_clap:
   enable_bridge:
     en: "authorize this node to receive complete Ethernet frames in automatic mode"
     zh-CN: "授权此节点在自动模式下接收完整以太网帧"
-  quic_congestion:
-    en: "QUIC congestion controller: adaptive, bbr, or brutal"
-    zh-CN: "QUIC 拥塞控制器：adaptive、bbr 或 brutal"
-  quic_brutal_send_bps:
-    en: "Brutal QUIC target send rate in bits per second; required when quic-congestion is brutal"
-    zh-CN: "Brutal QUIC 的目标发送速率，单位为比特每秒；使用 brutal 时必须设置"
-  quic_brutal_loss_compensation:
-    en: "increase Brutal QUIC attempts within a bounded limit to compensate for measured packet loss"
-    zh-CN: "在受限范围内提高 Brutal QUIC 发送量，以补偿测得的丢包"
   quic_initial_receive_window:
     en: "QUIC per-stream receive window in bytes"
     zh-CN: "QUIC 单流接收窗口，单位为字节"

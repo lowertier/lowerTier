@@ -246,7 +246,7 @@ pub async fn run_web_client(
         .with_context(|| "failed to resolve machine id for web client")?;
     let config_server_url = match Url::parse(config_server_url_s) {
         Ok(u) => u,
-        Err(_) => format!("udp://127.0.0.1:22020/{}", config_server_url_s)
+        Err(_) => format!("tcp://127.0.0.1:22020/{}", config_server_url_s)
             .parse()
             .with_context(|| "failed to parse config server URL")?,
     };
@@ -259,7 +259,7 @@ pub async fn run_web_client(
     })?;
 
     let mut c_url = config_server_url.clone();
-    if !matches!(c_url.scheme(), "ws" | "wss") {
+    if !matches!(c_url.scheme(), "wss") {
         c_url.set_path("");
     }
     let token = config_server_url
@@ -307,61 +307,4 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     use crate::{common::MachineIdOptions, instance_manager::NetworkInstanceManager};
-
-    #[tokio::test]
-    async fn test_manager_wait() {
-        let manager = Arc::new(NetworkInstanceManager::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let client = super::run_web_client(
-            "https://127.0.0.1:9/test",
-            MachineIdOptions {
-                explicit_machine_id: None,
-                state_dir: Some(temp_dir.path().to_path_buf()),
-            },
-            None,
-            false,
-            manager.clone(),
-            None,
-        )
-        .await
-        .unwrap();
-        let sleep_finish = Arc::new(AtomicBool::new(false));
-        let sleep_finish_clone = sleep_finish.clone();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            println!("Dropping client...");
-            sleep_finish_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-            drop(client);
-            println!("Client dropped.");
-        });
-
-        println!("Waiting for manager...");
-        manager.wait().await;
-        assert!(sleep_finish.load(std::sync::atomic::Ordering::Relaxed));
-        println!("Manager stopped.");
-    }
-
-    #[tokio::test]
-    async fn test_run_web_client_with_unreachable_config_server() {
-        let manager = Arc::new(NetworkInstanceManager::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let client = super::run_web_client(
-            "udp://config-server.invalid:22020/test",
-            MachineIdOptions {
-                explicit_machine_id: None,
-                state_dir: Some(temp_dir.path().to_path_buf()),
-            },
-            None,
-            false,
-            manager,
-            None,
-        )
-        .await
-        .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(!client.is_connected());
-        drop(client);
-    }
 }

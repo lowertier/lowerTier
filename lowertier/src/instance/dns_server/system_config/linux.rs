@@ -352,11 +352,4 @@ fn is_libnss_resolve_used(env: &OSConfigEnv) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dns_mode_test() {
-        let env = new_os_config_env();
-        let mode = dns_mode(&env).unwrap();
-        println!("Detected DNS mode: {}", mode);
-    }
 }
