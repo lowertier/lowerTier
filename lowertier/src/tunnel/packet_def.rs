@@ -592,8 +592,9 @@ impl ReusableBufferPool {
     }
 
     pub(crate) fn take_or_allocate(&self) -> BytesMut {
+        // Receive APIs expose slices before writing. Recycling can restore the full slab length.
         self.try_take()
-            .unwrap_or_else(|| packet_buffer(self.inner.buffer_len))
+            .unwrap_or_else(|| zeroed_packet_buffer(self.inner.buffer_len))
     }
 
     fn recycle(&self, mut buffer: BytesMut) {
@@ -638,13 +639,6 @@ impl ReusableBufferPool {
 fn zeroed_packet_buffer(length: usize) -> BytesMut {
     let mut buffer = BytesMut::with_capacity(length);
     buffer.resize(length, 0);
-    buffer
-}
-
-/// Overflow slab for TUN/UDP recv. The kernel overwrites `[0, received)`.
-fn packet_buffer(length: usize) -> BytesMut {
-    let mut buffer = BytesMut::with_capacity(length);
-    unsafe { buffer.set_len(length) };
     buffer
 }
 
@@ -1825,10 +1819,20 @@ mod tests {
         let pool = ReusableBufferPool::new(256, 1);
         let pooled = pool.try_take().unwrap();
 
-        let replacement = pool.take_or_allocate();
+        let mut replacement = pool.take_or_allocate();
 
         assert_eq!(replacement.len(), 256);
+        assert!(replacement.iter().all(|byte| *byte == 0));
         assert_eq!(pool.available(), 0);
+        replacement[64..96].fill(0x5a);
+        replacement.truncate(96);
+        drop(ZCPacket::new_from_reusable_buf(replacement, ZCPacketType::NIC, pool.clone()));
+
+        let recycled = pool.try_take().unwrap();
+        assert_eq!(recycled.len(), 256);
+        assert!(recycled[..64].iter().all(|byte| *byte == 0));
+        assert!(recycled[64..96].iter().all(|byte| *byte == 0x5a));
+        assert!(recycled[96..].iter().all(|byte| *byte == 0));
         drop(pooled);
     }
 

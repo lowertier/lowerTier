@@ -942,7 +942,10 @@ impl Connection {
         }
 
         self.app_limited =
-            buf.is_empty() && !congestion_blocked && !self.datagrams.fast_send_blocked;
+            buf.is_empty() && !congestion_blocked && !self.datagrams.fast_send_pending;
+        if self.app_limited {
+            self.path.congestion.on_app_limited();
+        }
 
         // Send MTU probe if necessary
         if buf.is_empty() && self.state.is_established() {
@@ -1272,6 +1275,8 @@ impl Connection {
         let mut stats = self.stats;
         stats.path.rtt = self.path.rtt.get();
         stats.path.cwnd = self.path.congestion.window();
+        stats.path.pacing_rate = self.path.congestion.metrics().pacing_rate;
+        stats.path.app_limited = self.app_limited;
         stats.path.in_flight = self.path.in_flight.bytes;
         stats.path.current_mtu = self.path.mtud.current_mtu();
 
@@ -1323,6 +1328,9 @@ impl Connection {
         let mut sent_bytes = 0;
         let first_packet = packets.len();
         packets.reserve(payloads.len());
+        if !payloads.is_empty() {
+            self.app_limited = false;
+        }
 
         while let Some(data) = payloads.pop_front() {
             if self.path.in_flight.bytes.saturating_add(mtu as u64) > in_flight_limit {
@@ -1395,6 +1403,8 @@ impl Connection {
             packets.push(Bytes::from(buf));
         }
 
+        // A wakeup permits another attempt. It does not consume queued payloads.
+        self.datagrams.fast_send_pending = !payloads.is_empty();
         if let Some(last_packet_number) = last_packet_number {
             self.path.congestion.on_sent(now, sent_bytes, last_packet_number);
             self.stats.udp_tx.datagrams += (packets.len() - first_packet) as u64;

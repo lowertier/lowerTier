@@ -380,8 +380,16 @@ impl ValueEnum for EncryptionAlgorithm {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TrackerDiscoveryConfig {
+    pub trackers: Vec<url::Url>,
+    pub bind: Option<std::net::SocketAddr>,
+    pub advertise: Option<std::net::SocketAddr>,
+}
+
 #[auto_impl::auto_impl(Box, &)]
 pub trait ConfigLoader: Send + Sync {
+    fn get_tracker_discovery(&self) -> Option<TrackerDiscoveryConfig> { None }
     fn get_id(&self) -> uuid::Uuid;
     fn set_id(&self, id: uuid::Uuid);
 
@@ -463,6 +471,7 @@ pub trait ConfigLoader: Send + Sync {
     fn set_udp_whitelist(&self, whitelist: Vec<String>);
 
     fn get_stun_servers(&self) -> Option<Vec<String>>;
+    fn get_tcp_stun_servers(&self) -> Option<Vec<String>>;
     fn set_stun_servers(&self, servers: Option<Vec<String>>);
 
     fn get_stun_servers_v6(&self) -> Option<Vec<String>>;
@@ -884,6 +893,7 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
+    discovery: Option<TrackerDiscoveryConfig>,
     netns: Option<String>,
     hostname: Option<String>,
     instance_name: Option<String>,
@@ -922,6 +932,7 @@ struct Config {
     tcp_whitelist: Option<Vec<String>>,
     udp_whitelist: Option<Vec<String>>,
     stun_servers: Option<Vec<String>>,
+    tcp_stun_servers: Option<Vec<String>>,
     stun_servers_v6: Option<Vec<String>>,
 
     credential_file: Option<PathBuf>,
@@ -1456,6 +1467,14 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn get_stun_servers(&self) -> Option<Vec<String>> {
         self.config.lock().unwrap().stun_servers.clone()
+    }
+
+    fn get_tracker_discovery(&self) -> Option<TrackerDiscoveryConfig> {
+        self.config.lock().unwrap().discovery.clone()
+    }
+
+    fn get_tcp_stun_servers(&self) -> Option<Vec<String>> {
+        self.config.lock().unwrap().tcp_stun_servers.clone()
     }
 
     fn set_stun_servers(&self, servers: Option<Vec<String>>) {
@@ -2146,7 +2165,8 @@ stun_servers = [
     "stun.l.google.com:19302",
     "stun1.l.google.com:19302",
     "txt:stun.example.invalid"
-]"#;
+]
+tcp_stun_servers = ["192.0.2.1:3478"]"#;
 
         let config = TomlConfigLoader::new_from_str(config_str).unwrap();
         let stun_servers = config.get_stun_servers().unwrap();
@@ -2155,6 +2175,9 @@ stun_servers = [
         assert_eq!(stun_servers[0], "stun.l.google.com:19302");
         assert_eq!(stun_servers[1], "stun1.l.google.com:19302");
         assert_eq!(stun_servers[2], "txt:stun.example.invalid");
+        assert_eq!(config.get_tcp_stun_servers().unwrap(), vec!["192.0.2.1:3478"]);
+        let reloaded = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+        assert_eq!(reloaded.get_tcp_stun_servers(), config.get_tcp_stun_servers());
     }
 
     #[test]

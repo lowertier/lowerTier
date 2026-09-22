@@ -76,6 +76,7 @@ impl PathData {
                 congestion.initial_window(),
                 config.get_initial_mtu(),
                 now,
+                config.pacing_burst_size,
             ),
             congestion,
             challenge: None,
@@ -118,7 +119,13 @@ impl PathData {
         Self {
             remote,
             rtt: prev.rtt,
-            pacing: Pacer::new(smoothed_rtt, congestion.window(), prev.current_mtu(), now),
+            pacing: Pacer::new(
+                smoothed_rtt,
+                congestion.window(),
+                prev.current_mtu(),
+                now,
+                prev.pacing.max_burst_size(),
+            ),
             sending_ecn: true,
             congestion,
             challenge: None,
@@ -448,5 +455,30 @@ impl InFlight {
     fn remove(&mut self, packet: &SentPacket) {
         self.bytes -= u64::from(packet.size);
         self.ack_eliciting -= u64::from(packet.ack_eliciting);
+    }
+}
+
+#[cfg(test)]
+mod pacing_policy_tests {
+    use super::*;
+    use std::num::NonZeroU16;
+
+    #[test]
+    fn path_migration_preserves_configured_pacing_burst_bound() {
+        let mut config = TransportConfig::default();
+        let limit = NonZeroU16::new(64).unwrap();
+        config.pacing_burst_size(limit);
+        let now = Instant::now();
+        let path = PathData::new(
+            "127.0.0.1:40001".parse().unwrap(),
+            false,
+            None,
+            0,
+            now,
+            &config,
+        );
+        let migrated = PathData::from_previous("127.0.0.1:40002".parse().unwrap(), &path, 1, now);
+        assert_eq!(path.pacing.max_burst_size(), limit);
+        assert_eq!(migrated.pacing.max_burst_size(), limit);
     }
 }

@@ -50,6 +50,7 @@ pub struct Bbr {
     pacing_rate: u64,
     max_acked_packet_number: u64,
     max_sent_packet_number: u64,
+    app_limited_until: Option<u64>,
     end_recovery_at_packet_number: u64,
     cwnd: u64,
     current_round_trip_end_packet_number: u64,
@@ -91,6 +92,7 @@ impl Bbr {
             pacing_rate: 0,
             max_acked_packet_number: 0,
             max_sent_packet_number: 0,
+            app_limited_until: None,
             end_recovery_at_packet_number: 0,
             cwnd: initial_window,
             current_round_trip_end_packet_number: 0,
@@ -412,7 +414,15 @@ impl Controller for Bbr {
         // A fresh connection has no stale RTT measurement to probe.
         self.probe_rtt_last_started_at.get_or_insert(now);
         self.max_sent_packet_number = last_packet_number;
-        self.max_bandwidth.on_sent(now, bytes);
+        // RTT probing reduces offered load. Its delivery rate is not a path limit.
+        self.max_bandwidth.on_sent(
+            now, bytes, self.mode == Mode::ProbeRtt || self.app_limited_until.is_some(),
+        );
+    }
+
+    fn on_app_limited(&mut self) {
+        // Keep the marker until delivery passes the flight that ended the backlog.
+        self.app_limited_until = Some(self.max_sent_packet_number);
     }
 
     fn on_ack(
@@ -439,6 +449,7 @@ impl Controller for Bbr {
         largest_packet_num_acked: Option<u64>,
     ) {
         let bytes_acked = self.max_bandwidth.bytes_acked_this_window();
+        let previous_mode = self.mode;
         let excess_acked = self.ack_aggregation.update_ack_aggregation_bytes(
             bytes_acked,
             now,
@@ -446,9 +457,12 @@ impl Controller for Bbr {
             self.max_bandwidth.get_estimate(),
         );
         self.max_bandwidth
-            .end_acks(self.round_count, app_limited, in_flight, self.min_rtt);
+            .end_acks(self.round_count, in_flight);
         if let Some(largest_acked_packet) = largest_packet_num_acked {
             self.max_acked_packet_number = largest_acked_packet;
+            if self.app_limited_until.is_some_and(|last| largest_acked_packet > last) {
+                self.app_limited_until = None;
+            }
         }
 
         let mut is_round_start = false;
@@ -482,6 +496,13 @@ impl Controller for Bbr {
 
         self.prev_in_flight_count = in_flight;
         self.loss_state.reset();
+        if self.mode != previous_mode {
+            tracing::debug!(target: "quinn_proto::congestion::bbr",
+                ?previous_mode, mode = ?self.mode, min_rtt_us = self.min_rtt.as_micros(),
+                bandwidth_bytes_per_second = self.max_bandwidth.get_estimate(),
+                pacing_bytes_per_second = self.pacing_rate, cwnd = self.window(),
+                "BBR mode changed");
+        }
     }
 
     fn on_congestion_event(
@@ -675,6 +696,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn application_limited_flight_keeps_its_send_time_state() {
+        let mut controller = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        controller.min_rtt = Duration::from_millis(1);
+        let now = Instant::now();
+        controller.on_sent(now, 100_000, 1);
+        controller.max_bandwidth.on_ack(now + Duration::from_millis(1), now, 100_000, 0, false);
+        controller.on_end_acks(now + Duration::from_millis(1), 0, false, Some(1));
+        let bandwidth = controller.max_bandwidth.get_estimate();
+        controller.on_app_limited();
+        let sent = now + Duration::from_millis(2);
+        controller.on_sent(sent, 1200, 2);
+        controller.round_count = 20;
+        controller.max_bandwidth.on_ack(sent + Duration::from_millis(10), sent, 1200, 20, false);
+        controller.on_end_acks(sent + Duration::from_millis(10), 0, false, Some(2));
+        assert_eq!(controller.max_bandwidth.get_estimate(), bandwidth);
+        assert!(controller.app_limited_until.is_none());
+    }
+
+    #[test]
+    fn rtt_probe_does_not_reduce_the_bandwidth_estimate() {
+        let mut controller = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        let rtt = Duration::from_millis(1);
+        controller.min_rtt = rtt;
+        let mut now = Instant::now();
+        controller.on_sent(now, 100_000, 1);
+        controller.max_bandwidth.on_ack(now + rtt, now, 100_000, 0, false);
+        controller.on_end_acks(now + rtt, 0, false, Some(1));
+        let bandwidth = controller.max_bandwidth.get_estimate();
+        controller.is_at_full_bandwidth = true;
+        controller.mode = Mode::ProbeRtt;
+        controller.exit_probe_rtt_at = Some(now + Duration::from_millis(200));
+        for pn in 2..32 {
+            now += rtt;
+            let bytes = controller.window();
+            controller.on_sent(now, bytes, pn);
+            controller.max_bandwidth.on_ack(now + rtt, now, bytes, pn, false);
+            controller.on_end_acks(now + rtt, 0, false, Some(pn));
+        }
+        assert_eq!(controller.max_bandwidth.get_estimate(), bandwidth);
+        now += rtt;
+        controller.on_sent(now, 1200, 32);
+        controller.enter_probe_bandwidth_mode(now);
+        controller.max_bandwidth.on_ack(now + rtt, now, 1200, 32, false);
+        controller.on_end_acks(now + rtt, 0, false, Some(32));
+        assert_eq!(controller.mode, Mode::ProbeBw);
+        assert_eq!(controller.max_bandwidth.get_estimate(), bandwidth);
+    }
+
+    #[test]
     fn startup_window_stops_growing_past_its_target() {
         let mut controller = Bbr::new(Arc::new(BbrConfig::default()), 1200);
         controller.min_rtt = Duration::from_millis(1);
@@ -699,7 +769,7 @@ mod tests {
         assert_eq!(controller.mode, Mode::Startup);
         assert!(!controller.is_at_full_bandwidth);
         assert!(controller.window() > flight);
-        assert!(controller.max_bandwidth.get_estimate() >= 150_000);
+        assert_eq!(controller.max_bandwidth.get_estimate(), 20_000);
     }
 
     #[test]

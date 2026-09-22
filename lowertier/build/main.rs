@@ -1,6 +1,8 @@
 mod rpc;
 
 use crate::rpc::ServiceGenerator;
+use prost::Message;
+use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 #[cfg(target_os = "windows")]
 use std::io::Cursor;
 use std::{env, path::PathBuf};
@@ -190,6 +192,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prost_reflect_build::Builder::new()
         .file_descriptor_set_bytes("crate::proto::DESCRIPTOR_POOL_BYTES")
         .compile_protos_with_config(config, &proto_files_reflect, &["src/proto/"])?;
+
+    // Generate documentation first. Runtime reflection does not use source locations or comments.
+    // Dynamic messages preserve custom options and unknown fields during this transformation.
+    let reflected_descriptor = std::fs::read(out.join("file_descriptor_set.bin"))?;
+    let descriptor_type = DescriptorPool::global()
+        .get_message_by_name("google.protobuf.FileDescriptorSet")
+        .expect("protobuf descriptor schema is available");
+    let mut runtime_descriptor =
+        DynamicMessage::decode(descriptor_type, reflected_descriptor.as_slice())?;
+    let Value::List(files) = runtime_descriptor.get_field_by_name_mut("file").unwrap() else {
+        panic!("descriptor files must be a list");
+    };
+    for file in files {
+        let Value::Message(file) = file else {
+            panic!("descriptor file must be a message");
+        };
+        file.clear_field_by_name("source_code_info");
+    }
+    std::fs::write(
+        out.join("runtime_descriptor_set.bin"),
+        runtime_descriptor.encode_to_vec(),
+    )?;
 
     let descriptor = std::fs::read(descriptor)?;
     pbjson_build::Builder::new()

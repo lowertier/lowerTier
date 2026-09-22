@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, num::NonZeroU16, sync::Arc};
 #[cfg(feature = "qlog")]
 use std::{io, sync::Mutex, time::Instant};
 
@@ -8,8 +8,8 @@ use qlog::streamer::QlogStreamer;
 #[cfg(feature = "qlog")]
 use crate::QlogStream;
 use crate::{
-    congestion, connection::qlog::QlogSink, Duration, VarInt, VarIntBoundsExceeded, INITIAL_MTU,
-    MAX_UDP_PAYLOAD,
+    Duration, INITIAL_MTU, MAX_UDP_PAYLOAD, VarInt, VarIntBoundsExceeded, congestion,
+    connection::qlog::QlogSink,
 };
 
 /// Selects which queued DATAGRAM is discarded when the receive buffer is full.
@@ -42,6 +42,7 @@ pub struct TransportConfig {
     pub(crate) receive_window: VarInt,
     pub(crate) send_window: u64,
     pub(crate) send_fairness: bool,
+    pub(crate) pacing_burst_size: NonZeroU16,
 
     pub(crate) packet_threshold: u32,
     pub(crate) time_threshold: f32,
@@ -161,6 +162,17 @@ impl TransportConfig {
     /// many small streams.
     pub fn send_fairness(&mut self, value: bool) -> &mut Self {
         self.send_fairness = value;
+        self
+    }
+
+    /// Maximum pacing credit expressed in full-sized UDP datagrams.
+    ///
+    /// This bounds consecutive transmissions after a scheduler delay. The
+    /// congestion controller still determines the flight window and send rate.
+    /// Smaller bounds reduce burst loss on shallow queues; larger bounds help
+    /// coarse timers sustain high rates. The default is 256 datagrams.
+    pub fn pacing_burst_size(&mut self, value: NonZeroU16) -> &mut Self {
+        self.pacing_burst_size = value;
         self
     }
 
@@ -371,8 +383,8 @@ impl Default for TransportConfig {
     fn default() -> Self {
         const EXPECTED_RTT: u32 = 100; // ms
         const MAX_STREAM_BANDWIDTH: u32 = 12500 * 1000; // bytes/s
-                                                        // Window size needed to avoid pipeline
-                                                        // stalls
+        // Window size needed to avoid pipeline
+        // stalls
         const STREAM_RWND: u32 = MAX_STREAM_BANDWIDTH / 1000 * EXPECTED_RTT;
 
         Self {
@@ -384,6 +396,7 @@ impl Default for TransportConfig {
             receive_window: VarInt::MAX,
             send_window: (8 * STREAM_RWND).into(),
             send_fairness: true,
+            pacing_burst_size: NonZeroU16::new(256).unwrap(),
 
             packet_threshold: 3,
             time_threshold: 9.0 / 8.0,
@@ -423,6 +436,7 @@ impl fmt::Debug for TransportConfig {
             receive_window,
             send_window,
             send_fairness,
+            pacing_burst_size,
             packet_threshold,
             time_threshold,
             initial_rtt,
@@ -453,6 +467,7 @@ impl fmt::Debug for TransportConfig {
             .field("receive_window", receive_window)
             .field("send_window", send_window)
             .field("send_fairness", send_fairness)
+            .field("pacing_burst_size", pacing_burst_size)
             .field("packet_threshold", packet_threshold)
             .field("time_threshold", time_threshold)
             .field("initial_rtt", initial_rtt)

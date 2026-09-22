@@ -1959,7 +1959,7 @@ mod tests {
         let config = gen_default_config();
         let mut flags = config.get_flags();
         flags.data_compress_algo = CompressionAlgoPb::Zstd.into();
-        flags.encryption_algorithm = "managed-test-algo".to_string();
+        flags.encryption_algorithm = "aes-256-gcm".to_string();
         config.set_flags(flags.clone());
 
         let network_config = super::NetworkConfig::new_from_config(&config)?;
@@ -1970,7 +1970,7 @@ mod tests {
         );
         assert_eq!(
             network_config.encryption_algorithm.as_deref(),
-            Some("managed-test-algo")
+            Some("aes-256-gcm")
         );
 
         let generated_config = network_config.gen_config()?;

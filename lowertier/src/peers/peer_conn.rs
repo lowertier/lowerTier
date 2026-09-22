@@ -4488,9 +4488,6 @@ impl PeerConn {
                         // instead of waiting behind the parked delivery.
                         let delivery = sender.send_batch(incoming);
                         tokio::pin!(delivery);
-                        let max_prefetch =
-                            RECEIVE_PREFETCH_BATCHES.saturating_sub(receive_queue.len());
-                        let mut prefetched = VecDeque::with_capacity(max_prefetch.min(8));
                         let mut prefetch_stream_open = true;
                         let mut prefetch_reached_end = false;
                         let mut delivery_failed = false;
@@ -4504,7 +4501,7 @@ impl PeerConn {
                                     }
                                     break;
                                 }
-                                next = stream.next(), if prefetch_stream_open && prefetched.len() < max_prefetch => {
+                                next = stream.next(), if prefetch_stream_open && receive_queue.len() < RECEIVE_PREFETCH_BATCHES => {
                                     match next {
                                         Some(result) => match result {
                                             Ok(mut batch) => {
@@ -4535,10 +4532,10 @@ impl PeerConn {
                                                     )
                                                     .await;
                                                 } else {
-                                                    prefetched.push_back(Ok(batch));
+                                                    receive_queue.push_back(Ok(batch));
                                                 }
                                             }
-                                            Err(_) => prefetched.push_back(result),
+                                            Err(_) => receive_queue.push_back(result),
                                         },
                                         None => {
                                             prefetch_stream_open = false;
@@ -4561,7 +4558,6 @@ impl PeerConn {
                         {
                             limiter.consume(received_bytes).await;
                         }
-                        receive_queue.append(&mut prefetched);
                         stream_ended |= prefetch_reached_end;
                         next_result = if let Some(first) = receive_queue.pop_front() {
                             Some(first)

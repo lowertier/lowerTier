@@ -1953,9 +1953,22 @@ fn datagram_fast_seal_pacing_timer_wakes_without_an_ack() {
         unblocked |= matches!(event, Event::DatagramsUnblocked);
     }
     assert!(unblocked);
+    // The notification grants a retry. The application still owns queued data.
+    let mut control = Vec::new();
+    while conn.poll_transmit(deadline, 1, &mut control).is_some() {
+        control.clear();
+    }
+    assert!(!conn.stats().path.app_limited);
     packets.clear();
     conn.seal_application_datagrams(deadline, &mut payloads, &mut packets);
     assert!(!packets.is_empty());
+    payloads.clear();
+    conn.seal_application_datagrams(deadline, &mut payloads, &mut packets);
+    control.clear();
+    while conn.poll_transmit(deadline, 1, &mut control).is_some() {
+        control.clear();
+    }
+    assert!(conn.stats().path.app_limited);
 }
 
 #[test]

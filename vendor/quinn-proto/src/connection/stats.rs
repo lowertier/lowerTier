@@ -138,6 +138,10 @@ pub struct PathStats {
     pub rtt: Duration,
     /// Current congestion window of the connection
     pub cwnd: u64,
+    /// Controller pacing rate in bits per second, when available.
+    pub pacing_rate: Option<u64>,
+    /// Whether missing application data limits transmission.
+    pub app_limited: bool,
     /// Bytes currently in flight on this path
     pub in_flight: u64,
     /// Congestion events on the connection

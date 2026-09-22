@@ -19,6 +19,10 @@ pub trait Controller: Send + Sync {
     #[allow(unused_variables)]
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {}
 
+    /// The connection has exhausted its queued application data.
+    #[allow(unused_variables)]
+    fn on_app_limited(&mut self) {}
+
     /// Packet deliveries were confirmed
     ///
     /// `app_limited` indicates whether the connection was blocked on outgoing

@@ -225,6 +225,14 @@ impl WsTunnelListener {
         self.socket_mark = socket_mark;
     }
 
+    pub(crate) async fn accept_punched(stream: TcpStream) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let addr = super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "wss");
+        let mut listener = Self::new(addr);
+        listener.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config()?)));
+        stream.set_nodelay(true)?;
+        listener.try_accept(stream).await
+    }
+
     async fn try_accept(&self, stream: TcpStream) -> Result<Box<dyn Tunnel>, TunnelError> {
         let peer_addr = stream.peer_addr()?;
         if is_wss(&self.addr)? {
@@ -416,10 +424,21 @@ impl WsTunnelConnector {
         tcp_socket: TcpSocket,
         underlay_policy: Arc<UnderlayPolicy>,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let is_wss = is_wss(&addr)?;
         super::common::size_tcp_socket_buffers(&socket2::SockRef::from(&tcp_socket));
         let stream = tcp_socket.connect(socket_addr).await?;
-        ensure_local_allowed(&underlay_policy, stream.local_addr()?)?;
+        Self::connect_punched(stream, addr, underlay_policy, None).await
+    }
+
+    pub(crate) async fn connect_punched(
+        stream: TcpStream, addr: url::Url, underlay_policy: Arc<UnderlayPolicy>,
+        net_ns: Option<crate::common::netns::NetNS>,
+    ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let is_wss = is_wss(&addr)?;
+        let socket_addr = stream.peer_addr()?;
+        {
+            let _guard = net_ns.map(|namespace| namespace.guard());
+            ensure_local_allowed(&underlay_policy, stream.local_addr()?)?;
+        }
         ensure_remote_allowed(&underlay_policy, stream.peer_addr()?)?;
         if let Err(error) = stream.set_nodelay(true) {
             tracing::warn!(?error, "set_nodelay fail in ws connect");

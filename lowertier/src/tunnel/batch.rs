@@ -143,15 +143,17 @@ impl PacketBatchPool {
         }
     }
 
-    fn take(&self) -> Vec<ZCPacket> {
-        self.containers
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(MAX_PACKET_BATCH_SIZE))
+    fn take(&self, capacity: usize) -> Vec<ZCPacket> {
+        let mut packets = self.containers.pop().unwrap_or_default();
+        if packets.capacity() < capacity {
+            packets.reserve_exact(capacity);
+        }
+        packets
     }
 
     fn recycle(&self, mut packets: Vec<ZCPacket>) {
         packets.clear();
-        if packets.capacity() < MAX_PACKET_BATCH_SIZE {
+        if packets.capacity() == 0 || packets.capacity() > MAX_PACKET_BATCH_SIZE {
             return;
         }
         let _ = self.containers.push(packets);
@@ -175,18 +177,13 @@ pub struct PacketBatch {
 
 impl PacketBatch {
     pub fn new() -> Self {
-        Self {
-            packets: packet_batch_pool().take(),
-        }
+        Self::with_capacity(MAX_PACKET_BATCH_SIZE)
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
         debug_assert!(capacity <= MAX_PACKET_BATCH_SIZE);
-        if capacity >= MAX_PACKET_BATCH_SIZE {
-            return Self::new();
-        }
         Self {
-            packets: Vec::with_capacity(capacity),
+            packets: packet_batch_pool().take(capacity.min(MAX_PACKET_BATCH_SIZE)),
         }
     }
 
@@ -704,4 +701,31 @@ mod tests {
     use futures::StreamExt;
 
     use super::{MAX_PACKET_BATCH_SIZE, PacketBatch, PacketBatchPool};
+
+    #[test]
+    fn pool_exhaustion_preserves_the_requested_allocation_size() {
+        let pool = PacketBatchPool::new(2);
+        let first = pool.take(MAX_PACKET_BATCH_SIZE);
+        let second = pool.take(MAX_PACKET_BATCH_SIZE);
+        let mut small = pool.take(1);
+        assert_eq!(small.capacity(), 1);
+        small.push(super::ZCPacket::new_with_payload(b"owned payload"));
+        let allocation = small.as_ptr();
+        pool.recycle(small);
+        let reused = pool.take(1);
+        assert!(reused.is_empty());
+        assert_eq!(reused.as_ptr(), allocation);
+        pool.recycle(reused);
+        pool.recycle(first);
+        pool.recycle(second);
+        assert_eq!(pool.containers.len(), 2);
+        assert!(pool.take(MAX_PACKET_BATCH_SIZE).capacity() >= MAX_PACKET_BATCH_SIZE);
+    }
+
+    #[test]
+    fn pool_does_not_retain_oversized_containers() {
+        let pool = PacketBatchPool::new(2);
+        pool.recycle(Vec::with_capacity(MAX_PACKET_BATCH_SIZE * 2));
+        assert!(pool.containers.is_empty());
+    }
 }

@@ -101,7 +101,10 @@ pub fn eligible_bind_addrs(
         .collect::<Vec<_>>();
     eligible
         .sort_by_key(|addr| std::cmp::Reverse(underlay_source_affinity(addr.ip(), remote.ip())));
-    if remote.is_ipv4() {
+    // The affinity heuristic only chooses when unrestricted connections defer
+    // to the kernel route. A strict policy needs an explicitly permitted local
+    // bind even across unrelated IPv4 prefixes (for example, a NAT uplink).
+    if remote.is_ipv4() && !policy.is_active() {
         let best = eligible
             .first()
             .map(|addr| underlay_source_affinity(addr.ip(), remote.ip()))
@@ -956,6 +959,8 @@ fn setup_socket2_ext(
     #[allow(unused_variables)] bind_dev: Option<String>,
     only_v6: bool,
     socket_mark: Option<u32>,
+    reuse_port: bool,
+    reuse_address: Option<bool>,
 ) -> Result<(), TunnelError> {
     #[cfg(target_os = "windows")]
     {
@@ -968,7 +973,13 @@ fn setup_socket2_ext(
     }
 
     socket2_socket.set_nonblocking(true)?;
-    socket2_socket.set_reuse_address(!cfg!(target_os = "windows"))?;
+    socket2_socket.set_reuse_address(reuse_address.unwrap_or(!cfg!(target_os = "windows") || reuse_port))?;
+    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+    if reuse_port {
+        socket2_socket.set_reuse_port(true)?;
+    }
+    #[cfg(not(all(unix, not(target_os = "solaris"), not(target_os = "illumos"))))]
+    let _ = reuse_port;
 
     // SO_MARK must be set before bind() so the kernel applies the mark to
     // any source-address selection bind() triggers on unspecified binds.
@@ -994,16 +1005,18 @@ fn setup_socket2_ext(
     // win can handle this with bind correctly
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     if let Some(dev_name) = bind_dev {
-        // use IP_BOUND_IF to bind device
-        unsafe {
-            let dev_idx = nix::libc::if_nametoindex(dev_name.as_str().as_ptr() as *const i8);
-            tracing::warn!(?dev_idx, ?dev_name, "bind device");
-            if bind_addr.is_ipv4() {
-                socket2_socket.bind_device_by_index_v4(std::num::NonZeroU32::new(dev_idx))?;
-            } else {
-                socket2_socket.bind_device_by_index_v6(std::num::NonZeroU32::new(dev_idx))?;
-            }
-            tracing::warn!(?dev_idx, ?dev_name, "bind device doen");
+        let name = std::ffi::CString::new(dev_name.as_str()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid interface name")
+        })?;
+        // if_nametoindex requires a terminated C string. Index zero would remove the binding.
+        let dev_idx = unsafe { nix::libc::if_nametoindex(name.as_ptr()) };
+        let dev_idx = std::num::NonZeroU32::new(dev_idx)
+            .ok_or_else(std::io::Error::last_os_error)?;
+        tracing::trace!(?dev_idx, ?dev_name, "bind device");
+        if bind_addr.is_ipv4() {
+            socket2_socket.bind_device_by_index_v4(Some(dev_idx))?;
+        } else {
+            socket2_socket.bind_device_by_index_v6(Some(dev_idx))?;
         }
     }
 
@@ -1099,6 +1112,11 @@ pub fn bind<B: Bindable>(
     /// Linux SO_MARK (fwmark) to apply to the socket. `None` leaves SO_MARK
     /// untouched; `Some(mark)` applies that exact value, including `Some(0)`.
     socket_mark: Option<u32>,
+    /// Reserve one TCP source port for listening, STUN, and simultaneous open.
+    #[builder(default)]
+    reuse_port: bool,
+    /// Disable address reuse when reserving an observed, locally assigned mapped port.
+    reuse_address: Option<bool>,
 ) -> Result<B, TunnelError> {
     let _g = net_ns.map(|n| n.guard());
     let dev = match dev {
@@ -1107,7 +1125,7 @@ pub fn bind<B: Bindable>(
         BindDev::Custom(s) => Some(s),
     };
     let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
-    setup_socket2_ext(&socket, &addr, dev, only_v6, socket_mark)?;
+    setup_socket2_ext(&socket, &addr, dev, only_v6, socket_mark, reuse_port, reuse_address)?;
     B::finalize(socket)
 }
 
@@ -1141,6 +1159,47 @@ pub mod tests {
         TunnelError,
         packet_def::{PEER_MANAGER_HEADER_SIZE, TCP_TUNNEL_HEADER_SIZE},
     };
+
+    #[cfg(test)]
+    #[test]
+    fn strict_underlay_keeps_a_permitted_routed_ipv4_source() {
+        let policy = UnderlayPolicy::new(&[], &["100.64.0.0/10".to_owned()]).unwrap();
+        let physical = "172.25.23.12:0".parse().unwrap();
+        let tailscale = "100.76.95.60:0".parse().unwrap();
+        let remote = "58.147.236.32:15390".parse().unwrap();
+        let actual = super::eligible_bind_addrs(&policy, &[tailscale, physical], remote).unwrap();
+        assert_eq!(actual, vec![physical]);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn strict_underlay_rejects_an_empty_permitted_source_set() {
+        let policy = UnderlayPolicy::new(&[], &["100.64.0.0/10".to_owned()]).unwrap();
+        let remote = "58.147.236.32:15390".parse().unwrap();
+        for sources in [
+            vec![],
+            vec!["100.76.95.60:0".parse().unwrap()],
+            vec!["[::1]:0".parse().unwrap()],
+        ] {
+            assert!(matches!(
+                super::eligible_bind_addrs(&policy, &sources, remote),
+                Err(TunnelError::UnderlayPolicyDenied(_))
+            ));
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn unrestricted_off_link_ipv4_still_uses_kernel_source_selection() {
+        let policy = UnderlayPolicy::default();
+        let physical = "172.25.23.12:0".parse().unwrap();
+        let remote = "58.147.236.32:15390".parse().unwrap();
+        assert!(
+            super::eligible_bind_addrs(&policy, &[physical], remote)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[cfg(all(test, target_os = "linux"))]
     #[tokio::test]

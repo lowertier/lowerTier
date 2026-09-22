@@ -362,9 +362,43 @@ service UdpHolePunchRpc {
       returns (SendPunchPacketBothEasySymResponse);
 }
 
-message TcpHolePunchRequest { common.SocketAddr connector_mapped_addr = 1; }
+message TcpHolePunchRequest {
+  common.SocketAddr connector_mapped_addr = 1;
+  repeated common.SocketAddr candidates = 2;
+  string protocol = 3;
+  uint32 source_index = 4;
+  uint32 version = 5;
+  bytes nomination_token = 6;
+  bool variable_mapping = 7;
+  // Both peers must opt in before they search ports outside the candidate list.
+  bool port_search = 8;
+}
 
-message TcpHolePunchResponse { common.SocketAddr listener_mapped_addr = 1; }
+message QuicPunchRequest {
+  repeated common.SocketAddr candidates = 1;
+  bytes transaction_id = 2;
+  uint32 source_index = 3;
+  bool variable_mapping = 4;
+}
+
+message QuicPunchResponse {
+  repeated common.SocketAddr candidates = 1;
+  bool variable_mapping = 2;
+}
+
+service QuicHolePunchRpc {
+  rpc Prepare(QuicPunchRequest) returns (QuicPunchResponse);
+  rpc Activate(QuicPunchRequest) returns (common.Void);
+}
+
+message TcpHolePunchResponse {
+  common.SocketAddr listener_mapped_addr = 1;
+  repeated common.SocketAddr candidates = 2;
+  string protocol = 3;
+  uint32 version = 4;
+  bool variable_mapping = 5;
+  bool port_search = 6;
+}
 
 service TcpHolePunchRpc {
   rpc ExchangeMappedAddr(TcpHolePunchRequest) returns (TcpHolePunchResponse);

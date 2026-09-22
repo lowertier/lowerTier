@@ -172,12 +172,18 @@ impl SmolTcpListener {
         tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
     ) {
         let locked_net = net.lock().await;
-        let mut tcp = locked_net
+        let tcp = locked_net
             .as_ref()
             .unwrap()
             .tcp_bind("0.0.0.0:8899".parse().unwrap())
-            .await
-            .unwrap();
+            .await;
+        let mut tcp = match tcp {
+            Ok(tcp) => tcp,
+            Err(error) => {
+                let _ = tx.send(Err(error.into()));
+                return;
+            }
+        };
         tasks.lock().unwrap().spawn(async move {
             let ret = timeout(Duration::from_secs(10), tcp.accept()).await;
             if let Ok(accept_ret) = ret {

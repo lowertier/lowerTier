@@ -61,6 +61,19 @@ pub(crate) struct ProcessMemoryPermit {
     bytes: usize,
 }
 
+impl ProcessMemoryPermit {
+    pub(crate) fn try_extend(&mut self, bytes: usize) -> bool {
+        let Some(total) = self.bytes.checked_add(bytes) else {
+            return false;
+        };
+        if !self.governor.reserve(bytes) {
+            return false;
+        }
+        self.bytes = total;
+        true
+    }
+}
+
 impl Drop for ProcessMemoryPermit {
     fn drop(&mut self) {
         self.governor.release(self.bytes);
@@ -685,6 +698,9 @@ impl GlobalCtx {
         let (event_bus, _) = tokio::sync::broadcast::channel(16);
 
         let mut stun_info_collector = StunInfoCollector::new_with_default_servers();
+        if let Some(servers) = config_fs.get_tcp_stun_servers() {
+            stun_info_collector.set_tcp_stun_servers(servers);
+        }
 
         if let Some(stun_servers) = config_fs.get_stun_servers() {
             stun_info_collector.set_stun_servers(stun_servers);

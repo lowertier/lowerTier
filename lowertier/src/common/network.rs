@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     ops::Deref,
     sync::Arc,
 };
@@ -22,6 +22,17 @@ use crate::proto::peer_rpc::GetIpListResponse;
 use super::{netns::NetNS, stun::StunInfoCollectorTrait, underlay_policy::UnderlayPolicy};
 
 pub const CACHED_IP_LIST_TIMEOUT_SEC: u64 = 60;
+
+pub(crate) fn local_mapped_addrs(
+    local: SocketAddr,
+    mappings: &[SocketAddr],
+) -> impl Iterator<Item = SocketAddr> + '_ {
+    // A local NAT can change the port while retaining an address assigned to this host.
+    mappings
+        .iter()
+        .copied()
+        .filter(move |mapped| mapped.ip() == local.ip() && mapped.port() != 0 && *mapped != local)
+}
 
 fn allowed_interface_ips(
     interfaces: &[NetworkInterface],
@@ -85,6 +96,19 @@ struct InterfaceFilter {
     iface: NetworkInterface,
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_underlay_interface(iface: &NetworkInterface, is_tun_tap: bool) -> bool {
+    // Point-to-point links can carry the WAN. Names and hardware types do not establish reachability.
+    !iface.is_loopback()
+        && iface.is_up()
+        && iface.flags & 0x10000 != 0 // Linux IFF_LOWER_UP.
+        && !is_tun_tap
+        && iface.ips.iter().any(|network| {
+            let ip = network.ip();
+            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast()
+        })
+}
+
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -124,12 +148,7 @@ impl InterfaceFilter {
             self.has_valid_ip().await
         );
 
-        !self.iface.is_point_to_point()
-            && !self.iface.is_loopback()
-            && self.iface.is_up()
-            && self.iface.is_lower_up()
-            && !self.is_tun_tap_device().await
-            && self.has_valid_ip().await
+        linux_underlay_interface(&self.iface, self.is_tun_tap_device().await)
     }
 }
 
@@ -493,6 +512,61 @@ mod tests {
     use super::*;
     use crate::common::underlay_policy::UnderlayPolicy;
     use pnet::ipnetwork::IpNetwork;
+
+    #[test]
+    fn mapped_port_binding_requires_the_same_local_address() {
+        let local = "192.0.2.1:40000".parse().unwrap();
+        let mappings = [
+            local,
+            "192.0.2.1:50000".parse().unwrap(),
+            "198.51.100.1:50000".parse().unwrap(),
+            "192.0.2.1:0".parse().unwrap(),
+        ];
+        assert_eq!(
+            local_mapped_addrs(local, &mappings).collect::<Vec<_>>(),
+            vec![mappings[1]]
+        );
+    }
+
+    #[test]
+    fn point_to_point_candidates_do_not_depend_on_interface_names() {
+        let mut interface = iface("arbitrary-wan-name", &["192.0.2.2/32"]);
+        interface.flags = 0x1 | 0x10 | 0x10000; // IFF_UP, IFF_POINTOPOINT, IFF_LOWER_UP.
+        assert!(linux_underlay_interface(&interface, false));
+        interface.name = "renamed-uplink".to_owned();
+        assert!(linux_underlay_interface(&interface, false));
+        assert!(!linux_underlay_interface(&interface, true));
+    }
+
+    #[test]
+    fn unavailable_links_are_not_underlay_candidates() {
+        let mut interface = iface("arbitrary-uplink", &["192.0.2.2/32"]);
+        assert!(!linux_underlay_interface(&interface, false));
+        interface.flags = 0x1 | 0x10000;
+        assert!(linux_underlay_interface(&interface, false));
+        interface.flags |= 0x8; // IFF_LOOPBACK.
+        assert!(!linux_underlay_interface(&interface, false));
+        interface.flags = 0x1 | 0x10000;
+        interface.ips.clear();
+        assert!(!linux_underlay_interface(&interface, false));
+    }
+
+    #[test]
+    fn explicit_underlay_rules_still_exclude_ppp_and_tailscale() {
+        let interfaces = [
+            iface("pppoe-wan", &["192.0.2.2/32"]),
+            iface("tailscale0", &["100.64.0.2/32"]),
+        ];
+        let policy =
+            UnderlayPolicy::new(&["tailscale0".to_owned()], &["100.64.0.0/10".to_owned()]).unwrap();
+        assert_eq!(
+            allowed_interface_ips(&interfaces, &policy).0,
+            vec!["192.0.2.2".parse::<Ipv4Addr>().unwrap()]
+        );
+        let policy =
+            UnderlayPolicy::new(&["pppoe-wan".to_owned(), "tailscale0".to_owned()], &[]).unwrap();
+        assert!(allowed_interface_ips(&interfaces, &policy).0.is_empty());
+    }
 
     fn iface(name: &str, ips: &[&str]) -> NetworkInterface {
         NetworkInterface {

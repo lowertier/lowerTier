@@ -109,6 +109,8 @@ pub(super) struct DatagramState {
     pub(super) outgoing_total: usize,
     pub(super) send_blocked: bool,
     pub(super) fast_send_blocked: bool,
+    /// Payloads remain with the external sender until its next seal call.
+    pub(super) fast_send_pending: bool,
 }
 
 impl DatagramState {
@@ -154,7 +156,7 @@ impl DatagramState {
     /// queued but can't send it.
     pub(super) fn drop_oversized(&mut self, max_payload: usize) {
         self.outgoing.retain(|datagram| {
-            let result = datagram.data.len() < max_payload;
+            let result = datagram.data.len() <= max_payload;
             if !result {
                 trace!(
                     "dropping {} byte datagram violating {} byte limit",
@@ -216,4 +218,26 @@ pub enum SendDatagramError {
     /// Send would block
     #[error("datagram send blocked")]
     Blocked(Bytes),
+}
+
+#[cfg(test)]
+mod mtu_limit_tests {
+    use super::*;
+
+    #[test]
+    fn mtu_reduction_retains_datagrams_at_the_new_limit() {
+        let mut state = DatagramState::default();
+        for length in [1199, 1200, 1201] {
+            state.outgoing.push_back(Datagram {
+                data: Bytes::from(vec![0; length]),
+            });
+            state.outgoing_total += length;
+        }
+
+        state.drop_oversized(1200);
+
+        let sizes: Vec<_> = state.outgoing.iter().map(|packet| packet.data.len()).collect();
+        assert_eq!(sizes, [1199, 1200]);
+        assert_eq!(state.outgoing_total, 2399);
+    }
 }

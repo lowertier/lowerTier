@@ -350,6 +350,7 @@ struct RelayQueue {
     packets: VecDeque<RelayQueuedPacket>,
     in_flight: usize,
     in_flight_bytes: usize,
+    confirmation: Option<RelayConfirmationIdentity>,
 }
 
 /// Immutable authority captured before a complete Ethernet packet enters a relay path.
@@ -409,9 +410,42 @@ struct RelaySendState {
     draining: Mutex<()>,
     retry_scheduled: AtomicBool,
     retry_attempt: AtomicU32,
-    confirmation: StdMutex<Option<RelayConfirmationIdentity>>,
     queued_bytes: AtomicUsize,
     process_memory: Arc<crate::common::global_ctx::ProcessMemoryGovernor>,
+}
+
+struct RelayPendingBatch<'a> {
+    state: &'a RelaySendState,
+    packets: Option<Vec<RelayQueuedPacket>>,
+}
+
+impl std::ops::Deref for RelayPendingBatch<'_> {
+    type Target = [RelayQueuedPacket];
+
+    fn deref(&self) -> &Self::Target {
+        self.packets
+            .as_deref()
+            .expect("batch still owns its packets")
+    }
+}
+
+impl RelayPendingBatch<'_> {
+    fn complete(mut self) {
+        let packets = self.packets.take().expect("batch still owns its packets");
+        let bytes = packets.iter().map(|packet| packet.2).sum();
+        let count = packets.len();
+        drop(packets);
+        self.state.complete_send_batch(bytes, count);
+    }
+}
+
+impl Drop for RelayPendingBatch<'_> {
+    fn drop(&mut self) {
+        if let Some(packets) = self.packets.take() {
+            // Cancellation must release in-flight ownership before another drain starts.
+            self.state.requeue_failed_batch(packets);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -454,11 +488,11 @@ impl RelaySendState {
                 packets: VecDeque::new(),
                 in_flight: 0,
                 in_flight_bytes: 0,
+                confirmation: None,
             }),
             draining: Mutex::new(()),
             retry_scheduled: AtomicBool::new(false),
             retry_attempt: AtomicU32::new(0),
-            confirmation: StdMutex::new(None),
             queued_bytes: AtomicUsize::new(0),
             process_memory,
         }
@@ -518,40 +552,64 @@ impl RelaySendState {
     }
 
     fn set_phase(&self, phase: RelaySendPhase) {
-        let _queue = self.queue.lock().unwrap();
-        self.phase.store(phase as u8, Ordering::Release);
+        let queue = self.queue.lock().unwrap();
+        // Only the matching confirmation can release its data barrier.
+        if queue.confirmation.is_none() {
+            self.phase.store(phase as u8, Ordering::Release);
+        }
     }
 
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        let mut queue = self.queue.lock().unwrap();
+        queue.confirmation = None;
         self.phase
             .store(RelaySendPhase::AwaitingSession as u8, Ordering::Release);
-        let mut queue = self.queue.lock().unwrap();
         let released_bytes = queue
             .packets
             .iter()
             .map(|(_, _, bytes, _)| *bytes)
-            .sum::<usize>()
-            .saturating_add(queue.in_flight_bytes);
-        let released_packets = queue.packets.len().saturating_add(queue.in_flight);
+            .sum::<usize>();
+        let released_packets = queue.packets.len();
         queue.packets.clear();
-        queue.in_flight = 0;
-        queue.in_flight_bytes = 0;
+        // The active sender retains its packet credit until completion.
         drop(queue);
         self.release(released_bytes, released_packets);
     }
 
     fn set_confirmation(&self, identity: RelayConfirmationIdentity) {
-        *self.confirmation.lock().unwrap() = Some(identity);
-        self.set_phase(RelaySendPhase::Confirming);
+        let mut queue = self.queue.lock().unwrap();
+        queue.confirmation = Some(identity);
+        self.phase
+            .store(RelaySendPhase::Confirming as u8, Ordering::Release);
     }
 
-    fn clear_confirmation(&self, identity: RelayConfirmationIdentity) -> bool {
-        let mut confirmation = self.confirmation.lock().unwrap();
-        if confirmation.as_ref() != Some(&identity) {
+    fn finish_confirmation(
+        &self,
+        identity: RelayConfirmationIdentity,
+        phase: RelaySendPhase,
+    ) -> bool {
+        let mut queue = self.queue.lock().unwrap();
+        if queue.confirmation.as_ref() != Some(&identity) {
             return false;
         }
-        *confirmation = None;
+        queue.confirmation = None;
+        self.phase.store(phase as u8, Ordering::Release);
+        true
+    }
+
+    fn begin_draining(&self) -> bool {
+        let queue = self.queue.lock().unwrap();
+        if queue.confirmation.is_some()
+            || !matches!(
+                self.phase(),
+                RelaySendPhase::Ready | RelaySendPhase::Draining
+            )
+        {
+            return false;
+        }
+        self.phase
+            .store(RelaySendPhase::Draining as u8, Ordering::Release);
         true
     }
 
@@ -623,8 +681,11 @@ impl RelaySendState {
         Ok(EnqueueBatchResult::Queued)
     }
 
-    fn pop_batch_for_send(&self, max_packets: usize) -> Option<Vec<RelayQueuedPacket>> {
+    fn pop_batch_for_send(&self, max_packets: usize) -> Option<RelayPendingBatch<'_>> {
         let mut queue = self.queue.lock().unwrap();
+        if self.phase() != RelaySendPhase::Draining {
+            return None;
+        }
         let first_policy = queue.packets.front()?.1.clone();
         let mut packets = Vec::with_capacity(max_packets);
         while packets.len() < max_packets {
@@ -642,7 +703,10 @@ impl RelaySendState {
             queue.in_flight = queue.in_flight.saturating_add(1);
             packets.push(packet);
         }
-        Some(packets)
+        Some(RelayPendingBatch {
+            state: self,
+            packets: Some(packets),
+        })
     }
 
     fn complete_send_batch(&self, bytes: usize, packets: usize) {
@@ -664,6 +728,12 @@ impl RelaySendState {
             .sum::<usize>();
         queue.in_flight = queue.in_flight.saturating_sub(count);
         queue.in_flight_bytes = queue.in_flight_bytes.saturating_sub(bytes);
+        if self.closed.load(Ordering::Acquire) {
+            drop(queue);
+            drop(packets);
+            self.release(bytes, count);
+            return;
+        }
         let mut released_bytes: usize = 0;
         let mut released_packets = 0;
         for packet in packets.into_iter().rev() {
@@ -687,7 +757,11 @@ impl RelaySendState {
 
     fn finish_draining(&self) -> bool {
         let queue = self.queue.lock().unwrap();
-        if !queue.packets.is_empty() || queue.in_flight != 0 {
+        if self.phase() != RelaySendPhase::Draining
+            || queue.confirmation.is_some()
+            || !queue.packets.is_empty()
+            || queue.in_flight != 0
+        {
             return false;
         }
         self.phase
@@ -894,8 +968,7 @@ impl RelayPeerMap {
 
     fn reset_confirmation_state(&self, peer_id: PeerId, identity: RelayConfirmationIdentity) {
         if let Some(state) = self.send_state(peer_id) {
-            state.clear_confirmation(identity);
-            state.set_phase(RelaySendPhase::AwaitingSession);
+            state.finish_confirmation(identity, RelaySendPhase::AwaitingSession);
         }
     }
 
@@ -1453,7 +1526,7 @@ impl RelayPeerMap {
         self: &Arc<Self>,
         dst_peer_id: PeerId,
         identity: RelayConfirmationIdentity,
-        reservation: InitiatorSessionReservation,
+        transition_identity: InitiatorTransitionIdentity,
         receipt_session_metadata_id: uuid::Uuid,
         previous_receipt_identity: Option<InitiatorTransitionIdentity>,
     ) -> Result<(), Error> {
@@ -1461,34 +1534,53 @@ impl RelayPeerMap {
             handshake_id: identity.handshake_id,
             session_metadata_id: receipt_session_metadata_id,
             transition_id: identity.transition_id,
-            action: reservation.action(),
-            session_generation: reservation.session_generation(),
-            initial_epoch: reservation.initial_epoch(),
+            action: transition_identity.action,
+            session_generation: transition_identity.session_generation,
+            initial_epoch: transition_identity.initial_epoch,
         };
         let state = self.ensure_send_state(dst_peer_id, RelaySendPhase::Confirming);
-        state.clear_confirmation(identity);
-        state.set_phase(RelaySendPhase::Draining);
-        let receipt_store_identity =
-            reservation.transition_identity_with_session_metadata(receipt_session_metadata_id);
-        let committed = match reservation
-            .commit_with_receipt_replacing(receipt_store_identity, previous_receipt_identity)
-        {
-            Ok(session) => session,
-            Err(error) => {
-                state.set_phase(RelaySendPhase::AwaitingSession);
-                return Err(Error::RouteError(Some(error.to_string())));
+        let committed = {
+            // Keep publication and the barrier transition under the same owner check.
+            let mut queue = state.queue.lock().unwrap();
+            if queue.confirmation != Some(identity) {
+                return Err(Error::RouteError(Some(
+                    "relay ready confirmation was replaced".to_string(),
+                )));
             }
+            // A stale ACK must not consume the durable recovery reservation.
+            let reservation = self
+                .peer_session_store
+                .resume_initiator_reservation(&transition_identity)
+                .map_err(|error| {
+                    Error::RouteError(Some(format!(
+                        "resume relay initiator reservation failed: {error}"
+                    )))
+                })?;
+            let receipt_store_identity =
+                reservation.transition_identity_with_session_metadata(receipt_session_metadata_id);
+            let result = reservation
+                .commit_with_receipt_replacing(receipt_store_identity, previous_receipt_identity)
+                .map_err(|error| Error::RouteError(Some(error.to_string())))
+                .and_then(|session| {
+                    if let Err(error) = self.bind_relay_session_auth(dst_peer_id, &session) {
+                        let key = SessionKey::new(
+                            self.global_ctx.get_network_identity().network_name,
+                            dst_peer_id,
+                        );
+                        self.peer_session_store.remove_if_same(&key, &session);
+                        return Err(error);
+                    }
+                    Ok(session)
+                });
+            queue.confirmation = None;
+            let phase = if result.is_ok() {
+                RelaySendPhase::Draining
+            } else {
+                RelaySendPhase::AwaitingSession
+            };
+            state.phase.store(phase as u8, Ordering::Release);
+            result?
         };
-        let session_key = SessionKey::new(
-            self.global_ctx.get_network_identity().network_name,
-            dst_peer_id,
-        );
-        if let Err(error) = self.bind_relay_session_auth(dst_peer_id, &committed) {
-            self.peer_session_store
-                .remove_if_same(&session_key, &committed);
-            state.set_phase(RelaySendPhase::AwaitingSession);
-            return Err(error);
-        }
         self.pending_confirmation_acks
             .remove_if(&dst_peer_id, |_, pending| {
                 pending.handshake_id == identity.handshake_id
@@ -1589,8 +1681,7 @@ impl RelayPeerMap {
                             && pending.session_id == session_id
                             && pending.transition_id == transition_id
                     });
-                state.clear_confirmation(identity);
-                state.set_phase(RelaySendPhase::AwaitingSession);
+                state.finish_confirmation(identity, RelaySendPhase::AwaitingSession);
                 return Err(Error::RouteError(Some(
                     "relay confirmation was canceled".to_string(),
                 )));
@@ -1698,6 +1789,13 @@ impl RelayPeerMap {
                     self.reject_canceled_suspended_ready_confirmation(dst_peer_id, identity)
                 );
             }
+            self.pending_confirmation_acks
+                .remove_if(&dst_peer_id, |_, pending| {
+                    pending.handshake_id == handshake_id
+                        && pending.session_id == session_id
+                        && pending.transition_id == transition_id
+                });
+            self.reset_confirmation_state(dst_peer_id, identity);
             return Err(Error::RouteError(Some(
                 "relay ready acknowledgement timed out; recovery is pending".to_string(),
             )));
@@ -1708,8 +1806,7 @@ impl RelayPeerMap {
                     && pending.session_id == session_id
                     && pending.transition_id == transition_id
             });
-        state.clear_confirmation(identity);
-        state.set_phase(RelaySendPhase::AwaitingSession);
+        state.finish_confirmation(identity, RelaySendPhase::AwaitingSession);
         Err(Error::RouteError(Some(
             "relay confirmation timed out".to_string(),
         )))
@@ -1810,8 +1907,14 @@ impl RelayPeerMap {
             pending.prepared.cancel();
         }
         if let Some(state) = self.send_state(peer_id) {
-            state.set_phase(RelaySendPhase::AwaitingSession);
-            *state.confirmation.lock().unwrap() = None;
+            state.finish_confirmation(
+                RelayConfirmationIdentity {
+                    handshake_id: pending.handshake_id,
+                    session_id: pending.prepared.session.metadata_session_id(),
+                    transition_id: pending.transition_id,
+                },
+                RelaySendPhase::AwaitingSession,
+            );
         }
     }
 
@@ -2118,6 +2221,10 @@ impl RelayPeerMap {
         if let Some(state) = self.send_state(dst_peer_id)
             && state.phase() != RelaySendPhase::Ready
         {
+            // Recovery must run before a full queue can reject the new packet.
+            if state.phase() == RelaySendPhase::AwaitingSession {
+                let _ = self.ensure_session(dst_peer_id, policy.clone()).await;
+            }
             if matches!(
                 state.enqueue(msg.clone(), policy.clone(), authorization.clone())?,
                 EnqueueResult::Queued
@@ -2266,6 +2373,10 @@ impl RelayPeerMap {
         if let Some(state) = self.send_state(dst_peer_id)
             && state.phase() != RelaySendPhase::Ready
         {
+            // Preserve handshake progress even when this batch exceeds the queue limit.
+            if state.phase() == RelaySendPhase::AwaitingSession {
+                let _ = self.ensure_session(dst_peer_id, policy.clone()).await;
+            }
             let items = batch.into_iter().map(|packet| {
                 let token = packet
                     .peer_manager_header()
@@ -2383,7 +2494,9 @@ impl RelayPeerMap {
             return Ok(());
         }
         let _drain_guard = state.draining.lock().await;
-        state.set_phase(RelaySendPhase::Draining);
+        if !state.begin_draining() {
+            return Ok(());
+        }
         if state.finish_draining() {
             return Ok(());
         }
@@ -2395,6 +2508,9 @@ impl RelayPeerMap {
         );
 
         loop {
+            if state.phase() != RelaySendPhase::Draining {
+                return Ok(());
+            }
             let Some(pending) =
                 state.pop_batch_for_send(crate::tunnel::batch::MAX_PACKET_BATCH_SIZE)
             else {
@@ -2414,8 +2530,7 @@ impl RelayPeerMap {
                 })
             });
             if !ethernet_authority_valid {
-                let bytes = pending.iter().map(|(_, _, bytes, _)| *bytes).sum::<usize>();
-                state.complete_send_batch(bytes, pending.len());
+                pending.complete();
                 tracing::debug!(
                     ?dst_peer_id,
                     "drop queued Ethernet after relay authority revocation"
@@ -2423,7 +2538,7 @@ impl RelayPeerMap {
                 continue;
             }
             let mut encrypted = PacketBatch::new();
-            for (packet, _, _, _) in &pending {
+            for (packet, _, _, _) in pending.iter() {
                 encrypted
                     .try_push(packet.clone())
                     .expect("the pending relay group is bounded");
@@ -2439,15 +2554,14 @@ impl RelayPeerMap {
                 })
             });
             if !ethernet_authority_valid {
-                let bytes = pending.iter().map(|(_, _, bytes, _)| *bytes).sum::<usize>();
-                state.complete_send_batch(bytes, pending.len());
+                pending.complete();
                 continue;
             }
             if let Err(error) =
                 session.encrypt_payload_batch(self.my_peer_id, dst_peer_id, &mut encrypted)
             {
                 tracing::debug!(?error, ?dst_peer_id, "pending relay encryption failed");
-                state.requeue_failed_batch(pending);
+                drop(pending);
                 if !session.is_valid() {
                     state.set_phase(RelaySendPhase::AwaitingSession);
                 }
@@ -2465,8 +2579,7 @@ impl RelayPeerMap {
                 })
             });
             if !ethernet_authority_valid {
-                let bytes = pending.iter().map(|(_, _, bytes, _)| *bytes).sum::<usize>();
-                state.complete_send_batch(bytes, pending.len());
+                pending.complete();
                 continue;
             }
             if let Err(error) = self
@@ -2474,12 +2587,11 @@ impl RelayPeerMap {
                 .await
             {
                 tracing::debug!(?error, ?dst_peer_id, "pending relay send failed");
-                state.requeue_failed_batch(pending);
+                drop(pending);
                 self.schedule_flush_retry(dst_peer_id, session.clone());
                 return Ok(());
             }
-            let bytes = pending.iter().map(|(_, _, bytes, _)| *bytes).sum::<usize>();
-            state.complete_send_batch(bytes, pending.len());
+            pending.complete();
         }
         state.retry_attempt.store(0, Ordering::Release);
         Ok(())
@@ -2585,6 +2697,17 @@ impl RelayPeerMap {
         {
             return Err(Error::RouteError(Some(
                 "relay responder confirmation is pending".to_string(),
+            )));
+        }
+
+        if self
+            .states
+            .get(&dst_peer_id)
+            .and_then(|state| state.next_retry_at)
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return Err(Error::RouteError(Some(
+                "relay handshake backoff".to_string(),
             )));
         }
 
@@ -3487,14 +3610,6 @@ impl RelayPeerMap {
                 let outcome = pending.outcome.clone();
                 let notify = pending.notify.clone();
                 drop(pending);
-                let reservation = self
-                    .peer_session_store
-                    .resume_initiator_reservation(&identity)
-                    .map_err(|error| {
-                        Error::RouteError(Some(format!(
-                            "resume relay initiator reservation failed: {error}"
-                        )))
-                    })?;
                 let relay_identity = RelayConfirmationIdentity {
                     handshake_id,
                     session_id: verified_session_id.expect("session id was checked"),
@@ -3503,7 +3618,7 @@ impl RelayPeerMap {
                 self.commit_initiator_after_ready(
                     remote_peer_id,
                     relay_identity,
-                    reservation,
+                    identity,
                     receipt_session_metadata_id,
                     previous_receipt_identity,
                 )
@@ -3536,7 +3651,7 @@ impl RelayPeerMap {
                 Error::RouteError(Some("relay ready has no confirmation state".to_string()))
             })?;
             let current_confirmation =
-                state.confirmation.lock().unwrap().as_ref() == Some(&identity);
+                state.queue.lock().unwrap().confirmation.as_ref() == Some(&identity);
             if !current_confirmation
                 && !self.responder_handshake_completed_identity(remote_peer_id, identity)
             {
@@ -3633,9 +3748,8 @@ impl RelayPeerMap {
                 remote_peer_id,
             )
             .await?;
-            if current_confirmation {
-                state.clear_confirmation(identity);
-                state.set_phase(RelaySendPhase::Draining);
+            if current_confirmation && state.finish_confirmation(identity, RelaySendPhase::Draining)
+            {
                 self.flush_pending_packets(remote_peer_id, session).await?;
             }
             return Ok(());
@@ -4677,5 +4791,234 @@ mod relay_origin_proof_tests {
         let mut packet = ZCPacket::new_with_payload(&payload);
         packet.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
         packet
+    }
+
+    #[test]
+    fn closed_relay_queue_releases_in_flight_credit_once() {
+        for failed_send in [false, true] {
+            let state = RelaySendState::new(RelaySendPhase::Draining);
+            state
+                .enqueue(queue_packet(64), NextHopPolicy::LeastHop, None)
+                .unwrap();
+            let pending = state.pop_batch_for_send(1).unwrap();
+            let bytes = pending[0].2;
+            state.close();
+            assert_eq!(state.queued_bytes.load(Ordering::Acquire), bytes);
+            if failed_send {
+                drop(pending);
+            } else {
+                pending.complete();
+            }
+            assert!(state.is_empty());
+            assert_eq!(state.queued_bytes.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn canceled_relay_batch_can_drain_again() {
+        let state = RelaySendState::new(RelaySendPhase::Draining);
+        state
+            .enqueue(queue_packet(64), NextHopPolicy::LeastHop, None)
+            .unwrap();
+        let pending = state.pop_batch_for_send(1).unwrap();
+        let bytes = pending[0].2;
+        drop(pending);
+        assert_eq!(state.queue.lock().unwrap().in_flight, 0);
+        assert_eq!(state.packet_count(), 1);
+        assert_eq!(state.queued_bytes.load(Ordering::Acquire), bytes);
+        state.pop_batch_for_send(1).unwrap().complete();
+        assert!(state.finish_draining());
+        assert!(state.is_empty());
+        assert_eq!(state.queued_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(state.process_memory.retained(), 0);
+    }
+
+    #[tokio::test]
+    async fn ready_timeout_preserves_recovery_and_reopens_queue() {
+        let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "ready-timeout-recovery".into(),
+            "test-secret".into(),
+        )));
+        let (sender, _receiver) = create_packet_recv_chan();
+        let peers = Arc::new(PeerMap::new(sender, ctx.clone(), 7));
+        let store = Arc::new(PeerSessionStore::new());
+        let key = SessionKey::new(ctx.get_network_name(), 9);
+        let relay = RelayPeerMap::new(peers, None, ctx, 7, store.clone(), None);
+        let reservation = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Create,
+                1,
+                Some(PeerSession::new_root_key()),
+                0,
+                "aes-256-gcm".into(),
+                "aes-256-gcm".into(),
+                Some([9; 32]),
+            )
+            .unwrap();
+        let responder_session = uuid::Uuid::new_v4();
+        let expected = reservation.transition_identity_with_session_metadata(responder_session);
+        let stale_confirmation = RelayConfirmationIdentity {
+            handshake_id: [1; RELAY_HANDSHAKE_ID_SIZE],
+            session_id: reservation.session().metadata_session_id(),
+            transition_id: reservation.transition_id(),
+        };
+        let task_relay = relay.clone();
+        let task = tokio::spawn(async move {
+            task_relay
+                .start_handshake_confirmation(
+                    9,
+                    [1; RELAY_HANDSHAKE_ID_SIZE],
+                    reservation,
+                    responder_session,
+                    None,
+                )
+                .await
+        });
+        // Accept CONFIRM, then withhold READY-ACK through the normal retry deadline.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(pending) = relay.pending_confirmation_acks.get(&9) {
+                    pending.outcome.store(1, Ordering::Release);
+                    pending.notify.notify_one();
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let preserved = store.in_doubt_identity(&key).as_ref() == Some(&expected);
+        let phase = relay.send_state(9).unwrap().phase();
+        let pending = relay.pending_confirmation_acks.contains_key(&9);
+        let late_ack = relay
+            .commit_initiator_after_ready(
+                9,
+                stale_confirmation,
+                expected.clone(),
+                responder_session,
+                None,
+            )
+            .await;
+        let preserved_after_ack = store.in_doubt_identity(&key).as_ref() == Some(&expected);
+        store
+            .resume_initiator_reservation(&expected)
+            .unwrap()
+            .cancel();
+        assert!(
+            error
+                .to_string()
+                .contains("ready acknowledgement timed out")
+        );
+        assert!(
+            preserved,
+            "the in-doubt reservation must survive the timeout"
+        );
+        assert_eq!(phase, RelaySendPhase::AwaitingSession);
+        assert!(!pending, "an expired owner cannot consume a late READY-ACK");
+        assert!(late_ack.is_err());
+        assert!(preserved_after_ack, "a stale ACK must preserve recovery");
+    }
+
+    #[test]
+    fn stale_confirmation_cannot_reset_a_replacement() {
+        let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "confirmation-recovery".into(),
+            "test-secret".into(),
+        )));
+        let (sender, _receiver) = create_packet_recv_chan();
+        let peers = Arc::new(PeerMap::new(sender, ctx.clone(), 7));
+        let relay = RelayPeerMap::new(peers, None, ctx, 7, Arc::new(PeerSessionStore::new()), None);
+        let previous = RelayConfirmationIdentity {
+            handshake_id: [1; RELAY_HANDSHAKE_ID_SIZE],
+            session_id: uuid::Uuid::new_v4(),
+            transition_id: [1; RELAY_TRANSITION_ID_SIZE],
+        };
+        let replacement = RelayConfirmationIdentity {
+            handshake_id: [2; RELAY_HANDSHAKE_ID_SIZE],
+            session_id: uuid::Uuid::new_v4(),
+            transition_id: [2; RELAY_TRANSITION_ID_SIZE],
+        };
+        let state = relay.set_confirmation_identity(9, previous);
+        relay.set_confirmation_identity(9, replacement);
+        relay.reset_confirmation_state(9, previous);
+        assert_eq!(state.phase(), RelaySendPhase::Confirming);
+        assert_eq!(state.queue.lock().unwrap().confirmation, Some(replacement));
+        assert!(!state.finish_confirmation(previous, RelaySendPhase::Draining));
+        assert!(!state.begin_draining());
+        assert!(!state.finish_draining());
+        state.set_phase(RelaySendPhase::AwaitingSession);
+        assert_eq!(state.phase(), RelaySendPhase::Confirming);
+        assert!(state.finish_confirmation(replacement, RelaySendPhase::Draining));
+        assert!(state.finish_draining());
+    }
+
+    #[tokio::test]
+    async fn saturated_relay_queue_restarts_authentication() {
+        use crate::peers::tests::{
+            connect_peer_manager, create_mock_peer_manager_secure, wait_route_appear,
+        };
+
+        for batch_send in [false, true] {
+            let name = format!("relay-recovery-{}", uuid::Uuid::new_v4());
+            let a = create_mock_peer_manager_secure(name.clone(), "recovery-test".into()).await;
+            let seed = create_mock_peer_manager_secure(name.clone(), "recovery-test".into()).await;
+            let b = create_mock_peer_manager_secure(name, "recovery-test".into()).await;
+            connect_peer_manager(a.clone(), seed.clone()).await;
+            connect_peer_manager(b.clone(), seed.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            let relay = a.get_relay_peer_map();
+            let destination = b.my_peer_id();
+            assert!(!relay.has_session(destination));
+            let packet = || {
+                let mut packet = queue_packet(32);
+                packet.fill_peer_manager_hdr(a.my_peer_id(), destination, PacketType::Data as u8);
+                packet
+            };
+            // A failed handshake leaves its bounded queue waiting for a session.
+            let state = relay.ensure_send_state(destination, RelaySendPhase::AwaitingSession);
+            for _ in 0..super::MAX_PENDING_PACKETS_PER_PEER {
+                let mut queued = packet();
+                attach_relay_origin_proof(&mut queued).unwrap();
+                state
+                    .enqueue(queued, NextHopPolicy::LeastHop, None)
+                    .unwrap();
+            }
+            let result = if batch_send {
+                relay
+                    .send_msg_batch(
+                        PacketBatch::singleton(packet()),
+                        destination,
+                        NextHopPolicy::LeastHop,
+                    )
+                    .await
+            } else {
+                relay
+                    .send_msg(packet(), destination, NextHopPolicy::LeastHop)
+                    .await
+            };
+            assert!(
+                result.is_err(),
+                "the full queue must retain its packet limit"
+            );
+            let recovered = tokio::time::timeout(Duration::from_secs(3), async {
+                while !relay.has_session(destination) || state.phase() != RelaySendPhase::Ready {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(state.is_empty());
+                assert!(b.get_relay_peer_map().has_session(a.my_peer_id()));
+            })
+            .await;
+            state.close();
+            assert!(
+                recovered.is_ok(),
+                "queued traffic did not restart authentication; batch={batch_send}"
+            );
+        }
     }
 }

@@ -58,6 +58,8 @@ use tokio_util::task::AbortOnDropHandle;
 use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
 use zerocopy::{NativeEndian, NetworkEndian};
 
+use super::tap_mac::TapMac;
+
 fn persistent_nic_deliveries(
     mgr: &Arc<PeerManager>,
     adapter: InterfaceAdapter,
@@ -129,7 +131,7 @@ fn restore_compact_ip_for_tap(
 
 struct HybridTapSink {
     inner: Pin<Box<dyn PacketBatchSink>>,
-    local_mac: [u8; 6],
+    local_mac: Arc<TapMac>,
 }
 
 impl Sink<PacketBatch> for HybridTapSink {
@@ -143,8 +145,9 @@ impl Sink<PacketBatch> for HybridTapSink {
     }
 
     fn start_send(mut self: Pin<&mut Self>, mut batch: PacketBatch) -> Result<(), Self::Error> {
+        let local_mac = self.local_mac.load();
         for packet in batch.iter_mut() {
-            restore_compact_ip_for_tap(packet, self.local_mac)
+            restore_compact_ip_for_tap(packet, local_mac)
                 .map_err(|error| TunnelError::InvalidPacket(error.to_string()))?;
         }
         self.inner.as_mut().start_send(batch)
@@ -1911,7 +1914,56 @@ impl NicCtx {
                 .await
                 .ok_or_else(|| anyhow::anyhow!("virtual NIC has no interface name"))?;
             let _guard = self.global_ctx.net_ns.guard();
-            Some(interface_mac(&ifname)?)
+            // Subscribe before the snapshot. Systemd can change the MAC after TAP creation.
+            #[cfg(target_os = "linux")]
+            let monitor = super::tap_mac::linux::LinkMonitor::new(&ifname)?;
+            let local_mac = Arc::new(TapMac::new(interface_mac(&ifname)?));
+            #[cfg(target_os = "linux")]
+            {
+                let local_mac = local_mac.clone();
+                let global_ctx = self.global_ctx.clone();
+                self.tasks.spawn(async move {
+                    let mut monitor = monitor;
+                    loop {
+                        if let Err(error) = monitor.changed().await {
+                            tracing::warn!(?error, %ifname, "restarting TAP MAC monitor");
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                let replacement = {
+                                    let _guard = global_ctx.net_ns.guard();
+                                    super::tap_mac::linux::LinkMonitor::new(&ifname)
+                                };
+                                match replacement {
+                                    Ok(replacement) => {
+                                        monitor = replacement;
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(?error, %ifname, "cannot restart TAP MAC monitor");
+                                    }
+                                }
+                            }
+                        }
+                        loop {
+                            let current_mac = {
+                                let _guard = global_ctx.net_ns.guard();
+                                interface_mac(&ifname)
+                            };
+                            match current_mac {
+                                Ok(mac) => {
+                                    local_mac.store(mac);
+                                    break;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(?error, %ifname, "cannot refresh TAP MAC address");
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Some(local_mac)
         } else {
             None
         };
@@ -2019,6 +2071,35 @@ mod tests {
         );
         assert_eq!(&packet.payload()[12..14], &0x0800_u16.to_be_bytes());
         assert_eq!(&packet.payload()[14..], &[0x45; 20]);
+    }
+
+    #[tokio::test]
+    async fn tap_sink_uses_the_current_mac_after_a_link_change() {
+        use futures::SinkExt;
+
+        use crate::tunnel::batch::PacketBatch;
+
+        let original_mac = [0x02, 1, 2, 3, 4, 5];
+        let updated_mac = [0x02, 6, 7, 8, 9, 10];
+        let mac = Arc::new(super::TapMac::new(original_mac));
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let inner = sender.sink_map_err(|error| TunnelError::InvalidPacket(error.to_string()));
+        let mut sink = super::HybridTapSink {
+            inner: Box::pin(inner),
+            local_mac: mac.clone(),
+        };
+        for expected in [original_mac, updated_mac] {
+            mac.store(expected);
+            let mut packet = ZCPacket::new_with_payload(&[0x45; 20]);
+            packet.fill_peer_manager_hdr(9, 7, PacketType::Data as u8);
+            let mut batch = PacketBatch::new();
+            batch.try_push(packet).unwrap();
+            sink.send(batch).await.unwrap();
+            let received = receiver.next().await.unwrap();
+            let frame = received.iter().next().unwrap().payload();
+            assert_eq!(&frame[..6], &expected);
+            assert_eq!(&frame[14..], &[0x45; 20]);
+        }
     }
 
     #[test]

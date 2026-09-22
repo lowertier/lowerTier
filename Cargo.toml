@@ -8,6 +8,7 @@ members = [
 default-members = ["lowertier"]
 exclude = [
     "vendor/quinn-proto",
+    "vendor/smoltcp",
     "vendor/rust-tun",
     "vendor/service-manager-rs",
     "vendor/thunk/thunk-rs",

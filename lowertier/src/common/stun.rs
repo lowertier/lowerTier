@@ -786,6 +786,8 @@ struct TcpStunClient {
     io_timeout: Duration,
     source_port: u16,
     source_ip: Option<IpAddr>,
+    socket_mark: Option<u32>,
+    net_ns: Option<super::netns::NetNS>,
 }
 
 impl TcpStunClient {
@@ -796,11 +798,23 @@ impl TcpStunClient {
             io_timeout: Duration::from_millis(3000),
             source_port,
             source_ip: None,
+            socket_mark: None,
+            net_ns: None,
         }
     }
 
     fn with_source_ip(mut self, source_ip: IpAddr) -> Self {
         self.source_ip = Some(source_ip);
+        self
+    }
+
+    fn with_socket_mark(mut self, mark: Option<u32>) -> Self {
+        self.socket_mark = mark;
+        self
+    }
+
+    fn with_net_ns(mut self, net_ns: super::netns::NetNS) -> Self {
+        self.net_ns = Some(net_ns);
         self
     }
 
@@ -877,27 +891,13 @@ impl TcpStunClient {
             self.source_port,
         );
 
-        let socket2_socket = socket2::Socket::new(
-            socket2::Domain::for_address(self.stun_server),
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        )?;
-
-        if bind_addr.is_ipv6() {
-            socket2_socket.set_only_v6(true)?;
-        }
-
-        socket2_socket.set_nonblocking(true)?;
-        socket2_socket.set_reuse_address(true)?;
-
-        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-        {
-            let _ = socket2_socket.set_reuse_port(true);
-        }
-
-        socket2_socket.bind(&SockAddr::from(bind_addr))?;
-
-        let socket = tokio::net::TcpSocket::from_std_stream(socket2_socket.into());
+        let socket = crate::tunnel::common::bind::<tokio::net::TcpSocket>()
+            .addr(bind_addr)
+            .only_v6(true)
+            .reuse_port(true)
+            .maybe_net_ns(self.net_ns.clone())
+            .maybe_socket_mark(self.socket_mark)
+            .call()?;
         let stream =
             tokio::time::timeout(self.conn_timeout, socket.connect(self.stun_server)).await??;
 
@@ -908,7 +908,23 @@ impl TcpStunClient {
 
     #[tracing::instrument(ret, level = Level::TRACE)]
     pub async fn bind_request(self) -> Result<BindRequestResponse, Error> {
+        self.bind_request_retained()
+            .await
+            .map(|(response, _stream)| response)
+    }
+
+    async fn bind_request_retained(
+        self,
+    ) -> Result<(BindRequestResponse, tokio::net::TcpStream), Error> {
         let mut stream = self.connect().await?;
+        let response = self.bind_request_on_stream(&mut stream).await?;
+        Ok((response, stream))
+    }
+
+    async fn bind_request_on_stream(
+        &self,
+        stream: &mut tokio::net::TcpStream,
+    ) -> Result<BindRequestResponse, Error> {
         let local_addr = stream.local_addr()?;
         let stun_host = self.stun_server;
 
@@ -921,7 +937,7 @@ impl TcpStunClient {
         tokio::time::timeout(self.io_timeout, stream.write_all(msg.as_slice())).await??;
 
         let now = Instant::now();
-        let msg = Self::tcp_read_stun_message(&mut stream, self.io_timeout).await?;
+        let msg = Self::tcp_read_stun_message(stream, self.io_timeout).await?;
         if msg.class() != MessageClass::SuccessResponse
             || msg.method() != BINDING
             || tid_to_u32(&msg.transaction_id()) != tid
@@ -1060,6 +1076,51 @@ pub trait StunInfoCollectorTrait: Send + Sync {
         self.get_udp_port_mappings_with_socket(udp).await
     }
     async fn get_tcp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error>;
+    async fn get_first_udp_mapping_with_receiver(&self, udp: Arc<UdpSocket>, receiver: StunPacketReceiver) -> Result<SocketAddr, Error> {
+        self.get_udp_port_mappings_with_socket_receiver(udp, receiver).await?.into_iter().next().ok_or(Error::NotFound)
+    }
+    async fn get_tcp_port_mappings_bound(
+        &self,
+        local: SocketAddr,
+        _socket_mark: Option<u32>,
+        _net_ns: super::netns::NetNS,
+    ) -> Result<TcpPortMappings, Error> {
+        Ok(TcpPortMappings {
+            addresses: vec![self.get_tcp_port_mapping(local.port()).await?],
+            connections: vec![],
+        })
+    }
+}
+
+pub struct TcpPortMappings {
+    pub addresses: Vec<SocketAddr>,
+    // Keep the STUN connections alive until the peer establishes its TCP path.
+    pub connections: Vec<tokio::net::TcpStream>,
+}
+
+impl TcpPortMappings {
+    pub(crate) async fn refresh(&mut self) -> Result<(), Error> {
+        // Reuse each established tuple. A second connection cannot own that tuple.
+        let requests = self.connections.drain(..).map(|mut stream| async move {
+            let server = stream.peer_addr()?;
+            let client = TcpStunClient::new(server, stream.local_addr()?.port());
+            let response = client.bind_request_on_stream(&mut stream).await?;
+            let mapped = response.mapped_socket_addr.ok_or(Error::NotFound)?;
+            Ok::<_, Error>((mapped, stream))
+        });
+        let replies = futures::future::join_all(requests).await;
+        self.addresses.clear();
+        for (mapped, stream) in replies.into_iter().flatten() {
+            if !self.addresses.contains(&mapped) {
+                self.addresses.push(mapped);
+            }
+            self.connections.push(stream);
+        }
+        if self.addresses.is_empty() {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
 }
 
 pub struct StunInfoCollector {
@@ -1081,6 +1142,7 @@ impl StunInfoCollector {
         &self,
         udp: Arc<UdpSocket>,
         receiver: Option<StunPacketReceiver>,
+        first_only: bool,
     ) -> Result<Vec<SocketAddr>, Error> {
         let local_addr = udp.local_addr()?;
         let policy = self.underlay_policy.load_full();
@@ -1158,6 +1220,7 @@ impl StunInfoCollector {
                             "STUN candidate observed"
                         );
                         observations.push((index, mapped_addr));
+                        if first_only { break; }
                     }
                 }
                 Err(error) => tracing::warn!(?server, ?error, "stun bind request failed"),
@@ -1256,7 +1319,7 @@ impl StunInfoCollectorTrait for StunInfoCollector {
         &self,
         udp: Arc<UdpSocket>,
     ) -> Result<Vec<SocketAddr>, Error> {
-        self.gather_udp_port_mappings(udp, None).await
+        self.gather_udp_port_mappings(udp, None, false).await
     }
 
     async fn get_udp_port_mappings_with_socket_receiver(
@@ -1264,7 +1327,69 @@ impl StunInfoCollectorTrait for StunInfoCollector {
         udp: Arc<UdpSocket>,
         receiver: StunPacketReceiver,
     ) -> Result<Vec<SocketAddr>, Error> {
-        self.gather_udp_port_mappings(udp, Some(receiver)).await
+        self.gather_udp_port_mappings(udp, Some(receiver), false).await
+    }
+
+    async fn get_first_udp_mapping_with_receiver(&self, udp: Arc<UdpSocket>, receiver: StunPacketReceiver) -> Result<SocketAddr, Error> {
+        self.gather_udp_port_mappings(udp, Some(receiver), true).await?.into_iter().next().ok_or(Error::NotFound)
+    }
+
+    async fn get_tcp_port_mappings_bound(
+        &self,
+        local: SocketAddr,
+        socket_mark: Option<u32>,
+        net_ns: super::netns::NetNS,
+    ) -> Result<TcpPortMappings, Error> {
+        let policy = self.underlay_policy.load_full();
+        {
+            let _guard = net_ns.guard();
+            crate::tunnel::common::ensure_local_allowed(&policy, local)?;
+        }
+        let hosts = self.tcp_stun_servers.read().unwrap().clone();
+        let hosts = if policy.is_active() {
+            strict_stun_hosts(hosts)
+        } else {
+            hosts
+        };
+        let mut resolver = HostResolverIter::new(hosts, 1, false);
+        let mut requests = JoinSet::new();
+        while let Some(server) = resolver.next().await {
+            if !server.is_ipv4() || !policy.allows_remote(server.ip()) {
+                continue;
+            }
+            requests.spawn(
+                TcpStunClient::new(server, local.port())
+                    .with_source_ip(local.ip())
+                    .with_socket_mark(socket_mark)
+                    .with_net_ns(net_ns.clone())
+                    .bind_request_retained(),
+            );
+            if requests.len() == 2 {
+                break;
+            }
+        }
+        let mut result = TcpPortMappings {
+            addresses: vec![],
+            connections: vec![],
+        };
+        while let Some(response) = requests.join_next().await {
+            let Ok(Ok((response, stream))) = response else {
+                continue;
+            };
+            if let Some(mapped) = response
+                .mapped_socket_addr
+                .filter(|address| policy.allows_ip(address.ip()))
+            {
+                if !result.addresses.contains(&mapped) {
+                    result.addresses.push(mapped);
+                }
+                result.connections.push(stream);
+            }
+        }
+        if result.addresses.is_empty() {
+            return Err(Error::NotFound);
+        }
+        Ok(result)
     }
 
     async fn get_tcp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error> {
@@ -1656,4 +1781,58 @@ mod tests {
     use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_stun_retains_the_reserved_source_port() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let reservation = crate::tunnel::common::bind::<tokio::net::TcpSocket>()
+                .addr("127.0.0.1:0".parse().unwrap())
+                .reuse_port(true)
+                .call()
+                .unwrap()
+                .listen(4)
+                .unwrap();
+            let local = reservation.local_addr().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let server = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let (mut stream, source) = listener.accept().await.unwrap();
+                assert_eq!(source, local);
+                for port in [source.port(), source.port().wrapping_add(1).max(1)] {
+                    let mut request = [0; 20];
+                    stream.read_exact(&mut request).await.unwrap();
+                    let mut response = Vec::from([1, 1, 0, 12]);
+                    response.extend_from_slice(&request[4..20]);
+                    response.extend_from_slice(&[0, 0x20, 0, 8, 0, 1]);
+                    response.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+                    response.extend_from_slice(
+                        &(u32::from(Ipv4Addr::LOCALHOST) ^ 0x2112a442).to_be_bytes(),
+                    );
+                    stream.write_all(&response).await.unwrap();
+                }
+            });
+            let (mapping, stream) = TcpStunClient::new(server, local.port())
+                .with_source_ip(local.ip())
+                .bind_request_retained()
+                .await
+                .unwrap();
+            assert_eq!(mapping.mapped_socket_addr, Some(local));
+            assert_eq!(stream.local_addr().unwrap(), local);
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+            let mut mappings = TcpPortMappings {
+                addresses: vec![local],
+                connections: vec![stream],
+            };
+            mappings.refresh().await.unwrap();
+            assert_eq!(mappings.addresses, vec![SocketAddr::new(local.ip(), local.port().wrapping_add(1).max(1))]);
+            assert_eq!(mappings.connections[0].local_addr().unwrap(), local);
+            task.await.unwrap();
+            assert!(mappings.refresh().await.is_err());
+            assert!(mappings.addresses.is_empty());
+            assert!(mappings.connections.is_empty());
+        })
+        .await
+        .unwrap();
+    }
 }

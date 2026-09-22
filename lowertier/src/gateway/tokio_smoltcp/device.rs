@@ -107,11 +107,8 @@ impl BufferDevice {
             send_queue: VecDeque::with_capacity(max_burst_size),
         }
     }
-    pub(crate) fn take_send_queue(&mut self) -> VecDeque<Packet> {
-        std::mem::replace(
-            &mut self.send_queue,
-            VecDeque::with_capacity(self.max_burst_size),
-        )
+    pub(crate) fn drain_send_queue(&mut self) -> std::collections::vec_deque::Drain<'_, Packet> {
+        self.send_queue.drain(..)
     }
     pub(crate) fn push_recv_queue(&mut self, p: impl Iterator<Item = Packet>) {
         self.recv_queue.extend(p.take(self.avaliable_recv_queue()));

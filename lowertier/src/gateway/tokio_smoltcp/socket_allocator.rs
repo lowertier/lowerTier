@@ -5,9 +5,13 @@ use smoltcp::{
     time::Duration,
 };
 use std::{
+    io,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
+
+use super::tcp_buffers::TcpBuffers;
+use crate::common::global_ctx::global_process_memory_governor;
 
 /// `BufferSize` is used to configure the size of the socket buffer.
 #[derive(Debug, Clone, Copy)]
@@ -54,15 +58,23 @@ impl SocketAlloctor {
     pub(crate) fn sockets(&self) -> &SharedSocketSet {
         &self.sockets
     }
-    pub fn new_tcp_socket(&self) -> SocketHandle {
+    pub fn new_tcp_socket(&self) -> io::Result<SocketHandle> {
+        let buffers = TcpBuffers::new(
+            self.buffer_size.tcp_rx_size,
+            self.buffer_size.tcp_tx_size,
+            global_process_memory_governor(),
+        )?;
         let mut set = self.sockets.lock();
         let handle = set.add(self.alloc_tcp_socket());
-        SocketHandle::new(handle, self.sockets.clone())
+        let mut handle = SocketHandle::new(handle, self.sockets.clone());
+        handle.2 = Some(Mutex::new(buffers));
+        Ok(handle)
     }
     fn alloc_tcp_socket(&self) -> tcp::Socket<'static> {
         let rx_buffer = tcp::SocketBuffer::new(vec![0; self.buffer_size.tcp_rx_size]);
         let tx_buffer = tcp::SocketBuffer::new(vec![0; self.buffer_size.tcp_tx_size]);
         let mut tcp = tcp::Socket::new(rx_buffer, tx_buffer);
+        tcp.set_recv_capacity_limit(TcpBuffers::recv_limit(self.buffer_size.tcp_rx_size));
         tcp.set_nagle_enabled(false);
         tcp.set_keep_alive(Some(Duration::from_secs(10)));
         tcp.set_timeout(Some(Duration::from_secs(60)));
@@ -90,11 +102,15 @@ impl SocketAlloctor {
     }
 }
 
-pub struct SocketHandle(InnerSocketHandle, SharedSocketSet);
+pub struct SocketHandle(
+    InnerSocketHandle,
+    SharedSocketSet,
+    pub(super) Option<Mutex<TcpBuffers>>,
+);
 
 impl SocketHandle {
     fn new(inner: InnerSocketHandle, set: SharedSocketSet) -> SocketHandle {
-        SocketHandle(inner, set)
+        SocketHandle(inner, set, None)
     }
 }
 

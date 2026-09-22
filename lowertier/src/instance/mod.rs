@@ -26,6 +26,8 @@ mod nic_ingress;
 #[cfg(feature = "tun")]
 mod nic_ingress_workers;
 #[cfg(feature = "tun")]
+mod tap_mac;
+#[cfg(feature = "tun")]
 pub mod virtual_nic;
 
 #[cfg(any(windows, test))]

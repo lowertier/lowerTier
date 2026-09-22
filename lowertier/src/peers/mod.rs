@@ -141,18 +141,9 @@ fn queue_credit_count(batch: &mut PacketBatch) -> Option<u32> {
 
 impl PacketRecvChan {
     pub(crate) fn create_sibling_channel(&self) -> (Self, PacketRecvChanReceiver) {
-        let (sender, receiver) = tokio::sync::mpsc::channel(PACKET_QUEUE_BATCH_CAPACITY);
-        (
-            Self {
-                sender,
-                queue_credits: self.queue_credits.clone(),
-                direct_nic: Arc::new(OnceLock::new()),
-            },
-            PacketRecvChanReceiver {
-                receiver,
-                pending: None,
-            },
-        )
+        // Each queue needs independent credits. Its consumer can await delivery
+        // to the sibling while producers refill the source queue.
+        create_packet_recv_chan()
     }
 
     pub async fn send(
@@ -363,6 +354,63 @@ mod vector_channel_tests {
     use super::{PeerPacketFilter, create_packet_recv_chan, recv_packet_batch_from_chan};
 
     struct KeepOddPackets;
+
+    #[tokio::test]
+    async fn full_ingress_cannot_block_nic_delivery() {
+        use std::task::Poll;
+
+        fn batch(value: u8) -> PacketBatch {
+            let mut batch = PacketBatch::new();
+            for _ in 0..crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+                batch
+                    .try_push(ZCPacket::new_with_payload(&[value; 128]))
+                    .unwrap();
+            }
+            batch
+        }
+
+        let (nic, mut nic_rx) = create_packet_recv_chan();
+        let (ingress, mut ingress_rx) = nic.create_sibling_channel();
+        ingress.send_batch(batch(1)).await.unwrap();
+        ingress.send_batch(batch(2)).await.unwrap();
+        let current = ingress_rx.recv_batch().await.unwrap();
+        ingress.send_batch(batch(3)).await.unwrap();
+        assert_eq!(ingress.queue_credits.available_permits(), 0);
+
+        // Production awaits NIC delivery before it can dequeue more ingress.
+        let delivery = nic.send_batch(current);
+        tokio::pin!(delivery);
+        assert!(matches!(futures::poll!(&mut delivery), Poll::Ready(Ok(()))));
+        nic.send_batch(batch(4)).await.unwrap();
+        assert_eq!(nic.queue_credits.available_permits(), 0);
+
+        // Both stages must retain their own bound and resume after a dequeue.
+        let blocked_ingress = ingress.send_batch(batch(5));
+        let blocked_nic = nic.send_batch(batch(6));
+        tokio::pin!(blocked_ingress, blocked_nic);
+        assert!(matches!(
+            futures::poll!(&mut blocked_ingress),
+            Poll::Pending
+        ));
+        assert!(matches!(futures::poll!(&mut blocked_nic), Poll::Pending));
+        let received = nic_rx.recv_batch().await.unwrap();
+        assert_eq!(received.len(), crate::tunnel::batch::MAX_PACKET_BATCH_SIZE);
+        assert!(received.iter().all(|packet| packet.payload()[0] == 1));
+        assert!(matches!(
+            futures::poll!(&mut blocked_nic),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            futures::poll!(&mut blocked_ingress),
+            Poll::Pending
+        ));
+        let received = ingress_rx.recv_batch().await.unwrap();
+        assert!(received.iter().all(|packet| packet.payload()[0] == 2));
+        assert!(matches!(
+            futures::poll!(&mut blocked_ingress),
+            Poll::Ready(Ok(()))
+        ));
+    }
 
     #[async_trait::async_trait]
     impl PeerPacketFilter for KeepOddPackets {

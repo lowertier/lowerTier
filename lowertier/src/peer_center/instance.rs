@@ -27,7 +27,10 @@ use crate::{
             PeerCenterRpcClientFactory, PeerCenterRpcServer, PeerInfoForGlobalMap,
             ReportPeersRequest, ReportPeersResponse,
         },
-        rpc_types::{self, controller::BaseController},
+        rpc_types::{
+            self,
+            controller::{BaseController, Controller},
+        },
     },
 };
 
@@ -45,6 +48,7 @@ pub trait PeerCenterPeerManagerTrait: Send + Sync + 'static {
     fn local_center_route(&self) -> Option<Route> {
         let global_ctx = self.get_global_ctx();
         if global_ctx.get_network_identity().network_secret.is_none()
+            || global_ctx.get_feature_flags().is_credential_peer
             || global_ctx
                 .get_hostname()
                 .starts_with(crate::peers::PUBLIC_SERVER_HOSTNAME_PREFIX)
@@ -67,6 +71,65 @@ struct PeerCenterBase {
     my_peer_id: PeerId,
     tasks: Mutex<JoinSet<()>>,
     lock: Arc<Mutex<()>>,
+    local_server: std::sync::OnceLock<PeerCenterServer>,
+}
+
+/// Only locally constructed jobs can use this service. Remote calls use the RPC server.
+struct LocalPeerCenterClient {
+    peer_mgr: Arc<dyn PeerCenterPeerManagerTrait>,
+    server: PeerCenterServer,
+}
+
+impl LocalPeerCenterClient {
+    fn controller(&self) -> Result<BaseController, rpc_types::error::Error> {
+        let route = self.peer_mgr.local_center_route().ok_or_else(|| {
+            rpc_types::error::Error::MalformatRpcPacket(
+                "local peer is not an eligible center".to_owned(),
+            )
+        })?;
+        let mut ctrl = BaseController::default();
+        ctrl.set_authenticated_peer_id(Some(route.peer_id));
+        ctrl.set_authenticated_peer_identity_type(Some(
+            crate::proto::peer_rpc::PeerIdentityType::try_from(route.peer_identity_type).map_err(
+                |_| {
+                    rpc_types::error::Error::MalformatRpcPacket("invalid local identity".to_owned())
+                },
+            )?,
+        ));
+        ctrl.set_authenticated_peer_secure_auth_level(Some(
+            crate::proto::peer_rpc::SecureAuthLevel::try_from(route.secure_auth_level).map_err(
+                |_| {
+                    rpc_types::error::Error::MalformatRpcPacket(
+                        "invalid local authentication level".to_owned(),
+                    )
+                },
+            )?,
+        ));
+        Ok(ctrl)
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerCenterRpc for LocalPeerCenterClient {
+    type Controller = BaseController;
+
+    async fn report_peers(
+        &self,
+        _: BaseController,
+        req: ReportPeersRequest,
+    ) -> Result<ReportPeersResponse, rpc_types::error::Error> {
+        self.server.report_peers(self.controller()?, req).await
+    }
+
+    async fn get_global_peer_map(
+        &self,
+        _: BaseController,
+        req: GetGlobalPeerMapRequest,
+    ) -> Result<GetGlobalPeerMapResponse, rpc_types::error::Error> {
+        self.server
+            .get_global_peer_map(self.controller()?, req)
+            .await
+    }
 }
 
 // static SERVICE_ID: u32 = 5; for compatibility with the original code
@@ -85,7 +148,7 @@ impl PeerCenterBase {
             return Err(Error::Shutdown);
         };
         rpc_mgr.rpc_server().registry().register(
-            PeerCenterRpcServer::new(PeerCenterServer::new()),
+            PeerCenterRpcServer::new(self.local_server.get_or_init(PeerCenterServer::new).clone()),
             &self.peer_mgr.get_global_ctx().get_network_name(),
         );
         Ok(())
@@ -151,6 +214,11 @@ impl PeerCenterBase {
         let my_peer_id = self.my_peer_id;
         let peer_mgr = self.peer_mgr.clone();
         let lock = self.lock.clone();
+        let local_server = self
+            .local_server
+            .get()
+            .expect("peer center is initialized")
+            .clone();
         self.tasks.lock().await.spawn(
             async move {
                 let ctx = Arc::new(PeridicJobCtx {
@@ -173,13 +241,21 @@ impl PeerCenterBase {
                     ctx.center_peer.store(center_peer);
                     tracing::trace!(?center_peer, "run periodic job");
                     let _g = lock.lock().await;
-                    let stub = rpc_mgr
-                        .rpc_client()
-                        .scoped_client::<PeerCenterRpcClientFactory<BaseController>>(
-                            my_peer_id,
-                            center_peer,
-                            peer_mgr.get_global_ctx().get_network_name(),
-                        );
+                    let stub: Box<dyn PeerCenterRpc<Controller = BaseController> + Send> =
+                        if center_peer == my_peer_id {
+                            Box::new(LocalPeerCenterClient {
+                                peer_mgr: peer_mgr.clone(),
+                                server: local_server.clone(),
+                            })
+                        } else {
+                            rpc_mgr
+                                .rpc_client()
+                                .scoped_client::<PeerCenterRpcClientFactory<BaseController>>(
+                                    my_peer_id,
+                                    center_peer,
+                                    peer_mgr.get_global_ctx().get_network_name(),
+                                )
+                        };
                     let ret = job_fn(stub, ctx.clone()).await;
                     drop(_g);
 
@@ -205,6 +281,7 @@ impl PeerCenterBase {
             my_peer_id,
             tasks: Mutex::new(JoinSet::new()),
             lock: Arc::new(Mutex::new(())),
+            local_server: std::sync::OnceLock::new(),
         }
     }
 }
@@ -641,4 +718,82 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn local_center_jobs_share_the_registered_server() {
+        let peer_mgr = create_mock_peer_manager().await;
+        let base = PeerCenterBase::new(peer_mgr.clone());
+        base.init().await.unwrap();
+        let local = LocalPeerCenterClient {
+            peer_mgr: peer_mgr.clone(),
+            server: base.local_server.get().unwrap().clone(),
+        };
+        let peer_id = peer_mgr.my_peer_id();
+        local
+            .report_peers(
+                BaseController::default(),
+                ReportPeersRequest {
+                    my_peer_id: peer_id,
+                    peer_infos: Some(PeerInfoForGlobalMap::default()),
+                },
+            )
+            .await
+            .unwrap();
+        let response = base
+            .local_server
+            .get()
+            .unwrap()
+            .get_global_peer_map(
+                local.controller().unwrap(),
+                GetGlobalPeerMapRequest::default(),
+            )
+            .await
+            .unwrap();
+        assert!(response.global_peer_map.contains_key(&peer_id));
+        assert!(
+            local
+                .report_peers(
+                    BaseController::default(),
+                    ReportPeersRequest {
+                        my_peer_id: peer_id.wrapping_add(1),
+                        peer_infos: Some(PeerInfoForGlobalMap::default()),
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_center_jobs_require_current_admin_eligibility() {
+        let peer_mgr = create_mock_peer_manager().await;
+        let local = LocalPeerCenterClient {
+            peer_mgr: peer_mgr.clone(),
+            server: PeerCenterServer::new(),
+        };
+        assert!(local.controller().is_ok());
+        peer_mgr.get_global_ctx().set_hostname(format!(
+            "{}test",
+            crate::peers::PUBLIC_SERVER_HOSTNAME_PREFIX
+        ));
+        assert!(
+            local
+                .get_global_peer_map(
+                    BaseController::default(),
+                    GetGlobalPeerMapRequest::default()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            local
+                .server
+                .get_global_peer_map(
+                    BaseController::default(),
+                    GetGlobalPeerMapRequest::default()
+                )
+                .await
+                .is_err()
+        );
+    }
 }

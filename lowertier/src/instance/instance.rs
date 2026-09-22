@@ -25,6 +25,7 @@ use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx, GlobalCtxEvent};
 use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
+use crate::connector::quic_hole_punch::QuicHolePunchConnector;
 
 use crate::gateway::overlay_stream::OverlayStreamEndpoint;
 use crate::gateway::tcp_proxy::TcpProxyRpcService;
@@ -600,6 +601,8 @@ pub struct Instance {
     conn_manager: Arc<ManualConnectorManager>,
     direct_conn_manager: Arc<DirectConnectorManager>,
     tcp_hole_puncher: Arc<Mutex<TcpHolePunchConnector>>,
+    quic_hole_puncher: Arc<Mutex<QuicHolePunchConnector>>,
+    tracker_discovery: Option<AbortOnDropHandle<()>>,
 
     ip_proxy: Option<IpProxy>,
     overlay_stream: Option<Arc<OverlayStreamEndpoint>>,
@@ -653,6 +656,8 @@ impl Instance {
 
         let tcp_hole_puncher =
             Arc::new(Mutex::new(TcpHolePunchConnector::new(peer_manager.clone())));
+        let quic_hole_puncher =
+            Arc::new(Mutex::new(QuicHolePunchConnector::new(peer_manager.clone())));
 
         let peer_center = Arc::new(PeerCenterInstance::new(peer_manager.clone()));
 
@@ -672,6 +677,8 @@ impl Instance {
             conn_manager,
             direct_conn_manager,
             tcp_hole_puncher,
+            quic_hole_puncher,
+            tracker_discovery: None,
 
             ip_proxy: None,
             overlay_stream: None,
@@ -1022,6 +1029,7 @@ impl Instance {
         self.run_ip_proxy().await?;
 
         self.tcp_hole_puncher.lock().await.run().await?;
+        self.quic_hole_puncher.lock().await.run();
 
         self.peer_center.init().await;
         let route_calc = self.peer_center.get_cost_calculator();
@@ -1031,6 +1039,9 @@ impl Instance {
             .await;
 
         self.add_initial_peers().await?;
+        if let Some(config) = self.global_ctx.config.get_tracker_discovery() {
+            self.tracker_discovery = Some(crate::connector::tracker_discovery::start(self.peer_manager.clone(), config)?);
+        }
 
         let monitor = super::proxy_cidrs_monitor::ProxyCidrsMonitor::new(
             self.peer_manager.clone(),

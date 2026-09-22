@@ -10,7 +10,11 @@ use rand::seq::SliceRandom;
 
 pub mod direct;
 pub mod manual;
+pub mod quic_hole_punch;
 pub mod tcp_hole_punch;
+pub mod tracker_discovery;
+mod traversal;
+mod traversal_resources;
 
 #[derive(Debug)]
 pub struct BackOff {

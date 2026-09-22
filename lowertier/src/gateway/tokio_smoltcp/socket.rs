@@ -33,7 +33,7 @@ impl TcpListener {
         reactor: Arc<Reactor>,
         local_endpoint: IpEndpoint,
     ) -> io::Result<TcpListener> {
-        let handle = reactor.socket_allocator().new_tcp_socket();
+        let handle = reactor.socket_allocator().new_tcp_socket()?;
         {
             let mut socket = reactor.get_socket::<tcp::Socket>(*handle);
             socket.listen(local_endpoint).map_err(map_err)?;
@@ -113,7 +113,7 @@ impl TcpStream {
         local_endpoint: IpEndpoint,
         remote_endpoint: IpEndpoint,
     ) -> io::Result<TcpStream> {
-        let handle = reactor.socket_allocator().new_tcp_socket();
+        let handle = reactor.socket_allocator().new_tcp_socket()?;
 
         // see https://github.com/spacemeowx2/tokio-smoltcp/pull/12
         let connect_result = {
@@ -146,7 +146,7 @@ impl TcpStream {
 
     fn accept(listener: &mut TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
         let reactor = listener.reactor.clone();
-        let new_handle = reactor.socket_allocator().new_tcp_socket();
+        let new_handle = reactor.socket_allocator().new_tcp_socket()?;
         {
             let mut new_socket = reactor.get_socket::<tcp::Socket>(*new_handle);
             new_socket.listen(listener.local_addr).map_err(map_err)?;
@@ -204,6 +204,12 @@ impl AsyncRead for TcpStream {
             let read = socket
                 .recv_slice(buf.initialize_unfilled())
                 .map_err(map_err)?;
+            self.handle
+                .2
+                .as_ref()
+                .unwrap()
+                .lock()
+                .received(&mut socket, read);
             self.reactor.notify();
             buf.advance(read);
             return Poll::Ready(Ok(()));
@@ -225,6 +231,7 @@ impl AsyncWrite for TcpStream {
         }
         if socket.can_send() {
             let r = socket.send_slice(buf).map_err(map_err)?;
+            self.handle.2.as_ref().unwrap().lock().sent(&mut socket, r);
             self.reactor.notify();
             return Poll::Ready(Ok(r));
         }
@@ -236,6 +243,9 @@ impl AsyncWrite for TcpStream {
         if !socket.may_send() {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
+        // SocketHandle::drop removes the stack's retransmission queue. Keep
+        // flush ACK-backed until graceful orphaned-socket ownership exists;
+        // returning early here would make write/flush/drop lose trailing data.
         if socket.send_queue() == 0 {
             return Poll::Ready(Ok(()));
         }
@@ -255,6 +265,103 @@ impl AsyncWrite for TcpStream {
 
         socket.register_send_waker(cx.waker());
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tcp_tests {
+    use super::*;
+    use crate::gateway::tokio_smoltcp::{Net, NetConfig, channel_device::ChannelDevice};
+    use crate::tunnel::batch::PacketBatch;
+    use smoltcp::{
+        iface::Config,
+        phy::{DeviceCapabilities, Medium},
+        wire::HardwareAddress,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::task::AbortOnDropHandle;
+
+    #[tokio::test]
+    async fn flush_preserves_acknowledged_delivery_before_handle_destruction() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut caps = DeviceCapabilities::default();
+            caps.medium = Medium::Ip;
+            caps.max_transmission_unit = 1280;
+            let (a, to_a, mut from_a) = ChannelDevice::new(caps.clone());
+            let (b, to_b, mut from_b) = ChannelDevice::new(caps);
+            let a = Net::new(
+                a,
+                NetConfig::new(
+                    Config::new(HardwareAddress::Ip),
+                    "192.0.2.1/24".parse().unwrap(),
+                    vec![],
+                    None,
+                ),
+            );
+            let b = Net::new(
+                b,
+                NetConfig::new(
+                    Config::new(HardwareAddress::Ip),
+                    "192.0.2.2/24".parse().unwrap(),
+                    vec![],
+                    None,
+                ),
+            );
+            let _a_to_b = AbortOnDropHandle::new(tokio::spawn(async move {
+                while let Some(packet) = from_a.recv().await {
+                    if to_b.send(Ok(PacketBatch::singleton(packet))).await.is_err() {
+                        break;
+                    }
+                }
+            }));
+            let _b_to_a = AbortOnDropHandle::new(tokio::spawn(async move {
+                while let Some(packet) = from_b.recv().await {
+                    if to_a.send(Ok(PacketBatch::singleton(packet))).await.is_err() {
+                        break;
+                    }
+                }
+            }));
+            let mut listener = b.tcp_bind("192.0.2.2:8080".parse().unwrap()).await.unwrap();
+            let (client, server) = tokio::join!(
+                a.tcp_connect("192.0.2.2:8080".parse().unwrap(), 12000),
+                listener.accept(),
+            );
+            let mut client = client.unwrap();
+            let (mut server, _) = server.unwrap();
+            let payload = vec![0x5a; 4096];
+            client.write_all(&payload).await.unwrap();
+            assert!(
+                client
+                    .reactor
+                    .get_socket::<tcp::Socket>(*client.handle)
+                    .send_queue()
+                    > 0
+            );
+            // Current-thread runtime: the peer cannot ACK between the write
+            // and this poll. Dropping this handle now would discard its queue.
+            {
+                let flush = client.flush();
+                tokio::pin!(flush);
+                assert!(futures::poll!(flush.as_mut()).is_pending());
+            }
+            client.flush().await.unwrap();
+            assert_eq!(
+                client
+                    .reactor
+                    .get_socket::<tcp::Socket>(*client.handle)
+                    .send_queue(),
+                0
+            );
+            let mut received = vec![0; payload.len()];
+            server.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, payload);
+            server.write_all(b"acknowledged payload").await.unwrap();
+            let mut reply = [0; 20];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"acknowledged payload");
+        })
+        .await
+        .unwrap();
     }
 }
 

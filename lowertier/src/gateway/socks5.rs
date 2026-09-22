@@ -27,7 +27,7 @@ use crate::{
         },
         http_proxy::serve_http_proxy,
         ip_reassembler::IpReassembler,
-        tokio_smoltcp::{BufferSize, Net, NetConfig, channel_device},
+        tokio_smoltcp::{Net, NetConfig, channel_device},
     },
     tunnel::{
         batch::PacketBatch,
@@ -871,11 +871,7 @@ impl Socks5ServerNet {
                     .parse()
                     .unwrap(),
                 vec![format!("{}", ipv4_addr.address()).parse().unwrap()],
-                Some(BufferSize {
-                    tcp_rx_size: 1024 * 128,
-                    tcp_tx_size: 1024 * 128,
-                    ..Default::default()
-                }),
+                None,
             ),
         );
 

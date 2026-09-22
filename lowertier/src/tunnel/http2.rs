@@ -24,7 +24,7 @@ use super::{
     },
 };
 use crate::common::config::Flags;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use h2::{RecvStream, SendStream};
 use http::{Method, Request, Response, StatusCode};
 use std::{
@@ -174,11 +174,14 @@ impl AsyncRead for H2Reader {
         cx: &mut TaskContext<'_>,
         dst: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if dst.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         loop {
             if !self.buf.is_empty() {
                 let n = self.buf.len().min(dst.remaining());
                 dst.put_slice(&self.buf[..n]);
-                self.buf = self.buf.slice(n..);
+                self.buf.advance(n);
                 return Poll::Ready(Ok(()));
             }
             match ready!(self.recv.poll_data(cx)) {
@@ -284,6 +287,9 @@ impl AsyncWrite for H2Writer {
         cx: &mut TaskContext<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Poll::Ready(Ok(0));
+        }
         ready!(self.poll_make_space(cx))?;
         let space = self
             .coalesce_bytes
@@ -562,6 +568,86 @@ pub async fn connect(
 mod tests {
     use super::tcp_routing_prefix;
     use crate::common::config::gen_default_flags;
+
+    async fn stream_pair() -> (
+        super::H2Reader,
+        h2::SendStream<bytes::Bytes>,
+        tokio_util::task::AbortOnDropHandle<()>,
+        tokio_util::task::AbortOnDropHandle<()>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut connection = h2::server::handshake(server_io).await.unwrap();
+            let (_, mut respond) = connection.accept().await.unwrap().unwrap();
+            let send = respond
+                .send_response(http::Response::new(()), false)
+                .unwrap();
+            sender.send(send).unwrap();
+            while connection.accept().await.is_some() {}
+        }));
+        let (mut client, connection) = h2::client::handshake(client_io).await.unwrap();
+        let driver = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
+        let request = http::Request::builder()
+            .uri("https://localhost/")
+            .body(())
+            .unwrap();
+        let (response, _) = client.send_request(request, true).unwrap();
+        let reader = super::H2Reader {
+            recv: response.await.unwrap().into_body(),
+            buf: bytes::Bytes::new(),
+        };
+        (reader, receiver.await.unwrap(), server, driver)
+    }
+
+    #[tokio::test]
+    async fn empty_read_completes_on_an_idle_h2_stream() {
+        use tokio::io::AsyncRead;
+        let (mut reader, _send, _server, _driver) = stream_pair().await;
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let mut empty = tokio::io::ReadBuf::new(&mut []);
+        assert!(matches!(
+            std::pin::Pin::new(&mut reader).poll_read(&mut cx, &mut empty),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        assert!(reader.buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn partial_h2_reads_preserve_the_unread_suffix_and_eof() {
+        use tokio::io::AsyncReadExt;
+        let (mut reader, mut send, _server, _driver) = stream_pair().await;
+        send.send_data(bytes::Bytes::from_static(b"abcdef"), true)
+            .unwrap();
+        let mut prefix = [0; 2];
+        reader.read_exact(&mut prefix).await.unwrap();
+        assert_eq!(&prefix, b"ab");
+        assert_eq!(reader.buf.as_ref(), b"cdef");
+        let pointer = reader.buf.as_ptr();
+        reader.read_exact(&mut prefix).await.unwrap();
+        assert_eq!(&prefix, b"cd");
+        assert_eq!(reader.buf.as_ptr(), pointer.wrapping_add(2));
+        let mut suffix = Vec::new();
+        reader.read_to_end(&mut suffix).await.unwrap();
+        assert_eq!(&suffix, b"ef");
+    }
+
+    #[tokio::test]
+    async fn empty_vectored_write_keeps_buffered_h2_data() {
+        use tokio::io::AsyncWrite;
+        let (_reader, send, _server, _driver) = stream_pair().await;
+        let mut writer = super::H2Writer::new(send);
+        writer.pending.resize(writer.coalesce_bytes, 0x5a);
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let empty = [std::io::IoSlice::new(&[])];
+        assert!(matches!(
+            std::pin::Pin::new(&mut writer).poll_write_vectored(&mut cx, &empty),
+            std::task::Poll::Ready(Ok(0))
+        ));
+        assert_eq!(writer.pending.len(), writer.coalesce_bytes);
+    }
 
     #[test]
     fn routing_prefix_is_off_behind_sni_passthrough() {

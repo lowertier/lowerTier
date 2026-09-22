@@ -12,6 +12,7 @@ struct SendState {
     first_sent: Instant,
     delivered: u64,
     delivered_time: Instant,
+    app_limited: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -28,7 +29,7 @@ pub(crate) struct BandwidthEstimation {
 }
 
 impl BandwidthEstimation {
-    pub(crate) fn on_sent(&mut self, now: Instant, bytes: u64) {
+    pub(crate) fn on_sent(&mut self, now: Instant, bytes: u64, app_limited: bool) {
         if self.in_flight == 0 {
             self.first_sent_time = Some(now);
             self.delivered_time = Some(now);
@@ -42,7 +43,10 @@ impl BandwidthEstimation {
                 first_sent: self.first_sent_time.unwrap_or(now),
                 delivered: self.total_acked,
                 delivered_time: self.delivered_time.unwrap_or(now),
+                app_limited,
             });
+        } else if let Some(state) = self.sent.back_mut() {
+            state.app_limited |= app_limited;
         }
     }
 
@@ -82,9 +86,7 @@ impl BandwidthEstimation {
     pub(crate) fn end_acks(
         &mut self,
         current_round: u64,
-        app_limited: bool,
         in_flight: u64,
-        min_rtt: Duration,
     ) {
         self.acked_at_last_window = self.total_acked;
         self.in_flight = in_flight;
@@ -99,16 +101,15 @@ impl BandwidthEstimation {
 
         // Measure the corresponding flight, not the gap between adjacent ACKs.
         // The send interval bounds samples when the return path compresses ACKs.
-        // A delayed ACK (scheduler steal, delayed-ACK timer) must not look like
-        // a low-bandwidth path: that freezes BBR startup at the initial window.
         let ack_wait = now.saturating_duration_since(sample.delivered_time);
         let send_wait = sample.sent.saturating_duration_since(sample.first_sent);
-        let interval = delivery_interval(ack_wait, send_wait, min_rtt);
+        // ACK delay can also contain queueing. Removing it inflates the rate.
+        let interval = ack_wait.max(send_wait);
         let Some(bandwidth) = Self::bw_from_delta(self.total_acked - sample.delivered, interval)
         else {
             return;
         };
-        if !app_limited || self.max_filter.get() < bandwidth {
+        if !sample.app_limited || self.max_filter.get() < bandwidth {
             self.max_filter.update_max(current_round, bandwidth);
         }
     }
@@ -131,21 +132,25 @@ impl BandwidthEstimation {
     }
 }
 
-fn delivery_interval(ack_wait: Duration, send_wait: Duration, min_rtt: Duration) -> Duration {
-    let interval = ack_wait.max(send_wait);
-    if min_rtt.is_zero() || min_rtt == Duration::MAX {
-        return interval;
-    }
-    // ACK wait longer than a few min_rtt is scheduling delay, not send spacing.
-    if ack_wait > min_rtt.saturating_mul(4) {
-        return send_wait.max(min_rtt);
-    }
-    interval
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_send_marker_survives_a_later_unlimited_ack() {
+        let mut bandwidth = BandwidthEstimation::default();
+        let now = Instant::now();
+        bandwidth.on_sent(now, 100_000, false);
+        bandwidth.on_ack(now + Duration::from_millis(1), now, 100_000, 0, false);
+        bandwidth.end_acks(0, 0);
+        let estimate = bandwidth.get_estimate();
+        let sent = now + Duration::from_millis(2);
+        bandwidth.on_sent(sent, 1200, false);
+        bandwidth.on_sent(sent, 1200, true);
+        bandwidth.on_ack(sent + Duration::from_millis(10), sent, 2400, 20, false);
+        bandwidth.end_acks(20, 0);
+        assert_eq!(bandwidth.get_estimate(), estimate);
+    }
 
     #[test]
     fn samples_all_packets_in_an_ack_batch() {
@@ -154,14 +159,14 @@ mod tests {
         for flight in 0..2 {
             let sent = now + Duration::from_millis(flight);
             for _ in 0..20 {
-                bandwidth.on_sent(sent, 1200);
+                bandwidth.on_sent(sent, 1200, false);
             }
             assert_eq!(bandwidth.sent.len(), 1);
             for _ in 0..20 {
                 bandwidth.on_ack(sent + Duration::from_millis(1), sent, 1200, flight, false);
             }
             assert_eq!(bandwidth.bytes_acked_this_window(), 24_000);
-            bandwidth.end_acks(flight, false, 0, Duration::MAX);
+            bandwidth.end_acks(flight, 0);
         }
         assert_eq!(bandwidth.get_estimate(), 24_000_000);
     }
@@ -172,10 +177,10 @@ mod tests {
         let mut now = Instant::now();
         for round in 0..24 {
             let sent = now;
-            bandwidth.on_sent(sent, 24_000);
+            bandwidth.on_sent(sent, 24_000, false);
             now += Duration::from_millis(if round < 3 { 1 } else { 10 });
             bandwidth.on_ack(now, sent, 24_000, round, false);
-            bandwidth.end_acks(round, false, 0, Duration::MAX);
+            bandwidth.end_acks(round, 0);
         }
         assert_eq!(bandwidth.get_estimate(), 2_400_000);
     }
@@ -185,10 +190,10 @@ mod tests {
         let mut bandwidth = BandwidthEstimation::default();
         let now = Instant::now();
         for packet in 0..8 {
-            bandwidth.on_sent(now + Duration::from_millis(packet * 10), 1200);
+            bandwidth.on_sent(now + Duration::from_millis(packet * 10), 1200, false);
         }
         bandwidth.on_ack(now + Duration::from_millis(80), now, 1200, 0, false);
-        bandwidth.end_acks(0, false, 8400, Duration::MAX);
+        bandwidth.end_acks(0, 8400);
         for packet in 1..8 {
             bandwidth.on_ack(
                 now + Duration::from_micros(80_100),
@@ -198,7 +203,7 @@ mod tests {
                 false,
             );
         }
-        bandwidth.end_acks(1, false, 0, Duration::MAX);
+        bandwidth.end_acks(1, 0);
         assert!(bandwidth.get_estimate() > 0);
         assert!(bandwidth.get_estimate() <= 120_000);
     }
@@ -207,8 +212,8 @@ mod tests {
     fn reordered_ack_counts_delivery_without_reusing_retired_state() {
         let mut bandwidth = BandwidthEstimation::default();
         let now = Instant::now();
-        bandwidth.on_sent(now, 1200);
-        bandwidth.on_sent(now + Duration::from_millis(1), 1200);
+        bandwidth.on_sent(now, 1200, false);
+        bandwidth.on_sent(now + Duration::from_millis(1), 1200, false);
         bandwidth.on_ack(
             now + Duration::from_millis(80),
             now + Duration::from_millis(1),
@@ -216,10 +221,10 @@ mod tests {
             0,
             false,
         );
-        bandwidth.end_acks(0, false, 1200, Duration::MAX);
+        bandwidth.end_acks(0, 1200);
         bandwidth.on_ack(now + Duration::from_millis(81), now, 1200, 1, false);
         assert_eq!(bandwidth.bytes_acked_this_window(), 1200);
-        bandwidth.end_acks(1, false, 0, Duration::MAX);
+        bandwidth.end_acks(1, 0);
         assert_eq!(bandwidth.total_acked, 2400);
         assert_eq!(bandwidth.get_estimate(), 15_000);
     }
@@ -228,23 +233,23 @@ mod tests {
     fn idle_after_loss_does_not_enter_the_delivery_interval() {
         let mut bandwidth = BandwidthEstimation::default();
         let now = Instant::now();
-        bandwidth.on_sent(now, 1200);
+        bandwidth.on_sent(now, 1200, false);
         bandwidth.on_loss(1200);
         let sent = now + Duration::from_secs(5);
-        bandwidth.on_sent(sent, 1200);
+        bandwidth.on_sent(sent, 1200, false);
         bandwidth.on_ack(sent + Duration::from_millis(1), sent, 1200, 0, false);
-        bandwidth.end_acks(0, false, 0, Duration::MAX);
+        bandwidth.end_acks(0, 0);
         assert_eq!(bandwidth.get_estimate(), 1_200_000);
     }
 
     #[test]
-    fn delayed_ack_does_not_look_like_a_narrow_path() {
+    fn delayed_ack_cannot_inflate_the_delivery_rate() {
         let mut bandwidth = BandwidthEstimation::default();
         let now = Instant::now();
-        bandwidth.on_sent(now, 12_000);
+        bandwidth.on_sent(now, 12_000, false);
         bandwidth.on_ack(now + Duration::from_millis(600), now, 12_000, 0, false);
-        bandwidth.end_acks(0, false, 0, Duration::from_millis(80));
-        assert_eq!(bandwidth.get_estimate(), 150_000);
+        bandwidth.end_acks(0, 0);
+        assert_eq!(bandwidth.get_estimate(), 20_000);
     }
 }
 

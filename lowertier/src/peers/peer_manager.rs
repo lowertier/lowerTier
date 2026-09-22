@@ -2247,6 +2247,57 @@ impl PeerManager {
             .await
     }
 
+    pub(crate) async fn add_punched_tunnel(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        expected_peer: PeerId,
+        client: bool,
+    ) -> Result<(), Error> {
+        let mut peer = PeerConn::new_with_peer_id_hint(
+            self.my_peer_id,
+            self.global_ctx.clone(),
+            tunnel,
+            Some(expected_peer),
+            self.peer_session_store.clone(),
+        );
+        peer.set_is_hole_punched(true);
+        if client {
+            peer.do_handshake_as_client().await?;
+        } else {
+            peer.do_handshake_as_server().await?;
+        }
+        // Rendezvous authorizes one peer. Check identity before publishing the connection.
+        if peer.get_peer_id() != expected_peer {
+            return Err(Error::SecretKeyError("punched peer differs from rendezvous peer".to_owned()));
+        }
+        self.add_new_peer_conn(peer).await
+    }
+
+    pub(crate) async fn add_discovered_tunnel(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        expected_peer: Option<PeerId>,
+        client: bool,
+    ) -> Result<PeerId, Error> {
+        let info = tunnel.info().ok_or_else(|| anyhow::anyhow!("discovery tunnel has no info"))?;
+        check_tunnel_info_underlay(&info, &self.global_ctx.get_underlay_policy())?;
+        self.check_remote_addr_not_from_virtual_network(&tunnel)?;
+        let mut peer = PeerConn::new_with_peer_id_hint(
+            self.my_peer_id, self.global_ctx.clone(), tunnel, expected_peer,
+            self.peer_session_store.clone(),
+        );
+        peer.set_is_hole_punched(expected_peer.is_some());
+        if client { peer.do_handshake_as_client().await?; }
+        else { peer.do_handshake_as_server().await?; }
+        let peer_id = peer.get_peer_id();
+        if expected_peer.is_some_and(|expected| expected != peer_id) {
+            return Err(Error::SecretKeyError("discovery peer differs from authenticated punch peer".to_owned()));
+        }
+        // Tracker candidates cannot authorize foreign-network relay membership.
+        self.add_new_peer_conn(peer).await?;
+        Ok(peer_id)
+    }
+
     pub async fn add_client_tunnel_with_peer_id_hint(
         &self,
         tunnel: Box<dyn Tunnel>,
