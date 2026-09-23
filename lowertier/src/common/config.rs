@@ -11,6 +11,7 @@ use base64::{Engine as _, prelude::BASE64_STANDARD};
 use clap::ValueEnum;
 use clap::builder::PossibleValue;
 use prost::Message;
+#[cfg(test)]
 use prost_reflect::{DynamicMessage, ReflectMessage, SerializeOptions};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, VariantArray};
@@ -306,6 +307,10 @@ impl InterfaceAdapter {
     }
 }
 
+// Generated typed comparisons keep reflection metadata out of normal config dumping.
+include!(concat!(env!("OUT_DIR"), "/flags_diff.rs"));
+
+#[cfg(test)]
 fn flags_to_dynamic_message(flags: &Flags) -> DynamicMessage {
     let mut message = DynamicMessage::new(flags.descriptor());
     message
@@ -314,6 +319,7 @@ fn flags_to_dynamic_message(flags: &Flags) -> DynamicMessage {
     message
 }
 
+#[cfg(test)]
 fn flags_to_full_json_map(flags: &DynamicMessage) -> serde_json::Map<String, serde_json::Value> {
     let options = SerializeOptions::new()
         .use_proto_field_name(true)
@@ -328,7 +334,8 @@ fn flags_to_full_json_map(flags: &DynamicMessage) -> serde_json::Map<String, ser
     }
 }
 
-fn flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, serde_json::Value> {
+#[cfg(test)]
+fn reflected_flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, serde_json::Value> {
     let default_flags = gen_default_flags();
     let default_message = flags_to_dynamic_message(&default_flags);
     let current_message = flags_to_dynamic_message(flags);
@@ -3196,5 +3203,75 @@ mod protocol_memory_tests {
         assert_eq!(config.get_flags().enabled_protocols, ["wss"]);
         let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
         assert_eq!(restored.get_flags().enabled_protocols, ["wss"]);
+    }
+}
+
+#[cfg(test)]
+mod flag_codegen_tests {
+    use super::*;
+    use prost_reflect::{Kind, Value};
+
+    #[test]
+    fn generated_config_diff_matches_reflection_for_every_field() {
+        let default_message = flags_to_dynamic_message(&gen_default_flags());
+        let schema = default_message.descriptor();
+        for field in schema.fields() {
+            let mut values = vec![field.default_value()];
+            if field.is_list() {
+                assert_eq!(field.kind(), Kind::String);
+                values.push(Value::List(vec![
+                    Value::String("quic".into()),
+                    Value::String("wss".into()),
+                ]));
+            } else {
+                values.extend(match field.kind() {
+                    Kind::Bool => vec![Value::Bool(false), Value::Bool(true)],
+                    Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => {
+                        vec![Value::I32(i32::MIN), Value::I32(i32::MAX)]
+                    }
+                    Kind::Uint32 | Kind::Fixed32 => vec![Value::U32(u32::MAX)],
+                    Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => {
+                        vec![Value::I64(i64::MIN), Value::I64(i64::MAX)]
+                    }
+                    Kind::Uint64 | Kind::Fixed64 => vec![Value::U64(u64::MAX)],
+                    Kind::String => vec![Value::String("modified \" value".into())],
+                    Kind::Enum(e) => e
+                        .values()
+                        .map(|v| Value::EnumNumber(v.number()))
+                        .chain([Value::EnumNumber(i32::MAX)])
+                        .collect(),
+                    other => panic!("uncovered flag type {other:?}"),
+                });
+            }
+            for value in values {
+                let mut message = default_message.clone();
+                message.set_field(&field, value);
+                let flags: Flags = message.transcode_to().unwrap();
+                assert_eq!(
+                    flags_diff_from_default(&flags),
+                    reflected_flags_diff_from_default(&flags),
+                    "{}",
+                    field.full_name()
+                );
+            }
+        }
+        assert!(flags_diff_from_default(&gen_default_flags()).is_empty());
+        assert_eq!(
+            flags_diff_from_default(&Flags::default()),
+            reflected_flags_diff_from_default(&Flags::default())
+        );
+    }
+
+    #[test]
+    fn typed_config_diff_preserves_zero_presence_and_explicit_false() {
+        let mut flags = gen_default_flags();
+        flags.socket_mark = Some(0);
+        flags.enable_ipv6 = false;
+        flags.mtu = 0;
+        let result = flags_diff_from_default(&flags);
+        assert_eq!(result.get("socket_mark"), Some(&serde_json::json!(0)));
+        assert_eq!(result.get("enable_ipv6"), Some(&serde_json::json!(false)));
+        assert_eq!(result.get("mtu"), Some(&serde_json::json!(0)));
+        assert_eq!(result.len(), 3);
     }
 }

@@ -1,3 +1,4 @@
+mod flags;
 mod rpc;
 
 use crate::rpc::ServiceGenerator;
@@ -196,6 +197,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate documentation first. Runtime reflection does not use source locations or comments.
     // Dynamic messages preserve custom options and unknown fields during this transformation.
     let reflected_descriptor = std::fs::read(out.join("file_descriptor_set.bin"))?;
+    flags::generate(
+        &DescriptorPool::decode(reflected_descriptor.as_slice())?,
+        &out,
+    )?;
     let descriptor_type = DescriptorPool::global()
         .get_message_by_name("google.protobuf.FileDescriptorSet")
         .expect("protobuf descriptor schema is available");
