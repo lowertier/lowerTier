@@ -1076,8 +1076,16 @@ pub trait StunInfoCollectorTrait: Send + Sync {
         self.get_udp_port_mappings_with_socket(udp).await
     }
     async fn get_tcp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error>;
-    async fn get_first_udp_mapping_with_receiver(&self, udp: Arc<UdpSocket>, receiver: StunPacketReceiver) -> Result<SocketAddr, Error> {
-        self.get_udp_port_mappings_with_socket_receiver(udp, receiver).await?.into_iter().next().ok_or(Error::NotFound)
+    async fn get_first_udp_mapping_with_receiver(
+        &self,
+        udp: Arc<UdpSocket>,
+        receiver: StunPacketReceiver,
+    ) -> Result<SocketAddr, Error> {
+        self.get_udp_port_mappings_with_socket_receiver(udp, receiver)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(Error::NotFound)
     }
     async fn get_tcp_port_mappings_bound(
         &self,
@@ -1134,6 +1142,7 @@ pub struct StunInfoCollector {
     redetect_notify: Arc<tokio::sync::Notify>,
     tasks: std::sync::Mutex<JoinSet<()>>,
     started: AtomicBool,
+    nat_protocols: (bool, bool), // UDP, TCP; immutable after sharing.
     underlay_policy: Arc<ArcSwap<UnderlayPolicy>>,
 }
 
@@ -1220,7 +1229,9 @@ impl StunInfoCollector {
                             "STUN candidate observed"
                         );
                         observations.push((index, mapped_addr));
-                        if first_only { break; }
+                        if first_only {
+                            break;
+                        }
                     }
                 }
                 Err(error) => tracing::warn!(?server, ?error, "stun bind request failed"),
@@ -1327,11 +1338,20 @@ impl StunInfoCollectorTrait for StunInfoCollector {
         udp: Arc<UdpSocket>,
         receiver: StunPacketReceiver,
     ) -> Result<Vec<SocketAddr>, Error> {
-        self.gather_udp_port_mappings(udp, Some(receiver), false).await
+        self.gather_udp_port_mappings(udp, Some(receiver), false)
+            .await
     }
 
-    async fn get_first_udp_mapping_with_receiver(&self, udp: Arc<UdpSocket>, receiver: StunPacketReceiver) -> Result<SocketAddr, Error> {
-        self.gather_udp_port_mappings(udp, Some(receiver), true).await?.into_iter().next().ok_or(Error::NotFound)
+    async fn get_first_udp_mapping_with_receiver(
+        &self,
+        udp: Arc<UdpSocket>,
+        receiver: StunPacketReceiver,
+    ) -> Result<SocketAddr, Error> {
+        self.gather_udp_port_mappings(udp, Some(receiver), true)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(Error::NotFound)
     }
 
     async fn get_tcp_port_mappings_bound(
@@ -1465,8 +1485,13 @@ impl StunInfoCollector {
             redetect_notify: Arc::new(tokio::sync::Notify::new()),
             tasks: std::sync::Mutex::new(JoinSet::new()),
             started: AtomicBool::new(false),
+            nat_protocols: (true, true),
             underlay_policy: Arc::new(ArcSwap::from_pointee(UnderlayPolicy::default())),
         }
+    }
+
+    pub fn set_nat_protocols(&mut self, udp: bool, tcp: bool) {
+        self.nat_protocols = (udp, tcp);
     }
 
     pub fn set_underlay_policy_source(&mut self, underlay_policy: Arc<ArcSwap<UnderlayPolicy>>) {
@@ -1569,135 +1594,134 @@ impl StunInfoCollector {
     }
 
     fn start_stun_routine(&self) {
-        if self.started.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.started.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
-        self.started
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if self.nat_protocols.0 {
+            let stun_servers = self.stun_servers.clone();
+            let udp_nat_test_result = self.udp_nat_test_result.clone();
+            let nat_test_time = self.nat_test_result_time.clone();
+            let redetect_notify = self.redetect_notify.clone();
+            let underlay_policy = self.underlay_policy.clone();
+            self.tasks.lock().unwrap().spawn(async move {
+                loop {
+                    let udp_servers = stun_servers.read().unwrap().clone();
+                    let udp_servers: Vec<String> = udp_servers
+                        .iter()
+                        .take(2)
+                        .chain(udp_servers.iter().skip(2).choose(&mut rand::thread_rng()))
+                        .map(|x| x.to_string())
+                        .collect();
 
-        let stun_servers = self.stun_servers.clone();
-        let udp_nat_test_result = self.udp_nat_test_result.clone();
-        let nat_test_time = self.nat_test_result_time.clone();
-        let redetect_notify = self.redetect_notify.clone();
-        let underlay_policy = self.underlay_policy.clone();
-        self.tasks.lock().unwrap().spawn(async move {
-            loop {
-                let udp_servers = stun_servers.read().unwrap().clone();
-                let udp_servers: Vec<String> = udp_servers
-                    .iter()
-                    .take(2)
-                    .chain(udp_servers.iter().skip(2).choose(&mut rand::thread_rng()))
-                    .map(|x| x.to_string())
-                    .collect();
-
-                let policy = underlay_policy.load_full();
-                let udp_detector =
-                    UdpNatTypeDetector::new(udp_servers, 1).with_underlay_policy(policy.clone());
-                let mut udp_ret = Err(Error::NotFound);
-                if let Ok(bind_addrs) = stun_bind_addrs(&policy, false, 0) {
-                    for bind_addr in bind_addrs {
-                        let Ok(socket) = UdpSocket::bind(bind_addr).await else {
-                            continue;
-                        };
-                        udp_ret = udp_detector
-                            .detect_nat_type_with_socket(Arc::new(socket))
-                            .await;
-                        if udp_ret.is_ok() {
-                            break;
+                    let policy = underlay_policy.load_full();
+                    let udp_detector = UdpNatTypeDetector::new(udp_servers, 1)
+                        .with_underlay_policy(policy.clone());
+                    let mut udp_ret = Err(Error::NotFound);
+                    if let Ok(bind_addrs) = stun_bind_addrs(&policy, false, 0) {
+                        for bind_addr in bind_addrs {
+                            let Ok(socket) = UdpSocket::bind(bind_addr).await else {
+                                continue;
+                            };
+                            udp_ret = udp_detector
+                                .detect_nat_type_with_socket(Arc::new(socket))
+                                .await;
+                            if udp_ret.is_ok() {
+                                break;
+                            }
                         }
                     }
-                }
-                tracing::debug!(?udp_ret, "finish udp nat type detect");
+                    tracing::debug!(?udp_ret, "finish udp nat type detect");
 
-                let mut nat_type = NatType::Unknown;
-                if let Ok(resp) = &udp_ret {
-                    tracing::debug!(?resp, "got udp nat type detect result");
-                    nat_type = resp.nat_type();
-                }
+                    let mut nat_type = NatType::Unknown;
+                    if let Ok(resp) = &udp_ret {
+                        tracing::debug!(?resp, "got udp nat type detect result");
+                        nat_type = resp.nat_type();
+                    }
 
-                // if nat type is symmtric, detect with another port to gather more info
-                if nat_type == NatType::Symmetric {
-                    let old_resp = udp_ret.as_mut().unwrap();
-                    tracing::debug!(?old_resp, "start get extra bind result");
-                    let available_stun_servers = old_resp.collect_available_stun_server();
-                    for server in available_stun_servers.iter() {
-                        let ret = udp_detector
-                            .get_extra_bind_result(
-                                SocketAddr::new(old_resp.local_addr().ip(), 0),
-                                *server,
-                            )
-                            .await
-                            .with_context(|| "get extra bind result failed");
-                        tracing::debug!(?ret, "finish udp nat type detect with another port");
-                        if let Ok(resp) = ret {
-                            old_resp.extra_bind_test = Some(resp);
-                            break;
+                    // if nat type is symmtric, detect with another port to gather more info
+                    if nat_type == NatType::Symmetric {
+                        let old_resp = udp_ret.as_mut().unwrap();
+                        tracing::debug!(?old_resp, "start get extra bind result");
+                        let available_stun_servers = old_resp.collect_available_stun_server();
+                        for server in available_stun_servers.iter() {
+                            let ret = udp_detector
+                                .get_extra_bind_result(
+                                    SocketAddr::new(old_resp.local_addr().ip(), 0),
+                                    *server,
+                                )
+                                .await
+                                .with_context(|| "get extra bind result failed");
+                            tracing::debug!(?ret, "finish udp nat type detect with another port");
+                            if let Ok(resp) = ret {
+                                old_resp.extra_bind_test = Some(resp);
+                                break;
+                            }
                         }
                     }
-                }
 
-                let mut sleep_sec = 10;
-                if let Ok(resp) = &udp_ret {
-                    nat_test_time.store(Local::now());
-                    *udp_nat_test_result.write().unwrap() = Some(resp.clone());
-                    if nat_type != NatType::Unknown
-                        && (nat_type != NatType::Symmetric || resp.extra_bind_test.is_some())
-                    {
-                        sleep_sec = 600
+                    let mut sleep_sec = 10;
+                    if let Ok(resp) = &udp_ret {
+                        nat_test_time.store(Local::now());
+                        *udp_nat_test_result.write().unwrap() = Some(resp.clone());
+                        if nat_type != NatType::Unknown
+                            && (nat_type != NatType::Symmetric || resp.extra_bind_test.is_some())
+                        {
+                            sleep_sec = 600
+                        }
+                    }
+
+                    tokio::select! {
+                        _ = redetect_notify.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_secs(sleep_sec)) => {}
                     }
                 }
+            });
+        }
+        if self.nat_protocols.1 {
+            let tcp_stun_servers = self.tcp_stun_servers.clone();
+            let tcp_nat_test_result = self.tcp_nat_test_result.clone();
+            let nat_test_time = self.nat_test_result_time.clone();
+            let redetect_notify = self.redetect_notify.clone();
+            let underlay_policy = self.underlay_policy.clone();
+            self.tasks.lock().unwrap().spawn(async move {
+                loop {
+                    let tcp_servers = tcp_stun_servers.read().unwrap().clone();
+                    let tcp_servers: Vec<String> = tcp_servers
+                        .iter()
+                        .take(2)
+                        .chain(tcp_servers.iter().skip(2).choose(&mut rand::thread_rng()))
+                        .map(|x| x.to_string())
+                        .collect();
 
-                tokio::select! {
-                    _ = redetect_notify.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(sleep_sec)) => {}
-                }
-            }
-        });
+                    let policy = underlay_policy.load_full();
+                    let tcp_detector = TcpNatTypeDetector::new(tcp_servers, 1)
+                        .with_underlay_policy(policy.clone());
+                    let tcp_ret = match stun_bind_addrs(&policy, false, 0) {
+                        Ok(bind_addrs) => {
+                            tcp_detector
+                                .detect_nat_type_with_bind_addrs(0, &bind_addrs)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    tracing::debug!(?tcp_ret, "finish tcp nat type detect");
 
-        let tcp_stun_servers = self.tcp_stun_servers.clone();
-        let tcp_nat_test_result = self.tcp_nat_test_result.clone();
-        let nat_test_time = self.nat_test_result_time.clone();
-        let redetect_notify = self.redetect_notify.clone();
-        let underlay_policy = self.underlay_policy.clone();
-        self.tasks.lock().unwrap().spawn(async move {
-            loop {
-                let tcp_servers = tcp_stun_servers.read().unwrap().clone();
-                let tcp_servers: Vec<String> = tcp_servers
-                    .iter()
-                    .take(2)
-                    .chain(tcp_servers.iter().skip(2).choose(&mut rand::thread_rng()))
-                    .map(|x| x.to_string())
-                    .collect();
-
-                let policy = underlay_policy.load_full();
-                let tcp_detector =
-                    TcpNatTypeDetector::new(tcp_servers, 1).with_underlay_policy(policy.clone());
-                let tcp_ret = match stun_bind_addrs(&policy, false, 0) {
-                    Ok(bind_addrs) => {
-                        tcp_detector
-                            .detect_nat_type_with_bind_addrs(0, &bind_addrs)
-                            .await
+                    let mut sleep_sec = 10;
+                    if let Ok(resp) = &tcp_ret {
+                        nat_test_time.store(Local::now());
+                        *tcp_nat_test_result.write().unwrap() = Some(resp.clone());
+                        if resp.nat_type() != NatType::Unknown {
+                            sleep_sec = 600;
+                        }
                     }
-                    Err(error) => Err(error),
-                };
-                tracing::debug!(?tcp_ret, "finish tcp nat type detect");
 
-                let mut sleep_sec = 10;
-                if let Ok(resp) = &tcp_ret {
-                    nat_test_time.store(Local::now());
-                    *tcp_nat_test_result.write().unwrap() = Some(resp.clone());
-                    if resp.nat_type() != NatType::Unknown {
-                        sleep_sec = 600;
+                    tokio::select! {
+                        _ = redetect_notify.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_secs(sleep_sec)) => {}
                     }
                 }
-
-                tokio::select! {
-                    _ = redetect_notify.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(sleep_sec)) => {}
-                }
-            }
-        });
-
+            });
+        }
         let stun_servers_v6 = self.stun_servers_v6.clone();
         if !stun_servers_v6.read().unwrap().is_empty() {
             let stored_ipv6 = self.public_ipv6.clone();
@@ -1825,7 +1849,13 @@ mod tests {
                 connections: vec![stream],
             };
             mappings.refresh().await.unwrap();
-            assert_eq!(mappings.addresses, vec![SocketAddr::new(local.ip(), local.port().wrapping_add(1).max(1))]);
+            assert_eq!(
+                mappings.addresses,
+                vec![SocketAddr::new(
+                    local.ip(),
+                    local.port().wrapping_add(1).max(1)
+                )]
+            );
             assert_eq!(mappings.connections[0].local_addr().unwrap(), local);
             task.await.unwrap();
             assert!(mappings.refresh().await.is_err());
@@ -1834,5 +1864,25 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod protocol_memory_tests {
+    use super::*;
+    #[tokio::test]
+    async fn discovery_starts_only_selected_workers_once() {
+        for (udp, tcp) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut collector = StunInfoCollector::new(Vec::new(), Vec::new(), Vec::new());
+            collector.set_nat_protocols(udp, tcp);
+            let collector = Arc::new(collector);
+            for _ in 0..8 {
+                collector.get_stun_info();
+            }
+            assert_eq!(
+                collector.tasks.lock().unwrap().len(),
+                usize::from(udp) + usize::from(tcp)
+            );
+        }
     }
 }

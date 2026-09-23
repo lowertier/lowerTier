@@ -39,6 +39,7 @@ pub fn gen_default_flags() -> Flags {
     #[allow(deprecated)]
     Flags {
         default_protocol: "quic".to_string(),
+        enabled_protocols: Vec::new(),
         dev_name: "".to_string(),
         enable_encryption: true,
         enable_ipv6: true,
@@ -97,7 +98,35 @@ pub fn gen_default_flags() -> Flags {
     }
 }
 
+/// Check at resource creation, outside the established packet fast path.
+pub fn transport_protocol_enabled(flags: &Flags, protocol: &str) -> bool {
+    flags.enabled_protocols.is_empty()
+        || flags
+            .enabled_protocols
+            .iter()
+            .any(|enabled| enabled == protocol)
+}
+
+pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        transport_protocol_enabled(flags, protocol),
+        "transport {protocol:?} is disabled by enabled_protocols"
+    );
+    Ok(())
+}
+
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
+    for (index, protocol) in flags.enabled_protocols.iter().enumerate() {
+        anyhow::ensure!(
+            matches!(protocol.as_str(), "quic" | "tcp" | "wss"),
+            "invalid enabled_protocols entry {protocol:?}; expected quic, tcp, or wss"
+        );
+        anyhow::ensure!(
+            !flags.enabled_protocols[..index].contains(protocol),
+            "duplicate enabled_protocols entry {protocol:?}"
+        );
+    }
+    ensure_transport_protocol_enabled(flags, &flags.default_protocol)?;
     UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)?;
     flags
         .encryption_algorithm
@@ -389,7 +418,9 @@ pub struct TrackerDiscoveryConfig {
 
 #[auto_impl::auto_impl(Box, &)]
 pub trait ConfigLoader: Send + Sync {
-    fn get_tracker_discovery(&self) -> Option<TrackerDiscoveryConfig> { None }
+    fn get_tracker_discovery(&self) -> Option<TrackerDiscoveryConfig> {
+        None
+    }
     fn get_id(&self) -> uuid::Uuid;
     fn set_id(&self, id: uuid::Uuid);
 
@@ -1023,6 +1054,18 @@ impl TomlConfigLoader {
             .context("failed to parse flags")?;
         remove_obsolete_adapter_flags(&mut flags);
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
+        // Reject contradictory listeners and bootstrap peers before runtime startup.
+        for listener in config
+            .listeners
+            .iter()
+            .flatten()
+            .chain(config.mapped_listeners.iter().flatten())
+        {
+            ensure_transport_protocol_enabled(&flags, listener.scheme())?;
+        }
+        for peer in config.peer.iter().flatten() {
+            ensure_transport_protocol_enabled(&flags, peer.uri.scheme())?;
+        }
         config.flags_struct = Some(flags);
         config.secure_mode = config
             .secure_mode
@@ -2175,9 +2218,15 @@ tcp_stun_servers = ["192.0.2.1:3478"]"#;
         assert_eq!(stun_servers[0], "stun.l.google.com:19302");
         assert_eq!(stun_servers[1], "stun1.l.google.com:19302");
         assert_eq!(stun_servers[2], "txt:stun.example.invalid");
-        assert_eq!(config.get_tcp_stun_servers().unwrap(), vec!["192.0.2.1:3478"]);
+        assert_eq!(
+            config.get_tcp_stun_servers().unwrap(),
+            vec!["192.0.2.1:3478"]
+        );
         let reloaded = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
-        assert_eq!(reloaded.get_tcp_stun_servers(), config.get_tcp_stun_servers());
+        assert_eq!(
+            reloaded.get_tcp_stun_servers(),
+            config.get_tcp_stun_servers()
+        );
     }
 
     #[test]
@@ -3092,5 +3141,60 @@ enable_encryption = ${MIXED_ENCRYPTION}
         remove_env_var("MIXED_MTU");
         remove_env_var("MIXED_ENCRYPTION");
         remove_env_var("MIXED_LISTEN_PORT");
+    }
+}
+
+#[cfg(test)]
+mod protocol_memory_tests {
+    use super::*;
+    #[test]
+    fn allowlist_is_explicit_and_empty_is_backwards_compatible() {
+        let mut flags = gen_default_flags();
+        for protocol in ["quic", "tcp", "wss"] {
+            assert!(transport_protocol_enabled(&flags, protocol));
+        }
+        for protocol in ["quic", "tcp", "wss"] {
+            flags.default_protocol = protocol.into();
+            flags.enabled_protocols = vec![protocol.into()];
+            validate_flags(&flags).unwrap();
+            for other in ["quic", "tcp", "wss"] {
+                assert_eq!(transport_protocol_enabled(&flags, other), other == protocol);
+            }
+        }
+    }
+    #[test]
+    fn allowlist_rejects_typos_duplicates_and_disabled_default() {
+        let mut flags = gen_default_flags();
+        for values in [vec!["udp"], vec!["QUIC"], vec!["quic", "quic"], vec!["tcp"]] {
+            flags.enabled_protocols = values.into_iter().map(String::from).collect();
+            assert!(validate_flags(&flags).is_err());
+        }
+        flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
+        validate_flags(&flags).unwrap();
+    }
+    #[test]
+    fn disabled_listener_and_bootstrap_are_rejected_before_startup() {
+        for prefix in [
+            "listeners = [\"tcp://127.0.0.1:0\"]\n",
+            "mapped_listeners = [\"wss://127.0.0.1:443\"]\n",
+            "[[peer]]\nuri = \"wss://unresolved.invalid:443\"\n",
+        ] {
+            let text = format!(
+                "{prefix}[flags]\ndefault_protocol = \"quic\"\nenabled_protocols = [\"quic\"]\n"
+            );
+            let error = TomlConfigLoader::new_from_str(&text).unwrap_err();
+            assert!(format!("{error:#}").contains("disabled by enabled_protocols"));
+        }
+    }
+
+    #[test]
+    fn allowlist_round_trips_through_config() {
+        let config = TomlConfigLoader::new_from_str(
+            "[flags]\ndefault_protocol = \"wss\"\nenabled_protocols = [\"wss\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.get_flags().enabled_protocols, ["wss"]);
+        let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+        assert_eq!(restored.get_flags().enabled_protocols, ["wss"]);
     }
 }

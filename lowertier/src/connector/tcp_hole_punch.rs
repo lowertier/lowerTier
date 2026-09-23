@@ -253,6 +253,10 @@ impl TcpBootstrap {
         advertised: Option<SocketAddr>,
     ) -> Result<Self> {
         let protocol = Protocol::parse(&ctx.get_flags().default_protocol)?;
+        crate::common::config::ensure_transport_protocol_enabled(
+            &ctx.flags_arc(),
+            protocol.name(),
+        )?;
         let reservation = if let Some(advertised) = advertised {
             ensure!(
                 advertised.port() != 0 && advertised.is_ipv4() == local.is_ipv4(),
@@ -648,6 +652,10 @@ impl Server {
         let (local_index, remote_index) = source_pair(index);
         let ctx = self.peer_mgr.get_global_ctx();
         let protocol = Protocol::parse(&ctx.get_flags().default_protocol)?;
+        crate::common::config::ensure_transport_protocol_enabled(
+            &ctx.flags_arc(),
+            protocol.name(),
+        )?;
         let reservation = reserve(&ctx, local_index as usize).await?;
         let variable_mapping = hard_nat::mapping_varies(&reservation.mapping);
         let hard_permit = if ctx.get_flags().disable_sym_hole_punching {
@@ -717,6 +725,10 @@ impl TcpHolePunchRpc for Server {
             ensure!(request.version == 1, "unsupported TCP rendezvous version");
             ensure!(self.allowed(peer).await, "TCP punch denied by peer policy");
             let protocol = Protocol::parse(&request.protocol)?;
+            crate::common::config::ensure_transport_protocol_enabled(
+                &ctx.flags_arc(),
+                protocol.name(),
+            )?;
             let token: [u8; 32] = request
                 .nomination_token
                 .as_slice()

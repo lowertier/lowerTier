@@ -24,8 +24,8 @@ use crate::common::error::Error;
 use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx, GlobalCtxEvent};
 use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
-use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
 use crate::connector::quic_hole_punch::QuicHolePunchConnector;
+use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
 
 use crate::gateway::overlay_stream::OverlayStreamEndpoint;
 use crate::gateway::tcp_proxy::TcpProxyRpcService;
@@ -600,8 +600,8 @@ pub struct Instance {
     listener_manager: Arc<Mutex<ListenerManager<PeerManager>>>,
     conn_manager: Arc<ManualConnectorManager>,
     direct_conn_manager: Arc<DirectConnectorManager>,
-    tcp_hole_puncher: Arc<Mutex<TcpHolePunchConnector>>,
-    quic_hole_puncher: Arc<Mutex<QuicHolePunchConnector>>,
+    tcp_hole_puncher: Option<Arc<Mutex<TcpHolePunchConnector>>>,
+    quic_hole_puncher: Option<Arc<Mutex<QuicHolePunchConnector>>>,
     tracker_discovery: Option<AbortOnDropHandle<()>>,
 
     ip_proxy: Option<IpProxy>,
@@ -654,10 +654,18 @@ impl Instance {
         direct_conn_manager.run();
         let direct_conn_manager = Arc::new(direct_conn_manager);
 
-        let tcp_hole_puncher =
-            Arc::new(Mutex::new(TcpHolePunchConnector::new(peer_manager.clone())));
-        let quic_hole_puncher =
-            Arc::new(Mutex::new(QuicHolePunchConnector::new(peer_manager.clone())));
+        // No servers, maps or task reapers for disabled transports.
+        let flags = global_ctx.flags_arc();
+        let enabled = |name| crate::common::config::transport_protocol_enabled(&flags, name);
+        let tcp_hole_puncher = (!flags.disable_tcp_hole_punching
+            && (enabled("tcp") || enabled("wss")))
+        .then(|| Arc::new(Mutex::new(TcpHolePunchConnector::new(peer_manager.clone()))));
+        let quic_hole_puncher = (!flags.disable_udp_hole_punching && enabled("quic")).then(|| {
+            Arc::new(Mutex::new(QuicHolePunchConnector::new(
+                peer_manager.clone(),
+            )))
+        });
+        drop(flags);
 
         let peer_center = Arc::new(PeerCenterInstance::new(peer_manager.clone()));
 
@@ -1028,8 +1036,12 @@ impl Instance {
         )?);
         self.run_ip_proxy().await?;
 
-        self.tcp_hole_puncher.lock().await.run().await?;
-        self.quic_hole_puncher.lock().await.run();
+        if let Some(puncher) = &self.tcp_hole_puncher {
+            puncher.lock().await.run().await?;
+        }
+        if let Some(puncher) = &self.quic_hole_puncher {
+            puncher.lock().await.run();
+        }
 
         self.peer_center.init().await;
         let route_calc = self.peer_center.get_cost_calculator();
@@ -1040,7 +1052,10 @@ impl Instance {
 
         self.add_initial_peers().await?;
         if let Some(config) = self.global_ctx.config.get_tracker_discovery() {
-            self.tracker_discovery = Some(crate::connector::tracker_discovery::start(self.peer_manager.clone(), config)?);
+            self.tracker_discovery = Some(crate::connector::tracker_discovery::start(
+                self.peer_manager.clone(),
+                config,
+            )?);
         }
 
         let monitor = super::proxy_cidrs_monitor::ProxyCidrsMonitor::new(
@@ -1494,4 +1509,54 @@ mod tests {
         instance::instance::{InstanceConfigPatcher, InstanceRpcServerHook},
         proto::{api::config::InstanceConfigPatch, rpc_impl::standalone::RpcServerHook},
     };
+}
+
+#[cfg(test)]
+mod protocol_memory_tests {
+    use super::*;
+    use crate::common::config::TomlConfigLoader;
+    #[tokio::test]
+    async fn disabled_punchers_are_never_constructed() {
+        for protocol in ["quic", "tcp", "wss"] {
+            let config = TomlConfigLoader::default();
+            let mut flags = config.get_flags();
+            flags.default_protocol = protocol.into();
+            flags.enabled_protocols = vec![protocol.into()];
+            config.set_flags(flags);
+            let instance = Instance::new(config);
+            assert_eq!(instance.quic_hole_puncher.is_some(), protocol == "quic");
+            assert_eq!(instance.tcp_hole_puncher.is_some(), protocol != "quic");
+        }
+    }
+    #[tokio::test]
+    async fn disabled_factories_fail_before_dns_and_socket_allocation() {
+        use crate::common::global_ctx::tests::get_mock_global_ctx;
+        for protocol in ["quic", "tcp", "wss"] {
+            let ctx = get_mock_global_ctx();
+            let mut flags = ctx.get_flags();
+            flags.default_protocol = protocol.into();
+            flags.enabled_protocols = vec![protocol.into()];
+            ctx.set_flags(flags);
+            for other in ["quic", "tcp", "wss"] {
+                if protocol == other {
+                    continue;
+                }
+                let url =
+                    url::Url::parse(&format!("{other}://must-not-resolve.invalid:12345")).unwrap();
+                let err = crate::connector::create_connector_by_url(
+                    url.as_str(),
+                    &ctx,
+                    crate::tunnel::IpVersion::Both,
+                )
+                .await
+                .err()
+                .unwrap();
+                assert!(err.to_string().contains("disabled by enabled_protocols"));
+                let err = super::super::listeners::create_listener_by_url(&url, ctx.clone())
+                    .err()
+                    .unwrap();
+                assert!(err.to_string().contains("disabled by enabled_protocols"));
+            }
+        }
+    }
 }

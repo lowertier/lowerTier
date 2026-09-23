@@ -150,8 +150,9 @@ impl ServiceRouteStore {
         Self {
             routes: RwLock::new(HashMap::new()),
             snapshot: ArcSwap::from_pointee(ServiceRouteSnapshot::default()),
-            pins: DashMap::with_capacity(pin_capacity.min(1024)),
-            plans: DashMap::with_capacity(pin_capacity.min(1024)),
+            // Capacity is a traffic bound, not a startup reservation.
+            pins: DashMap::new(),
+            plans: DashMap::new(),
             pin_capacity,
             pin_ttl,
             #[cfg(test)]
@@ -384,5 +385,17 @@ mod tests {
             path_id: gateway as u64,
             action: ServiceRouteAction::Forward,
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_memory_tests {
+    use super::*;
+    #[test]
+    fn empty_route_caches_do_not_reserve_flow_entries() {
+        let store = ServiceRouteStore::new(65_536, Duration::from_secs(300));
+        assert_eq!(store.pins.capacity(), 0);
+        assert_eq!(store.plans.capacity(), 0);
+        assert_eq!(store.pin_capacity, 65_536);
     }
 }

@@ -313,6 +313,7 @@ impl PunchServer {
         };
         let (local_source, remote_source) = source_pair(attempt);
         let ctx = self.peer_mgr.get_global_ctx();
+        crate::common::config::ensure_transport_protocol_enabled(&ctx.flags_arc(), "quic")?;
         let (socket, candidates) = mapped_socket(&ctx, local_source as usize).await?;
         let variable_mapping = hard_nat::mapping_varies(socket.local_addr()?, &candidates);
         let transaction: [u8; 12] = rand::random();
@@ -386,12 +387,14 @@ impl QuicHolePunchRpc for PunchServer {
             .into_iter()
             .find(|route| route.peer_id == peer);
         ensure_rpc(
-            should_try_p2p_with_peer(
-                route.as_ref().and_then(|r| r.feature_flag.as_ref()),
-                false,
-                flags.disable_p2p,
-                flags.need_p2p,
-            ),
+            !flags.disable_udp_hole_punching
+                && crate::common::config::transport_protocol_enabled(&flags, "quic")
+                && should_try_p2p_with_peer(
+                    route.as_ref().and_then(|r| r.feature_flag.as_ref()),
+                    false,
+                    flags.disable_p2p,
+                    flags.need_p2p,
+                ),
             "peer policy denies QUIC punching",
         )?;
         let transaction: [u8; 12] = input

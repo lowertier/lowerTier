@@ -102,6 +102,7 @@ pub fn create_listener_by_url(
     global_ctx: ArcGlobalCtx,
 ) -> Result<Box<dyn TunnelListener>, Error> {
     use crate::common::config::ConfigLoader;
+    crate::common::config::ensure_transport_protocol_enabled(&global_ctx.flags_arc(), l.scheme())?;
     let socket_mark = global_ctx.config.get_flags().socket_mark;
     let scheme = IpScheme::try_from(l)?;
     Ok(match scheme {

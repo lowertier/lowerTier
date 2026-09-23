@@ -722,6 +722,16 @@ impl GlobalCtx {
             UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)
                 .expect("underlay policy was validated"),
         )));
+        let udp_nat = crate::common::config::transport_protocol_enabled(&flags, "quic");
+        let tcp_nat = crate::common::config::transport_protocol_enabled(&flags, "tcp")
+            || crate::common::config::transport_protocol_enabled(&flags, "wss");
+        stun_info_collector.set_nat_protocols(udp_nat, tcp_nat);
+        if !udp_nat {
+            stun_info_collector.set_stun_servers(Vec::new());
+        }
+        if !tcp_nat {
+            stun_info_collector.set_tcp_stun_servers(Vec::new());
+        }
         stun_info_collector.set_underlay_policy_source(underlay_policy.clone());
         let stun_info_collector = Arc::new(stun_info_collector);
 

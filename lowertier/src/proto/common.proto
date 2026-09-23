@@ -123,6 +123,9 @@ message FlagsInConfig {
   // passthrough can split the VPN from other HTTP/3 sites. Off keeps CID-only
   // decoy routing when the VPN and the decoy share a name.
   bool quic_sni_passthrough = 69;
+  // Startup-only transport allowlist; empty preserves all transports.
+  // Include every listener and bootstrap scheme: quic, tcp (HTTP/2), wss.
+  repeated string enabled_protocols = 70;
 }
 
 message RpcDescriptor {

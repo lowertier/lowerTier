@@ -287,6 +287,10 @@ pub async fn create_connector_by_url(
     ip_version: IpVersion,
 ) -> Result<Box<dyn TunnelConnector + 'static>, Error> {
     let url = url::Url::parse(url).map_err(|_| Error::InvalidUrl(url.to_owned()))?;
+    crate::common::config::ensure_transport_protocol_enabled(
+        &global_ctx.flags_arc(),
+        url.scheme(),
+    )?;
     let url = idn::convert_idn_to_ascii(url)?;
     let scheme = IpScheme::try_from(&url)
         .map_err(|_| TunnelError::InvalidProtocol(url.scheme().to_owned()))?;

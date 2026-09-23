@@ -998,7 +998,7 @@ impl TcpProxy {
 
 #[derive(Clone)]
 pub struct TcpProxyRpcService {
-    tcp_proxy: Weak<TcpProxy>,
+    tcp_proxy: Weak<std::sync::OnceLock<Arc<TcpProxy>>>,
 }
 
 #[async_trait::async_trait]
@@ -1010,15 +1010,17 @@ impl TcpProxyRpc for TcpProxyRpcService {
         _request: ListTcpProxyEntryRequest, // Accept request of type HelloRequest
     ) -> std::result::Result<ListTcpProxyEntryResponse, rpc_types::error::Error> {
         let mut reply = ListTcpProxyEntryResponse::default();
-        if let Some(tcp_proxy) = self.tcp_proxy.upgrade() {
-            reply.entries = tcp_proxy.list_proxy_entries();
+        if let Some(slot) = self.tcp_proxy.upgrade() {
+            if let Some(tcp_proxy) = slot.get() {
+                reply.entries = tcp_proxy.list_proxy_entries();
+            }
         }
         Ok(reply)
     }
 }
 
 impl TcpProxyRpcService {
-    pub fn new(tcp_proxy: Arc<TcpProxy>) -> Self {
+    pub fn new(tcp_proxy: Arc<std::sync::OnceLock<Arc<TcpProxy>>>) -> Self {
         Self {
             tcp_proxy: Arc::downgrade(&tcp_proxy),
         }

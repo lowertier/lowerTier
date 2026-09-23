@@ -504,6 +504,10 @@ impl DirectConnectorManagerData {
         // Prefer the configured protocol. Default is QUIC/h3, then H2/TCP, then WSS.
         // highest priority is in the last
         let mut available_listeners = available_listeners;
+        let flags = self.global_ctx.flags_arc();
+        available_listeners.retain(|listener| {
+            crate::common::config::transport_protocol_enabled(&flags, listener.scheme())
+        });
         available_listeners
             .sort_by_key(|listener| direct_protocol_priority(listener.scheme(), &default_protocol));
 
