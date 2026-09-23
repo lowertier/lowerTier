@@ -1,213 +1,176 @@
 {
-  "selected_at": "2026-09-23T08:27:44.629786+00:00",
-  "build": "quic8",
+  "selected_at": "2026-09-23T15:08:57.532632+00:00",
+  "build": "memory11",
   "preferred_transport": "quic",
-  "scope": "native osku-UTM sequential upload/download; simultaneous full duplex below target",
-  "source_commit": "7aeadc7a493f30812d24d89dd5e3057bfa385a1f",
-  "source_manifest": "benchmark-results/quic-400-20260923/repair8/candidate8/source-hashes.json",
+  "enabled_protocols": [
+    "quic"
+  ],
+  "scope": "native osku/UTM single-flow sequential transfer and lower cold memory; full duplex is not retested",
+  "source_commit": "35fbd1f5ff069092be5d22a3bd1bb39c57e7f503",
+  "source_manifest": "benchmark-results/protocol-memory-20260923/final11/candidate/source-hashes.json",
   "binaries": {
     "arm-lowertier-cli": {
-      "sha256": "485af41a2c0f8f3b77a3fb0b0e549cbfddd3aedd73a8169b90f8acc5d7c7e1c9",
-      "bytes": 6322008
+      "sha256": "1f844c72131b7e6251741cec5a022b006b81a60df969735ec6a276275d6efddf",
+      "bytes": 6321624
     },
     "native-lowertier-cli": {
-      "sha256": "9528f522ffe96fcd0f9f937cc0777d0c76344484fd8d7bf5f2366443cedddd37",
-      "bytes": 5856640
+      "sha256": "7952281debdf89cd40f3ad535293176ef3104e8e19cbea26c9920b32e30d1d1d",
+      "bytes": 5856656
     },
     "native-lowertier-core": {
-      "sha256": "fbbc630dc990179745225e6f93d652a88999cee67cf09d78facdacd38836d496",
-      "bytes": 17126192
+      "sha256": "8945e6745dbe11d3fc270b57de84e629ab1f5f63255d9a429a3f145b930173e2",
+      "bytes": 17076560
     },
     "arm-lowertier-core": {
-      "sha256": "40247690888e84e3b4e6134df3ed21d53a7f6d6af343d391ba59698a97459688",
-      "bytes": 19332944
+      "sha256": "2b10fb5b18e8fb3881b98ae04048eca31710736c181bbaa8ca2231d0b06f6bb0",
+      "bytes": 19295312
     }
   },
   "benchmark": {
-    "method": {
-      "host_pair": [
-        "osku macOS arm64",
-        "UTMOWRT Linux aarch64-musl"
-      ],
-      "path": "public authenticated direct QUIC, cost 1, stable connection identity and counter coverage",
-      "inner_ip_mtu": 1280,
-      "config_mtu_flag": 1300,
-      "warmup_seconds": 3,
-      "single_flow_repetitions_per_direction": 3,
-      "single_flow_measurement_seconds": 15,
-      "soak_seconds_per_direction": 120,
-      "four_flow_measurement_seconds": 15,
-      "resource_sample_interval_seconds": 0.25,
-      "cpu_basis": "100%=one logical CPU; full steady sample window [4,duration+2] seconds",
-      "cpu_normalization": "steady CPU seconds per delivered Gbit",
-      "diagnostic_logging": "1-second QUIC stats opted in; controller/timer/burst compiled defaults unchanged"
-    },
-    "groups": [
+    "method": "same-protocol bootstrap and data, native TUN, inner MTU 1280, 3s warmup + 15s measure, two repetitions, matching TLS roles; 250ms sampling; CPU 100%=one logical core; RSS includes shared pages; physical footprint separate",
+    "quic_groups": [
       {
-        "phase": "long-soak",
-        "direction": "down",
-        "streams": 1,
-        "n": 1,
-        "receiver_mbps_median": 523.7003424656963,
-        "receiver_mbps_min": 523.7003424656963,
-        "receiver_mbps_max": 523.7003424656963,
-        "resources": {
-          "osku": {
-            "cpu_pct_median": 53.14025280583142,
-            "cpu_s_per_Gbit_median": 1.0147072380292026,
-            "rss_peak_mib": 34.484375,
-            "footprint_peak_mib": 12.438117980957031
-          },
-          "utm": {
-            "cpu_pct_median": 83.4649018303439,
-            "cpu_s_per_Gbit_median": 1.5937530504061312,
-            "rss_peak_mib": 44.34765625,
-            "footprint_peak_mib": null
-          }
-        }
-      },
-      {
-        "phase": "long-soak",
+        "protocol": "quic",
         "direction": "up",
-        "streams": 1,
-        "n": 1,
-        "receiver_mbps_median": 461.01110790567014,
-        "receiver_mbps_min": 461.01110790567014,
-        "receiver_mbps_max": 461.01110790567014,
-        "resources": {
-          "osku": {
-            "cpu_pct_median": 50.89258456781122,
-            "cpu_s_per_Gbit_median": 1.1039340201369858,
-            "rss_peak_mib": 34.4375,
-            "footprint_peak_mib": 13.578742980957031
-          },
-          "utm": {
-            "cpu_pct_median": 87.71855149071506,
-            "cpu_s_per_Gbit_median": 1.902742688548485,
-            "rss_peak_mib": 42.234375,
-            "footprint_peak_mib": null
+        "quic8": {
+          "n": 2,
+          "receiver_mbps_median": 725.1097269454945,
+          "receiver_mbps_range": [
+            674.4512706289046,
+            775.7681832620843
+          ],
+          "resources": {
+            "osku": {
+              "cpu_pct_one_core": 63.94398673487488,
+              "cpu_s_per_Gbit": 0.8836115878172586,
+              "rss_peak_mib": 35.96875,
+              "rss_mean_mib": 35.45703125,
+              "footprint_peak_mib": 16.67249298095703,
+              "footprint_mean_mib": 12.704343942495493
+            },
+            "utm": {
+              "cpu_pct_one_core": 137.101137442341,
+              "cpu_s_per_Gbit": 1.8872036425969103,
+              "rss_peak_mib": 36.40234375,
+              "rss_mean_mib": 33.844353907428356
+            }
+          }
+        },
+        "memory11": {
+          "n": 2,
+          "receiver_mbps_median": 797.788773199297,
+          "receiver_mbps_range": [
+            778.8151292185738,
+            816.7624171800202
+          ],
+          "resources": {
+            "osku": {
+              "cpu_pct_one_core": 85.59423012422931,
+              "cpu_s_per_Gbit": 1.0782356417306849,
+              "rss_peak_mib": 35.75,
+              "rss_mean_mib": 35.45162259615385,
+              "footprint_peak_mib": 12.688117980957031,
+              "footprint_mean_mib": 12.366303077110878
+            },
+            "utm": {
+              "cpu_pct_one_core": 144.34863110719718,
+              "cpu_s_per_Gbit": 1.808988629753184,
+              "rss_peak_mib": 32.08203125,
+              "rss_mean_mib": 28.888942896870287
+            }
           }
         }
       },
       {
-        "phase": "parallel-four",
+        "protocol": "quic",
         "direction": "down",
-        "streams": 4,
-        "n": 1,
-        "receiver_mbps_median": 523.721980864584,
-        "receiver_mbps_min": 523.721980864584,
-        "receiver_mbps_max": 523.721980864584,
-        "resources": {
-          "osku": {
-            "cpu_pct_median": 53.57690050454516,
-            "cpu_s_per_Gbit_median": 1.0230027087291234,
-            "rss_peak_mib": 39.953125,
-            "footprint_peak_mib": 13.360015869140625
-          },
-          "utm": {
-            "cpu_pct_median": 76.92471511180995,
-            "cpu_s_per_Gbit_median": 1.4688082212020037,
-            "rss_peak_mib": 44.33984375,
-            "footprint_peak_mib": null
+        "quic8": {
+          "n": 2,
+          "receiver_mbps_median": 529.760817351699,
+          "receiver_mbps_range": [
+            529.2560672188722,
+            530.2655674845257
+          ],
+          "resources": {
+            "osku": {
+              "cpu_pct_one_core": 40.122057919141774,
+              "cpu_s_per_Gbit": 0.7573585798219034,
+              "rss_peak_mib": 35.109375,
+              "rss_mean_mib": 35.10847355769231,
+              "footprint_peak_mib": 12.719367980957031,
+              "footprint_mean_mib": 12.718466538649338
+            },
+            "utm": {
+              "cpu_pct_one_core": 82.04527012260472,
+              "cpu_s_per_Gbit": 1.5487384252923833,
+              "rss_peak_mib": 35.91796875,
+              "rss_mean_mib": 35.01156850961539
+            }
           }
-        }
-      },
-      {
-        "phase": "parallel-four",
-        "direction": "up",
-        "streams": 4,
-        "n": 1,
-        "receiver_mbps_median": 803.098838612897,
-        "receiver_mbps_min": 803.098838612897,
-        "receiver_mbps_max": 803.098838612897,
-        "resources": {
-          "osku": {
-            "cpu_pct_median": 79.7565201769874,
-            "cpu_s_per_Gbit_median": 0.9931096440724771,
-            "rss_peak_mib": 39.9375,
-            "footprint_peak_mib": 17.875640869140625
-          },
-          "utm": {
-            "cpu_pct_median": 150.6674984103432,
-            "cpu_s_per_Gbit_median": 1.8760766566488174,
-            "rss_peak_mib": 27.74609375,
-            "footprint_peak_mib": null
-          }
-        }
-      },
-      {
-        "phase": "repeat",
-        "direction": "down",
-        "streams": 1,
-        "n": 3,
-        "receiver_mbps_median": 530.1965127320708,
-        "receiver_mbps_min": 452.84812085800496,
-        "receiver_mbps_max": 533.8793696879408,
-        "resources": {
-          "osku": {
-            "cpu_pct_median": 53.91663700522644,
-            "cpu_s_per_Gbit_median": 1.0299961139125458,
-            "rss_peak_mib": 34.53125,
-            "footprint_peak_mib": 12.500617980957031
-          },
-          "utm": {
-            "cpu_pct_median": 84.07889109859181,
-            "cpu_s_per_Gbit_median": 1.585806188451492,
-            "rss_peak_mib": 43.30859375,
-            "footprint_peak_mib": null
-          }
-        }
-      },
-      {
-        "phase": "repeat",
-        "direction": "up",
-        "streams": 1,
-        "n": 3,
-        "receiver_mbps_median": 621.714735643579,
-        "receiver_mbps_min": 524.6913992831593,
-        "receiver_mbps_max": 663.6849085729117,
-        "resources": {
-          "osku": {
-            "cpu_pct_median": 72.35833715265166,
-            "cpu_s_per_Gbit_median": 1.1757146108956622,
-            "rss_peak_mib": 34.515625,
-            "footprint_peak_mib": 13.547492980957031
-          },
-          "utm": {
-            "cpu_pct_median": 112.07409808687984,
-            "cpu_s_per_Gbit_median": 1.802661118702042,
-            "rss_peak_mib": 37.98046875,
-            "footprint_peak_mib": null
+        },
+        "memory11": {
+          "n": 2,
+          "receiver_mbps_median": 529.2683953969604,
+          "receiver_mbps_range": [
+            528.6253211778022,
+            529.9114696161187
+          ],
+          "resources": {
+            "osku": {
+              "cpu_pct_one_core": 45.06012301462548,
+              "cpu_s_per_Gbit": 0.8513910762831469,
+              "rss_peak_mib": 35.203125,
+              "rss_mean_mib": 35.17487980769231,
+              "footprint_peak_mib": 12.391242980957031,
+              "footprint_mean_mib": 12.362997788649338
+            },
+            "utm": {
+              "cpu_pct_one_core": 82.52786703116223,
+              "cpu_s_per_Gbit": 1.5592829205937933,
+              "rss_peak_mib": 31.25,
+              "rss_mean_mib": 30.178600383254718
+            }
           }
         }
       }
     ],
-    "verified_results": "benchmark-results/quic-400-20260923/repair8/verified-results.json"
+    "long_run": {
+      "complete": true,
+      "passed_400_each_direction": true,
+      "labels": [
+        "memory11-native-quic-tcp-up-p1-r124000",
+        "memory11-native-quic-tcp-down-p1-r124000",
+        "memory11-native-quic-tcp-up-p1-r124001",
+        "memory11-native-quic-tcp-down-p1-r124001"
+      ],
+      "receiver_mbps": [
+        519.7157640264603,
+        457.2406017238812,
+        623.022258097115,
+        458.92941847371657
+      ],
+      "time": 1790175507.69963,
+      "connection_reused": true
+    },
+    "all_protocol_evidence": "benchmark-results/protocol-memory-20260923/final11/paired-summary.json"
   },
   "deployment": {
-    "core_and_cli_installed_on": [
-      "osku:/Users/boyu/et",
-      "utm:/root/et"
-    ],
-    "default_protocol": "quic",
-    "mtu_flag": 1300,
-    "osku_rpc_ready": true,
-    "utm_rpc_ready": true,
+    "installed": true,
+    "runtime_verified": true,
     "resident_pair_delivery_verified": false,
-    "osku_bootstrap_refused": true,
-    "utm_authenticated_peers": [
-      "hattori-opwrt",
-      "jpaws"
-    ]
+    "limitation": "UTM remains without authenticated resident peers in the bounded Q8/original-config and M11/QUIC-only probes. osku M11 has authenticated QUIC peers. Isolated public-WAN measurement success does not imply the resident pair is connected.",
+    "verification": "benchmark-results/protocol-memory-20260923/final11/final-resource-verification.json"
   },
-  "prior_baseline_manifest": "benchmark-results/quic-400-20260923/repair8/previous-current-baseline.json",
-  "selection_limitations": [
-    "The target is separate upload and download receiver goodput; simultaneous full-duplex 400+400 Mbit/s was not achieved.",
-    "WAN rates vary. The 120-second upload contains an inner-TCP recovery interval below 400 Mbit/s; the achieved figures are whole-transfer averages, not a continuous floor.",
-    "The short runs, long runs and simultaneous-duplex extension are separate test groups; a single four-flow run is not a repeated median.",
-    "Native TUN only. CPU includes the measured core process user/system time, excludes iperf and unattributed kernel/other process work.",
-    "RSS includes shared mappings; macOS physical footprint is reported separately. Linux PSS is unavailable.",
-    "Resident osku is running Q8 with healthy RPC but its bootstrap server refuses new connections; C4 rollback did not restore authenticated peers. Controlled WAN test success does not prove resident-pair delivery.",
-    "Final STUN cleanup was blocked before server execution. Read-only verification confirms relay STUN PID 2510464 still listens on TCP/UDP 18780 and 18781."
+  "retained_protocol_baselines": {
+    "tcp": "quic8",
+    "quic_previous": "quic8"
+  },
+  "memory_evidence": "benchmark-results/protocol-memory-20260923/final11/independent-validation.json",
+  "limitations": [
+    "No WireGuard memory-parity claim",
+    "Universal binary still includes transport code; inactive transport runtime resources are omitted",
+    "H2 throughput regressed in this paired campaign",
+    "Simultaneous full duplex was not retested",
+    "CPU cost and loaded memory do not improve uniformly"
   ]
 }
