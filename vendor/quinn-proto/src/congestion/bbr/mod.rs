@@ -238,6 +238,11 @@ impl Bbr {
         }
 
         if self.mode == Mode::ProbeRtt {
+            // ProbeRTT deliberately drains the flight. Keep that limitation
+            // attached through the first refill after exit; otherwise an old
+            // max-bandwidth filter can learn the probe's low rate as capacity.
+            // Refresh on every probe ACK, including the ACK that exits this mode.
+            self.on_app_limited();
             match self.exit_probe_rtt_at {
                 None => {
                     // If the window has reached the appropriate size, schedule exiting
@@ -742,6 +747,44 @@ mod tests {
         controller.on_end_acks(now + rtt, 0, false, Some(32));
         assert_eq!(controller.mode, Mode::ProbeBw);
         assert_eq!(controller.max_bandwidth.get_estimate(), bandwidth);
+    }
+
+    #[test]
+    fn probe_rtt_exit_marks_the_refill_flight_as_application_limited() {
+        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        let rtt = Duration::from_millis(1);
+        let start = Instant::now();
+        bbr.min_rtt = rtt;
+        bbr.on_sent(start, 100_000, 1);
+        bbr.max_bandwidth.on_ack(start + rtt, start, 100_000, 0, false);
+        bbr.on_end_acks(start + rtt, 0, false, Some(1));
+        let bandwidth = bbr.max_bandwidth.get_estimate();
+        bbr.is_at_full_bandwidth = true;
+        bbr.mode = Mode::ProbeRtt;
+        bbr.probe_rtt_last_started_at = Some(start);
+        bbr.exit_probe_rtt_at = Some(start + Duration::from_millis(200));
+        // The ten-round max filter is old when the 200 ms probe completes.
+        bbr.round_count = 30;
+        let probe = start + Duration::from_millis(200);
+        bbr.on_sent(probe, 1200, 2);
+        bbr.max_bandwidth.on_ack(probe + rtt, probe, 1200, 30, false);
+        bbr.on_end_acks(probe + rtt, 0, false, Some(2));
+        assert_eq!(bbr.mode, Mode::ProbeBw);
+        let refill = probe + rtt * 2;
+        bbr.on_sent(refill, 1200, 3);
+        bbr.max_bandwidth.on_ack(refill + rtt, refill, 1200, 31, false);
+        bbr.on_end_acks(refill + rtt, 0, false, Some(3));
+        assert_eq!(bbr.max_bandwidth.get_estimate(), bandwidth,
+            "a probe-limited refill sample must not replace the path estimate");
+        assert!(bbr.app_limited_until.is_none(), "the protected flight must end");
+        // Real, sustained lower delivery must still replace the old path model.
+        for packet in 4..30 {
+            let sent = refill + Duration::from_millis((packet - 3) * 10);
+            bbr.on_sent(sent, 1200, packet);
+            bbr.max_bandwidth.on_ack(sent + rtt, sent, 1200, 31 + packet, false);
+            bbr.on_end_acks(sent + rtt, 0, false, Some(packet));
+        }
+        assert!(bbr.max_bandwidth.get_estimate() < bandwidth);
     }
 
     #[test]
