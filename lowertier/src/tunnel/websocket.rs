@@ -9,7 +9,6 @@ use crate::tunnel::common::{
 };
 use crate::{common::underlay_policy::UnderlayPolicy, proto::common::TunnelInfo};
 use anyhow::Context;
-use bytes::BytesMut;
 use forwarded_header_value::ForwardedHeaderValue;
 use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
 use pnet::ipnetwork::IpNetwork;
@@ -171,8 +170,8 @@ async fn map_from_ws_message(
         return Some(Err(TunnelError::InvalidPacket(msg)));
     }
 
-    Some(Ok(ZCPacket::new_from_buf(
-        BytesMut::from(msg.into_payload().as_bytes()),
+    Some(Ok(ZCPacket::new_from_owned_bytes(
+        msg.into_payload().into(),
         ZCPacketType::DummyTunnel,
     )))
 }
@@ -430,7 +429,9 @@ impl WsTunnelConnector {
     }
 
     pub(crate) async fn connect_punched(
-        stream: TcpStream, addr: url::Url, underlay_policy: Arc<UnderlayPolicy>,
+        stream: TcpStream,
+        addr: url::Url,
+        underlay_policy: Arc<UnderlayPolicy>,
         net_ns: Option<crate::common::netns::NetNS>,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         let is_wss = is_wss(&addr)?;
@@ -778,6 +779,23 @@ pub mod tests {
             )
             .as_str(),
             "wss://challenges.cloudflare.com/ws?n=1"
+        );
+    }
+    #[tokio::test]
+    async fn owned_websocket_receive_reuses_payload_and_preserves_control_handling() {
+        let bytes = bytes::Bytes::from(vec![0x42; 64]);
+        let pointer = bytes.as_ptr();
+        let packet = map_from_ws_message(Ok(Message::binary(bytes)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(packet.tunnel_payload().as_ptr(), pointer);
+        assert_eq!(packet.tunnel_payload(), &[0x42; 64]);
+        assert!(
+            map_from_ws_message(Ok(Message::text("invalid")))
+                .await
+                .unwrap()
+                .is_err()
         );
     }
 }

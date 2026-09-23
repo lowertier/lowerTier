@@ -97,11 +97,7 @@ impl ReadState {
             device,
             original: vec![0; VIRTIO_NET_HDR_LEN + MAX_TUN_PACKET_SIZE],
             segments: (0..MAX_PACKET_BATCH_SIZE)
-                .map(|_| {
-                    reusable_pool
-                        .try_take()
-                        .expect("the reusable TAP pool contains the first read batch")
-                })
+                .map(|_| reusable_pool.take_or_allocate())
                 .collect(),
             sizes: vec![0; MAX_PACKET_BATCH_SIZE],
             payload_offset,

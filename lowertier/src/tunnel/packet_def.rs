@@ -464,6 +464,17 @@ pub const TAIL_RESERVED_SIZE: usize = max(
 /// H2/QUIC/WSS windows cannot pin 64 KiB unique copies.
 const COMPACT_SPARE_THRESHOLD: usize = 512;
 
+/// Normalize the allocation base before checking capacity, including any
+/// discarded prefix. Independent mutable slices can then share this bounded slab.
+pub(crate) fn bounded_owned_buffer(bytes: Bytes) -> BytesMut {
+    let storage: Vec<u8> = bytes.into();
+    if storage.capacity().saturating_sub(storage.len()) > COMPACT_SPARE_THRESHOLD {
+        BytesMut::from(storage.as_slice())
+    } else {
+        BytesMut::from(Bytes::from(storage))
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct ZCPacketOffsets {
     pub payload_offset: usize,
@@ -574,7 +585,8 @@ impl ReusableBufferPool {
         assert!(buffer_len > 0);
         assert!(buffer_count > 0);
         let buffers = ArrayQueue::new(buffer_count);
-        for _ in 0..buffer_count {
+        // Warm one I/O batch. Additional in-flight demand allocates lazily.
+        for _ in 0..buffer_count.min(super::batch::MAX_PACKET_BATCH_SIZE) {
             buffers
                 .push(zeroed_packet_buffer(buffer_len))
                 .expect("a new reusable buffer pool has room");
@@ -598,6 +610,9 @@ impl ReusableBufferPool {
     }
 
     fn recycle(&self, mut buffer: BytesMut) {
+        if self.inner.buffers.is_full() {
+            return;
+        }
         if buffer.capacity() < self.inner.buffer_len
             || buffer.capacity() > self.inner.buffer_len.saturating_mul(2)
         {
@@ -612,6 +627,9 @@ impl ReusableBufferPool {
     }
 
     fn recycle_initialized(&self, mut buffer: BytesMut, allocation_start: usize) {
+        if self.inner.buffers.is_full() {
+            return;
+        }
         if buffer.as_ptr() as usize != allocation_start
             || buffer.capacity() < self.inner.buffer_len
             || buffer.capacity() > self.inner.buffer_len.saturating_mul(2)
@@ -628,7 +646,9 @@ impl ReusableBufferPool {
     }
 
     fn replace_detached(&self) {
-        self.recycle(zeroed_packet_buffer(self.inner.buffer_len));
+        if !self.inner.buffers.is_full() {
+            self.recycle(zeroed_packet_buffer(self.inner.buffer_len));
+        }
     }
 
     pub(crate) fn available(&self) -> usize {
@@ -842,6 +862,12 @@ impl ZCPacket {
             reusable_prefix: None,
             reusable_allocation_start: None,
         }
+    }
+
+    /// Reuse an owned receive allocation while bounding both hidden prefix and
+    /// spare suffix capacity. Shared storage is copied by the Bytes conversion.
+    pub(crate) fn new_from_owned_bytes(bytes: Bytes, packet_type: ZCPacketType) -> Self {
+        Self::new_from_buf(bounded_owned_buffer(bytes), packet_type)
     }
 
     pub fn new_from_buf(buf: BytesMut, packet_type: ZCPacketType) -> Self {
@@ -1308,6 +1334,10 @@ impl ZCPacket {
         if self.reusable_pool.is_some() {
             self.recycle_reusable_buffer();
         }
+        // An owned receive prefix may exist without a pool. Release that owner
+        // as well, otherwise compaction still pins the original slab.
+        self.reusable_prefix = None;
+        self.reusable_allocation_start = None;
         self.inner = compact;
         debug_assert!(self.reusable_pool.is_none());
         debug_assert!(self.reusable_prefix.is_none());
@@ -1826,7 +1856,11 @@ mod tests {
         assert_eq!(pool.available(), 0);
         replacement[64..96].fill(0x5a);
         replacement.truncate(96);
-        drop(ZCPacket::new_from_reusable_buf(replacement, ZCPacketType::NIC, pool.clone()));
+        drop(ZCPacket::new_from_reusable_buf(
+            replacement,
+            ZCPacketType::NIC,
+            pool.clone(),
+        ));
 
         let recycled = pool.try_take().unwrap();
         assert_eq!(recycled.len(), 256);
@@ -2401,5 +2435,75 @@ mod tests {
         assert_eq!(header.from_peer_id.get(), 7);
         assert_eq!(header.to_peer_id.get(), 9);
         assert_eq!(header.len.get(), 7);
+    }
+    #[test]
+    fn owned_receive_reuses_unique_payload_and_bounds_hidden_prefix() {
+        let storage = vec![0x55; 96];
+        let pointer = storage.as_ptr();
+        let packet =
+            ZCPacket::new_from_owned_bytes(Bytes::from(storage), ZCPacketType::DummyTunnel);
+        assert_eq!(packet.tunnel_payload().as_ptr(), pointer);
+        assert_eq!(packet.tunnel_payload(), &[0x55; 96]);
+        for tail in [false, true] {
+            let mut bytes = Bytes::from(vec![0x33; 65536]);
+            bytes = if tail {
+                bytes.slice(65504..)
+            } else {
+                bytes.slice(..32)
+            };
+            let packet = ZCPacket::new_from_owned_bytes(bytes, ZCPacketType::DummyTunnel);
+            assert_eq!(packet.tunnel_payload(), &[0x33; 32]);
+            assert!(packet.retained_buffer_capacity() <= 32 + COMPACT_SPARE_THRESHOLD);
+        }
+    }
+
+    #[test]
+    fn owned_receive_never_mutates_a_shared_alias() {
+        let bytes = Bytes::from(vec![0x77; 96]);
+        let alias = bytes.clone();
+        let mut packet = ZCPacket::new_from_owned_bytes(bytes, ZCPacketType::DummyTunnel);
+        packet.mut_inner()[0] = 1;
+        assert_eq!(alias[0], 0x77);
+        assert_ne!(packet.tunnel_payload().as_ptr(), alias.as_ptr());
+    }
+
+    #[test]
+    fn compact_owned_prefix_releases_the_original_slab() {
+        let mut storage = BytesMut::with_capacity(65536);
+        storage.resize(256, 0x44);
+        let mut packet = ZCPacket::new_from_buf_with_prefix(storage, 8, ZCPacketType::DummyTunnel);
+        assert!(packet.reusable_pool.is_none() && packet.reusable_prefix.is_some());
+        packet.compact_retained_buffer();
+        assert!(packet.reusable_prefix.is_none());
+        assert!(packet.reusable_allocation_start.is_none());
+        assert_eq!(packet.tunnel_payload(), &[0x44; 248]);
+        assert!(packet.retained_buffer_capacity() <= 248 + COMPACT_SPARE_THRESHOLD);
+    }
+
+    #[test]
+    fn large_pool_warms_one_batch_and_recycles_without_exceeding_its_bound() {
+        let pool = ReusableBufferPool::new(256, 256);
+        assert_eq!(pool.available(), super::super::batch::MAX_PACKET_BATCH_SIZE);
+        let buffers: Vec<_> = (0..300).map(|_| pool.take_or_allocate()).collect();
+        assert_eq!(pool.available(), 0);
+        for b in buffers {
+            assert_eq!(b.len(), 256);
+            pool.recycle(b);
+        }
+        assert_eq!(pool.available(), 256);
+        pool.replace_detached();
+        assert_eq!(pool.available(), 256);
+    }
+
+    #[test]
+    fn full_pool_keeps_existing_storage_when_oversized_buffers_return() {
+        let pool = ReusableBufferPool::new(256, 1);
+        let retained = pool.try_take().unwrap();
+        let pointer = retained.as_ptr();
+        pool.recycle(retained);
+        pool.recycle(BytesMut::with_capacity(65536));
+        pool.replace_detached();
+        let retained = pool.try_take().unwrap();
+        assert_eq!(retained.as_ptr(), pointer);
     }
 }

@@ -1710,13 +1710,24 @@ fn quic_stats_interval_from(value: Option<&str>) -> Option<Duration> {
 }
 
 fn quic_stats_interval() -> Option<Duration> {
-    *QUIC_STATS_INTERVAL.get_or_init(|| match std::env::var("LOWTIER_QUIC_STATS_INTERVAL_MS") {
-        Ok(value) if value.trim() == "0" => None,
-        Ok(value) => {
-            quic_stats_interval_from(Some(value.as_str())).or(Some(Duration::from_secs(2)))
-        }
-        Err(_) => Some(Duration::from_secs(2)),
+    *QUIC_STATS_INTERVAL.get_or_init(|| {
+        // Verbose per-path dumps are opt-in. Aggregate I/O counters stay live.
+        quic_stats_interval_from(
+            std::env::var("LOWTIER_QUIC_STATS_INTERVAL_MS")
+                .ok()
+                .as_deref(),
+        )
     })
+}
+
+fn quic_observer_delay(active: bool, previous: Duration, diagnostic: Option<Duration>) -> Duration {
+    if let Some(period) = diagnostic {
+        period.min(Duration::from_secs(1))
+    } else if active {
+        Duration::from_secs(1)
+    } else {
+        previous.saturating_mul(2).min(Duration::from_secs(8))
+    }
 }
 
 fn observe_quic_path(connection: &Arc<ConnWrapper>) {
@@ -1726,17 +1737,19 @@ fn observe_quic_path(connection: &Arc<ConnWrapper>) {
         .unwrap_or(Duration::from_secs(1));
     let connection = Arc::downgrade(connection);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tick_period);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut delay = tick_period;
+        let mut previous_datagrams = (0, 0);
         let mut next_log = log_period.map(|period| Instant::now() + period);
-        interval.tick().await;
         loop {
-            interval.tick().await;
+            tokio::time::sleep(delay).await;
             let Some(connection) = connection.upgrade() else {
                 break;
             };
             let stats = connection.conn.stats();
             connection.record_io_stats(&stats);
+            let datagrams = (stats.udp_tx.datagrams, stats.udp_rx.datagrams);
+            delay = quic_observer_delay(datagrams != previous_datagrams, delay, log_period);
+            previous_datagrams = datagrams;
 
             let now = Instant::now();
             let should_log = next_log.is_some_and(|deadline| now >= deadline);
@@ -5695,5 +5708,29 @@ mod pacing_configuration_tests {
         for value in ["", "0", "-1", "257", "65536", "64 packets"] {
             assert!(parse_pacing_burst_packets(Some(value)).is_err(), "{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_observer_tests {
+    use super::*;
+    #[test]
+    fn diagnostics_are_opt_in_and_idle_backoff_is_bounded() {
+        assert_eq!(quic_stats_interval_from(None), None);
+        assert_eq!(quic_stats_interval_from(Some("0")), None);
+        assert_eq!(quic_stats_interval_from(Some("garbage")), None);
+        let mut delay = Duration::from_secs(1);
+        for expected in [2, 4, 8, 8] {
+            delay = quic_observer_delay(false, delay, None);
+            assert_eq!(delay, Duration::from_secs(expected));
+        }
+        assert_eq!(
+            quic_observer_delay(true, delay, None),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            quic_observer_delay(false, delay, Some(Duration::from_millis(250))),
+            Duration::from_millis(250)
+        );
     }
 }

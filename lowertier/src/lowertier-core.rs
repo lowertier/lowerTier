@@ -16,16 +16,15 @@ fn configure_mimalloc_rss() {
     const MI_OPTION_PURGE_DELAY: i32 = 15;
     const MI_OPTION_ARENA_RESERVE: i32 = 23;
     unsafe extern "C" {
-        fn mi_option_set(option: i32, value: std::ffi::c_long);
-        fn mi_collect(force: bool);
+        fn mi_option_set_default(option: i32, value: std::ffi::c_long);
     }
     unsafe {
-        mi_option_set(MI_OPTION_EAGER_COMMIT, 0);
-        mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
-        mi_option_set(MI_OPTION_PURGE_DELAY, 0);
+        mi_option_set_default(MI_OPTION_EAGER_COMMIT, 0);
+        mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+        // Keep a short reuse interval; explicit environment values take precedence.
+        mi_option_set_default(MI_OPTION_PURGE_DELAY, 10);
         // Internally KiB. 4 MiB arenas instead of the 1 GiB default.
-        mi_option_set(MI_OPTION_ARENA_RESERVE, 4096);
-        mi_collect(true);
+        mi_option_set_default(MI_OPTION_ARENA_RESERVE, 4096);
     }
 }
 
@@ -58,7 +57,19 @@ rust_i18n::i18n!("locales", fallback = "en");
 #[cfg(all(feature = "mimalloc", not(feature = "jemalloc"), unix))]
 fn ensure_mimalloc_env() {
     use std::os::unix::process::CommandExt as _;
-    if std::env::var_os("MIMALLOC_PURGE_DELAY").is_some() {
+    // Some allocator initialization precedes main. Re-exec only when a default
+    // is missing, without replacing any caller-provided option.
+    const DEFAULTS: [(&str, &str); 4] = [
+        ("MIMALLOC_EAGER_COMMIT", "0"),
+        ("MIMALLOC_ARENA_EAGER_COMMIT", "0"),
+        ("MIMALLOC_PURGE_DELAY", "10"),
+        ("MIMALLOC_ARENA_RESERVE", "4M"),
+    ];
+    let missing: Vec<_> = DEFAULTS
+        .into_iter()
+        .filter(|(key, _)| std::env::var_os(key).is_none())
+        .collect();
+    if missing.is_empty() {
         configure_mimalloc_rss();
         return;
     }
@@ -69,15 +80,33 @@ fn ensure_mimalloc_env() {
             return;
         }
     };
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let error = std::process::Command::new(exe)
-        .args(args)
-        .env("MIMALLOC_EAGER_COMMIT", "0")
-        .env("MIMALLOC_ARENA_EAGER_COMMIT", "0")
-        .env("MIMALLOC_PURGE_DELAY", "0")
-        .env("MIMALLOC_ARENA_RESERVE", "4M")
+        .args(std::env::args_os().skip(1))
+        .envs(missing)
         .exec();
     panic!("re-exec with mimalloc RSS options failed: {error}");
+}
+
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
+fn report_mimalloc_options() {
+    if std::env::var_os("LOWTIER_ALLOCATOR_DIAGNOSTICS").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+    unsafe extern "C" {
+        fn mi_option_get(option: i32) -> std::ffi::c_long;
+    }
+    // These are allocator settings only; no network configuration is logged.
+    unsafe {
+        eprintln!(
+            "LOWTIER_ALLOCATOR eager_commit={} arena_eager_commit={} purge_delay_ms={} arena_reserve_kib={}",
+            mi_option_get(3),
+            mi_option_get(4),
+            mi_option_get(15),
+            mi_option_get(23)
+        );
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -85,6 +114,8 @@ fn main() -> std::process::ExitCode {
     ensure_mimalloc_env();
     #[cfg(all(feature = "mimalloc", not(feature = "jemalloc"), not(unix)))]
     configure_mimalloc_rss();
+    #[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
+    report_mimalloc_options();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

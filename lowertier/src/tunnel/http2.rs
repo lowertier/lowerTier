@@ -17,7 +17,11 @@
 
 use super::{
     TransportBinding, TransportBindingKind, Tunnel, TunnelError, TunnelInfo,
-    common::{FramedReader, FramedWriter, TunnelWrapper},
+    common::{FramedWriter, TunnelWrapper},
+    packet_def::{
+        PEER_MANAGER_HEADER_SIZE, TCP_TUNNEL_HEADER_SIZE, ZCPacket, ZCPacketType,
+        bounded_owned_buffer,
+    },
     stealth_tls::{
         self, ConnectIpAdmission, QUIC_ROUTING_CID_BYTES, routing_cid_bytes,
         valid_routing_cid_bytes,
@@ -25,6 +29,7 @@ use super::{
 };
 use crate::common::config::Flags;
 use bytes::{Buf, Bytes, BytesMut};
+use futures::Stream;
 use h2::{RecvStream, SendStream};
 use http::{Method, Request, Response, StatusCode};
 use std::{
@@ -33,7 +38,9 @@ use std::{
     sync::Arc,
     task::{Context as TaskContext, Poll, ready},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+#[cfg(test)]
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::task::AbortOnDropHandle;
@@ -163,11 +170,14 @@ fn connect_ip_request(url: &url::Url, bearer: Option<&str>) -> Result<Request<()
     Ok(request)
 }
 
+// AsyncRead reference adapter retained only for its original regression tests.
+#[cfg(test)]
 struct H2Reader {
     recv: RecvStream,
     buf: Bytes,
 }
 
+#[cfg(test)]
 impl AsyncRead for H2Reader {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -197,6 +207,138 @@ impl AsyncRead for H2Reader {
                 None => return Poll::Ready(Ok(())),
             }
         }
+    }
+}
+
+/// Own one DATA slab plus at most one incomplete LowTier frame. Complete
+/// frames split disjoint mutable views directly, without an intermediate read.
+#[derive(Default)]
+struct H2FrameDecoder {
+    chunk: BytesMut,
+    partial: BytesMut,
+}
+
+impl H2FrameDecoder {
+    fn load(&mut self, data: Bytes) {
+        debug_assert!(self.chunk.is_empty());
+        self.chunk = bounded_owned_buffer(data);
+    }
+
+    fn frame_len(header: &[u8]) -> Result<usize, TunnelError> {
+        let body =
+            u32::from_le_bytes(header[..TCP_TUNNEL_HEADER_SIZE].try_into().unwrap()) as usize;
+        if !(PEER_MANAGER_HEADER_SIZE..=TCP_MTU_BYTES).contains(&body) {
+            return Err(TunnelError::InvalidPacket(
+                "invalid HTTP/2 tunnel frame length".into(),
+            ));
+        }
+        body.checked_add(TCP_TUNNEL_HEADER_SIZE)
+            .ok_or_else(|| TunnelError::InvalidPacket("HTTP/2 frame length overflow".into()))
+    }
+
+    fn decode(&mut self) -> Result<Option<ZCPacket>, TunnelError> {
+        if self.partial.is_empty() && self.chunk.len() >= TCP_TUNNEL_HEADER_SIZE {
+            let length = Self::frame_len(&self.chunk)?;
+            if self.chunk.len() >= length {
+                let packet = self.chunk.split_to(length);
+                if self.chunk.is_empty() {
+                    self.chunk = BytesMut::new();
+                }
+                return Ok(Some(ZCPacket::new_from_buf(packet, ZCPacketType::TCP)));
+            }
+        }
+        if self.partial.len() < TCP_TUNNEL_HEADER_SIZE {
+            let take = (TCP_TUNNEL_HEADER_SIZE - self.partial.len()).min(self.chunk.len());
+            self.partial.extend_from_slice(&self.chunk[..take]);
+            self.chunk.advance(take);
+            if self.partial.len() < TCP_TUNNEL_HEADER_SIZE {
+                return Ok(None);
+            }
+        }
+        let length = Self::frame_len(&self.partial)?;
+        let take = (length - self.partial.len()).min(self.chunk.len());
+        // Allocation remains bounded by one validated frame even when the peer
+        // sends a partial header followed by a huge advertised length.
+        self.partial.reserve(length - self.partial.len());
+        self.partial.extend_from_slice(&self.chunk[..take]);
+        self.chunk.advance(take);
+        if self.partial.len() == length {
+            return Ok(Some(ZCPacket::new_from_buf(
+                std::mem::take(&mut self.partial),
+                ZCPacketType::TCP,
+            )));
+        }
+        Ok(None)
+    }
+
+    fn finish(&self) -> Result<(), TunnelError> {
+        if self.partial.is_empty() && self.chunk.is_empty() {
+            Ok(())
+        } else {
+            Err(TunnelError::InvalidPacket(
+                "truncated HTTP/2 tunnel frame".into(),
+            ))
+        }
+    }
+}
+
+struct H2PacketReader {
+    recv: RecvStream,
+    decoder: H2FrameDecoder,
+    ended: bool,
+}
+
+impl H2PacketReader {
+    fn new(recv: RecvStream) -> Self {
+        Self {
+            recv,
+            decoder: H2FrameDecoder::default(),
+            ended: false,
+        }
+    }
+}
+
+impl Stream for H2PacketReader {
+    type Item = Result<ZCPacket, TunnelError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.ended {
+            return Poll::Ready(None);
+        }
+        // Bound ready empty DATA frames so a peer cannot monopolize a worker.
+        for _ in 0..super::batch::MAX_PACKET_BATCH_SIZE {
+            let before = this.decoder.chunk.len();
+            let packet = this.decoder.decode();
+            let consumed = before - this.decoder.chunk.len();
+            if consumed != 0 {
+                if let Err(error) = this.recv.flow_control().release_capacity(consumed) {
+                    this.ended = true;
+                    return Poll::Ready(Some(Err(TunnelError::IOError(io::Error::other(error)))));
+                }
+            }
+            match packet {
+                Ok(Some(packet)) => return Poll::Ready(Some(Ok(packet))),
+                Err(error) => {
+                    this.ended = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Ok(None) => {}
+            }
+            match ready!(this.recv.poll_data(cx)) {
+                Some(Ok(data)) => this.decoder.load(data),
+                Some(Err(error)) => {
+                    this.ended = true;
+                    return Poll::Ready(Some(Err(TunnelError::IOError(io::Error::other(error)))));
+                }
+                None => {
+                    this.ended = true;
+                    return Poll::Ready(this.decoder.finish().err().map(Err));
+                }
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 
@@ -336,13 +478,7 @@ fn wrap_http2_tunnel(
     driver: AbortOnDropHandle<()>,
 ) -> Box<dyn Tunnel> {
     let mut tunnel = TunnelWrapper::new_with_transport_binding(
-        FramedReader::new(
-            H2Reader {
-                recv,
-                buf: Bytes::new(),
-            },
-            TCP_MTU_BYTES,
-        ),
+        H2PacketReader::new(recv),
         FramedWriter::new(H2Writer::new(send)),
         Some(info),
         Some(binding),
@@ -677,5 +813,114 @@ mod tests {
         // Live challenges.cloudflare.com ClientHello is ~1500 bytes (0x06xx),
         // never a 8-byte handshake record.
         assert!(!is_tcp_routing_record(&[0x16, 0x03, 0x01, 0x06, 0x07]));
+    }
+    fn framed(body: usize, value: u8) -> bytes::Bytes {
+        let mut bytes = Vec::with_capacity(body + 4);
+        bytes.extend_from_slice(&(body as u32).to_le_bytes());
+        bytes.resize(body + 4, value);
+        bytes.into()
+    }
+
+    #[test]
+    fn owned_h2_decoder_handles_every_split_and_coalesced_frame() {
+        use super::*;
+        let data = framed(96, 0x42);
+        for split in 0..=data.len() {
+            let mut decoder = H2FrameDecoder::default();
+            decoder.load(data.slice(..split));
+            let mut packets = Vec::new();
+            while let Some(p) = decoder.decode().unwrap() {
+                packets.push(p);
+            }
+            decoder.load(data.slice(split..));
+            while let Some(p) = decoder.decode().unwrap() {
+                packets.push(p);
+            }
+            assert_eq!(packets.len(), 1, "split={split}");
+            assert_eq!(packets[0].tunnel_payload(), &[0x42; 96]);
+            decoder.finish().unwrap();
+        }
+        let mut coalesced = Vec::new();
+        for n in 0..64 {
+            coalesced.extend_from_slice(&framed(96, n));
+        }
+        let coalesced = coalesced.into_boxed_slice().into_vec();
+        let pointer = coalesced.as_ptr();
+        let mut decoder = H2FrameDecoder::default();
+        decoder.load(coalesced.into());
+        let mut packets = Vec::new();
+        for n in 0..64 {
+            let p = decoder.decode().unwrap().unwrap();
+            assert_eq!(p.tunnel_payload(), &[n as u8; 96]);
+            assert_eq!(
+                p.tunnel_payload().as_ptr(),
+                pointer.wrapping_add(n * 100 + 4)
+            );
+            packets.push(p);
+        }
+        assert!(decoder.decode().unwrap().is_none());
+        decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn owned_h2_decoder_rejects_bad_lengths_before_reserving_and_truncated_eof() {
+        use super::*;
+        for length in [0_u32, 15, 2001, u32::MAX] {
+            let mut decoder = H2FrameDecoder::default();
+            decoder.load(Bytes::copy_from_slice(&length.to_le_bytes()));
+            assert!(decoder.decode().is_err());
+            assert!(decoder.partial.capacity() <= 8);
+        }
+        for bytes in [Bytes::from_static(&[1, 2]), framed(96, 3).slice(..50)] {
+            let mut decoder = H2FrameDecoder::default();
+            decoder.load(bytes);
+            assert!(decoder.decode().unwrap().is_none());
+            assert!(decoder.finish().is_err());
+        }
+        for length in [PEER_MANAGER_HEADER_SIZE, TCP_MTU_BYTES] {
+            let mut decoder = H2FrameDecoder::default();
+            decoder.load(framed(length, 7));
+            assert_eq!(
+                decoder.decode().unwrap().unwrap().tunnel_payload().len(),
+                length
+            );
+            decoder.finish().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_h2_reader_delivers_split_data_and_returns_exact_credit() {
+        use futures::StreamExt;
+        let (reader, mut send, _server, _driver) = stream_pair().await;
+        let mut reader = super::H2PacketReader::new(reader.recv);
+        let mut data = Vec::new();
+        for n in 0..32 {
+            data.extend_from_slice(&framed(96, n));
+        }
+        let data = bytes::Bytes::from(data);
+        send.send_data(data.slice(..2), false).unwrap();
+        send.send_data(data.slice(2..199), false).unwrap();
+        send.send_data(data.slice(199..), true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for n in 0..32 {
+                let p = reader.next().await.unwrap().unwrap();
+                assert_eq!(p.tunnel_payload(), &[n as u8; 96]);
+            }
+            assert!(reader.next().await.is_none());
+            assert!(reader.next().await.is_none());
+            assert_eq!(reader.recv.flow_control().used_capacity(), 0);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_h2_reader_reports_truncated_frame_once() {
+        use futures::StreamExt;
+        let (reader, mut send, _server, _driver) = stream_pair().await;
+        let mut reader = super::H2PacketReader::new(reader.recv);
+        send.send_data(framed(96, 1).slice(..50), true).unwrap();
+        assert!(reader.next().await.unwrap().is_err());
+        assert!(reader.next().await.is_none());
     }
 }

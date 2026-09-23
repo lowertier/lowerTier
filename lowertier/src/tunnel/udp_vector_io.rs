@@ -857,32 +857,22 @@ fn try_send_batch_apple(
         return Ok(0);
     }
     let destination = destination.map(socket2::SockAddr::from);
-    let mut iovecs: [libc::iovec; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| libc::iovec {
-        iov_base: ptr::null_mut(),
-        iov_len: 0,
-    });
-    for (iovec, buffer) in iovecs.iter_mut().zip(buffers) {
-        *iovec = libc::iovec {
+    // Only the active prefix is initialized; the bounded vector stays on stack.
+    let mut iovecs = SmallVec::<[libc::iovec; MAX_PACKET_BATCH_SIZE]>::new();
+    for buffer in buffers {
+        iovecs.push(libc::iovec {
             iov_base: buffer.as_ptr().cast_mut().cast(),
             iov_len: buffer.len(),
-        };
+        });
     }
-    let mut messages: [MsgHdrX; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| MsgHdrX {
-        msg_name: ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: ptr::null_mut(),
-        msg_iovlen: 0,
-        msg_control: ptr::null_mut(),
-        msg_controllen: 0,
-        msg_flags: 0,
-        msg_datalen: 0,
-    });
-    for (message, iovec) in messages.iter_mut().zip(&mut iovecs).take(buffers.len()) {
+    let mut messages = SmallVec::<[MsgHdrX; MAX_PACKET_BATCH_SIZE]>::new();
+    // iovecs is complete before taking addresses; no push can invalidate them.
+    for iovec in &mut iovecs {
         let (msg_name, msg_namelen) = destination
             .as_ref()
             .map(|destination| (destination.as_ptr().cast_mut().cast(), destination.len()))
             .unwrap_or((ptr::null_mut(), 0));
-        *message = MsgHdrX {
+        messages.push(MsgHdrX {
             msg_name,
             msg_namelen,
             msg_iov: iovec,
@@ -891,7 +881,7 @@ fn try_send_batch_apple(
             msg_controllen: 0,
             msg_flags: 0,
             msg_datalen: iovec.iov_len,
-        };
+        });
     }
 
     let result = unsafe {
@@ -930,22 +920,22 @@ pub(crate) fn try_send_batch(
         }
     }
     let destination = socket2::SockAddr::from(destination);
-    let mut iovecs: [libc::iovec; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| libc::iovec {
-        iov_base: ptr::null_mut(),
-        iov_len: 0,
-    });
-    for (iovec, buffer) in iovecs.iter_mut().zip(buffers) {
-        *iovec = libc::iovec {
+    // Only the active prefix is initialized; the bounded vector stays on stack.
+    let mut iovecs = SmallVec::<[libc::iovec; MAX_PACKET_BATCH_SIZE]>::new();
+    for buffer in buffers {
+        iovecs.push(libc::iovec {
             iov_base: buffer.as_ptr().cast_mut().cast(),
             iov_len: buffer.len(),
-        };
+        });
     }
-    let mut messages: [libc::mmsghdr; MAX_PACKET_BATCH_SIZE] = unsafe { std::mem::zeroed() };
-    for (message, iovec) in messages.iter_mut().zip(&mut iovecs).take(buffers.len()) {
+    let mut messages = SmallVec::<[libc::mmsghdr; MAX_PACKET_BATCH_SIZE]>::new();
+    for iovec in &mut iovecs {
+        let mut message: libc::mmsghdr = unsafe { std::mem::zeroed() };
         message.msg_hdr.msg_name = destination.as_ptr().cast_mut().cast();
         message.msg_hdr.msg_namelen = destination.len();
         message.msg_hdr.msg_iov = iovec;
         message.msg_hdr.msg_iovlen = 1;
+        messages.push(message);
     }
 
     #[cfg(not(target_env = "musl"))]
@@ -976,16 +966,14 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
 
     debug_assert!(buffers.len() >= 2);
     let destination = socket2::SockAddr::from(destination);
-    let mut iovecs: [libc::iovec; MAX_PACKET_BATCH_SIZE] = std::array::from_fn(|_| libc::iovec {
-        iov_base: ptr::null_mut(),
-        iov_len: 0,
-    });
+    // Only the active prefix is initialized; the bounded vector stays on stack.
+    let mut iovecs = SmallVec::<[libc::iovec; MAX_PACKET_BATCH_SIZE]>::new();
     let mut total = 0_usize;
-    for (iovec, buffer) in iovecs.iter_mut().zip(buffers) {
-        *iovec = libc::iovec {
+    for buffer in buffers {
+        iovecs.push(libc::iovec {
             iov_base: buffer.as_ptr().cast_mut().cast(),
             iov_len: buffer.len(),
-        };
+        });
         total += buffer.len();
     }
 
@@ -1049,7 +1037,8 @@ fn try_send_gso(socket: &UdpSocket, destination: SocketAddr, buffers: &[Bytes]) 
 }
 
 fn udp_gso_enabled() -> bool {
-    std::env::var_os("LOWTIER_DEBUG_DISABLE_UDP_GSO").is_none()
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LOWTIER_DEBUG_DISABLE_UDP_GSO").is_none())
         && !UDP_GSO_RUNTIME_DISABLED.get().copied().unwrap_or(false)
 }
 
@@ -1261,5 +1250,40 @@ mod tests {
                 "segment {index}"
             );
         }
+    }
+    #[tokio::test]
+    async fn active_udp_vectors_deliver_empty_single_and_full_batches_in_order() {
+        use super::*;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let destination = receiver.local_addr().unwrap();
+            assert_eq!(try_send_batch(&sender, destination, &[], false).unwrap(), 0);
+            for count in [1, 8, MAX_PACKET_BATCH_SIZE, MAX_PACKET_BATCH_SIZE + 3] {
+                let payloads: Vec<_> = (0..count).map(|n| Bytes::from(vec![n as u8; 32])).collect();
+                let mut sent = 0;
+                while sent < count {
+                    sender.writable().await.unwrap();
+                    match sender.try_io(Interest::WRITABLE, || {
+                        try_send_batch(&sender, destination, &payloads[sent..], false)
+                    }) {
+                        Ok(n) => {
+                            assert!(n > 0 && n <= MAX_PACKET_BATCH_SIZE);
+                            sent += n;
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+                for n in 0..count {
+                    let mut packet = [0_u8; 64];
+                    let (len, source) = receiver.recv_from(&mut packet).await.unwrap();
+                    assert_eq!(source, sender.local_addr().unwrap());
+                    assert_eq!(&packet[..len], &[n as u8; 32]);
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
 }
