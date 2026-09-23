@@ -69,12 +69,15 @@ mod sni;
 #[cfg(target_os = "linux")]
 use self::runtime::default_runtime;
 use fragments::DatagramFragments;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod darwin_runtime;
+#[cfg(target_os = "macos")]
+use darwin_runtime::default_runtime;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use quinn::default_runtime;
 pub(crate) mod tunnel_cc;
 
 use self::sni::quic_initial_sni_eq;
-use self::tunnel_cc::TunnelConfig;
 
 // Begin at QUIC's Internet-safe UDP payload size. PMTUD probes upward before
 // application traffic uses larger packets, including on lower-MTU PPPoE paths.
@@ -906,7 +909,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
         .receive_window(receive_window)
-        .congestion_controller_factory(Arc::new(TunnelConfig::default()));
+        .congestion_controller_factory(tunnel_cc::controller_factory()?);
 
     Ok(Arc::new(config))
 }
