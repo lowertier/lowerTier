@@ -467,6 +467,11 @@ const COMPACT_SPARE_THRESHOLD: usize = 512;
 /// Normalize the allocation base before checking capacity, including any
 /// discarded prefix. Independent mutable slices can then share this bounded slab.
 pub(crate) fn bounded_owned_buffer(bytes: Bytes) -> BytesMut {
+    // Shared or owner-backed storage already requires a copy. Copy once into
+    // the destination type instead of normalizing it through Vec and Bytes.
+    if !bytes.is_unique() {
+        return BytesMut::from(bytes.as_ref());
+    }
     let storage: Vec<u8> = bytes.into();
     if storage.capacity().saturating_sub(storage.len()) > COMPACT_SPARE_THRESHOLD {
         BytesMut::from(storage.as_slice())

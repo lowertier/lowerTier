@@ -285,6 +285,9 @@ impl H2FrameDecoder {
 struct H2PacketReader {
     recv: RecvStream,
     decoder: H2FrameDecoder,
+    // Return consumed credit at DATA boundaries, avoiding one flow-control
+    // lock/wakeup operation for every small inner packet in a coalesced slab.
+    pending_release: usize,
     ended: bool,
 }
 
@@ -293,6 +296,7 @@ impl H2PacketReader {
         Self {
             recv,
             decoder: H2FrameDecoder::default(),
+            pending_release: 0,
             ended: false,
         }
     }
@@ -311,7 +315,9 @@ impl Stream for H2PacketReader {
             let before = this.decoder.chunk.len();
             let packet = this.decoder.decode();
             let consumed = before - this.decoder.chunk.len();
-            if consumed != 0 {
+            this.pending_release += consumed;
+            if this.pending_release != 0 && (this.decoder.chunk.is_empty() || packet.is_err()) {
+                let consumed = std::mem::take(&mut this.pending_release);
                 if let Err(error) = this.recv.flow_control().release_capacity(consumed) {
                     this.ended = true;
                     return Poll::Ready(Some(Err(TunnelError::IOError(io::Error::other(error)))));
@@ -909,6 +915,30 @@ mod tests {
             assert!(reader.next().await.is_none());
             assert!(reader.next().await.is_none());
             assert_eq!(reader.recv.flow_control().used_capacity(), 0);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_h2_reader_returns_coalesced_credit_at_the_data_boundary() {
+        use futures::StreamExt;
+        let (reader, mut send, _server, _driver) = stream_pair().await;
+        let mut reader = super::H2PacketReader::new(reader.recv);
+        let mut data = Vec::new();
+        data.extend_from_slice(&framed(96, 1));
+        data.extend_from_slice(&framed(96, 2));
+        send.send_data(data.into(), true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let first = reader.next().await.unwrap().unwrap();
+            assert_eq!(first.tunnel_payload(), &[1; 96]);
+            assert_eq!(reader.pending_release, 100);
+            assert_eq!(reader.recv.flow_control().used_capacity(), 200);
+            let second = reader.next().await.unwrap().unwrap();
+            assert_eq!(second.tunnel_payload(), &[2; 96]);
+            assert_eq!(reader.pending_release, 0);
+            assert_eq!(reader.recv.flow_control().used_capacity(), 0);
+            assert!(reader.next().await.is_none());
         })
         .await
         .unwrap();
