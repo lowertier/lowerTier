@@ -529,6 +529,7 @@ impl State {
             if event.is_drained() {
                 self.recv_state.connections.senders.remove(&ch);
                 if self.recv_state.connections.is_empty() {
+                    self.recv_state.recv_buf.reset();
                     shared.idle.notify_waiters();
                 }
             }
@@ -734,11 +735,54 @@ impl std::ops::Deref for EndpointRef {
     }
 }
 
+/// Scratch memory follows receive demand independently of the advertised
+/// datagram limit, connection flow-control windows and kernel socket buffers.
+/// Every slot always fits the socket's full GRO segment count.
+struct ReceiveBuffer {
+    storage: Vec<u8>,
+    stride: usize,
+    initial_slots: usize,
+}
+
+impl ReceiveBuffer {
+    fn new(max_payload: usize, max_segments: usize) -> Self {
+        let stride = max_payload
+            .checked_mul(max_segments.max(1))
+            .expect("UDP receive stride fits address space");
+        assert!(stride > 0);
+        // Ordinary datagrams already use a small batch. GRO multiplies each
+        // slot, so begin with one complete GRO message and grow under pressure.
+        let initial_slots = if max_segments > 1 { 1 } else { BATCH_SIZE };
+        Self {
+            storage: vec![0; stride * initial_slots],
+            stride,
+            initial_slots,
+        }
+    }
+
+    fn slots(&self) -> usize {
+        self.storage.len() / self.stride
+    }
+
+    fn grow(&mut self) {
+        let slots = self.slots().saturating_mul(2).min(BATCH_SIZE);
+        self.storage.resize(self.stride * slots, 0);
+    }
+
+    fn reset(&mut self) {
+        let length = self.stride * self.initial_slots;
+        if self.storage.len() > length {
+            self.storage.truncate(length);
+            self.storage.shrink_to_fit();
+        }
+    }
+}
+
 /// State directly involved in handling incoming packets
 struct RecvState {
     incoming: VecDeque<proto::Incoming>,
     connections: ConnectionSet,
-    recv_buf: Box<[u8]>,
+    recv_buf: ReceiveBuffer,
 }
 
 impl RecvState {
@@ -747,12 +791,10 @@ impl RecvState {
         max_receive_segments: usize,
         endpoint: &proto::Endpoint,
     ) -> Self {
-        let recv_buf = vec![
-            0;
-            endpoint.config().get_max_udp_payload_size().min(64 * 1024) as usize
-                * max_receive_segments
-                * BATCH_SIZE
-        ];
+        let recv_buf = ReceiveBuffer::new(
+            endpoint.config().get_max_udp_payload_size().min(64 * 1024) as usize,
+            max_receive_segments,
+        );
         Self {
             connections: ConnectionSet {
                 senders: FxHashMap::default(),
@@ -760,7 +802,7 @@ impl RecvState {
                 close: None,
             },
             incoming: VecDeque::new(),
-            recv_buf: recv_buf.into(),
+            recv_buf,
         }
     }
 
@@ -780,19 +822,14 @@ impl RecvState {
         }
         let mut received_connection_packet = false;
         let mut metas = [RecvMeta::default(); BATCH_SIZE];
+        let slots = self.recv_buf.slots();
         let mut iovs: [IoSliceMut; BATCH_SIZE] = {
-            let mut bufs = self
-                .recv_buf
-                .chunks_mut(self.recv_buf.len() / BATCH_SIZE)
-                .map(IoSliceMut::new);
-
-            // expect() safe as self.recv_buf is chunked into BATCH_SIZE items
-            // and iovs will be of size BATCH_SIZE, thus from_fn is called
-            // exactly BATCH_SIZE times.
-            std::array::from_fn(|_| bufs.next().expect("BATCH_SIZE elements"))
+            let mut bufs = self.recv_buf.storage.chunks_mut(self.recv_buf.stride);
+            // Empty suffix descriptors never reach the socket implementation.
+            std::array::from_fn(|_| IoSliceMut::new(bufs.next().unwrap_or(&mut [])))
         };
         loop {
-            match socket.poll_recv(cx, &mut iovs, &mut metas) {
+            match socket.poll_recv(cx, &mut iovs[..slots], &mut metas[..slots]) {
                 Poll::Ready(Ok(msgs)) => {
                     let logical_datagrams = metas
                         .iter()
@@ -844,6 +881,15 @@ impl RecvState {
                         if let Some(sender) = self.connections.senders.get_mut(&handle) {
                             let _ = sender.send(ConnectionEvent::ProtoBatch(events));
                         }
+                    }
+                    if msgs == slots && slots < BATCH_SIZE {
+                        // No packet or IoSlice may retain a reference across growth.
+                        drop(iovs);
+                        self.recv_buf.grow();
+                        return Ok(PollProgress {
+                            received_connection_packet,
+                            keep_going: true,
+                        });
                     }
                 }
                 Poll::Pending => {
@@ -903,8 +949,9 @@ struct PollProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_datagram_count, receive_cycle_complete};
+    use super::{logical_datagram_count, receive_cycle_complete, ReceiveBuffer};
     use crate::IO_LOOP_BOUND;
+    use udp::BATCH_SIZE;
 
     #[test]
     fn gro_work_count_uses_logical_datagrams() {
@@ -917,5 +964,35 @@ mod tests {
     fn receive_cycle_uses_the_existing_io_bound() {
         assert!(!receive_cycle_complete(IO_LOOP_BOUND - 1));
         assert!(receive_cycle_complete(IO_LOOP_BOUND));
+    }
+    #[test]
+    fn gro_scratch_starts_small_and_grows_to_the_existing_batch_ceiling() {
+        let mut buffer = ReceiveBuffer::new(1500, 64);
+        assert_eq!(buffer.storage.len(), 1500 * 64);
+        buffer.storage.fill(0xa5);
+        for _ in 0..16 {
+            let previous = buffer.storage.len();
+            buffer.grow();
+            assert!(buffer.slots() <= BATCH_SIZE);
+            assert_eq!(&buffer.storage[..1500 * 64], &[0xa5; 1500 * 64]);
+            assert!(buffer.storage[previous..].iter().all(|byte| *byte == 0));
+        }
+        assert_eq!(buffer.storage.len(), 1500 * 64 * BATCH_SIZE);
+        buffer.reset();
+        assert_eq!(buffer.storage.len(), 1500 * 64);
+        assert!(buffer.storage.capacity() < 1500 * 64 * BATCH_SIZE || BATCH_SIZE == 1);
+        buffer.grow();
+        assert!(buffer.storage[1500 * 64..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn ordinary_udp_scratch_preserves_the_full_batch_without_growth() {
+        let mut buffer = ReceiveBuffer::new(1500, 1);
+        assert_eq!(buffer.slots(), BATCH_SIZE);
+        let allocation = buffer.storage.as_ptr();
+        buffer.grow();
+        buffer.reset();
+        assert_eq!(buffer.storage.as_ptr(), allocation);
+        assert_eq!(buffer.storage.len(), 1500 * BATCH_SIZE);
     }
 }
