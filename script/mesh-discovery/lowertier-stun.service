@@ -1,0 +1,27 @@
+[Unit]
+Description=LowTier mesh STUN Binding service
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /opt/lowertier-discovery/mesh-stun.py
+Restart=always
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=64M
+TasksMax=16
+LimitNOFILE=256
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

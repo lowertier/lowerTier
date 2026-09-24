@@ -1,0 +1,27 @@
+[Unit]
+Description=LowTier mesh UDP tracker
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/opt/lowertier-discovery/lowertier-tracker --udp-listen 0.0.0.0:16970 --http-listen 127.0.0.1:16973 --interval 30
+Restart=always
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=64M
+TasksMax=16
+LimitNOFILE=256
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

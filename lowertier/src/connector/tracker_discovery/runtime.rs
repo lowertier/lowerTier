@@ -32,6 +32,27 @@ static QUIC_DISCOVERY_HANDSHAKES: tokio::sync::Semaphore = tokio::sync::Semaphor
 );
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Withdraw expired observations without disturbing established QUIC sessions.
+/// A restored mapping (including the same address) must wake tracker watchers.
+fn publish_udp_mapping(
+    sender: &watch::Sender<Option<SocketAddr>>,
+    mapped: Option<SocketAddr>,
+) -> Duration {
+    sender.send_if_modified(|current| {
+        if *current == mapped {
+            return false;
+        }
+        *current = mapped;
+        true
+    });
+    if mapped.is_some() {
+        Duration::from_secs(30)
+    } else {
+        // Mapping recovery is independent of the tracker's announce interval.
+        Duration::from_secs(5)
+    }
+}
+
 async fn acquire_quic_discovery_slot<'a>(
     slots: &'a tokio::sync::Semaphore,
     upgrade: &mut Option<oneshot::Receiver<u32>>,
@@ -280,20 +301,15 @@ async fn run_path(
                             .get_first_udp_mapping_with_receiver(udp.clone(), packets.subscribe())
                             .await
                     };
-                    match mapping {
-                        Ok(mapped) => {
-                            mapped_tx.send_if_modified(|current| {
-                                if *current == Some(mapped) {
-                                    false
-                                } else {
-                                    *current = Some(mapped);
-                                    true
-                                }
-                            });
+                    let mapped = match mapping {
+                        Ok(mapped) => Some(mapped),
+                        Err(error) => {
+                            tracing::debug!(%error, "tracker discovery STUN failed; mapping withdrawn");
+                            None
                         }
-                        Err(error) => tracing::debug!(%error, "tracker discovery STUN failed"),
-                    }
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    };
+                    let delay = publish_udp_mapping(&mapped_tx, mapped);
+                    tokio::time::sleep(delay).await;
                 }
                 #[allow(unreachable_code)]
                 Ok::<(), anyhow::Error>(())
@@ -425,6 +441,27 @@ mod tests {
     use super::super::server::TrackerServer;
     use super::*;
     use crate::peers::tests::create_mock_peer_manager_secure;
+
+    #[tokio::test]
+    async fn udp_mapping_failure_withdraws_and_same_address_recovery_notifies() {
+        let address = "198.51.100.7:16969".parse().unwrap();
+        let (sender, mut receiver) = watch::channel(None);
+        assert_eq!(publish_udp_mapping(&sender, None), Duration::from_secs(5));
+        assert!(!receiver.has_changed().unwrap());
+        assert_eq!(
+            publish_udp_mapping(&sender, Some(address)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(*receiver.borrow_and_update(), Some(address));
+        publish_udp_mapping(&sender, Some(address));
+        assert!(!receiver.has_changed().unwrap());
+        assert_eq!(publish_udp_mapping(&sender, None), Duration::from_secs(5));
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(*receiver.borrow_and_update(), None);
+        publish_udp_mapping(&sender, Some(address));
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(*receiver.borrow_and_update(), Some(address));
+    }
 
     #[tokio::test]
     async fn queued_handshake_consumes_ready_and_closed_upgrades() {
