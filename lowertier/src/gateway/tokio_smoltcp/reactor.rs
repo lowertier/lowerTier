@@ -249,6 +249,7 @@ async fn run(
     stopper: Arc<Notify>,
 ) -> io::Result<()> {
     let default_timeout = Duration::from_secs(60);
+    let mut next_retired_reap = std::time::Instant::now();
     let timer = sleep(default_timeout.into());
     let max_burst_size = async_iface
         .capabilities()
@@ -271,6 +272,11 @@ async fn run(
                     .unwrap_or(default_timeout)
             };
 
+            let deadline = if socket_allocator.has_retired() {
+                deadline.min(Duration::from_secs(1))
+            } else {
+                deadline
+            };
             timer
                 .as_mut()
                 .reset(tokio::time::Instant::now() + deadline.into());
@@ -296,6 +302,14 @@ async fn run(
             Instant::now(),
             max_burst_size,
         );
+
+        if socket_allocator.has_retired() {
+            let now = std::time::Instant::now();
+            if now >= next_retired_reap {
+                socket_allocator.reap_retired(&mut sockets, now);
+                next_retired_reap = now + std::time::Duration::from_secs(1);
+            }
+        }
 
         // wake up all closed sockets (smoltcp seems have a bug that it doesn't wake up closed sockets)
         for (_, socket) in sockets.iter_mut() {

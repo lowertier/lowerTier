@@ -1266,6 +1266,22 @@ impl<'a> Socket<'a> {
         self.tx_buffer.grow(storage);
     }
 
+    /// Release empty payload storage after both TCP halves have closed.
+    /// The caller retains TIME-WAIT protocol state for retransmitted FINs.
+    /// Live windows and queued/unread payload are never changed.
+    #[cfg(feature = "alloc")]
+    pub fn release_time_wait_buffers(&mut self) -> bool {
+        if !matches!(self.state, State::TimeWait | State::Closed)
+            || !self.tx_buffer.is_empty()
+            || !self.rx_buffer.is_empty()
+        {
+            return false;
+        }
+        self.tx_buffer = SocketBuffer::new(alloc::vec::Vec::new());
+        self.rx_buffer = SocketBuffer::new(alloc::vec::Vec::new());
+        true
+    }
+
     /// Check whether the receive half of the full-duplex connection buffer is open
     /// (see [may_recv](#method.may_recv)), and the receive buffer is not empty.
     #[inline]
@@ -7562,7 +7578,8 @@ mod test {
         let reduced = s.congestion_controller.inner().window();
         s.remote_win_len = 0;
         let rto = s.rtte.retransmission_timeout();
-        s.timer.set_for_zero_window_probe(Instant::from_millis(0), rto);
+        s.timer
+            .set_for_zero_window_probe(Instant::from_millis(0), rto);
         send!(
             s,
             TcpRepr {

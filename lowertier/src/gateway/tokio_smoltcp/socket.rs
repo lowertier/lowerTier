@@ -255,12 +255,22 @@ impl AsyncWrite for TcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
 
-        if socket.is_open() {
+        if socket.may_send() {
             socket.close();
             self.reactor.notify();
         }
-        if socket.state() == tcp::State::Closed {
-            return Poll::Ready(Ok(()));
+        // AsyncWrite shutdown closes only the transmit half. Requiring the
+        // peer's FIN (or TIME-WAIT expiry) deadlocks request/response protocols.
+        // Wait for our FIN ACK so dropping the handle cannot lose a tail.
+        if matches!(
+            socket.state(),
+            tcp::State::FinWait2 | tcp::State::TimeWait | tcp::State::Closed
+        ) {
+            return if socket.send_queue() == 0 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+            };
         }
 
         socket.register_send_waker(cx.waker());
@@ -280,6 +290,284 @@ mod tcp_tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::task::AbortOnDropHandle;
+
+    async fn connected_test_pair() -> (
+        Net,
+        Net,
+        AbortOnDropHandle<()>,
+        AbortOnDropHandle<()>,
+        TcpStream,
+        TcpStream,
+    ) {
+        connected_test_pair_with_ack_loss(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    async fn connected_test_pair_with_ack_loss(
+        drop_ack: Arc<std::sync::atomic::AtomicBool>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (
+        Net,
+        Net,
+        AbortOnDropHandle<()>,
+        AbortOnDropHandle<()>,
+        TcpStream,
+        TcpStream,
+    ) {
+        let mut caps = DeviceCapabilities::default();
+        caps.medium = Medium::Ip;
+        caps.max_transmission_unit = 1280;
+        let (a_device, to_a, mut from_a) = ChannelDevice::new(caps.clone());
+        let (b_device, to_b, mut from_b) = ChannelDevice::new(caps);
+        let a = Net::new(
+            a_device,
+            NetConfig::new(
+                Config::new(HardwareAddress::Ip),
+                "192.0.2.1/24".parse().unwrap(),
+                vec![],
+                None,
+            ),
+        );
+        let b = Net::new(
+            b_device,
+            NetConfig::new(
+                Config::new(HardwareAddress::Ip),
+                "192.0.2.2/24".parse().unwrap(),
+                vec![],
+                None,
+            ),
+        );
+        let forward = AbortOnDropHandle::new(tokio::spawn(async move {
+            while let Some(packet) = from_a.recv().await {
+                let ip = smoltcp::wire::Ipv4Packet::new_checked(packet.payload()).unwrap();
+                let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).unwrap();
+                if tcp.ack()
+                    && !tcp.fin()
+                    && tcp.payload().is_empty()
+                    && drop_ack.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    dropped.store(true, std::sync::atomic::Ordering::SeqCst);
+                    continue;
+                }
+                if to_b.send(Ok(PacketBatch::singleton(packet))).await.is_err() {
+                    break;
+                }
+            }
+        }));
+        let backward = AbortOnDropHandle::new(tokio::spawn(async move {
+            while let Some(packet) = from_b.recv().await {
+                if to_a.send(Ok(PacketBatch::singleton(packet))).await.is_err() {
+                    break;
+                }
+            }
+        }));
+        let mut listener = b.tcp_bind("192.0.2.2:8080".parse().unwrap()).await.unwrap();
+        let (client, server) = tokio::join!(
+            a.tcp_connect("192.0.2.2:8080".parse().unwrap(), 12000),
+            listener.accept()
+        );
+        (a, b, forward, backward, client.unwrap(), server.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn shutdown_half_close_delivers_tail_and_reclaims_time_wait_buffers() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let (_a, _b, _forward, _backward, mut client, mut server) = connected_test_pair().await;
+            let request = vec![0x5a; 128 * 1024];
+            let response = vec![0xa5; 96 * 1024];
+            let send = async {
+                client.write_all(&request).await.unwrap();
+                client.shutdown().await.unwrap();
+                // The peer still owes its response: shutdown must preserve reading.
+                assert_eq!(
+                    client
+                        .reactor
+                        .get_socket::<tcp::Socket>(*client.handle)
+                        .send_queue(),
+                    0
+                );
+                client.shutdown().await.unwrap();
+                let mut received = Vec::new();
+                client.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received, response);
+            };
+            let receive = async {
+                let mut received = Vec::new();
+                server.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received, request);
+                server.write_all(&response).await.unwrap();
+                server.shutdown().await.unwrap();
+            };
+            tokio::join!(send, receive);
+            assert_eq!(
+                client
+                    .reactor
+                    .get_socket::<tcp::Socket>(*client.handle)
+                    .state(),
+                tcp::State::TimeWait
+            );
+            let reactor = client.reactor.clone();
+            let handle = *client.handle;
+            drop(client);
+            assert!(reactor.socket_allocator().has_retired());
+            {
+                let socket = reactor.get_socket::<tcp::Socket>(handle);
+                assert_eq!(socket.state(), tcp::State::TimeWait);
+                assert_eq!(socket.send_capacity(), 0);
+                assert_eq!(socket.recv_capacity(), 0);
+            }
+            // Linger metadata has a fixed deadline even if no packet wakes it.
+            let allocator = reactor.socket_allocator();
+            let mut sockets = allocator.sockets().lock();
+            allocator.reap_retired(
+                &mut sockets,
+                std::time::Instant::now() + std::time::Duration::from_secs(61),
+            );
+            assert!(!sockets.iter().any(|(h, _)| h == handle));
+            assert!(!allocator.has_retired());
+        })
+        .await
+        .expect("half-close blocked until peer FIN or TIME-WAIT expiry");
+    }
+
+    #[tokio::test]
+    async fn dropped_acknowledged_half_close_keeps_fin_wait_protocol_state() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let (_a, _b, _forward, _backward, mut client, mut server) = connected_test_pair().await;
+            client.write_all(b"complete tail").await.unwrap();
+            // Before the current-thread reactor has run, the tail has no ACK.
+            {
+                let shutdown = client.shutdown();
+                tokio::pin!(shutdown);
+                assert!(futures::poll!(shutdown.as_mut()).is_pending());
+            }
+            client.shutdown().await.unwrap();
+            let reactor = client.reactor.clone();
+            let handle = *client.handle;
+            assert_eq!(
+                reactor.get_socket::<tcp::Socket>(handle).state(),
+                tcp::State::FinWait2
+            );
+            drop(client);
+            assert!(reactor.socket_allocator().has_retired());
+            assert!(reactor.get_socket::<tcp::Socket>(handle).recv_capacity() > 0);
+            let mut received = Vec::new();
+            server.read_to_end(&mut received).await.unwrap();
+            assert_eq!(&received, b"complete tail");
+            server.shutdown().await.unwrap();
+            assert_eq!(
+                reactor.get_socket::<tcp::Socket>(handle).state(),
+                tcp::State::TimeWait
+            );
+            let allocator = reactor.socket_allocator();
+            let mut sockets = allocator.sockets().lock();
+            allocator.reap_retired(&mut sockets, std::time::Instant::now());
+            assert_eq!(sockets.get::<tcp::Socket>(handle).recv_capacity(), 0);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_full_close_wait_reproduces_half_close_stall() {
+        let (_a, _b, _forward, _backward, mut client, mut server) = connected_test_pair().await;
+        client.write_all(b"request").await.unwrap();
+        // Exact previous shutdown condition: only CLOSED is accepted.
+        let legacy = future::poll_fn(|cx| {
+            let mut socket = client.reactor.get_socket::<tcp::Socket>(*client.handle);
+            if socket.is_open() {
+                socket.close();
+                client.reactor.notify();
+            }
+            if socket.state() == tcp::State::Closed {
+                return Poll::Ready(());
+            }
+            socket.register_send_waker(cx.waker());
+            Poll::Pending
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), legacy)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            client
+                .reactor
+                .get_socket::<tcp::Socket>(*client.handle)
+                .state(),
+            tcp::State::FinWait2
+        );
+        client.shutdown().await.unwrap();
+        let mut request = Vec::new();
+        server.read_to_end(&mut request).await.unwrap();
+        assert_eq!(&request, b"request");
+    }
+
+    #[tokio::test]
+    async fn buffer_reclamation_preserves_live_windows_and_unread_tail() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let (_a, _b, _forward, _backward, mut client, mut server) = connected_test_pair().await;
+            {
+                let mut socket = client.reactor.get_socket::<tcp::Socket>(*client.handle);
+                let capacity = socket.recv_capacity();
+                assert!(!socket.release_time_wait_buffers());
+                assert_eq!(socket.recv_capacity(), capacity);
+            }
+            client.shutdown().await.unwrap();
+            server.write_all(b"unread response").await.unwrap();
+            server.shutdown().await.unwrap();
+            {
+                let mut socket = client.reactor.get_socket::<tcp::Socket>(*client.handle);
+                assert_eq!(socket.state(), tcp::State::TimeWait);
+                assert!(!socket.release_time_wait_buffers());
+                assert!(socket.recv_queue() > 0);
+            }
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            assert_eq!(&response, b"unread response");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reclaimed_time_wait_socket_acknowledges_retransmitted_fin() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            let drop_ack = Arc::new(AtomicBool::new(false));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (_a, _b, _forward, _backward, mut client, mut server) =
+                connected_test_pair_with_ack_loss(drop_ack.clone(), dropped.clone()).await;
+            client.shutdown().await.unwrap();
+            let mut request = Vec::new();
+            server.read_to_end(&mut request).await.unwrap();
+            drop_ack.store(true, Ordering::SeqCst);
+            let closing = AbortOnDropHandle::new(tokio::spawn(async move {
+                server.shutdown().await.unwrap();
+            }));
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            let reactor = client.reactor.clone();
+            let handle = *client.handle;
+            assert_eq!(
+                reactor.get_socket::<tcp::Socket>(handle).state(),
+                tcp::State::TimeWait
+            );
+            drop(client);
+            assert_eq!(reactor.get_socket::<tcp::Socket>(handle).send_capacity(), 0);
+            assert_eq!(reactor.get_socket::<tcp::Socket>(handle).recv_capacity(), 0);
+            // The peer's first FIN ACK was lost. The empty TIME-WAIT socket
+            // must still answer its retransmitted FIN after its owner was dropped.
+            closing.await.unwrap();
+            assert!(dropped.load(Ordering::SeqCst));
+        })
+        .await
+        .expect("lost final ACK stranded the peer after buffer reclamation");
+    }
 
     #[tokio::test]
     async fn flush_preserves_acknowledged_delivery_before_handle_destruction() {
