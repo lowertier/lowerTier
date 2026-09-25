@@ -291,6 +291,9 @@ pub struct InitiatorSessionReservation {
     recv_algorithm: String,
     peer_static_pubkey: Option<[u8; 32]>,
     recovery_quota: Mutex<Option<QuotaPermit>>,
+    // Publication restores an evicted session or replaces a peer-forgotten one.
+    publishes_session: bool,
+    previous_session: Option<(Arc<PeerSession>, u64)>,
     state: AtomicU8,
 }
 
@@ -1228,6 +1231,9 @@ impl PeerSessionStore {
                 "responder recovery proof is awaiting exact recovery"
             ));
         }
+        if self.pending_creates.contains_key(key) {
+            return Err(anyhow!("session creation is pending"));
+        }
         // Reserve the recovery slot before any handshake message can make
         // the responder commit this transition. The permit moves into an
         // in-doubt record if the confirmation result is ambiguous.
@@ -1237,115 +1243,91 @@ impl PeerSessionStore {
         let recovery_quota = QuotaPermit {
             counter: &IN_DOUBT_RESERVATION_COUNT,
         };
-        let result = match action {
-            PeerSessionAction::Join => {
-                let session = self
-                    .peek(key)
-                    .ok_or_else(|| anyhow!("no local session for JOIN"))?;
-                session.check_encrypt_algo_same(&send_algorithm, &recv_algorithm)?;
-                session.check_peer_static_pubkey(peer_static_pubkey)?;
-                if session.session_generation() != b_session_generation {
-                    return Err(anyhow!("JOIN generation mismatch"));
-                }
-                Ok(InitiatorSessionReservation {
-                    transition_revision: session.transition_revision(),
-                    root_key: session.root_key(),
-                    initial_epoch,
-                    transition_id,
-                    session_generation: b_session_generation,
-                    store: self.clone(),
-                    key: key.clone(),
-                    session,
-                    action,
-                    send_algorithm,
-                    recv_algorithm,
-                    peer_static_pubkey,
-                    recovery_quota: Mutex::new(None),
-                    state: AtomicU8::new(RESERVATION_PENDING),
-                })
-            }
-            PeerSessionAction::Sync => {
-                if self.pending_creates.contains_key(key) {
-                    return Err(anyhow!("session creation is pending"));
-                }
-                let session = self
-                    .peek(key)
-                    .ok_or_else(|| anyhow!("no local session for SYNC"))?;
-                session.check_encrypt_algo_same(&send_algorithm, &recv_algorithm)?;
-                session.check_peer_static_pubkey(peer_static_pubkey)?;
-                let root_key = root_key_32.ok_or_else(|| anyhow!("missing root_key"))?;
-                let (active_generation, _current_root_key, reserved_epoch, transition_revision) =
-                    session.prepare_sync_transition_at(initial_epoch)?;
-                if let Err(error) = session.reserve_peer_static_pubkey(peer_static_pubkey) {
-                    session.cancel_reserved_sync(transition_revision, reserved_epoch);
-                    return Err(error);
-                }
-                if active_generation != b_session_generation {
-                    session.cancel_reserved_sync(transition_revision, reserved_epoch);
-                    session.cancel_reserved_peer_static_pubkey();
-                    return Err(anyhow!("SYNC generation mismatch"));
-                }
-                Ok(InitiatorSessionReservation {
-                    store: self.clone(),
-                    key: key.clone(),
-                    session,
-                    action,
-                    session_generation: b_session_generation,
-                    root_key,
-                    initial_epoch,
-                    transition_id,
-                    transition_revision,
-                    send_algorithm,
-                    recv_algorithm,
-                    peer_static_pubkey,
-                    recovery_quota: Mutex::new(None),
-                    state: AtomicU8::new(RESERVATION_PENDING),
-                })
-            }
-            PeerSessionAction::Create => {
-                if self.pending_creates.contains_key(key) {
-                    return Err(anyhow!("session creation is pending"));
-                }
-                if self.peek(key).is_some() {
-                    return Err(anyhow!("session already exists; use SYNC"));
-                }
-                let root_key = root_key_32.ok_or_else(|| anyhow!("missing root_key"))?;
-                let session = Arc::new(PeerSession::new(
-                    key.peer_id,
-                    root_key,
-                    b_session_generation,
-                    initial_epoch,
-                    send_algorithm.clone(),
-                    recv_algorithm.clone(),
-                    peer_static_pubkey,
-                ));
-                session.initialize_transition_revision(1);
-                match self.pending_creates.entry(key.clone()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(session.clone());
+        let result = if matches!(action, PeerSessionAction::Create)
+            || (matches!(action, PeerSessionAction::Sync) && self.peek(key).is_none())
+        {
+            self.prepare_new_initiator_session_locked(
+                key,
+                action,
+                b_session_generation,
+                root_key_32,
+                initial_epoch,
+                send_algorithm,
+                recv_algorithm,
+                peer_static_pubkey,
+                transition_id,
+            )
+        } else {
+            match action {
+                PeerSessionAction::Join => {
+                    let session = self
+                        .peek(key)
+                        .ok_or_else(|| anyhow!("no local session for JOIN"))?;
+                    session.check_encrypt_algo_same(&send_algorithm, &recv_algorithm)?;
+                    session.check_peer_static_pubkey(peer_static_pubkey)?;
+                    if session.session_generation() != b_session_generation {
+                        return Err(anyhow!("JOIN generation mismatch"));
                     }
-                    Entry::Occupied(_) => {
+                    Ok(InitiatorSessionReservation {
+                        transition_revision: session.transition_revision(),
+                        root_key: session.root_key(),
+                        initial_epoch,
+                        transition_id,
+                        session_generation: b_session_generation,
+                        store: self.clone(),
+                        key: key.clone(),
+                        session,
+                        action,
+                        send_algorithm,
+                        recv_algorithm,
+                        peer_static_pubkey,
+                        recovery_quota: Mutex::new(None),
+                        publishes_session: false,
+                        previous_session: None,
+                        state: AtomicU8::new(RESERVATION_PENDING),
+                    })
+                }
+                PeerSessionAction::Sync => {
+                    if self.pending_creates.contains_key(key) {
                         return Err(anyhow!("session creation is pending"));
                     }
+                    let session = self
+                        .peek(key)
+                        .ok_or_else(|| anyhow!("no local session for SYNC"))?;
+                    session.check_encrypt_algo_same(&send_algorithm, &recv_algorithm)?;
+                    session.check_peer_static_pubkey(peer_static_pubkey)?;
+                    let root_key = root_key_32.ok_or_else(|| anyhow!("missing root_key"))?;
+                    let (active_generation, _current_root_key, reserved_epoch, transition_revision) =
+                        session.prepare_sync_transition_at(initial_epoch)?;
+                    if let Err(error) = session.reserve_peer_static_pubkey(peer_static_pubkey) {
+                        session.cancel_reserved_sync(transition_revision, reserved_epoch);
+                        return Err(error);
+                    }
+                    if active_generation != b_session_generation {
+                        session.cancel_reserved_sync(transition_revision, reserved_epoch);
+                        session.cancel_reserved_peer_static_pubkey();
+                        return Err(anyhow!("SYNC generation mismatch"));
+                    }
+                    Ok(InitiatorSessionReservation {
+                        store: self.clone(),
+                        key: key.clone(),
+                        session,
+                        action,
+                        session_generation: b_session_generation,
+                        root_key,
+                        initial_epoch,
+                        transition_id,
+                        transition_revision,
+                        send_algorithm,
+                        recv_algorithm,
+                        peer_static_pubkey,
+                        recovery_quota: Mutex::new(None),
+                        publishes_session: false,
+                        previous_session: None,
+                        state: AtomicU8::new(RESERVATION_PENDING),
+                    })
                 }
-                Ok(InitiatorSessionReservation {
-                    store: self.clone(),
-                    key: key.clone(),
-                    session,
-                    action,
-                    session_generation: b_session_generation,
-                    root_key,
-                    initial_epoch,
-                    // A new session starts at revision zero. The first
-                    // transition uses revision one on both peers.
-                    transition_revision: 1,
-                    transition_id,
-                    send_algorithm,
-                    recv_algorithm,
-                    peer_static_pubkey,
-                    recovery_quota: Mutex::new(None),
-                    state: AtomicU8::new(RESERVATION_PENDING),
-                })
+                PeerSessionAction::Create => unreachable!("CREATE uses staged publication"),
             }
         };
         match result {
@@ -1360,8 +1342,137 @@ impl PeerSessionStore {
         }
     }
 
+    /// Build an unpublished session when the peers have different cache lifetimes.
+    /// A retained session stays usable until authenticated confirmation commits
+    /// its replacement. Failed handshakes never remove its traffic keys.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_new_initiator_session_locked(
+        &self,
+        key: &SessionKey,
+        action: PeerSessionAction,
+        generation: u32,
+        root_key: Option<[u8; 32]>,
+        initial_epoch: u32,
+        send_algorithm: String,
+        recv_algorithm: String,
+        peer_static_pubkey: Option<[u8; 32]>,
+        transition_id: [u8; 16],
+    ) -> Result<InitiatorSessionReservation, anyhow::Error> {
+        let root_key = root_key.ok_or_else(|| anyhow!("missing root_key"))?;
+        let previous_session = self
+            .peek(key)
+            .map(|session| {
+                session.check_encrypt_algo_same(&send_algorithm, &recv_algorithm)?;
+                session.check_peer_static_pubkey(peer_static_pubkey)?;
+                if session.root_key() == root_key {
+                    return Err(anyhow!("replacement session requires a fresh root key"));
+                }
+                let transition = session.transition.lock().unwrap();
+                if transition.pending_epoch.is_some() {
+                    return Err(anyhow!("session synchronization is already pending"));
+                }
+                let revision = transition.revision;
+                drop(transition);
+                Ok((session, revision))
+            })
+            .transpose()?;
+        let session = Arc::new(PeerSession::new(
+            key.peer_id,
+            root_key,
+            generation,
+            initial_epoch,
+            send_algorithm.clone(),
+            recv_algorithm.clone(),
+            peer_static_pubkey,
+        ));
+        session.initialize_transition_revision(1);
+        match self.pending_creates.entry(key.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(session.clone());
+            }
+            Entry::Occupied(_) => return Err(anyhow!("session creation is pending")),
+        }
+        Ok(InitiatorSessionReservation {
+            store: self.clone(),
+            key: key.clone(),
+            session,
+            action,
+            session_generation: generation,
+            root_key,
+            initial_epoch,
+            transition_revision: 1,
+            transition_id,
+            send_algorithm,
+            recv_algorithm,
+            peer_static_pubkey,
+            recovery_quota: Mutex::new(None),
+            publishes_session: true,
+            previous_session,
+            state: AtomicU8::new(RESERVATION_PENDING),
+        })
+    }
+
+    fn commit_new_initiator_session_locked(
+        &self,
+        reservation: &InitiatorSessionReservation,
+    ) -> Result<(), anyhow::Error> {
+        if !self
+            .pending_creates
+            .get(&reservation.key)
+            .is_some_and(|pending| Arc::ptr_eq(pending.value(), &reservation.session))
+        {
+            return Err(anyhow!("initiator session creation claim changed"));
+        }
+        if !reservation.session.is_valid()
+            || reservation.session.transition_revision() != reservation.transition_revision
+        {
+            return Err(anyhow!("initiator session changed before confirmation"));
+        }
+        let can_publish = match (
+            self.sessions.get(&reservation.key),
+            &reservation.previous_session,
+        ) {
+            (None, None) => true,
+            (Some(entry), None) => !entry.session.is_valid(),
+            (Some(entry), Some((expected, revision))) => {
+                Arc::ptr_eq(&entry.session, expected) && expected.transition_revision() == *revision
+            }
+            _ => false,
+        };
+        if !can_publish {
+            return Err(anyhow!("session changed before initiator confirmation"));
+        }
+        reservation.session.record_committed_transition(
+            reservation.action,
+            reservation.session_generation,
+            reservation.root_key,
+            reservation.initial_epoch,
+            reservation.transition_id,
+            reservation.transition_revision,
+        );
+        let previous = self.sessions.insert(
+            reservation.key.clone(),
+            PeerSessionEntry::new(reservation.session.clone()),
+        );
+        if let Some(previous) = previous {
+            previous.session.invalidate();
+        }
+        self.pending_creates
+            .remove_if(&reservation.key, |_, pending| {
+                Arc::ptr_eq(pending, &reservation.session)
+            });
+        Ok(())
+    }
+
     fn cancel_initiator_reservation(&self, reservation: &InitiatorSessionReservation) {
         let _guard = self.creation_lock.lock().unwrap();
+        if reservation.publishes_session {
+            self.pending_creates
+                .remove_if(&reservation.key, |_, pending| {
+                    Arc::ptr_eq(pending, &reservation.session)
+                });
+            return;
+        }
         match reservation.action {
             PeerSessionAction::Create => {
                 self.pending_creates
@@ -1515,53 +1626,11 @@ impl PeerSessionStore {
         &self,
         reservation: &InitiatorSessionReservation,
     ) -> Result<(), anyhow::Error> {
+        if reservation.publishes_session {
+            return self.commit_new_initiator_session_locked(reservation);
+        }
         match reservation.action {
-            PeerSessionAction::Create => {
-                if !self
-                    .pending_creates
-                    .get(&reservation.key)
-                    .is_some_and(|current| Arc::ptr_eq(&current, &reservation.session))
-                {
-                    return Err(anyhow!("initiator session creation claim changed"));
-                }
-                if !reservation.session.is_valid()
-                    || reservation.session.transition_revision() != reservation.transition_revision
-                {
-                    return Err(anyhow!("initiator session changed before confirmation"));
-                }
-                let can_publish = match self.sessions.get(&reservation.key) {
-                    None => true,
-                    Some(entry) if !entry.session.is_valid() => true,
-                    Some(_) => false,
-                };
-                if !can_publish {
-                    return Err(anyhow!("session changed before initiator confirmation"));
-                }
-                reservation.session.record_committed_transition(
-                    PeerSessionAction::Create,
-                    reservation.session_generation,
-                    reservation.root_key,
-                    reservation.initial_epoch,
-                    reservation.transition_id,
-                    reservation.transition_revision,
-                );
-                match self.sessions.entry(reservation.key.clone()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(PeerSessionEntry::new(reservation.session.clone()));
-                    }
-                    Entry::Occupied(mut entry) if !entry.get().session.is_valid() => {
-                        entry.insert(PeerSessionEntry::new(reservation.session.clone()));
-                    }
-                    Entry::Occupied(_) => unreachable!(
-                        "creation lock protects the initiator session publication check"
-                    ),
-                }
-                self.pending_creates
-                    .remove_if(&reservation.key, |_, current| {
-                        Arc::ptr_eq(current, &reservation.session)
-                    });
-                Ok(())
-            }
+            PeerSessionAction::Create => unreachable!("CREATE uses staged publication"),
             PeerSessionAction::Sync => {
                 let current = self
                     .sessions
@@ -1949,6 +2018,9 @@ impl PeerSessionStore {
         peer_static_pubkey: Option<[u8; 32]>,
         allow_existing_proof: bool,
     ) -> Result<UpsertResponderSessionReturn, anyhow::Error> {
+        if self.pending_creates.contains_key(key) {
+            return Err(anyhow!("session creation is already pending"));
+        }
         if self.in_doubt_initiators.contains_key(key) {
             return Err(anyhow!("session transition is awaiting exact recovery"));
         }
@@ -2587,6 +2659,152 @@ mod tests {
     static IN_DOUBT_TEST_LOCK: Mutex<()> = Mutex::new(());
     static RECEIPT_TEST_LOCK: Mutex<()> = Mutex::new(());
     static RESPONDER_PROOF_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn cached_session_for_replacement() -> (PeerSessionStore, SessionKey, Arc<PeerSession>) {
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("cache-recovery-test".into(), 9123);
+        let session = Arc::new(PeerSession::new(
+            key.peer_id,
+            PeerSession::new_root_key(),
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([7; 32]),
+        ));
+        store.insert_session(key.clone(), session.clone());
+        (store, key, session)
+    }
+
+    fn replacement_reservation(
+        store: &PeerSessionStore,
+        key: &SessionKey,
+        root: [u8; 32],
+        public_key: [u8; 32],
+    ) -> Result<InitiatorSessionReservation, anyhow::Error> {
+        store.prepare_initiator_action(
+            key,
+            PeerSessionAction::Create,
+            1,
+            Some(root),
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some(public_key),
+        )
+    }
+
+    #[test]
+    fn asymmetric_replacement_keeps_old_keys_until_commit_and_cancel() {
+        let (store, key, old) = cached_session_for_replacement();
+        let old_root = old.root_key();
+        let first =
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).unwrap();
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &old));
+        assert_eq!(old.root_key(), old_root);
+        first.cancel();
+        assert!(old.is_valid());
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &old));
+        assert!(!store.pending_creates.contains_key(&key));
+        let second =
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).unwrap();
+        let new = second.commit().unwrap();
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &new));
+        assert!(!old.is_valid());
+        assert_ne!(new.root_key(), old_root);
+    }
+
+    #[test]
+    fn asymmetric_replacement_rejects_key_change_root_reuse_and_pending_sync() {
+        let (store, key, old) = cached_session_for_replacement();
+        assert!(
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [8; 32]).is_err()
+        );
+        assert!(replacement_reservation(&store, &key, old.root_key(), [7; 32]).is_err());
+        let (_, _, epoch, revision) = old.prepare_sync_transition().unwrap();
+        assert!(
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).is_err()
+        );
+        old.cancel_reserved_sync(revision, epoch);
+        assert!(old.is_valid());
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &old));
+        assert!(!store.pending_creates.contains_key(&key));
+    }
+
+    #[test]
+    fn asymmetric_replacement_rejects_stale_commit_and_preserves_new_owner() {
+        let (store, key, old) = cached_session_for_replacement();
+        let pending =
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).unwrap();
+        let concurrent = Arc::new(PeerSession::new(
+            key.peer_id,
+            PeerSession::new_root_key(),
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([7; 32]),
+        ));
+        store.insert_session(key.clone(), concurrent.clone());
+        assert!(pending.commit().is_err());
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &concurrent));
+        assert!(concurrent.is_valid() && old.is_valid());
+    }
+
+    #[test]
+    fn asymmetric_sync_reconstructs_an_evicted_session_without_reusing_epoch_zero() {
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("sync-recovery-test".into(), 8123);
+        let root = PeerSession::new_root_key();
+        let pending = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Sync,
+                4,
+                Some(root),
+                17,
+                "chacha20-poly1305".into(),
+                "chacha20-poly1305".into(),
+                Some([7; 32]),
+            )
+            .unwrap();
+        assert!(store.peek(&key).is_none());
+        assert_eq!(pending.action(), PeerSessionAction::Sync);
+        assert_eq!(pending.initial_epoch(), 17);
+        let committed = pending.commit().unwrap();
+        assert_eq!(committed.root_key(), root);
+        assert_eq!(committed.session_generation(), 4);
+        assert_eq!(
+            committed.last_committed_transition().unwrap().initial_epoch,
+            17
+        );
+        assert_eq!(
+            committed.last_committed_transition().unwrap().action,
+            PeerSessionAction::Sync
+        );
+    }
+
+    #[test]
+    fn asymmetric_replacement_retains_exact_recovery_and_does_not_erase_old_keys() {
+        let _guard = IN_DOUBT_TEST_LOCK.lock().unwrap();
+        let (store, key, old) = cached_session_for_replacement();
+        let pending =
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).unwrap();
+        let identity = pending.transition_identity();
+        pending.suspend(Duration::from_secs(1)).unwrap();
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &old));
+        assert!(
+            replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).is_err()
+        );
+        let mut wrong = identity.clone();
+        wrong.transition_id[0] ^= 1;
+        assert!(store.resume_initiator_reservation(&wrong).is_err());
+        let resumed = store.resume_initiator_reservation(&identity).unwrap();
+        let new = resumed.commit().unwrap();
+        assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &new));
+        assert!(!old.is_valid());
+        assert_eq!(store.in_doubt_reservation_count(), 0);
+    }
 
     #[test]
     fn responder_recovery_debug_output_redacts_the_root_key() {

@@ -824,6 +824,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reachable_quic_candidate_recovers_while_another_peer_is_live() {
+        let a =
+            create_mock_peer_manager_secure("fallback-test".into(), "fallback-secret".into()).await;
+        let b =
+            create_mock_peer_manager_secure("fallback-test".into(), "fallback-secret".into()).await;
+        let other =
+            create_mock_peer_manager_secure("fallback-test".into(), "fallback-secret".into()).await;
+        let (client_link, server_link) = crate::tunnel::ring::create_ring_tunnel_pair();
+        let (client_result, server_result) = tokio::join!(
+            b.add_discovered_tunnel(client_link, None, true),
+            other.add_discovered_tunnel(server_link, None, false),
+        );
+        client_result.unwrap();
+        server_result.unwrap();
+        assert!(b.has_directly_connected_conn(other.my_peer_id()));
+        let (server_packets, _) = broadcast::channel(128);
+        let (server, _) = quic::discovery_endpoint(
+            UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            &a.get_global_ctx(),
+            server_packets,
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let mut listener =
+            QuicTunnelListener::from_discovery_endpoint(server, a.get_global_ctx()).unwrap();
+        let accepting = a.clone();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        // This receiver discards punch packets but accepts standard authenticated QUIC.
+        let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+            let tunnel = listener.accept().await.unwrap();
+            source_tx
+                .send(tunnel.info().unwrap().remote_addr.unwrap().url)
+                .unwrap();
+            accepting
+                .add_discovered_tunnel(tunnel, None, false)
+                .await
+                .unwrap();
+        }));
+        let ctx = b.get_global_ctx();
+        let key = ctx.get_network_identity().network_secret_digest.unwrap();
+        let mut clients = Vec::new();
+        let mut silent = Vec::new();
+        let mut discovery_sources = Vec::new();
+        // Two interface paths must retain memory for authentication during candidate bursts.
+        for _ in 0..2 {
+            let (packets, _) = broadcast::channel(128);
+            let (endpoint, socket) = quic::discovery_endpoint(
+                UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+                &ctx,
+                packets.clone(),
+            )
+            .unwrap();
+            discovery_sources.push(socket.local_addr().unwrap());
+            let (candidates, receiver) = mpsc::channel(64);
+            clients.push(AbortOnDropHandle::new(tokio::spawn(candidate_loop(
+                ctx.clone(),
+                b.clone(),
+                socket,
+                packets,
+                Some(endpoint),
+                None,
+                receiver,
+                candidates.clone(),
+                key,
+            ))));
+            candidates.send(address).await.unwrap();
+            for _ in 0..7 {
+                let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                candidates.send(socket.local_addr().unwrap()).await.unwrap();
+                silent.push(socket);
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !a.has_directly_connected_conn(b.my_peer_id())
+                || !b.has_directly_connected_conn(a.my_peer_id())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standard QUIC fallback did not authenticate");
+        let source = url::Url::parse(&source_rx.await.unwrap()).unwrap();
+        assert_eq!(source.host_str().unwrap(), "127.0.0.1");
+        assert!(
+            discovery_sources
+                .iter()
+                .all(|local| local.port() != source.port().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_tracker_candidate_recovers_lost_link_with_healthy_mesh_peer() {
+        let a =
+            create_mock_peer_manager_secure("cached-recovery".into(), "test-secret".into()).await;
+        let b =
+            create_mock_peer_manager_secure("cached-recovery".into(), "test-secret".into()).await;
+        let healthy =
+            create_mock_peer_manager_secure("cached-recovery".into(), "test-secret".into()).await;
+        let (c, s) = crate::tunnel::ring::create_ring_tunnel_pair();
+        let (c, s) = tokio::join!(
+            a.add_discovered_tunnel(c, None, true),
+            healthy.add_discovered_tunnel(s, None, false),
+        );
+        c.unwrap();
+        s.unwrap();
+        let (server_packets, _) = broadcast::channel(128);
+        let (server_endpoint, _) = quic::discovery_endpoint(
+            UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            &b.get_global_ctx(),
+            server_packets,
+        )
+        .unwrap();
+        let address = server_endpoint.local_addr().unwrap();
+        let mut listener =
+            QuicTunnelListener::from_discovery_endpoint(server_endpoint, b.get_global_ctx())
+                .unwrap();
+        let server = b.clone();
+        let _accept = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            loop {
+                let tunnel = listener.accept().await.unwrap();
+                server
+                    .add_discovered_tunnel(tunnel, None, false)
+                    .await
+                    .unwrap();
+            }
+        }));
+        let ctx = a.get_global_ctx();
+        let key = ctx.get_network_identity().network_secret_digest.unwrap();
+        let (packets, _) = broadcast::channel(128);
+        let (client_endpoint, udp) = quic::discovery_endpoint(
+            UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            &ctx,
+            packets.clone(),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel(64);
+        let _path = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(candidate_loop(
+            a.get_global_ctx(),
+            a.clone(),
+            udp,
+            packets,
+            Some(client_endpoint),
+            None,
+            rx,
+            tx.clone(),
+            key,
+        )));
+        tx.send(address).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !a.has_directly_connected_conn(b.my_peer_id()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(a.has_directly_connected_conn(healthy.my_peer_id()));
+        let sk =
+            crate::peers::peer_session::SessionKey::new("cached-recovery".into(), a.my_peer_id());
+        let bk = b
+            .get_peer_session_store()
+            .peek(&sk)
+            .unwrap()
+            .peer_static_pubkey()
+            .unwrap();
+        a.get_peer_map().close_peer(b.my_peer_id()).await.unwrap();
+        b.get_peer_map().close_peer(a.my_peer_id()).await.unwrap();
+        assert!(
+            b.get_peer_session_store()
+                .clear_peer_records_if_static_key_matches(&sk, bk)
+        );
+        assert!(!a.has_directly_connected_conn(b.my_peer_id()));
+        // No new tracker result is supplied. The bounded 30-second retry must
+        // repair the lost peer even while the unrelated connection stays live.
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while !a.has_directly_connected_conn(b.my_peer_id()) {
+                assert!(a.has_directly_connected_conn(healthy.my_peer_id()));
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("cached candidate did not repair the lost link");
+        assert!(a.has_directly_connected_conn(healthy.my_peer_id()));
+        assert!(b.has_directly_connected_conn(a.my_peer_id()));
+    }
+
+    #[tokio::test]
     async fn discovery_rejects_foreign_networks_before_publication() {
         let a = create_mock_peer_manager_secure("tracker-a".into(), "secret-a".into()).await;
         let b = create_mock_peer_manager_secure("tracker-b".into(), "secret-b".into()).await;
@@ -987,33 +1173,38 @@ async fn candidate_loop(
             Some(_) = punch_tasks.join_next(), if !punch_tasks.is_empty() => {}
             Some((address, peer)) = success_rx.recv() => { if connected.len() < 64 { connected.insert(address, peer); } }
             Some(address) = fallbacks.recv(), if attempts.len() < 8 => {
-                if peers.get_peer_map().list_peers_with_conn().await.is_empty() {
+                // Other healthy peers do not establish reachability to this candidate.
+                if !connected.get(&address).is_some_and(|peer| peers.has_directly_connected_conn(*peer)) {
                     connect = Some((address, None));
                 }
             }
             _ = retry.tick() => {
-                connected.retain(|_, peer| peers.get_peer_map().has_peer(*peer));
-                if !peers.get_peer_map().list_peers_with_conn().await.is_empty() { continue; }
+                connected.retain(|_, peer| peers.has_directly_connected_conn(*peer));
                 if let Some((&address, _)) = cached_candidates.iter()
-                    .filter(|(address, time)| !connected.contains_key(address) && time.elapsed() >= Duration::from_secs(30))
+                    .filter(|(address, time)| !connected.contains_key(address)
+                        && time.elapsed() >= Duration::from_secs(30)
+                        && recent.get(*address).is_none_or(|(attempt, _)| attempt.elapsed() >= Duration::from_secs(30)))
                     .min_by_key(|(_, time)| **time) {
                     if retry_sender.try_send(address).is_ok() { cached_candidates.insert(address, Instant::now()); }
                 }
             }
             Some(address) = candidates.recv(), if attempts.len() < 8 && punch_tasks.len() < 16 => {
-                if connected.get(&address).is_some_and(|peer| peers.get_peer_map().has_peer(*peer)) { continue; }
+                if connected.get(&address).is_some_and(|peer| peers.has_directly_connected_conn(*peer)) { continue; }
                 if cached_candidates.len() >= 64 && !cached_candidates.contains_key(&address) {
                     if let Some((&oldest, _)) = cached_candidates.iter().min_by_key(|(_, time)| **time) {
                         cached_candidates.remove(&oldest);
                     }
                 }
-                cached_candidates.insert(address, Instant::now());
+                // Repeated announcements and suppressed retries must not extend
+                // the retry deadline of a candidate that has already been seen.
+                cached_candidates.entry(address).or_insert_with(Instant::now);
                 recent.retain(|_, (time, _)| time.elapsed() < Duration::from_secs(30));
                 if recent.contains_key(&address) { continue; }
                 if endpoint.is_some() {
                     probes.retain(|_, (_, time)| time.elapsed() < Duration::from_secs(15));
                     // Duplicate tracker results must retain the challenge accepted by the responder.
                     if probes.contains_key(&address) || probes.len() >= 64 { continue; }
+                    cached_candidates.insert(address, Instant::now());
                     let nonce = rand::random();
                     probes.insert(address, (nonce, Instant::now()));
                     let udp = udp.clone();
@@ -1027,7 +1218,10 @@ async fn candidate_loop(
                         // A reachable peer can accept QUIC even when the path drops custom probes.
                         let _ = fallback.try_send(address);
                     });
-                } else { connect = Some((address, None)); }
+                } else {
+                    cached_candidates.insert(address, Instant::now());
+                    connect = Some((address, None));
+                }
             }
             packet = incoming.recv(), if endpoint.is_some() => {
                 let packet = match packet { Ok(packet) => packet, Err(broadcast::error::RecvError::Lagged(_)) => continue, Err(error) => return Err(error.into()) };
@@ -1042,7 +1236,7 @@ async fn candidate_loop(
                     responses.insert(packet.addr, Instant::now());
                     let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), true), packet.addr).await;
                 }
-                if my_id < peer && !peers.get_peer_map().has_peer(peer) { connect = Some((packet.addr, Some(peer))); }
+                if my_id < peer && !peers.has_directly_connected_conn(peer) { connect = Some((packet.addr, Some(peer))); }
             }
         }
         let Some((address, expected)) = connect else {
@@ -1083,11 +1277,9 @@ async fn candidate_loop(
                 else {
                     return;
                 };
-                let obsolete = if let Some(peer) = expected {
-                    peers.get_peer_map().has_peer(peer)
-                } else {
-                    !peers.get_peer_map().list_peers_with_conn().await.is_empty()
-                };
+                // A permit can arrive after this particular peer connected.
+                // An unrelated connection must never cancel the repair attempt.
+                let obsolete = expected.is_some_and(|peer| peers.has_directly_connected_conn(peer));
                 if obsolete {
                     return;
                 }

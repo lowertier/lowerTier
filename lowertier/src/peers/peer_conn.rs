@@ -5310,6 +5310,188 @@ pub mod tests {
     use crate::tunnel::{PacketBatchSink, SinkError};
     use tokio_util::task::AbortOnDropHandle;
 
+    async fn asymmetric_session_expiry_handshake(retained_by_client: bool) {
+        let client_id = 1001;
+        let server_id = 2002;
+        let network = "asymmetric-session-expiry";
+        let client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            network.into(),
+            "test-only-secret".into(),
+        )));
+        let server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            network.into(),
+            "test-only-secret".into(),
+        )));
+        set_secure_mode_cfg(&client_ctx, true);
+        set_secure_mode_cfg(&server_ctx, true);
+        let client_store = Arc::new(PeerSessionStore::new());
+        let server_store = Arc::new(PeerSessionStore::new());
+        let (ct, st) = create_ring_tunnel_pair();
+        let mut client = PeerConn::new_with_peer_id_hint(
+            client_id,
+            client_ctx,
+            ct,
+            Some(server_id),
+            client_store.clone(),
+        );
+        let mut server = PeerConn::new_with_peer_id_hint(
+            server_id,
+            server_ctx,
+            st,
+            Some(client_id),
+            server_store.clone(),
+        );
+        let (store, remote, public_key) = if retained_by_client {
+            (&client_store, server_id, server.get_keypair().unwrap().1)
+        } else {
+            (&server_store, client_id, client.get_keypair().unwrap().1)
+        };
+        // A closed connection can leave a cached session on one endpoint after
+        // the other endpoint's idle eviction. No transition remains in doubt.
+        let retained = Arc::new(crate::peers::peer_session::PeerSession::new(
+            remote,
+            crate::peers::peer_session::PeerSession::new_root_key(),
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some(public_key.try_into().unwrap()),
+        ));
+        store.insert_session(SessionKey::new(network.into(), remote), retained.clone());
+        let (c, s) = tokio::join!(
+            client.do_handshake_as_client(),
+            server.do_handshake_as_server()
+        );
+        assert!(
+            c.is_ok() && s.is_ok(),
+            "asymmetric idle eviction failed: client={c:?}, server={s:?}"
+        );
+        let a = client_store
+            .get(&SessionKey::new(network.into(), server_id))
+            .unwrap();
+        let b = server_store
+            .get(&SessionKey::new(network.into(), client_id))
+            .unwrap();
+        assert_eq!(a.root_key(), b.root_key());
+        assert_eq!(a.session_generation(), b.session_generation());
+        assert!(a.is_valid() && b.is_valid());
+    }
+
+    #[tokio::test]
+    async fn asymmetric_session_expiry_recovers_when_responder_forgot() {
+        asymmetric_session_expiry_handshake(true).await;
+    }
+
+    #[tokio::test]
+    async fn asymmetric_session_expiry_recovers_when_initiator_forgot() {
+        asymmetric_session_expiry_handshake(false).await;
+    }
+
+    #[tokio::test]
+    async fn asymmetric_session_expiry_reconnects_after_real_handshake_and_delivers_data() {
+        for retained_by_client in [false, true] {
+            for known_peer in [false, true] {
+                let client_id = 901;
+                let server_id = 902;
+                let network = "real-session-cache-expiry";
+                let client_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+                    network.into(),
+                    "test-cache-secret".into(),
+                )));
+                let server_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+                    network.into(),
+                    "test-cache-secret".into(),
+                )));
+                set_secure_mode_cfg(&client_ctx, true);
+                set_secure_mode_cfg(&server_ctx, true);
+                let client_store = Arc::new(PeerSessionStore::new());
+                let server_store = Arc::new(PeerSessionStore::new());
+                let (ct, st) = create_ring_tunnel_pair();
+                let mut client = PeerConn::new_with_peer_id_hint(
+                    client_id,
+                    client_ctx.clone(),
+                    ct,
+                    None,
+                    client_store.clone(),
+                );
+                let mut server = PeerConn::new_with_peer_id_hint(
+                    server_id,
+                    server_ctx.clone(),
+                    st,
+                    None,
+                    server_store.clone(),
+                );
+                let client_key: [u8; 32] = client.get_keypair().unwrap().1.try_into().unwrap();
+                let server_key: [u8; 32] = server.get_keypair().unwrap().1.try_into().unwrap();
+                let (c, s) = tokio::join!(
+                    client.do_handshake_as_client(),
+                    server.do_handshake_as_server()
+                );
+                assert!(c.is_ok() && s.is_ok(), "initial handshake: {c:?} {s:?}");
+                drop((client, server));
+                let ck = SessionKey::new(network.into(), server_id);
+                let sk = SessionKey::new(network.into(), client_id);
+                if retained_by_client {
+                    assert!(server_store.clear_peer_records_if_static_key_matches(&sk, client_key));
+                    assert!(server_store.peek(&sk).is_none());
+                    assert!(client_store.peek(&ck).is_some());
+                } else {
+                    assert!(client_store.clear_peer_records_if_static_key_matches(&ck, server_key));
+                    assert!(client_store.peek(&ck).is_none());
+                    assert!(server_store.peek(&sk).is_some());
+                }
+                let (ct, st) = create_ring_tunnel_pair();
+                let mut client = PeerConn::new_with_peer_id_hint(
+                    client_id,
+                    client_ctx,
+                    ct,
+                    known_peer.then_some(server_id),
+                    client_store.clone(),
+                );
+                let mut server = PeerConn::new_with_peer_id_hint(
+                    server_id,
+                    server_ctx,
+                    st,
+                    None,
+                    server_store.clone(),
+                );
+                let (c, s) = tokio::join!(
+                    client.do_handshake_as_client(),
+                    server.do_handshake_as_server()
+                );
+                assert!(
+                    c.is_ok() && s.is_ok(),
+                    "reconnect retained_client={retained_by_client} hinted={known_peer}: {c:?} {s:?}"
+                );
+                let (client_tx, mut client_rx) = create_packet_recv_chan();
+                let (server_tx, mut server_rx) = create_packet_recv_chan();
+                client.start_recv_loop(client_tx).await;
+                server.start_recv_loop(server_tx).await;
+                for (sender, receiver, from, to) in [
+                    (&client, &mut server_rx, client_id, server_id),
+                    (&server, &mut client_rx, server_id, client_id),
+                ] {
+                    let mut packet =
+                        ZCPacket::new_with_payload(b"authenticated post-expiry payload");
+                    packet.fill_peer_manager_hdr(from, to, PacketType::Data as u8);
+                    sender.send_msg(packet).await.unwrap();
+                    let received = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        recv_packet_from_chan(receiver),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(received.payload(), b"authenticated post-expiry payload");
+                }
+                let a = client_store.get(&ck).unwrap();
+                let b = server_store.get(&sk).unwrap();
+                assert_eq!(a.root_key(), b.root_key());
+                assert!(a.is_valid() && b.is_valid());
+            }
+        }
+    }
+
     #[test]
     fn rejects_an_unknown_peer_encryption_algorithm() {
         assert!(validate_encryption_algorithm("chacha20-poly1305").is_ok());
