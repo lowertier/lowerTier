@@ -27,7 +27,7 @@ struct Entry {
     expires: Instant,
 }
 struct Store {
-    swarms: HashMap<Id, HashMap<(Id, bool), Entry>>,
+    swarms: HashMap<Id, HashMap<(Id, SocketAddr), Entry>>,
     entries: usize,
     cleanup: Instant,
     rate_second: u64,
@@ -48,8 +48,8 @@ impl TrackerServer {
     }
     pub fn new(interval: u32) -> Result<Arc<Self>> {
         ensure!(
-            (30..=86400).contains(&interval),
-            "tracker interval must be 30–86400 seconds"
+            (1..=86400).contains(&interval),
+            "rendezvous interval must be 1–86400 seconds"
         );
         Ok(Arc::new(Self {
             secret: rand::random(),
@@ -110,16 +110,30 @@ impl TrackerServer {
             "invalid tracker announce"
         );
         let address = SocketAddr::new(source, announce.port);
-        let key = (announce.peer, source.is_ipv6());
+        let key = (announce.peer, address);
         let mut store = self.store.lock().unwrap();
         let now = Instant::now();
-        if store.cleanup.elapsed() >= Duration::from_secs(30) {
+        let capacity_reached = store.entries >= MAX_ENTRIES
+            || store.swarms.len() >= MAX_SWARMS
+            || store
+                .swarms
+                .get(&announce.hash)
+                .is_some_and(|entries| entries.len() >= MAX_SWARM_ENTRIES);
+        if store.cleanup.elapsed() >= Duration::from_secs(30)
+            || (capacity_reached && store.cleanup.elapsed() >= Duration::from_secs(1))
+        {
             store.swarms.retain(|_, entries| {
                 entries.retain(|_, entry| entry.expires > now);
                 !entries.is_empty()
             });
             store.entries = store.swarms.values().map(HashMap::len).sum();
             store.cleanup = now;
+        }
+        if let Some(entries) = store.swarms.get_mut(&announce.hash) {
+            let previous = entries.len();
+            entries.retain(|_, entry| entry.expires > now);
+            let removed = previous - entries.len();
+            store.entries -= removed;
         }
         if announce.event == 3 {
             if let Some(entries) = store.swarms.get_mut(&announce.hash) {
@@ -151,17 +165,25 @@ impl TrackerServer {
             key,
             Entry {
                 address,
-                expires: now + Duration::from_secs(u64::from(self.interval) * 2 + 60),
+                expires: now + Duration::from_secs((u64::from(self.interval) * 3).max(10)),
             },
         );
-        let peers = entries
+        let mut peers = entries
             .iter()
             .filter(|(id, entry)| {
-                **id != key && entry.expires > now && entry.address.is_ipv6() == source.is_ipv6()
+                id.0 != announce.peer
+                    && entry.expires > now
+                    && entry.address.is_ipv6() == source.is_ipv6()
             })
             .map(|(_, entry)| entry.address)
-            .take(MAX_PEERS)
-            .collect();
+            .collect::<Vec<_>>();
+        // Rotate bounded replies so large groups do not hide the same endpoints forever.
+        peers.sort_unstable();
+        if !peers.is_empty() {
+            let offset = unix_seconds() as usize % peers.len();
+            peers.rotate_left(offset);
+        }
+        peers.truncate(MAX_PEERS);
         Ok(peers)
     }
 
@@ -277,7 +299,7 @@ impl TrackerServer {
             let peers = self.announce(&announce, source)?;
             let mut ipv4 = Vec::new();
             let mut ipv6 = Vec::new();
-            for peer in peers {
+            for peer in peers.into_iter().take(MAX_PEERS) {
                 append_compact(if peer.is_ipv4() { &mut ipv4 } else { &mut ipv6 }, peer);
             }
             let mut reply =

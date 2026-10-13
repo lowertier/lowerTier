@@ -2298,7 +2298,7 @@ impl PeerManager {
         tunnel: Box<dyn Tunnel>,
         expected_peer: Option<PeerId>,
         client: bool,
-    ) -> Result<PeerId, Error> {
+    ) -> Result<(PeerId, PeerConnId), Error> {
         let info = tunnel
             .info()
             .ok_or_else(|| anyhow::anyhow!("discovery tunnel has no info"))?;
@@ -2324,8 +2324,9 @@ impl PeerManager {
             ));
         }
         // Tracker candidates cannot authorize foreign-network relay membership.
+        let conn_id = peer.get_conn_id();
         self.add_new_peer_conn(peer).await?;
-        Ok(peer_id)
+        Ok((peer_id, conn_id))
     }
 
     pub async fn add_client_tunnel_with_peer_id_hint(

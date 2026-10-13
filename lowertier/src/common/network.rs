@@ -289,6 +289,16 @@ pub struct IPCollector {
 }
 
 impl IPCollector {
+    pub(crate) async fn collect_current_interface_addrs(&self) -> GetIpListResponse {
+        let interfaces = Self::collect_interfaces(self.net_ns.clone(), true).await;
+        let (ipv4, ipv6) = allowed_interface_ips(&interfaces, &self.underlay_policy.load_full());
+        GetIpListResponse {
+            interface_ipv4s: ipv4.into_iter().map(Into::into).collect(),
+            interface_ipv6s: ipv6.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        }
+    }
+
     pub fn new<T: StunInfoCollectorTrait + 'static>(
         net_ns: NetNS,
         stun_info_collector: T,

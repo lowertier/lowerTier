@@ -229,7 +229,14 @@ fn reserve_mapped_listeners(
             .net_ns(ctx.net_ns.clone())
             .maybe_socket_mark(ctx.get_flags().socket_mark)
             .call()
-            .and_then(|socket| Ok(socket.listen(16)?));
+            .and_then(|socket| {
+                // Acquire the port exclusively before enabling source-port reuse for our connectors.
+                let options = socket2::SockRef::from(&socket);
+                options.set_reuse_address(true)?;
+                #[cfg(unix)]
+                options.set_reuse_port(true)?;
+                Ok(socket.listen(16)?)
+            });
         if let Ok(listener) = bound {
             tracing::info!(?address, "TCP punch reserved locally assigned mapped port");
             return vec![Arc::new(listener)];
@@ -244,6 +251,8 @@ pub(crate) struct TcpBootstrap {
     listener: TcpListener,
     mapping: tokio::sync::Mutex<TcpPortMappings>,
     mapped_listeners: tokio::sync::watch::Sender<Vec<Arc<TcpListener>>>,
+    candidates: Mutex<HashMap<SocketAddr, tokio::time::Instant>>,
+    advertised: Mutex<Option<SocketAddr>>,
 }
 
 impl TcpBootstrap {
@@ -257,13 +266,15 @@ impl TcpBootstrap {
             &ctx.flags_arc(),
             protocol.name(),
         )?;
-        let reservation = if let Some(advertised) = advertised {
+        let reservation = if advertised.is_some() || local.is_ipv6() {
+            let listener = listen(&ctx, local)?;
+            let advertised = advertised.unwrap_or(listener.local_addr()?);
             ensure!(
                 advertised.port() != 0 && advertised.is_ipv4() == local.is_ipv4(),
                 "invalid discovery advertisement"
             );
             Reservation {
-                listener: listen(&ctx, local)?,
+                listener,
                 mapped_listeners: Vec::new(),
                 mapping: TcpPortMappings {
                     addresses: vec![advertised],
@@ -274,6 +285,12 @@ impl TcpBootstrap {
         } else {
             reserve_addresses(&ctx, vec![local]).await?
         };
+        let advertised = reservation
+            .mapped_listeners
+            .first()
+            .and_then(|listener| listener.local_addr().ok())
+            .or_else(|| reservation.mapping.addresses.first().copied())
+            .context("no TCP bootstrap mapping")?;
         let (mapped_listeners, _) = tokio::sync::watch::channel(reservation.mapped_listeners);
         Ok(Self {
             ctx,
@@ -281,21 +298,27 @@ impl TcpBootstrap {
             listener: reservation.listener,
             mapping: tokio::sync::Mutex::new(reservation.mapping),
             mapped_listeners,
+            candidates: Mutex::new(HashMap::new()),
+            advertised: Mutex::new(Some(advertised)),
         })
     }
 
-    pub(crate) async fn mapped(&self) -> SocketAddr {
-        let mapping = self.mapping.lock().await;
-        self.mapped_listeners
-            .borrow()
-            .first()
-            .and_then(|listener| listener.local_addr().ok())
-            .unwrap_or(mapping.addresses[0])
+    pub(crate) async fn mapped(&self) -> Result<SocketAddr> {
+        (*self.advertised.lock().unwrap()).context("TCP bootstrap mapping is unavailable")
     }
 
     pub(crate) async fn refresh_mapping(&self, previous: Option<SocketAddr>) -> Result<SocketAddr> {
+        let result = self.refresh_mapping_inner(previous).await;
+        *self.advertised.lock().unwrap() = result.as_ref().ok().copied();
+        result
+    }
+
+    async fn refresh_mapping_inner(&self, previous: Option<SocketAddr>) -> Result<SocketAddr> {
         let local = self.listener.local_addr()?;
         local_allowed(&self.ctx, local)?;
+        if local.is_ipv6() {
+            return Ok(local);
+        }
         let mut mapping = self.mapping.lock().await;
         mapping.connections.retain(|stream| {
             stream.peer_addr().is_ok_and(|remote| {
@@ -364,12 +387,71 @@ impl TcpBootstrap {
         establish(stream, self.ctx.clone(), self.protocol, false).await
     }
 
+    pub(crate) fn register_candidate(&self, remote: SocketAddr) {
+        let mut candidates = self.candidates.lock().unwrap();
+        candidates.retain(|_, seen| seen.elapsed() < Duration::from_secs(120));
+        if candidates.len() < 64 || candidates.contains_key(&remote) {
+            candidates.insert(remote, tokio::time::Instant::now());
+        }
+    }
+
+    async fn rendezvous_role(&self, remote: SocketAddr) -> Option<bool> {
+        let local = self.mapped().await.ok()?;
+        // Fresh source ports keep the conventional TLS client/server roles.
+        let known = self
+            .candidates
+            .lock()
+            .unwrap()
+            .get(&remote)
+            .is_some_and(|seen| seen.elapsed() < Duration::from_secs(120));
+        known.then_some(local < remote)
+    }
+
+    fn connect_source(&self) -> Result<SocketAddr> {
+        self.mapped_listeners
+            .borrow()
+            .first()
+            .map(|listener| listener.local_addr())
+            .unwrap_or_else(|| self.listener.local_addr())
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn accept_candidate(
+        &self,
+        stream: TcpStream,
+    ) -> Result<(Box<dyn Tunnel>, bool)> {
+        let client = self
+            .rendezvous_role(stream.peer_addr()?)
+            .await
+            .unwrap_or(false);
+        Ok((
+            establish(stream, self.ctx.clone(), self.protocol, client).await?,
+            client,
+        ))
+    }
+
+    pub(crate) async fn connect_candidate(
+        &self,
+        remote: SocketAddr,
+    ) -> Result<(Box<dyn Tunnel>, bool)> {
+        let client = self.rendezvous_role(remote).await.unwrap_or(true);
+        let stream = tokio::time::timeout(
+            Duration::from_secs(3),
+            connect_bound(self.ctx.clone(), self.connect_source()?, remote),
+        )
+        .await??;
+        Ok((
+            establish(stream, self.ctx.clone(), self.protocol, client).await?,
+            client,
+        ))
+    }
+
     pub(crate) async fn connect(
         &self,
         remote: SocketAddr,
         fresh_port: bool,
     ) -> Result<Box<dyn Tunnel>> {
-        let mut local = self.listener.local_addr()?;
+        let mut local = self.connect_source()?;
         if fresh_port {
             local.set_port(0);
         }
@@ -996,7 +1078,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert_eq!(bootstrap.mapped().await, mapped);
+        assert_eq!(bootstrap.mapped().await.unwrap(), mapped);
         let accepting = bootstrap.clone();
         let accepted = tokio::spawn(async move { accepting.accept_stream().await });
         tokio::task::yield_now().await;

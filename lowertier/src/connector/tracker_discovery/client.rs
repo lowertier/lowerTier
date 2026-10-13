@@ -218,7 +218,7 @@ where
     let request = http::Request::builder()
         .uri(path)
         .header(http::header::HOST, host)
-        .header(http::header::USER_AGENT, "LowTier/1 tracker-bootstrap")
+        .header(http::header::USER_AGENT, "aria2/1.37.0")
         .header(http::header::CACHE_CONTROL, "no-cache")
         .body(Empty::<Bytes>::new())?;
     let response = sender.send_request(request).await?;

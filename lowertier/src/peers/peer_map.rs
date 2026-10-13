@@ -50,12 +50,13 @@ const MAX_LIVE_CONNECTIONS_PER_PEER: usize = 2;
 struct PeerConnectionAdmission {
     global: Arc<Semaphore>,
     per_peer: Mutex<HashMap<PeerId, usize>>,
+    released: AtomicU64,
 }
 
 pub(crate) struct PeerConnectionPermit {
     peer_id: PeerId,
     admission: Arc<PeerConnectionAdmission>,
-    _global: OwnedSemaphorePermit,
+    global: Option<OwnedSemaphorePermit>,
 }
 
 impl PeerConnectionAdmission {
@@ -63,6 +64,7 @@ impl PeerConnectionAdmission {
         Self {
             global: Arc::new(Semaphore::new(MAX_LIVE_PEER_CONNECTIONS)),
             per_peer: Mutex::new(HashMap::new()),
+            released: AtomicU64::new(0),
         }
     }
 
@@ -78,7 +80,7 @@ impl PeerConnectionAdmission {
         Some(PeerConnectionPermit {
             peer_id,
             admission: self.clone(),
-            _global: global,
+            global: Some(global),
         })
     }
 }
@@ -92,6 +94,9 @@ impl Drop for PeerConnectionPermit {
                 per_peer.remove(&self.peer_id);
             }
         }
+        drop(per_peer);
+        drop(self.global.take());
+        self.admission.released.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -313,6 +318,9 @@ pub struct PeerMap {
 }
 
 impl PeerMap {
+    pub(crate) fn connection_release_generation(&self) -> u64 {
+        self.connection_admission.released.load(Ordering::Acquire)
+    }
     pub fn new(packet_send: PacketRecvChan, global_ctx: ArcGlobalCtx, my_peer_id: PeerId) -> Self {
         let data_plane_descriptor =
             Arc::new(ArcSwap::from_pointee(PeerMapDataPlaneDescriptor::default()));

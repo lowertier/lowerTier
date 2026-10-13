@@ -1757,6 +1757,21 @@ impl PeerConn {
             .is_some_and(|(left, right)| tunnel_infos_have_distinct_quic_surface(left, right))
     }
 
+    pub(crate) fn discovery_order(&self) -> Option<(bool, [u8; 32])> {
+        // The Noise transcript gives both endpoints the same order for simultaneous flows.
+        let hash = self
+            .noise_handshake_result
+            .as_ref()?
+            .handshake_hash
+            .as_slice()
+            .try_into()
+            .ok()?;
+        Some((
+            self.is_client? == (self.my_peer_id < self.get_peer_id()),
+            hash,
+        ))
+    }
+
     pub(crate) fn alternate_parity_path_allowed(&self) -> bool {
         self.tunnel_info.as_ref().is_some_and(|info| {
             tunnel_info_allowed_for_alternate_parity(info, &self.global_ctx.get_underlay_policy())

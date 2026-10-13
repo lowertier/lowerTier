@@ -1,0 +1,31 @@
+# This configuration uses local test services. Set actual addresses and explicit ports before deployment.
+# Each node needs its own VPN address.
+hostname = "rendezvous-client-a"
+ipv4 = "10.216.0.1/24"
+listeners = []
+stun_servers = ["127.0.0.1:16780", "127.0.0.1:16781"]
+tcp_stun_servers = ["127.0.0.1:16780", "127.0.0.1:16781"]
+
+[network_identity]
+network_name = "local-rendezvous-test"
+network_secret = "replace-with-a-random-shared-secret"
+
+[discovery]
+trackers = [
+  "udp://127.0.0.1:16969/announce",
+  "udp://[::1]:16969/announce",
+  "http://127.0.0.1:16969/announce",
+  "http://[::1]:16969/announce",
+]
+# Omit bind to discover through every permitted interface.
+# Use explicit endpoints when a fixed local port is required.
+# bind = "127.0.0.1:17001"
+# advertise = "127.0.0.1:17001"
+
+[flags]
+default_protocol = "quic"
+enable_ipv6 = true
+dev_name = "rv0"
+
+# Set the local RPC port explicitly when starting the process:
+# lowertier-core -c client.example.toml --rpc-portal 127.0.0.1:15888
