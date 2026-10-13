@@ -125,3 +125,105 @@ Existing resident baselines remain untouched. No release/WAN performance gate
 or matched baseline comparison was performed, so the debug validation binary is
 not promoted to a resident baseline. This report makes no claim of validated
 remote deployment or faster authenticated VPN throughput.
+
+## Main integration and local demo follow-up
+
+The scoped implementation was committed on local `main` as
+`85dec0102424de8c6a57f086894e33f6ed8f6a24`. Only the passthrough hunks of
+`README.md` and `quic.rs` were staged; unrelated tracker, userspace, and QUIC
+liveness work remained in the original working tree. No remote push was made.
+
+A clean detached worktree at that commit reused the existing toolchain/build
+cache. **176 transport tests passed**, including both explicitly enabled Caddy
+integrations, in 22.90 seconds after compilation. The count is one below the
+original working-tree run because the unrelated, uncommitted QUIC liveness test
+was deliberately not merged. No assertion was removed or weakened.
+
+A runnable demo was added at `lowertier/examples/passthrough_demo.rs`. It was
+built against that clean committed library, with source SHA256
+`4b32daa2d3571b97ca63710ac9e793ec09c1cf3c1cd1dbc2f04c30fad44abd8a`.
+It uses a real LowTier TCP listener, a loopback H2/TLS origin, an in-memory test
+certificate with client verification enabled, and three consecutive 512 KiB
+responses. The H3 demo was the committed loopback integration fixture, including
+the oversized-certificate and UDP guard cases. No external destination, TUN,
+privileged networking, or system trust-store changes were used.
+
+### H2/TLS demo
+
+| Trial | Delivered bytes | TLS ms | First 32 KiB ms | Total ms | Effective Mbit/s | Average KiB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 524,288 / 524,288 | 3 | 6 | 3,536 | 1.186 | 144.79 |
+| 1 | 524,288 / 524,288 | 8 | 383 | 4,031 | 1.040 | 127.00 |
+| 2 | 524,288 / 524,288 | 7 | 382 | 4,027 | 1.041 | 127.11 |
+
+All responses were HTTP 200 and every payload byte matched. The first transfer
+consumed the initial burst; new TCP connections did not reset the IP bucket.
+Whole-transfer averages, including TLS setup, are reported. A pilot run printed
+a short last-half interval as `steady_KiB_s`; that label was misleading because
+a token bucket also permits bursts within an interval. The final demo reports
+whole-transfer `average_KiB_s` instead. The pilot log was retained, and its payload
+and rate-bound assertions passed; it is not used as a steady-rate measurement.
+TCP kernel retransmission counts and TCP RTT were not sampled. TLS setup time
+must not be presented as TCP RTT. No custom TCP/loopback MTU was configured.
+
+### H3 and UDP protection demo
+
+| Trial | Delivered bytes | Handshake ms | Total ms | Effective Mbit/s | Final RTT µs | QUIC lost/sent packets | Client/server UDP MTU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0 | 524,288 / 524,288 | 3 | 3,790 | 1.106 | 154,533 | 4 / 389 | 1452 / 1452 |
+| 1 | 524,288 / 524,288 | 25 | 4,277 | 0.981 | 56,902 | 3 / 396 | 1200 / 1452 |
+| 2 | 524,288 / 524,288 | 32 | 4,256 | 0.985 | 78,855 | 3 / 394 | 1200 / 1452 |
+
+All payloads matched. These are application-delivery results, not a zero-UDP-loss
+claim. RTT is the final Quinn estimate, and adaptive MTUs differ between trials.
+The additional UDP cases passed: non-QUIC input did not reach the origin; a
+1,200-byte Initial did not permit a 2,400-byte response or duplicate reflected
+responses before CID return; a wrong CID did not unlock amplification; and a
+new source port did not borrow validation. Pending decoy traffic could neither
+exhaust the local-route cache nor erase an existing local route on rejection.
+
+### Resource scope and evidence
+
+Each invocation delivered 1,572,864 application bytes (0.012582912 Gbit) in three
+transfers. `/usr/bin/time -l` excluded compilation and covered the combined local
+client, origin, and relay process:
+
+| Invocation | Wall seconds | User + system CPU seconds | CPU-seconds / delivered Gbit | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| H2 demo | 12.10 | 0.14 + 0.07 | 16.69 | 16,908,288 bytes (16.125 MiB) |
+| H3 + two UDP guard cases | 13.05 | 1.03 + 0.56 | 126.36 | 40,812,544 bytes (38.922 MiB) |
+
+RSS is the OS process high-water statistic, not a periodically sampled range.
+The H3 invocation also includes the synthetic 5,000-tuple route-pressure test;
+its CPU figure is **not** a pure H3 forwarding measurement and must not be compared
+with the H2 figure to rank transports. Both are debug builds, not release/WAN
+baselines. No resident binary was replaced.
+
+All logs below are in `benchmark-results/.work/`:
+
+- `passthrough-main-audit.jsonl`: commands, working directories, PIDs, timestamps,
+  exit codes, and log references.
+- `passthrough-main-clean-transport.log`: complete committed-tree transport run,
+  including Caddy and a separate set of three H3 trials.
+- `passthrough-main-demo-h2-final.log`: complete final H2 demo and resource output.
+- `passthrough-main-demo-h3-udp.log`: complete H3/UDP demo and resource output.
+- `passthrough-main-demo-h2.log`: retained H2 pilot, including the superseded
+  interval-rate label.
+- `passthrough-main-demo-hashes.log`: committed-library, demo-source, and binary
+  SHA256 identities.
+
+H2 demo binary SHA256:
+`04b7083dbb79daab78557dc49365a676fb699fe80e261ed5eea170731ad983fd`.
+Committed-tree test binary SHA256:
+`2d3a231338aed9fd0c55a9cc6c7359801eeca68ec1982f1f051a1565c6e21025`.
+
+The initial chained background launch created the worktree but did not start
+Cargo. Process state and saved logs were inspected, the existing worktree was
+verified rather than recreated, and the test job was relaunched with redirected
+output. A formatting-sensitive edit was rejected atomically; rereading the
+source and applying the exact text recovered. Both are recorded separately from
+the successful demo runs. A subsequent preservation check detected an additional
+concurrent QUIC CONNECT-IP admission-timeout hunk. The earlier unrelated hunks
+were verified intact; the new concurrent hunk was retained and excluded from
+these commits. The pre-existing CI annotation overage remains; the merge did not
+raise its threshold or remove tests.

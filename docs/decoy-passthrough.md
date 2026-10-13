@@ -102,6 +102,37 @@ separate client address-validation protocol. Network-level anti-spoofing and
 host ingress limits remain useful, particularly against floods that saturate the
 link before the application can act.
 
+## Run a local demo
+
+From the repository root:
+
+```sh
+cargo run --locked --offline -p lowertier --example passthrough_demo
+cargo test --locked --offline -p lowertier --lib tunnel::quic::decoy_tests -- --nocapture --test-threads=1
+```
+
+The first command starts an ephemeral loopback H2/TLS origin and a real LowTier
+TCP listener, verifies the origin's in-memory test certificate, and downloads
+512 KiB three times. It prints TLS latency, time to receive the first 32 KiB,
+full-download time, effective throughput, and exact byte delivery. The initial
+burst is fast; reconnecting does not create another full IP burst. It checks
+that each entire transfer obeys the sustained-rate-plus-burst bound. All sockets
+are loopback-bound and all demo services stop on exit. No root/TUN access or
+system trust-store modification is required.
+
+The second command demonstrates real H3 downloads with a large certificate,
+checks byte-for-byte delivery, reports QUIC loss/RTT/MTU, and exercises UDP
+anti-amplification, wrong-CID probes, and source-port isolation. These are local
+debug demos, not release/WAN performance comparisons. TLS timing is not a TCP
+RTT measurement, and the H2 demo does not sample kernel retransmission counters.
+
+If macOS clang selects an inaccessible custom `/usr/local/include`, the local
+validation used the installed SDK headers without changing directory permissions:
+
+```sh
+export CFLAGS="-nostdinc -isystem $(xcrun clang -print-resource-dir)/include -isystem $(xcrun --show-sdk-path)/usr/include"
+```
+
 ## Verification
 
 Local tests cover shared global/IP budgets, burst refill and reconnect behavior,
