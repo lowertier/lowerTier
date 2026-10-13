@@ -586,6 +586,11 @@ tiny TLS handshake record before the real ClientHello so shallow DPI still
 sees `16 03 01`. Preread would parse that record as a ClientHello and fail.
 Nginx only forwards bytes. LowTier distinguishes peers from probes.
 
+Decoy passthrough shares process-wide and per-source-IP bandwidth limits, with
+burst allowance, across TCP and UDP. TCP uses backpressure; QUIC responses are
+paced without changing their contents. UDP also has a pre-return-path
+anti-amplification bound. See [passthrough limits and upstream requirements](docs/decoy-passthrough.md).
+
 The upstream must support HTTP/3 on UDP port 443. This decoy path currently
 supports IPv4 listeners and IPv4 upstream endpoints. Marked packets enter the
 local QUIC endpoint through the public socket and do not use a loopback UDP

@@ -120,17 +120,55 @@ fn is_tcp_routing_record(header: &[u8; 5]) -> bool {
         && u16::from_be_bytes([header[3], header[4]]) as usize == QUIC_ROUTING_CID_BYTES
 }
 
+fn spawn_passthrough_tcp(client: TcpStream, prefix: Vec<u8>, upstream: std::net::SocketAddr) {
+    let Ok(peer) = client.peer_addr() else {
+        return;
+    };
+    // Acquire before spawning or dialing. All listeners and both protocols share
+    // the same process and source-IP budgets; authenticated tunnels bypass this.
+    let Some(permit) = super::decoy::process_limiter().admit(peer.ip()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            super::decoy::FLOW_LIFETIME,
+            passthrough_tcp(client, &prefix, upstream, &permit),
+        )
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::debug!(?result, "HTTP/2 decoy passthrough closed");
+        }
+    });
+}
+
 async fn passthrough_tcp(
     mut client: TcpStream,
     prefix: &[u8],
     upstream: std::net::SocketAddr,
+    permit: &super::decoy::DecoyPermit,
 ) -> Result<(), TunnelError> {
-    let mut upstream = TcpStream::connect(upstream).await?;
+    let mut upstream =
+        tokio::time::timeout(super::decoy::CONNECT_TIMEOUT, TcpStream::connect(upstream)).await??;
     if let Err(error) = upstream.set_nodelay(true) {
         tracing::warn!(?error, "set_nodelay fail on HTTP/2 decoy upstream");
     }
-    upstream.write_all(prefix).await?;
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    permit.wait(prefix.len()).await;
+    tokio::time::timeout(super::decoy::IDLE_TIMEOUT, upstream.write_all(prefix)).await??;
+    let (client_read, client_write) = client.split();
+    let (upstream_read, upstream_write) = upstream.split();
+    let activity = tokio::sync::Notify::new();
+    let relay = async {
+        tokio::try_join!(
+            super::decoy::copy_tcp(client_read, upstream_write, permit, &activity),
+            super::decoy::copy_tcp(upstream_read, client_write, permit, &activity),
+        )
+    };
+    tokio::select! {
+        result = relay => { result?; }
+        _ = super::decoy::tcp_idle(&activity, super::decoy::IDLE_TIMEOUT) => {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "decoy TCP idle timeout").into());
+        }
+    }
     Ok(())
 }
 
@@ -510,27 +548,27 @@ pub async fn accept(
             )
         })?;
         let mut header = [0_u8; 5];
-        stream.read_exact(&mut header).await?;
+        tokio::time::timeout(
+            super::decoy::CONNECT_TIMEOUT,
+            stream.read_exact(&mut header),
+        )
+        .await??;
         if is_tcp_routing_record(&header) {
             let mut marker = [0_u8; QUIC_ROUTING_CID_BYTES];
-            stream.read_exact(&mut marker).await?;
+            tokio::time::timeout(
+                super::decoy::CONNECT_TIMEOUT,
+                stream.read_exact(&mut marker),
+            )
+            .await??;
             if !valid_routing_cid_bytes(&marker, &secret, std::time::SystemTime::now()) {
                 let mut prefix = [0_u8; TCP_ROUTING_RECORD_LEN];
                 prefix[..5].copy_from_slice(&header);
                 prefix[5..].copy_from_slice(&marker);
-                tokio::spawn(async move {
-                    if let Err(error) = passthrough_tcp(stream, &prefix, upstream).await {
-                        tracing::debug!(?error, "HTTP/2 decoy passthrough closed");
-                    }
-                });
+                spawn_passthrough_tcp(stream, prefix.to_vec(), upstream);
                 return Ok(None);
             }
         } else {
-            tokio::spawn(async move {
-                if let Err(error) = passthrough_tcp(stream, &header, upstream).await {
-                    tracing::debug!(?error, "HTTP/2 decoy passthrough closed");
-                }
-            });
+            spawn_passthrough_tcp(stream, header.to_vec(), upstream);
             return Ok(None);
         }
     }

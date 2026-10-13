@@ -62,6 +62,8 @@ use super::common::TcpZCPacketToBytes;
 use super::packet_def::ZCPacketType;
 use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
 
+#[cfg(test)]
+mod decoy_tests;
 mod fragments;
 #[cfg(target_os = "linux")]
 mod runtime;
@@ -3218,7 +3220,8 @@ impl QuicDecoySocket {
         server_name: Option<Arc<str>>,
     ) -> Arc<Self> {
         let routes = Arc::new(dashmap::DashMap::new());
-        let (decoy_tx, decoy_rx) = mpsc::channel(MAX_QUIC_DECOY_FLOWS);
+        // Keep unauthenticated ingress bounded independently of VPN routing.
+        let (decoy_tx, decoy_rx) = mpsc::channel(64);
         tokio::spawn(run_quic_decoy_relays(
             inner.clone(),
             upstream,
@@ -3285,16 +3288,25 @@ impl QuicDecoySocket {
             .is_some_and(|name| quic_initial_sni_eq(packet, name))
         {
             QuicSocketRoute::Local
-        } else {
+        } else if super::decoy::is_quic_initial(packet) {
             QuicSocketRoute::Decoy
+        } else {
+            // Never turn arbitrary UDP, short packets, or unsupported versions
+            // into new upstream sockets / reflected responses.
+            return None;
         };
-        self.routes.insert(
-            client,
-            QuicSocketRouteEntry {
-                route,
-                last_seen_seconds: AtomicU64::new(now_seconds),
-            },
-        );
+        if route == QuicSocketRoute::Local {
+            self.routes.insert(
+                client,
+                QuicSocketRouteEntry {
+                    route,
+                    last_seen_seconds: AtomicU64::new(now_seconds),
+                },
+            );
+        }
+        // Decoy routes are cached only after the relay task admits the flow.
+        // Otherwise overflowing the ingress queue could leave thousands of
+        // orphan routes and prevent authenticated clients from being admitted.
         Some(route)
     }
 
@@ -3430,49 +3442,68 @@ async fn run_quic_decoy_flow(
     server_ip: Option<IpAddr>,
     mut incoming: mpsc::Receiver<Bytes>,
     cleanup: mpsc::UnboundedSender<SocketAddr>,
+    permit: super::decoy::DecoyPermit,
 ) {
-    let socket = bind::<UdpSocket>()
-        .addr((Ipv4Addr::UNSPECIFIED, 0).into())
-        .maybe_socket_mark(socket_mark)
-        .call();
-    let Ok(socket) = socket else {
-        let _ = cleanup.send(client);
-        return;
-    };
-    if socket.connect(upstream).await.is_err() {
-        let _ = cleanup.send(client);
-        return;
-    }
-    let mut poller = public.clone().create_io_poller();
-    let mut response = [0_u8; QUIC_DECOY_PACKET_BYTES];
-    loop {
-        let activity = tokio::time::timeout(QUIC_DECOY_FLOW_IDLE, async {
-            tokio::select! {
-                packet = incoming.recv() => {
-                    let Some(packet) = packet else {
-                        return false;
-                    };
-                    socket.send(&packet).await.is_ok()
-                }
-                received = socket.recv(&mut response) => {
-                    let Ok(length) = received else {
-                        return false;
-                    };
-                    send_quic_decoy_response(
-                        &public,
-                        &mut poller,
-                        client,
-                        server_ip,
-                        &response[..length],
-                    ).await.is_ok()
-                }
-            }
-        })
-        .await;
-        if !matches!(activity, Ok(true)) {
-            break;
+    let relay = async {
+        let socket = bind::<UdpSocket>()
+            .addr((Ipv4Addr::UNSPECIFIED, 0).into())
+            .maybe_socket_mark(socket_mark)
+            .call();
+        let Ok(socket) = socket else {
+            return;
+        };
+        if socket.connect(upstream).await.is_err() {
+            return;
         }
-    }
+        let mut poller = public.clone().create_io_poller();
+        let mut response = [0_u8; QUIC_DECOY_PACKET_BYTES];
+        let mut return_path = super::decoy::QuicReturnPath::default();
+        loop {
+            let activity = tokio::time::timeout(super::decoy::IDLE_TIMEOUT, async {
+                tokio::select! {
+                    packet = incoming.recv() => {
+                        let Some(packet) = packet else { return false; };
+                        // UDP cannot backpressure the sender: excess ingress is
+                        // dropped. Only forwarded input earns response credit.
+                        if !permit.allow_datagram(packet.len()) {
+                            tracing::trace!(?client, length = packet.len(), "decoy ingress limited");
+                            return true;
+                        }
+                        if socket.send(&packet).await.is_err() { return false; }
+                        return_path.received(&packet);
+                        tracing::trace!(?client, length = packet.len(), ?return_path, "decoy ingress forwarded");
+                        true
+                    }
+                    received = socket.recv(&mut response) => {
+                        let Ok(length) = received else { return false; };
+                        if !return_path.can_send(length) {
+                            tracing::trace!(?client, length, ?return_path, "decoy response amplification limited");
+                            return true;
+                        }
+                        // One pending response, paced without altering datagrams.
+                        // The socket and bounded ingress channel absorb bursts;
+                        // overload drops instead of growing a delay queue.
+                        permit.pace_datagram(length).await;
+                        if send_quic_decoy_response(
+                            &public,
+                            &mut poller,
+                            client,
+                            server_ip,
+                            &response[..length],
+                        ).await.is_err() { return false; }
+                        return_path.sent(&response[..length]);
+                        tracing::trace!(?client, length, ?return_path, "decoy response forwarded");
+                        true
+                    }
+                }
+            })
+            .await;
+            if !matches!(activity, Ok(true)) {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(super::decoy::FLOW_LIFETIME, relay).await;
     let _ = cleanup.send(client);
 }
 
@@ -3495,7 +3526,25 @@ async fn run_quic_decoy_relays(
                     let _ = flow.try_send(packet.bytes);
                     continue;
                 }
-                let (flow_tx, flow_rx) = mpsc::channel(64);
+                // Check process-wide/source-IP admission before allocating a
+                // socket or task. Rejected sources cannot fill the route table.
+                let Some(permit) = super::decoy::process_limiter().admit(packet.client.ip()) else {
+                    continue;
+                };
+                if !super::decoy::is_quic_initial(&packet.bytes) {
+                    continue;
+                }
+                let route = routes.entry(packet.client).or_insert_with(|| QuicSocketRouteEntry {
+                    route: QuicSocketRoute::Decoy,
+                    last_seen_seconds: AtomicU64::new(QuicDecoySocket::now_seconds()),
+                });
+                if route.route != QuicSocketRoute::Decoy {
+                    // A marked client may have been admitted while this Initial
+                    // waited in the queue. Never overwrite its authenticated route.
+                    continue;
+                }
+                drop(route);
+                let (flow_tx, flow_rx) = mpsc::channel(4);
                 let _ = flow_tx.try_send(packet.bytes);
                 tokio::spawn(run_quic_decoy_flow(
                     public.clone(),
@@ -3505,12 +3554,13 @@ async fn run_quic_decoy_relays(
                     packet.server_ip,
                     flow_rx,
                     cleanup_tx.clone(),
+                    permit,
                 ));
                 flows.insert(packet.client, flow_tx);
             }
             Some(client) = cleanup_rx.recv() => {
                 flows.remove(&client);
-                routes.remove(&client);
+                routes.remove_if(&client, |_, entry| entry.route == QuicSocketRoute::Decoy);
             }
         }
     }

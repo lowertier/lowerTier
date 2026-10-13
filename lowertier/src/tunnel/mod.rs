@@ -26,6 +26,7 @@ pub mod batch;
 mod browser_tls;
 pub mod buf;
 pub mod common;
+mod decoy;
 pub mod direct;
 pub mod filter;
 pub mod mpsc;
