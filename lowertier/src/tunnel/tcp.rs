@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
+};
 
 use super::FromUrl;
 use crate::{
@@ -8,10 +12,14 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use futures::stream::FuturesUnordered;
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 use super::{IpVersion, Tunnel, TunnelError, TunnelListener, common::wait_for_connect_futures};
+
+const MAX_PENDING_ACCEPTS: usize = 32;
+const MAX_PENDING_ACCEPTS_PER_IP: usize = 4;
+type PendingAccept = BoxFuture<'static, (IpAddr, Result<Option<Box<dyn Tunnel>>, TunnelError>)>;
 
 pub struct TcpTunnelListener {
     addr: url::Url,
@@ -21,6 +29,8 @@ pub struct TcpTunnelListener {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     lanes: tokio::sync::Mutex<super::tcp_lanes::LaneListener>,
     flags: crate::common::config::Flags,
+    pending: Mutex<FuturesUnordered<PendingAccept>>,
+    pending_by_ip: HashMap<IpAddr, usize>,
 }
 
 impl std::fmt::Debug for TcpTunnelListener {
@@ -43,6 +53,8 @@ impl TcpTunnelListener {
             tls_acceptor: None,
             lanes: tokio::sync::Mutex::default(),
             flags: crate::common::config::gen_default_flags(),
+            pending: Mutex::new(FuturesUnordered::new()),
+            pending_by_ip: HashMap::new(),
         }
     }
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
@@ -57,25 +69,31 @@ impl TcpTunnelListener {
         self.underlay_policy = underlay_policy;
     }
 
-    async fn do_accept(&self) -> Result<Box<dyn Tunnel>, std::io::Error> {
-        let listener = self.listener.as_ref().unwrap();
-        let (stream, _) = listener.accept().await?;
-        ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)
-            .map_err(std::io::Error::other)?;
+    fn start_accept(&mut self, stream: TcpStream, remote: SocketAddr) -> Result<(), TunnelError> {
+        ensure_remote_allowed(&self.underlay_policy, remote)?;
+        let ip = remote.ip();
+        if self.pending.get_mut().unwrap().len() >= MAX_PENDING_ACCEPTS
+            || self.pending_by_ip.get(&ip).copied().unwrap_or(0) >= MAX_PENDING_ACCEPTS_PER_IP
+        {
+            return Ok(());
+        }
         let acceptor = self
             .tls_acceptor
             .as_ref()
-            .ok_or_else(|| std::io::Error::other("HTTP/2 TCP listener has no TLS acceptor"))?;
-        match super::http2::accept(stream, acceptor, self.local_url(), &self.flags)
-            .await
-            .map_err(std::io::Error::other)?
-        {
-            Some(tunnel) => Ok(tunnel),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "HTTP/2 TCP connection was passed through to the decoy upstream",
-            )),
-        }
+            .ok_or_else(|| {
+                TunnelError::InternalError("HTTP/2 TCP listener has no TLS acceptor".into())
+            })?
+            .clone();
+        let url = self.local_url();
+        let flags = self.flags.clone();
+        *self.pending_by_ip.entry(ip).or_default() += 1;
+        self.pending.get_mut().unwrap().push(Box::pin(async move {
+            (
+                ip,
+                super::http2::accept(stream, &acceptor, url, &flags).await,
+            )
+        }));
+        Ok(())
     }
 }
 
@@ -83,6 +101,8 @@ impl TcpTunnelListener {
 impl TunnelListener for TcpTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         self.listener = None;
+        *self.pending.get_mut().unwrap() = FuturesUnordered::new();
+        self.pending_by_ip.clear();
         {
             super::tcp_lanes::requested(&self.addr)?;
             *self.lanes.get_mut() = Default::default();
@@ -112,16 +132,30 @@ impl TunnelListener for TcpTunnelListener {
         let lane_count = super::tcp_lanes::requested(&self.addr)?;
         loop {
             self.lanes.get_mut().expire();
-            let result = if lane_count > 1 {
-                match tokio::time::timeout(super::tcp_lanes::JOIN_TIMEOUT, self.do_accept()).await {
-                    Ok(result) => result,
-                    Err(_) => continue,
+            let pending = self.pending.get_mut().unwrap();
+            let completed = tokio::select! {
+                biased;
+                completed = pending.next(), if !pending.is_empty() => completed,
+                accepted = self.listener.as_ref().unwrap().accept() => {
+                    let (stream, remote) = accepted?;
+                    if let Err(error) = self.start_accept(stream, remote) {
+                        tracing::debug!(?error, "HTTP/2 admission rejected");
+                    }
+                    continue;
                 }
-            } else {
-                self.do_accept().await
+                _ = tokio::time::sleep(super::tcp_lanes::JOIN_TIMEOUT), if lane_count > 1 => continue,
             };
+            let Some((ip, result)) = completed else {
+                continue;
+            };
+            if let Some(count) = self.pending_by_ip.get_mut(&ip) {
+                *count -= 1;
+                if *count == 0 {
+                    self.pending_by_ip.remove(&ip);
+                }
+            }
             match result {
-                Ok(ret) => {
+                Ok(Some(ret)) => {
                     if lane_count > 1 {
                         match self.lanes.get_mut().accept(ret, lane_count).await {
                             Ok(Some(tunnel)) => return Ok(tunnel),
@@ -134,18 +168,8 @@ impl TunnelListener for TcpTunnelListener {
                     }
                     return Ok(ret);
                 }
-                Err(e) => {
-                    use std::io::ErrorKind::*;
-                    if matches!(
-                        e.kind(),
-                        NotConnected | ConnectionAborted | ConnectionRefused | ConnectionReset
-                    ) {
-                        tracing::warn!(?e, "accept fail with retryable error: {:?}", e);
-                        continue;
-                    }
-                    tracing::warn!(?e, "accept fail");
-                    return Err(e.into());
-                }
+                Ok(None) => continue,
+                Err(error) => tracing::debug!(?error, "HTTP/2 admission failed"),
             }
         }
     }
@@ -305,10 +329,21 @@ mod tests {
         let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
         listener.listen().await.unwrap();
         let listener_addr = listener.local_url();
+        // An idle client must not delay a separate TLS and CONNECT handshake.
+        let _idle = TcpStream::connect(
+            SocketAddr::from_url(listener_addr.clone(), IpVersion::Both)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         let server = tokio::spawn(async move { listener.accept().await.unwrap() });
 
         let mut connector = TcpTunnelConnector::new(listener_addr);
-        let client = connector.connect().await.unwrap();
+        let client = tokio::time::timeout(std::time::Duration::from_secs(2), connector.connect())
+            .await
+            .unwrap()
+            .unwrap();
         let server = server.await.unwrap();
 
         assert_eq!(client.transport_binding(), server.transport_binding());
@@ -316,6 +351,53 @@ mod tests {
             client.transport_binding().map(|binding| binding.kind),
             Some(TransportBindingKind::Http2TlsExporterV1)
         );
+    }
+
+    #[tokio::test]
+    async fn http2_admission_deadline_covers_tls_and_connect() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(std::time::Duration::from_secs(13), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let flags = crate::common::config::gen_default_flags();
+            let acceptor = super::super::http2::tls_acceptor(&flags).unwrap();
+            let server = tokio::spawn(async move {
+                let mut pending = FuturesUnordered::new();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let acceptor = acceptor.clone();
+                    let flags = flags.clone();
+                    pending.push(tokio::spawn(async move {
+                        let error = super::super::http2::accept(
+                            stream,
+                            &acceptor,
+                            format!("tcp://{addr}").parse().unwrap(),
+                            &flags,
+                        )
+                        .await
+                        .err()
+                        .unwrap();
+                        assert!(error.to_string().contains("admission timed out"));
+                    }));
+                }
+                while let Some(result) = pending.next().await {
+                    result.unwrap();
+                }
+            });
+            let mut idle = TcpStream::connect(addr).await.unwrap();
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let tls = super::super::browser_tls::connect(stream, "localhost", &[b"h2"], false)
+                .await
+                .unwrap();
+            let (_requests, connection) = h2::client::handshake(tls).await.unwrap();
+            let connection = tokio::spawn(connection);
+            let mut byte = [0; 1];
+            assert_eq!(idle.read(&mut byte).await.unwrap(), 0);
+            let _ = connection.await.unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

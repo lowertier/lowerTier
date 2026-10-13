@@ -1294,12 +1294,12 @@ impl NicCtx {
         Ok(())
     }
 
-    async fn do_forward_nic_to_peers(ret: ZCPacket, mgr: &PeerManager, adapter: InterfaceAdapter) {
+    pub(crate) async fn do_forward_nic_to_peers(
+        ret: ZCPacket,
+        mgr: &PeerManager,
+        adapter: InterfaceAdapter,
+    ) {
         let payload_kind = if adapter.uses_native_ethernet() {
-            Self::learn_hybrid_multicast_membership(ret.payload(), mgr);
-            if Self::handle_hybrid_control_frame(&ret, mgr).await {
-                return;
-            }
             FabricPayloadKind::Ethernet
         } else {
             Self::learn_hybrid_ip_multicast_membership(ret.payload(), mgr);
@@ -1313,22 +1313,13 @@ impl NicCtx {
         }
     }
 
-    async fn do_forward_nic_batch_to_peers(
+    pub(crate) async fn do_forward_nic_batch_to_peers(
         batch: PacketBatch,
         mgr: &PeerManager,
         adapter: InterfaceAdapter,
     ) {
         let (payload_kind, batch) = if adapter.uses_native_ethernet() {
-            let mut data = PacketBatch::new();
-            for packet in batch {
-                Self::learn_hybrid_multicast_membership(packet.payload(), mgr);
-                if Self::handle_hybrid_control_frame(&packet, mgr).await {
-                    continue;
-                }
-                data.try_push(packet)
-                    .expect("a filtered NIC batch cannot exceed its input");
-            }
-            (FabricPayloadKind::Ethernet, data)
+            (FabricPayloadKind::Ethernet, batch)
         } else {
             for packet in &batch {
                 Self::learn_hybrid_ip_multicast_membership(packet.payload(), mgr);
@@ -1343,8 +1334,10 @@ impl NicCtx {
         }
     }
 
-    async fn handle_hybrid_control_frame(packet: &ZCPacket, mgr: &PeerManager) -> bool {
+    pub(crate) async fn handle_hybrid_control_frame(packet: &ZCPacket, mgr: &PeerManager) -> bool {
         let frame = packet.payload();
+        // The fabric admits the source before control frames change local state.
+        Self::learn_hybrid_multicast_membership(frame, mgr);
         let Some(request) = crate::instance::l2_tun::validated_neighbor_request(frame) else {
             return false;
         };

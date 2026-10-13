@@ -10,12 +10,15 @@ use super::{TunnelError, stealth_tls};
 
 pub(super) type TlsClientStream = TlsStream<TcpStream>;
 
-pub(super) async fn connect(
-    stream: TcpStream,
+pub(super) async fn connect<S>(
+    stream: S,
     server_name: &str,
     alpn: &[&[u8]],
     verify_certificate: bool,
-) -> Result<TlsClientStream, TunnelError> {
+) -> Result<TlsStream<S>, TunnelError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let config = stealth_tls::rustls_client_config_for(alpn, verify_certificate)?;
     let connector = TlsConnector::from(Arc::new(config));
     let name = ServerName::try_from(server_name.to_owned())

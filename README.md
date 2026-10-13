@@ -120,6 +120,7 @@ Start node A.
 ```bash
 sudo lowertier-core \
   --hostname node-a \
+  --enable-bridge \
   --ipv4 10.44.0.1/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
@@ -131,6 +132,7 @@ Start node B.
 ```bash
 sudo lowertier-core \
   --hostname node-b \
+  --enable-bridge \
   --ipv4 10.44.0.2/24 \
   --network-name office-l2 \
   --network-secret '<same-secret>' \
@@ -369,6 +371,8 @@ Listeners are QUIC/HTTP/3, H2/TCP, and WSS.
 
 `--listeners 11010` creates every compiled IP listener with its standard offset.
 `--no-listener` creates an outbound-only node.
+
+For a TLS-terminating CDN, configure [WSS CDN mode](docs/wss-cdn.md) at both endpoints.
 
 The default QUIC listener is `11012`, not `443`. HTTP/3 does not require port 443.
 Bind `quic://0.0.0.0:443` only when a network allows UDP/443 and blocks other UDP.
@@ -619,40 +623,11 @@ name. HTTP/2 is still Nginx-forwardable: use the dumb stream block above,
 not `ssl_preread`. Marked clients send a tiny TLS record then ClientHello;
 Nginx forwards bytes; LowTier splices unmarked TCP to Cloudflare.
 
-A TLS-terminating CDN (Cloudflare orange-cloud, Nginx `location`) cannot
-carry CONNECT-IP or HTTP/3 DATAGRAMs. Use WebSocket there. Listen with
-cleartext `ws` on localhost and connect with `wss://…?via=cdn`. The query
-is a client flag only and is stripped from the HTTP upgrade. The CDN owns
-TLS. LowTier keeps Noise and does not bind a TLS exporter to the CDN hop.
-
-```toml
-listeners = ["ws://127.0.0.1:11011/ws"]
-
-[[peer]]
-uri = "wss://your.domain.example/ws?via=cdn"
-```
-
-```nginx
-location /ws {
-    proxy_pass http://127.0.0.1:11011;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_read_timeout 1d;
-    proxy_send_timeout 1d;
-}
-```
-
-Speed vs deploy cost, cheapest ops first:
-
-1. WebSocket through a CDN. No UDP/443, works on orange-cloud. Inner
-   Noise AEAD stays. Use this when you cannot own port 443.
-2. HTTP/2 plus HTTP/3 camouflage as `challenges.cloudflare.com` behind
-   Nginx stream. The TLS exporter skips inner AEAD. Unmarked probes
-   complete TLS with Cloudflare. The extra stream hop was about 8
-   percent on loopback. This is the layout tests and examples use.
+A TLS-terminating CDN cannot forward the existing CONNECT-IP or HTTP/3
+DATAGRAM sessions unchanged. Direct WSS uses TLS exporter binding.
+Use `via=cdn` at both WSS endpoints to carry an inner TLS connection through the CDN.
+The inner TLS exporter remains bound to Noise peer authentication.
+See [WSS CDN mode](docs/wss-cdn.md) for origin configuration and compatibility limits.
 
 ## Complete `lowertier-core` startup reference
 

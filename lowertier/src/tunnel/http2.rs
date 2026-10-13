@@ -532,6 +532,21 @@ fn wrap_http2_tunnel(
 }
 
 pub async fn accept(
+    stream: TcpStream,
+    acceptor: &TlsAcceptor,
+    local_url: url::Url,
+    flags: &Flags,
+) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
+    // One deadline covers routing inspection, TLS, and CONNECT admission.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        accept_inner(stream, acceptor, local_url, flags),
+    )
+    .await
+    .map_err(|_| TunnelError::InternalError("HTTP/2 admission timed out".into()))?
+}
+
+async fn accept_inner(
     mut stream: TcpStream,
     acceptor: &TlsAcceptor,
     local_url: url::Url,

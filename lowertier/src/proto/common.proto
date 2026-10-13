@@ -126,6 +126,13 @@ message FlagsInConfig {
   // Startup-only transport allowlist; empty preserves all transports.
   // Include every listener and bootstrap scheme: quic, tcp (HTTP/2), wss.
   repeated string enabled_protocols = 70;
+  // Startup-only bridge policy. Zero disables each source ownership limit.
+  uint32 l2_max_macs_per_peer = 71;
+  uint64 l2_mac_move_hold_seconds = 72;
+  // Empty permits all. VLAN zero includes untagged frames. Check every tag.
+  repeated uint32 l2_allowed_vlans = 73;
+  // Empty permits all. Values identify the final EtherType after VLAN tags.
+  repeated uint32 l2_allowed_ether_types = 74;
 }
 
 message RpcDescriptor {

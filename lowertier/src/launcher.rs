@@ -1024,6 +1024,14 @@ impl NetworkConfig {
         if let Some(enable_bridge) = self.enable_bridge {
             flags.enable_bridge = enable_bridge;
         }
+        if let Some(limit) = self.l2_max_macs_per_peer {
+            flags.l2_max_macs_per_peer = limit;
+        }
+        if let Some(seconds) = self.l2_mac_move_hold_seconds {
+            flags.l2_mac_move_hold_seconds = seconds;
+        }
+        flags.l2_allowed_vlans = self.l2_allowed_vlans.clone();
+        flags.l2_allowed_ether_types = self.l2_allowed_ether_types.clone();
         if let Some(quic_initial_receive_window) = self.quic_initial_receive_window {
             flags.quic_initial_receive_window = quic_initial_receive_window;
         }
@@ -1297,6 +1305,12 @@ impl NetworkConfig {
             (flags.l2_flood_bps != default_flags.l2_flood_bps).then_some(flags.l2_flood_bps);
         result.enable_bridge =
             (flags.enable_bridge != default_flags.enable_bridge).then_some(flags.enable_bridge);
+        result.l2_max_macs_per_peer =
+            (flags.l2_max_macs_per_peer != 0).then_some(flags.l2_max_macs_per_peer);
+        result.l2_mac_move_hold_seconds =
+            (flags.l2_mac_move_hold_seconds != 0).then_some(flags.l2_mac_move_hold_seconds);
+        result.l2_allowed_vlans = flags.l2_allowed_vlans.clone();
+        result.l2_allowed_ether_types = flags.l2_allowed_ether_types.clone();
         result.quic_initial_receive_window = (flags.quic_initial_receive_window
             != default_flags.quic_initial_receive_window)
             .then_some(flags.quic_initial_receive_window);
@@ -1402,6 +1416,10 @@ mod tests {
         flags.l2_fdb_age_seconds = 600;
         flags.l2_flood_bps = 128 * 1024 * 1024;
         flags.enable_bridge = true;
+        flags.l2_max_macs_per_peer = 128;
+        flags.l2_mac_move_hold_seconds = 30;
+        flags.l2_allowed_vlans = vec![0, 7];
+        flags.l2_allowed_ether_types = vec![0x0800, 0x0806];
         config.set_flags(flags.clone());
 
         let network_config = super::NetworkConfig::new_from_config(&config)?;
@@ -1418,6 +1436,19 @@ mod tests {
 
         let regenerated = network_config.gen_config()?;
         let regenerated_flags = regenerated.get_flags();
+        assert_eq!(
+            regenerated_flags.l2_max_macs_per_peer,
+            flags.l2_max_macs_per_peer
+        );
+        assert_eq!(
+            regenerated_flags.l2_mac_move_hold_seconds,
+            flags.l2_mac_move_hold_seconds
+        );
+        assert_eq!(regenerated_flags.l2_allowed_vlans, flags.l2_allowed_vlans);
+        assert_eq!(
+            regenerated_flags.l2_allowed_ether_types,
+            flags.l2_allowed_ether_types
+        );
         assert_eq!(
             regenerated_flags.underlay_deny_interfaces,
             flags.underlay_deny_interfaces

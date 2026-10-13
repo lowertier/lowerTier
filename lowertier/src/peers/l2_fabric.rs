@@ -1,5 +1,7 @@
 use std::{
+    collections::HashMap,
     hint::spin_loop,
+    sync::Mutex,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -115,6 +117,57 @@ pub struct L2Fabric {
     flood_bps: u64,
     flood_epoch: AtomicU64,
     flood_bytes: AtomicU64,
+    maintenance: Mutex<FdbMaintenance>,
+    policy: L2Policy,
+}
+
+#[derive(Default)]
+pub(crate) struct L2Policy {
+    max_macs_per_peer: usize,
+    move_hold: Duration,
+    allowed_vlans: Vec<u16>,
+    allowed_ether_types: Vec<u16>,
+}
+
+impl L2Policy {
+    pub(crate) fn from_flags(flags: &crate::common::config::Flags) -> Self {
+        let mut policy = Self {
+            max_macs_per_peer: flags.l2_max_macs_per_peer as usize,
+            move_hold: Duration::from_secs(flags.l2_mac_move_hold_seconds),
+            allowed_vlans: flags
+                .l2_allowed_vlans
+                .iter()
+                .map(|value| *value as u16)
+                .collect(),
+            allowed_ether_types: flags
+                .l2_allowed_ether_types
+                .iter()
+                .map(|value| *value as u16)
+                .collect(),
+        };
+        policy.allowed_vlans.sort_unstable();
+        policy.allowed_vlans.dedup();
+        policy.allowed_ether_types.sort_unstable();
+        policy.allowed_ether_types.dedup();
+        policy
+    }
+}
+
+struct FdbMaintenance {
+    next_expiry: Instant,
+    // Counts exist only when the optional per-peer limit is enabled.
+    per_peer: HashMap<PeerId, usize>,
+}
+
+impl FdbMaintenance {
+    fn remove_peer_entry(&mut self, peer: PeerId) {
+        if let Some(count) = self.per_peer.get_mut(&peer) {
+            *count -= 1;
+            if *count == 0 {
+                self.per_peer.remove(&peer);
+            }
+        }
+    }
 }
 
 /// Keep one packet fanout within the maximum peer set accepted by route sync.
@@ -124,6 +177,15 @@ impl L2Fabric {
     const FLOOD_EPOCH_RESETTING: u64 = 1 << 63;
 
     pub fn new(capacity: usize, age: Duration, flood_bps: u64) -> Self {
+        Self::with_policy(capacity, age, flood_bps, L2Policy::default())
+    }
+
+    pub(crate) fn with_policy(
+        capacity: usize,
+        age: Duration,
+        flood_bps: u64,
+        policy: L2Policy,
+    ) -> Self {
         Self {
             fdb: DashMap::new(),
             entry_count: AtomicUsize::new(0),
@@ -132,7 +194,89 @@ impl L2Fabric {
             flood_bps,
             flood_epoch: AtomicU64::new(0),
             flood_bytes: AtomicU64::new(0),
+            maintenance: Mutex::new(FdbMaintenance {
+                next_expiry: Instant::now(),
+                per_peer: HashMap::new(),
+            }),
+            policy,
         }
+    }
+
+    pub(crate) fn has_policy(&self) -> bool {
+        self.policy.max_macs_per_peer != 0
+            || !self.policy.move_hold.is_zero()
+            || !self.policy.allowed_vlans.is_empty()
+            || !self.policy.allowed_ether_types.is_empty()
+    }
+
+    pub(crate) fn allows_compact_ip(&self, payload: &[u8]) -> bool {
+        let ether_type = match payload.first().map(|byte| byte >> 4) {
+            Some(4) => 0x0800,
+            Some(6) => 0x86dd,
+            _ => return false,
+        };
+        (self.policy.allowed_vlans.is_empty()
+            || self.policy.allowed_vlans.binary_search(&0).is_ok())
+            && (self.policy.allowed_ether_types.is_empty()
+                || self
+                    .policy
+                    .allowed_ether_types
+                    .binary_search(&ether_type)
+                    .is_ok())
+    }
+
+    /// Apply bridge policy before forwarding or learning an Ethernet source.
+    pub(crate) fn admit_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) -> bool {
+        let Some(metadata) = ethernet_network_metadata(frame) else {
+            return false;
+        };
+        if !self.policy.allowed_ether_types.is_empty()
+            && self
+                .policy
+                .allowed_ether_types
+                .binary_search(&metadata.ether_type)
+                .is_err()
+        {
+            return false;
+        }
+        if !self.policy.allowed_vlans.is_empty() {
+            // Check every tag, so an allowed outer VLAN cannot hide a denied inner VLAN.
+            let mut offset = 12;
+            let mut tagged = false;
+            while matches!(
+                u16::from_be_bytes([frame[offset], frame[offset + 1]]),
+                0x8100 | 0x88a8 | 0x9100
+            ) {
+                tagged = true;
+                let vlan = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]) & 0x0fff;
+                if self.policy.allowed_vlans.binary_search(&vlan).is_err() {
+                    return false;
+                }
+                offset += 4;
+            }
+            if !tagged && self.policy.allowed_vlans.binary_search(&0).is_err() {
+                return false;
+            }
+        }
+        let source = frame[6..12].try_into().unwrap();
+        is_unicast(source) && self.learn_address_at(metadata.vlan_stack, source, peer_id, now)
+    }
+
+    fn reclaim_expired_at(&self, now: Instant, state: &mut FdbMaintenance) {
+        if now < state.next_expiry {
+            return;
+        }
+        // Pressure triggers at most one capacity-bounded sweep per second.
+        // Never hold a DashMap entry while acquiring this maintenance lock.
+        state.next_expiry = now + self.age.min(Duration::from_secs(1));
+        self.fdb.retain(|_, entry| {
+            if now.saturating_duration_since(entry.last_seen) <= self.age {
+                return true;
+            }
+            state.remove_peer_entry(entry.peer_id);
+            self.entry_count.fetch_sub(1, Ordering::AcqRel);
+            false
+        });
     }
 
     pub fn learn_source(&self, frame: &[u8], peer_id: PeerId) {
@@ -171,6 +315,7 @@ impl L2Fabric {
     }
 
     pub fn forget_peer(&self, peer_id: PeerId) {
+        let mut maintenance = self.maintenance.lock().unwrap();
         let keys = self
             .fdb
             .iter()
@@ -183,19 +328,22 @@ impl L2Fabric {
                 .is_some()
             {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
+                maintenance.remove_peer_entry(peer_id);
             }
         }
     }
 
     pub fn clear(&self) {
+        let mut maintenance = self.maintenance.lock().unwrap();
         let keys = self
             .fdb
             .iter()
             .map(|entry| *entry.key())
             .collect::<Vec<_>>();
         for key in keys {
-            if self.fdb.remove(&key).is_some() {
+            if let Some((_, entry)) = self.fdb.remove(&key) {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
+                maintenance.remove_peer_entry(entry.peer_id);
             }
         }
     }
@@ -221,23 +369,67 @@ impl L2Fabric {
         }
     }
 
-    fn learn_address_at(&self, vlan: VlanStack, source: MacAddress, peer_id: PeerId, now: Instant) {
-        match self.fdb.entry(FdbKey { vlan, mac: source }) {
+    fn learn_address_at(
+        &self,
+        vlan: VlanStack,
+        source: MacAddress,
+        peer_id: PeerId,
+        now: Instant,
+    ) -> bool {
+        let key = FdbKey { vlan, mac: source };
+        let mut maintenance =
+            (self.policy.max_macs_per_peer != 0).then(|| self.maintenance.lock().unwrap());
+        let peer_full = maintenance.as_ref().is_some_and(|state| {
+            state.per_peer.get(&peer_id).copied().unwrap_or(0) >= self.policy.max_macs_per_peer
+        });
+        if peer_full || (self.len() >= self.capacity && !self.fdb.contains_key(&key)) {
+            if let Some(state) = maintenance.as_mut() {
+                self.reclaim_expired_at(now, state);
+            } else if let Ok(mut state) = self.maintenance.try_lock() {
+                self.reclaim_expired_at(now, &mut state);
+            }
+        }
+        let peer_has_capacity = maintenance.as_ref().is_none_or(|state| {
+            state.per_peer.get(&peer_id).copied().unwrap_or(0) < self.policy.max_macs_per_peer
+        });
+        match self.fdb.entry(key) {
             Entry::Occupied(mut occupied) => {
+                let previous = *occupied.get();
+                if previous.peer_id != peer_id {
+                    if now.saturating_duration_since(previous.last_seen) < self.policy.move_hold
+                        || !peer_has_capacity
+                    {
+                        return false;
+                    }
+                    if let Some(state) = maintenance.as_mut() {
+                        state.remove_peer_entry(previous.peer_id);
+                        *state.per_peer.entry(peer_id).or_default() += 1;
+                    }
+                }
                 *occupied.get_mut() = FdbEntry {
                     peer_id,
                     last_seen: now,
                 };
             }
             Entry::Vacant(vacant) => {
+                if !peer_has_capacity {
+                    return false;
+                }
                 if self.try_reserve_entry() {
                     vacant.insert(FdbEntry {
                         peer_id,
                         last_seen: now,
                     });
+                    if let Some(state) = maintenance.as_mut() {
+                        *state.per_peer.entry(peer_id).or_default() += 1;
+                    }
+                } else if self.policy.max_macs_per_peer != 0 || !self.policy.move_hold.is_zero() {
+                    // Ownership policies require a recorded source before forwarding.
+                    return false;
                 }
             }
         }
+        true
     }
 
     pub(crate) fn destination_at(
@@ -270,15 +462,12 @@ impl L2Fabric {
             return EthernetDestination::Known(entry.peer_id);
         }
         drop(entry);
-
-        if self
-            .fdb
-            .remove_if(&key, |_, entry| {
-                now.saturating_duration_since(entry.last_seen) > self.age
-            })
-            .is_some()
-        {
+        let mut maintenance = self.maintenance.lock().unwrap();
+        if let Some((_, entry)) = self.fdb.remove_if(&key, |_, entry| {
+            now.saturating_duration_since(entry.last_seen) > self.age
+        }) {
             self.entry_count.fetch_sub(1, Ordering::AcqRel);
+            maintenance.remove_peer_entry(entry.peer_id);
         }
         EthernetDestination::Flood
     }
@@ -548,6 +737,53 @@ mod tests {
             fabric.destination_at(&frame(second, first), now),
             Ok(EthernetDestination::Flood)
         );
+        // An unused destination must not retain table capacity after expiry.
+        let later = now + Duration::from_secs(301);
+        fabric.learn_source_at(&frame([0xff; 6], second), 8, later);
+        assert_eq!(fabric.len(), 1);
+        assert_eq!(
+            fabric.destination_at(&frame(second, first), later),
+            Ok(EthernetDestination::Known(8))
+        );
+    }
+
+    #[test]
+    fn bridge_policy_limits_sources_tags_and_reflected_frames() {
+        let mut flags = crate::common::config::gen_default_flags();
+        flags.l2_max_macs_per_peer = 1;
+        flags.l2_mac_move_hold_seconds = 10;
+        flags.l2_allowed_vlans = vec![0, 7];
+        flags.l2_allowed_ether_types = vec![0x0800];
+        let fabric = L2Fabric::with_policy(
+            4,
+            Duration::from_secs(20),
+            0,
+            super::L2Policy::from_flags(&flags),
+        );
+        let now = Instant::now();
+        let mac_a = [2, 0, 0, 0, 0, 1];
+        let mac_b = [2, 0, 0, 0, 0, 2];
+        let original = frame([0xff; 6], mac_a);
+        assert!(fabric.admit_source_at(&original, 7, now));
+        assert!(!fabric.admit_source_at(&original, 8, now + Duration::from_secs(1)));
+        assert!(!fabric.admit_source_at(&frame([0xff; 6], mac_b), 7, now));
+        assert!(!fabric.admit_source_at(&vlan_frame(8, [0xff; 6], mac_b), 8, now));
+        let mut wrong_type = frame([0xff; 6], mac_b);
+        wrong_type[12..14].copy_from_slice(&0x0806_u16.to_be_bytes());
+        assert!(!fabric.admit_source_at(&wrong_type, 8, now));
+        assert!(fabric.allows_compact_ip(&[0x45]));
+        assert!(!fabric.allows_compact_ip(&[0x60]));
+        let mut nested = vlan_frame(7, [0xff; 6], mac_b);
+        nested.splice(16..16, [0x81, 0x00, 0, 8]);
+        assert!(!fabric.admit_source_at(&nested, 8, now));
+        assert!(fabric.admit_source_at(&original, 8, now + Duration::from_secs(11)));
+        // Moving and forgetting an owner release its source allowance.
+        assert!(fabric.admit_source_at(&frame([0xff; 6], mac_b), 7, now + Duration::from_secs(11)));
+        fabric.forget_peer(7);
+        assert!(fabric.admit_source_at(&frame([0xff; 6], mac_b), 7, now + Duration::from_secs(12)));
+        let mac_c = [2, 0, 0, 0, 0, 3];
+        assert!(fabric.admit_source_at(&frame([0xff; 6], mac_c), 7, now + Duration::from_secs(33)));
+        assert_eq!(fabric.len(), 1);
     }
 
     #[test]

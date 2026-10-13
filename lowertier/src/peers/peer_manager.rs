@@ -48,7 +48,8 @@ use crate::{
             stamp_critical_l2_control, stamp_packet_flow,
         },
         l2_fabric::{
-            EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch, MAX_FANOUT_RECIPIENTS,
+            EthernetDestination, L2DestinationBatch, L2Fabric, L2Policy, L2SourceBatch,
+            MAX_FANOUT_RECIPIENTS,
         },
         peer_conn::PeerConn,
         peer_rpc::PeerRpcManagerTransport,
@@ -1360,9 +1361,25 @@ impl DirectNicIngress {
             }
         }
 
-        if packet_type == PacketType::Ethernet as u8 {
-            self.l2_fabric
-                .learn_source_batch_at(source_batch, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        if self.ethernet_input && self.l2_fabric.has_policy() {
+            let keep: SmallVec<[bool; 64]> = batch
+                .iter()
+                .map(|packet| {
+                    if packet_type == PacketType::Ethernet as u8 {
+                        self.l2_fabric
+                            .admit_source_at(packet.payload(), from_peer_id, now)
+                    } else {
+                        self.l2_fabric.allows_compact_ip(packet.payload())
+                    }
+                })
+                .collect();
+            batch.retain_flags(&keep);
+            if batch.is_empty() {
+                return Ok(());
+            }
+        } else if packet_type == PacketType::Ethernet as u8 {
+            self.l2_fabric.learn_source_batch_at(source_batch, now);
         }
         // Stamp flow shards, account bytes and size the bounded TUN admission
         // in one pass while the cleartext tuple is still available.
@@ -1931,10 +1948,11 @@ impl PeerManager {
             .try_into()
             .expect("invalid data compress algo, maybe some features not enabled");
         let l2_flags = global_ctx.get_flags();
-        let l2_fabric = Arc::new(L2Fabric::new(
+        let l2_fabric = Arc::new(L2Fabric::with_policy(
             l2_flags.l2_fdb_capacity as usize,
             Duration::from_secs(l2_flags.l2_fdb_age_seconds),
             l2_flags.l2_flood_bps,
+            L2Policy::from_flags(&l2_flags),
         ));
         let service_routes = Arc::new(ServiceRouteStore::new(65_536, Duration::from_secs(300)));
 
@@ -2268,7 +2286,9 @@ impl PeerManager {
         }
         // Rendezvous authorizes one peer. Check identity before publishing the connection.
         if peer.get_peer_id() != expected_peer {
-            return Err(Error::SecretKeyError("punched peer differs from rendezvous peer".to_owned()));
+            return Err(Error::SecretKeyError(
+                "punched peer differs from rendezvous peer".to_owned(),
+            ));
         }
         self.add_new_peer_conn(peer).await
     }
@@ -2279,19 +2299,29 @@ impl PeerManager {
         expected_peer: Option<PeerId>,
         client: bool,
     ) -> Result<PeerId, Error> {
-        let info = tunnel.info().ok_or_else(|| anyhow::anyhow!("discovery tunnel has no info"))?;
+        let info = tunnel
+            .info()
+            .ok_or_else(|| anyhow::anyhow!("discovery tunnel has no info"))?;
         check_tunnel_info_underlay(&info, &self.global_ctx.get_underlay_policy())?;
         self.check_remote_addr_not_from_virtual_network(&tunnel)?;
         let mut peer = PeerConn::new_with_peer_id_hint(
-            self.my_peer_id, self.global_ctx.clone(), tunnel, expected_peer,
+            self.my_peer_id,
+            self.global_ctx.clone(),
+            tunnel,
+            expected_peer,
             self.peer_session_store.clone(),
         );
         peer.set_is_hole_punched(expected_peer.is_some());
-        if client { peer.do_handshake_as_client().await?; }
-        else { peer.do_handshake_as_server().await?; }
+        if client {
+            peer.do_handshake_as_client().await?;
+        } else {
+            peer.do_handshake_as_server().await?;
+        }
         let peer_id = peer.get_peer_id();
         if expected_peer.is_some_and(|expected| expected != peer_id) {
-            return Err(Error::SecretKeyError("discovery peer differs from authenticated punch peer".to_owned()));
+            return Err(Error::SecretKeyError(
+                "discovery peer differs from authenticated punch peer".to_owned(),
+            ));
         }
         // Tracker candidates cannot authorize foreign-network relay membership.
         self.add_new_peer_conn(peer).await?;
@@ -3387,8 +3417,22 @@ impl PeerManager {
                     return NicPacketAction::Drop;
                 }
                 if is_ethernet {
-                    self.l2_fabric
-                        .learn_source_at(packet.payload(), from_peer_id, now);
+                    if self.l2_fabric.has_policy() {
+                        if !self
+                            .l2_fabric
+                            .admit_source_at(packet.payload(), from_peer_id, now)
+                        {
+                            return NicPacketAction::Drop;
+                        }
+                    } else {
+                        self.l2_fabric
+                            .learn_source_at(packet.payload(), from_peer_id, now);
+                    }
+                } else if self.ethernet_input
+                    && self.l2_fabric.has_policy()
+                    && !self.l2_fabric.allows_compact_ip(packet.payload())
+                {
+                    return NicPacketAction::Drop;
                 }
                 NicPacketAction::Send(packet)
             }
@@ -3420,6 +3464,7 @@ impl PeerManager {
                 let batch_time = std::time::Instant::now();
                 let mut source_batch = L2SourceBatch::default();
                 if self.local_bridge_authorized
+                    && !self.l2_fabric.has_policy()
                     && batch.iter().all(|packet| {
                         packet.peer_manager_header().is_some_and(|header| {
                             header.packet_type != PacketType::Ethernet as u8
@@ -6026,8 +6071,22 @@ impl PeerManager {
         let mut errors = Vec::new();
         let mut nic_batch = PacketBatch::with_capacity(batch.len());
         let mut metadata = TapBatchMetadata::new();
+        let policy_time = std::time::Instant::now();
         for packet in batch {
             let frame = packet.payload();
+            if self.l2_fabric.has_policy()
+                && !self
+                    .l2_fabric
+                    .admit_source_at(frame, self.my_peer_id, policy_time)
+            {
+                continue;
+            }
+            #[cfg(feature = "tun")]
+            if crate::instance::virtual_nic::NicCtx::handle_hybrid_control_frame(&packet, self)
+                .await
+            {
+                continue;
+            }
             let Some(ethernet_header) = frame
                 .get(..crate::instance::l2_tun::ETHERNET_HEADER_LEN)
                 .and_then(|header| {
@@ -6056,6 +6115,9 @@ impl PeerManager {
                 }
                 [0x08, 0x00] | [0x86, 0xdd] => {}
                 _ => {
+                    let mut packet = packet;
+                    // Reused NIC buffers can contain a previous packet's routing header.
+                    packet.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
                     exceptional_inputs.push(EthernetBatchInput {
                         packet,
                         destination_peer_id: None,
@@ -7597,11 +7659,20 @@ mod tests {
         l2_flood_bps: u64,
         ipv4: Option<std::net::Ipv4Addr>,
     ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
+        create_tap_peer_manager_with_policy(l2_flood_bps, ipv4, |_| {}).await
+    }
+
+    async fn create_tap_peer_manager_with_policy(
+        l2_flood_bps: u64,
+        ipv4: Option<std::net::Ipv4Addr>,
+        configure: impl FnOnce(&mut Flags),
+    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(ipv4.map(|address| cidr::Ipv4Inet::new(address, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
         flags.enable_bridge = true;
         flags.l2_flood_bps = l2_flood_bps;
+        configure(&mut flags);
         global_ctx.set_flags(flags);
         let mut features = global_ctx.get_feature_flags();
         features.ethernet_input = true;
@@ -7705,6 +7776,180 @@ mod tests {
         frame[6..12].copy_from_slice(&source);
         frame[12..14].copy_from_slice(&0x88b5_u16.to_be_bytes());
         frame
+    }
+
+    #[cfg(feature = "tun")]
+    #[tokio::test]
+    async fn l2_nic_policy_precedes_neighbor_replies_and_membership() {
+        use crate::instance::virtual_nic::NicCtx;
+        let (peer_a, _legacy_nic_a) =
+            create_tap_peer_manager_with_policy(0, Some("10.77.0.1".parse().unwrap()), |flags| {
+                flags.l2_allowed_vlans = vec![0];
+                flags.l2_allowed_ether_types = vec![0x0806, 0x0800];
+            })
+            .await;
+        let (nic_send, mut nic_a) = futures::channel::mpsc::unbounded::<PacketBatch>();
+        let _nic_endpoint = peer_a
+            .install_direct_nic_sink(Box::pin(nic_send.sink_map_err(|error| {
+                crate::tunnel::TunnelError::InvalidPacket(error.to_string())
+            })));
+        let (peer_b, _nic_b) =
+            create_tap_peer_manager_with_ipv4(0, Some("10.77.0.2".parse().unwrap())).await;
+        connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
+        wait_route_appear(peer_a.clone(), peer_b.clone())
+            .await
+            .unwrap();
+        let source = [2, 0, 0, 0, 0, 1];
+        let mut arp = ethernet_frame([0xff; 6], source);
+        arp[12..14].copy_from_slice(&0x0806_u16.to_be_bytes());
+        arp[14..22].copy_from_slice(&[0, 1, 8, 0, 6, 4, 0, 1]);
+        arp[22..28].copy_from_slice(&source);
+        arp[28..32].copy_from_slice(&[10, 77, 0, 1]);
+        arp[38..42].copy_from_slice(&[10, 77, 0, 2]);
+        let mut denied_arp = arp.clone();
+        denied_arp.splice(12..12, [0x81, 0, 0, 7]);
+        let mut membership = ethernet_frame([1, 0, 0x5e, 1, 2, 3], source);
+        membership[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        membership[14] = 0x45;
+        membership[16..18].copy_from_slice(&28_u16.to_be_bytes());
+        membership[22] = 1;
+        membership[23] = 2;
+        membership[26..30].copy_from_slice(&[10, 77, 0, 1]);
+        membership[30..34].copy_from_slice(&[239, 1, 2, 3]);
+        membership[34..42].copy_from_slice(&[0x16, 0, 0xf8, 0xfa, 239, 1, 2, 3]);
+        let mut denied_membership = membership.clone();
+        denied_membership.splice(12..12, [0x81, 0, 0, 7]);
+        let mut denied = PacketBatch::new();
+        for frame in [&denied_arp, &denied_membership] {
+            denied.try_push(ZCPacket::new_with_payload(frame)).unwrap();
+        }
+        let adapter = crate::common::config::InterfaceAdapter::Tap;
+        NicCtx::do_forward_nic_batch_to_peers(denied, &peer_a, adapter).await;
+        assert!(peer_a.global_ctx.get_multicast_groups().is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), nic_a.next())
+                .await
+                .is_err()
+        );
+        NicCtx::do_forward_nic_to_peers(ZCPacket::new_with_payload(&arp), &peer_a, adapter).await;
+        let reply = tokio::time::timeout(Duration::from_secs(1), nic_a.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&reply[0].payload()[20..22], &[0, 2]);
+        NicCtx::do_forward_nic_to_peers(ZCPacket::new_with_payload(&membership), &peer_a, adapter)
+            .await;
+        assert!(
+            peer_a
+                .global_ctx
+                .get_multicast_groups()
+                .contains(&"239.1.2.3".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn l2_bridge_policy_filters_batches_and_external_reflection() {
+        let (peer_a, mut nic_a) = create_tap_peer_manager(0).await;
+        let (peer_b, mut nic_b) = create_tap_peer_manager_with_policy(0, None, |flags| {
+            flags.l2_max_macs_per_peer = 1;
+            flags.l2_mac_move_hold_seconds = 30;
+            flags.l2_allowed_vlans = vec![0];
+            flags.l2_allowed_ether_types = vec![0x88b5];
+        })
+        .await;
+        connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
+        wait_route_appear(peer_a.clone(), peer_b.clone())
+            .await
+            .unwrap();
+        wait_route_appear(peer_b.clone(), peer_a.clone())
+            .await
+            .unwrap();
+        let accepted = ethernet_frame([0xff; 6], [2, 0, 0, 0, 0, 1]);
+        let excess = ethernet_frame([0xff; 6], [2, 0, 0, 0, 0, 2]);
+        let mut tagged = accepted.clone();
+        tagged.splice(12..12, [0x81, 0x00, 0, 7]);
+        let mut batch = PacketBatch::new();
+        for frame in [&accepted, &excess, &tagged] {
+            batch.try_push(ZCPacket::new_with_payload(frame)).unwrap();
+        }
+        peer_a.send_msg_by_ethernet_batch(batch).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(3), nic_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.payload(), accepted);
+        // An external LAN can reflect this received frame into the local TAP.
+        peer_b
+            .send_msg_by_ethernet(ZCPacket::new_with_payload(&accepted))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), nic_a.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), nic_b.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(peer_b.l2_fabric.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn l2_direct_nic_policy_checks_compact_ip_types() {
+        for allowed_type in [0x0800, 0x86dd] {
+            let (peer, _legacy_nic) = create_tap_peer_manager_with_policy(0, None, |flags| {
+                flags.l2_allowed_ether_types = vec![allowed_type];
+            })
+            .await;
+            let (send, mut receive) = futures::channel::mpsc::unbounded::<PacketBatch>();
+            let _endpoint = peer.install_direct_nic_sink(Box::pin(send.sink_map_err(|error| {
+                crate::tunnel::TunnelError::InvalidPacket(error.to_string())
+            })));
+            let mut batch = PacketBatch::new();
+            for version in [4, 6] {
+                let mut payload = vec![0; if version == 4 { 28 } else { 48 }];
+                if version == 4 {
+                    payload[0] = 0x45;
+                    payload[2..4].copy_from_slice(&28_u16.to_be_bytes());
+                    payload[8] = 64;
+                    payload[9] = 17;
+                    payload[12..16].copy_from_slice(&[10, 77, 0, 2]);
+                    payload[16..20].copy_from_slice(&[10, 77, 0, 1]);
+                    payload[24..26].copy_from_slice(&8_u16.to_be_bytes());
+                } else {
+                    payload[0] = 0x60;
+                    payload[4..6].copy_from_slice(&8_u16.to_be_bytes());
+                    payload[6] = 17;
+                    payload[7] = 64;
+                    payload[8] = 0xfd;
+                    payload[23] = 2;
+                    payload[24] = 0xfd;
+                    payload[39] = 1;
+                    payload[44..46].copy_from_slice(&8_u16.to_be_bytes());
+                }
+                let mut packet = ZCPacket::new_with_payload(&payload);
+                packet.fill_peer_manager_hdr(42, peer.my_peer_id, PacketType::Data as u8);
+                assert!(packet.set_authenticated_peer_id(42));
+                assert!(packet.set_authenticated_peer_identity_type(PeerIdentityType::Admin));
+                assert!(packet.set_authenticated_peer_secure_auth_level(
+                    SecureAuthLevel::NetworkSecretConfirmed
+                ));
+                assert!(packet.set_authenticated_session_id(uuid::Uuid::new_v4()));
+                batch.try_push(packet).unwrap();
+            }
+            peer.packet_ingress.send_batch(batch).await.unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(1), receive.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(
+                received[0].payload()[0] >> 4,
+                if allowed_type == 0x0800 { 4 } else { 6 }
+            );
+        }
     }
 
     #[tokio::test]

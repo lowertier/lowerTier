@@ -107,7 +107,7 @@ def receive_frame(args: argparse.Namespace) -> int:
                 frame, ancillary, _, address = packet_socket.recvmsg(
                     65535, socket.CMSG_SPACE(20)
                 )
-            except TimeoutError:
+            except socket.timeout:
                 continue
             if len(address) > 2 and address[2] == PACKET_OUTGOING:
                 continue

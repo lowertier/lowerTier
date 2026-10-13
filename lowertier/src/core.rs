@@ -602,6 +602,29 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        help = "Maximum learned MAC and VLAN entries per bridge peer; zero disables the limit"
+    )]
+    l2_max_macs_per_peer: Option<u32>,
+    #[arg(
+        long,
+        help = "Reject MAC movement until the previous source has been idle for this many seconds"
+    )]
+    l2_mac_move_hold_seconds: Option<u64>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Allowed bridge VLAN IDs; zero includes untagged frames"
+    )]
+    l2_allowed_vlans: Vec<u32>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Allowed final Ethernet types as decimal integers"
+    )]
+    l2_allowed_ether_types: Vec<u32>,
+
+    #[arg(
+        long,
         env = "ET_QUIC_INITIAL_RECEIVE_WINDOW",
         help = t!("core_clap.quic_initial_receive_window").to_string()
     )]
@@ -1318,6 +1341,16 @@ impl NetworkOptions {
         f.l2_fdb_age_seconds = self.l2_fdb_age_seconds.unwrap_or(f.l2_fdb_age_seconds);
         f.l2_flood_bps = self.l2_flood_bps.unwrap_or(f.l2_flood_bps);
         f.enable_bridge = self.enable_bridge.unwrap_or(f.enable_bridge);
+        f.l2_max_macs_per_peer = self.l2_max_macs_per_peer.unwrap_or(f.l2_max_macs_per_peer);
+        f.l2_mac_move_hold_seconds = self
+            .l2_mac_move_hold_seconds
+            .unwrap_or(f.l2_mac_move_hold_seconds);
+        if !self.l2_allowed_vlans.is_empty() {
+            f.l2_allowed_vlans = self.l2_allowed_vlans.clone();
+        }
+        if !self.l2_allowed_ether_types.is_empty() {
+            f.l2_allowed_ether_types = self.l2_allowed_ether_types.clone();
+        }
         f.quic_initial_receive_window = self
             .quic_initial_receive_window
             .unwrap_or(f.quic_initial_receive_window);

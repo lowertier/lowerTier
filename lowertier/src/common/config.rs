@@ -89,6 +89,10 @@ pub fn gen_default_flags() -> Flags {
         l2_fdb_age_seconds: 300,
         l2_flood_bps: 64 * 1024 * 1024,
         enable_bridge: false,
+        l2_max_macs_per_peer: 0,
+        l2_mac_move_hold_seconds: 0,
+        l2_allowed_vlans: Vec::new(),
+        l2_allowed_ether_types: Vec::new(),
         quic_tls_cert: String::new(),
         quic_tls_key: String::new(),
         quic_server_name: String::new(),
@@ -186,6 +190,27 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     }
     if !(1..=86_400).contains(&flags.l2_fdb_age_seconds) {
         anyhow::bail!("l2_fdb_age_seconds must be between 1 and 86400");
+    }
+    if flags.l2_max_macs_per_peer > flags.l2_fdb_capacity {
+        anyhow::bail!("l2_max_macs_per_peer must not exceed l2_fdb_capacity");
+    }
+    if flags.l2_mac_move_hold_seconds > flags.l2_fdb_age_seconds {
+        anyhow::bail!("l2_mac_move_hold_seconds must not exceed l2_fdb_age_seconds");
+    }
+    if flags.l2_allowed_vlans.len() > 4095
+        || flags.l2_allowed_vlans.iter().any(|value| *value > 4094)
+    {
+        anyhow::bail!("l2_allowed_vlans must contain at most 4095 VLAN IDs from 0 through 4094");
+    }
+    if flags.l2_allowed_ether_types.len() > 256
+        || flags
+            .l2_allowed_ether_types
+            .iter()
+            .any(|value| !(0x0600..=0xffff).contains(value))
+    {
+        anyhow::bail!(
+            "l2_allowed_ether_types must contain at most 256 EtherTypes from 1536 through 65535"
+        );
     }
 
     match flags.default_protocol.as_str() {

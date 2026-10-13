@@ -647,22 +647,60 @@ async fn send_normal_http3_response(
 }
 
 async fn serve_additional_http3_requests(
-    mut connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
+    connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
     fallback_root: Option<PathBuf>,
 ) {
+    serve_http3_requests(connection, fallback_root, None).await;
+}
+
+struct Http3Website {
+    connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
+    first: (http::Request<()>, H3ServerStream),
+}
+
+enum ConnectIpAccept {
+    Tunnel(Box<dyn ConnectIpRequestStream>, u64),
+    Website(Box<Http3Website>),
+}
+
+async fn serve_http3_requests(
+    mut connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
+    fallback_root: Option<PathBuf>,
+    first: Option<(http::Request<()>, H3ServerStream)>,
+) {
+    let website = first.is_some();
+    let mut responses = tokio::task::JoinSet::new();
+    if let Some((request, stream)) = first {
+        responses.spawn(send_normal_http3_response(
+            request,
+            stream,
+            fallback_root.clone(),
+        ));
+    }
     loop {
-        let resolver = match connection.accept().await {
+        let accepted = tokio::select! {
+            result = responses.join_next(), if !responses.is_empty() => {
+                if let Some(Err(error)) = result { tracing::debug!(?error, "HTTP/3 response task stopped"); }
+                continue;
+            }
+            accepted = connection.accept(), if responses.len() < 2 => accepted,
+            _ = tokio::time::sleep(super::decoy::IDLE_TIMEOUT), if website && responses.is_empty() => return,
+        };
+        let resolver = match accepted {
             Ok(Some(resolver)) => resolver,
             Ok(None) | Err(_) => return,
         };
-        match resolver.resolve_request().await {
-            Ok((request, stream)) => {
-                let fallback_root = fallback_root.clone();
-                tokio::spawn(async move {
-                    let _ = send_normal_http3_response(request, stream, fallback_root).await;
-                });
+        match tokio::time::timeout(super::decoy::CONNECT_TIMEOUT, resolver.resolve_request()).await
+        {
+            Ok(Ok((request, stream))) => {
+                responses.spawn(send_normal_http3_response(
+                    request,
+                    stream,
+                    fallback_root.clone(),
+                ));
             }
             Err(error) => tracing::debug!(?error, "reject malformed HTTP/3 request"),
+            Ok(Err(error)) => tracing::debug!(?error, "reject malformed HTTP/3 request"),
         }
     }
 }
@@ -671,7 +709,7 @@ async fn accept_connect_ip_request(
     connection: &Connection,
     admission: Option<&ConnectIpAdmission>,
     fallback_root: Option<PathBuf>,
-) -> Result<(Box<dyn ConnectIpRequestStream>, u64), TunnelError> {
+) -> Result<ConnectIpAccept, TunnelError> {
     let mut builder = h3::server::builder();
     builder.enable_extended_connect(true).enable_datagram(true);
     let mut h3 = builder
@@ -703,11 +741,12 @@ async fn accept_connect_ip_request(
             None => false,
         };
         if !is_connect_ip || !authorized {
-            let fallback_root = fallback_root.clone();
-            tokio::spawn(async move {
-                let _ = send_normal_http3_response(request, stream, fallback_root).await;
-            });
-            continue;
+            // Website requests leave VPN admission immediately. Their separate
+            // owner applies website resource limits without the CONNECT deadline.
+            return Ok(ConnectIpAccept::Website(Box::new(Http3Website {
+                connection: h3,
+                first: (request, stream),
+            })));
         }
         let response = http::Response::builder()
             .status(http::StatusCode::OK)
@@ -719,7 +758,7 @@ async fn accept_connect_ip_request(
         })?;
         let stream_id = connect_ip_stream_id(stream.id());
         tokio::spawn(serve_additional_http3_requests(h3, fallback_root));
-        return Ok((
+        return Ok(ConnectIpAccept::Tunnel(
             Box::new(stream) as Box<dyn ConnectIpRequestStream>,
             stream_id,
         ));
@@ -3572,8 +3611,13 @@ struct PendingQuicAcceptState {
     admission_limiter: QuicAdmissionLimiter,
 }
 
-type PendingQuicAccept =
-    Pin<Box<dyn Future<Output = (IpAddr, Result<Box<dyn Tunnel>, TunnelError>)> + Send + 'static>>;
+type PendingQuicAccept = Pin<
+    Box<
+        dyn Future<Output = (IpAddr, Result<Option<Box<dyn Tunnel>>, TunnelError>)>
+            + Send
+            + 'static,
+    >,
+>;
 
 const MAX_PENDING_QUIC_ACCEPTS: usize = 32;
 const MAX_PENDING_QUIC_ACCEPTS_PER_IP: usize = 1;
@@ -3713,7 +3757,7 @@ impl QuicTunnelListener {
         source_permit: QuicSourcePermit,
         endpoint_manager: Option<Arc<QuicEndpointManager>>,
         endpoint_owner: Option<Endpoint>,
-    ) -> Result<Box<dyn Tunnel>, TunnelError> {
+    ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), initial_remote)?;
         let conn = tokio::time::timeout(Duration::from_secs(7), incoming)
             .await
@@ -3729,14 +3773,55 @@ impl QuicTunnelListener {
             root if root.is_empty() => None,
             root => Some(PathBuf::from(root)),
         };
-        let (connect_stream, connect_stream_id) =
-            match accept_connect_ip_request(&conn, admission.as_ref(), fallback_root).await {
-                Ok(lane) => lane,
-                Err(error) => {
-                    conn.close(VarInt::from_u32(1), b"CONNECT-IP activation failed");
-                    return Err(error);
-                }
-            };
+        let activation = tokio::time::timeout(
+            Duration::from_secs(7),
+            accept_connect_ip_request(&conn, admission.as_ref(), fallback_root.clone()),
+        )
+        .await
+        .map_err(|_| TunnelError::InternalError("CONNECT-IP admission timed out".into()))
+        .and_then(|result| result);
+        let (connect_stream, connect_stream_id) = match activation {
+            Ok(ConnectIpAccept::Tunnel(stream, id)) => (stream, id),
+            Ok(ConnectIpAccept::Website(website)) => {
+                drop(source_permit);
+                let Some(website_permit) = super::decoy::process_limiter().admit(remote_addr.ip())
+                else {
+                    conn.close(VarInt::from_u32(1), b"website capacity full");
+                    return Ok(None);
+                };
+                let Some(response_memory) = global_ctx
+                    .process_memory_governor()
+                    .try_reserve_owned(2 * MAX_HTTP3_ORIGIN_FILE_BYTES as usize)
+                else {
+                    conn.close(VarInt::from_u32(1), b"website memory full");
+                    return Ok(None);
+                };
+                tokio::spawn(async move {
+                    let _owners = (
+                        memory_permit,
+                        response_memory,
+                        website_permit,
+                        endpoint_manager,
+                        endpoint_owner,
+                    );
+                    let _ = tokio::time::timeout(
+                        super::decoy::FLOW_LIFETIME,
+                        serve_http3_requests(
+                            website.connection,
+                            fallback_root,
+                            Some(website.first),
+                        ),
+                    )
+                    .await;
+                    conn.close(VarInt::from_u32(0), b"website connection complete");
+                });
+                return Ok(None);
+            }
+            Err(error) => {
+                conn.close(VarInt::from_u32(1), b"CONNECT-IP activation failed");
+                return Err(error);
+            }
+        };
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -3765,6 +3850,7 @@ impl QuicTunnelListener {
             endpoint_owner,
             Some(global_ctx.dataplane_telemetry().clone()),
         )
+        .map(Some)
     }
 
     fn release_pending_ip(&mut self, ip: IpAddr) {
@@ -3830,12 +3916,12 @@ impl QuicTunnelListener {
 
     fn handle_completed_accept(
         &mut self,
-        completed: (IpAddr, Result<Box<dyn Tunnel>, TunnelError>),
+        completed: (IpAddr, Result<Option<Box<dyn Tunnel>>, TunnelError>),
     ) -> Option<Box<dyn Tunnel>> {
         let (ip, result) = completed;
         self.release_pending_ip(ip);
         match result {
-            Ok(tunnel) => Some(tunnel),
+            Ok(tunnel) => tunnel,
             Err(error) => {
                 tracing::warn!(?error, ?ip, "QUIC connection activation failed");
                 None
@@ -4461,6 +4547,42 @@ mod tests {
     }
 
     #[test]
+    fn quic_admission_deadline_releases_source_for_another_peer() {
+        RUNTIME.block_on(async {
+            tokio::time::timeout(Duration::from_secs(12), async {
+                let context = global_ctx();
+                let mut listener =
+                    QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), context.clone());
+                listener.listen().await.unwrap();
+                let url = listener.local_url();
+                let addr = SocketAddr::from_url(url.clone(), IpVersion::Both)
+                    .await
+                    .unwrap();
+                let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+                let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+                endpoint.set_default_client_config(client_config(&context.get_flags()).unwrap());
+                let stalled = endpoint.connect(addr, "localhost").unwrap().await.unwrap();
+                // QUIC remains active, but this client never sends CONNECT-IP.
+                let closed = tokio::time::timeout(Duration::from_secs(9), stalled.closed())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    closed,
+                    quinn::ConnectionError::ApplicationClosed(_)
+                ));
+                let client = QuicTunnelConnector::new(url, global_ctx())
+                    .connect()
+                    .await
+                    .unwrap();
+                let accepted = server.await.unwrap();
+                assert_eq!(client.transport_binding(), accepted.transport_binding());
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
     fn quic_hybrid_lanes_cross_a_live_connection() {
         RUNTIME.block_on(async {
             let mut listener =
@@ -4534,19 +4656,14 @@ mod tests {
     fn unrelated_http3_request_gets_a_normal_response() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
-            let server_endpoint = Endpoint::server(
-                server_config(&flags).unwrap(),
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
-            let server_addr = server_endpoint.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let connection = server_endpoint.accept().await.unwrap().await.unwrap();
-                let admission = ConnectIpAdmission {
-                    key: Arc::from(b"correct-test-admission-key".as_slice()),
-                };
-                let _ = accept_connect_ip_request(&connection, Some(&admission), None).await;
-            });
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+            listener.listen().await.unwrap();
+            let url = listener.local_url();
+            let server_addr = SocketAddr::from_url(url.clone(), IpVersion::Both)
+                .await
+                .unwrap();
+            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
 
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
@@ -4583,6 +4700,18 @@ mod tests {
                     .starts_with(b"<!doctype html>")
             );
 
+            // A website owner releases VPN admission for peers behind the same NAT.
+            let _peer = tokio::time::timeout(
+                Duration::from_secs(2),
+                QuicTunnelConnector::new(url, global_ctx()).connect(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let _accepted = server.await.unwrap();
+            // The website remains usable after the CONNECT admission deadline.
+            tokio::time::sleep(Duration::from_secs(8)).await;
+
             let request = http::Request::builder()
                 .method(http::Method::CONNECT)
                 .uri(format!("https://example.com{CONNECT_IP_PATH}"))
@@ -4596,7 +4725,6 @@ mod tests {
             assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
             drop(requests);
             driver.abort();
-            server.abort();
         });
     }
 
@@ -4643,7 +4771,11 @@ mod tests {
             let upstream_addr = upstream.local_addr().unwrap();
             let upstream_task = tokio::spawn(async move {
                 let connection = upstream.accept().await.unwrap().await.unwrap();
-                let _ = accept_connect_ip_request(&connection, None, None).await;
+                if let Ok(ConnectIpAccept::Website(website)) =
+                    accept_connect_ip_request(&connection, None, None).await
+                {
+                    serve_http3_requests(website.connection, None, Some(website.first)).await;
+                }
             });
             let global_ctx = global_ctx();
             let mut listener_flags = global_ctx.get_flags();

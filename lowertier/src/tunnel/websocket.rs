@@ -25,7 +25,11 @@ use tokio_rustls::TlsAcceptor;
 use tokio_websockets::{ClientBuilder, Config as WebSocketConfig, Limits, Message, ServerBuilder};
 use zerocopy::AsBytes;
 
+mod cdn;
+
 const HTTP_1_1_ALPN: &[u8] = b"http/1.1";
+// Match the bounded lane receive budget, including control packets.
+const MAX_WS_MESSAGE_BYTES: usize = super::tcp_lanes::MAX_PENDING_BYTES;
 const WSS_TRANSPORT_BINDING_LABEL: &[u8] = b"EXPORTER-LowTier-Wss-PeerConn-v1";
 const WSS_TRANSPORT_BINDING_CONTEXT: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256|peerconn-v3|wss";
 const WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
@@ -67,10 +71,10 @@ fn ws_http_url(url: &url::Url) -> url::Url {
 }
 
 fn ws_peer_tunnel_type(url: &url::Url) -> &'static str {
-    if is_wss(url).unwrap_or(false) && !ws_via_cdn(url) {
+    if is_wss(url).unwrap_or(false) || ws_via_cdn(url) {
         "wss"
     } else {
-        "wss"
+        "ws"
     }
 }
 
@@ -118,7 +122,14 @@ fn browser_ws_client(addr: &url::Url) -> Result<ClientBuilder<'_>, TunnelError> 
     let origin = http::HeaderValue::from_str(&origin)
         .map_err(|_| TunnelError::InvalidAddr(format!("invalid websocket origin for {addr}")))?;
     let mut client =
-        ClientBuilder::from_uri(http::Uri::try_from(ws_http_url(addr).to_string()).unwrap());
+        ClientBuilder::from_uri(http::Uri::try_from(ws_http_url(addr).to_string()).unwrap())
+            .limits(Limits::default().max_payload_len(Some(MAX_WS_MESSAGE_BYTES)));
+    if ws_via_cdn(addr) {
+        client = client.add_header(
+            http::header::SEC_WEBSOCKET_PROTOCOL,
+            http::HeaderValue::from_static(cdn::SUBPROTOCOL),
+        )?;
+    }
     if super::tcp_lanes::requested(addr)? > 1 {
         // Explicit batch flushes still send small/control messages immediately.
         client = client
@@ -269,7 +280,14 @@ impl WsTunnelListener {
         // tokio-util Either implementation falls back to scalar frame writes.
         let mut remote_addr =
             super::build_url_from_socket_addr(&peer_addr.to_string(), self.addr.scheme());
-        let mut server = ServerBuilder::new().limits(Limits::unlimited());
+        let mut server = ServerBuilder::new()
+            .limits(Limits::default().max_payload_len(Some(MAX_WS_MESSAGE_BYTES)));
+        if ws_via_cdn(&self.addr) {
+            server = server.add_header(
+                http::header::SEC_WEBSOCKET_PROTOCOL,
+                http::HeaderValue::from_static(cdn::SUBPROTOCOL),
+            )?;
+        }
         if super::tcp_lanes::requested(&self.addr)? > 1 {
             server = server
                 .config(WebSocketConfig::default().flush_threshold(64 * 1024))
@@ -278,6 +296,17 @@ impl WsTunnelListener {
                 );
         }
         let (request, stream) = server.max_headers(128).accept(stream).await?;
+        if ws_via_cdn(&self.addr)
+            && request
+                .headers()
+                .get(http::header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok())
+                != Some(cdn::SUBPROTOCOL)
+        {
+            return Err(TunnelError::InvalidProtocol(
+                "CDN origin requires the inner TLS subprotocol".into(),
+            ));
+        }
 
         if TRUSTED_PROXIES
             .iter()
@@ -304,15 +333,19 @@ impl WsTunnelListener {
                 .append_pair("proxy", &peer_addr.to_string());
         }
 
-        let (write, read) = stream.split();
         let remote_addr: crate::proto::common::Url = remote_addr.into();
 
         let info = TunnelInfo {
-            tunnel_type: self.addr.scheme().to_owned(),
+            tunnel_type: ws_peer_tunnel_type(&self.addr).to_owned(),
             local_addr: Some(self.local_url().into()),
             remote_addr: Some(remote_addr.clone()),
             resolved_remote_addr: Some(remote_addr),
         };
+
+        if ws_via_cdn(&self.addr) {
+            return cdn::accept(stream, info).await;
+        }
+        let (write, read) = stream.split();
 
         Ok(Box::new(TunnelWrapper::new_with_transport_binding(
             read.filter_map(map_from_ws_message),
@@ -498,7 +531,20 @@ impl WsTunnelConnector {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let (client, _) = browser_ws_client(addr)?.connect_on(stream).await?;
+        let (client, response) = browser_ws_client(addr)?.connect_on(stream).await?;
+        if ws_via_cdn(addr) {
+            if response
+                .headers()
+                .get(http::header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok())
+                != Some(cdn::SUBPROTOCOL)
+            {
+                return Err(TunnelError::InvalidProtocol(
+                    "CDN origin did not select inner TLS".into(),
+                ));
+            }
+            return timeout(Duration::from_secs(10), cdn::connect(client, info)).await?;
+        }
         let (write, read) = client.split();
         Ok(Box::new(TunnelWrapper::new_with_transport_binding(
             read.filter_map(map_from_ws_message),
@@ -753,7 +799,7 @@ pub mod tests {
     }
 
     #[test]
-    fn cdn_websocket_urls_skip_the_tls_exporter() {
+    fn cdn_websocket_urls_select_inner_tls() {
         let direct: url::Url = "wss://challenges.cloudflare.com/ws".parse().unwrap();
         let cdn: url::Url = "wss://challenges.cloudflare.com/ws?via=cdn"
             .parse()
@@ -780,6 +826,84 @@ pub mod tests {
             .as_str(),
             "wss://challenges.cloudflare.com/ws?n=1"
         );
+    }
+    #[tokio::test]
+    async fn websocket_rejects_oversized_frame_before_payload() {
+        use tokio::io::AsyncWriteExt;
+        timeout(Duration::from_secs(3), async {
+            let mut listener = WsTunnelListener::new("wss://127.0.0.1:0".parse().unwrap());
+            listener.listen().await.unwrap();
+            let url = listener.local_url();
+            let server = tokio::spawn(async move {
+                let tunnel = listener.accept().await.unwrap();
+                let (mut recv, _) = tunnel.split();
+                assert!(recv.next().await.unwrap().is_err());
+            });
+            let stream = TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+                .await
+                .unwrap();
+            let tls =
+                super::super::browser_tls::connect(stream, "localhost", &[HTTP_1_1_ALPN], false)
+                    .await
+                    .unwrap();
+            let (mut client, _) = browser_ws_client(&url)
+                .unwrap()
+                .connect_on(tls)
+                .await
+                .unwrap();
+            let mut header = vec![0x82, 0xff];
+            header.extend_from_slice(&((MAX_WS_MESSAGE_BYTES + 1) as u64).to_be_bytes());
+            header.extend_from_slice(&[0; 4]);
+            client.get_mut().write_all(&header).await.unwrap();
+            client.get_mut().flush().await.unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cdn_inner_tls_binds_peers_and_carries_packets() {
+        use crate::tunnel::batch::PacketBatch;
+        timeout(Duration::from_secs(5), async {
+            let mut listener =
+                WsTunnelListener::new("ws://127.0.0.1:0/ws?via=cdn".parse().unwrap());
+            listener.listen().await.unwrap();
+            let url = listener.local_url();
+            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+            let client = WsTunnelConnector::new(url).connect().await.unwrap();
+            let server = server.await.unwrap();
+            assert_eq!(client.transport_binding(), server.transport_binding());
+            assert_eq!(
+                client.transport_binding().unwrap().kind,
+                TransportBindingKind::WssTlsExporterV1
+            );
+            assert_eq!(client.info().unwrap().tunnel_type, "wss");
+            let (mut recv, _) = server.split();
+            let (_, mut send) = client.split();
+            let packet = ZCPacket::new_with_payload(&[0x73; 2000]);
+            send.send(PacketBatch::singleton(packet)).await.unwrap();
+            assert_eq!(
+                recv.next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pop_singleton()
+                    .unwrap()
+                    .payload(),
+                &[0x73; 2000]
+            );
+            let mut ordinary = WsTunnelListener::new("ws://127.0.0.1:0/ws".parse().unwrap());
+            ordinary.listen().await.unwrap();
+            let mut url = ordinary.local_url();
+            url.set_query(Some("via=cdn"));
+            let ordinary_server = tokio::spawn(async move { ordinary.accept().await });
+            let result = WsTunnelConnector::new(url).connect().await;
+            assert!(result.is_err(), "CDN mode accepted an unbound WebSocket");
+            let _ = ordinary_server.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn owned_websocket_receive_reuses_payload_and_preserves_control_handling() {

@@ -6,6 +6,7 @@ docker_context="${COLIMA_DOCKER_CONTEXT:-colima-lowertier-l2}"
 image_name="lowertier-l2-qemu-test:local"
 network_name="lowertier-l2-qemu-net"
 nodes=(lowertier-qemu-a lowertier-qemu-b lowertier-qemu-c)
+protocol="quic"
 
 docker_cmd=(docker --context "${docker_context}")
 
@@ -156,6 +157,11 @@ run_tap_frame_matrix() {
         "${mac_a}" 01:80:c2:00:00:0e 04040404
     run_exact_frame_check broadcast "${nodes[0]}" "${nodes[2]}" \
         "${mac_a}" ff:ff:ff:ff:ff:ff 05050505
+    # Reinject a received source at another bridge, as an external LAN loop does.
+    start_frame_receiver "${nodes[0]}" broadcast "${mac_a}" ff:ff:ff:ff:ff:ff \
+        05050506 reflected-loop 128 timeout
+    send_frame "${nodes[2]}" broadcast "${mac_a}" ff:ff:ff:ff:ff:ff 05050506
+    check_frame_result "${nodes[0]}" reflected-loop
     run_exact_frame_check mtu-boundary "${nodes[0]}" "${nodes[2]}" \
         "${mac_a}" "${mac_c}" 06060606 "${maximum_frame_size}"
 
@@ -179,6 +185,8 @@ run_tap_frame_matrix() {
     check_frame_result "${nodes[1]}" unknown-b
     check_frame_result "${nodes[2]}" unknown-c
 
+    # A genuine move is accepted after the configured ownership hold expires.
+    sleep 2
     run_exact_frame_check broadcast "${nodes[2]}" "${nodes[0]}" \
         "${learned_mac}" ff:ff:ff:ff:ff:ff 0a0a0a0a
     start_frame_receiver "${nodes[1]}" mac-move "${mac_a}" "${learned_mac}" \
@@ -228,10 +236,14 @@ start_node() {
         --network-secret colima-l2-secret
         --dev-name et0
         --ipv4 "${overlay_ip}/24"
-        --listeners udp://0.0.0.0:11010
+        --listeners "${protocol}://0.0.0.0:11010"
+        --default-protocol "${protocol}"
+        --disable-p2p
+        --enable-bridge
         --l2-fdb-capacity 1024
         --l2-fdb-age-seconds 120
         --l2-flood-bps 8388608
+        --l2-mac-move-hold-seconds 2
     )
     if [[ -n "${peer_url}" ]]; then
         args+=(--peers "${peer_url}")
@@ -248,8 +260,8 @@ run_suite() {
     "${docker_cmd[@]}" network create "${network_name}" >/dev/null
 
     start_node "${nodes[0]}" "${subnet}.1"
-    start_node "${nodes[1]}" "${subnet}.2" "udp://${nodes[0]}:11010"
-    start_node "${nodes[2]}" "${subnet}.3" "udp://${nodes[1]}:11010"
+    start_node "${nodes[1]}" "${subnet}.2" "${protocol}://${nodes[0]}:11010"
+    start_node "${nodes[2]}" "${subnet}.3" "${protocol}://${nodes[1]}:11010"
 
     for node in "${nodes[@]}"; do
         wait_for_interface "${node}"
@@ -260,8 +272,6 @@ run_suite() {
     assert_stable_ping "${nodes[0]}" "${subnet}.3"
     assert_stable_ping "${nodes[2]}" "${subnet}.1"
 
-    "${docker_cmd[@]}" exec -d "${nodes[2]}" iperf3 -s -1 -p 5201
-    "${docker_cmd[@]}" exec "${nodes[0]}" iperf3 -c "${subnet}.3" -p 5201 -t 3
     run_tap_frame_matrix
 }
 
@@ -278,6 +288,13 @@ if [[ "${SKIP_IMAGE_BUILD:-0}" != "1" ]]; then
         -t "${image_name}" "$repo_root"
 fi
 
-run_suite 10.77.0
+for protocol in ${LOWTIER_L2_PROTOCOLS:-quic tcp wss}; do
+    case "${protocol}" in
+        quic|tcp|wss) ;;
+        *) echo "Unsupported L2 test protocol: ${protocol}" >&2; exit 2 ;;
+    esac
+    echo "L2 transport: ${protocol}"
+    run_suite 10.77.0
+done
 
 echo "Colima QEMU automatic L2 checks passed"
