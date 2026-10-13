@@ -235,6 +235,9 @@ impl DirectConnectorManagerData {
     }
 
     async fn do_try_connect_to_ip(&self, dst_peer_id: PeerId, addr: String) -> Result<(), Error> {
+        if self.peer_manager.has_live_peer_connection(dst_peer_id) {
+            return Ok(());
+        }
         let connector = create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both).await?;
         let tunnel = timeout(
             std::time::Duration::from_secs(3),
@@ -243,7 +246,7 @@ impl DirectConnectorManagerData {
         .await??;
         let handshake_lock = self.direct_handshake_lock(dst_peer_id).await;
         let _handshake_guard = handshake_lock.lock().await;
-        if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+        if self.peer_manager.has_live_peer_connection(dst_peer_id) {
             return Ok(());
         }
         let (peer_id, conn_id) = timeout(
@@ -296,7 +299,7 @@ impl DirectConnectorManagerData {
                 return Ok(());
             }
 
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.peer_manager.has_live_peer_connection(dst_peer_id) {
                 return Ok(());
             }
 
@@ -329,6 +332,7 @@ impl DirectConnectorManagerData {
         ip_list: &GetIpListResponse,
         listener: &url::Url,
         tasks: &mut JoinSet<Result<(), Error>>,
+        scheduled: &mut HashSet<String>,
     ) {
         let policy = self.global_ctx.get_underlay_policy();
         if !direct_listener_allowed_before_resolution(&policy, listener) {
@@ -382,6 +386,9 @@ impl DirectConnectorManagerData {
                             }
                             let mut addr = (*listener).clone();
                             if addr.set_host(Some(ip.to_string().as_str())).is_ok() {
+                                if !scheduled.insert(addr.to_string()) {
+                                    return;
+                                }
                                 tasks.spawn(Self::try_connect_to_ip(
                                     self.clone(),
                                     dst_peer_id,
@@ -403,6 +410,9 @@ impl DirectConnectorManagerData {
                     {
                         tracing::debug!(?listener, "skip self-connection (specific IPv4)");
                     } else {
+                        if !scheduled.insert(listener.to_string()) {
+                            return;
+                        }
                         tasks.spawn(Self::try_connect_to_ip(
                             self.clone(),
                             dst_peer_id,
@@ -437,6 +447,9 @@ impl DirectConnectorManagerData {
                             }
                             let mut addr = (*listener).clone();
                             if addr.set_host(Some(format!("[{}]", ip).as_str())).is_ok() {
+                                if !scheduled.insert(addr.to_string()) {
+                                    return;
+                                }
                                 tasks.spawn(Self::try_connect_to_ip(
                                     self.clone(),
                                     dst_peer_id,
@@ -463,6 +476,9 @@ impl DirectConnectorManagerData {
                     {
                         tracing::debug!(?listener, "skip self-connection (specific IPv6)");
                     } else {
+                        if !scheduled.insert(listener.to_string()) {
+                            return;
+                        }
                         tasks.spawn(Self::try_connect_to_ip(
                             self.clone(),
                             dst_peer_id,
@@ -505,15 +521,21 @@ impl DirectConnectorManagerData {
         // highest priority is in the last
         let mut available_listeners = available_listeners;
         let flags = self.global_ctx.flags_arc();
+        let mut unique_listeners = HashSet::new();
         available_listeners.retain(|listener| {
             crate::common::config::transport_protocol_enabled(&flags, listener.scheme())
+                && unique_listeners.insert(listener.clone())
         });
         available_listeners
             .sort_by_key(|listener| direct_protocol_priority(listener.scheme(), &default_protocol));
 
         while !available_listeners.is_empty() {
+            if self.peer_manager.has_live_peer_connection(dst_peer_id) {
+                return Ok(());
+            }
             let mut tasks = JoinSet::new();
             let mut listener_list = vec![];
+            let mut scheduled = HashSet::new();
 
             let cur_scheme = available_listeners.last().unwrap().scheme().to_owned();
             while let Some(listener) = available_listeners.last() {
@@ -522,8 +544,14 @@ impl DirectConnectorManagerData {
                 }
 
                 tracing::debug!("try direct connect to peer with listener: {}", listener);
-                self.spawn_direct_connect_task(dst_peer_id, &ip_list, listener, &mut tasks)
-                    .await;
+                self.spawn_direct_connect_task(
+                    dst_peer_id,
+                    &ip_list,
+                    listener,
+                    &mut tasks,
+                    &mut scheduled,
+                )
+                .await;
 
                 listener_list.push(listener.clone().to_string());
                 available_listeners.pop();
@@ -531,7 +559,7 @@ impl DirectConnectorManagerData {
 
             let ret = wait_for_probe_group(
                 &mut tasks,
-                || self.peer_manager.has_directly_connected_conn(dst_peer_id),
+                || self.peer_manager.has_live_peer_connection(dst_peer_id),
                 DIRECT_PROBE_GRACE_PERIOD,
             )
             .await;
@@ -543,7 +571,7 @@ impl DirectConnectorManagerData {
                 "all tasks finished for current scheme"
             );
 
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.peer_manager.has_live_peer_connection(dst_peer_id) {
                 tracing::info!(
                     "direct connect to peer {} success, has direct conn",
                     dst_peer_id
@@ -569,6 +597,10 @@ impl DirectConnectorManagerData {
 
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(backoff.next_backoff())).await;
+            }
+            // A punched connection already supplies a direct path. Do not query or dial it again.
+            if self.peer_manager.has_live_peer_connection(dst_peer_id) {
+                return Ok(());
             }
             attempt += 1;
 
@@ -597,7 +629,7 @@ impl DirectConnectorManagerData {
                 .await;
             tracing::info!(?ret, ?dst_peer_id, "do_try_direct_connect return");
 
-            if peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if peer_manager.has_live_peer_connection(dst_peer_id) {
                 tracing::info!(
                     "direct connect to peer {} success, has direct conn",
                     dst_peer_id
@@ -645,7 +677,7 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
             .into_iter()
             .filter(|peer_id| {
                 *peer_id != my_peer_id
-                    && !data.peer_manager.has_directly_connected_conn(*peer_id)
+                    && !data.peer_manager.has_live_peer_connection(*peer_id)
                     && !data.peer_black_list.contains(peer_id)
             })
             .collect()

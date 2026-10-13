@@ -2299,6 +2299,17 @@ impl PeerManager {
         expected_peer: Option<PeerId>,
         client: bool,
     ) -> Result<(PeerId, PeerConnId), Error> {
+        self.add_discovered_tunnel_with_hint(tunnel, expected_peer, client, None)
+            .await
+    }
+
+    pub(crate) async fn add_discovered_tunnel_with_hint(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        expected_peer: Option<PeerId>,
+        client: bool,
+        hint: Option<Arc<super::peer_conn::DiscoveryPeerHint>>,
+    ) -> Result<(PeerId, PeerConnId), Error> {
         let info = tunnel
             .info()
             .ok_or_else(|| anyhow::anyhow!("discovery tunnel has no info"))?;
@@ -2308,9 +2319,12 @@ impl PeerManager {
             self.my_peer_id,
             self.global_ctx.clone(),
             tunnel,
-            expected_peer,
+            expected_peer.or_else(|| hint.as_ref().and_then(|hint| hint.peer_id())),
             self.peer_session_store.clone(),
         );
+        if let Some(hint) = hint {
+            peer.set_discovery_peer_hint(hint);
+        }
         peer.set_is_hole_punched(expected_peer.is_some());
         if client {
             peer.do_handshake_as_client().await?;
@@ -2362,6 +2376,17 @@ impl PeerManager {
         } else {
             self.foreign_network_client.get_peer_map().has_peer(peer_id)
         }
+    }
+
+    pub(crate) fn has_live_peer_connection(&self, peer_id: PeerId) -> bool {
+        self.peers
+            .get_peer_by_id(peer_id)
+            .is_some_and(|peer| peer.has_live_conns())
+            || self
+                .foreign_network_client
+                .get_peer_map()
+                .get_peer_by_id(peer_id)
+                .is_some_and(|peer| peer.has_live_conns())
     }
 
     #[tracing::instrument]

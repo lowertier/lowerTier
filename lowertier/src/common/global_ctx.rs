@@ -254,6 +254,7 @@ pub enum GlobalCtxEvent {
     PeerRemoved(PeerId),
     PeerConnAdded(PeerConnInfo),
     PeerConnRemoved(PeerConnInfo),
+    PeerRoutesUpdated,
 
     ListenerAdded(url::Url),
     ListenerAddFailed(url::Url, String), // (url, error message)
@@ -423,6 +424,7 @@ pub struct GlobalCtx {
     stun_info_collection: Mutex<Arc<dyn StunInfoCollectorTrait>>,
 
     running_listeners: Mutex<Vec<url::Url>>,
+    discovery_listeners: Mutex<HashMap<SocketAddr, Vec<url::Url>>>,
     advertised_ipv6_public_addr_prefix: Mutex<Option<cidr::Ipv6Cidr>>,
     tun_device_name: Mutex<Option<String>>,
 
@@ -812,6 +814,7 @@ impl GlobalCtx {
             stun_info_collection: Mutex::new(stun_info_collector),
 
             running_listeners: Mutex::new(Vec::new()),
+            discovery_listeners: Mutex::new(HashMap::new()),
             advertised_ipv6_public_addr_prefix: Mutex::new(None),
             tun_device_name: Mutex::new(None),
 
@@ -1155,6 +1158,40 @@ impl GlobalCtx {
         if !l.contains(&url) {
             l.push(url);
         }
+    }
+
+    pub(crate) fn set_discovery_listeners(
+        &self,
+        local: SocketAddr,
+        protocol: &str,
+        mapped: Option<SocketAddr>,
+    ) {
+        let mut addresses = vec![local];
+        if let Some(mapped) = mapped.filter(|address| *address != local) {
+            addresses.push(mapped);
+        }
+        let listeners = addresses
+            .into_iter()
+            .filter_map(|address| url::Url::parse(&format!("{protocol}://{address}")).ok())
+            .collect();
+        self.discovery_listeners
+            .lock()
+            .unwrap()
+            .insert(local, listeners);
+    }
+
+    pub(crate) fn remove_discovery_listeners(&self, local: SocketAddr) {
+        self.discovery_listeners.lock().unwrap().remove(&local);
+    }
+
+    pub(crate) fn get_discovery_listeners(&self) -> Vec<url::Url> {
+        self.discovery_listeners
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     pub fn get_flags(&self) -> Flags {

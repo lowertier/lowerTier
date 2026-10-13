@@ -2511,6 +2511,16 @@ impl RelayPeerMap {
             if state.phase() != RelaySendPhase::Draining {
                 return Ok(());
             }
+            if let Err(error) = self.validate_relay_session_auth_from_snapshot(
+                dst_peer_id,
+                &session,
+                false,
+                &self.peer_map.origin_auth_snapshot(),
+            ) {
+                state.set_phase(RelaySendPhase::AwaitingSession);
+                self.schedule_flush_retry(dst_peer_id, session.clone());
+                return Err(error);
+            }
             let Some(pending) =
                 state.pop_batch_for_send(crate::tunnel::batch::MAX_PACKET_BATCH_SIZE)
             else {
@@ -2681,13 +2691,12 @@ impl RelayPeerMap {
     ) -> Result<Arc<PeerSession>, Error> {
         let network = self.global_ctx.get_network_identity();
         let key = SessionKey::new(network.network_name.clone(), dst_peer_id);
-        if let Some(session) = self.peer_session_store.get(&key) {
+        if let Some(session) = self.current_session(dst_peer_id, &key) {
             let awaiting = self
                 .send_state(dst_peer_id)
                 .is_some_and(|state| state.phase() == RelaySendPhase::AwaitingSession);
             self.retry_pending_ready_receipt(dst_peer_id, session.clone());
             if !awaiting {
-                self.bind_existing_relay_session_auth_if_missing(dst_peer_id, &session)?;
                 return Ok(session);
             }
         }
@@ -2725,6 +2734,30 @@ impl RelayPeerMap {
         )))
     }
 
+    fn current_session(&self, peer_id: PeerId, key: &SessionKey) -> Option<Arc<PeerSession>> {
+        let session = self.peer_session_store.get(key)?;
+        let authority = self
+            .bind_existing_relay_session_auth_if_missing(peer_id, &session)
+            .and_then(|()| {
+                self.validate_relay_session_auth_from_snapshot(
+                    peer_id,
+                    &session,
+                    false,
+                    &self.peer_map.origin_auth_snapshot(),
+                )
+            });
+        if let Err(error) = authority {
+            tracing::debug!(?peer_id, ?error, "reset stale relay send session");
+            // Keep cryptographic state for the next authenticated transition.
+            // Session publication can precede authority-binding publication.
+            if let Some(state) = self.send_state(peer_id) {
+                state.set_phase(RelaySendPhase::AwaitingSession);
+            }
+            return None;
+        }
+        Some(session)
+    }
+
     #[tracing::instrument(skip(self, _lock_guard), level = "debug", ret)]
     pub async fn handshake_session(
         self: &Arc<Self>,
@@ -2734,12 +2767,11 @@ impl RelayPeerMap {
     ) -> Result<(), Error> {
         let network = self.global_ctx.get_network_identity();
         let key = SessionKey::new(network.network_name.clone(), dst_peer_id);
-        if let Some(session) = self.peer_session_store.get(&key)
+        if let Some(session) = self.current_session(dst_peer_id, &key)
             && self
                 .send_state(dst_peer_id)
                 .is_none_or(|state| state.phase() == RelaySendPhase::Ready)
         {
-            self.bind_existing_relay_session_auth_if_missing(dst_peer_id, &session)?;
             self.retry_pending_ready_receipt(dst_peer_id, session.clone());
             self.flush_pending_packets(dst_peer_id, session).await?;
             return Ok(());
@@ -2755,8 +2787,7 @@ impl RelayPeerMap {
 
         let mut last_err = None;
         for attempt in 0..HANDSHAKE_MAX_ATTEMPTS {
-            if let Some(session) = self.peer_session_store.get(&key) {
-                self.bind_existing_relay_session_auth_if_missing(dst_peer_id, &session)?;
+            if let Some(session) = self.current_session(dst_peer_id, &key) {
                 if let Some(state) = self.send_state(dst_peer_id)
                     && state.phase() == RelaySendPhase::AwaitingSession
                 {
@@ -2873,7 +2904,7 @@ impl RelayPeerMap {
         let out_len = hs
             .write_message(&payload, &mut out)
             .map_err(|e| Error::RouteError(Some(format!("noise write msg1 failed: {e:?}"))))?;
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         self.pending_handshakes.insert(
             dst_peer_id,
             PendingHandshake {
@@ -2884,27 +2915,43 @@ impl RelayPeerMap {
             },
         );
 
-        let send_res = self
-            .send_handshake_packet(
-                out[..out_len].to_vec(),
-                handshake_id,
-                PacketType::RelayHandshake,
-                dst_peer_id,
-                policy,
-            )
-            .await;
-
-        if send_res.is_err() {
-            self.remove_pending_handshake_if_matching(dst_peer_id, handshake_id);
-        }
-        send_res?;
-        let msg2_pkt = match timeout(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS), rx).await {
+        let response = timeout(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS), async {
+            // Repeat the same Noise message when connection replacement loses a reply.
+            let retries = async {
+                let mut retry_ms = HANDSHAKE_CONFIRM_RETRY_MS;
+                loop {
+                    if let Err(error) = self
+                        .send_handshake_packet(
+                            out[..out_len].to_vec(),
+                            handshake_id,
+                            PacketType::RelayHandshake,
+                            dst_peer_id,
+                            policy.clone(),
+                        )
+                        .await
+                    {
+                        return error;
+                    }
+                    tokio::time::sleep(Duration::from_millis(retry_ms)).await;
+                    retry_ms = (retry_ms * 2).min(HANDSHAKE_CONFIRM_RETRY_MAX_MS);
+                }
+            };
+            tokio::select! {
+                biased;
+                packet = &mut rx => {
+                    packet.map_err(|_| Error::RouteError(Some(
+                        "relay handshake canceled".to_string(),
+                    )))
+                }
+                error = retries => Err(error),
+            }
+        })
+        .await;
+        let msg2_pkt = match response {
             Ok(Ok(pkt)) => pkt,
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
                 self.remove_pending_handshake_if_matching(dst_peer_id, handshake_id);
-                return Err(Error::RouteError(Some(
-                    "relay handshake canceled".to_string(),
-                )));
+                return Err(error);
             }
             Err(_) => {
                 self.remove_pending_handshake_if_matching(dst_peer_id, handshake_id);
@@ -2938,7 +2985,7 @@ impl RelayPeerMap {
             {
                 self.handle_relay_msg1(deferred, dst_peer_id, deferred_handshake_id)
                     .await?;
-                if let Some(session) = self.peer_session_store.get(&session_key) {
+                if let Some(session) = self.current_session(dst_peer_id, &session_key) {
                     return Ok(session);
                 }
             }
@@ -4370,6 +4417,19 @@ impl RelayPeerMap {
                 group_requires_bridge_grant,
                 &auth_snapshot,
             ) else {
+                // Only local generic authority can request session recovery.
+                // An unverified Ethernet flag cannot reset a valid data session.
+                if let Err(error) = self.validate_relay_session_auth_from_snapshot(
+                    from_peer_id,
+                    &session,
+                    false,
+                    &auth_snapshot,
+                ) {
+                    tracing::debug!(?from_peer_id, ?error, "reset stale relay batch session");
+                    if let Some(state) = self.send_state(from_peer_id) {
+                        state.set_phase(RelaySendPhase::AwaitingSession);
+                    }
+                }
                 for index in indexes {
                     outcomes[index] = RelayBatchDecryptOutcome::Failed;
                 }

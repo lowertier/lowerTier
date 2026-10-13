@@ -156,7 +156,7 @@ pub(super) async fn hole_punch_peers(peer_mgr: &PeerManager) -> Vec<PeerId> {
         .filter(|route| {
             // One stable initiator role prevents duplicate rendezvous sessions.
             route.peer_id > my_peer_id
-                && !peer_mgr.get_peer_map().has_peer(route.peer_id)
+                && !peer_mgr.has_live_peer_connection(route.peer_id)
                 && (should_background_p2p_with_peer(
                     route.feature_flag.as_ref(),
                     false,

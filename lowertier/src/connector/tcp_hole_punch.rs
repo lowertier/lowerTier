@@ -307,6 +307,10 @@ impl TcpBootstrap {
         (*self.advertised.lock().unwrap()).context("TCP bootstrap mapping is unavailable")
     }
 
+    pub(crate) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
     pub(crate) async fn refresh_mapping(&self, previous: Option<SocketAddr>) -> Result<SocketAddr> {
         let result = self.refresh_mapping_inner(previous).await;
         *self.advertised.lock().unwrap() = result.as_ref().ok().copied();
@@ -435,11 +439,8 @@ impl TcpBootstrap {
         remote: SocketAddr,
     ) -> Result<(Box<dyn Tunnel>, bool)> {
         let client = self.rendezvous_role(remote).await.unwrap_or(true);
-        let stream = tokio::time::timeout(
-            Duration::from_secs(3),
-            connect_bound(self.ctx.clone(), self.connect_source()?, remote),
-        )
-        .await??;
+        // The discovery caller bounds the complete mapped attempt, including remote polling.
+        let stream = connect_bound(self.ctx.clone(), self.connect_source()?, remote).await?;
         Ok((
             establish(stream, self.ctx.clone(), self.protocol, client).await?,
             client,
@@ -900,6 +901,9 @@ impl PeerTaskLauncher for Launcher {
                 .map(|(time, _)| *time + RETRY);
             if let Some(next) = next {
                 tokio::time::sleep_until(next).await;
+            }
+            if data.peer_mgr.has_live_peer_connection(peer) {
+                return Ok(());
             }
             tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer)).await?
         })

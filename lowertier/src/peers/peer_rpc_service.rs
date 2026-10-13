@@ -176,6 +176,7 @@ impl DirectConnectorRpc for DirectConnectorManagerRpcServer {
             .get_mapped_listeners()
             .into_iter()
             .chain(self.global_ctx.get_running_listeners())
+            .chain(self.global_ctx.get_discovery_listeners())
             .map(Into::into)
             .collect();
         remove_lowertier_managed_ipv6s(&mut ret, &self.global_ctx);

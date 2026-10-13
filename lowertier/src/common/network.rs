@@ -289,6 +289,10 @@ pub struct IPCollector {
 }
 
 impl IPCollector {
+    pub(crate) async fn collect_current_bind_addrs(&self) -> GetIpListResponse {
+        Self::do_collect_local_ip_addrs(self.net_ns.clone(), self.underlay_policy.load_full()).await
+    }
+
     pub(crate) async fn collect_current_interface_addrs(&self) -> GetIpListResponse {
         let interfaces = Self::collect_interfaces(self.net_ns.clone(), true).await;
         let (ipv4, ipv6) = allowed_interface_ips(&interfaces, &self.underlay_policy.load_full());

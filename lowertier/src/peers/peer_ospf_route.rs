@@ -6413,6 +6413,9 @@ impl PeerRouteServiceImpl {
                         }
                         if let Err(error) = self.publish_forwarding_snapshot_for_domains(domains) {
                             tracing::warn!(?error, "forwarding snapshot publication rejected");
+                        } else if domains.foreign {
+                            self.global_ctx
+                                .issue_event(GlobalCtxEvent::PeerRoutesUpdated);
                         }
                         return;
                     }
@@ -6455,6 +6458,9 @@ impl PeerRouteServiceImpl {
         }
         if let Err(error) = self.publish_forwarding_snapshot_for_domains(effective_domains) {
             tracing::warn!(?error, "forwarding snapshot publication rejected");
+        } else if effective_domains.topology || effective_domains.foreign {
+            self.global_ctx
+                .issue_event(GlobalCtxEvent::PeerRoutesUpdated);
         }
     }
 

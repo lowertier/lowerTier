@@ -546,6 +546,7 @@ fn handle_event(
                     GlobalCtxEvent::MulticastGroupsUpdated => {
                         event!(debug, "[{}] multicast membership changed", instance_id);
                     }
+                    GlobalCtxEvent::PeerRoutesUpdated => {}
                 }
             } else {
                 events = events.resubscribe();

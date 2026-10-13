@@ -104,7 +104,11 @@ async fn set_bind_addr_for_peer_connector(
         return;
     }
 
-    let ips = global_ctx.get_ip_collector().collect_ip_addrs().await;
+    // A new connection must not bind an address removed since the last cache refresh.
+    let ips = global_ctx
+        .get_ip_collector()
+        .collect_current_bind_addrs()
+        .await;
     if is_ipv4 {
         let mut bind_addrs = vec![];
         for ipv4 in ips.interface_ipv4s {
@@ -118,7 +122,7 @@ async fn set_bind_addr_for_peer_connector(
         connector.set_bind_addrs(bind_addrs);
     } else {
         let mut bind_addrs = vec![];
-        for ipv6 in ips.interface_ipv6s.iter().chain(ips.public_ipv6.iter()) {
+        for ipv6 in &ips.interface_ipv6s {
             let ipv6 = std::net::Ipv6Addr::from(*ipv6);
             if global_ctx.is_ip_lowertier_managed_ipv6(&ipv6) {
                 continue;

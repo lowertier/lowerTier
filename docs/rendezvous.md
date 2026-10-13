@@ -76,7 +76,8 @@ IPv4 NAT mappings still use STUN.
 
 The client attempts candidates from each permitted source interface.
 Connection state refers to a specific authenticated connection.
-A healthy connection on another interface does not suppress repair of a failed connection.
+A live connection to the same peer suppresses duplicate attempts on other interfaces.
+A healthy connection to a different peer does not suppress repair of a lost peer.
 Expired candidate observations stop producing retries.
 The existing process and peer connection limits still apply.
 Discovery candidates do not allocate unlimited VPN connections.
@@ -84,6 +85,9 @@ Discovery candidates do not allocate unlimited VPN connections.
 QUIC retains its authenticated peer probes and mapped UDP socket.
 H2 and WSS retain their mapped TCP listening sockets.
 Both endpoints select opposite TLS roles for coordinated TCP attempts.
+Mapped TCP attempts remain active through one default private polling interval and the existing handshake allowance.
+The caller limits this complete attempt to 45 seconds.
+The existing limit of eight concurrent candidate attempts remains unchanged.
 A conventional TCP connection remains available for reachable listeners and older peers.
 Existing authenticated peer-assisted traversal remains available after bootstrap.
 NAT mapping and filtering behavior can still prevent a direct connection.
@@ -94,13 +98,47 @@ Initial rendezvous alone cannot guarantee traversal of that NAT.
 ## Timing and HTTP identification
 
 The private service defaults to a two-second announce interval.
+After authentication, clients request an interval of at least 30 seconds from the private service.
+Clients retain all interface paths and continue to request candidate endpoints.
+This permits new nodes and disconnected groups to establish connections.
+The private hint uses `left=2`; bootstrap uses `left=1`.
+Both values remain nonzero for compatibility with public trackers that exclude other seeders from seeder replies.
+The private service extends each endpoint lease to three returned intervals.
 Clients honor the interval returned by each public tracker.
 A changed mapping starts a new announce event without the previous extra 15-second delay.
+Link loss and mapping changes cancel pending tracker requests.
+Mapping changes also discard tracker cookies that can depend on the previous source IP.
 Independent tracker requests prevent one unavailable service from blocking another service.
 
 HTTP and HTTPS requests send `User-Agent: aria2/1.37.0`.
 This changes the HTTP identification field.
 It does not change TLS behavior or provide an indistinguishability guarantee.
+
+## Discovery through authenticated peers
+
+The existing authenticated overlay carries versioned peer information and connection requests.
+It maintains the peer list without a second gossip protocol.
+Unchanged peer information does not require another full synchronization message.
+The endpoint RPC now includes active discovery listeners and their mapped addresses.
+A new node can use one known peer to learn other peers and establish direct connections.
+
+Peer and route changes immediately trigger connection-task checks.
+The periodic check remains available for recovery.
+An existing live connection, including a hole-punched connection, suppresses duplicate direct connection and traversal attempts.
+Endpoint lists remove duplicate URLs before connection attempts.
+Task membership checks use a local hash table instead of repeated linear searches and concurrent-map locks.
+
+Rendezvous remains necessary when two groups have no authenticated path between them.
+The longer private interval can add up to one polling interval before an established group discovers a new endpoint.
+Handshake retries and public tracker intervals can add further delay.
+Cached candidates continue to support repair while another mesh connection remains active.
+Failed liveness checks mark the connection closed, even when a silent TCP stream remains open.
+
+Multiple NAT layers do not by themselves determine whether direct traversal will work.
+Mapping and filtering behavior at every layer determine the result.
+Two endpoints with incompatible destination-dependent mappings can require an authenticated relay.
+Configure a reachable LowTier peer for this fallback.
+The tracker supplies endpoints only and cannot relay VPN traffic.
 
 The protocol references are [BEP 15](https://www.bittorrent.org/beps/bep_0015.html)
 and [BEP 7](https://www.bittorrent.org/beps/bep_0007.html).

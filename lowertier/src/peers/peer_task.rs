@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     result::Result,
     sync::{Arc, Mutex, atomic::Ordering},
 };
@@ -6,7 +7,6 @@ use std::{
 use atomic_shim::AtomicU64;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -15,6 +15,27 @@ use anyhow::Error;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::peer_manager::PeerManager;
+use crate::common::global_ctx::{ArcGlobalCtx, EventBusSubscriber, GlobalCtxEvent};
+
+async fn peer_changed(events: &mut EventBusSubscriber) {
+    loop {
+        match events.recv().await {
+            Ok(
+                GlobalCtxEvent::PeerAdded(_)
+                | GlobalCtxEvent::PeerRemoved(_)
+                | GlobalCtxEvent::PeerConnAdded(_)
+                | GlobalCtxEvent::PeerConnRemoved(_)
+                | GlobalCtxEvent::PeerRoutesUpdated,
+            )
+            | Err(_) => {
+                // One scan covers all changes that are already queued.
+                while events.try_recv().is_ok() {}
+                return;
+            }
+            _ => {}
+        }
+    }
+}
 
 pub struct ExternalTaskSignal {
     version: AtomicU64,
@@ -71,6 +92,7 @@ pub trait PeerTaskLauncher: Send + Sync + Clone + 'static {
 }
 
 pub struct PeerTaskManager<Launcher: PeerTaskLauncher> {
+    global_ctx: ArcGlobalCtx,
     launcher: Launcher,
     main_loop_task: Mutex<Option<AbortOnDropHandle<()>>>,
     run_signal: Arc<Notify>,
@@ -96,6 +118,7 @@ where
     ) -> Self {
         let data = launcher.new_data(peer_mgr.clone());
         Self {
+            global_ctx: peer_mgr.get_global_ctx(),
             launcher,
             main_loop_task: Mutex::new(None),
             run_signal: Arc::new(Notify::new()),
@@ -110,6 +133,7 @@ where
             self.data.clone(),
             self.run_signal.clone(),
             self.external_signal.clone(),
+            self.global_ctx.subscribe(),
         )));
         self.main_loop_task.lock().unwrap().replace(task);
     }
@@ -119,23 +143,28 @@ where
         data: D,
         signal: Arc<Notify>,
         external_signal: Option<Arc<ExternalTaskSignal>>,
+        mut events: EventBusSubscriber,
     ) {
-        let peer_task_map = Arc::new(DashMap::<C, AbortOnDropHandle<Result<T, Error>>>::new());
+        let mut peer_task_map = HashMap::<C, AbortOnDropHandle<Result<T, Error>>>::new();
         let mut external_signal_version = external_signal.as_ref().map(|signal| signal.version());
 
         loop {
-            let peers_to_connect = launcher.collect_peers_need_task(&data).await;
+            let peers_to_connect: HashSet<_> = launcher
+                .collect_peers_need_task(&data)
+                .await
+                .into_iter()
+                .collect();
 
             // remove task not in peers_to_connect
             let mut to_remove = vec![];
-            for item in peer_task_map.iter() {
-                if !peers_to_connect.contains(item.key()) || item.value().is_finished() {
-                    to_remove.push(item.key().clone());
+            for (peer, task) in &peer_task_map {
+                if !peers_to_connect.contains(peer) || task.is_finished() {
+                    to_remove.push(peer.clone());
                 }
             }
 
             for key in to_remove {
-                if let Some((_, task)) = peer_task_map.remove(&key) {
+                if let Some(task) = peer_task_map.remove(&key) {
                     task.abort();
                     match task.await {
                         Ok(Ok(_)) => {}
@@ -147,7 +176,6 @@ where
                         }
                     }
                 }
-                peer_task_map.shrink_to_fit();
             }
 
             if !peers_to_connect.is_empty() {
@@ -180,6 +208,7 @@ where
                         launcher.loop_interval_ms(),
                     )) => {},
                     _ = signal.notified() => {},
+                    _ = peer_changed(&mut events) => {},
                     _ = &mut notified => {
                         external_signal_version = Some(external_signal.version());
                     }
@@ -189,7 +218,8 @@ where
                     _ = tokio::time::sleep(std::time::Duration::from_millis(
                         launcher.loop_interval_ms(),
                     )) => {},
-                    _ = signal.notified() => {}
+                    _ = signal.notified() => {},
+                    _ = peer_changed(&mut events) => {}
                 }
             }
         }

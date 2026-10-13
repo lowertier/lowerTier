@@ -542,6 +542,9 @@ impl PeerTaskLauncher for Launcher {
             if let Some(retry_at) = retry_at {
                 tokio::time::sleep_until(retry_at).await;
             }
+            if data.peer_mgr.has_live_peer_connection(peer) {
+                return Ok(());
+            }
             tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer)).await?
         })
     }

@@ -6,7 +6,7 @@ use super::{
 use crate::connector::tcp_hole_punch::TcpBootstrap;
 use crate::{
     common::{config::TrackerDiscoveryConfig, global_ctx::ArcGlobalCtx, stun::StunPacket},
-    peers::peer_manager::PeerManager,
+    peers::{peer_conn::DiscoveryPeerHint, peer_manager::PeerManager},
     tunnel::{
         TunnelConnector, TunnelListener,
         common::{bind, ensure_local_allowed, ensure_remote_allowed},
@@ -56,6 +56,7 @@ struct PathOwnership {
 #[derive(Default)]
 struct PathConnections {
     entries: std::sync::Mutex<HashMap<SocketAddr, DiscoveryConnection>>,
+    hints: std::sync::Mutex<HashMap<SocketAddr, Arc<DiscoveryPeerHint>>>,
     ownership: std::sync::Mutex<PathOwnership>,
     admission: tokio::sync::Mutex<()>,
     changed: tokio::sync::Notify,
@@ -64,6 +65,7 @@ struct PathConnections {
 struct PathLifetime {
     peers: Arc<PeerManager>,
     connections: Arc<PathConnections>,
+    local: SocketAddr,
 }
 
 impl Drop for PathLifetime {
@@ -72,6 +74,9 @@ impl Drop for PathLifetime {
         let owned = {
             let mut ownership = self.connections.ownership.lock().unwrap();
             ownership.closed = true;
+            peers
+                .get_global_ctx()
+                .remove_discovery_listeners(self.local);
             std::mem::take(&mut ownership.connections)
         };
         // Published tunnels outlive discovery tasks. Release their admission slots when the path stops.
@@ -84,6 +89,50 @@ impl Drop for PathLifetime {
 }
 
 impl PathConnections {
+    fn hint(&self, address: SocketAddr) -> Arc<DiscoveryPeerHint> {
+        let mut hints = self.hints.lock().unwrap();
+        if let Some(hint) = hints.get(&address) {
+            return hint.clone();
+        }
+        if hints.len() >= 64 {
+            if let Some(address) = hints
+                .iter()
+                .find_map(|(address, hint)| (Arc::strong_count(hint) == 1).then_some(*address))
+            {
+                hints.remove(&address);
+            }
+        }
+        let hint = Arc::new(DiscoveryPeerHint::default());
+        if hints.len() < 64 {
+            hints.insert(address, hint.clone());
+        }
+        hint
+    }
+
+    fn known_live_peer(&self, peers: &PeerManager, address: SocketAddr) -> bool {
+        // Recheck old endpoint identities. A different node can reuse the same endpoint.
+        self.hints
+            .lock()
+            .unwrap()
+            .get(&address)
+            .and_then(|hint| hint.recent_peer_id(Duration::from_secs(30)))
+            .is_some_and(|peer| peers.has_live_peer_connection(peer))
+    }
+
+    fn publish_listener(
+        &self,
+        ctx: &ArcGlobalCtx,
+        local: SocketAddr,
+        protocol: &str,
+        mapped: Option<SocketAddr>,
+    ) {
+        // Serialize mapping publication with path withdrawal.
+        let ownership = self.ownership.lock().unwrap();
+        if !ownership.closed {
+            ctx.set_discovery_listeners(local, protocol, mapped);
+        }
+    }
+
     fn live(&self, peers: &PeerManager, address: SocketAddr) -> Option<DiscoveryConnection> {
         self.entries
             .lock()
@@ -99,6 +148,7 @@ impl PathConnections {
         address: SocketAddr,
         connection: DiscoveryConnection,
     ) -> DiscoveryConnection {
+        self.hint(address).observe(connection.0);
         // Register ownership before the first await. Teardown must also see pending duplicate resolution.
         let open = {
             let mut ownership = self.ownership.lock().unwrap();
@@ -246,7 +296,7 @@ async fn acquire_quic_discovery_slot<'a>(
 
 pub(crate) fn start(
     peers: Arc<PeerManager>,
-    config: TrackerDiscoveryConfig,
+    mut config: TrackerDiscoveryConfig,
 ) -> Result<AbortOnDropHandle<()>> {
     let ctx = peers.get_global_ctx();
     ensure!(
@@ -304,9 +354,46 @@ pub(crate) fn start(
     }
     // One process incarnation can advertise several independent interface endpoints.
     let peer_session = rand::random();
+    config.trackers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    config.trackers.dedup();
     Ok(AbortOnDropHandle::new(tokio::spawn(async move {
         let mut paths = HashMap::new();
+        let (connected_tx, connected_rx) = watch::channel(false);
+        let mut events = ctx.subscribe();
+        let mut refresh = tokio::time::interval(Duration::from_secs(2));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let map = peers.get_peer_map();
+            let connected = map.list_peers().into_iter().any(|peer| {
+                use crate::proto::peer_rpc::{PeerIdentityType, SecureAuthLevel};
+                peers.has_live_peer_connection(peer)
+                    && matches!(
+                        map.get_peer_identity_type(peer),
+                        Some(PeerIdentityType::Admin | PeerIdentityType::Credential)
+                    )
+                    && matches!(
+                        map.get_peer_secure_auth_level(peer),
+                        Some(
+                            SecureAuthLevel::PeerVerified | SecureAuthLevel::NetworkSecretConfirmed
+                        )
+                    )
+            });
+            connected_tx.send_if_modified(|current| {
+                if *current == connected {
+                    false
+                } else {
+                    *current = connected;
+                    true
+                }
+            });
+            tokio::select! {
+                _ = refresh.tick() => {},
+                event = events.recv() => {
+                    if matches!(event, Err(broadcast::error::RecvError::Closed)) { break; }
+                    while events.try_recv().is_ok() {}
+                    continue;
+                }
+            }
             let mut addresses = if let Some(local) = config.bind {
                 vec![local]
             } else {
@@ -342,6 +429,7 @@ pub(crate) fn start(
                     continue;
                 }
                 let (ctx, peers, config) = (ctx.clone(), peers.clone(), config.clone());
+                let connected = connected_rx.clone();
                 paths.insert(
                     local,
                     AbortOnDropHandle::new(tokio::spawn(async move {
@@ -353,6 +441,7 @@ pub(crate) fn start(
                                 local,
                                 key,
                                 peer_session,
+                                connected.clone(),
                             )
                             .await
                             {
@@ -363,7 +452,6 @@ pub(crate) fn start(
                     })),
                 );
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     })))
 }
@@ -375,6 +463,7 @@ async fn run_path(
     local: SocketAddr,
     key: [u8; 32],
     peer_session: wire::Id,
+    connected: watch::Receiver<bool>,
 ) -> Result<()> {
     let protocol = ctx.get_flags().default_protocol;
     let udp_local = if protocol == "quic" {
@@ -417,6 +506,7 @@ async fn run_path(
     let hash = wire::rendezvous_id(&key, &protocol);
     // CONNECT requests start while STUN is still in flight.
     for url in config.trackers.clone() {
+        let connected = connected.clone();
         let (ctx, udp, packets, mapped, candidates) = (
             ctx.clone(),
             udp.clone(),
@@ -434,15 +524,20 @@ async fn run_path(
                 candidates,
                 hash,
                 peer_session,
+                connected,
             )
             .await
         });
     }
+    let connections = Arc::new(PathConnections::default());
     let tcp = if protocol != "quic" {
         let tcp = Arc::new(TcpBootstrap::new(ctx.clone(), local, config.advertise).await?);
         mapped_tx.send_replace(Some(tcp.mapped().await?));
         if config.advertise.is_none() && local.is_ipv4() {
             let tcp = tcp.clone();
+            let ctx = ctx.clone();
+            let protocol = protocol.clone();
+            let connections = connections.clone();
             tasks.spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(30)).await;
@@ -454,6 +549,7 @@ async fn run_path(
                             None
                         }
                     };
+                    connections.publish_listener(&ctx, tcp.local_addr()?, &protocol, mapped);
                     mapped_tx.send_if_modified(|current| {
                         if *current == mapped {
                             false
@@ -471,6 +567,7 @@ async fn run_path(
     } else {
         if config.advertise.is_none() && local.is_ipv4() {
             let (ctx, udp, packets) = (ctx.clone(), udp.clone(), packets.clone());
+            let connections = connections.clone();
             tasks.spawn(async move {
                 loop {
                     let current = *mapped_tx.borrow();
@@ -501,6 +598,7 @@ async fn run_path(
                             None
                         }
                     };
+                    connections.publish_listener(&ctx, udp.local_addr()?, "quic", mapped);
                     let delay = publish_udp_mapping(&mapped_tx, mapped);
                     tokio::time::sleep(delay).await;
                 }
@@ -510,11 +608,17 @@ async fn run_path(
         }
         None
     };
-    let connections = Arc::new(PathConnections::default());
+    let bound = if let Some(tcp) = &tcp {
+        tcp.local_addr()?
+    } else {
+        udp.local_addr()?
+    };
     let _lifetime = PathLifetime {
         peers: peers.clone(),
         connections: connections.clone(),
+        local: bound,
     };
+    connections.publish_listener(&ctx, bound, &protocol, *mapped_rx.borrow());
     let listener_connections = connections.clone();
     let (listener_peers, listener_ctx, listener_tcp) = (peers.clone(), ctx.clone(), tcp.clone());
     let listener_endpoint = endpoint.clone();
@@ -537,7 +641,8 @@ async fn run_path(
                             let (tunnel, client) = match accepted { futures::future::Either::Left(tunnel) => (tunnel, false),
                                 futures::future::Either::Right(stream) => tcp.unwrap().accept_candidate(stream).await? };
                             let remote = tunnel_remote(tunnel.as_ref());
-                            let connection = peers.add_discovered_tunnel(tunnel, None, client).await?;
+                            let hint = remote.map(|remote| connections.hint(remote));
+                            let connection = peers.add_discovered_tunnel_with_hint(tunnel, None, client, hint).await?;
                             if let Some(remote) = remote { connections.record(&peers, remote, connection).await; }
                             Ok::<(), anyhow::Error>(())
                         }).await;
@@ -579,19 +684,33 @@ async fn tracker_loop(
     candidates: mpsc::Sender<Candidate>,
     hash: wire::Id,
     peer: wire::Id,
+    mut connected: watch::Receiver<bool>,
 ) -> Result<()> {
     let local = udp.local_addr()?;
     let tracker_name = url.host_str().unwrap().to_owned();
     let mut started = true;
     let mut cached_tracker = None;
     let mut address_index = 0usize;
+    let mut mapping_changes = mapped.clone();
     loop {
+        mapping_changes.borrow_and_update();
+        let idle = *connected.borrow_and_update() && !started;
         let result = async {
             if url.scheme() == "udp" && cached_tracker.is_none() {
-                let host = match url.host().unwrap() { url::Host::Domain(host) => host.to_owned(), url::Host::Ipv4(ip) => ip.to_string(), url::Host::Ipv6(ip) => ip.to_string() };
-                let addresses = client::resolve_tracker_host(&ctx, host, url.port().unwrap()).await?;
-                let mut allowed = addresses.into_iter().filter(|addr| addr.is_ipv4() == local.is_ipv4()
-                    && ensure_remote_allowed(&ctx.get_underlay_policy(), *addr).is_ok()).collect::<Vec<_>>();
+                let host = match url.host().unwrap() {
+                    url::Host::Domain(host) => host.to_owned(),
+                    url::Host::Ipv4(ip) => ip.to_string(),
+                    url::Host::Ipv6(ip) => ip.to_string(),
+                };
+                let addresses =
+                    client::resolve_tracker_host(&ctx, host, url.port().unwrap()).await?;
+                let mut allowed = addresses
+                    .into_iter()
+                    .filter(|addr| {
+                        addr.is_ipv4() == local.is_ipv4()
+                            && ensure_remote_allowed(&ctx.get_underlay_policy(), *addr).is_ok()
+                    })
+                    .collect::<Vec<_>>();
                 allowed.sort_unstable();
                 allowed.dedup();
                 ensure!(!allowed.is_empty(), "no allowed UDP tracker address");
@@ -602,22 +721,59 @@ async fn tracker_loop(
             }
             // Hold the watch read lock until the valid mapping has been copied.
             // Refresh can withdraw a mapping between separate check and read operations.
-            let address = mapped.wait_for(Option::is_some).await?
+            let address = mapped
+                .wait_for(Option::is_some)
+                .await?
                 .expect("wait_for retains the matching mapping until it is copied");
-            let announce = Announce { hash, peer, key: u32::from_be_bytes(peer[..4].try_into().unwrap()), port: address.port(), event: if started { 2 } else { 0 } };
-            let peers = if let Some(tracker) = cached_tracker.as_ref() { tracker.announce(&announce).await? }
-                else { tokio::time::timeout(Duration::from_secs(15), client::http_announce_rotating(&url, &announce, local, &ctx, address_index)).await?? };
+            let announce = Announce {
+                hash,
+                peer,
+                key: u32::from_be_bytes(peer[..4].try_into().unwrap()),
+                port: address.port(),
+                event: if started { 2 } else { 0 },
+                left: if idle { 2 } else { 1 },
+                numwant: wire::MAX_PEERS as i32,
+            };
+            let peers = if let Some(tracker) = cached_tracker.as_ref() {
+                tracker.announce(&announce).await?
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    client::http_announce_rotating(&url, &announce, local, &ctx, address_index),
+                )
+                .await??
+            };
             tracing::info!(tracker = %tracker_name, protocol = %ctx.get_flags().default_protocol, count = peers.addresses.len(), interval = peers.interval, ?address, "tracker discovery announce succeeded");
             for peer in peers.addresses {
-                if peer.is_ipv4() == local.is_ipv4() && peer != address && peer != local && ensure_remote_allowed(&ctx.get_underlay_policy(), peer).is_ok() {
+                if peer.is_ipv4() == local.is_ipv4()
+                    && peer != address
+                    && peer != local
+                    && ensure_remote_allowed(&ctx.get_underlay_policy(), peer).is_ok()
+                {
                     let _ = candidates.try_send(Candidate {
                         address: peer,
-                        expires: Instant::now() + Duration::from_secs(u64::from(peers.interval) * 2 + 60),
+                        expires: Instant::now()
+                            + Duration::from_secs(u64::from(peers.interval) * 2 + 60),
                     });
                 }
             }
             Ok::<u32, anyhow::Error>(peers.interval)
-        }.await;
+        };
+        // Link loss and mapping changes must cancel stalled tracker requests.
+        let result = tokio::select! {
+            result = result => result,
+            changed = connected.changed() => {
+                if changed.is_err() { return Ok(()); }
+                continue;
+            }
+            changed = mapping_changes.changed() => {
+                if changed.is_err() { return Ok(()); }
+                // Tracker cookies can bind the previous public source IP.
+                cached_tracker = None;
+                started = true;
+                continue;
+            }
+        };
         let interval = match result {
             Ok(interval) => {
                 started = false;
@@ -633,10 +789,16 @@ async fn tracker_loop(
         };
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
+            changed = connected.changed() => {
+                if changed.is_err() { return Ok(()); }
+            }
             changed = mapped.changed() => {
                 // A changed NAT mapping is a new announce event, not membership polling.
                 if changed.is_err() { tokio::time::sleep(interval).await; }
-                else { started = true; }
+                else {
+                    cached_tracker = None;
+                    started = true;
+                }
             }
         }
     }
@@ -930,10 +1092,16 @@ mod tests {
                         peer
                     }));
                     assert_eq!(
-                        connect_tcp_candidate(&tcp, &client, address, &PathConnections::default())
-                            .await
-                            .unwrap()
-                            .0,
+                        connect_tcp_candidate(
+                            &tcp,
+                            &client,
+                            address,
+                            &PathConnections::default(),
+                            None
+                        )
+                        .await
+                        .unwrap()
+                        .0,
                         server.my_peer_id()
                     );
                     assert_eq!(accepted.await.unwrap().0, client.my_peer_id());
@@ -1312,6 +1480,8 @@ mod tests {
                                     key: 0,
                                     port: socket.local_addr().unwrap().port(),
                                     event: 2,
+                                    left: 1,
+                                    numwant: wire::MAX_PEERS as i32,
                                 };
                                 client::http_announce(
                                     &http_url,
@@ -1393,7 +1563,7 @@ async fn candidate_loop(
     let mut responses = HashMap::<SocketAddr, Instant>::new();
     let mut cached_candidates = HashMap::<SocketAddr, (Instant, Instant)>::new();
     let mut connected = HashMap::<SocketAddr, DiscoveryConnection>::new();
-    let (success_tx, mut success_rx) = mpsc::channel(16);
+    let (success_tx, mut success_rx) = mpsc::channel::<(SocketAddr, DiscoveryConnection)>(16);
     let mut retry = tokio::time::interval(Duration::from_secs(1));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let my_id = peers.my_peer_id();
@@ -1413,7 +1583,9 @@ async fn candidate_loop(
                 }
             }
             Some(_) = punch_tasks.join_next(), if !punch_tasks.is_empty() => {}
-            Some((address, peer)) = success_rx.recv() => { if connected.len() < 64 { connected.insert(address, peer); } }
+            Some((address, peer)) = success_rx.recv() => {
+                if connected.len() < 64 { connected.insert(address, peer); }
+            }
             Some(address) = fallbacks.recv(), if attempts.len() < 8 => {
                 // Other healthy peers do not establish reachability to this candidate.
                 if connections.live(&peers, address).is_none() && !active.contains_key(&address) {
@@ -1449,8 +1621,10 @@ async fn candidate_loop(
                     false
                 });
                 cached_candidates.retain(|_, (_, expires)| *expires > Instant::now());
+                connections.hints.lock().unwrap().retain(|address, hint| Arc::strong_count(hint) > 1 || cached_candidates.contains_key(address) || connected.contains_key(address));
                 if let Some((&address, (_, expires))) = cached_candidates.iter()
                     .filter(|(address, (time, _))| !connected.contains_key(*address) && !active.contains_key(*address)
+                        && !connections.known_live_peer(&peers, **address)
                         && time.elapsed() >= Duration::from_secs(30)
                         && recent.get(*address).is_none_or(|(attempt, _)| attempt.elapsed() >= Duration::from_secs(30)))
                     .min_by_key(|(_, (time, _))| *time) {
@@ -1473,6 +1647,7 @@ async fn candidate_loop(
                 cached_candidates.entry(address)
                     .and_modify(|(_, old_expiry)| *old_expiry = (*old_expiry).max(expires))
                     .or_insert_with(|| (Instant::now(), expires));
+                if connections.known_live_peer(&peers, address) { continue; }
                 if connections.live(&peers, address).is_some() || active.contains_key(&address) { continue; }
                 recent.retain(|address, (time, _)| active.contains_key(address) || time.elapsed() < Duration::from_secs(30));
                 if recent.contains_key(&address) { continue; }
@@ -1512,6 +1687,9 @@ async fn candidate_loop(
                     responses.insert(packet.addr, Instant::now());
                     let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), true), packet.addr).await;
                 }
+                // Retain the authenticated identity for session recovery on every interface.
+                connections.hint(packet.addr).observe(peer);
+                if peers.has_live_peer_connection(peer) { continue; }
                 if my_id < peer && connections.live(&peers, packet.addr).is_none() {
                     connect = Some((packet.addr, Some(peer)));
                 }
@@ -1520,6 +1698,9 @@ async fn candidate_loop(
         let Some((address, expected)) = connect else {
             continue;
         };
+        if connections.known_live_peer(&peers, address) {
+            continue;
+        }
         recent.retain(|address, (time, _)| {
             active.contains_key(address) || time.elapsed() < Duration::from_secs(30)
         });
@@ -1570,7 +1751,18 @@ async fn candidate_loop(
                 let _ = success_tx.try_send((address, connection));
                 return address;
             }
-            let result = tokio::time::timeout(BOOTSTRAP_TIMEOUT, async {
+            if connections.known_live_peer(&peers, address) {
+                return address;
+            }
+            // Keep the mapped TCP flow alive until an idle peer can learn this endpoint.
+            // Canceling its SYN early can leave NAT state for a socket that no longer exists.
+            let timeout = if tcp.is_some() {
+                BOOTSTRAP_TIMEOUT
+                    + Duration::from_secs(u64::from(wire::IDLE_ANNOUNCE_INTERVAL_SECS))
+            } else {
+                BOOTSTRAP_TIMEOUT
+            };
+            let result = tokio::time::timeout(timeout, async {
                 let peer = if let Some(endpoint) = endpoint {
                     let outgoing = async {
                         let tunnel = loop {
@@ -1603,7 +1795,14 @@ async fn candidate_loop(
                             }
                         };
                         Ok::<_, anyhow::Error>(
-                            peers.add_discovered_tunnel(tunnel, expected, true).await?,
+                            peers
+                                .add_discovered_tunnel_with_hint(
+                                    tunnel,
+                                    expected,
+                                    true,
+                                    Some(connections.hint(address)),
+                                )
+                                .await?,
                         )
                     };
                     tokio::select! {
@@ -1612,8 +1811,14 @@ async fn candidate_loop(
                         connected = outgoing => connected?,
                     }
                 } else {
-                    connect_tcp_candidate(tcp.as_ref().unwrap(), &peers, address, &connections)
-                        .await?
+                    connect_tcp_candidate(
+                        tcp.as_ref().unwrap(),
+                        &peers,
+                        address,
+                        &connections,
+                        expected,
+                    )
+                    .await?
                 };
                 let peer = connections.record(&peers, address, peer).await;
                 let _ = success_tx.try_send((address, peer));
@@ -1636,13 +1841,23 @@ async fn connect_tcp_candidate(
     peers: &PeerManager,
     address: SocketAddr,
     connections: &PathConnections,
+    expected: Option<crate::common::PeerId>,
 ) -> Result<DiscoveryConnection> {
     use futures::{FutureExt, StreamExt};
     let mut attempts = futures::stream::FuturesUnordered::new();
     attempts.push(
         async {
             let (tunnel, client) = tcp.connect_candidate(address).await?;
-            Ok::<_, anyhow::Error>(peers.add_discovered_tunnel(tunnel, None, client).await?)
+            Ok::<_, anyhow::Error>(
+                peers
+                    .add_discovered_tunnel_with_hint(
+                        tunnel,
+                        expected,
+                        client,
+                        Some(connections.hint(address)),
+                    )
+                    .await?,
+            )
         }
         .boxed(),
     );
@@ -1655,21 +1870,26 @@ async fn connect_tcp_candidate(
                 return Ok(connection);
             }
             let tunnel = tcp.connect(address, true).await?;
-            Ok::<_, anyhow::Error>(peers.add_discovered_tunnel(tunnel, None, true).await?)
+            Ok::<_, anyhow::Error>(
+                peers
+                    .add_discovered_tunnel_with_hint(
+                        tunnel,
+                        expected,
+                        true,
+                        Some(connections.hint(address)),
+                    )
+                    .await?,
+            )
         }
         .boxed(),
     );
     attempts.push(async { Ok(connections.wait(peers, address).await) }.boxed());
-    tokio::time::timeout(BOOTSTRAP_TIMEOUT, async {
-        let mut error = anyhow::anyhow!("TCP bootstrap attempts stopped");
-        while let Some(result) = attempts.next().await {
-            match result {
-                Ok(peer) => return Ok(peer),
-                Err(failed) => error = failed,
-            }
+    let mut error = anyhow::anyhow!("TCP bootstrap attempts stopped");
+    while let Some(result) = attempts.next().await {
+        match result {
+            Ok(peer) => return Ok(peer),
+            Err(failed) => error = failed,
         }
-        Err(error)
-    })
-    .await
-    .context("TCP bootstrap timed out")?
+    }
+    Err(error)
 }

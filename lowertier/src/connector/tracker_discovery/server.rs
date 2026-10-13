@@ -42,6 +42,14 @@ pub struct TrackerServer {
 }
 
 impl TrackerServer {
+    fn announce_interval(&self, announce: &Announce) -> u32 {
+        // LowTier uses a nonzero private hint. Public trackers still see an incomplete download.
+        if announce.left == 2 {
+            self.interval.max(wire::IDLE_ANNOUNCE_INTERVAL_SECS)
+        } else {
+            self.interval
+        }
+    }
     #[cfg(test)]
     pub(crate) fn peer_count(&self) -> usize {
         self.store.lock().unwrap().entries
@@ -165,9 +173,20 @@ impl TrackerServer {
             key,
             Entry {
                 address,
-                expires: now + Duration::from_secs((u64::from(self.interval) * 3).max(10)),
+                expires: now
+                    + Duration::from_secs(
+                        (u64::from(self.announce_interval(announce)) * 3).max(10),
+                    ),
             },
         );
+        let limit = if announce.numwant < 0 {
+            MAX_PEERS
+        } else {
+            (announce.numwant as usize).min(MAX_PEERS)
+        };
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut peers = entries
             .iter()
             .filter(|(id, entry)| {
@@ -183,7 +202,7 @@ impl TrackerServer {
             let offset = unix_seconds() as usize % peers.len();
             peers.rotate_left(offset);
         }
-        peers.truncate(MAX_PEERS);
+        peers.truncate(limit);
         Ok(peers)
     }
 
@@ -213,23 +232,15 @@ impl TrackerServer {
             key: u32::from_be_bytes(packet[88..92].try_into().ok()?),
             port: u16::from_be_bytes(packet[96..98].try_into().ok()?),
             event: u32::from_be_bytes(packet[80..84].try_into().ok()?),
+            left: u64::from_be_bytes(packet[64..72].try_into().ok()?),
+            numwant: i32::from_be_bytes(packet[92..96].try_into().ok()?),
         };
         let peers = self.announce(&announce, source.ip()).ok()?;
         let mut reply = 1u32.to_be_bytes().to_vec();
         reply.extend_from_slice(transaction);
-        reply.extend_from_slice(&self.interval.to_be_bytes());
+        reply.extend_from_slice(&self.announce_interval(&announce).to_be_bytes());
         reply.extend_from_slice(&0u64.to_be_bytes());
-        let want = i32::from_be_bytes(packet[92..96].try_into().ok()?);
-        let limit = if want < 0 {
-            MAX_PEERS
-        } else {
-            (want as usize).min(MAX_PEERS)
-        };
-        for peer in peers
-            .into_iter()
-            .filter(|peer| peer.is_ipv6() == source.is_ipv6())
-            .take(limit)
-        {
+        for peer in peers {
             append_compact(&mut reply, peer);
         }
         Some(reply)
@@ -302,8 +313,12 @@ impl TrackerServer {
             for peer in peers.into_iter().take(MAX_PEERS) {
                 append_compact(if peer.is_ipv4() { &mut ipv4 } else { &mut ipv6 }, peer);
             }
-            let mut reply =
-                format!("d8:intervali{}e5:peers{}:", self.interval, ipv4.len()).into_bytes();
+            let mut reply = format!(
+                "d8:intervali{}e5:peers{}:",
+                self.announce_interval(&announce),
+                ipv4.len()
+            )
+            .into_bytes();
             reply.extend_from_slice(&ipv4);
             reply.extend_from_slice(format!("6:peers6{}:", ipv6.len()).as_bytes());
             reply.extend_from_slice(&ipv6);
@@ -364,6 +379,16 @@ fn parse_query(query: &str) -> Result<Announce> {
         port,
         event,
         key: 0,
+        left: fields
+            .get("left")
+            .map(|value| -> Result<u64> { Ok(std::str::from_utf8(value)?.parse()?) })
+            .transpose()?
+            .unwrap_or(1),
+        numwant: fields
+            .get("numwant")
+            .map(|value| -> Result<i32> { Ok(std::str::from_utf8(value)?.parse()?) })
+            .transpose()?
+            .unwrap_or(MAX_PEERS as i32),
     })
 }
 
@@ -384,6 +409,8 @@ mod tests {
             key: 2,
             port: 43821,
             event: 2,
+            left: 1,
+            numwant: MAX_PEERS as i32,
         };
         assert!(
             server

@@ -136,15 +136,10 @@ fn update_loss_counter(
     succeeded: bool,
     rx_packets_at_start: u64,
     current_rx_packets: u64,
-    tx_data_packets_at_start: u64,
-    current_tx_data_packets: u64,
     receive_backpressured: bool,
 ) {
-    if succeeded
-        || current_rx_packets > rx_packets_at_start
-        || current_tx_data_packets > tx_data_packets_at_start
-        || receive_backpressured
-    {
+    // Local send counters advance before transport delivery. Only ingress proves remote progress.
+    if succeeded || current_rx_packets > rx_packets_at_start || receive_backpressured {
         loss_counter.store(0, Ordering::Relaxed);
     } else {
         loss_counter.fetch_add(1, Ordering::Relaxed);
@@ -201,15 +196,13 @@ impl PeerConnPinger {
         receiver: &mut broadcast::Receiver<ZCPacket>,
         seq: u32,
     ) -> Result<u128, Error> {
-        // should add seq here. so latency can be calculated more accurately
         let req = Self::new_ping_packet(my_node_id, peer_id, seq);
         let req_len = req.buf_len() as u64;
-        sink.send(req).await?;
-        control_metrics.record_tx(req_len);
-
-        let now = Instant::now();
-        // wait until we get a pong packet in ctrl_resp_receiver
+        // Bound queue admission too. A stalled transport must not suspend liveness checks indefinitely.
         let resp = timeout(Duration::from_secs(8), async {
+            sink.send(req).await?;
+            control_metrics.record_tx(req_len);
+            let now = Instant::now();
             loop {
                 match receiver.recv().await {
                     Ok(p) => {
@@ -231,23 +224,13 @@ impl PeerConnPinger {
                     }
                 }
             }
-            Ok(())
+            Ok(now.elapsed().as_micros())
         })
         .await;
 
         tracing::trace!(?resp, "wait ping response done");
 
-        if resp.is_err() {
-            return Err(Error::WaitRespError(
-                "wait ping response timeout".to_owned(),
-            ));
-        }
-
-        if resp.as_ref().unwrap().is_err() {
-            return Err(resp.unwrap().err().unwrap());
-        }
-
-        Ok(now.elapsed().as_micros())
+        resp.map_err(|_| Error::WaitRespError("wait ping response timeout".to_owned()))?
     }
 
     pub async fn pingpong(&mut self) {
@@ -351,8 +334,6 @@ impl PeerConnPinger {
                 ret.is_ok(),
                 attempt.rx_packets_at_start,
                 current_rx_packets,
-                attempt.tx_data_packets_at_start,
-                current_tx_data_packets,
                 self.receive_backpressure
                     .as_ref()
                     .is_some_and(|signal| signal.load(Ordering::Acquire)),

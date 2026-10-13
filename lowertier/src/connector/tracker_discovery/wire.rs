@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 pub const CONNECT_MAGIC: u64 = 0x41727101980;
 pub const MAX_PEERS: usize = 16;
 pub const MAX_RESPONSE: usize = 16 * 1024;
+pub const IDLE_ANNOUNCE_INTERVAL_SECS: u32 = 30;
 pub type Id = [u8; 20];
 
 pub fn rendezvous_id(key: &[u8], protocol: &str) -> Id {
@@ -60,6 +61,9 @@ pub struct Announce {
     pub key: u32,
     pub port: u16,
     pub event: u32,
+    // Both values stay nonzero to retain leecher discovery on public trackers.
+    pub left: u64,
+    pub numwant: i32,
 }
 
 impl Announce {
@@ -70,10 +74,10 @@ impl Announce {
         packet[12..16].copy_from_slice(&transaction.to_be_bytes());
         packet[16..36].copy_from_slice(&self.hash);
         packet[36..56].copy_from_slice(&self.peer);
-        packet[64..72].copy_from_slice(&1u64.to_be_bytes());
+        packet[64..72].copy_from_slice(&self.left.to_be_bytes());
         packet[80..84].copy_from_slice(&self.event.to_be_bytes());
         packet[88..92].copy_from_slice(&self.key.to_be_bytes());
-        packet[92..96].copy_from_slice(&(MAX_PEERS as u32).to_be_bytes());
+        packet[92..96].copy_from_slice(&self.numwant.to_be_bytes());
         packet[96..98].copy_from_slice(&self.port.to_be_bytes());
         packet
     }
@@ -88,11 +92,13 @@ impl Announce {
             _ => "",
         };
         format!(
-            "info_hash={}&peer_id={}&port={}&key={}&uploaded=0&downloaded=0&left=1&compact=1&numwant={MAX_PEERS}&event={event}",
+            "info_hash={}&peer_id={}&port={}&key={}&uploaded=0&downloaded=0&left={}&compact=1&numwant={}&event={event}",
             escape(&self.hash),
             escape(&self.peer),
             self.port,
-            self.key
+            self.key,
+            self.left,
+            self.numwant
         )
     }
 }
@@ -344,6 +350,8 @@ mod tests {
             key: 7,
             port: 43821,
             event: 2,
+            left: 1,
+            numwant: MAX_PEERS as i32,
         };
         let packet = request.udp(23, 42);
         assert_eq!(packet.len(), 98);

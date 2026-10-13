@@ -1387,11 +1387,34 @@ impl PeerConnCloseNotify {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct DiscoveryPeerHint {
+    identity: AtomicCell<Option<(PeerId, std::time::Instant)>>,
+}
+
+impl DiscoveryPeerHint {
+    pub(crate) fn observe(&self, peer: PeerId) {
+        self.identity.store(Some((peer, std::time::Instant::now())));
+    }
+
+    pub(crate) fn peer_id(&self) -> Option<PeerId> {
+        self.identity.load().map(|(peer, _)| peer)
+    }
+
+    pub(crate) fn recent_peer_id(&self, age: Duration) -> Option<PeerId> {
+        self.identity
+            .load()
+            .filter(|(_, seen)| seen.elapsed() < age)
+            .map(|(peer, _)| peer)
+    }
+}
+
 pub struct PeerConn {
     conn_id: PeerConnId,
 
     my_peer_id: PeerId,
     peer_id_hint: Option<PeerId>,
+    discovery_peer_hint: Option<Arc<DiscoveryPeerHint>>,
     global_ctx: ArcGlobalCtx,
 
     secure_mode_cfg: SecureModeConfig,
@@ -1528,6 +1551,7 @@ impl PeerConn {
 
             my_peer_id,
             peer_id_hint,
+            discovery_peer_hint: None,
             global_ctx,
 
             secure_mode_cfg,
@@ -1748,6 +1772,10 @@ impl PeerConn {
 
     pub fn get_conn_id(&self) -> PeerConnId {
         self.conn_id
+    }
+
+    pub(crate) fn set_discovery_peer_hint(&mut self, hint: Arc<DiscoveryPeerHint>) {
+        self.discovery_peer_hint = Some(hint);
     }
 
     pub(crate) fn has_distinct_quic_surface(&self, other: &Self) -> bool {
@@ -2445,16 +2473,6 @@ impl PeerConn {
             .map(|recovery| recovery_identity_from_pb(recovery, session_key.clone()))
             .transpose()?;
         let recovery_reset = recovery_identity.is_some() && server_recovery_identity.is_none();
-        if !recovery_reset
-            && !recovery_identity_matches_wire(
-                recovery_identity.as_ref(),
-                server_recovery_identity.as_ref(),
-            )
-        {
-            return Err(Error::WaitRespError(
-                "noise recovery identity mismatch".to_owned(),
-            ));
-        }
         let recovering = recovery_identity.is_some() && !recovery_reset;
 
         if remote_network_name == network.network_name && msg2_pb.role_hint != 1 {
@@ -2506,6 +2524,26 @@ impl PeerConn {
                 true,
             )
         };
+        if remote_network_name == network.network_name
+            && matches!(
+                responder_auth_level_for_msg3,
+                SecureAuthLevel::NetworkSecretConfirmed | SecureAuthLevel::PeerVerified
+            )
+            && let Some(hint) = &self.discovery_peer_hint
+        {
+            // Persist identity before session commit. Cancellation can retain a receipt that needs this identity on retry.
+            hint.observe(remote_peer_id);
+        }
+        if !recovery_reset
+            && !recovery_identity_matches_wire(
+                recovery_identity.as_ref(),
+                server_recovery_identity.as_ref(),
+            )
+        {
+            return Err(Error::WaitRespError(
+                "noise recovery identity mismatch".to_owned(),
+            ));
+        }
         let b_conn_id = msg2_pb.b_conn_id.clone();
         let msg3_pb = PeerConnNoiseMsg3Pb {
             a_conn_id_echo: Some(a_conn_id.into()),
@@ -4856,8 +4894,11 @@ impl PeerConn {
             self.receive_backpressure.clone(),
         );
 
+        let close_event_notifier = self.close_event_notifier.clone();
         self.tasks.spawn(async move {
             pingpong.pingpong().await;
+            // A silent transport can outlive the liveness task without ending its receive stream.
+            close_event_notifier.notify_close();
             tracing::warn!(target: "CORE", ?pingpong, "pingpong task exit");
             Ok(())
         });
