@@ -220,6 +220,9 @@ fn create_shared_config(
         "shared_network".to_string(),
         "".to_string(),
     ));
+    let mut flags = config.get_flags();
+    flags.relay_config_mut().transit_networks = vec!["test_network".to_owned()];
+    config.set_flags(flags);
     config.set_secure_mode(Some(generate_secure_mode_config()));
     config
 }

@@ -269,7 +269,7 @@ disable_udp_hole_punching = false
 [relay]
 policy = "hop"
 transit = "allow"
-transit_networks = ["*"]
+transit_networks = []
 
 EOF
 

@@ -27,6 +27,15 @@ token_file = "/path/to/control.token"
 `use_relays=false` permits local data only through directly connected peers. It does not change transit permission.
 `transit` accepts `allow`, `avoid`, and `deny`. Denied nodes remain reachable as endpoints.
 `transit_networks` contains foreign network name patterns. Use `["*"]` to permit every foreign network.
+An empty list denies foreign transit. A public relay must explicitly permit each client network.
+For example, a relay outside `office-l2` can permit that network with this configuration:
+
+```toml
+[relay]
+transit = "allow"
+transit_networks = ["office-l2"]
+```
+
 Transit and probe limits use bit/s. Burst capacity uses bytes. Omit the transit limit for unlimited transit.
 The default burst holds one second of traffic or one 256 KiB maximum packet, whichever is larger.
 An explicit burst must hold at least one maximum packet.

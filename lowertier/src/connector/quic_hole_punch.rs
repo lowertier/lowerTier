@@ -699,6 +699,12 @@ mod tests {
         };
         let relay =
             create_mock_peer_manager_secure(relay_network.into(), relay_secret.into()).await;
+        if foreign {
+            let ctx = relay.get_global_ctx();
+            let mut flags = ctx.get_flags();
+            flags.relay_config_mut().transit_networks = vec!["punch-rpc".to_owned()];
+            ctx.set_flags(flags);
+        }
         for peer in [&a, &b] {
             peer.get_global_ctx()
                 .replace_stun_info_collector(Box::new(LocalStun::default()));

@@ -496,6 +496,7 @@ group_secret = "<group-secret>"
 
 Put retained core settings under `[flags]`.
 Use `[relay]`, `[camouflage]`, and `[limits]` for grouped settings.
+Same-network transit defaults to `allow`. Foreign transit requires an explicit `relay.transit_networks` match.
 The table uses TOML paths for grouped settings.
 
 | Field | Default | Purpose | CLI option |

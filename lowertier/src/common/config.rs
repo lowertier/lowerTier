@@ -2127,9 +2127,9 @@ quic_receive_window = 33554432
 
         let retrieved_servers = config.get_stun_servers();
         assert_eq!(retrieved_servers.unwrap(), custom_servers);
+        test_stun_servers_toml_parsing();
     }
 
-    #[test]
     fn test_stun_servers_toml_parsing() {
         let config_str = r#"
 instance_name = "test"
