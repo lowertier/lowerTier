@@ -7,6 +7,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "lowertier/**"
+      - "lowertier-contrib/lowertier-ffi/**"
       - "lowertier-tracker/**"
       - "vendor/**"
       - "script/**/*.py"
@@ -19,6 +20,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "lowertier/**"
+      - "lowertier-contrib/lowertier-ffi/**"
       - "lowertier-tracker/**"
       - "vendor/**"
       - "script/**/*.py"
@@ -91,7 +93,7 @@ jobs:
       - name: Build test archive
         run: >-
           cargo nextest archive --locked
-          --package lowertier --package lowertier-tracker --features lowertier-tracker/server --package quincy-tun
+          --package lowertier --package lowertier-ffi --package lowertier-tracker --features lowertier-tracker/server --package quincy-tun
           --archive-file "$RUNNER_TEMP/lowertier-tests.tar.zst"
 
       - name: Run essential tests

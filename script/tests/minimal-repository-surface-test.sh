@@ -102,7 +102,7 @@ if grep -Eiq 'mips|riscv|loongarch|armv7|i686|freebsd|magisk|build_web|lowertier
   exit 1
 fi
 
-grep -Fq -- '--package lowertier --bins' "$core_workflow"
+grep -Fq -- '--package lowertier --package lowertier-tracker --features lowertier-tracker/server --bins' "$core_workflow"
 if grep -Fq -- '--features lean' "$core_workflow" "$test_workflow" "$repo_root/lowertier/Cargo.toml"; then
   echo "the lean build route is still present" >&2
   exit 1
@@ -119,6 +119,8 @@ if grep -Eq 'pre_job|pre-test|test_matrix|upload-artifact|download-artifact' "$t
 fi
 
 grep -Fq 'cargo nextest run' "$test_workflow"
+grep -Fq -- '--package lowertier-ffi' "$test_workflow"
+test "$(grep -Fc 'lowertier-contrib/lowertier-ffi/**' "$test_workflow")" -eq 2
 
 if grep -Eiq 'lowertier-web|lowertier-gui|gui:|pnpm:' "$test_workflow"; then
   echo "the test workflow contains a frontend build" >&2

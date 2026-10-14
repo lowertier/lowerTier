@@ -76,16 +76,14 @@ body:
     id: logs
     attributes:
       label: 日志信息 / Log Information
-      description: 请提供相关的日志信息，包括 GUI 的事件日志或命令行的控制台输出。 / Please provide relevant log information, including GUI event logs or command line console output.
+      description: 请提供命令行控制台输出或文件日志。 / Provide console output or file logs.
       placeholder: |
         请粘贴相关的日志信息：
-        - GUI 用户：请提供事件日志中的错误信息
         - 命令行用户：请提供控制台输出的详细日志
         - 一般情况下，提供默认输出的事件日志即可
         - 如果能提供 --file-log-level debug 输出的日志，会更方便 debug
         
         Please paste relevant log information:
-        - GUI users: Please provide error messages from event logs
         - CLI users: Please provide detailed console output logs
         - Default log output is usually sufficient
         - If possible, logs with --file-log-level debug would be more helpful for debugging

@@ -1,269 +1,113 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-
-CORE_BIN=${CORE_BIN:-"$REPO_ROOT/target/debug/lowertier-core"}
-CLI_BIN=${CLI_BIN:-"$REPO_ROOT/target/debug/lowertier-cli"}
-TMPDIR_PATH=""
-CORE_PID=""
+BUILD_DIR=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
+CORE_BIN=${CORE_BIN:-"$BUILD_DIR/debug/lowertier-core"}
+CLI_BIN=${CLI_BIN:-"$BUILD_DIR/debug/lowertier-cli"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
+INSTANCE_A=11111111-1111-4111-8111-111111111111
+INSTANCE_B=22222222-2222-4222-8222-222222222222
+CORE_PID=
 
-print_section() {
-  printf '\n==> %s\n' "$1"
+if [[ "${SKIP_BUILD:-0}" != 1 ]] || [[ ! -x "$CORE_BIN" ]] || [[ ! -x "$CLI_BIN" ]]; then
+    cargo build -p lowertier --bin lowertier-core --bin lowertier-cli
+fi
+
+RUN_DIR=$(mktemp -d -t lowertier-cli-e2e.XXXXXX)
+cleanup() {
+    if [[ -n "$CORE_PID" ]]; then
+        kill "$CORE_PID" 2>/dev/null || true
+        wait "$CORE_PID" 2>/dev/null || true
+    fi
+    rm -rf "$RUN_DIR"
 }
-
-print_output() {
-  local title="$1"
-  local content="$2"
-  printf -- '---- %s ----\n' "$title"
-  printf '%s\n' "$content"
-  printf -- '---- end %s ----\n' "$title"
-}
-
-build_binaries() {
-  print_section "Building lowertier-core and lowertier-cli"
-  cargo build -p lowertier --bin lowertier-core --bin lowertier-cli
-}
-
-ensure_binaries() {
-  if [[ "${SKIP_BUILD:-0}" != "1" ]] || [[ ! -x "$CORE_BIN" ]] || [[ ! -x "$CLI_BIN" ]]; then
-    build_binaries
-  fi
-}
-
-make_tmpdir() {
-  "$PYTHON_BIN" - <<'PY'
-import tempfile
-print(tempfile.mkdtemp(prefix="lowertier-cli-e2e-"))
-PY
-}
-
-cleanup_tmpdir() {
-  TMPDIR_TO_DELETE="$1" "$PYTHON_BIN" - <<'PY'
-import os
-import shutil
-
-shutil.rmtree(os.environ["TMPDIR_TO_DELETE"], ignore_errors=True)
-PY
-}
-
-alloc_port() {
-  "$PYTHON_BIN" - <<'PY'
+trap cleanup EXIT
+mkdir "$RUN_DIR/config"
+RPC_PORT=$("$PYTHON_BIN" - <<'PY'
 import socket
-
-sock = socket.socket()
-sock.bind(("127.0.0.1", 0))
-print(sock.getsockname()[1])
-sock.close()
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
 PY
-}
+)
 
-wait_for_cli() {
-  local rpc_port="$1"
-  local attempts=0
-  while (( attempts < 50 )); do
-    if "$CLI_BIN" -p "127.0.0.1:${rpc_port}" -o json node >/dev/null 2>&1; then
-      return 0
+write_config() {
+    local name=$1 id=$2
+    cat >"$RUN_DIR/config/$name.toml" <<EOF
+instance_name = "e2e-inst-$name"
+instance_id = "$id"
+listeners = []
+
+[network_identity]
+network_name = "e2e-net-$name"
+network_secret = "e2e-secret-$name"
+
+[flags]
+no_tun = true
+enable_ipv6 = false
+EOF
+}
+write_config a "$INSTANCE_A"
+write_config b "$INSTANCE_B"
+"$CORE_BIN" --config-dir "$RUN_DIR/config" --rpc-portal "127.0.0.1:$RPC_PORT" \
+    >"$RUN_DIR/core.log" 2>&1 &
+CORE_PID=$!
+cli=("$CLI_BIN" -p "127.0.0.1:$RPC_PORT" --control-token-file "$RUN_DIR/config/control.token" -o json)
+
+ready=false
+for _ in $(seq 1 50); do
+    if "${cli[@]}" --instance "$INSTANCE_A" node show >"$RUN_DIR/node.json" 2>/dev/null \
+        && "${cli[@]}" --instance "$INSTANCE_B" node show >/dev/null 2>&1; then
+        ready=true
+        break
     fi
-    attempts=$((attempts + 1))
     sleep 0.2
-  done
-  return 1
-}
-
-run_cmd() {
-  local __var_name="$1"
-  local title="$2"
-  shift 2
-
-  print_section "$title"
-  printf '+'
-  for arg in "$@"; do
-    printf ' %q' "$arg"
-  done
-  printf '\n'
-
-  local output
-  if ! output=$("$@" 2>&1); then
-    print_output "$title output" "$output"
-    return 1
-  fi
-
-  print_output "$title output" "$output"
-  printf -v "$__var_name" '%s' "$output"
-}
-
-assert_text_output() {
-  local text_output="$1"
-  grep -F '== e2e-inst-a (' <<<"$text_output" >/dev/null
-  grep -F '== e2e-inst-b (' <<<"$text_output" >/dev/null
-}
-
-assert_multi_instance_json() {
-  local json_payload="$1"
-  JSON_PAYLOAD="$json_payload" "$PYTHON_BIN" - <<'PY'
-import json
-import os
-
-data = json.loads(os.environ["JSON_PAYLOAD"])
-assert isinstance(data, list), data
-assert len(data) == 2, data
-
-names = {item["instance_name"] for item in data}
-assert names == {"e2e-inst-a", "e2e-inst-b"}, names
-
-for item in data:
-    assert item["instance_id"], item
-    assert isinstance(item["result"], dict), item
-PY
-}
-
-assert_single_instance_json() {
-  local json_payload="$1"
-  JSON_PAYLOAD="$json_payload" "$PYTHON_BIN" - <<'PY'
-import json
-import os
-
-data = json.loads(os.environ["JSON_PAYLOAD"])
-assert isinstance(data, dict), data
-assert data["config"].find('instance_name = "e2e-inst-a"') >= 0, data["config"]
-PY
-}
-
-assert_whitelist_fanout() {
-  local json_payload="$1"
-  JSON_PAYLOAD="$json_payload" "$PYTHON_BIN" - <<'PY'
-import json
-import os
-
-data = json.loads(os.environ["JSON_PAYLOAD"])
-assert len(data) == 2, data
-for item in data:
-    assert item["result"]["tcp_ports"] == ["80", "443"], item
-    assert item["result"]["udp_ports"] == [], item
-PY
-}
-
-assert_single_instance_write() {
-  local json_payload="$1"
-  JSON_PAYLOAD="$json_payload" "$PYTHON_BIN" - <<'PY'
-import json
-import os
-
-data = {item["instance_name"]: item["result"] for item in json.loads(os.environ["JSON_PAYLOAD"])}
-assert data["e2e-inst-a"]["tcp_ports"] == ["80", "443"], data
-assert data["e2e-inst-b"]["tcp_ports"] == [], data
-PY
-}
-
-main() {
-  command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
-    echo "python interpreter not found: $PYTHON_BIN" >&2
+done
+if [[ "$ready" != true ]]; then
+    cat "$RUN_DIR/core.log" >&2
     exit 1
-  }
+fi
 
-  ensure_binaries
+"${cli[@]}" instance list >"$RUN_DIR/instances.json"
+if "${cli[@]}" node show >"$RUN_DIR/ambiguous.json" 2>/dev/null; then
+    echo "A node request requires an instance ID when two instances exist." >&2
+    exit 1
+else
+    test "$?" -eq 4
+fi
 
-  TMPDIR_PATH=$(make_tmpdir)
-  print_section "Created temporary test directory"
-  printf '%s\n' "$TMPDIR_PATH"
+printf '%s\n' '{"tcp_whitelist":["80","443"]}' >"$RUN_DIR/acl.json"
+"${cli[@]}" --instance "$INSTANCE_A" acl set --file "$RUN_DIR/acl.json" >"$RUN_DIR/write.json"
+"${cli[@]}" --instance "$INSTANCE_A" acl get >"$RUN_DIR/acl-a.json"
+"${cli[@]}" --instance "$INSTANCE_B" acl get >"$RUN_DIR/acl-b.json"
+"$PYTHON_BIN" - "$RUN_DIR" "$INSTANCE_A" "$INSTANCE_B" <<'PY'
+import json
+from pathlib import Path
+import sys
 
-  local rpc_port
-  rpc_port=$(alloc_port)
-  print_section "Allocated RPC port"
-  printf '%s\n' "$rpc_port"
+directory = Path(sys.argv[1])
+instance_a, instance_b = sys.argv[2:]
 
-  cleanup() {
-    if [[ -n "$CORE_PID" ]] && kill -0 "$CORE_PID" >/dev/null 2>&1; then
-      kill "$CORE_PID" >/dev/null 2>&1 || true
-      wait "$CORE_PID" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "$TMPDIR_PATH" ]]; then
-      cleanup_tmpdir "$TMPDIR_PATH"
-    fi
-  }
-  trap cleanup EXIT
+def read(name, instance=None):
+    envelope = json.loads((directory / name).read_text())
+    assert envelope["schema_version"] == 1, envelope
+    assert envelope["request_id"], envelope
+    assert envelope.get("error") is None, envelope
+    if instance:
+        assert envelope["instance_id"] == instance, envelope
+    return envelope["data"]
 
-  cat >"$TMPDIR_PATH/inst-a.toml" <<'EOF'
-instance_name = "e2e-inst-a"
-listeners = []
-
-[network_identity]
-network_name = "e2e-net-a"
-network_secret = ""
-
-[flags]
-no_tun = true
-enable_ipv6 = false
-EOF
-
-  cat >"$TMPDIR_PATH/inst-b.toml" <<'EOF'
-instance_name = "e2e-inst-b"
-listeners = []
-
-[network_identity]
-network_name = "e2e-net-b"
-network_secret = ""
-
-[flags]
-no_tun = true
-enable_ipv6 = false
-EOF
-
-  "$CORE_BIN" --config-dir "$TMPDIR_PATH" --rpc-portal "127.0.0.1:${rpc_port}" \
-    >"$TMPDIR_PATH/core.log" 2>&1 &
-  CORE_PID=$!
-  print_section "Started lowertier-core"
-  printf 'pid=%s\n' "$CORE_PID"
-
-  wait_for_cli "$rpc_port"
-  print_output "lowertier-core startup log" "$(cat "$TMPDIR_PATH/core.log")"
-
-  local text_output
-  run_cmd text_output \
-    "Case 1: node fanout in table mode" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" node
-  assert_text_output "$text_output"
-
-  local json_output
-  run_cmd json_output \
-    "Case 2: node fanout in JSON mode" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" -o json node
-  assert_multi_instance_json "$json_output"
-
-  local single_output
-  run_cmd single_output \
-    "Case 3: explicit instance selector stays single-instance" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" --instance-name e2e-inst-a -o json node
-  assert_single_instance_json "$single_output"
-
-  local set_whitelist_output
-  run_cmd set_whitelist_output \
-    "Case 4: whitelist set-tcp fans out to all instances" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" whitelist set-tcp 80,443
-
-  local whitelist_output
-  run_cmd whitelist_output \
-    "Case 5: whitelist show confirms fanout write" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" -o json whitelist show
-  assert_whitelist_fanout "$whitelist_output"
-
-  local clear_whitelist_output
-  run_cmd clear_whitelist_output \
-    "Case 6: explicit selector write only touches one instance" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" --instance-name e2e-inst-b whitelist clear-tcp
-
-  local cleared_output
-  run_cmd cleared_output \
-    "Case 7: whitelist show confirms single-instance write isolation" \
-    "$CLI_BIN" -p "127.0.0.1:${rpc_port}" -o json whitelist show
-  assert_single_instance_write "$cleared_output"
-
-  print_section "Result"
-  echo "CLI multi-instance E2E passed"
-}
-
-main "$@"
+instances = read("instances.json")["instances"]
+assert {item["instance_id"] for item in instances} == {instance_a, instance_b}, instances
+assert {item["name"] for item in instances} == {"e2e-inst-a", "e2e-inst-b"}, instances
+assert "node" in read("node.json", instance_a)
+error = json.loads((directory / "ambiguous.json").read_text())
+assert error["schema_version"] == 1, error
+assert error["error"]["code"] == "ambiguous", error
+read("write.json", instance_a)
+assert read("acl-a.json", instance_a)["tcp_whitelist"] == ["80", "443"]
+assert read("acl-b.json", instance_b).get("tcp_whitelist", []) == []
+PY
+echo "CLI multi-instance E2E passed"
