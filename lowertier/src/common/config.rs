@@ -1871,6 +1871,7 @@ pub mod tests {
         crate::common::control_config::tests::rejects_legacy_control_keys_with_replacement_names();
         automatic_adapter_uses_the_platform_capability();
         rejects_removed_transport_schemes();
+        rejects_removed_fec_options();
         underlay_and_quic_flags_roundtrip_through_toml();
         rejects_invalid_l2_flags();
         dump_preserves_flags_that_differ_from_lowertier_defaults();
@@ -2044,7 +2045,6 @@ quic_receive_window = 33554432
         assert_eq!(reloaded.get_flags(), flags);
     }
 
-    #[test]
     fn rejects_removed_fec_options() {
         for option in [
             "quic_datagram_fec_parity",
