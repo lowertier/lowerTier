@@ -1,5 +1,5 @@
 use super::*;
-use futures::{FutureExt, SinkExt};
+use futures::{FutureExt, Sink, SinkExt};
 
 #[tokio::test]
 async fn sink_owner_drains_closed_lanes_and_exits() {
@@ -100,6 +100,20 @@ async fn queued_transit_observes_denial_before_framing() {
     ready.store(true, Ordering::Release);
     assert!(send.await.is_ok());
     assert_eq!(sent.load(Ordering::Relaxed), 0);
+    let mut local_sink = Box::pin(TransitSink {
+        inner: Box::pin(GateSink {
+            ready: ready.clone(),
+            sent: sent.clone(),
+        }),
+        state: Arc::downgrade(&state),
+    });
+    let mut local = ZCPacket::new_with_payload(&[0; 100]);
+    local.fill_peer_manager_hdr(1, 3, PacketType::Data as u8);
+    local_sink
+        .as_mut()
+        .start_send(PacketBatch::singleton(local))
+        .unwrap();
+    assert_eq!(sent.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

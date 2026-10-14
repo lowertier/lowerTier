@@ -1360,7 +1360,7 @@ impl GlobalCtx {
 
     pub(crate) fn admit_transit(
         &self,
-        packet: &mut crate::tunnel::packet_def::ZCPacket,
+        packet: &crate::tunnel::packet_def::ZCPacket,
         network: &str,
         destination: PeerId,
     ) -> bool {
@@ -1408,6 +1408,9 @@ impl GlobalCtx {
     pub(crate) async fn pace_receive(&self, mut bytes: usize) {
         let parent = self.transit_parent.upgrade();
         let context = parent.as_deref().unwrap_or(self);
+        if bytes == 0 || context.flags.load().receive_bps().is_none() {
+            return;
+        }
         while bytes > 0 {
             let (consumed, delay) = context.receive_budget.lock().unwrap().receive_chunk(bytes);
             bytes -= consumed;

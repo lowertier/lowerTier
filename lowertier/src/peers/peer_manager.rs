@@ -49,7 +49,9 @@ use crate::{
             is_critical_l2_control, partition_packet_batch_by_flow, stamp_critical_control,
             stamp_critical_l2_control, stamp_packet_flow,
         },
-        l2_fabric::{EthernetDestination, L2DestinationBatch, L2Fabric, L2IngressBatch},
+        l2_fabric::{
+            EthernetDestination, L2DestinationBatch, L2Fabric, L2IngressBatch, L2SourceBatch,
+        },
         peer_conn::PeerConn,
         peer_rpc::PeerRpcManagerTransport,
         peer_session::PeerSessionStore,
@@ -4851,16 +4853,21 @@ impl PeerManager {
         let topology_generation = topology_routes.generation();
         if self
             .topology_service_route_generation
-            .swap(topology_generation, Ordering::AcqRel)
+            .load(Ordering::Acquire)
             != topology_generation
+            && self
+                .topology_service_route_generation
+                .swap(topology_generation, Ordering::AcqRel)
+                != topology_generation
         {
             self.service_routes
                 .replace_source(RouteSource::Overlay, topology_routes.routes().to_vec());
         }
-        if self
-            .static_service_route_generation
-            .swap(snapshot.generation(), Ordering::AcqRel)
-            != snapshot.generation()
+        if self.static_service_route_generation.load(Ordering::Acquire) != snapshot.generation()
+            && self
+                .static_service_route_generation
+                .swap(snapshot.generation(), Ordering::AcqRel)
+                != snapshot.generation()
         {
             let flags = self.global_ctx.flags_arc();
             let policy = match flags.relay_config().policy() {
@@ -5141,18 +5148,16 @@ impl PeerManager {
         let mut nic_batch = PacketBatch::with_capacity(batch.len());
         let mut metadata = TapBatchMetadata::new();
         let policy_time = std::time::Instant::now();
+        let mut source_batch = L2SourceBatch::default();
         for packet in batch {
             let frame = packet.payload();
-            if self.l2_fabric.has_policy()
-                && !self
-                    .l2_fabric
-                    .admit_source_at(frame, self.my_peer_id, policy_time)
-            {
+            if !self.l2_fabric.admit_source_batch_at(
+                frame,
+                self.my_peer_id,
+                policy_time,
+                &mut source_batch,
+            ) {
                 continue;
-            }
-            if !self.l2_fabric.has_policy() {
-                self.l2_fabric
-                    .learn_source_at(frame, self.my_peer_id, policy_time);
             }
             #[cfg(feature = "tun")]
             if crate::instance::virtual_nic::NicCtx::handle_hybrid_control_frame(&packet, self)
@@ -5225,6 +5230,7 @@ impl PeerManager {
         let mut full_batches = OrderedPeerBatches::new();
         let fdb_batch_time = std::time::Instant::now();
         let mut destination_batch = L2DestinationBatch::default();
+        self.sync_topology_service_routes(snapshot);
         for mut ip_packet in accepted_batch {
             let metadata_index = ip_packet.batch_key().ok_or_else(|| {
                 Error::InvalidEthernetFrame("TAP pipeline removed packet identity".to_string())
@@ -5246,18 +5252,24 @@ impl PeerManager {
                 ));
                 continue;
             };
-            let fdb_destination = self.live_l2_destination(
-                destination_batch
-                    .resolve_at(&self.l2_fabric, &metadata.ethernet_header, fdb_batch_time)
-                    .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?,
-                &descriptor,
-            );
+            let fdb_destination = if snapshot.peer_id_by_ip(&ip_addr).is_none()
+                && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
+            {
+                Some(
+                    self.live_l2_destination(
+                        destination_batch
+                            .resolve_at(&self.l2_fabric, &metadata.ethernet_header, fdb_batch_time)
+                            .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?,
+                        &descriptor,
+                    ),
+                )
+            } else {
+                None
+            };
             let bridged_peer = match fdb_destination {
-                EthernetDestination::Known(peer_id)
-                    if snapshot.peer_id_by_ip(&ip_addr).is_none()
-                        && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
-                        && metadata.ethernet_header[..6]
-                            != crate::instance::l2_tun::encode_peer_mac(self.my_peer_id)
+                Some(EthernetDestination::Known(peer_id))
+                    if metadata.ethernet_header[..6]
+                        != crate::instance::l2_tun::encode_peer_mac(self.my_peer_id)
                         && metadata.ethernet_header[..6]
                             != crate::instance::l2_tun::encode_peer_mac(peer_id) =>
                 {
@@ -5266,7 +5278,7 @@ impl PeerManager {
                 _ => None,
             };
             let (candidate_peers, is_exit_node, blackholed) = self
-                .hybrid_destination_from_packet_snapshot(
+                .hybrid_destination_from_packet_snapshot_with_synced_routes(
                     &ip_packet,
                     snapshot,
                     ip_addr,
@@ -5303,7 +5315,19 @@ impl PeerManager {
                 }
                 continue;
             }
-            let fdb_destination = candidate_peers.is_empty().then_some(fdb_destination);
+            let fdb_destination = if candidate_peers.is_empty() {
+                Some(match fdb_destination {
+                    Some(destination) => destination,
+                    None => self.live_l2_destination(
+                        destination_batch
+                            .resolve_at(&self.l2_fabric, &metadata.ethernet_header, fdb_batch_time)
+                            .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?,
+                        &descriptor,
+                    ),
+                })
+            } else {
+                None
+            };
             let sets = self.hybrid_recipient_sets(
                 candidate_peers,
                 is_exit_node,

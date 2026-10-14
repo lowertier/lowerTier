@@ -190,8 +190,10 @@ impl PacketBatch {
         for (read, should_keep) in keep.iter().copied().enumerate() {
             unsafe {
                 if should_keep {
-                    let packet = ptr::read(ptr.add(read));
-                    ptr::write(ptr.add(write), packet);
+                    if write != read {
+                        let packet = ptr::read(ptr.add(read));
+                        ptr::write(ptr.add(write), packet);
+                    }
                     write += 1;
                 } else {
                     ptr::drop_in_place(ptr.add(read));

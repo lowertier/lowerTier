@@ -4504,13 +4504,16 @@ impl PeerConn {
         let Some(header) = msg.peer_manager_header() else {
             return;
         };
+        if !msg.transit_data && header.from_peer_id.get() == self.my_peer_id {
+            return;
+        }
         let is_data = if header.packet_type == PacketType::ForeignNetworkPacket as u8 {
             !header.is_foreign_control()
                 && msg.foreign_network_inner_is_data().is_none_or(|data| data)
         } else {
             super::traffic_metrics::is_relay_data_packet_type(header.packet_type)
         };
-        if !is_data || (!msg.transit_data && header.from_peer_id.get() == self.my_peer_id) {
+        if !is_data {
             return;
         }
         let destination = header.to_peer_id.get();
@@ -4733,12 +4736,6 @@ impl PeerConn {
         };
         let paced_bytes = paced_batch_bytes(&batch);
         self.pace_outbound_bulk(batch.len(), paced_bytes).await;
-        if batch
-            .iter()
-            .all(|packet| !packet.transit_data && packet.get_src_peer_id() == Some(self.my_peer_id))
-        {
-            return Ok(self.sink.send_batch(batch).await?);
-        }
         for packet in batch.iter_mut() {
             self.prepare_outbound_transit(packet);
         }

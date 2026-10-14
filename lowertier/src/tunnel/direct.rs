@@ -46,6 +46,9 @@ impl futures::Sink<PacketBatch> for TransitSink {
         self.inner.as_mut().poll_ready(cx)
     }
     fn start_send(mut self: Pin<&mut Self>, mut batch: PacketBatch) -> Result<(), Self::Error> {
+        if !batch.iter().any(|packet| packet.transit_data) {
+            return self.inner.as_mut().start_send(batch);
+        }
         // Check after poll_ready. Queued data cannot retain old permission or credit.
         if let Some(context) = self.state.upgrade().and_then(|state| {
             state
@@ -57,12 +60,17 @@ impl futures::Sink<PacketBatch> for TransitSink {
                 if !packet.transit_data {
                     return true;
                 }
-                let network = packet.transit_network.clone();
+                let default_network;
+                let network = match packet.transit_network.as_deref() {
+                    Some(network) => network,
+                    None => {
+                        default_network = context.get_network_name();
+                        &default_network
+                    }
+                };
                 context.admit_transit(
                     packet,
-                    network
-                        .as_deref()
-                        .unwrap_or(&context.get_network_identity().network_name),
+                    network,
                     packet
                         .transit_destination
                         .or_else(|| packet.get_dst_peer_id())

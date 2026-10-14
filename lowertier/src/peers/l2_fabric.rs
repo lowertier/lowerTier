@@ -38,8 +38,9 @@ struct FdbKey {
 }
 
 #[derive(Default)]
-struct L2SourceBatch {
+pub(crate) struct L2SourceBatch {
     sources: SmallVec<[(VlanStack, MacAddress, PeerId); 4]>,
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -78,6 +79,20 @@ impl L2DestinationBatch {
 }
 
 impl L2SourceBatch {
+    fn contains(
+        &mut self,
+        fabric: &L2Fabric,
+        vlan: VlanStack,
+        source: MacAddress,
+        peer_id: PeerId,
+    ) -> bool {
+        let generation = fabric.generation();
+        if generation != self.generation {
+            self.sources.clear();
+            self.generation = generation;
+        }
+        self.sources.contains(&(vlan, source, peer_id))
+    }
     pub(crate) fn record_source(&mut self, vlan: VlanStack, source: MacAddress, peer_id: PeerId) {
         if !is_unicast(source) {
             return;
@@ -300,6 +315,33 @@ impl L2Fabric {
         self.learn_address_at(vlan, source, peer_id, now)
     }
 
+    pub(crate) fn admit_source_batch_at(
+        &self,
+        frame: &[u8],
+        peer_id: PeerId,
+        now: Instant,
+        batch: &mut L2SourceBatch,
+    ) -> bool {
+        if !self.has_policy()
+            && !ethernet_addresses(frame).is_ok_and(|(_, _, source)| is_unicast(source))
+        {
+            return true;
+        }
+        let Some((vlan, source)) = self.permitted_source(frame) else {
+            return false;
+        };
+        if batch.contains(self, vlan, source, peer_id) {
+            return true;
+        }
+        let generation = batch.generation;
+        let admitted = self.learn_address_at(vlan, source, peer_id, now);
+        // Cache only an unchanged ownership generation. Withdrawal can race with learning.
+        if admitted && generation == self.generation() {
+            batch.record_source(vlan, source, peer_id);
+        }
+        admitted
+    }
+
     fn permitted_source(&self, frame: &[u8]) -> Option<(VlanStack, MacAddress)> {
         let Some(metadata) = ethernet_network_metadata(frame) else {
             return None;
@@ -443,8 +485,7 @@ impl L2Fabric {
             return false;
         }
         // Ownership can change during a batch when another task withdraws a peer.
-        let learned =
-            !self.has_policy() && batch.sources.sources.contains(&(vlan, source, peer_id));
+        let learned = batch.sources.contains(self, vlan, source, peer_id);
         let is_flood =
             batch.destinations.resolve_at(self, frame, now).unwrap() == EthernetDestination::Flood;
         if !learned
@@ -465,12 +506,15 @@ impl L2Fabric {
             return false;
         }
         if !learned && is_unicast(source) {
+            let generation = batch.sources.generation;
             let admitted = self.learn_address_at(vlan, source, peer_id, now);
             if !admitted {
                 self.policy_drops.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            batch.sources.record_source(vlan, source, peer_id);
+            if generation == self.generation() {
+                batch.sources.record_source(vlan, source, peer_id);
+            }
         }
         true
     }
@@ -1065,6 +1109,13 @@ mod tests {
             assert!(fabric.admit_source_at(&moving, 1, now));
             assert!(!fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
             assert_eq!(fabric.counters().loop_drops, 2);
+            let mut sources = super::L2SourceBatch::default();
+            let local = frame([0xff; 6], [2, 0, 0, 0, 0, 5]);
+            assert!(fabric.admit_source_batch_at(&local, 1, now, &mut sources));
+            assert!(fabric.admit_source_batch_at(&local, 1, now, &mut sources));
+            fabric.forget_peer(1);
+            assert!(fabric.admit_source_at(&local, 9, now));
+            assert!(!fabric.admit_source_batch_at(&local, 1, now, &mut sources));
             assert!(!fabric.allow_flood_output_bytes(101, 1));
             assert_eq!(fabric.snapshot().counters.flood_drops, 1);
         }
