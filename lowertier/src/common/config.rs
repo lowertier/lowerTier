@@ -104,6 +104,12 @@ pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyho
 
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     anyhow::ensure!(
+        flags
+            .memory_bytes()
+            .is_none_or(|bytes| bytes > 0 && usize::try_from(bytes).is_ok()),
+        "limits.memory_bytes must be positive and fit the platform address space"
+    );
+    anyhow::ensure!(
         flags.receive_bps() != Some(0),
         "limits.receive_bps must be positive"
     );
@@ -2539,14 +2545,6 @@ allow = ["tcp", "udp", "icmp"]
 cidr = "10.1.1.0/24"
 allow = ["tcp", "icmp"]
 
-[file_logger]
-level = "info"
-file = "lowertier"
-dir = "/tmp/lowertier"
-
-[console_logger]
-level = "warn"
-
 [[port_forward]]
 bind_addr = "0.0.0.0:11011"
 dst_addr = "192.168.94.33:11011"
@@ -3144,6 +3142,51 @@ mod protocol_memory_tests {
 
     #[test]
     fn configuration_cases_protocols() {
+        #[cfg(not(any(target_os = "ios", feature = "macos-ne")))]
+        crate::common::global_ctx::tests::process_memory_configuration_cases();
+        use crate::common::global_ctx::process_memory_limit;
+        let mib = 1024_u64 * 1024;
+        for (physical, expected) in [
+            (0, 64),
+            (512 * mib, 64),
+            (8192 * mib, 512),
+            (32768 * mib, 1024),
+        ] {
+            assert_eq!(
+                process_memory_limit(physical, None, false),
+                expected * mib as usize
+            );
+        }
+        assert_eq!(
+            process_memory_limit(8192 * mib, Some(12 * mib), false),
+            12 * mib as usize
+        );
+        assert_eq!(
+            process_memory_limit(0, Some(2048 * mib), false),
+            2048 * mib as usize
+        );
+        assert_eq!(
+            process_memory_limit(32768 * mib, None, true),
+            16 * mib as usize
+        );
+        assert_eq!(
+            process_memory_limit(0, Some(2048 * mib), true),
+            16 * mib as usize
+        );
+        assert_eq!(
+            process_memory_limit(0, Some(8 * mib), true),
+            8 * mib as usize
+        );
+        assert!(TomlConfigLoader::new_from_str("[limits]\nmemory_bytes = 0\n").is_err());
+        let config = TomlConfigLoader::new_from_str("[limits]\nmemory_bytes = 67108864\n").unwrap();
+        assert_eq!(config.get_flags().memory_bytes(), Some(64 * mib));
+        assert_eq!(
+            TomlConfigLoader::new_from_str(&config.dump())
+                .unwrap()
+                .get_flags()
+                .memory_bytes(),
+            Some(64 * mib)
+        );
         allowlist_is_explicit_and_empty_is_backwards_compatible();
         allowlist_rejects_typos_duplicates_and_disabled_default();
         disabled_listener_and_bootstrap_are_rejected_before_startup();
@@ -3209,31 +3252,38 @@ mod flag_codegen_tests {
         let schema = default_message.descriptor();
         for field in schema.fields() {
             let mut values = vec![field.default_value()];
+            let boundary_values = match field.kind() {
+                Kind::Bool => vec![Value::Bool(false), Value::Bool(true)],
+                Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => {
+                    vec![Value::I32(i32::MIN), Value::I32(i32::MAX)]
+                }
+                Kind::Uint32 | Kind::Fixed32 => vec![Value::U32(u32::MAX)],
+                Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => {
+                    vec![Value::I64(i64::MIN), Value::I64(i64::MAX)]
+                }
+                Kind::Uint64 | Kind::Fixed64 => vec![Value::U64(u64::MAX)],
+                Kind::String => vec![Value::String("modified \" value".into())],
+                Kind::Enum(e) => e
+                    .values()
+                    .map(|v| Value::EnumNumber(v.number()))
+                    .chain([Value::EnumNumber(i32::MAX)])
+                    .collect(),
+                Kind::Message(descriptor) => {
+                    let mut message = prost_reflect::DynamicMessage::new(descriptor);
+                    let fields: Vec<_> = message.descriptor().fields().collect();
+                    for nested in fields {
+                        if !nested.is_list() && nested.kind() == Kind::Uint64 {
+                            message.set_field(&nested, Value::U64(u64::MAX));
+                        }
+                    }
+                    vec![Value::Message(message)]
+                }
+                other => panic!("uncovered flag type {other:?}"),
+            };
             if field.is_list() {
-                assert_eq!(field.kind(), Kind::String);
-                values.push(Value::List(vec![
-                    Value::String("quic".into()),
-                    Value::String("wss".into()),
-                ]));
+                values.push(Value::List(boundary_values));
             } else {
-                values.extend(match field.kind() {
-                    Kind::Bool => vec![Value::Bool(false), Value::Bool(true)],
-                    Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => {
-                        vec![Value::I32(i32::MIN), Value::I32(i32::MAX)]
-                    }
-                    Kind::Uint32 | Kind::Fixed32 => vec![Value::U32(u32::MAX)],
-                    Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => {
-                        vec![Value::I64(i64::MIN), Value::I64(i64::MAX)]
-                    }
-                    Kind::Uint64 | Kind::Fixed64 => vec![Value::U64(u64::MAX)],
-                    Kind::String => vec![Value::String("modified \" value".into())],
-                    Kind::Enum(e) => e
-                        .values()
-                        .map(|v| Value::EnumNumber(v.number()))
-                        .chain([Value::EnumNumber(i32::MAX)])
-                        .collect(),
-                    other => panic!("uncovered flag type {other:?}"),
-                });
+                values.extend(boundary_values);
             }
             for value in values {
                 let mut message = default_message.clone();

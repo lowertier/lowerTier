@@ -7,11 +7,13 @@ use std::{
 use smoltcp::socket::tcp;
 
 use crate::common::global_ctx::{
-    PROCESS_RETAINED_MEMORY_LIMIT_BYTES, ProcessMemoryGovernor, ProcessMemoryPermit,
+    ProcessMemoryGovernor, ProcessMemoryPermit, global_process_memory_governor,
 };
 
 // One full-duplex socket can retain at most one quarter of the process budget.
-const MAX_BUFFER_BYTES: usize = PROCESS_RETAINED_MEMORY_LIMIT_BYTES / 8;
+fn max_buffer_bytes(governor: &ProcessMemoryGovernor) -> usize {
+    (governor.limit() / 8).min(8 * 1024 * 1024)
+}
 
 struct DeliverySample {
     start: Instant,
@@ -26,7 +28,14 @@ impl DeliverySample {
         }
     }
 
-    fn target(&mut self, bytes: usize, now: Instant, rtt: Duration, capacity: usize) -> usize {
+    fn target(
+        &mut self,
+        bytes: usize,
+        now: Instant,
+        rtt: Duration,
+        capacity: usize,
+        maximum: usize,
+    ) -> usize {
         self.bytes = self.bytes.saturating_add(bytes);
         let elapsed = now.saturating_duration_since(self.start);
         if elapsed < rtt || rtt.is_zero() {
@@ -36,7 +45,7 @@ impl DeliverySample {
         // to overlap. Geometric growth bounds total copying by the final size.
         let target = (self.bytes as u128 * 2 * rtt.as_nanos())
             .div_ceil(elapsed.as_nanos().max(1))
-            .min(MAX_BUFFER_BYTES as u128) as usize;
+            .min(maximum as u128) as usize;
         self.start = now;
         self.bytes = 0;
         if target <= capacity {
@@ -45,7 +54,7 @@ impl DeliverySample {
             target
                 .next_power_of_two()
                 .min(capacity.saturating_mul(2))
-                .min(MAX_BUFFER_BYTES)
+                .min(maximum)
         }
     }
 }
@@ -82,7 +91,7 @@ impl TcpBuffers {
     }
 
     pub(super) fn recv_limit(initial: usize) -> usize {
-        initial.max(MAX_BUFFER_BYTES)
+        initial.max(max_buffer_bytes(&global_process_memory_governor()))
     }
 
     pub(super) fn received(&mut self, socket: &mut tcp::Socket<'_>, bytes: usize) {
@@ -94,7 +103,13 @@ impl TcpBuffers {
         let rtt = Duration::from(rtt).max(Duration::from_millis(1));
         let target = self
             .rx_sample
-            .target(bytes, Instant::now(), rtt, socket.recv_capacity())
+            .target(
+                bytes,
+                Instant::now(),
+                rtt,
+                socket.recv_capacity(),
+                max_buffer_bytes(&self.governor),
+            )
             .min(socket.recv_capacity_limit());
         if target <= socket.recv_capacity() {
             return;
@@ -114,9 +129,13 @@ impl TcpBuffers {
             return;
         };
         let rtt = Duration::from(rtt).max(Duration::from_millis(1));
-        let target = self
-            .tx_sample
-            .target(bytes, Instant::now(), rtt, socket.send_capacity());
+        let target = self.tx_sample.target(
+            bytes,
+            Instant::now(),
+            rtt,
+            socket.send_capacity(),
+            max_buffer_bytes(&self.governor),
+        );
         if target <= socket.send_capacity() {
             return;
         }
@@ -149,13 +168,21 @@ mod tests {
         let now = Instant::now();
         let rtt = Duration::from_millis(20);
         let mut sample = DeliverySample::new(now);
-        assert_eq!(sample.target(8192, now + rtt / 2, rtt, 8192), 8192);
-        assert_eq!(sample.target(0, now + rtt, rtt, 8192), 16384);
-        assert_eq!(sample.target(0, now + rtt * 2, rtt, 16384), 16384);
-        assert_eq!(sample.target(100, now + rtt * 3, rtt, 16384), 16384);
+        let maximum = 8 * 1024 * 1024;
+        assert_eq!(sample.target(8192, now + rtt / 2, rtt, 8192, maximum), 8192);
+        assert_eq!(sample.target(0, now + rtt, rtt, 8192, maximum), 16384);
+        assert_eq!(sample.target(0, now + rtt * 2, rtt, 16384, maximum), 16384);
         assert_eq!(
-            sample.target(usize::MAX, now + rtt * 4, rtt, MAX_BUFFER_BYTES),
-            MAX_BUFFER_BYTES
+            sample.target(100, now + rtt * 3, rtt, 16384, maximum),
+            16384
+        );
+        assert_eq!(
+            sample.target(usize::MAX, now + rtt * 4, rtt, maximum, maximum),
+            maximum
+        );
+        assert_eq!(
+            max_buffer_bytes(&ProcessMemoryGovernor::with_limit(16 * 1024 * 1024)),
+            2 * 1024 * 1024
         );
     }
 

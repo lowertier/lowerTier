@@ -1320,9 +1320,7 @@ impl NetworkOptions {
         f.accept_dns = self.accept_dns.unwrap_or(f.accept_dns);
         f.private_mode = self.private_mode.unwrap_or(f.private_mode);
         if let Some(receive_bps) = self.receive_bps {
-            f.limits = Some(crate::common::control_config::LimitsConfig {
-                receive_bps: Some(receive_bps),
-            });
+            f.limits.get_or_insert_with(Default::default).receive_bps = Some(receive_bps);
         }
         f.multi_thread_count = self.multi_thread_count.unwrap_or(f.multi_thread_count);
         f.disable_sym_hole_punching = self

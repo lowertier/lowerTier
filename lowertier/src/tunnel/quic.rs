@@ -92,19 +92,21 @@ const DATAGRAM_CONTEXT_WHOLE: u64 = 0;
 const DATAGRAM_CONTEXT_FRAGMENT: u64 = 1;
 const DATAGRAM_FRAGMENT_HEADER_LEN: usize = 6;
 const DATAGRAM_FRAGMENT_MAX_PENDING: usize = 64;
-// One packet batch (~93 KiB) is smaller than the WAN BDP we bench
-// (100 ms each way at ~130 Mbit ≈ 3.3 MB). send_datagrams_wait blocks
-// when this queue is full, so inner TCP BBR sees a tiny path.
-// DATAGRAM send is drop-oldest (UDP-like). Keep this small so inner TCP
-// BBR sees path delay, not a userspace queue. Receive stays large so a
-// brief drain stall does not drop a WAN BDP.
-const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = 1024 * 1024;
-const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
-const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
-const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
-const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
+// Quinn cannot charge all retained buffers through its public interface.
+// Bound payload windows to 768 KiB. Allow 256 KiB each for receive metadata and connection state.
+// DATAGRAM queues allocate on demand; idle connections do not allocate these windows.
+const QUIC_DATAGRAM_SEND_BUFFER_BYTES: usize = 128 * 1024;
+const QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 256 * 1024;
+const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u64 = 256 * 1024;
+const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 256 * 1024;
+const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 128 * 1024;
 const QUIC_PENDING_ACCEPT_BUFFER_BYTES: u64 = 256 * 1024;
-pub(crate) const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 256 * 1024
+    + QUIC_DATAGRAM_SEND_BUFFER_BYTES
+    + QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES
+    + QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES
+    + QUIC_CONNECTION_RECEIVE_WINDOW_BYTES as usize
+    + QUIC_CONNECTION_SEND_WINDOW_BYTES as usize;
 // Peer IDs are process-scoped. After a remote restart, the old UDP 4-tuple can
 // remain locally writable until QUIC declares it idle, so routing can keep
 // preferring a dead cost-1 incarnation. Transport keepalive makes healthy idle
@@ -924,7 +926,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
     })?;
 
     config
-        .max_concurrent_bidi_streams(100_u8.into())
+        .max_concurrent_bidi_streams(16_u8.into())
         .migration_requires_policy(true)
         .max_concurrent_uni_streams(3_u8.into())
         .max_idle_timeout(Some(idle_timeout))
@@ -3520,13 +3522,12 @@ impl QuicTunnelListener {
         let Some(memory_permit) = self
             .global_ctx
             .process_memory_governor()
-            .try_reserve_owned(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
+            .try_reserve_connection(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
         else {
             incoming.refuse();
-            tracing::warn!(
-                ?ip,
-                "reject QUIC connection because the memory limit is full"
-            );
+            self.global_ctx
+                .process_memory_governor()
+                .record_connection_refusal("quic accept");
             return;
         };
         let local_url = self.local_url();
@@ -3847,8 +3848,11 @@ impl TunnelConnector for QuicTunnelConnector {
         let memory_permit = self
             .global_ctx
             .process_memory_governor()
-            .try_reserve_owned(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
+            .try_reserve_connection(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
             .ok_or_else(|| {
+                self.global_ctx
+                    .process_memory_governor()
+                    .record_connection_refusal("quic connect");
                 TunnelError::InternalError("QUIC connection memory limit is full".to_owned())
             })?;
         let addr = match self.resolved_addr {
@@ -5554,6 +5558,27 @@ mod pacing_configuration_tests {
 
     #[test]
     fn burst_override_is_nonzero_bounded_and_optional() {
+        use crate::common::global_ctx::{ProcessMemoryGovernor, process_memory_limit};
+        let governor = Arc::new(ProcessMemoryGovernor::with_limit(process_memory_limit(
+            0, None, false,
+        )));
+        let mut permits = Vec::new();
+        while let Some(permit) =
+            governor.try_reserve_connection(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
+        {
+            permits.push(permit);
+        }
+        assert_eq!(permits.len(), 38);
+        let retained = governor.retained();
+        assert!(
+            governor
+                .try_reserve_connection(QUIC_CONNECTION_MEMORY_CHARGE_BYTES)
+                .is_none()
+        );
+        assert_eq!(governor.retained(), retained);
+        assert!(governor.try_reserve_owned(governor.limit() / 4).is_some());
+        drop(permits);
+        assert_eq!(governor.retained(), 0);
         assert_eq!(parse_pacing_burst_packets(None).unwrap().get(), 64);
         for value in ["1", "32", "64", "128", "256"] {
             assert_eq!(

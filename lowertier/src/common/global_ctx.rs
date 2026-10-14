@@ -45,12 +45,81 @@ use socket2::Protocol;
 
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
 
-pub(crate) const PROCESS_RETAINED_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const MIN_PROCESS_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROCESS_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+const NETWORK_EXTENSION_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) fn process_memory_limit(
+    physical_bytes: u64,
+    override_bytes: Option<u64>,
+    network_extension: bool,
+) -> usize {
+    let default = (physical_bytes / 16).clamp(
+        MIN_PROCESS_MEMORY_BYTES as u64,
+        MAX_PROCESS_MEMORY_BYTES as u64,
+    );
+    let limit = override_bytes.unwrap_or(default).min(usize::MAX as u64) as usize;
+    if network_extension {
+        limit.min(NETWORK_EXTENSION_MEMORY_BYTES)
+    } else {
+        limit
+    }
+}
+
+fn physical_memory_bytes() -> u64 {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    {
+        let mut bytes = 0_u64;
+        let mut length = std::mem::size_of_val(&bytes);
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let name = c"hw.memsize";
+        #[cfg(target_os = "freebsd")]
+        let name = c"hw.physmem";
+        // The kernel writes one integer into the supplied storage.
+        let result = unsafe {
+            nix::libc::sysctlbyname(
+                name.as_ptr(),
+                (&mut bytes as *mut u64).cast(),
+                &mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result == 0 && length == std::mem::size_of_val(&bytes) {
+            return bytes;
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // sysconf returns -1 when a value is unavailable.
+        let pages = unsafe { nix::libc::sysconf(nix::libc::_SC_PHYS_PAGES) };
+        let page_size = unsafe { nix::libc::sysconf(nix::libc::_SC_PAGESIZE) };
+        if pages > 0 && page_size > 0 {
+            return (pages as u64).saturating_mul(page_size as u64);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        // dwLength identifies the writable structure size for Windows.
+        if unsafe { GlobalMemoryStatusEx(&mut status) }.is_ok() {
+            return status.ullTotalPhys;
+        }
+    }
+    tracing::warn!("physical memory query failed; use the minimum process memory budget");
+    0
+}
 
 #[derive(Debug)]
 pub(crate) struct ProcessMemoryGovernor {
-    limit: usize,
+    limit: AtomicUsize,
+    explicit_limit: Mutex<Option<usize>>,
     retained: AtomicUsize,
+    refused: AtomicUsize,
     released: tokio::sync::Notify,
 }
 
@@ -89,15 +158,56 @@ pub(crate) fn global_process_memory_governor() -> Arc<ProcessMemoryGovernor> {
 
 impl ProcessMemoryGovernor {
     pub(crate) fn new() -> Self {
-        Self::with_limit(PROCESS_RETAINED_MEMORY_LIMIT_BYTES)
+        Self::with_limit(process_memory_limit(
+            physical_memory_bytes(),
+            None,
+            cfg!(any(target_os = "ios", feature = "macos-ne")),
+        ))
     }
 
     pub(crate) fn with_limit(limit: usize) -> Self {
         Self {
-            limit,
+            limit: AtomicUsize::new(limit),
+            explicit_limit: Mutex::new(None),
             retained: AtomicUsize::new(0),
+            refused: AtomicUsize::new(0),
             released: tokio::sync::Notify::new(),
         }
+    }
+
+    fn configure(&self, override_bytes: Option<u64>) {
+        let Some(bytes) = override_bytes else {
+            return;
+        };
+        let limit = process_memory_limit(
+            0,
+            Some(bytes),
+            cfg!(any(target_os = "ios", feature = "macos-ne")),
+        );
+        // Instances share one governor. Keep the strictest explicit limit until process restart.
+        let mut explicit = self.explicit_limit.lock().unwrap();
+        let limit = explicit.map_or(limit, |previous| previous.min(limit));
+        *explicit = Some(limit);
+        let previous = self.limit.swap(limit, Ordering::AcqRel);
+        if limit != previous {
+            tracing::info!(limit_bytes = limit, "process memory budget configured");
+            self.released.notify_waiters();
+        }
+    }
+
+    pub(crate) fn limit(&self) -> usize {
+        self.limit.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn record_connection_refusal(&self, transport: &str) {
+        let refused = self.refused.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::warn!(
+            transport,
+            refused,
+            limit_bytes = self.limit(),
+            retained_bytes = self.retained.load(Ordering::Acquire),
+            "connection refused: process memory budget exhausted"
+        );
     }
 
     pub(crate) fn release_notified(&self) -> tokio::sync::futures::Notified<'_> {
@@ -105,13 +215,29 @@ impl ProcessMemoryGovernor {
     }
 
     pub(crate) fn reserve(&self, bytes: usize) -> bool {
+        self.reserve_with_headroom(bytes, 0)
+    }
+
+    fn reserve_with_headroom(&self, bytes: usize, headroom: usize) -> bool {
         self.retained
             .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
                     .checked_add(bytes)
-                    .filter(|total| *total <= self.limit)
+                    .filter(|total| *total <= self.limit().saturating_sub(headroom))
             })
             .is_ok()
+    }
+
+    pub(crate) fn try_reserve_connection(
+        self: &Arc<Self>,
+        bytes: usize,
+    ) -> Option<ProcessMemoryPermit> {
+        // Admission leaves one quarter available for control packets and shared buffer growth.
+        self.reserve_with_headroom(bytes, self.limit() / 4)
+            .then(|| ProcessMemoryPermit {
+                governor: self.clone(),
+                bytes,
+            })
     }
 
     pub(crate) fn try_reserve_owned(self: &Arc<Self>, bytes: usize) -> Option<ProcessMemoryPermit> {
@@ -696,6 +822,7 @@ impl GlobalCtx {
         };
         let credential_manager = Arc::new(credential_manager);
         let process_memory_governor = global_process_memory_governor();
+        process_memory_governor.configure(flags.memory_bytes());
 
         GlobalCtx {
             inst_name: config_fs.get_inst_name(),
@@ -1127,6 +1254,7 @@ impl GlobalCtx {
             UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)
                 .expect("underlay policy was validated");
         self.config.set_flags(flags.clone());
+        self.process_memory_governor.configure(flags.memory_bytes());
         self.feature_flags.store(Self::derive_feature_flags(
             &flags,
             self.base_feature_flags.load(),
@@ -1450,6 +1578,27 @@ impl GlobalCtx {
 
 #[cfg(test)]
 pub mod tests {
+    pub(crate) fn process_memory_configuration_cases() {
+        use super::*;
+        let mib = 1024 * 1024;
+        let governor = Arc::new(ProcessMemoryGovernor::with_limit(64 * mib));
+        governor.configure(Some(128 * mib as u64));
+        assert_eq!(governor.limit(), 128 * mib);
+        governor.configure(Some(256 * mib as u64));
+        assert_eq!(governor.limit(), 128 * mib);
+        let permit = governor.try_reserve_owned(64 * mib).unwrap();
+        governor.configure(Some(32 * mib as u64));
+        governor.configure(None);
+        assert_eq!(governor.limit(), 32 * mib);
+        assert_eq!(governor.retained(), 64 * mib);
+        assert!(governor.try_reserve_owned(1).is_none());
+        governor.record_connection_refusal("quic test");
+        assert_eq!(governor.refused.load(Ordering::Relaxed), 1);
+        drop(permit);
+        assert_eq!(governor.retained(), 0);
+        assert!(governor.try_reserve_owned(32 * mib).is_some());
+    }
+
     use crate::{
         common::{config::TomlConfigLoader, new_peer_id, stun::MockStunInfoCollector},
         proto::common::NatType,

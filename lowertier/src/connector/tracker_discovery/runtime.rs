@@ -24,11 +24,15 @@ use tokio_util::task::AbortOnDropHandle;
 
 // Speculative QUIC handshakes share one quarter of the process memory budget.
 // A per-interface limit can otherwise consume all credit before Noise can send.
-static QUIC_DISCOVERY_HANDSHAKES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(
-    crate::common::global_ctx::PROCESS_RETAINED_MEMORY_LIMIT_BYTES
-        / quic::QUIC_CONNECTION_MEMORY_CHARGE_BYTES
-        / 4,
-);
+static QUIC_DISCOVERY_HANDSHAKES: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| {
+        tokio::sync::Semaphore::new(
+            (crate::common::global_ctx::global_process_memory_governor().limit()
+                / quic::QUIC_CONNECTION_MEMORY_CHARGE_BYTES
+                / 4)
+            .max(1),
+        )
+    });
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAPPING_EVENT_INTERVAL: Duration = Duration::from_secs(5);
 

@@ -101,8 +101,7 @@ impl Datagrams<'_> {
 
 #[derive(Default)]
 pub(super) struct DatagramState {
-    /// Number of bytes of datagrams that have been received by the local transport but not
-    /// delivered to the application
+    /// Payload bytes not yet delivered to the application.
     pub(super) recv_buffered: usize,
     pub(super) incoming: VecDeque<Datagram>,
     pub(super) outgoing: VecDeque<Datagram>,
@@ -116,7 +115,7 @@ pub(super) struct DatagramState {
 impl DatagramState {
     pub(super) fn received(
         &mut self,
-        datagram: Datagram,
+        mut datagram: Datagram,
         window: &Option<usize>,
         drop_policy: DatagramReceiveDropPolicy,
     ) -> Result<bool, TransportError> {
@@ -133,18 +132,28 @@ impl DatagramState {
             return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
         }
 
-        let was_empty = self.recv_buffered == 0;
-        if datagram.data.len() + self.recv_buffered > window
+        // Bound metadata for tiny and empty frames, including deque capacity growth.
+        let max_datagrams = window.div_ceil(2 * std::mem::size_of::<Datagram>());
+        let was_empty = self.incoming.is_empty();
+        if max_datagrams == 0 {
+            return Ok(false);
+        }
+        if (datagram.data.len() + self.recv_buffered > window
+            || self.incoming.len() >= max_datagrams)
             && drop_policy == DatagramReceiveDropPolicy::Newest
         {
             debug!("dropping newest datagram");
             return Ok(false);
         }
-        while datagram.data.len() + self.recv_buffered > window {
+        while datagram.data.len() + self.recv_buffered > window
+            || self.incoming.len() >= max_datagrams
+        {
             debug!("dropping stale datagram");
             self.recv();
         }
 
+        // Frame slices can retain a padded UDP packet. Keep only owned payload storage.
+        datagram.data = Bytes::copy_from_slice(&datagram.data);
         self.recv_buffered += datagram.data.len();
         self.incoming.push_back(datagram);
         Ok(was_empty)
@@ -194,9 +203,9 @@ impl DatagramState {
     }
 
     pub(super) fn recv(&mut self) -> Option<Bytes> {
-        let x = self.incoming.pop_front()?.data;
-        self.recv_buffered -= x.len();
-        Some(x)
+        let datagram = self.incoming.pop_front()?;
+        self.recv_buffered -= datagram.data.len();
+        Some(datagram.data)
     }
 }
 
@@ -226,6 +235,48 @@ mod mtu_limit_tests {
 
     #[test]
     fn mtu_reduction_retains_datagrams_at_the_new_limit() {
+        let window = Some(256);
+        let mut receive = DatagramState::default();
+        for _ in 0..100 {
+            receive
+                .received(
+                    Datagram { data: Bytes::new() },
+                    &window,
+                    DatagramReceiveDropPolicy::Newest,
+                )
+                .unwrap();
+        }
+        assert!(receive.incoming.len() <= 256_usize.div_ceil(2 * std::mem::size_of::<Datagram>()));
+        assert!(!receive.incoming.is_empty());
+        while receive.recv().is_some() {}
+        assert_eq!(receive.recv_buffered, 0);
+        for _ in 0..100 {
+            receive
+                .received(
+                    Datagram { data: Bytes::new() },
+                    &window,
+                    DatagramReceiveDropPolicy::Oldest,
+                )
+                .unwrap();
+        }
+        assert!(receive.incoming.len() <= 256_usize.div_ceil(2 * std::mem::size_of::<Datagram>()));
+        assert_eq!(receive.recv().unwrap().len(), 0);
+        while receive.recv().is_some() {}
+        assert_eq!(receive.recv_buffered, 0);
+        let padded = Bytes::from(vec![0x5a; 65536]);
+        let slice = padded.slice(..1);
+        let original = slice.as_ptr();
+        receive
+            .received(
+                Datagram { data: slice },
+                &window,
+                DatagramReceiveDropPolicy::Newest,
+            )
+            .unwrap();
+        let compact = receive.recv().unwrap();
+        assert_eq!(&compact[..], &[0x5a]);
+        assert_ne!(compact.as_ptr(), original);
+        assert_eq!(receive.recv_buffered, 0);
         let mut state = DatagramState::default();
         for length in [1199, 1200, 1201] {
             state.outgoing.push_back(Datagram {
@@ -236,7 +287,11 @@ mod mtu_limit_tests {
 
         state.drop_oversized(1200);
 
-        let sizes: Vec<_> = state.outgoing.iter().map(|packet| packet.data.len()).collect();
+        let sizes: Vec<_> = state
+            .outgoing
+            .iter()
+            .map(|packet| packet.data.len())
+            .collect();
         assert_eq!(sizes, [1199, 1200]);
         assert_eq!(state.outgoing_total, 2399);
     }

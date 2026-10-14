@@ -34,6 +34,10 @@ pub const LEGACY_KEYS: &[(&str, &str)] = &[
 pub(crate) const MAX_TRANSIT_PACKET_BYTES: u64 = crate::tunnel::tcp_lanes::MAX_PENDING_BYTES as u64;
 
 impl Flags {
+    pub(crate) fn memory_bytes(&self) -> Option<u64> {
+        self.limits.as_ref().and_then(|limits| limits.memory_bytes)
+    }
+
     pub fn receive_bps(&self) -> Option<u64> {
         self.limits.as_ref().and_then(|limits| limits.receive_bps)
     }
