@@ -3378,6 +3378,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lowertier-ffi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "log",
+ "lowertier",
+ "once_cell",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "lowertier-tracker"
 version = "2.6.4"
 dependencies = [

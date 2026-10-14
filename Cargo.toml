@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "lowertier",
     "lowertier-tracker",
+    "lowertier-contrib/lowertier-ffi",
     "vendor/quinn",
     "vendor/quincy-tun",
 ]

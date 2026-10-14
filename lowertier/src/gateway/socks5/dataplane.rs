@@ -318,6 +318,7 @@ impl Socks5Server {
         let local_port = smoltcp_net.get_port();
         let local_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
         let connector = Socks5AutoConnector {
+            overlay_connector: self.overlay_connector.lock().await.clone(),
             peer_mgr: self.peer_manager.clone(),
             entries: self.entries.clone(),
             smoltcp_net: Some(smoltcp_net),
