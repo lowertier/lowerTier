@@ -36,14 +36,16 @@ LowTier selects permitted local addresses from its interface collector.
 It does not require an interface named `eth0`, `en0`, or `map-m4`.
 Existing underlay allow and deny rules apply to tracker connections and discovered peers.
 Public tracker candidates exclude local and private address scopes.
-List private service URLs in both `discovery.trackers` and `discovery.private_trackers` to permit those scopes.
+List private service URLs in `discovery.private_trackers` to permit those scopes.
+The effective tracker set is the deduplicated union of `trackers` and `private_trackers`, with at most eight distinct URLs.
+A URL in `private_trackers` is private even when it also appears in `trackers`.
+Either list can be omitted. At least one tracker URL is required across the two lists.
 The automatic address selection currently uses IPv4. Explicit IPv6 binding supports tracker codecs and QUIC endpoints; automatic dual-stack discovery is pending.
 
 For a reachable seed or a fixed port mapping, set explicit socket endpoints:
 
 ```toml
 [discovery]
-trackers = ["http://127.0.0.1:6970/announce"]
 private_trackers = ["http://127.0.0.1:6970/announce"]
 bind = "127.0.0.1:16969"
 advertise = "127.0.0.1:16969"

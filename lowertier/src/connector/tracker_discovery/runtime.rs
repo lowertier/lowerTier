@@ -427,6 +427,11 @@ pub(crate) fn start(
     mut config: TrackerDiscoveryConfig,
 ) -> Result<AbortOnDropHandle<()>> {
     let ctx = peers.get_global_ctx();
+    config
+        .trackers
+        .extend(config.private_trackers.iter().cloned());
+    config.trackers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    config.trackers.dedup();
     ensure!(
         !config.trackers.is_empty() && config.trackers.len() <= 8,
         "discovery needs 1–8 trackers"
@@ -460,13 +465,6 @@ pub(crate) fn start(
             "invalid tracker URL"
         );
     }
-    ensure!(
-        config
-            .private_trackers
-            .iter()
-            .all(|url| config.trackers.contains(url)),
-        "private trackers must also appear in discovery trackers"
-    );
     if let Some(local) = config.bind {
         ensure!(
             local.is_ipv4() || ctx.get_flags().enable_ipv6,
@@ -490,8 +488,6 @@ pub(crate) fn start(
     }
     // One process incarnation can advertise several independent interface endpoints.
     let peer_session = rand::random();
-    config.trackers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    config.trackers.dedup();
     Ok(AbortOnDropHandle::new(tokio::spawn(async move {
         let mut paths = HashMap::new();
         let (connected_tx, connected_rx) = watch::channel(false);
@@ -1024,12 +1020,10 @@ mod tests {
                     paths.push(
                         start(
                             peer.clone(),
-                            TrackerDiscoveryConfig {
-                                trackers: vec![url.clone()],
-                                private_trackers: vec![url.clone()],
-                                bind: Some("127.0.0.1:0".parse().unwrap()),
-                                advertise: None,
-                            },
+                            toml::from_str(&format!(
+                                "private_trackers = [\"{url}\", \"{url}\"]\nbind = \"127.0.0.1:0\""
+                            ))
+                            .unwrap(),
                         )
                         .unwrap(),
                     );

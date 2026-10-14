@@ -4,7 +4,8 @@
 It accepts standard BEP 15 UDP requests and compact HTTP announcements.
 HTTP can run behind an HTTPS reverse proxy.
 Public tracker clients remain compatible.
-Client configurations identify private services with `discovery.private_trackers`, using URLs also present in `discovery.trackers`.
+Client configurations identify private services with `discovery.private_trackers`.
+Discovery uses the deduplicated union of `trackers` and `private_trackers`; the private setting takes priority for duplicate URLs.
 Public tracker candidates exclude loopback, private, link-local, and shared IPv4 addresses by default.
 Private tracker candidates and authenticated peer candidates retain the configured underlay policy.
 The service does not implement torrent storage, scraping, indexing, or VPN relaying.
