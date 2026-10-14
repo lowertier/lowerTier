@@ -92,7 +92,8 @@ CIDs retain the one-for-one cap and may prevent ordinary large downloads.
 The pre-validation limit is deliberately stricter than QUIC's standard 3x
 anti-amplification allowance. Large certificate flights can take extra probe
 round trips. A new source tuple cannot borrow prior validation; transparent
-migration using only short headers is not supported by this decoy admission path.
+migration of upstream website traffic using only short headers is not supported by this decoy admission path.
+Authenticated VPN path migration uses Quinn's separate connection policy and path validation.
 
 This prevents **amplification before return-path evidence**, subject to the CID
 entropy requirement; it is not a claim of zero reflection. A transparent UDP

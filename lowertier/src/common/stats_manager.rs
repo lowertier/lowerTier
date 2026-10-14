@@ -11,6 +11,8 @@ use tokio_util::task::AbortOnDropHandle;
 /// Predefined metric names for type safety
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetricName {
+    /// QUIC path changes rejected by authentication, policy, or migration limits.
+    QuicMigrationsRejected,
     /// RPC calls sent to peers
     PeerRpcClientTx,
     /// RPC calls received from peers
@@ -142,6 +144,7 @@ impl MetricName {
 impl fmt::Display for MetricName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MetricName::QuicMigrationsRejected => write!(f, "quic_migrations_rejected"),
             MetricName::PeerRpcClientTx => write!(f, "peer_rpc_client_tx"),
             MetricName::PeerRpcClientRx => write!(f, "peer_rpc_client_rx"),
             MetricName::PeerRpcServerTx => write!(f, "peer_rpc_server_tx"),

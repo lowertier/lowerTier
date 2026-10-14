@@ -65,6 +65,7 @@ use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
 #[cfg(test)]
 mod decoy_tests;
 mod fragments;
+mod migration;
 #[cfg(test)]
 mod rebind_tests;
 #[cfg(target_os = "linux")]
@@ -82,6 +83,7 @@ use quinn::default_runtime;
 pub(crate) mod tunnel_cc;
 
 use self::sni::quic_initial_sni_eq;
+use migration::QuicMigrationPolicy;
 
 // Begin at QUIC's Internet-safe UDP payload size. PMTUD probes upward before
 // application traffic uses larger packets, including on lower-MTU PPPoE paths.
@@ -923,6 +925,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
 
     config
         .max_concurrent_bidi_streams(100_u8.into())
+        .migration_requires_policy(true)
         .max_concurrent_uni_streams(3_u8.into())
         .max_idle_timeout(Some(idle_timeout))
         .keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL))
@@ -968,7 +971,7 @@ pub fn client_config(flags: &Flags) -> Result<ClientConfig, TunnelError> {
 fn configure_server_admission(config: &mut ServerConfig) {
     config.max_incoming(MAX_PENDING_QUIC_ACCEPTS * 2);
     config.incoming_buffer_size_total(QUIC_PENDING_ACCEPT_BUFFER_BYTES);
-    config.migration(false);
+    config.migration(true);
 }
 
 pub fn endpoint_config() -> EndpointConfig {
@@ -1133,6 +1136,8 @@ pub struct QuicEndpointManager {
     both: RwPool<Endpoint>,
     servers: dashmap::DashMap<SocketAddr, Endpoint>,
     flags: Arc<Flags>,
+    client_paths: ParkingMutex<Vec<Weak<ConnWrapper>>>,
+    route_watcher: OnceLock<()>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1229,6 +1234,8 @@ impl QuicEndpointManager {
             both,
             servers: dashmap::DashMap::new(),
             flags,
+            client_paths: ParkingMutex::new(Vec::new()),
+            route_watcher: OnceLock::new(),
         }
     }
 
@@ -1274,6 +1281,9 @@ impl QuicEndpointManager {
         for pool in [&manager.ipv4, &manager.ipv6, &manager.both] {
             pool.resize();
         }
+        manager.route_watcher.get_or_init(|| {
+            migration::observe_network_changes(&manager, global_ctx);
+        });
         manager
     }
 
@@ -1681,38 +1691,28 @@ struct ConnWrapper {
     conn: Connection,
     telemetry: Arc<DataplaneTelemetry>,
     io_observed: QuicIoObserved,
+    migration_policy: Arc<QuicMigrationPolicy>,
+    migration_rejections: crate::common::stats_manager::CounterHandle,
+    observed_migration_rejections: AtomicU64,
     _memory_permit: Option<ProcessMemoryPermit>,
     _source_permit: Option<QuicSourcePermit>,
     _endpoint_manager: Option<Arc<QuicEndpointManager>>,
     _endpoint_owner: Option<Endpoint>,
 }
 
-struct QuicRebindingPolicy {
-    global_ctx: Weak<crate::common::global_ctx::GlobalCtx>,
-    initial_remote: SocketAddr,
-    path_state: Arc<super::TunnelPathState>,
-}
-
-impl quinn::PathPolicy for QuicRebindingPolicy {
-    fn allow(&self, _current: SocketAddr, candidate: SocketAddr) -> bool {
-        // IP changes need separate source admission. Port changes retain the existing credit.
-        self.path_state.peer_authenticated.load(Ordering::Acquire)
-            && candidate.ip() == self.initial_remote.ip()
-            && self.global_ctx.upgrade().is_some_and(|ctx| {
-                ensure_remote_allowed(&ctx.get_underlay_policy(), candidate).is_ok()
-            })
-    }
-
-    fn validated(&self, remote: SocketAddr) {
-        let url = super::build_url_from_socket_addr(&remote.to_string(), "quic");
-        let mut info = self.path_state.info.write();
-        info.remote_addr = Some(url.clone().into());
-        info.resolved_remote_addr = Some(url.into());
-    }
-}
-
 impl ConnWrapper {
     fn record_io_stats(&self, stats: &quinn::ConnectionStats) {
+        if stats.path.migration_rejections
+            != self.observed_migration_rejections.load(Ordering::Relaxed)
+        {
+            let rejected = counter_delta(
+                &self.observed_migration_rejections,
+                stats.path.migration_rejections,
+            );
+            if rejected != 0 {
+                self.migration_rejections.add(rejected as u64);
+            }
+        }
         self.io_observed.record(
             self.telemetry.as_ref(),
             stats.udp_tx.ios,
@@ -1790,6 +1790,7 @@ fn observe_quic_path(connection: &Arc<ConnWrapper>) {
                     target: "CORE::TUNNEL::QUIC_PATH",
                     connection = connection.conn.stable_id(),
                     remote = %connection.conn.remote_address(),
+                    migration_rejections = stats.path.migration_rejections,
                     tx_datagrams = stats.udp_tx.datagrams,
                     tx_bytes = stats.udp_tx.bytes,
                     tx_ios = stats.udp_tx.ios,
@@ -2749,20 +2750,29 @@ fn build_connect_ip_tunnel(
         peer_authenticated: std::sync::atomic::AtomicBool::new(false),
         info: RwLock::new(info.clone()),
     });
-    connection.set_path_policy(Arc::new(QuicRebindingPolicy {
-        global_ctx: Arc::downgrade(&global_ctx),
-        initial_remote: connection.remote_address(),
-        path_state: path_state.clone(),
-    }));
+    let migration_policy = Arc::new(QuicMigrationPolicy::new(&global_ctx, path_state.clone()));
+    connection.set_path_policy(migration_policy.clone());
     let connection = Arc::new(ConnWrapper {
         conn: connection,
         telemetry: global_ctx.dataplane_telemetry().clone(),
         io_observed: QuicIoObserved::default(),
+        migration_policy,
+        migration_rejections: global_ctx
+            .stats_manager()
+            .get_simple_counter(crate::common::stats_manager::MetricName::QuicMigrationsRejected),
+        observed_migration_rejections: AtomicU64::new(0),
         _memory_permit: memory_permit,
         _source_permit: source_permit,
         _endpoint_manager: endpoint_manager,
         _endpoint_owner: endpoint_owner,
     });
+    if connection.conn.side().is_client()
+        && let Some(manager) = &connection._endpoint_manager
+    {
+        let mut paths = manager.client_paths.lock();
+        paths.retain(|path| path.strong_count() != 0);
+        paths.push(Arc::downgrade(&connection));
+    }
     observe_quic_path(&connection);
     let (reliable_tx, reliable_outgoing) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
     let (reliable_incoming, reliable_rx) = mpsc::channel(RELIABLE_LANE_QUEUE_BATCHES);
@@ -3958,6 +3968,28 @@ mod tests {
         get_mock_global_ctx_with_network(Some(test_identity()))
     }
 
+    fn test_connection_wrapper(conn: Connection) -> Arc<ConnWrapper> {
+        let ctx = global_ctx();
+        let state = Arc::new(super::super::TunnelPathState {
+            peer_authenticated: std::sync::atomic::AtomicBool::new(false),
+            info: RwLock::new(TunnelInfo::default()),
+        });
+        Arc::new(ConnWrapper {
+            conn,
+            telemetry: ctx.dataplane_telemetry().clone(),
+            io_observed: QuicIoObserved::default(),
+            migration_policy: Arc::new(QuicMigrationPolicy::new(&ctx, state)),
+            migration_rejections: ctx.stats_manager().get_simple_counter(
+                crate::common::stats_manager::MetricName::QuicMigrationsRejected,
+            ),
+            observed_migration_rejections: AtomicU64::new(0),
+            _endpoint_manager: None,
+            _endpoint_owner: None,
+            _memory_permit: None,
+            _source_permit: None,
+        })
+    }
+
     const CAMOUFLAGE_HOST: &str = "challenges.cloudflare.com";
 
     struct UdpPassthrough {
@@ -5010,6 +5042,7 @@ mod tests {
 
     #[test]
     fn quic_transport_uses_tls13_and_survives_a_key_update() {
+        quic_transport_uses_an_ephemeral_identity();
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
             let server_endpoint = Endpoint::server(
@@ -5173,15 +5206,7 @@ mod tests {
             }
             assert!(client.datagram_send_buffer_space() < filler.len());
 
-            let connection = Arc::new(ConnWrapper {
-                conn: client.clone(),
-                telemetry: Arc::new(DataplaneTelemetry::new()),
-                io_observed: QuicIoObserved::default(),
-                _endpoint_manager: None,
-                _endpoint_owner: None,
-                _memory_permit: None,
-                _source_permit: None,
-            });
+            let connection = test_connection_wrapper(client.clone());
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let payload =
                 vec![0x5a; maximum - PEER_MANAGER_HEADER_SIZE - connect_ip_datagram_overhead(0)];
@@ -5243,15 +5268,7 @@ mod tests {
                 client.send_datagram(filler.clone()).unwrap();
             }
 
-            let connection = Arc::new(ConnWrapper {
-                conn: client,
-                telemetry: Arc::new(DataplaneTelemetry::new()),
-                io_observed: QuicIoObserved::default(),
-                _endpoint_manager: None,
-                _endpoint_owner: None,
-                _memory_permit: None,
-                _source_permit: None,
-            });
+            let connection = test_connection_wrapper(client);
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let packet = |marker| {
                 let mut packet = ZCPacket::new_with_payload(&[marker; 64]);
@@ -5311,15 +5328,7 @@ mod tests {
                 .await
                 .unwrap();
             let server = server_task.await.unwrap();
-            let connection = Arc::new(ConnWrapper {
-                conn: client.clone(),
-                telemetry: Arc::new(DataplaneTelemetry::new()),
-                io_observed: QuicIoObserved::default(),
-                _endpoint_manager: None,
-                _endpoint_owner: None,
-                _memory_permit: None,
-                _source_permit: None,
-            });
+            let connection = test_connection_wrapper(client.clone());
             let mut writer = hybrid_writer_without_reliable_io(connection);
             let mut batch = PacketBatch::with_capacity(8);
             for sequence in 0..8_u8 {
@@ -5396,7 +5405,6 @@ mod tests {
         });
     }
 
-    #[test]
     fn quic_transport_uses_an_ephemeral_identity() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
@@ -5425,6 +5433,7 @@ mod tests {
 
     #[test]
     fn quic_admission_limiter_bounds_global_and_prefix_rates() {
+        migration::check_budget();
         let now = Instant::now();
         let mut limiter = QuicAdmissionLimiter::new();
         let first: IpAddr = "192.0.2.1".parse().unwrap();
