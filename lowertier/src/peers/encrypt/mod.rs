@@ -77,6 +77,14 @@ pub fn create_encryptor(
         }
     };
 
+    create_ring_encryptor(algorithm, key_128, key_256)
+}
+
+fn create_ring_encryptor(
+    algorithm: EncryptionAlgorithm,
+    key_128: [u8; 16],
+    key_256: [u8; 32],
+) -> Arc<dyn Encryptor> {
     match algorithm {
         EncryptionAlgorithm::AesGcm => Arc::new(ring::RingCipher::new_aes128_gcm(key_128)),
         EncryptionAlgorithm::Aes256Gcm => Arc::new(ring::RingCipher::new_aes256_gcm(key_256)),
@@ -94,11 +102,9 @@ pub fn create_secure_datagram_encryptor(
     key_128: [u8; 16],
     key_256: [u8; 32],
 ) -> Arc<dyn Encryptor> {
-    match EncryptionAlgorithm::try_from(algorithm).unwrap_or_default() {
-        EncryptionAlgorithm::AesGcm => Arc::new(ring::RingCipher::new_aes128_gcm(key_128)),
-        EncryptionAlgorithm::Aes256Gcm => Arc::new(ring::RingCipher::new_aes256_gcm(key_256)),
-        EncryptionAlgorithm::ChaCha20Poly1305 => {
-            Arc::new(ring::RingCipher::new_chacha20_poly1305(key_256))
-        }
-    }
+    create_ring_encryptor(
+        EncryptionAlgorithm::try_from(algorithm).unwrap_or_default(),
+        key_128,
+        key_256,
+    )
 }
