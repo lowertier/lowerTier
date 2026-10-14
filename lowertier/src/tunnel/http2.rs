@@ -35,7 +35,10 @@ use http::{Method, Request, Response, StatusCode};
 use std::{
     io::{self, IoSlice},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context as TaskContext, Poll, ready},
 };
 #[cfg(test)]
@@ -401,14 +404,81 @@ impl Stream for H2PacketReader {
     }
 }
 
+#[derive(Debug)]
+struct H2SendBudget {
+    limit: Arc<AtomicUsize>,
+    queued: AtomicUsize,
+    waker: futures::task::AtomicWaker,
+}
+
+impl H2SendBudget {
+    fn new(limit: Arc<AtomicUsize>) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            queued: AtomicUsize::new(0),
+            waker: futures::task::AtomicWaker::new(),
+        })
+    }
+
+    fn available(&self) -> usize {
+        self.limit
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.queued.load(Ordering::Acquire))
+    }
+
+    fn release(&self, bytes: usize) {
+        if bytes != 0 {
+            self.queued.fetch_sub(bytes, Ordering::AcqRel);
+            self.waker.wake();
+        }
+    }
+}
+
+// Release application admission when h2 consumes DATA, before TLS and socket admission.
+#[derive(Debug)]
+struct H2Data {
+    bytes: Bytes,
+    budget: Arc<H2SendBudget>,
+}
+
+impl H2Data {
+    fn new(bytes: Bytes, budget: &Arc<H2SendBudget>) -> Self {
+        budget.queued.fetch_add(bytes.len(), Ordering::AcqRel);
+        Self {
+            bytes,
+            budget: budget.clone(),
+        }
+    }
+}
+
+impl Buf for H2Data {
+    fn remaining(&self) -> usize {
+        self.bytes.remaining()
+    }
+    fn chunk(&self) -> &[u8] {
+        self.bytes.chunk()
+    }
+    fn advance(&mut self, count: usize) {
+        self.bytes.advance(count);
+        self.budget.release(count);
+    }
+}
+
+impl Drop for H2Data {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes.len());
+    }
+}
+
 struct H2Writer {
-    send: SendStream<Bytes>,
+    send: SendStream<H2Data>,
+    budget: Arc<H2SendBudget>,
     pending: BytesMut,
     coalesce_bytes: usize,
 }
 
 impl H2Writer {
-    fn new(send: SendStream<Bytes>) -> Self {
+    fn new(send: SendStream<H2Data>, limit: Arc<AtomicUsize>) -> Self {
         let coalesce_bytes = if cfg!(target_os = "linux")
             && std::env::var_os("LOWTIER_ENABLE_TCP_LARGE_BUFFERS").is_some()
         {
@@ -418,6 +488,7 @@ impl H2Writer {
         };
         Self {
             send,
+            budget: H2SendBudget::new(limit),
             pending: BytesMut::with_capacity(coalesce_bytes),
             coalesce_bytes,
         }
@@ -431,13 +502,21 @@ impl H2Writer {
         if self.pending.is_empty() {
             if end_stream {
                 self.send
-                    .send_data(Bytes::new(), true)
+                    .send_data(H2Data::new(Bytes::new(), &self.budget), true)
                     .map_err(io::Error::other)?;
             }
             return Poll::Ready(Ok(()));
         }
 
-        let want = self.pending.len().min(self.coalesce_bytes);
+        self.budget.waker.register(cx.waker());
+        let want = self
+            .pending
+            .len()
+            .min(self.coalesce_bytes)
+            .min(self.budget.available());
+        if want == 0 {
+            return Poll::Pending;
+        }
         self.send.reserve_capacity(want);
         match ready!(self.send.poll_capacity(cx)) {
             Some(Ok(0)) => Poll::Pending,
@@ -448,7 +527,9 @@ impl H2Writer {
                 }
                 let data = self.pending.split_to(take).freeze();
                 let end = end_stream && self.pending.is_empty();
-                self.send.send_data(data, end).map_err(io::Error::other)?;
+                self.send
+                    .send_data(H2Data::new(data, &self.budget), end)
+                    .map_err(io::Error::other)?;
                 Poll::Ready(Ok(()))
             }
             Some(Err(error)) => Poll::Ready(Err(io::Error::other(error))),
@@ -531,14 +612,15 @@ impl AsyncWrite for H2Writer {
 
 fn wrap_http2_tunnel(
     recv: RecvStream,
-    send: SendStream<Bytes>,
+    send: SendStream<H2Data>,
+    budget: Arc<AtomicUsize>,
     info: TunnelInfo,
     binding: TransportBinding,
     driver: AbortOnDropHandle<()>,
 ) -> Box<dyn Tunnel> {
     let mut tunnel = TunnelWrapper::new_with_transport_binding(
         H2PacketReader::new(recv),
-        FramedWriter::new(H2Writer::new(send)),
+        FramedWriter::new(H2Writer::new(send, budget)),
         Some(info),
         Some(binding),
     );
@@ -602,7 +684,9 @@ async fn accept_inner(
             return Ok(None);
         }
     }
-    let tls = acceptor.accept(super::tcp_socket::prepare(stream)).await?;
+    let stream = super::tcp_socket::prepare(stream);
+    let budget = stream.send_budget();
+    let tls = acceptor.accept(stream).await?;
     let binding = derive_http2_binding(|output| {
         tls.get_ref()
             .1
@@ -620,7 +704,7 @@ async fn accept_inner(
         .enable_connect_protocol()
         .initial_window_size(stream_window)
         .initial_connection_window_size(conn_window)
-        .max_send_buffer_size(super::tcp_socket::TCP_NOTSENT_BYTES as usize)
+        .max_send_buffer_size(super::tcp_socket::TCP_MAX_UNSENT_BYTES)
         .max_frame_size(HTTP2_MAX_FRAME);
     let mut conn = server
         .handshake(tls)
@@ -684,7 +768,9 @@ async fn accept_inner(
         remote_addr: Some(remote.clone().into()),
         resolved_remote_addr: Some(remote.into()),
     };
-    Ok(Some(wrap_http2_tunnel(recv, send, info, binding, driver)))
+    Ok(Some(wrap_http2_tunnel(
+        recv, send, budget, info, binding, driver,
+    )))
 }
 
 pub async fn connect(
@@ -702,8 +788,10 @@ pub async fn connect(
         stream.write_all(&tcp_routing_record(&marker)).await?;
     }
     let server_name = stealth_tls::client_server_name(flags, &url)?;
+    let stream = super::tcp_socket::prepare(stream);
+    let budget = stream.send_budget();
     let tls = super::browser_tls::connect(
-        super::tcp_socket::prepare(stream),
+        stream,
         &server_name.to_str(),
         &[HTTP2_ALPN, HTTP11_ALPN],
         !stealth_tls::skip_server_verification(flags),
@@ -735,7 +823,7 @@ pub async fn connect(
     client
         .initial_window_size(stream_window)
         .initial_connection_window_size(conn_window)
-        .max_send_buffer_size(super::tcp_socket::TCP_NOTSENT_BYTES as usize)
+        .max_send_buffer_size(super::tcp_socket::TCP_MAX_UNSENT_BYTES)
         .max_frame_size(HTTP2_MAX_FRAME);
     let (h2, conn) = client
         .handshake(tls)
@@ -777,7 +865,7 @@ pub async fn connect(
             super::build_url_from_socket_addr(&peer_addr.to_string(), "tcp").into(),
         ),
     };
-    Ok(wrap_http2_tunnel(recv, send, info, binding, driver))
+    Ok(wrap_http2_tunnel(recv, send, budget, info, binding, driver))
 }
 
 #[cfg(test)]
@@ -785,16 +873,19 @@ mod tests {
     use super::tcp_routing_prefix;
     use crate::common::config::gen_default_flags;
 
-    async fn stream_pair() -> (
+    async fn stream_pair<B: bytes::Buf + Send + std::fmt::Debug + 'static>() -> (
         super::H2Reader,
-        h2::SendStream<bytes::Bytes>,
+        h2::SendStream<B>,
         tokio_util::task::AbortOnDropHandle<()>,
         tokio_util::task::AbortOnDropHandle<()>,
     ) {
         let (client_io, server_io) = tokio::io::duplex(65536);
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            let mut connection = h2::server::handshake(server_io).await.unwrap();
+            let mut connection = h2::server::Builder::new()
+                .handshake::<_, B>(server_io)
+                .await
+                .unwrap();
             let (_, mut respond) = connection.accept().await.unwrap().unwrap();
             let send = respond
                 .send_response(http::Response::new(()), false)
@@ -821,7 +912,7 @@ mod tests {
     #[tokio::test]
     async fn empty_read_completes_on_an_idle_h2_stream() {
         use tokio::io::AsyncRead;
-        let (mut reader, _send, _server, _driver) = stream_pair().await;
+        let (mut reader, _send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
         let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
         let mut empty = tokio::io::ReadBuf::new(&mut []);
         assert!(matches!(
@@ -834,7 +925,7 @@ mod tests {
     #[tokio::test]
     async fn partial_h2_reads_preserve_the_unread_suffix_and_eof() {
         use tokio::io::AsyncReadExt;
-        let (mut reader, mut send, _server, _driver) = stream_pair().await;
+        let (mut reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
         send.send_data(bytes::Bytes::from_static(b"abcdef"), true)
             .unwrap();
         let mut prefix = [0; 2];
@@ -853,8 +944,11 @@ mod tests {
     #[tokio::test]
     async fn empty_vectored_write_keeps_buffered_h2_data() {
         use tokio::io::AsyncWrite;
-        let (_reader, send, _server, _driver) = stream_pair().await;
-        let mut writer = super::H2Writer::new(send);
+        let (_reader, send, _server, _driver) = stream_pair::<super::H2Data>().await;
+        let mut writer = super::H2Writer::new(
+            send,
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(131072)),
+        );
         writer.pending.resize(writer.coalesce_bytes, 0x5a);
         let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
         let empty = [std::io::IoSlice::new(&[])];
@@ -863,6 +957,33 @@ mod tests {
             std::task::Poll::Ready(Ok(0))
         ));
         assert_eq!(writer.pending.len(), writer.coalesce_bytes);
+
+        // Consumed and discarded DATA both release admission after the shared limit changes.
+        let limit = writer.budget.limit.clone();
+        limit.store(6, super::Ordering::Relaxed);
+        let mut data = super::H2Data::new(bytes::Bytes::from_static(b"abcdef"), &writer.budget);
+        assert_eq!(writer.budget.available(), 0);
+        struct WakeCount(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, super::Ordering::Relaxed);
+            }
+        }
+        let wakes = std::sync::Arc::new(WakeCount(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut blocked = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut writer)
+                .poll_flush(&mut blocked)
+                .is_pending()
+        );
+        bytes::Buf::advance(&mut data, 2);
+        assert_eq!(wakes.0.load(super::Ordering::Relaxed), 1);
+        assert_eq!(writer.budget.available(), 2);
+        limit.store(10, super::Ordering::Relaxed);
+        assert_eq!(writer.budget.available(), 6);
+        drop(data);
+        assert_eq!(writer.budget.available(), 10);
     }
 
     #[test]
@@ -973,7 +1094,7 @@ mod tests {
     #[tokio::test]
     async fn owned_h2_reader_delivers_split_data_and_returns_exact_credit() {
         use futures::StreamExt;
-        let (reader, mut send, _server, _driver) = stream_pair().await;
+        let (reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
         let mut reader = super::H2PacketReader::new(reader.recv);
         let mut data = Vec::new();
         for n in 0..32 {
@@ -999,7 +1120,7 @@ mod tests {
     #[tokio::test]
     async fn owned_h2_reader_returns_coalesced_credit_at_the_data_boundary() {
         use futures::StreamExt;
-        let (reader, mut send, _server, _driver) = stream_pair().await;
+        let (reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
         let mut reader = super::H2PacketReader::new(reader.recv);
         let mut data = Vec::new();
         data.extend_from_slice(&framed(96, 1));
@@ -1023,7 +1144,7 @@ mod tests {
     #[tokio::test]
     async fn owned_h2_reader_reports_truncated_frame_once() {
         use futures::StreamExt;
-        let (reader, mut send, _server, _driver) = stream_pair().await;
+        let (reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
         let mut reader = super::H2PacketReader::new(reader.recv);
         send.send_data(framed(96, 1).slice(..50), true).unwrap();
         assert!(reader.next().await.unwrap().is_err());
