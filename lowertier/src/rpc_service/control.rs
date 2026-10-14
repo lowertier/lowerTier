@@ -199,6 +199,7 @@ macro_rules! control_service {
                     max_page_size: 256,
                     max_watch_wait_ms: 20_000,
                     apply_classes: vec!["live".into(), "new_connection".into(), "restart".into()],
+                    resources: watch::RESOURCES.iter().map(|resource| (*resource).into()).collect(),
                     ..Default::default()
                 })
             }

@@ -40,6 +40,7 @@ message GetCapabilitiesResponse {
   uint32 max_page_size = 4;
   uint32 max_watch_wait_ms = 5;
   repeated string apply_classes = 6;
+  repeated string resources = 7;
 }
 
 message ListInstancesRequest { RequestMeta meta = 1; }

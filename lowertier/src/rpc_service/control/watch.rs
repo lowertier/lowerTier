@@ -13,7 +13,7 @@ use super::{ControlPlaneService, failure, logs, read::now_ms};
 
 pub(super) static PROCESS_EPOCH: LazyLock<uuid::Uuid> = LazyLock::new(uuid::Uuid::new_v4);
 
-const RESOURCES: &[&str] = &[
+pub(super) const RESOURCES: &[&str] = &[
     "node",
     "peers",
     "routes",
