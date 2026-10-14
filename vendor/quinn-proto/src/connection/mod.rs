@@ -1134,11 +1134,12 @@ impl Connection {
                 self.stats.udp_rx.datagrams += 1;
                 self.stats.udp_rx.bytes += first_decode.len() as u64;
                 let data_len = first_decode.len() + remaining.as_ref().map_or(0, BytesMut::len);
+                let retained_bytes = first_decode.retained_bytes();
 
                 self.handle_decode(now, remote, ecn, first_decode);
                 if let Some(data) = remaining {
                     self.stats.udp_rx.bytes += data.len() as u64;
-                    self.handle_coalesced(now, remote, ecn, data);
+                    self.handle_coalesced(now, remote, ecn, data, retained_bytes);
                 }
                 // Credit only the source path. Old-path traffic cannot fund a new path.
                 let received_path = if remote == self.path.remote {
@@ -2310,10 +2311,11 @@ impl Connection {
             false,
         );
 
+        let retained_bytes = packet.retained_bytes;
         self.process_decrypted_packet(now, remote, Some(packet_number), packet.into())?;
         if let Some(data) = remaining {
             self.path.total_recvd = self.path.total_recvd.saturating_add(data.len() as u64);
-            self.handle_coalesced(now, remote, ecn, data);
+            self.handle_coalesced(now, remote, ecn, data, retained_bytes);
         }
 
         self.config.qlog_sink.emit_recovery_metrics(
@@ -2503,11 +2505,13 @@ impl Connection {
         remote: SocketAddr,
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
+        retained_bytes: usize,
     ) {
         let mut remaining = Some(data);
         while let Some(data) = remaining {
-            match PartialDecode::new(
+            match PartialDecode::new_with_retained_bytes(
                 data,
+                retained_bytes,
                 &FixedLengthConnectionIdParser::new(self.local_cid_state.cid_len()),
                 &[self.version],
                 self.endpoint_config.grease_quic_bit,

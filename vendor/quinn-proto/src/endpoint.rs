@@ -157,10 +157,28 @@ impl Endpoint {
         data: BytesMut,
         buf: &mut Vec<u8>,
     ) -> Option<DatagramEvent> {
+        self.handle_owned(now, remote, local_ip, ecn, data.into(), buf)
+    }
+
+    /// Process a UDP datagram with an owned allocation of known capacity.
+    ///
+    /// This avoids capacity recovery from a potentially shared `BytesMut` slice.
+    pub fn handle_owned(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+        ecn: Option<EcnCodepoint>,
+        data: Vec<u8>,
+        buf: &mut Vec<u8>,
+    ) -> Option<DatagramEvent> {
+        let retained_bytes = data.capacity();
+        let data = BytesMut::from(Bytes::from(data));
         // Partially decode packet or short-circuit if unable
         let datagram_len = data.len();
-        let event = match PartialDecode::new(
+        let event = match PartialDecode::new_with_retained_bytes(
             data,
+            retained_bytes,
             &FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
             &self.config.supported_versions,
             self.config.grease_quic_bit,

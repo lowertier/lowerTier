@@ -38,10 +38,27 @@ impl PartialDecode {
         supported_versions: &[u32],
         grease_quic_bit: bool,
     ) -> Result<(Self, Option<BytesMut>), PacketDecodeError> {
-        // Normalize shared slices before splitting. Capacity then bounds the retained allocation.
+        // External slices can hide a larger allocation. Recover its capacity before splitting.
         let storage: Vec<u8> = bytes.into();
         let retained_bytes = storage.capacity();
-        let mut buf = io::Cursor::new(BytesMut::from(Bytes::from(storage)));
+        Self::new_with_retained_bytes(
+            BytesMut::from(Bytes::from(storage)),
+            retained_bytes,
+            cid_parser,
+            supported_versions,
+            grease_quic_bit,
+        )
+    }
+
+    pub(crate) fn new_with_retained_bytes(
+        bytes: BytesMut,
+        retained_bytes: usize,
+        cid_parser: &(impl ConnectionIdParser + ?Sized),
+        supported_versions: &[u32],
+        grease_quic_bit: bool,
+    ) -> Result<(Self, Option<BytesMut>), PacketDecodeError> {
+        debug_assert!(retained_bytes >= bytes.len());
+        let mut buf = io::Cursor::new(bytes);
         let plain_header =
             ProtectedHeader::decode(&mut buf, cid_parser, supported_versions, grease_quic_bit)?;
         let dgram_len = buf.get_ref().len();
@@ -78,6 +95,10 @@ impl PartialDecode {
     /// The underlying partially-decoded packet data
     pub(crate) fn data(&self) -> &[u8] {
         self.buf.get_ref()
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 
     pub(crate) fn initial_header(&self) -> Option<&ProtectedInitialHeader> {
@@ -1006,14 +1027,30 @@ mod tests {
 
         let server = initial_keys(Version::V1, dcid, Side::Server, &suite);
         let supported_versions = crate::DEFAULT_SUPPORTED_VERSIONS.to_vec();
-        let decode = PartialDecode::new(
-            buf.as_slice().into(),
+        buf.extend_from_within(..);
+        let retained_bytes = buf.capacity();
+        let pointer = buf.as_ptr();
+        let (decode, rest) = PartialDecode::new_with_retained_bytes(
+            BytesMut::from(Bytes::from(buf)),
+            retained_bytes,
             &FixedLengthConnectionIdParser::new(0),
             &supported_versions,
             false,
         )
-        .unwrap()
-        .0;
+        .unwrap();
+        assert_eq!(decode.data().as_ptr(), pointer);
+        assert_eq!(decode.retained_bytes(), retained_bytes);
+        let (tail, rest) = PartialDecode::new_with_retained_bytes(
+            rest.unwrap(),
+            retained_bytes,
+            &FixedLengthConnectionIdParser::new(0),
+            &supported_versions,
+            false,
+        )
+        .unwrap();
+        assert_eq!(tail.retained_bytes(), retained_bytes);
+        assert_eq!(tail.data(), decode.data());
+        assert!(rest.is_none());
         let mut packet = decode.finish(Some(&*server.header.remote)).unwrap();
         assert_eq!(
             packet.header_data[..],
