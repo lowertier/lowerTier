@@ -7,7 +7,7 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-ExecStart=/opt/lowertier-discovery/lowertier-tracker --udp-listen 0.0.0.0:16970 --http-listen 127.0.0.1:16973 --interval 30
+ExecStart=/opt/lowertier-discovery/lowertier-tracker --udp-listen 0.0.0.0:16970 --http-listen 127.0.0.1:16973 --interval 10
 Restart=always
 RestartSec=2
 DynamicUser=yes

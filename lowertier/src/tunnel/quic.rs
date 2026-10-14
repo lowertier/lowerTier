@@ -101,6 +101,13 @@ const QUIC_CONNECTION_RECEIVE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 const QUIC_CONNECTION_SEND_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 const QUIC_PENDING_ACCEPT_BUFFER_BYTES: u64 = 256 * 1024;
 pub(crate) const QUIC_CONNECTION_MEMORY_CHARGE_BYTES: usize = 4 * 1024 * 1024;
+// Peer IDs are process-scoped. After a remote restart, the old UDP 4-tuple can
+// remain locally writable until QUIC declares it idle, so routing can keep
+// preferring a dead cost-1 incarnation. Transport keepalive makes healthy idle
+// links prove receive liveness; the shorter idle timeout retires a blackholed
+// incarnation before the next private-tracker rediscovery cycle.
+const QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3);
 const QUIC_RELIABLE_INITIAL_BUFFER_SIZE: usize = 4500;
 /// Bound reliable frame allocation even though the wire length field is 32-bit.
 const QUIC_RELIABLE_MAX_PACKET_SIZE: usize = 64 * 1024;
@@ -930,11 +937,15 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
             .max(stream_receive_window.into_inner()),
     )
     .map_err(|error| TunnelError::InternalError(error.to_string()))?;
+    let idle_timeout = QUIC_MAX_IDLE_TIMEOUT.try_into().map_err(|error| {
+        TunnelError::InternalError(format!("invalid QUIC idle timeout: {error}"))
+    })?;
 
     config
         .max_concurrent_bidi_streams(100_u8.into())
         .max_concurrent_uni_streams(3_u8.into())
-        .keep_alive_interval(None)
+        .max_idle_timeout(Some(idle_timeout))
+        .keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL))
         .initial_mtu(QUIC_INITIAL_MTU)
         .enable_segmentation_offload(true)
         .ack_frequency_config(Some({
@@ -5338,6 +5349,84 @@ mod tests {
             QUIC_DATAGRAM_SEND_BUFFER_BYTES >= MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize
         );
         assert!(QUIC_DATAGRAM_SEND_BUFFER_BYTES < WAN_BDP_BYTES);
+    }
+
+    #[test]
+    fn quic_liveness_keeps_idle_peer_and_reaps_a_blackholed_path() {
+        RUNTIME.block_on(async {
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let flags = gen_default_flags();
+            let server_config = server_config(&flags).unwrap();
+            let endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+            let server_addr = endpoint.local_addr().unwrap();
+
+            // Forward both directions through one UDP socket so the established
+            // QUIC path can later be turned into a silent NAT-style blackhole.
+            let proxy = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let proxy_addr = proxy.local_addr().unwrap();
+            let client_addr = Arc::new(tokio::sync::Mutex::new(None));
+            let blackhole = Arc::new(AtomicBool::new(false));
+            let proxy_task = {
+                let proxy = proxy.clone();
+                let client_addr = client_addr.clone();
+                let blackhole = blackhole.clone();
+                tokio::spawn(async move {
+                    let mut bytes = vec![0_u8; 65535];
+                    loop {
+                        let (length, source) = proxy.recv_from(&mut bytes).await.unwrap();
+                        if blackhole.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        if source == server_addr {
+                            if let Some(client) = *client_addr.lock().await {
+                                proxy.send_to(&bytes[..length], client).await.unwrap();
+                            }
+                        } else {
+                            *client_addr.lock().await = Some(source);
+                            proxy.send_to(&bytes[..length], server_addr).await.unwrap();
+                        }
+                    }
+                })
+            };
+
+            let accept =
+                tokio::spawn(async move { endpoint.accept().await.unwrap().await.unwrap() });
+            let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client_endpoint.set_default_client_config(client_config(&flags).unwrap());
+            let client = client_endpoint
+                .connect(proxy_addr, "127.0.0.1")
+                .unwrap()
+                .await
+                .unwrap();
+            let server = accept.await.unwrap();
+
+            // Keepalive traffic must preserve a genuinely idle healthy mesh link
+            // beyond the configured idle timeout.
+            tokio::time::sleep(QUIC_MAX_IDLE_TIMEOUT + Duration::from_secs(2)).await;
+            assert!(client.close_reason().is_none());
+            let payload = Bytes::from_static(b"liveness");
+            client.send_datagram(payload.clone()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server.read_datagram())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                payload
+            );
+
+            // A restarted/NAT-lost peer becomes a silent UDP blackhole. The old
+            // connection must stop being considered live well before Quinn's
+            // former 30-second default.
+            blackhole.store(true, Ordering::Release);
+            tokio::time::timeout(
+                QUIC_MAX_IDLE_TIMEOUT + Duration::from_secs(4),
+                client.closed(),
+            )
+            .await
+            .expect("blackholed QUIC connection outlived its idle timeout");
+            proxy_task.abort();
+        });
     }
 
     #[test]

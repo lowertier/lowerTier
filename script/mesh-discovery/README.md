@@ -21,8 +21,8 @@ operations have five-second deadlines. Parser and limiter coverage lives in
 `script/tests/test_mesh_stun.py`.
 
 `lowertier-tracker.service` runs the existing release tracker binary with UDP
-16970, loopback-only HTTP 16973, and a 30-second announce interval. This shorter
-interval belongs to these private trackers. Clients continue to respect the
+16970, loopback-only HTTP 16973, and a 10-second announce interval. This bounded
+cadence is for the small private mesh and shortens restart-incarnation discovery. Clients continue to respect the
 interval returned by each tracker. Public tracker operators retain control of
 their own announce cadence.
 
