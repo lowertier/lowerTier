@@ -20,6 +20,7 @@ pub type ApiRpcServer<T> = self::api::ApiRpcServer<T>;
 pub use json_rpc::call_json_rpc;
 
 pub trait InstanceRpcService: Sync + Send {
+    fn control_instance(&self) -> control::ControlInstance;
     fn get_peer_manage_service(
         &self,
     ) -> &dyn crate::proto::api::instance::PeerManageRpc<

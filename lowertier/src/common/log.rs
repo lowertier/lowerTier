@@ -101,6 +101,8 @@ pub fn init(
 ) -> Result<Option<NewFilterSender>, anyhow::Error> {
     let mut layers = Vec::new();
 
+    layers.push(crate::rpc_service::control::logs::ControlLogLayer.boxed());
+
     let console_layers = console_layers(
         config
             .get_console_logger_config()

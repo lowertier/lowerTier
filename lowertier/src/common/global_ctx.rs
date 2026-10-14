@@ -441,6 +441,7 @@ pub struct GlobalCtx {
     pub network: NetworkIdentity,
 
     event_bus: EventBus,
+    control_generation: std::sync::atomic::AtomicU64,
 
     cached_ipv4: AtomicCell<Option<cidr::Ipv4Inet>>,
     cached_ipv6: AtomicCell<Option<cidr::Ipv6Inet>>,
@@ -832,6 +833,7 @@ impl GlobalCtx {
             network,
 
             event_bus,
+            control_generation: std::sync::atomic::AtomicU64::new(1),
             cached_ipv4: AtomicCell::new(None),
             cached_ipv6: AtomicCell::new(None),
             public_ipv6_lease: AtomicCell::new(None),
@@ -890,6 +892,7 @@ impl GlobalCtx {
     }
 
     pub fn issue_event(&self, event: GlobalCtxEvent) {
+        self.control_generation.fetch_add(1, Ordering::Release);
         if let Err(e) = self.event_bus.send(event.clone()) {
             tracing::warn!(
                 "Failed to send event: {:?}, error: {:?}, receiver count: {}",
@@ -898,6 +901,10 @@ impl GlobalCtx {
                 self.event_bus.receiver_count()
             );
         }
+    }
+
+    pub(crate) fn control_generation(&self) -> u64 {
+        self.control_generation.load(Ordering::Acquire)
     }
 
     fn set_tun_device_name(&self, name: Option<String>) {

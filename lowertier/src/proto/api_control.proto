@@ -1,5 +1,9 @@
 syntax = "proto3";
 
+import "api_instance.proto";
+import "common.proto";
+import "acl.proto";
+
 package api.control.v1;
 
 message RequestMeta {
@@ -37,6 +41,178 @@ message GetCapabilitiesResponse {
   uint32 max_watch_wait_ms = 5;
 }
 
+message ListInstancesRequest { RequestMeta meta = 1; }
+message InstanceSnapshot {
+  string instance_id = 1;
+  string name = 2;
+  string network_name = 3;
+  bool running = 4;
+  string last_error = 5;
+}
+message ListInstancesResponse { ApiError error = 1; repeated InstanceSnapshot instances = 2; }
+
+message GetNodeRequest { RequestMeta meta = 1; }
+message GetNodeResponse { ApiError error = 1; SnapshotMeta snapshot = 2; api.instance.NodeInfo node = 3; }
+
+message PeerSnapshot {
+  bytes peer_key = 1;
+  uint32 peer_id = 2;
+  repeated uint32 path_peer_ids = 3;
+  repeated api.instance.PeerConnInfo conns = 4;
+  common.NatType udp_nat = 5;
+  common.NatType tcp_nat = 6;
+  optional uint64 rtt_us = 7;
+  optional uint32 loss_ppm = 8;
+  optional uint64 delivery_bps = 9;
+  optional uint64 sample_age_ms = 10;
+  string metric_scope = 11;
+  api.instance.Route route = 12;
+}
+message ListPeersRequest { RequestMeta meta = 1; Page page = 2; }
+message ListPeersResponse {
+  ApiError error = 1;
+  SnapshotMeta snapshot = 2;
+  repeated PeerSnapshot peers = 3;
+  string next_page_token = 4;
+}
+
+message RouteSnapshot {
+  string destination = 1;
+  repeated uint32 path_peer_ids = 2;
+  string policy = 3;
+  string effective_policy = 4;
+  string source = 5;
+  optional uint64 measured_rtt_us = 6;
+  optional uint64 cost_ms = 7;
+  optional uint64 delivery_bps = 8;
+  string override_status = 9;
+  api.instance.Route route = 10;
+  string path_error = 11;
+}
+message ListRoutesRequest { RequestMeta meta = 1; Page page = 2; bool include_paths = 3; }
+message ListRoutesResponse {
+  ApiError error = 1;
+  SnapshotMeta snapshot = 2;
+  repeated RouteSnapshot routes = 3;
+  string next_page_token = 4;
+}
+
+message FdbEntry {
+  repeated uint32 vlans = 1;
+  bytes mac = 2;
+  uint32 owner_peer = 3;
+  uint64 age_ms = 4;
+}
+message L2Counters {
+  uint64 flood_drops = 1;
+  uint64 ingress_flood_drops = 2;
+  uint64 loop_drops = 3;
+  uint64 policy_drops = 4;
+}
+message GetL2Request { RequestMeta meta = 1; Page page = 2; }
+message GetL2Response {
+  ApiError error = 1;
+  SnapshotMeta snapshot = 2;
+  repeated FdbEntry fdb = 3;
+  L2Counters counters = 4;
+  string next_page_token = 5;
+}
+
+message Observation {
+  string protocol = 1;
+  string socket = 2;
+  string observer = 3;
+  string endpoint = 4;
+  uint64 age_ms = 5;
+  int64 expires_at_unix_ms = 6;
+  bool provisional = 7;
+}
+message TrackerSnapshot { string uri = 1; string last_error = 2; optional uint32 candidate_count = 3; }
+message GetDiscoveryRequest { RequestMeta meta = 1; }
+message GetDiscoveryResponse {
+  ApiError error = 1;
+  SnapshotMeta snapshot = 2;
+  repeated TrackerSnapshot trackers = 3;
+  repeated Observation observations = 4;
+  optional uint32 candidate_count = 5;
+  repeated string active_paths = 6;
+  string last_error = 7;
+}
+
+message ListenerSnapshot {
+  string id = 1;
+  string uri = 2;
+  string transport = 3;
+  uint32 lanes = 4;
+  string auth_state = 5;
+  string binding_kind = 6;
+  uint64 config_revision = 7;
+}
+message ListListenersRequest { RequestMeta meta = 1; }
+message ListListenersResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated ListenerSnapshot listeners = 3; }
+
+message GetStatsRequest { RequestMeta meta = 1; }
+message GetStatsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated api.instance.MetricSnapshot metrics = 3; }
+message GetPrometheusRequest { RequestMeta meta = 1; }
+message GetPrometheusResponse { ApiError error = 1; SnapshotMeta snapshot = 2; string text = 3; }
+
+message ReadLogsRequest { RequestMeta meta = 1; Page page = 2; }
+message LogEntry { uint64 sequence = 1; int64 sampled_at_unix_ms = 2; string level = 3; string target = 4; string message = 5; }
+message ReadLogsResponse { ApiError error = 1; repeated LogEntry logs = 2; string next_page_token = 3; uint64 truncated = 4; }
+message GetLogConfigRequest { RequestMeta meta = 1; }
+message GetLogConfigResponse { ApiError error = 1; string level = 2; }
+message SetLogConfigRequest { RequestMeta meta = 1; string level = 2; }
+message SetLogConfigResponse { ApiError error = 1; }
+
+message GetAclRequest { RequestMeta meta = 1; }
+message GetAclResponse { ApiError error = 1; SnapshotMeta snapshot = 2; acl.Acl acl = 3; repeated string tcp_whitelist = 4; repeated string udp_whitelist = 5; }
+message GetAclStatsRequest { RequestMeta meta = 1; }
+message GetAclStatsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; acl.AclStats stats = 3; }
+message ListCredentialsRequest { RequestMeta meta = 1; Page page = 2; }
+message ListCredentialsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated api.instance.CredentialInfo credentials = 3; string next_page_token = 4; }
+message IssueCredentialRequest {
+  RequestMeta meta = 1;
+  repeated string groups = 2;
+  bool allow_relay = 3;
+  repeated string allowed_proxy_cidrs = 4;
+  int64 ttl_seconds = 5;
+  optional string credential_id = 6;
+  optional bool reusable = 7;
+}
+message IssueCredentialResponse { ApiError error = 1; string credential_id = 2; string credential_secret = 3; }
+message RevokeCredentialRequest { RequestMeta meta = 1; string credential_id = 2; }
+message RevokeCredentialResponse { ApiError error = 1; bool revoked = 2; }
+
+message ListPortForwardsRequest { RequestMeta meta = 1; }
+message ListPortForwardsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated common.PortForwardConfigPb port_forwards = 3; }
+
+message WatchChangesRequest {
+  RequestMeta meta = 1;
+  repeated string resources = 2;
+  string cursor = 3;
+  uint32 max_wait_ms = 4;
+}
+message WatchChangesResponse { ApiError error = 1; string cursor = 2; repeated string changed = 3; bool reset = 4; }
+
 service ControlPlaneV1Rpc {
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+  rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc GetL2(GetL2Request) returns (GetL2Response);
+  rpc GetDiscovery(GetDiscoveryRequest) returns (GetDiscoveryResponse);
+  rpc ListListeners(ListListenersRequest) returns (ListListenersResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  rpc GetPrometheus(GetPrometheusRequest) returns (GetPrometheusResponse);
+  rpc ReadLogs(ReadLogsRequest) returns (ReadLogsResponse);
+  rpc GetLogConfig(GetLogConfigRequest) returns (GetLogConfigResponse);
+  rpc SetLogConfig(SetLogConfigRequest) returns (SetLogConfigResponse);
+  rpc GetAcl(GetAclRequest) returns (GetAclResponse);
+  rpc GetAclStats(GetAclStatsRequest) returns (GetAclStatsResponse);
+  rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
+  rpc IssueCredential(IssueCredentialRequest) returns (IssueCredentialResponse);
+  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc ListPortForwards(ListPortForwardsRequest) returns (ListPortForwardsResponse);
+  rpc WatchChanges(WatchChangesRequest) returns (WatchChangesResponse);
 }

@@ -1461,6 +1461,10 @@ impl PeerManager {
         self.l2_fabric.counters()
     }
 
+    pub(crate) fn l2_generation(&self) -> u64 {
+        self.l2_fabric.generation()
+    }
+
     fn admit_compact_to_tap(
         fabric: &L2Fabric,
         payload: &[u8],

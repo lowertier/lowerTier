@@ -1625,17 +1625,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
             control.set_no_delete(true);
         }
 
-        log::info!(
-            "\
-            Starting lowertier from config file {:?}({:?}) with config:\n\
-            ############### TOML ###############\n\
-            {}\n\
-            -----------------------------------\n\
-            ",
-            config_file,
-            control.permission,
-            cfg.dump()
-        );
+        log::info!(path = %config_file.display(), permission = %control.permission, "Starting LowTier from a config file");
         manager.run_network_instance(cfg, true, control)?;
     }
 
@@ -1644,15 +1634,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         cli.network_options
             .merge_into(&cfg)
             .with_context(|| "failed to create config from cli".to_string())?;
-        log::info!(
-            "\
-            Starting lowertier from cli with config:\n\
-            ############### TOML ###############\n\
-            {}\n\
-            -----------------------------------\n\
-            ",
-            cfg.dump()
-        );
+        log::info!("Starting LowTier from command-line configuration");
         manager.run_network_instance(cfg, true, ConfigFileControl::STATIC_CONFIG)?;
     }
 

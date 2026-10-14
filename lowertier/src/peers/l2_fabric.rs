@@ -104,6 +104,7 @@ impl L2SourceBatch {
 pub struct L2Fabric {
     fdb: DashMap<FdbKey, FdbEntry>,
     entry_count: AtomicUsize,
+    generation: AtomicU64,
     capacity: usize,
     age: Duration,
     flood_bytes_per_second: u64,
@@ -236,6 +237,7 @@ impl L2Fabric {
         Self {
             fdb: DashMap::new(),
             entry_count: AtomicUsize::new(0),
+            generation: AtomicU64::new(1),
             capacity,
             age,
             flood_bytes_per_second,
@@ -636,6 +638,7 @@ impl L2Fabric {
                         peer_id,
                         last_seen: now,
                     });
+                    self.generation.fetch_add(1, Ordering::Release);
                 } else {
                     if let Some(count) = owner_count {
                         count.fetch_sub(1, Ordering::AcqRel);
@@ -651,6 +654,7 @@ impl L2Fabric {
     }
 
     fn release_peer_entry(&self, peer_id: PeerId) {
+        self.generation.fetch_add(1, Ordering::Release);
         if self.policy.max_macs_per_peer != 0 {
             let count = self
                 .per_peer_counts
@@ -659,6 +663,10 @@ impl L2Fabric {
             let previous = count.fetch_sub(1, Ordering::AcqRel);
             debug_assert!(previous != 0);
         }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     fn try_reserve_peer(&self, peer_id: PeerId) -> Result<Option<Arc<AtomicUsize>>, ()> {

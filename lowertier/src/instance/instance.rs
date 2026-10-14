@@ -1315,6 +1315,7 @@ impl Instance {
 
         #[derive(Clone)]
         struct ApiRpcServiceImpl<A, B, C, E, F, G, H> {
+            control_instance: crate::rpc_service::control::ControlInstance,
             peer_mgr_rpc_service: A,
             connector_mgr_rpc_service: B,
             mapped_listener_mgr_rpc_service: C,
@@ -1341,6 +1342,9 @@ impl Instance {
             H: ConfigRpc<Controller = BaseController> + Send + Sync,
         > InstanceRpcService for ApiRpcServiceImpl<A, B, C, E, F, G, H>
         {
+            fn control_instance(&self) -> crate::rpc_service::control::ControlInstance {
+                self.control_instance.clone()
+            }
             fn get_peer_manage_service(&self) -> &dyn PeerManageRpc<Controller = BaseController> {
                 &self.peer_mgr_rpc_service
             }
@@ -1399,6 +1403,11 @@ impl Instance {
         }
 
         ApiRpcServiceImpl {
+            control_instance: crate::rpc_service::control::ControlInstance {
+                peer_manager: Arc::downgrade(&self.peer_manager),
+                global_ctx: Arc::downgrade(&self.global_ctx),
+                patcher: self.get_config_patcher(),
+            },
             peer_mgr_rpc_service: PeerManagerRpcService::new(self.peer_manager.clone()),
             connector_mgr_rpc_service: ConnectorManagerRpcService(Arc::downgrade(
                 &self.conn_manager,
