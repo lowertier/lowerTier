@@ -1817,6 +1817,19 @@ impl Connection {
             self.app_limited,
             self.spaces[space].largest_acked_packet,
         );
+        if self.config.datagram_send_queue_time.is_some() {
+            let rate = self
+                .path
+                .congestion
+                .metrics()
+                .pacing_rate
+                .map(|bits| bits as f64 / 8.0)
+                .unwrap_or_else(|| {
+                    self.path.congestion.window() as f64
+                        / self.path.rtt.get().as_secs_f64().max(0.001)
+                });
+            self.datagrams.send_rate.update(now, rate);
+        }
         self.maybe_unblock_fast_datagrams();
 
         if new_largest && ack_eliciting_acked {

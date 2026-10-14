@@ -35,8 +35,11 @@ One legal batch always fits an empty budget.
 The 1 MiB retained-memory ceiling still applies.
 Credits remain held until sink flush completes.
 
-QUIC DATAGRAM admission uses the controller pacing rate times 4 ms.
+QUIC DATAGRAM admission uses the recent peak controller pacing rate times 4 ms.
 Controllers without a pacing rate use congestion window divided by RTT.
+Ten 100 ms buckets retain peaks for approximately 0.9 to 1 second.
+ACK processing records samples. Batch admission also ages the filter after idle periods.
+This prevents BBR drain and ProbeRTT from immediately reducing the scheduling budget.
 Three 64-datagram batches at the path MTU form the scheduling floor.
 The 1 MiB DATAGRAM memory ceiling still applies.
 Quinn reports this capacity through `datagram_send_buffer_space()`.
@@ -50,16 +53,20 @@ The previous QUIC FIFO ceiling was 18.64 ms.
 The direct floor is 393,216 charged bytes, or 6.99 ms if all charges represented wire bytes.
 Actual payload queue time is lower because charges include allocation capacity and packet metadata.
 
-QUIC expires unsent application packets after 10 ms, before packet sealing.
-Fragments of one packet enter Quinn together and share an expiry deadline.
-Once Quinn seals the first fragment, the remaining fragments retain transmission permission.
-This prevents expiry from sending only part of a packet.
-Expiry uses the connection timer and wakes blocked senders when capacity becomes available.
-Writer staging uses the same deadline, including time before Quinn admission.
-The `quic_datagrams_expired` statistic counts complete expired application packets.
-Quinn path statistics also report expired fragment and byte counts.
-The 10 ms bound covers packets whose transmission has not started.
-It does not bound network flight or socket submission delay.
+The tunnel does not configure DATAGRAM packet expiry.
+The former 10 ms deadline could discard valid traffic during BBR's approximately 200 ms ProbeRTT period.
+The measured upload path combined these local losses with increased inner TCP retransmissions and negligible NIC residence.
+Removing this loss source should reduce inner TCP recovery.
+NIC CoDel still controls persistent waiting time. Hard memory limits still bound staging and Quinn admission.
+Quinn retains its optional complete-group expiry API for other callers.
+The `quic_datagrams_expired` statistic remains available and should stay zero without another expiry caller.
+
+At 8 Gbit/s, a 4 ms budget would require 4,000,000 bytes.
+The existing 1 MiB QUIC ceiling instead permits approximately 1.05 ms of payload service.
+At 450 Mbit/s, the 288,000-byte floor still represents 5.12 ms at a 1,500-byte MTU.
+The recent peak can increase that budget during controller probe gains, within the same memory ceiling.
+Removing expiry preserves queued packets through temporary congestion-controller pauses.
+It does not change the congestion window, pacing algorithm, wire format, or network flight capacity.
 
 At a CoDel congestion signal, ECT inner IPv4 and IPv6 packets receive CE before encryption.
 IPv4 marking recomputes the header checksum, including options.

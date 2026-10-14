@@ -937,7 +937,6 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .datagram_receive_drop_policy(DatagramReceiveDropPolicy::Newest)
         .datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_BYTES)
         .datagram_send_queue_time(Some(Duration::from_millis(4)))
-        .datagram_send_max_time(Some(Duration::from_millis(10)))
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
         .receive_window(receive_window)

@@ -22,6 +22,13 @@ fn queue_byte_limit(rate: f64, target: std::time::Duration, mtu: u16, hard_limit
 }
 
 impl Datagrams<'_> {
+    /// Age admission rate samples before sending a batch after an idle period.
+    pub fn refresh_send_rate(&mut self, now: Instant) {
+        if self.conn.config.datagram_send_queue_time.is_some() {
+            self.conn.datagrams.send_rate.update(now, 0.0);
+        }
+    }
+
     /// Return the configured maximum unsent residence time.
     pub fn max_send_time(&self) -> Option<std::time::Duration> {
         self.conn.config.datagram_send_max_time
@@ -62,7 +69,12 @@ impl Datagrams<'_> {
                 self.conn.path.congestion.window() as f64
                     / self.conn.path.rtt.get().as_secs_f64().max(0.001)
             });
-        queue_byte_limit(rate, target, self.conn.path.current_mtu(), hard_limit)
+        queue_byte_limit(
+            rate.max(self.conn.datagrams.send_rate.max),
+            target,
+            self.conn.path.current_mtu(),
+            hard_limit,
+        )
     }
 
     /// Wait for actual FIFO drain when queue-time admission is enabled.
@@ -177,6 +189,7 @@ impl Datagrams<'_> {
 
 #[derive(Default)]
 pub(super) struct DatagramState {
+    pub(super) send_rate: SendRate,
     /// Payload bytes not yet delivered to the application.
     pub(super) recv_buffered: usize,
     recv_retained: usize,
@@ -190,6 +203,36 @@ pub(super) struct DatagramState {
     pub(super) expired_packets: u64,
     pub(super) expired_datagrams: u64,
     pub(super) expired_bytes: u64,
+}
+
+/// Retain recent rate peaks through congestion-controller drain and ProbeRTT.
+#[derive(Default)]
+pub(super) struct SendRate {
+    buckets: [f64; 10],
+    epoch: Option<Instant>,
+    current: usize,
+    max: f64,
+}
+
+impl SendRate {
+    pub(super) fn update(&mut self, now: Instant, rate: f64) {
+        let epoch = *self.epoch.get_or_insert(now);
+        let steps = now.saturating_duration_since(epoch).as_millis() / 100;
+        if steps != 0 {
+            if steps >= self.buckets.len() as u128 {
+                self.buckets.fill(0.0);
+            } else {
+                for _ in 0..steps {
+                    self.current = (self.current + 1) % self.buckets.len();
+                    self.buckets[self.current] = 0.0;
+                }
+            }
+            self.epoch = Some(epoch + std::time::Duration::from_millis((steps * 100) as u64));
+            self.max = self.buckets.iter().copied().fold(0.0, f64::max);
+        }
+        self.buckets[self.current] = self.buckets[self.current].max(rate);
+        self.max = self.max.max(rate);
+    }
 }
 
 struct OutgoingDatagram {
@@ -398,6 +441,17 @@ mod mtu_limit_tests {
 
     #[test]
     fn expiry_discards_whole_unstarted_groups_and_releases_capacity() {
+        let now = Instant::now();
+        let mut rate = SendRate::default();
+        rate.update(now, 1_000_000_000.0);
+        for millis in [100, 200, 750, 899] {
+            rate.update(now + std::time::Duration::from_millis(millis), 1.0);
+            assert_eq!(rate.max, 1_000_000_000.0);
+        }
+        rate.update(now + std::time::Duration::from_millis(1000), 2.0);
+        assert_eq!(rate.max, 2.0);
+        rate.update(now + std::time::Duration::from_millis(3000), 0.0);
+        assert_eq!(rate.max, 0.0);
         let target = std::time::Duration::from_millis(4);
         assert_eq!(
             queue_byte_limit(450_000_000.0 / 8.0, target, 1500, 1_048_576),

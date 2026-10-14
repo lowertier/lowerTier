@@ -1090,6 +1090,7 @@ impl Future for SendDatagrams<'_> {
 
         let mut queued = false;
         let now = state.runtime.now();
+        state.inner.datagrams().refresh_send_rate(now);
         let deadline = this.queued_at.and_then(|queued_at| {
             state
                 .inner

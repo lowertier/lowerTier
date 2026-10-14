@@ -339,7 +339,8 @@ impl TransportConfig {
         self
     }
 
-    /// Bound unsent DATAGRAM bytes by the path rate and this queue duration.
+    /// Bound unsent DATAGRAM bytes by the recent peak path rate and this queue duration.
+    /// Ten 100 ms buckets retain rate peaks through short controller drain periods.
     /// Three 64-datagram batches form the scheduling floor. The memory limit still applies.
     pub fn datagram_send_queue_time(&mut self, value: Option<Duration>) -> &mut Self {
         self.datagram_send_queue_time = value;
