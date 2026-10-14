@@ -1,7 +1,0 @@
-id=lowertier_magisk
-name=LowTier_Magisk
-version=v2.6.4
-versionCode=1
-author=LowTier
-description=lowertier magisk module @LowTier(https://github.com/lowertier/lowertier)
-updateJson=https://raw.githubusercontent.com/lowertier/lowertier/refs/heads/main/lowertier-contrib/lowertier-magisk/magisk_update.json

@@ -13,22 +13,37 @@ removed_paths=(
   ".github/workflows/gui.yml"
   ".github/workflows/mobile.yml"
   ".github/workflows/ohos.yml"
+  "lowertier-gui"
+  "tauri-plugin-vpnservice"
+  "lowertier-web"
+  "lowertier-contrib/lowertier-ohrs"
+  "lowertier-contrib/lowertier-uptime"
+  "lowertier-contrib/lowertier-magisk"
+  "lowertier-contrib/lowertier-android-jni"
+  "package.json"
+  "pnpm-workspace.yaml"
+  "pnpm-lock.yaml"
+  "lowertier.code-workspace"
+  "assets"
+  "lowertier/assets"
+  "script/install.cmd"
+  "script/discovery-model"
+  "lowertier/third_party/arm64/WinDivert64.sys"
 )
 
 for path in "${removed_paths[@]}"; do
-  if [[ -e "$repo_root/$path" ]]; then
+  if [[ -e "$repo_root/$path" || -L "$repo_root/$path" ]]; then
     echo "removed repository surface still exists: $path" >&2
     exit 1
   fi
 done
 
 retained_paths=(
-  "lowertier-gui/package.json"
-  "lowertier-gui/src-tauri/Cargo.toml"
-  "tauri-plugin-vpnservice/Cargo.toml"
-  "lowertier-web/Cargo.toml"
-  "lowertier-web/frontend/package.json"
-  "lowertier-web/frontend-lib/package.json"
+  "lowertier/Cargo.toml"
+  "lowertier-contrib/lowertier-ffi/Cargo.toml"
+  "lowertier/third_party/arm64/Packet.lib"
+  "lowertier/third_party/arm64/wintun.dll"
+  "pyrightconfig.json"
   ".github/workflows/core.yml"
 )
 
@@ -38,9 +53,7 @@ done
 
 active_files=(
   "$repo_root/Cargo.toml"
-  "$repo_root/pnpm-workspace.yaml"
   "$repo_root/.gitignore"
-  "$repo_root/lowertier.code-workspace"
   "$repo_root/README.md"
   "$repo_root/README_CN.md"
   "$repo_root/CONTRIBUTING.md"
@@ -57,14 +70,14 @@ if grep -En 'flake\.nix|android\.nix|\.flake-profile|\.direnv|\[nix\]' "${active
   exit 1
 fi
 
-if grep -Eq 'lowertier-gui|lowertier-web|lowertier-contrib' "$repo_root/Cargo.toml"; then
-  echo "the Cargo workspace contains a non-CLI package" >&2
+if grep -Eq 'lowertier-gui|lowertier-web|tauri-plugin-vpnservice|lowertier-(ohrs|uptime|magisk|android-jni)' "$repo_root/Cargo.toml"; then
+  echo "the Cargo workspace references a removed package" >&2
   exit 1
 fi
-grep -Fq "'lowertier-gui'" "$repo_root/pnpm-workspace.yaml"
-grep -Fq "'tauri-plugin-vpnservice'" "$repo_root/pnpm-workspace.yaml"
-grep -Fq "'lowertier-web/frontend'" "$repo_root/pnpm-workspace.yaml"
-grep -Fq "'lowertier-web/frontend-lib'" "$repo_root/pnpm-workspace.yaml"
+if grep -En 'lowertier-gui|lowertier-web|tauri-plugin-vpnservice|pnpm|lowertier-(ohrs|uptime|magisk|android-jni)|script/discovery-model|\]\([^)]*assets/' "${active_files[@]}" "$repo_root/lowertier/README.md" "$repo_root/pyrightconfig.json"; then
+  echo "removed repository surfaces are still referenced" >&2
+  exit 1
+fi
 
 core_workflow="$repo_root/.github/workflows/core.yml"
 test_workflow="$repo_root/.github/workflows/test.yml"

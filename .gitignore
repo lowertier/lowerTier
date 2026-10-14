@@ -28,8 +28,6 @@ nohup.out
 
 .DS_Store
 
-components.d.ts
-
 musl_gcc
 
 # log
@@ -80,16 +78,6 @@ lowertier-panic.log
 /.github/copilot-instructions.md
 /docs/superpowers/
 /.worktrees/
-
-# web
-node_modules
-lowertier-web/frontend-lib/src/generated/
-
-.vite
-
-lowertier-gui/src-tauri/*.dll
-lowertier-gui/src-tauri/*.sys
-/lowertier-contrib/lowertier-ohrs/dist/
 
 # contrib
 go.sum

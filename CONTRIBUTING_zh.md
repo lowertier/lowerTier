@@ -16,8 +16,6 @@
   - [项目结构](#项目结构)
   - [构建指南](#构建指南)
     - [构建核心组件](#构建核心组件)
-    - [构建桌面应用](#构建桌面应用)
-    - [构建移动应用](#构建移动应用)
     - [构建注意事项](#构建注意事项)
   - [开发工作流](#开发工作流)
   - [测试指南](#测试指南)
@@ -32,8 +30,6 @@
 ### 前置要求
 
 #### 必需工具
-- Node.js v21 或更高版本
-- pnpm v9 或更高版本
 - Rust 工具链（版本 1.95）
 - LLVM 和 Clang
 - Protoc（Protocol Buffers 编译器）
@@ -49,20 +45,6 @@ sudo apt-get update && sudo apt-get install -y \
     clang \
     protobuf-compiler
 
-# GUI 构建依赖
-sudo apt install -y \
-    libwebkit2gtk-4.1-dev \
-    build-essential \
-    curl \
-    wget \
-    file \
-    libgtk-3-dev \
-    librsvg2-dev \
-    libxdo-dev \
-    libssl-dev \
-    libappindicator3-dev \
-    patchelf
-
 # 测试依赖
 sudo apt install -y bridge-utils
 ```
@@ -70,11 +52,6 @@ sudo apt install -y bridge-utils
 **交叉编译依赖**
 - musl-cross 工具链（用于 MIPS 和其他架构）
 - 可能需要额外配置（详见 `.github/workflows/` 目录）
-
-**Android 开发依赖**
-- Java 20
-- Android SDK（Build Tools 34.0.0）
-- Android NDK（26.0.10792818）
 
 ### 安装步骤
 
@@ -89,17 +66,13 @@ sudo apt install -y bridge-utils
    # 安装 Rust 工具链
    rustup install 1.95
    rustup default 1.95
-
-   # 安装项目依赖
-   pnpm -r install
    ```
 
 ## 项目结构
 
 ```
 lowertier/          # 核心功能和库
-lowertier-web/      # Web 仪表盘和前端
-lowertier-gui/      # 桌面 GUI 应用
+lowertier-contrib/lowertier-ffi/ # C interface for platform clients
 .github/workflows/ # CI/CD 配置文件
 ```
 
@@ -120,44 +93,6 @@ cargo build --release --target x86_64-pc-windows-msvc        # Windows x86_64
 ```
 
 构建产物位置：`target/[target-triple]/release/`
-
-### 构建桌面应用
-
-```bash
-# 1. 构建前端
-pnpm -r build
-
-# 2. 构建 GUI 应用
-cd lowertier-gui
-
-# Linux
-pnpm tauri build --target x86_64-unknown-linux-gnu
-
-# macOS
-pnpm tauri build --target x86_64-apple-darwin      # Intel
-pnpm tauri build --target aarch64-apple-darwin     # Apple Silicon
-
-# Windows
-pnpm tauri build --target x86_64-pc-windows-msvc   # x64
-```
-
-构建产物位置：`lowertier-gui/src-tauri/target/release/bundle/`
-
-### 构建移动应用
-
-```bash
-# 1. 安装 Android 目标平台
-rustup target add aarch64-linux-android
-rustup target add armv7-linux-androideabi
-rustup target add i686-linux-android
-rustup target add x86_64-linux-android
-
-# 2. 构建 Android 应用
-cd lowertier-gui
-pnpm tauri android build
-```
-
-构建产物位置：`lowertier-gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/`
 
 ### 构建注意事项
 
@@ -208,7 +143,7 @@ cargo test -p lowertier --lib --verbose
 
 不要为同一断言再写一份标量路径和一份批量路径。不要为同一条拒绝路径堆叠变体。不要把被 ignore 的性能基准放进 `src/`。
 
-仓库只保留维护中的核心/CLI 测试；GUI 和其他暂不维护的界面不在测试范围内。核心测试总数必须不超过 500。CI 会运行完整的关键测试套件并检查这一上限。
+Keep tests for the maintained core and command-line programs. Keep the core suite at or below 500 tests. CI runs the essential suite and checks this limit.
 
 ## Pull Request 规范
 

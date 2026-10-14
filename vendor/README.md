@@ -1,18 +1,19 @@
 # Vendored Rust dependencies
 
-LowTier vendors patched dependencies that are not available under stable registry identities.
-Local path dependencies make builds reproducible after the project rename.
+LowTier keeps local dependency snapshots for transport, userspace networking, platform interfaces, and service management.
+Local path dependencies preserve the patches used by the core build.
 
-| Directory | Version or revision | Source |
+| Directory | Version or revision | Purpose |
 | --- | --- | --- |
-| `boringtun-lowertier` | 0.6.1 | Patched BoringTun snapshot |
-| `http_req` | `b10aa9fc0db3067cc3d2174683a87250b80a1ea9` | `https://github.com/jayjamesjay/http_req` fork snapshot |
-| `kcp-sys` | `d7427c22d764deb1860a7d37acc446ed5033464c` | Patched KCP snapshot |
-| `rust-tun` | `12378839e7985283df0e4fb536b7137230356db5` | Patched Rust TUN snapshot |
-| `service-manager-rs` | `5eb28f7a686858eea4f4933534ed989d3b71dc2a` | `https://github.com/chipsenkbeil/service-manager-rs` fork snapshot |
-| `thunk` | `cbbeec75a66b7b3cf0824ae890d9d06bcfb9d1f3` | `https://github.com/felixmaker/thunk` fork snapshot |
-| `tokio-websockets` | `dc9771c7c215882349c3cb328877550a3593df21` | `https://github.com/Gelbpunkt/tokio-websockets` fork snapshot |
-| `windivert-rust` | `adcc56d1550f7b5377ec2b3429f413ee24a77375` | `https://github.com/Rubensei/windivert-rust` fork snapshot |
+| `quinn` | 0.11.11 | Async QUIC transport with local transport patches. |
+| `quinn-proto` | 0.11.16 | QUIC protocol state and DATAGRAM handling. |
+| `quincy-tun` | 1.0.0 | Async interface access for the QUIC transport. |
+| `smoltcp` | 0.12.0 | IP stack for userspace networking. |
+| `rust-tun` | `12378839e7985283df0e4fb536b7137230356db5` | Platform TUN and TAP interface access. |
+| `service-manager-rs` | `5eb28f7a686858eea4f4933534ed989d3b71dc2a` | Operating system service installation and control. |
+| `thunk` | `cbbeec75a66b7b3cf0824ae890d9d06bcfb9d1f3` | Windows API compatibility during builds. |
+| `tokio-websockets` | `dc9771c7c215882349c3cb328877550a3593df21` | Async WebSocket transport for WSS. |
+| `windivert-rust` | `adcc56d1550f7b5377ec2b3429f413ee24a77375` | Windows packet capture and injection bindings. |
 
 The import changes package names and metadata where the LowTier build requires them.
 The repository formatter also formats the imported Rust source.

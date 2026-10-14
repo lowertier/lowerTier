@@ -8,7 +8,7 @@ Source SHA-256: `5b8dc2b03fd2e7154fe1ab5926bd64971f8991d05cc4c1c9db55ba6cd80da4f
 
 Cases per seed: 156. Retained runs: 3. Total modeled sessions: 4,680,000.
 
-The successful-check time is the first authenticated-probe/ACK round trip in the model. It excludes transport establishment. Traffic includes both nodes and service responses, DNS assumptions, and peer probes; WAN and LAN are separate. IP-layer bytes exclude Ethernet/Wi-Fi and final transport handshakes. HTTP/TLS byte counts are assumed budgets. Read `script/discovery-model/README.md` before interpreting the numbers.
+The successful-check time is the first authenticated-probe/ACK round trip in the model. It excludes transport establishment. Traffic includes both nodes and service responses, DNS assumptions, and peer probes; WAN and LAN are separate. IP-layer bytes exclude Ethernet/Wi-Fi and final transport handshakes. HTTP/TLS byte counts are assumed budgets. These historical results came from an offline model that is no longer maintained in this repository.
 
 ## Primary seed results
 
@@ -300,4 +300,4 @@ test tests::warm_cookie_saves_rtt_when_mapping_is_ready ... ok
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-See `docs/superpowers/specs/2026-09-11-public-discovery-model.md` for implementation decisions and remaining validation gates.
+The original implementation specification is no longer maintained in this repository.

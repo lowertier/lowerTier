@@ -12,8 +12,6 @@ Thank you for your interest in contributing to LowTier! This document provides g
 - [Project Structure](#project-structure)
 - [Build Guide](#build-guide)
   - [Building Core](#building-core)
-  - [Building GUI](#building-gui)
-  - [Building Mobile](#building-mobile)
 - [Development Workflow](#development-workflow)
 - [Testing Guidelines](#testing-guidelines)
 - [Pull Request Guidelines](#pull-request-guidelines)
@@ -24,8 +22,6 @@ Thank you for your interest in contributing to LowTier! This document provides g
 ### Prerequisites
 
 #### Required Tools
-- Node.js v21 or higher
-- pnpm v9 or higher
 - Rust toolchain (version 1.95)
 - LLVM and Clang
 - Protoc (Protocol Buffers compiler)
@@ -41,20 +37,6 @@ sudo apt-get update && sudo apt-get install -y \
     clang \
     protobuf-compiler
 
-# GUI build dependencies
-sudo apt install -y \
-    libwebkit2gtk-4.1-dev \
-    build-essential \
-    curl \
-    wget \
-    file \
-    libgtk-3-dev \
-    librsvg2-dev \
-    libxdo-dev \
-    libssl-dev \
-    libappindicator3-dev \
-    patchelf
-
 # Testing dependencies
 sudo apt install -y bridge-utils
 ```
@@ -62,11 +44,6 @@ sudo apt install -y bridge-utils
 **For Cross-Compilation**
 - musl-cross toolchain (for MIPS and other architectures)
 - Additional setup may be required (see `.github/workflows/` for details)
-
-**For Android Development**
-- Java 20
-- Android SDK (Build Tools 34.0.0)
-- Android NDK (26.0.10792818)
 
 ### Installation Steps
 
@@ -81,17 +58,13 @@ sudo apt install -y bridge-utils
    # Install Rust toolchain
    rustup install 1.95
    rustup default 1.95
-
-   # Install project dependencies
-   pnpm -r install
    ```
 
 ## Project Structure
 
 ```
 lowertier/          # Core functionality and libraries
-lowertier-web/      # Web dashboard and frontend
-lowertier-gui/      # Desktop GUI application
+lowertier-contrib/lowertier-ffi/ # C interface for platform clients
 .github/workflows/ # CI/CD configuration files
 ```
 
@@ -112,44 +85,6 @@ cargo build --release --target x86_64-pc-windows-msvc        # Windows x86_64
 ```
 
 Build artifacts: `target/[target-triple]/release/`
-
-### Building GUI
-
-```bash
-# 1. Build frontend
-pnpm -r build
-
-# 2. Build GUI application
-cd lowertier-gui
-
-# Linux
-pnpm tauri build --target x86_64-unknown-linux-gnu
-
-# macOS
-pnpm tauri build --target x86_64-apple-darwin      # Intel
-pnpm tauri build --target aarch64-apple-darwin     # Apple Silicon
-
-# Windows
-pnpm tauri build --target x86_64-pc-windows-msvc   # x64
-```
-
-Build artifacts: `lowertier-gui/src-tauri/target/release/bundle/`
-
-### Building Mobile
-
-```bash
-# 1. Install Android targets
-rustup target add aarch64-linux-android
-rustup target add armv7-linux-androideabi
-rustup target add i686-linux-android
-rustup target add x86_64-linux-android
-
-# 2. Build Android application
-cd lowertier-gui
-pnpm tauri android build
-```
-
-Build artifacts: `lowertier-gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/`
 
 ### Build Notes
 
@@ -200,7 +135,7 @@ Keep tests minimal. A test stays in the tree only if it locks a real invariant: 
 
 Do not add scalar-plus-batch copies of the same assertion. Do not add combinatorial matrices unless each cell is a different invariant. Do not put ignored perf benches in `src/`.
 
-Only the maintained core/CLI suite is kept in the tree; GUI and other unmaintained surfaces are outside the test scope. Keep the core suite at or below 500 tests.
+Keep tests for the maintained core and command-line programs. Keep the core suite at or below 500 tests.
 
 ```bash
 cargo test -p lowertier --lib
