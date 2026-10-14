@@ -651,7 +651,6 @@ pub struct DirectConnectorManager {
     global_ctx: ArcGlobalCtx,
     data: Arc<DirectConnectorManagerData>,
     client: PeerTaskManager<DirectConnectorLauncher>,
-    _tasks: JoinSet<()>,
 }
 
 #[derive(Clone)]
@@ -713,7 +712,6 @@ impl DirectConnectorManager {
             global_ctx,
             data,
             client,
-            _tasks: JoinSet::new(),
         }
     }
 
