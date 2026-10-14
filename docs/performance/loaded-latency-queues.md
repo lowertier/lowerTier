@@ -27,7 +27,8 @@ CoDel targets 5 ms of persistent delay after an initial observation interval.
 The target is not a maximum packet age.
 Transient bursts and unresponsive senders can exceed the target.
 Network flight windows, transport authentication, and MTU rules do not change.
-Throughput and loaded latency require a matched measurement after integration.
+The [matched confirmation](lean-core-ab-20261014.md#rate-based-admission-confirmation) passes the clean throughput guards.
+Public upload and latency targets remain unmet.
 
 Direct data admission uses the measured sink drain rate times 4 ms.
 Its scheduling floor is three 128 KiB charged batches.
@@ -55,8 +56,11 @@ Actual payload queue time is lower because charges include allocation capacity a
 
 The tunnel does not configure DATAGRAM packet expiry.
 The former 10 ms deadline could discard valid traffic during BBR's approximately 200 ms ProbeRTT period.
-The measured upload path combined these local losses with increased inner TCP retransmissions and negligible NIC residence.
-Removing this loss source should reduce inner TCP recovery.
+This BBR implementation uses a ProbeRTT window of 0.75 times estimated BDP, with a four-MTU minimum.
+It sets the ProbeRTT pacing gain to 1.0. It does not always reduce flight to four packets.
+The 200 ms minimum duration starts after flight reaches the probe target and requires a subsequent round start before exit.
+The earlier B upload records combined local expiry with increased inner TCP retransmissions and low mean NIC residence.
+Removing expiry removes that loss source. The confirmation still records inner retransmissions and unmet public performance targets.
 NIC CoDel still controls persistent waiting time. Hard memory limits still bound staging and Quinn admission.
 Quinn retains its optional complete-group expiry API for other callers.
 The `quic_datagrams_expired` statistic remains available and should stay zero without another expiry caller.
@@ -64,6 +68,8 @@ The `quic_datagrams_expired` statistic remains available and should stay zero wi
 At 8 Gbit/s, a 4 ms budget would require 4,000,000 bytes.
 The existing 1 MiB QUIC ceiling instead permits approximately 1.05 ms of payload service.
 At 450 Mbit/s, the 288,000-byte floor still represents 5.12 ms at a 1,500-byte MTU.
+At the normal 1.25 ProbeBw pacing gain, rate times 4 ms is 281,250 bytes at this speed.
+The 288,000-byte floor therefore dominates that budget. The confirmation does not isolate the peak filter's performance effect.
 The recent peak can increase that budget during controller probe gains, within the same memory ceiling.
 Removing expiry preserves queued packets through temporary congestion-controller pauses.
 It does not change the congestion window, pacing algorithm, wire format, or network flight capacity.

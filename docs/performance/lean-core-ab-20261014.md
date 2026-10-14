@@ -783,3 +783,167 @@ Benchmark binaries and original measurement evidence remain available.
 
 Raw logs, scripts, samples, counters, and validation records: `benchmark-results/lean-core-latency-20261014/`.
 Command audit: `benchmark-results/.work/lean-core-20261014-bench3.jsonl`.
+
+## Rate-based admission confirmation
+
+The 2026-10-15 confirmation does not pass all requested performance gates.
+A is `f3c62ece`. C is `a2b742f5`.
+B denotes the historical `1b2452cd` latency measurements in the preceding section.
+The campaign ran once. No slow trial was replaced.
+
+C removes the fixed 10 ms QUIC expiry and retains recent peak pacing rates for admission.
+C also uses rate × 4 ms for TCP and H2 admission, with platform floors and a 4 MiB ceiling.
+NIC CoDel, ECN, direct admission, and NIC handoff limits remain unchanged.
+The source models are in [local queue delay](loaded-latency-queues.md) and [TCP admission](tcp-unsent-budget.md).
+
+### Public path
+
+The isolated Mac Studio to s6916 method matches bench3.
+Each protocol used one stream, 12 sender seconds, and two interleaved A/C repetitions in each direction.
+Overlay MTU was 1280. Underlay MTU was 1500. Each daemon used two worker threads.
+Management used Tailscale SSH. Overlay traffic used the public peer address and separate temporary credentials.
+No Rust compilation ran during measurement.
+Cells give median [minimum–maximum] across both repetitions.
+
+| Transport | Direction | A Mbit/s | C Mbit/s | Change | Throughput gate |
+| --- | --- | ---: | ---: | ---: | --- |
+| QUIC | upload | 426.8 [411.0–442.7] | 413.7 [402.3–425.1] | -3.07% | fail |
+| QUIC | download | 417.3 [415.6–419.1] | 456.4 [453.2–459.5] | +9.36% | pass |
+| H2 | upload | 451.0 [450.0–452.0] | 378.3 [309.0–447.7] | -16.10% | fail |
+| H2 | download | 429.5 [413.5–445.5] | 428.3 [406.3–450.2] | -0.29% | pass |
+| WSS | upload | 323.8 [249.4–398.3] | 433.7 [424.0–443.4] | +33.92% | pass |
+| WSS | download | 454.0 [447.7–460.2] | 452.3 [451.9–452.8] | -0.36% | pass |
+
+| Transport | Direction | A p50 / p95 ms | Historical B p50 / p95 ms | C p50 / p95 ms | C latency gate |
+| --- | --- | ---: | ---: | ---: | --- |
+| QUIC | upload | 15.02 [14.52–15.51] / 26.08 [22.49–29.66] | 12.10 [11.55–12.66] / 15.54 [11.81–19.27] | 19.75 [17.66–21.84] / 30.68 [30.53–30.83] | fail |
+| QUIC | download | 12.25 [12.24–12.26] / 13.69 [13.67–13.70] | 13.02 [12.98–13.07] / 15.50 [15.39–15.61] | 13.90 [12.16–15.64] / 16.28 [14.51–18.05] | fail |
+| H2 | upload | 30.42 [28.46–32.38] / 38.05 [37.26–38.84] | 16.07 [12.14–19.99] / 20.15 [12.41–27.89] | 20.36 [11.90–28.81] / 24.05 [12.65–35.46] | fail |
+| H2 | download | 29.75 [29.51–29.99] / 58.30 [53.71–62.89] | 23.64 [23.48–23.79] / 40.68 [33.44–47.92] | 24.00 [23.26–24.74] / 35.87 [35.41–36.32] | fail |
+| WSS | upload | 53.82 [37.50–70.15] / 79.81 [72.60–87.02] | 40.66 [40.16–41.15] / 59.49 [51.39–67.60] | 29.53 [28.54–30.52] / 50.46 [45.78–55.13] | pass |
+| WSS | download | 28.51 [20.01–37.01] / 73.49 [66.94–80.04] | 22.56 [17.24–27.88] / 45.78 [41.72–49.85] | 24.24 [21.03–27.45] / 49.89 [41.83–57.95] | fail |
+
+The latency gate compares C with historical B medians.
+B did not run in this campaign. Public path variation limits that comparison.
+B QUIC records retain the measurement contamination limits documented in the preceding section.
+Twelve ping probes at 0.5-second intervals cover approximately the first half of each transfer.
+Two repetitions and twelve probes limit p95 confidence.
+
+| Transport | Direction | Binary | CPU Mac / Linux s/Gbit | RSS Mac / Linux MiB | Inner retransmissions |
+| --- | --- | --- | ---: | ---: | ---: |
+| QUIC | upload | A | 0.917 [0.788–1.046] / 3.210 [3.155–3.265] | 25.2–30.8 / 21.4–32.8 | 476, 1821 |
+| QUIC | upload | C | 0.835 [0.815–0.855] / 3.240 [3.232–3.249] | 25.4–29.9 / 21.6–32.9 | 1182, 1026 |
+| QUIC | download | A | 1.305 [1.295–1.314] / 2.537 [2.496–2.577] | 29.0–31.3 / 32.6–33.9 | 22092, 23276 |
+| QUIC | download | C | 1.269 [1.236–1.302] / 2.753 [2.656–2.849] | 29.7–30.9 / 31.9–34.5 | 56121, 17574 |
+| H2 | upload | A | 0.347 [0.343–0.351] / 2.796 [2.785–2.807] | 24.5–30.6 / 18.4–37.4 | 118, 440 |
+| H2 | upload | C | 0.496 [0.355–0.636] / 2.969 [2.880–3.059] | 24.6–31.1 / 20.5–40.1 | 196, 137 |
+| H2 | download | A | 1.282 [1.222–1.342] / 1.420 [1.413–1.428] | 30.1–32.6 / 35.3–44.6 | 12, 11 |
+| H2 | download | C | 1.218 [1.155–1.281] / 1.447 [1.370–1.525] | 30.4–32.2 / 38.9–44.3 | 0, 0 |
+| WSS | upload | A | 0.376 [0.355–0.398] / 2.996 [2.912–3.079] | 24.4–30.7 / 17.6–33.5 | 0, 339 |
+| WSS | upload | C | 0.576 [0.569–0.582] / 2.965 [2.928–3.001] | 24.6–30.3 / 20.0–46.9 | 312, 461 |
+| WSS | download | A | 0.852 [0.848–0.856] / 1.297 [1.297–1.298] | 29.6–32.2 / 29.6–33.6 | 0, 0 |
+| WSS | download | C | 0.899 [0.892–0.906] / 1.256 [1.221–1.290] | 30.1–31.2 / 41.5–47.6 | 560, 0 |
+
+| Transport | Direction | C host | NIC drops | ECN marks | Mean NIC residence us | Expired QUIC packets |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| QUIC | upload | Mac | 0, 0 | 2, 1 | 1127.29, 2228.05 | 0, 0 |
+| QUIC | upload | Linux | 0, 0 | 0, 0 | 48.62, 4.10 | 0, 0 |
+| QUIC | download | Mac | 1, 0 | 0, 0 | 376.24, 33.31 | 0, 0 |
+| QUIC | download | Linux | 0, 0 | 4, 22 | 876.81, 5283.36 | 0, 0 |
+| H2 | upload | Mac | 196, 134 | 1, 1 | 7746.75, 549.44 | not applicable |
+| H2 | upload | Linux | 0, 0 | 0, 0 | 1.76, 2.59 | not applicable |
+| H2 | download | Mac | 0, 0 | 0, 0 | 2.79, 2.94 | not applicable |
+| H2 | download | Linux | 0, 0 | 39, 7 | 5936.75, 6538.43 | not applicable |
+| WSS | upload | Mac | 303, 412 | 2, 1 | 1480.90, 2215.61 | not applicable |
+| WSS | upload | Linux | 0, 0 | 0, 0 | 2.54, 3.26 | not applicable |
+| WSS | download | Mac | 0, 0 | 0, 0 | 17.68, 0.76 | not applicable |
+| WSS | download | Linux | 560, 0 | 33, 36 | 8090.13, 7947.73 | not applicable |
+
+### Clean Colima guard
+
+The clean guard used forward traffic, one stream, and two interleaved A/C repetitions for each protocol.
+Each transfer excluded ten warmup seconds and measured twenty seconds.
+Overlay MTU was 1340. Docker bridge MTU was 1500. Inner TCP used BBR.
+No compilation ran during this guard.
+
+| Transport | A Gbit/s | C Gbit/s | Change | 3% guard | A / C CPU s/Gbit |
+| --- | ---: | ---: | ---: | --- | ---: |
+| QUIC | 6.327 [6.285–6.369] | 6.427 [6.365–6.489] | +1.58% | pass | 0.335 [0.334–0.335] / 0.333 [0.333–0.334] |
+| H2 | 8.547 [8.539–8.555] | 8.381 [8.334–8.428] | -1.94% | pass | 0.261 [0.261–0.262] / 0.265 [0.264–0.267] |
+| WSS | 7.754 [7.710–7.799] | 7.715 [7.705–7.725] | -0.51% | pass | 0.288 [0.287–0.289] / 0.290 [0.290–0.290] |
+
+| Transport | Binary | RSS endpoint A / B MiB | Inner retransmissions | Outer retransmissions or QUIC loss |
+| --- | --- | ---: | ---: | ---: |
+| QUIC | A | 25.3–25.7 / 26.7–27.3 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | C | 25.1–27.0 / 27.8–29.0 | 2, 2 | 0.0000%, 0.0000% |
+| H2 | A | 22.2–26.3 / 25.8–27.3 | 165, 90 | 1467, 734 |
+| H2 | C | 23.6–25.8 / 25.2–27.3 | 70, 237 | 1319, 1456 |
+| WSS | A | 23.2–25.9 / 22.7–22.9 | 852, 1668 | 666, 943 |
+| WSS | C | 22.4–25.5 / 22.8–23.1 | 2270, 2201 | 926, 1151 |
+
+Public ping delivery was 288/288. Colima ping delivery was 1775/1775.
+Public trials retained authenticated connection IDs and positive receiver delivery.
+Clean trials passed topology, connection-count, sampling, and delivery checks.
+Clean authentication uses private secure configuration and connection logs; explicit peer authentication snapshots were not saved.
+Public CPU uses daemon user and system CPU seconds divided by receiver-delivered Gbit.
+Public CPU sampling spans were 98.31%–103.75% of receiver duration.
+CPU normalization therefore uses slightly different sampling and delivery windows.
+Clean CPU uses sampled CPU seconds per second, divided by receiver Gbit/s.
+CPU excludes iperf, monitoring, and kernel networking work outside daemon accounting.
+RSS includes shared pages, excludes kernel socket memory, and does not establish peak memory.
+Inner retransmissions, outer losses, and unsent expiry measure different events.
+H2/WSS outer retransmissions cover both sockets and include warmup.
+QUIC outer loss uses path-counter differences within the measured window.
+Public outer loss was not measured symmetrically. Remote socket and network snapshots remain in the raw records.
+
+### Interpretation
+
+All clean throughput guards pass. The public-path acceptance target remains unmet.
+QUIC upload misses the 3% threshold by 0.07 percentage points. H2 upload retains a wide 309.0–447.7 Mbit/s range.
+WSS baseline upload also varies widely, from 249.4 to 398.3 Mbit/s.
+The two-repetition public comparison does not establish a stable ranking across changing network conditions.
+Removing expiry eliminates the recorded unsent-expiry source. It does not eliminate inner retransmissions or guarantee historical B latency.
+The clean H2 result supports the scheduling-margin model at high rates. It does not explain the remaining public H2 upload loss.
+The fixed byte-budget hypothesis is therefore incomplete for the public path.
+C H2 uploads record 196 and 134 NIC drops, alongside 196 and 137 inner retransmissions.
+Those counters suggest local drop timing merits review. They do not isolate CoDel drops from hard-limit drops or prove the throughput cause.
+The existing BBR uses a ProbeRTT window of 0.75 × estimated BDP, floored at four MTUs, and a pacing gain of 1.0.
+The brief's fixed four-packet ProbeRTT model does not match this source configuration.
+The minimum probe duration is 200 ms after flight drains to the target; exit also waits for a round start.
+The peak-rate filter protects local admission through rate dips. It does not remove the congestion controller's flight limit.
+At 450 Mbit/s and a 1,500-byte path MTU, the 288,000-byte floor exceeds the 281,250-byte budget at a 1.25 pacing gain.
+The floor can therefore dominate normal ProbeBw admission at this speed.
+The campaign changes expiry and admission together. It cannot isolate their performance effects.
+
+### Build and cleanup evidence
+
+A artifacts were retained from bench3 and match its recorded hashes.
+All C release builds used Rust 1.95.0, fat LTO, one codegen unit, feature `tun`, and no default features.
+Mac used aarch64-apple-darwin. Public Linux used x86_64-unknown-linux-musl with cargo-zigbuild.
+Colima used aarch64-unknown-linux-gnu in the existing builder image.
+
+| Binary | SHA256 |
+| --- | --- |
+| baseline-mac | `46ce5db2e8a6402d98c1bacaf805a4574f5bc5449ae7a244e71cd22cccf199c0` |
+| baseline-mac-cli | `862aa208a53441fca9b35227f5e9b1a27c9f553e647eee3e77b033e00e1209b0` |
+| baseline-remote-linux | `5cccb3956e3ccc078f2d88fbb1789adac0ff2bcb2b4bf02a6fa48d917cf0cabf` |
+| baseline-remote-linux-cli | `4325cc7d6251a51f89c74064d4b6dab6be78382bcd5c5d6d4f7806de9409eb46` |
+| baseline-linux | `bf19b3b658bca9caf3d0b9f25fb938cb960cd1c6875d7b2d016a634e2a5e3f6b` |
+| main-mac | `beb12a5bae03e24048ea618065aa662a40f8a50a091f5167ad4791af753536f9` |
+| main-mac-cli | `919ccf7b2fe59f79a53c1b03dec9243da17a282f87ed266a2f1b7d9e2ae3f876` |
+| main-remote-linux | `5b8bd11c29bf5bc354cdb2ca3d72e4565c6a63b4a45a1f83625c5bbc2a3b039b` |
+| main-remote-linux-cli | `f0e01f520b402ab50b46d861d8c3aee246bcb049e02da51a972df7f39a447b55` |
+| main-linux | `1c5f576a6169a049aa2e462c623736c18c6cc96b6e97f9df70e61d7699b41fba` |
+
+macOS and aarch64 Linux all-target checks passed. Focused transport tests and locked Cargo metadata passed.
+Formatting checks covered only changed Rust files.
+The first release build selected repository nightly. It was stopped before measurement and rebuilt with Rust 1.95.0.
+Temporary peer processes, binaries, credentials, interfaces, and routes were removed.
+Colima benchmark containers and their network were removed.
+Resident PIDs and binary hashes matched before and after. Resident authentication and ping delivery passed after cleanup.
+Mac resident hashes cover the installed file. Linux resident hashes cover running `/proc/PID/exe` executables.
+No resident configuration, keys, ACLs, routes, or binary changed.
+Caddy routing, unauthorized probes, multi-stream traffic, and symmetric public loss measurements were outside the brief.
+
+Raw records and scripts: `benchmark-results/lean-core-tune-20261015/` in the tune worktree.
+Command audit: `/Users/boyu/code/lowertier/benchmark-results/.work/lean-core-20261014-tune.jsonl`.

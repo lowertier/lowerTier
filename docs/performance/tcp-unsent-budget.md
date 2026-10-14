@@ -2,6 +2,7 @@
 
 Updated: 2026-10-15. H2 and WSS use a rate-based budget for each socket, including TCP lanes and punched connections.
 The matched confirmation is recorded in [the performance report](lean-core-ab-20261014.md).
+All clean throughput guards pass. Public upload and latency targets remain unmet.
 
 ## Socket admission
 
