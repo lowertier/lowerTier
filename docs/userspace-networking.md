@@ -22,9 +22,10 @@ lowertier-core \
 
 Replace the example network values before use.
 Use an unprivileged local port above 1023.
-Published binaries support UDP, TCP, and QUIC underlay connections.
-Full source builds can also support WebSocket connections.
-Some other underlay modes can require extra operating system privileges.
+The retained underlays are QUIC/H3, H2 over TLS, and WSS.
+Use `quic://`, `tcp://`, and `wss://` URLs, respectively.
+The `tcp://` scheme selects H2 over TLS.
+Plain `ws://` and raw `udp://` underlays are rejected.
 
 LowTier detects SOCKS5 and HTTP from the first client byte.
 One shared listener avoids a second socket and a second userspace network stack.
@@ -58,6 +59,15 @@ It uses system DNS only when the route table has no matching peer name.
 It uses the same peer, subnet, exit, service, and blackhole routes as packet forwarding.
 The userspace overlay target path currently supports IPv4 destinations.
 One SOCKS5 UDP association can use at most 256 active targets.
+
+Each userspace TCP socket starts with an 8 KiB receive buffer and an 8 KiB transmit buffer.
+Active buffers grow with measured application demand and TCP round-trip time.
+Each buffer can grow to 8 MiB, subject to the shared process memory budget.
+Growth reserves replacement storage before it copies the existing buffer.
+If that reservation fails, the socket retains its current buffer.
+Socket creation returns an error if the initial storage cannot fit within the budget.
+Buffers remain allocated until the socket closes.
+The memory budget does not limit total process RSS.
 
 This mode does not add host routes.
 It does not create a TUN or TAP interface.

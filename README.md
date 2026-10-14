@@ -21,12 +21,15 @@ It does not cover a web interface or graphical client.
 
 ## Program model
 
-LowTier uses two command-line programs.
+LowTier provides a VPN daemon, a control client, and an optional tracker service.
 
 | Program | Purpose |
 | --- | --- |
 | `lowertier-core` | Runs the VPN instance, virtual interface, peer links, routing, and proxies. |
 | `lowertier-cli` | Reads status and changes supported runtime settings through the RPC portal. |
+| `lowertier-tracker` | Serves UDP and HTTP tracker discovery for public or self-hosted bootstrap. |
+
+See [tracker discovery](docs/tracker-discovery.md) for client configuration, peer-assisted punching, and HTTP deployment behind a proxy or CDN.
 
 `lowertier-cli` prints tables by default.
 Use `--output json` for scripts.
@@ -310,6 +313,7 @@ Normal CLI deployments must omit the `source` table.
 | `udp_whitelist` | port string array | empty | Allow only listed inbound UDP ports. Supports ports and ranges. |
 | `stun_servers` | string array | built-in list | Replace the IPv4 STUN server list. An empty array disables the list. |
 | `stun_servers_v6` | string array | built-in list | Replace the IPv6 STUN server list. An empty array disables the list. |
+| `tcp_stun_servers` | string array | built-in list | Replace the TCP STUN server list for H2 and WSS traversal. |
 | `credential_file` | path | unset | Persist issued temporary credentials on an administrator node. |
 
 ### Network identity
@@ -359,15 +363,14 @@ listeners = [
 ]
 ```
 
-Listeners are QUIC/HTTP/3, H2/TCP, and WSS.
+Listeners are QUIC/HTTP/3, H2 over TLS, and WSS.
+Plain `ws://` and raw `udp://` underlays are rejected.
 
 | Scheme | Network protocol | Default port from base `11010` |
 | --- | --- | ---: |
-| `udp` | UDP | 11010 |
-| `quic` | UDP | 11012 |
-| `tcp` | TCP | 11010 |
-| `ws` (full) | TCP | 11011 |
-| `wss` (full) | TCP with TLS | 11012 |
+| `quic` | HTTP/3 over QUIC/UDP | 11012 |
+| `tcp` | HTTP/2 over TLS/TCP | 11010 |
+| `wss` | WebSocket over TLS/TCP | 11012 |
 
 `--listeners 11010` creates every compiled IP listener with its standard offset.
 `--no-listener` creates an outbound-only node.
@@ -542,6 +545,26 @@ The table includes every supported flag.
 | `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
 | `quic_datagram_fec_parity` | `0` | Select `0` off, `2` for 16+2, or `3` for 16+3 alternate-path FEC. | `--quic-datagram-fec-parity` |
 | `quic_datagram_alternate_path_parity` | `false` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
+
+QUIC NAT traversal exchanges candidates through authenticated peer RPC.
+It retains the selected UDP socket for the QUIC connection.
+When one peer has destination-dependent mappings, traversal can use a bounded socket pool and public-port search.
+The search respects the underlay policy and `disable_sym_hole_punching`.
+`disable_udp_hole_punching` disables the QUIC traversal coordinator.
+This UDP procedure does not establish H2 or WSS connections.
+H2 and WSS use authenticated TCP rendezvous and simultaneous open.
+TCP traversal retains one source port for listening, STUN, and peer connections.
+The initiator nominates one TLS connection before the peers verify their identities.
+`default_protocol = "wss"` selects WSS traversal; other values select H2 for TCP traversal.
+`disable_tcp_hole_punching` disables both TCP traversal protocols.
+Destination-dependent TCP mappings can still prevent direct connections.
+Candidate discovery uses current interface addresses and configured underlay restrictions.
+Production traversal does not require a fixed physical interface name.
+When a mapped address is also a local address, traversal can reserve its mapped port exclusively.
+TCP retains the original listener. QUIC also retries the original STUN socket.
+Peer authentication must succeed before the direct connection becomes active.
+See the [eth0 traversal measurements](docs/performance/eth0-direct-20260922.md) for verified behavior and limits.
+See the [osku–UTMOWRT measurements](docs/performance/osku-utmowrt-20260922.md) for all three traversal protocols.
 
 LowTier selects TAP on Linux and FreeBSD.
 LowTier selects TUN on other systems.
