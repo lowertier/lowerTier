@@ -670,21 +670,7 @@ struct NetworkOptions {
     )]
     quic_sni_passthrough: Option<bool>,
 
-    #[arg(
-        long,
-        env = "ET_QUIC_DATAGRAM_FEC_PARITY",
-        help = t!("core_clap.quic_datagram_fec_parity").to_string()
-    )]
-    quic_datagram_fec_parity: Option<u32>,
 
-    #[arg(
-        long,
-        env = "ET_QUIC_DATAGRAM_ALTERNATE_PATH_PARITY",
-        help = t!("core_clap.quic_datagram_alternate_path_parity").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    quic_datagram_alternate_path_parity: Option<bool>,
 
     #[arg(
         long,
@@ -1356,12 +1342,6 @@ impl NetworkOptions {
             f.quic_decoy_upstream = upstream.clone();
         }
         f.quic_sni_passthrough = self.quic_sni_passthrough.unwrap_or(f.quic_sni_passthrough);
-        f.quic_datagram_fec_parity = self
-            .quic_datagram_fec_parity
-            .unwrap_or(f.quic_datagram_fec_parity);
-        f.quic_datagram_alternate_path_parity = self
-            .quic_datagram_alternate_path_parity
-            .unwrap_or(f.quic_datagram_alternate_path_parity);
         f.accept_dns = self.accept_dns.unwrap_or(f.accept_dns);
         f.private_mode = self.private_mode.unwrap_or(f.private_mode);
         f.foreign_relay_bps_limit = self

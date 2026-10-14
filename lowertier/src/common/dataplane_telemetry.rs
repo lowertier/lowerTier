@@ -121,36 +121,6 @@ impl DataplaneIo {
     }
 }
 
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DataplaneFec {
-    SourceTx,
-    ParityTx,
-    SourceRx,
-    ParityRx,
-    Recovered,
-}
-
-const DATAPLANE_FEC: [DataplaneFec; 5] = [
-    DataplaneFec::SourceTx,
-    DataplaneFec::ParityTx,
-    DataplaneFec::SourceRx,
-    DataplaneFec::ParityRx,
-    DataplaneFec::Recovered,
-];
-
-impl DataplaneFec {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::SourceTx => "source_tx",
-            Self::ParityTx => "parity_tx",
-            Self::SourceRx => "source_rx",
-            Self::ParityRx => "parity_rx",
-            Self::Recovered => "recovered",
-        }
-    }
-}
-
 #[derive(Default)]
 struct StageStats {
     samples: AtomicU64,
@@ -174,12 +144,6 @@ struct QueueStats {
 #[derive(Default)]
 struct IoStats {
     syscalls: AtomicU64,
-    packets: AtomicU64,
-    bytes: AtomicU64,
-}
-
-#[derive(Default)]
-struct FecStats {
     packets: AtomicU64,
     bytes: AtomicU64,
 }
@@ -223,7 +187,6 @@ pub struct DataplaneTelemetry {
     stages: [StageStats; DATAPLANE_STAGES.len()],
     queues: [QueueStats; DATAPLANE_QUEUE_SLOTS],
     io: [IoStats; DATAPLANE_IO.len()],
-    fec: [FecStats; DATAPLANE_FEC.len()],
 }
 
 impl Default for DataplaneTelemetry {
@@ -239,7 +202,6 @@ impl DataplaneTelemetry {
             stages: std::array::from_fn(|_| StageStats::default()),
             queues: std::array::from_fn(|_| QueueStats::default()),
             io: std::array::from_fn(|_| IoStats::default()),
-            fec: std::array::from_fn(|_| FecStats::default()),
         }
     }
 
@@ -349,11 +311,6 @@ impl DataplaneTelemetry {
         stats.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
-    pub fn record_fec(&self, operation: DataplaneFec, packets: usize, bytes: usize) {
-        let stats = &self.fec[operation as usize];
-        stats.packets.fetch_add(packets as u64, Ordering::Relaxed);
-        stats.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
 
     pub fn receiver_pressure_snapshot(&self) -> ReceiverPressureSnapshot {
         let queue = &self.queues[queue_slot(DataplaneQueueClass::DirectNic, 0)];
@@ -505,26 +462,6 @@ impl DataplaneTelemetry {
             );
         }
 
-        output.push_str(
-            "# HELP lowertier_dataplane_fec_packets_total Alternate-path FEC packets by operation.\n\
-# TYPE lowertier_dataplane_fec_packets_total counter\n\
-# HELP lowertier_dataplane_fec_bytes_total Alternate-path FEC bytes by operation.\n\
-# TYPE lowertier_dataplane_fec_bytes_total counter\n",
-        );
-        for operation in DATAPLANE_FEC {
-            let stats = &self.fec[operation as usize];
-            let name = operation.as_str();
-            let _ = writeln!(
-                output,
-                "lowertier_dataplane_fec_packets_total{{operation=\"{name}\"}} {}",
-                stats.packets.load(Ordering::Relaxed)
-            );
-            let _ = writeln!(
-                output,
-                "lowertier_dataplane_fec_bytes_total{{operation=\"{name}\"}} {}",
-                stats.bytes.load(Ordering::Relaxed)
-            );
-        }
         output
     }
 }
@@ -567,6 +504,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        DataplaneFec, DataplaneIo, DataplaneQueueClass, DataplaneStage, DataplaneTelemetry,
+        DataplaneIo, DataplaneQueueClass, DataplaneStage, DataplaneTelemetry,
     };
 }

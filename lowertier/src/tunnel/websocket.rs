@@ -796,9 +796,7 @@ pub mod tests {
             .parse()
             .unwrap();
         assert!(!ws_via_cdn(&direct));
-        assert_eq!("wss", "wss");
         assert!(ws_via_cdn(&cdn));
-        assert_eq!("wss", "wss");
         assert!(ws_via_cdn(
             &"wss://challenges.cloudflare.com/ws?via=proxy"
                 .parse()

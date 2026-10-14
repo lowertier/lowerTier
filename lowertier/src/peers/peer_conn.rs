@@ -30,7 +30,6 @@ use tracing::Instrument;
 
 use snow::{HandshakeState, TransportState, params::NoiseParams};
 
-use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet_with_stats};
 use super::{
     PacketRecvChan,
     peer_conn_ping::PeerConnPinger,
@@ -48,7 +47,6 @@ use super::{
     },
     traffic_metrics::{AggregateTrafficMetrics, SpeedProbeMetrics},
 };
-use crate::common::dataplane_telemetry::DataplaneFec;
 use crate::{
     common::{
         PeerId,
@@ -89,19 +87,8 @@ use crate::{
     use_global_var,
 };
 
-use crate::tunnel::DatagramSizeBudget;
 
 pub type PeerConnId = uuid::Uuid;
-
-const ALTERNATE_FEC_CONSERVATIVE_DATAGRAM_BUDGET: usize = 1200;
-
-fn alternate_fec_wire_len(record_len: usize, session_outer_encrypted: bool) -> Option<usize> {
-    let mut wire_len = PEER_MANAGER_HEADER_SIZE.checked_add(record_len)?;
-    if session_outer_encrypted {
-        wire_len = wire_len.checked_add(crate::tunnel::packet_def::StandardAeadTail::SIZE)?;
-    }
-    Some(wire_len)
-}
 
 fn is_noise_handshake_packet_type(packet_type: u8) -> bool {
     matches!(
@@ -131,15 +118,6 @@ const MAX_PENDING_HANDSHAKE_PACKETS: usize = MAX_PACKET_BATCH_SIZE;
 const MAX_PENDING_HANDSHAKE_BYTES: usize =
     MAX_PENDING_HANDSHAKE_PACKETS * (4096 + PEER_MANAGER_HEADER_SIZE);
 pub(crate) const SPEED_ROUTING_FEATURE: &str = "speed-routing-v2";
-
-pub(crate) const ALTERNATE_FEC_RX_V1: u64 = 1 << 0;
-
-fn alternate_fec_negotiated(
-    local_transmit_enabled: bool,
-    remote_receive_capabilities: u64,
-) -> bool {
-    local_transmit_enabled && (remote_receive_capabilities & ALTERNATE_FEC_RX_V1) != 0
-}
 
 fn handshake_features() -> Vec<String> {
     vec![
@@ -258,8 +236,6 @@ fn packet_batch_is_direct_control(packet_type: u8) -> bool {
         || packet_type == PacketType::SpeedProbe as u8
         || packet_type == PacketType::SpeedProbeAck as u8
         || packet_type == PacketType::ReceiverPressure as u8
-        || packet_type == PacketType::AlternateFecSource as u8
-        || packet_type == PacketType::AlternateFecParity as u8
         || is_noise_handshake_packet_type(packet_type)
 }
 
@@ -758,8 +734,6 @@ struct NoiseHandshakeResult {
 
     my_encrypt_algo: String,
     remote_encrypt_algo: String,
-    alternate_fec_enabled: bool,
-    alternate_fec_remote_receive_capabilities: u64,
 }
 
 #[derive(Clone)]
@@ -895,70 +869,6 @@ impl PeerSessionTunnelFilter {
             return Ok(());
         }
         self.encrypt_packet_with_session(data, my_peer_id, peer_id, &session)
-    }
-
-    fn encrypt_alternate_fec_source(&self, data: &mut ZCPacket) -> Result<(), anyhow::Error> {
-        let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
-            return Ok(());
-        };
-        let Some(header) = data.peer_manager_header() else {
-            return Ok(());
-        };
-        if header.is_encrypted()
-            || header.from_peer_id.get() != my_peer_id
-            || header.to_peer_id.get() != peer_id
-        {
-            return Ok(());
-        }
-        session.encrypt_fec_payload(my_peer_id, peer_id, data)
-    }
-
-    fn decrypt_recovered_alternate_fec_packet(
-        &self,
-        data: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        if !self.enabled {
-            return Ok(());
-        }
-
-        let (from_peer_id, to_peer_id, encrypted) = {
-            let header = data
-                .peer_manager_header()
-                .ok_or_else(|| anyhow::anyhow!("recovered FEC packet has no peer header"))?;
-            (
-                header.from_peer_id.get(),
-                header.to_peer_id.get(),
-                header.is_encrypted(),
-            )
-        };
-        let expected_peer_id = self
-            .peer_id
-            .load()
-            .ok_or_else(|| anyhow::anyhow!("recovered FEC packet has no peer session"))?;
-        let my_peer_id = self.my_peer_id.load();
-        if from_peer_id != expected_peer_id || to_peer_id != my_peer_id {
-            return Err(anyhow::anyhow!(
-                "recovered FEC packet has unexpected peer identifiers"
-            ));
-        }
-
-        if !encrypted {
-            return Err(anyhow::anyhow!(
-                "recovered FEC packet is unprotected on a raw peer stream"
-            ));
-        }
-
-        let session = self
-            .session
-            .load_full()
-            .ok_or_else(|| anyhow::anyhow!("recovered FEC packet has no active session"))?;
-        session.decrypt_fec_payload(from_peer_id, my_peer_id, data)
-    }
-
-    fn alternate_fec_session_invalidated(&self) -> bool {
-        self.session
-            .load_full()
-            .is_some_and(|session| !session.is_valid())
     }
 
     fn encrypt_batch_sequential(&self, batch: &mut PacketBatch) -> Result<(), anyhow::Error> {
@@ -1437,11 +1347,6 @@ pub struct PeerConn {
     peer_session_store: Arc<PeerSessionStore>,
     my_encrypt_algo: String,
 
-    alternate_fec_decoder: Option<Arc<parking_lot::Mutex<AlternateFecDecoder>>>,
-    alternate_fec_offer: bool,
-    alternate_fec_enabled: bool,
-    alternate_fec_remote_receive_capabilities: u64,
-    alternate_fec_datagram_size_budget: Option<DatagramSizeBudget>,
 }
 
 impl Debug for PeerConn {
@@ -1487,7 +1392,6 @@ impl PeerConn {
         let tunnel_info = tunnel.info();
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
-        let alternate_fec_datagram_size_budget = tunnel.datagram_size_budget();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
         let (speed_ack_sender, _speed_ack_receiver) = broadcast::channel(8);
 
@@ -1512,8 +1416,6 @@ impl PeerConn {
 
         let conn_id = PeerConnId::new_v4();
         let my_encrypt_algo = flags.encryption_algorithm;
-        let alternate_fec_offer = flags.quic_datagram_alternate_path_parity
-            && matches!(flags.quic_datagram_fec_parity, 2 | 3);
 
         PeerConn {
             conn_id,
@@ -1562,11 +1464,6 @@ impl PeerConn {
             peer_session_store,
             my_encrypt_algo,
 
-            alternate_fec_decoder: None,
-            alternate_fec_offer,
-            alternate_fec_enabled: false,
-            alternate_fec_remote_receive_capabilities: 0,
-            alternate_fec_datagram_size_budget,
         }
     }
 
@@ -1746,12 +1643,6 @@ impl PeerConn {
         self.discovery_peer_hint = Some(hint);
     }
 
-    pub(crate) fn has_distinct_quic_surface(&self, other: &Self) -> bool {
-        self.tunnel_info
-            .as_ref()
-            .zip(other.tunnel_info.as_ref())
-            .is_some_and(|(left, right)| tunnel_infos_have_distinct_quic_surface(left, right))
-    }
 
     pub(crate) fn discovery_order(&self) -> Option<(bool, [u8; 32])> {
         // The Noise transcript gives both endpoints the same order for simultaneous flows.
@@ -1766,85 +1657,6 @@ impl PeerConn {
             self.is_client? == (self.my_peer_id < self.get_peer_id()),
             hash,
         ))
-    }
-
-    pub(crate) fn alternate_parity_path_allowed(&self) -> bool {
-        self.tunnel_info.as_ref().is_some_and(|info| {
-            tunnel_info_allowed_for_alternate_parity(info, &self.global_ctx.get_underlay_policy())
-        })
-    }
-
-    pub(crate) fn encrypt_alternate_fec_source(
-        &self,
-        packet: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        self.session_filter.encrypt_alternate_fec_source(packet)
-    }
-
-    pub(crate) fn decrypt_recovered_alternate_fec_packet(
-        &self,
-        packet: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        self.session_filter
-            .decrypt_recovered_alternate_fec_packet(packet)
-    }
-
-    pub(crate) fn set_alternate_fec_decoder(
-        &mut self,
-        decoder: Option<Arc<parking_lot::Mutex<AlternateFecDecoder>>>,
-    ) {
-        self.alternate_fec_decoder = decoder;
-    }
-
-    pub(crate) fn alternate_fec_enabled(&self) -> bool {
-        self.alternate_fec_enabled
-    }
-
-    pub(crate) fn alternate_fec_remote_receive_ready(&self) -> bool {
-        (self.alternate_fec_remote_receive_capabilities & ALTERNATE_FEC_RX_V1) != 0
-    }
-
-    pub(crate) fn alternate_fec_datagram_budget(&self) -> usize {
-        self.alternate_fec_datagram_size_budget
-            .as_ref()
-            .and_then(|budget| budget())
-            .unwrap_or(ALTERNATE_FEC_CONSERVATIVE_DATAGRAM_BUDGET)
-    }
-
-    pub(crate) fn alternate_fec_source_payload_len(&self, packet: &ZCPacket) -> Option<usize> {
-        let payload_len = packet.tunnel_payload().len();
-        let header = packet.peer_manager_header()?;
-        if header.is_encrypted() {
-            return Some(payload_len);
-        }
-        let Some((my_peer_id, peer_id, _session)) = self.session_filter.encryption_context() else {
-            return Some(payload_len);
-        };
-        if header.from_peer_id.get() != my_peer_id || header.to_peer_id.get() != peer_id {
-            return Some(payload_len);
-        }
-        payload_len.checked_add(crate::tunnel::packet_def::StandardAeadTail::SIZE)
-    }
-
-    pub(crate) fn alternate_fec_record_fits(&self, record_len: usize) -> bool {
-        alternate_fec_wire_len(
-            record_len,
-            self.session_filter.encryption_context().is_some(),
-        )
-        .is_some_and(|wire_len| wire_len <= self.alternate_fec_datagram_budget())
-    }
-
-    fn local_receive_capabilities(&self) -> u64 {
-        {
-            return self
-                .alternate_fec_offer
-                .then_some(ALTERNATE_FEC_RX_V1)
-                .unwrap_or(0);
-        }
-    }
-
-    fn local_transmit_capabilities(&self) -> u64 {
-        self.local_receive_capabilities()
     }
 
     pub fn set_is_hole_punched(&mut self, is_hole_punched: bool) {
@@ -2236,8 +2048,8 @@ impl PeerConn {
             acknowledged_transition_id: acknowledged_transition_id
                 .map(|id| id.to_vec())
                 .unwrap_or_default(),
-            receive_capabilities: self.local_receive_capabilities(),
-            transmit_capabilities: self.local_transmit_capabilities(),
+            receive_capabilities: 0,
+            transmit_capabilities: 0,
             credential_root_fingerprint: local_root_fingerprint.to_vec(),
             initiator_certificate_digest: local_certificate_digest.to_vec(),
         };
@@ -2278,8 +2090,6 @@ impl PeerConn {
         let selected_protection = PeerConnDataProtectionPb::try_from(msg2_pb.data_protection)
             .map_err(|_| Error::WaitRespError("invalid data protection mode".to_owned()))?;
         validate_data_protection_mode(local_data_protection, selected_protection)?;
-        let alternate_fec_enabled =
-            alternate_fec_negotiated(self.alternate_fec_offer, msg2_pb.transmit_capabilities);
         if msg2_pb.a_conn_id_echo != Some(a_conn_id.into()) {
             return Err(Error::WaitRespError(
                 "noise msg2 conn_id_echo mismatch".to_owned(),
@@ -2668,9 +2478,9 @@ impl PeerConn {
             responder_identity_type_for_msg3,
             initiator_auth_level_for_context,
             responder_auth_level_for_context,
-            self.local_receive_capabilities(),
+            0,
             msg2_pb.receive_capabilities,
-            self.local_transmit_capabilities(),
+            0,
             msg2_pb.transmit_capabilities,
             &[0; 32],
             &responder_status_digest,
@@ -3073,8 +2883,6 @@ impl PeerConn {
 
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg2_pb.server_encryption_algorithm.clone(),
-            alternate_fec_enabled,
-            alternate_fec_remote_receive_capabilities: msg2_pb.receive_capabilities,
         })
     }
 
@@ -3192,8 +3000,6 @@ impl PeerConn {
         )?;
         validate_protocol_version(msg1_pb.version)?;
         validate_encryption_algorithm(&msg1_pb.client_encryption_algorithm)?;
-        let alternate_fec_enabled =
-            alternate_fec_negotiated(self.alternate_fec_offer, msg1_pb.transmit_capabilities);
         let remote_network_name = msg1_pb.a_network_name.clone();
         self.record_control_rx(&remote_network_name, first_msg1_len);
 
@@ -3446,8 +3252,8 @@ impl PeerConn {
                 .map_err(|_| Error::WaitRespError("invalid Admin certificate status".to_owned()))?
                 .sequence
         };
-        let responder_receive_capabilities = self.local_receive_capabilities();
-        let responder_transmit_capabilities = self.local_transmit_capabilities();
+        let responder_receive_capabilities = 0;
+        let responder_transmit_capabilities = 0;
         let local_data_protection = self.local_data_protection()?;
         let (transport_binding_kind, transport_binding_digest) =
             self.local_transport_binding_context()?;
@@ -4149,8 +3955,6 @@ impl PeerConn {
 
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg1_pb.client_encryption_algorithm.clone(),
-            alternate_fec_enabled,
-            alternate_fec_remote_receive_capabilities: msg1_pb.receive_capabilities,
         })
     }
 
@@ -4219,11 +4023,6 @@ impl PeerConn {
         self.session_filter.set_peer_id(noise.peer_id);
         self.session_filter
             .set_data_protection_mode(data_protection_mode);
-        {
-            self.alternate_fec_enabled = noise.alternate_fec_enabled;
-            self.alternate_fec_remote_receive_capabilities =
-                noise.alternate_fec_remote_receive_capabilities;
-        }
         self.noise_handshake_result = Some(noise);
         self.info = Some(handshake_rsp);
         self.is_client = Some(false);
@@ -4250,11 +4049,6 @@ impl PeerConn {
         self.session_filter
             .set_data_protection_mode(data_protection_mode);
 
-        {
-            self.alternate_fec_enabled = noise.alternate_fec_enabled;
-            self.alternate_fec_remote_receive_capabilities =
-                noise.alternate_fec_remote_receive_capabilities;
-        }
 
         let handshake_rsp = self.build_handshake_rsp(&noise);
         self.noise_handshake_result = Some(noise);
@@ -4352,10 +4146,6 @@ impl PeerConn {
             conn_info_for_instrument.network_name.clone(),
             probe_peer_id,
         );
-        let alternate_fec_decoder = self.alternate_fec_decoder.clone();
-        let alternate_fec_telemetry = self.global_ctx.dataplane_telemetry().clone();
-        let alternate_fec_session_filter = self.session_filter.clone();
-        let alternate_fec_enabled = self.alternate_fec_enabled;
 
         let is_foreign_network = conn_info_for_instrument.network_name
             != self.global_ctx.get_network_identity().network_name;
@@ -4576,8 +4366,6 @@ impl PeerConn {
                     }
 
                     let mut data = PacketBatch::with_capacity(incoming.len());
-                    let mut fec_send_failed = false;
-                    let mut fec_session_invalidated = false;
                     for mut zc_packet in incoming {
                         let buf_len = zc_packet.buf_len() as u64;
                         let Some(peer_mgr_hdr) = zc_packet.mut_peer_manager_header() else {
@@ -4588,85 +4376,10 @@ impl PeerConn {
                             continue;
                         };
 
-                        if peer_mgr_hdr.packet_type == PacketType::AlternateFecSource as u8
-                            || peer_mgr_hdr.packet_type == PacketType::AlternateFecParity as u8
-                        {
-                            let fec_rx_operation = if peer_mgr_hdr.packet_type
-                                == PacketType::AlternateFecSource as u8
-                            {
-                                DataplaneFec::SourceRx
-                            } else {
-                                DataplaneFec::ParityRx
-                            };
-                            if alternate_fec_enabled
-                                && let Some(decoder) = alternate_fec_decoder.as_ref()
-                            {
-                                let decoded = {
-                                    let mut decoder = decoder.lock();
-                                    decode_alternate_fec_packet_with_stats(
-                                        zc_packet,
-                                        &mut decoder,
-                                        std::time::Instant::now(),
-                                    )
-                                };
-                                match decoded {
-                                    Ok(decoded) => {
-                                        alternate_fec_telemetry.record_fec(
-                                            fec_rx_operation,
-                                            1,
-                                            usize::try_from(buf_len).unwrap_or(usize::MAX),
-                                        );
-                                        if decoded.recovered_packets != 0 {
-                                            alternate_fec_telemetry.record_fec(
-                                                DataplaneFec::Recovered,
-                                                decoded.recovered_packets,
-                                                decoded.recovered_bytes,
-                                            );
-                                        }
-                                        for mut packet in decoded.packets {
-                                            if let Err(error) = alternate_fec_session_filter
-                                                .decrypt_recovered_alternate_fec_packet(&mut packet)
-                                            {
-                                                tracing::warn!(
-                                                    ?error,
-                                                    "dropping recovered alternate-path FEC packet"
-                                                );
-                                                if alternate_fec_session_filter
-                                                    .alternate_fec_session_invalidated()
-                                                {
-                                                    task_ret = Err(TunnelError::InternalError(
-                                                        "session invalidated by recovered alternate-path FEC packet"
-                                                            .to_string(),
-                                                    ));
-                                                    fec_session_invalidated = true;
-                                                    break;
-                                                }
-                                                continue;
-                                            }
-                                            if let Err(packet) = data.try_push(packet) {
-                                                if sender
-                                                    .send_batch(std::mem::take(&mut data))
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    fec_send_failed = true;
-                                                    break;
-                                                }
-                                                data.try_push(packet).expect(
-                                                    "fresh alternate FEC receive batch has room",
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(error) => tracing::warn!(
-                                        ?error,
-                                        "dropping invalid alternate-path FEC packet"
-                                    ),
-                                }
-                            }
+                        // Old peers must not deliver retired FEC records as ordinary data.
+                        if matches!(peer_mgr_hdr.packet_type, 23 | 24) {
                             continue;
                         }
-
                         if peer_mgr_hdr.packet_type == PacketType::ReceiverPressure as u8 {
                             control_metrics.record_rx(buf_len);
                             match ReceiverPressureReport::decode(zc_packet.payload()) {
@@ -4781,10 +4494,6 @@ impl PeerConn {
                             data.try_push(zc_packet)
                                 .expect("filtered peer receive vector remains bounded");
                         }
-                    }
-
-                    if fec_send_failed || fec_session_invalidated {
-                        break;
                     }
 
                     if !data.is_empty() {
@@ -5219,65 +4928,6 @@ impl PeerConn {
     pub fn get_my_peer_id(&self) -> PeerId {
         self.my_peer_id
     }
-}
-
-fn tunnel_url_ip(url: Option<&crate::proto::common::Url>) -> Option<std::net::IpAddr> {
-    let ip: std::net::IpAddr = url::Url::parse(&url?.url).ok()?.host_str()?.parse().ok()?;
-    (!ip.is_unspecified()).then_some(ip)
-}
-
-fn tunnel_infos_have_distinct_quic_surface(left: &TunnelInfo, right: &TunnelInfo) -> bool {
-    if left.tunnel_type != "quic" || right.tunnel_type != "quic" {
-        return false;
-    }
-    let left_local = tunnel_url_ip(left.local_addr.as_ref());
-    let right_local = tunnel_url_ip(right.local_addr.as_ref());
-    let left_remote = tunnel_url_ip(
-        left.resolved_remote_addr
-            .as_ref()
-            .or(left.remote_addr.as_ref()),
-    );
-    let right_remote = tunnel_url_ip(
-        right
-            .resolved_remote_addr
-            .as_ref()
-            .or(right.remote_addr.as_ref()),
-    );
-    left_local
-        .zip(right_local)
-        .is_some_and(|(left, right)| left != right)
-        || left_remote
-            .zip(right_remote)
-            .is_some_and(|(left, right)| left != right)
-}
-
-fn tunnel_info_allowed_for_alternate_parity(
-    info: &TunnelInfo,
-    policy: &crate::common::underlay_policy::UnderlayPolicy,
-) -> bool {
-    if info.tunnel_type != "quic" {
-        return false;
-    }
-    if !policy.is_active() {
-        return true;
-    }
-    // TunnelInfo carries IP endpoints but not a stable interface name. When
-    // an interface deny rule is active, do not add alternate-path traffic to
-    // a connection whose interface cannot be re-proven at selection time.
-    if policy.has_interface_rules() {
-        return false;
-    }
-    let Some(local) = tunnel_url_ip(info.local_addr.as_ref()) else {
-        return false;
-    };
-    let Some(remote) = tunnel_url_ip(
-        info.resolved_remote_addr
-            .as_ref()
-            .or(info.remote_addr.as_ref()),
-    ) else {
-        return false;
-    };
-    policy.allows_ip(local) && policy.allows_remote(remote)
 }
 
 impl Drop for PeerConn {

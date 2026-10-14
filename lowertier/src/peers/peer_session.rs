@@ -2575,33 +2575,7 @@ impl PeerSession {
         )
     }
 
-    pub fn encrypt_fec_payload(
-        &self,
-        sender_peer_id: PeerId,
-        receiver_peer_id: PeerId,
-        pkt: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        if !self.is_valid() {
-            return Err(anyhow!("session invalidated"));
-        }
-        self.datagram
-            .encrypt_fec_payload(Self::dir_for_sender(sender_peer_id, receiver_peer_id), pkt)
-    }
 
-    pub fn encrypt_fec_payload_batch(
-        &self,
-        sender_peer_id: PeerId,
-        receiver_peer_id: PeerId,
-        packets: &mut [ZCPacket],
-    ) -> Result<(), anyhow::Error> {
-        if !self.is_valid() {
-            return Err(anyhow!("session invalidated"));
-        }
-        self.datagram.encrypt_fec_payload_batch(
-            Self::dir_for_sender(sender_peer_id, receiver_peer_id),
-            packets,
-        )
-    }
 
     pub fn decrypt_payload(
         &self,
@@ -2636,20 +2610,6 @@ impl PeerSession {
         )
     }
 
-    pub fn decrypt_fec_payload(
-        &self,
-        sender_peer_id: PeerId,
-        receiver_peer_id: PeerId,
-        ciphertext_with_tail: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        if !self.is_valid() {
-            return Err(anyhow!("session invalidated"));
-        }
-        self.datagram.decrypt_fec_payload(
-            Self::dir_for_sender(sender_peer_id, receiver_peer_id),
-            ciphertext_with_tail,
-        )
-    }
 }
 
 #[cfg(test)]

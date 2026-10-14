@@ -88,8 +88,7 @@ pub enum PacketType {
     RelayHandshake = 20,
     RelayHandshakeAck = 21,
     Ethernet = 22,
-    AlternateFecSource = 23,
-    AlternateFecParity = 24,
+    // Values 23 and 24 belonged to removed FEC records. Do not reuse them.
     SpeedProbe = 25,
     SpeedProbeAck = 26,
     RelayHandshakeConfirm = 27,
@@ -1571,8 +1570,6 @@ impl ZCPacket {
             .map(|hdr| {
                 hdr.packet_type == PacketType::Data as u8
                     || hdr.packet_type == PacketType::Ethernet as u8
-                    || hdr.packet_type == PacketType::AlternateFecSource as u8
-                    || hdr.packet_type == PacketType::AlternateFecParity as u8
             })
             .unwrap_or(false)
     }
@@ -2139,17 +2136,6 @@ mod tests {
         assert!(!header.is_latency_first());
     }
 
-    #[test]
-    fn alternate_fec_records_use_the_lossy_datagram_lane() {
-        for packet_type in [
-            PacketType::AlternateFecSource,
-            PacketType::AlternateFecParity,
-        ] {
-            let mut packet = ZCPacket::new_with_payload(b"fec");
-            packet.fill_peer_manager_hdr(1, 2, packet_type as u8);
-            assert!(packet.is_lossy());
-        }
-    }
 
     #[test]
     fn into_bytes_drops_spare_capacity_before_freeze() {

@@ -605,8 +605,6 @@ pub(crate) fn is_data_packet(packet: &ZCPacket) -> bool {
         x if x == PacketType::Data as u8
             || x == PacketType::OverlayStream as u8
             || x == PacketType::Ethernet as u8
-            || x == PacketType::AlternateFecSource as u8
-            || x == PacketType::AlternateFecParity as u8
     )
 }
 

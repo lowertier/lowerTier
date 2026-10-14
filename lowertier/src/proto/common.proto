@@ -91,13 +91,11 @@ message FlagsInConfig {
   // Zero disables the limit.
   uint64 l2_flood_bps = 54;
 
-  // Alternate-path SIMD FEC. Zero disables FEC. Two selects 16+2.
-  // Three selects 16+3.
-  uint32 quic_datagram_fec_parity = 55;
+  reserved 55;
+  reserved "quic_datagram_fec_parity";
   reserved 56;
-  // When two authenticated QUIC connections use distinct local or remote IP
-  // surfaces, carry an additional peer-layer parity block on the alternate.
-  bool quic_datagram_alternate_path_parity = 57;
+  reserved 57;
+  reserved "quic_datagram_alternate_path_parity";
 
   // Prefer the freshest route with the highest measured delivery rate.
   bool speed_first = 58;

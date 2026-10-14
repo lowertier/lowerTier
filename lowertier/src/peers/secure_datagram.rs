@@ -119,29 +119,20 @@ pub struct SecureDatagramSession {
 
     send_epoch: AtomicU32,
     send_seq: [AtomicU64; 2],
-    // FEC uses an independent nonce sequence in a domain-separated key space.
-    // The epoch remains shared with the session transition state.
-    fec_send_seq: [AtomicU64; 2],
     send_epoch_started_ms: AtomicU64,
-    // Counts standard and FEC packets together for epoch lifetime rotation.
     send_packets_since_epoch: AtomicU64,
     rotation_lock: Mutex<()>,
 
     rx_slots: Mutex<[[EpochRxSlot; 2]; 2]>,
     key_cache: Mutex<[[EpochKeySlot; 2]; 2]>,
-    fec_rx_slots: Mutex<[[EpochRxSlot; 2]; 2]>,
-    fec_key_cache: Mutex<[[EpochKeySlot; 2]; 2]>,
     sync_rx_grace: Mutex<SyncRxGrace>,
     sync_rx_grace_expires_at_ms: AtomicU64,
-    fec_sync_rx_grace: Mutex<SyncRxGrace>,
-    fec_sync_rx_grace_expires_at_ms: AtomicU64,
 
     send_cipher_algorithm: String,
     recv_cipher_algorithm: String,
 
     invalidated: AtomicBool,
     decrypt_fail_count: AtomicU32,
-    fec_decrypt_fail_count: AtomicU32,
 }
 
 struct RedactedSecret;
@@ -159,25 +150,17 @@ impl std::fmt::Debug for SecureDatagramSession {
             .field("session_generation", &self.session_generation)
             .field("send_epoch", &self.send_epoch)
             .field("send_seq", &self.send_seq)
-            .field("fec_send_seq", &self.fec_send_seq)
             .field("send_epoch_started_ms", &self.send_epoch_started_ms)
             .field("send_packets_since_epoch", &self.send_packets_since_epoch)
             .field("rx_slots", &self.rx_slots)
             .field("key_cache", &self.key_cache)
-            .field("fec_rx_slots", &self.fec_rx_slots)
-            .field("fec_key_cache", &self.fec_key_cache)
             .field("sync_rx_grace", &self.sync_rx_grace)
             .field(
                 "sync_rx_grace_expires_at_ms",
                 &self.sync_rx_grace_expires_at_ms,
             )
-            .field(
-                "fec_sync_rx_grace_expires_at_ms",
-                &self.fec_sync_rx_grace_expires_at_ms,
-            )
             .field("send_cipher_algorithm", &self.send_cipher_algorithm)
             .field("recv_cipher_algorithm", &self.recv_cipher_algorithm)
-            .field("fec_decrypt_fail_count", &self.fec_decrypt_fail_count)
             .finish()
     }
 }
@@ -188,7 +171,6 @@ impl SecureDatagramSession {
     const ROTATE_AFTER_MS: u64 = 10 * 60 * 1000;
     const MAX_ACCEPTED_RX_EPOCH_AHEAD: u32 = 3;
     const DECRYPT_FAIL_THRESHOLD: u32 = 10;
-    const FEC_DECRYPT_FAIL_THRESHOLD: u32 = 10;
 
     pub fn new(
         root_key: [u8; 32],
@@ -205,7 +187,6 @@ impl SecureDatagramSession {
             [EpochKeySlot::default(), EpochKeySlot::default()],
             [EpochKeySlot::default(), EpochKeySlot::default()],
         ];
-        let fec_key_cache = key_cache.clone();
         let now_ms = now_ms();
         Self {
             state_transition: RwLock::new(()),
@@ -213,23 +194,17 @@ impl SecureDatagramSession {
             session_generation: AtomicU32::new(session_generation),
             send_epoch: AtomicU32::new(initial_epoch),
             send_seq: [AtomicU64::new(0), AtomicU64::new(0)],
-            fec_send_seq: [AtomicU64::new(0), AtomicU64::new(0)],
             send_epoch_started_ms: AtomicU64::new(now_ms),
             send_packets_since_epoch: AtomicU64::new(0),
             rotation_lock: Mutex::new(()),
             rx_slots: Mutex::new(rx_slots),
             key_cache: Mutex::new(key_cache),
-            fec_rx_slots: Mutex::new(rx_slots),
-            fec_key_cache: Mutex::new(fec_key_cache),
             sync_rx_grace: Mutex::new(SyncRxGrace::default()),
             sync_rx_grace_expires_at_ms: AtomicU64::new(0),
-            fec_sync_rx_grace: Mutex::new(SyncRxGrace::default()),
-            fec_sync_rx_grace_expires_at_ms: AtomicU64::new(0),
             send_cipher_algorithm,
             recv_cipher_algorithm,
             invalidated: AtomicBool::new(false),
             decrypt_fail_count: AtomicU32::new(0),
-            fec_decrypt_fail_count: AtomicU32::new(0),
         }
     }
 
@@ -260,35 +235,7 @@ impl SecureDatagramSession {
         self.decrypt_fail_count.store(0, Ordering::Release);
     }
 
-    /// Record one failed FEC decrypt operation without invalidating standard
-    /// traffic. The counter is bounded to limit attacker-controlled state.
-    fn record_fec_decrypt_failure(&self) {
-        let previous = self
-            .fec_decrypt_fail_count
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(
-                    current
-                        .saturating_add(1)
-                        .min(Self::FEC_DECRYPT_FAIL_THRESHOLD),
-                )
-            })
-            .unwrap_or(Self::FEC_DECRYPT_FAIL_THRESHOLD);
-        let count = previous
-            .saturating_add(1)
-            .min(Self::FEC_DECRYPT_FAIL_THRESHOLD);
-        if previous < Self::FEC_DECRYPT_FAIL_THRESHOLD && count == Self::FEC_DECRYPT_FAIL_THRESHOLD
-        {
-            tracing::warn!(
-                count,
-                "secure datagram FEC decrypt failures reached bounded threshold"
-            );
-        }
-    }
 
-    /// Clear the FEC failure streak after an authenticated FEC packet.
-    fn record_fec_authenticated_success(&self) {
-        self.fec_decrypt_fail_count.store(0, Ordering::Release);
-    }
 
     pub fn session_generation(&self) -> u32 {
         self.session_generation.load(Ordering::Relaxed)
@@ -307,7 +254,6 @@ impl SecureDatagramSession {
     pub fn next_sync_epoch(&self) -> u32 {
         let send_epoch = self.send_epoch.load(Ordering::Relaxed);
         let rx = self.rx_slots.lock().unwrap();
-        let fec_rx = self.fec_rx_slots.lock().unwrap();
         let mut max_epoch = send_epoch;
         for dir in 0..2 {
             let cur = rx[dir][0];
@@ -317,14 +263,6 @@ impl SecureDatagramSession {
             let prev = rx[dir][1];
             if prev.valid {
                 max_epoch = max_epoch.max(prev.epoch);
-            }
-            let fec_cur = fec_rx[dir][0];
-            if fec_cur.valid {
-                max_epoch = max_epoch.max(fec_cur.epoch);
-            }
-            let fec_prev = fec_rx[dir][1];
-            if fec_prev.valid {
-                max_epoch = max_epoch.max(fec_prev.epoch);
             }
         }
         max_epoch.wrapping_add(1)
@@ -363,8 +301,6 @@ impl SecureDatagramSession {
         self.send_epoch.store(initial_epoch, Ordering::Relaxed);
         self.send_seq[0].store(0, Ordering::Relaxed);
         self.send_seq[1].store(0, Ordering::Relaxed);
-        self.fec_send_seq[0].store(0, Ordering::Relaxed);
-        self.fec_send_seq[1].store(0, Ordering::Relaxed);
         self.send_epoch_started_ms
             .store(now_ms(), Ordering::Relaxed);
         self.send_packets_since_epoch.store(0, Ordering::Relaxed);
@@ -406,67 +342,19 @@ impl SecureDatagramSession {
             }
         }
 
-        // FEC has its own replay windows and key cache. Preserve its grace
-        // state only when the root key and transition epoch remain compatible.
-        {
-            let mut fec_rx = self.fec_rx_slots.lock().unwrap();
-            let mut fec_sync_rx_grace = self.fec_sync_rx_grace.lock().unwrap();
-            if can_preserve_rx_grace {
-                let expires_at_ms = now_ms().saturating_add(Self::SYNC_RX_GRACE_AFTER_MS);
-                let mut previous_slots = *fec_rx;
-                for direction in 0..2 {
-                    let mut current = [EpochRxSlot::default(), EpochRxSlot::default()];
-                    for slot in fec_rx[direction].iter().copied() {
-                        if !slot.valid {
-                            continue;
-                        }
-                        if slot.epoch == initial_epoch {
-                            current[0] = slot;
-                            for previous in previous_slots[direction].iter_mut() {
-                                if previous.valid && previous.epoch == initial_epoch {
-                                    previous.clear();
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    fec_rx[direction] = current;
-                }
-                fec_sync_rx_grace.refresh(previous_slots, expires_at_ms);
-                self.fec_sync_rx_grace_expires_at_ms
-                    .store(expires_at_ms, Ordering::Relaxed);
-            } else {
-                fec_sync_rx_grace.clear();
-                self.fec_sync_rx_grace_expires_at_ms
-                    .store(0, Ordering::Relaxed);
-                for dir in 0..2 {
-                    fec_rx[dir][0].clear();
-                    fec_rx[dir][1].clear();
-                }
-            }
-        }
-
         self.key_cache
-            .lock()
-            .unwrap()
-            .fill([EpochKeySlot::default(), EpochKeySlot::default()]);
-        self.fec_key_cache
             .lock()
             .unwrap()
             .fill([EpochKeySlot::default(), EpochKeySlot::default()]);
         // A root-key sync starts a new authenticated epoch. Do not carry a
         // failure streak from the previous key into the new session state.
         self.decrypt_fail_count.store(0, Ordering::Release);
-        self.fec_decrypt_fail_count.store(0, Ordering::Release);
     }
 
     fn hkdf_traffic_key(&self, epoch: u32, dir: SecureDatagramDirection) -> [u8; 32] {
         self.hkdf_traffic_key_with_label(epoch, dir, b"et-traffic")
     }
 
-    fn hkdf_fec_traffic_key(&self, epoch: u32, dir: SecureDatagramDirection) -> [u8; 32] {
-        self.hkdf_traffic_key_with_label(epoch, dir, b"et-fec-traffic")
-    }
 
     fn hkdf_traffic_key_with_label(
         &self,
@@ -539,50 +427,6 @@ impl SecureDatagramSession {
         ret
     }
 
-    fn get_or_create_fec_encryptor(
-        &self,
-        epoch: u32,
-        dir: SecureDatagramDirection,
-        generation: u32,
-        is_send: bool,
-    ) -> Arc<dyn Encryptor> {
-        let dir_idx = dir.idx();
-        let mut guard = self.fec_key_cache.lock().unwrap();
-        for slot in guard[dir_idx].iter_mut() {
-            if slot.valid && slot.epoch == epoch && slot.generation == generation {
-                return slot.get_encryptor(is_send);
-            }
-        }
-
-        let key = self.hkdf_fec_traffic_key(epoch, dir);
-        let mut key_128 = [0u8; 16];
-        key_128.copy_from_slice(&key[..16]);
-
-        let slot = EpochKeySlot {
-            epoch,
-            generation,
-            valid: true,
-            send_cipher: Some(create_secure_datagram_encryptor(
-                &self.send_cipher_algorithm,
-                key_128,
-                key,
-            )),
-            recv_cipher: Some(create_secure_datagram_encryptor(
-                &self.recv_cipher_algorithm,
-                key_128,
-                key,
-            )),
-        };
-        let ret = slot.get_encryptor(is_send);
-
-        if !guard[dir_idx][0].valid || guard[dir_idx][0].epoch == epoch {
-            guard[dir_idx][0] = slot;
-        } else {
-            guard[dir_idx][1] = slot;
-        }
-
-        ret
-    }
 
     fn maybe_rotate_epoch(&self, now_ms: u64, packet_count: u64) {
         let mut packets = self.send_packets_since_epoch.load(Ordering::Acquire);
@@ -656,39 +500,6 @@ impl SecureDatagramSession {
         Ok((epoch, seq))
     }
 
-    fn reserve_fec_nonce_range(
-        &self,
-        dir: SecureDatagramDirection,
-        packet_count: usize,
-    ) -> Result<(u32, u64), anyhow::Error> {
-        let packet_count = u64::try_from(packet_count)
-            .map_err(|_| anyhow!("secure datagram FEC batch is too large"))?;
-        if packet_count == 0 {
-            return Ok((self.send_epoch.load(Ordering::Relaxed), 0));
-        }
-        // FEC packets share the epoch lifetime budget with standard packets.
-        // Their nonce sequence remains independent and domain separated.
-        self.maybe_rotate_epoch(now_ms(), packet_count);
-        let epoch = self.send_epoch.load(Ordering::Relaxed);
-        let seq = loop {
-            let current = self.fec_send_seq[dir.idx()].load(Ordering::Relaxed);
-            if current > u64::MAX.saturating_sub(packet_count) {
-                return Err(anyhow!("secure datagram FEC nonce sequence exhausted"));
-            }
-            if self.fec_send_seq[dir.idx()]
-                .compare_exchange_weak(
-                    current,
-                    current + packet_count,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                break current;
-            }
-        };
-        Ok((epoch, seq))
-    }
 
     fn nonce(epoch: u32, seq: u64) -> [u8; 12] {
         let mut nonce = [0u8; 12];
@@ -748,45 +559,13 @@ impl SecureDatagramSession {
         (rx, grace)
     }
 
-    fn max_authenticated_epoch(
-        rx: &[[EpochRxSlot; 2]; 2],
-        sync_rx_grace: Option<&SyncRxGrace>,
-    ) -> u32 {
-        let mut max_epoch = 0;
-        for direction in rx {
-            for slot in direction {
-                if slot.valid {
-                    max_epoch = max_epoch.max(slot.epoch);
-                }
-            }
-        }
-        if let Some(grace) = sync_rx_grace {
-            for direction in &grace.slots {
-                for slot in direction {
-                    if slot.valid {
-                        max_epoch = max_epoch.max(slot.epoch);
-                    }
-                }
-            }
-        }
-        max_epoch
-    }
 
-    fn fec_authenticated_epoch_snapshot(&self, now_ms: u64) -> u32 {
-        let (rx, grace) = self.fec_replay_state_snapshot(now_ms);
-        Self::max_authenticated_epoch(&rx, grace.valid.then_some(&grace))
-    }
 
-    fn standard_authenticated_epoch_snapshot(&self, now_ms: u64) -> u32 {
-        let (rx, grace) = self.replay_state_snapshot(now_ms);
-        Self::max_authenticated_epoch(&rx, grace.valid.then_some(&grace))
-    }
 
     fn precheck_replay_state(
         rx: &[[EpochRxSlot; 2]; 2],
         sync_rx_grace: Option<&SyncRxGrace>,
         send_epoch: u32,
-        cross_domain_epoch: u32,
         epoch: u32,
         seq: u64,
         dir_idx: usize,
@@ -803,7 +582,7 @@ impl SecureDatagramSession {
         }
 
         if !rx[dir_idx][0].valid {
-            let baseline_epoch = send_epoch.max(cross_domain_epoch);
+            let baseline_epoch = send_epoch;
             return epoch <= baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD);
         }
 
@@ -816,7 +595,7 @@ impl SecureDatagramSession {
         }
 
         if epoch > rx[dir_idx][0].epoch {
-            let mut baseline_epoch = send_epoch.max(cross_domain_epoch).max(rx[dir_idx][0].epoch);
+            let mut baseline_epoch = send_epoch.max(rx[dir_idx][0].epoch);
             if rx[dir_idx][1].valid {
                 baseline_epoch = baseline_epoch.max(rx[dir_idx][1].epoch);
             }
@@ -830,7 +609,6 @@ impl SecureDatagramSession {
         rx: &mut [[EpochRxSlot; 2]; 2],
         sync_rx_grace: &mut Option<SyncRxGrace>,
         send_epoch: u32,
-        cross_domain_epoch: u32,
         epoch: u32,
         seq: u64,
         dir_idx: usize,
@@ -853,7 +631,7 @@ impl SecureDatagramSession {
         }
 
         if !rx[dir_idx][0].valid {
-            let baseline_epoch = send_epoch.max(cross_domain_epoch);
+            let baseline_epoch = send_epoch;
             if epoch > baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD) {
                 return false;
             }
@@ -874,7 +652,7 @@ impl SecureDatagramSession {
             return rx[dir_idx][1].window.accept(seq);
         }
         if epoch > rx[dir_idx][0].epoch {
-            let mut baseline_epoch = send_epoch.max(cross_domain_epoch).max(rx[dir_idx][0].epoch);
+            let mut baseline_epoch = send_epoch.max(rx[dir_idx][0].epoch);
             if rx[dir_idx][1].valid {
                 baseline_epoch = baseline_epoch.max(rx[dir_idx][1].epoch);
             }
@@ -922,7 +700,6 @@ impl SecureDatagramSession {
         now_ms: u64,
     ) -> bool {
         let dir_idx = dir.idx();
-        let cross_domain_epoch = self.fec_authenticated_epoch_snapshot(now_ms);
         let rx = self.rx_slots.lock().unwrap();
         let sync_rx_grace = if self.sync_rx_grace_active(now_ms) {
             let mut sync_rx_grace = self.sync_rx_grace.lock().unwrap();
@@ -950,7 +727,7 @@ impl SecureDatagramSession {
 
         if !rx[dir_idx][0].valid {
             let send_epoch = self.send_epoch.load(Ordering::Relaxed);
-            let baseline_epoch = send_epoch.max(cross_domain_epoch);
+            let baseline_epoch = send_epoch;
             return epoch <= baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD);
         }
 
@@ -965,8 +742,7 @@ impl SecureDatagramSession {
         if rx[dir_idx][0].valid && epoch > rx[dir_idx][0].epoch {
             let mut baseline_epoch = self
                 .send_epoch
-                .load(Ordering::Relaxed)
-                .max(cross_domain_epoch);
+                .load(Ordering::Relaxed);
             if rx[dir_idx][0].valid {
                 baseline_epoch = baseline_epoch.max(rx[dir_idx][0].epoch);
             }
@@ -993,7 +769,6 @@ impl SecureDatagramSession {
         now_ms: u64,
     ) -> bool {
         let dir_idx = dir.idx();
-        let cross_domain_epoch = self.fec_authenticated_epoch_snapshot(now_ms);
         let mut rx = self.rx_slots.lock().unwrap();
         let mut sync_rx_grace = if self.sync_rx_grace_active(now_ms) {
             let mut sync_rx_grace = self.sync_rx_grace.lock().unwrap();
@@ -1024,7 +799,7 @@ impl SecureDatagramSession {
         } else {
             if !rx[dir_idx][0].valid {
                 let send_epoch = self.send_epoch.load(Ordering::Relaxed);
-                let baseline_epoch = send_epoch.max(cross_domain_epoch);
+                let baseline_epoch = send_epoch;
                 if epoch > baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD) {
                     false
                 } else {
@@ -1045,8 +820,7 @@ impl SecureDatagramSession {
             } else if rx[dir_idx][0].valid && epoch > rx[dir_idx][0].epoch {
                 let mut baseline_epoch = self
                     .send_epoch
-                    .load(Ordering::Relaxed)
-                    .max(cross_domain_epoch);
+                    .load(Ordering::Relaxed);
                 if rx[dir_idx][0].valid {
                     baseline_epoch = baseline_epoch.max(rx[dir_idx][0].epoch);
                 }
@@ -1090,95 +864,9 @@ impl SecureDatagramSession {
         false
     }
 
-    fn fec_replay_state_snapshot(&self, now_ms: u64) -> ([[EpochRxSlot; 2]; 2], SyncRxGrace) {
-        let rx = *self.fec_rx_slots.lock().unwrap();
-        let mut grace = *self.fec_sync_rx_grace.lock().unwrap();
-        let expires_at_ms = self.fec_sync_rx_grace_expires_at_ms.load(Ordering::Relaxed);
-        if expires_at_ms == 0 || now_ms >= expires_at_ms {
-            grace.clear();
-            self.fec_sync_rx_grace_expires_at_ms
-                .store(0, Ordering::Relaxed);
-        } else if grace.valid {
-            grace.maybe_expire(now_ms);
-            if !grace.valid {
-                self.fec_sync_rx_grace_expires_at_ms
-                    .store(0, Ordering::Relaxed);
-            }
-        }
-        (rx, grace)
-    }
 
-    fn fec_precheck_replay(
-        &self,
-        epoch: u32,
-        seq: u64,
-        dir: SecureDatagramDirection,
-        now_ms: u64,
-    ) -> bool {
-        let cross_domain_epoch = self.standard_authenticated_epoch_snapshot(now_ms);
-        let (rx_snapshot, grace_snapshot) = self.fec_replay_state_snapshot(now_ms);
-        let grace = grace_snapshot.valid.then_some(&grace_snapshot);
-        Self::precheck_replay_state(
-            &rx_snapshot,
-            grace,
-            self.send_epoch.load(Ordering::Relaxed),
-            cross_domain_epoch,
-            epoch,
-            seq,
-            dir.idx(),
-        )
-    }
 
-    fn fec_prune_key_cache(&self, rx: &[[EpochRxSlot; 2]; 2], sync_rx_grace: Option<&SyncRxGrace>) {
-        let send_epoch = self.send_epoch.load(Ordering::Relaxed);
-        let mut key_cache = self.fec_key_cache.lock().unwrap();
-        for d in 0..2 {
-            for s in 0..2 {
-                if !key_cache[d][s].valid {
-                    continue;
-                }
-                let e = key_cache[d][s].epoch;
-                let allowed = e == send_epoch
-                    || rx[d][0].valid && rx[d][0].epoch == e
-                    || rx[d][1].valid && rx[d][1].epoch == e
-                    || sync_rx_grace.is_some_and(|g| Self::epoch_in_slots(&g.slots[d], e));
-                if !allowed {
-                    key_cache[d][s].valid = false;
-                }
-            }
-        }
-    }
 
-    fn fec_commit_replay(
-        &self,
-        epoch: u32,
-        seq: u64,
-        dir: SecureDatagramDirection,
-        now_ms: u64,
-    ) -> bool {
-        let cross_domain_epoch = self.standard_authenticated_epoch_snapshot(now_ms);
-        let mut rx = self.fec_rx_slots.lock().unwrap();
-        let mut grace = self.fec_sync_rx_grace.lock().unwrap();
-        grace.maybe_expire(now_ms);
-        if !grace.valid {
-            self.fec_sync_rx_grace_expires_at_ms
-                .store(0, Ordering::Relaxed);
-        }
-        let mut grace_work = grace.valid.then_some(*grace);
-        let accepted = Self::commit_replay_state(
-            &mut rx,
-            &mut grace_work,
-            self.send_epoch.load(Ordering::Relaxed),
-            cross_domain_epoch,
-            epoch,
-            seq,
-            dir.idx(),
-            now_ms,
-        );
-        *grace = grace_work.unwrap_or_default();
-        self.fec_prune_key_cache(&rx, grace.valid.then_some(&*grace));
-        accepted
-    }
 
     pub fn encrypt_payload(
         &self,
@@ -1235,69 +923,7 @@ impl SecureDatagramSession {
         Ok(())
     }
 
-    /// Encrypt one packet in the domain reserved for alternate FEC sources.
-    ///
-    /// FEC uses a separate key label and nonce sequence. The packet header is
-    /// authenticated as AAD in the same way as the standard domain.
-    pub fn encrypt_fec_payload(
-        &self,
-        dir: SecureDatagramDirection,
-        pkt: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        let _transition_guard = self.state_transition.read().unwrap();
-        if !self.is_valid() {
-            return Err(anyhow!("session invalidated"));
-        }
-        let (epoch, seq) = self.reserve_fec_nonce_range(dir, 1)?;
-        let nonce_bytes = Self::nonce(epoch, seq);
-        let aad = Self::packet_aad(pkt)?;
-        let encryptor =
-            self.get_or_create_fec_encryptor(epoch, dir, self.session_generation(), true);
-        if let Err(error) =
-            encryptor.encrypt_with_nonce_and_aad(pkt, Some(nonce_bytes.as_slice()), &aad)
-        {
-            tracing::warn!(?error, "secure datagram FEC encrypt failed, invalidating");
-            self.invalidate();
-            return Err(error.into());
-        }
-        Ok(())
-    }
 
-    /// Encrypt a FEC source batch with one FEC nonce reservation.
-    pub fn encrypt_fec_payload_batch(
-        &self,
-        dir: SecureDatagramDirection,
-        packets: &mut [ZCPacket],
-    ) -> Result<(), anyhow::Error> {
-        let _transition_guard = self.state_transition.read().unwrap();
-        if !self.is_valid() {
-            return Err(anyhow!("session invalidated"));
-        }
-        if packets.is_empty() {
-            return Ok(());
-        }
-        let (epoch, start_seq) = self.reserve_fec_nonce_range(dir, packets.len())?;
-        let encryptor =
-            self.get_or_create_fec_encryptor(epoch, dir, self.session_generation(), true);
-        for (offset, packet) in packets.iter_mut().enumerate() {
-            let seq = start_seq
-                .checked_add(offset as u64)
-                .ok_or_else(|| anyhow!("secure datagram FEC nonce sequence exhausted"))?;
-            let nonce_bytes = Self::nonce(epoch, seq);
-            let aad = Self::packet_aad(packet)?;
-            if let Err(error) =
-                encryptor.encrypt_with_nonce_and_aad(packet, Some(nonce_bytes.as_slice()), &aad)
-            {
-                tracing::warn!(
-                    ?error,
-                    "secure datagram FEC batch encrypt failed, invalidating"
-                );
-                self.invalidate();
-                return Err(error.into());
-            }
-        }
-        Ok(())
-    }
 
     pub fn decrypt_payload(
         &self,
@@ -1340,44 +966,6 @@ impl SecureDatagramSession {
         Ok(())
     }
 
-    /// Decrypt one packet in the alternate FEC domain.
-    pub fn decrypt_fec_payload(
-        &self,
-        dir: SecureDatagramDirection,
-        ciphertext_with_tail: &mut ZCPacket,
-    ) -> Result<(), anyhow::Error> {
-        let _transition_guard = self.state_transition.read().unwrap();
-        if !self.is_valid() {
-            return Err(anyhow!("session invalidated"));
-        }
-        if !ciphertext_with_tail
-            .peer_manager_header()
-            .is_some_and(|header| header.is_encrypted())
-        {
-            return Err(anyhow!("secure datagram FEC packet is not encrypted"));
-        }
-        let nonce_bytes =
-            Self::parse_tail(ciphertext_with_tail.payload()).ok_or_else(|| anyhow!("no tail"))?;
-        let aad = Self::packet_aad(ciphertext_with_tail)?;
-        let epoch = u32::from_be_bytes(nonce_bytes[..4].try_into().unwrap());
-        let seq = u64::from_be_bytes(nonce_bytes[4..].try_into().unwrap());
-        let now_ms = now_ms();
-        if !self.fec_precheck_replay(epoch, seq, dir, now_ms) {
-            return Err(anyhow!("FEC replay rejected"));
-        }
-
-        let encryptor =
-            self.get_or_create_fec_encryptor(epoch, dir, self.session_generation(), false);
-        if let Err(error) = encryptor.decrypt_with_aad(ciphertext_with_tail, &aad) {
-            self.record_fec_decrypt_failure();
-            return Err(error.into());
-        }
-        if !self.fec_commit_replay(epoch, seq, dir, now_ms) {
-            return Err(anyhow!("FEC replay rejected"));
-        }
-        self.record_fec_authenticated_success();
-        Ok(())
-    }
 
     /// Decrypt one batch with one replay snapshot and one replay commit.
     ///
@@ -1457,7 +1045,6 @@ impl SecureDatagramSession {
         }
 
         let now_ms = now_ms();
-        let cross_domain_epoch = self.fec_authenticated_epoch_snapshot(now_ms);
         let (rx_snapshot, grace_snapshot) = self.replay_state_snapshot(now_ms);
         let send_epoch = self.send_epoch.load(Ordering::Relaxed);
         let grace = grace_snapshot.valid.then_some(&grace_snapshot);
@@ -1475,7 +1062,6 @@ impl SecureDatagramSession {
                 &rx_snapshot,
                 grace,
                 send_epoch,
-                cross_domain_epoch,
                 *epoch,
                 *seq,
                 dir_idx,
@@ -1534,7 +1120,6 @@ impl SecureDatagramSession {
                 &mut rx_work,
                 &mut grace_work,
                 self.send_epoch.load(Ordering::Relaxed),
-                cross_domain_epoch,
                 epoch,
                 seq,
                 dir_idx,
@@ -1671,195 +1256,9 @@ mod tests {
         assert_eq!(pkt2.payload(), plaintext2);
     }
 
-    #[test]
-    fn fec_domain_is_separate_and_survives_standard_replay_advance() {
-        let root_key = SecureDatagramSession::new_root_key();
-        let sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let receiver = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
 
-        let mut standard = ZCPacket::new_with_payload(b"same plaintext");
-        standard.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        let mut fec = standard.clone();
-        sender
-            .encrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-            .unwrap();
-        assert_ne!(standard.payload(), fec.payload());
-        assert!(standard.peer_manager_header().unwrap().is_encrypted());
-        assert!(fec.peer_manager_header().unwrap().is_encrypted());
 
-        let mut delayed_fec = fec;
-        for value in 0..300_u16 {
-            let mut packet = ZCPacket::new_with_payload(&value.to_be_bytes());
-            packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-            sender
-                .encrypt_payload(SecureDatagramDirection::AToB, &mut packet)
-                .unwrap();
-            receiver
-                .decrypt_payload(SecureDatagramDirection::AToB, &mut packet)
-                .unwrap();
-        }
 
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut delayed_fec)
-            .unwrap();
-        assert_eq!(delayed_fec.payload(), b"same plaintext");
-    }
-
-    #[test]
-    fn fec_replay_is_rejected_without_rejecting_a_new_fec_nonce() {
-        let root_key = SecureDatagramSession::new_root_key();
-        let sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let receiver = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-
-        let mut first = ZCPacket::new_with_payload(b"first");
-        first.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut first)
-            .unwrap();
-        let mut replay = first.clone();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut first)
-            .unwrap();
-        assert!(
-            receiver
-                .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut replay)
-                .is_err()
-        );
-
-        let mut second = ZCPacket::new_with_payload(b"second");
-        second.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut second)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut second)
-            .unwrap();
-    }
-
-    #[test]
-    fn fec_sync_preserves_old_epoch_only_during_authenticated_grace() {
-        let root_key = SecureDatagramSession::new_root_key();
-        let sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let receiver = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-
-        let mut before_sync = ZCPacket::new_with_payload(b"before sync");
-        before_sync.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut before_sync)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut before_sync)
-            .unwrap();
-
-        let mut delayed = ZCPacket::new_with_payload(b"delayed");
-        delayed.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut delayed)
-            .unwrap();
-        receiver.sync_root_key(root_key, 2, 2, true);
-        let sender_after_sync = SecureDatagramSession::new(
-            root_key,
-            2,
-            2,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let mut current_epoch = ZCPacket::new_with_payload(b"current epoch");
-        current_epoch.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender_after_sync
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut current_epoch)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut current_epoch)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut delayed)
-            .unwrap();
-
-        let mut expired = ZCPacket::new_with_payload(b"expired");
-        expired.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut expired)
-            .unwrap();
-        receiver
-            .fec_sync_rx_grace_expires_at_ms
-            .store(now_ms().saturating_sub(1), Ordering::Relaxed);
-        assert!(
-            receiver
-                .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut expired)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn fec_sync_clears_old_epoch_when_root_key_changes() {
-        let old_root_key = SecureDatagramSession::new_root_key();
-        let sender = SecureDatagramSession::new(
-            old_root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let new_root_key = SecureDatagramSession::new_root_key();
-        let receiver = SecureDatagramSession::new(
-            old_root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let mut packet = ZCPacket::new_with_payload(b"old root");
-        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut packet)
-            .unwrap();
-        receiver.sync_root_key(new_root_key, 2, 2, true);
-        assert!(
-            receiver
-                .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut packet)
-                .is_err()
-        );
-    }
 
     #[test]
     fn batch_decrypt_reports_individual_forgery_without_discarding_valid_packets() {
@@ -2237,121 +1636,11 @@ mod tests {
         assert_ne!(ranges[0], ranges[1]);
     }
 
-    #[test]
-    fn fec_only_traffic_contributes_to_epoch_packet_rotation() {
-        let session = SecureDatagramSession::new(
-            SecureDatagramSession::new_root_key(),
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        session.send_packets_since_epoch.store(
-            SecureDatagramSession::ROTATE_AFTER_PACKETS - 1,
-            Ordering::Relaxed,
-        );
 
-        let mut packet = ZCPacket::new_with_payload(b"fec-only");
-        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        session
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut packet)
-            .unwrap();
 
-        let nonce = SecureDatagramSession::parse_tail(packet.payload()).unwrap();
-        assert_eq!(u32::from_be_bytes(nonce[..4].try_into().unwrap()), 1);
-        assert_eq!(
-            session.send_packets_since_epoch.load(Ordering::Relaxed),
-            0,
-            "rotation resets the aggregate standard plus FEC packet count"
-        );
-    }
 
     #[test]
-    fn fec_only_traffic_rotates_epoch_after_elapsed_time() {
-        let session = SecureDatagramSession::new(
-            SecureDatagramSession::new_root_key(),
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        session.send_epoch_started_ms.store(
-            now_ms().saturating_sub(SecureDatagramSession::ROTATE_AFTER_MS + 1),
-            Ordering::Relaxed,
-        );
-
-        let mut packet = ZCPacket::new_with_payload(b"fec-time");
-        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        session
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut packet)
-            .unwrap();
-
-        let nonce = SecureDatagramSession::parse_tail(packet.payload()).unwrap();
-        assert_eq!(u32::from_be_bytes(nonce[..4].try_into().unwrap()), 1);
-    }
-
-    #[test]
-    fn forged_fec_does_not_advance_standard_failure_streak_or_invalidate_session() {
-        let root_key = SecureDatagramSession::new_root_key();
-        let sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let receiver = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-
-        for _ in 0..SecureDatagramSession::FEC_DECRYPT_FAIL_THRESHOLD {
-            let mut packet = ZCPacket::new_with_payload(b"forged-fec");
-            packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-            sender
-                .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut packet)
-                .unwrap();
-            packet.mut_payload()[0] ^= 1;
-            assert!(
-                receiver
-                    .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut packet)
-                    .is_err()
-            );
-        }
-
-        assert!(receiver.is_valid());
-        assert_eq!(receiver.decrypt_fail_count.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            receiver.fec_decrypt_fail_count.load(Ordering::Relaxed),
-            SecureDatagramSession::FEC_DECRYPT_FAIL_THRESHOLD
-        );
-
-        let mut valid_fec = ZCPacket::new_with_payload(b"valid-fec");
-        valid_fec.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut valid_fec)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut valid_fec)
-            .unwrap();
-        assert_eq!(receiver.fec_decrypt_fail_count.load(Ordering::Relaxed), 0);
-
-        let mut standard = ZCPacket::new_with_payload(b"valid-standard");
-        standard.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        sender
-            .encrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-        receiver
-            .decrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-        assert!(receiver.is_valid());
-    }
-
-    #[test]
-    fn first_standard_and_fec_packets_reject_far_future_epochs() {
+    fn first_standard_packet_rejects_far_future_epochs() {
         let root_key = SecureDatagramSession::new_root_key();
         let far_future_sender = SecureDatagramSession::new(
             root_key,
@@ -2379,109 +1668,11 @@ mod tests {
                 .is_err()
         );
 
-        let mut fec = ZCPacket::new_with_payload(b"far-future-fec");
-        fec.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        far_future_sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-            .unwrap();
-        assert!(
-            receiver
-                .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-                .is_err()
-        );
-
         assert!(receiver.is_valid());
         assert_eq!(receiver.decrypt_fail_count.load(Ordering::Relaxed), 0);
-        assert_eq!(receiver.fec_decrypt_fail_count.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn first_standard_packet_uses_authenticated_fec_epoch_as_bound() {
-        let root_key = SecureDatagramSession::new_root_key();
-        let fec_sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            3,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let standard_sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            6,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let receiver = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
 
-        let mut fec = ZCPacket::new_with_payload(b"authenticated-fec-epoch");
-        fec.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        fec_sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-            .unwrap();
-
-        let mut standard = ZCPacket::new_with_payload(b"standard-after-fec");
-        standard.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        standard_sender
-            .encrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-        receiver
-            .decrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-    }
-
-    #[test]
-    fn first_fec_packet_uses_authenticated_standard_epoch_as_bound() {
-        let root_key = SecureDatagramSession::new_root_key();
-        let standard_sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            3,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let fec_sender = SecureDatagramSession::new(
-            root_key,
-            1,
-            6,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-        let receiver = SecureDatagramSession::new(
-            root_key,
-            1,
-            0,
-            "aes-256-gcm".to_string(),
-            "aes-256-gcm".to_string(),
-        );
-
-        let mut standard = ZCPacket::new_with_payload(b"authenticated-standard-epoch");
-        standard.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        standard_sender
-            .encrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-        receiver
-            .decrypt_payload(SecureDatagramDirection::AToB, &mut standard)
-            .unwrap();
-
-        let mut fec = ZCPacket::new_with_payload(b"fec-after-standard");
-        fec.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
-        fec_sender
-            .encrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-            .unwrap();
-        receiver
-            .decrypt_fec_payload(SecureDatagramDirection::AToB, &mut fec)
-            .unwrap();
-    }
 
     #[test]
     fn scalar_decrypt_rejects_stable_header_tampering() {

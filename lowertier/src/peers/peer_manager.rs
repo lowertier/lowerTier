@@ -126,8 +126,6 @@ pub(crate) fn packet_supports_speed_first(packet: &ZCPacket) -> bool {
                 || packet_type == PacketType::ForeignNetworkPacket as u8
                 || packet_type == PacketType::OverlayStream as u8
                 || packet_type == PacketType::Ethernet as u8
-                || packet_type == PacketType::AlternateFecSource as u8
-                || packet_type == PacketType::AlternateFecParity as u8
     )
 }
 

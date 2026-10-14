@@ -235,12 +235,6 @@ core_clap:
   quic_receive_window:
     en: "QUIC connection receive window in bytes"
     zh-CN: "QUIC 连接接收窗口，单位为字节"
-  quic_datagram_fec_parity:
-    en: "Alternate-path SIMD FEC symbols: 0 disables, 2 selects 16+2, 3 selects 16+3"
-    zh-CN: "备用路径 SIMD FEC 校验符号数：0 表示关闭，2 表示 16+2，3 表示 16+3"
-  quic_datagram_alternate_path_parity:
-    en: "send authenticated L2 FEC parity on a second QUIC path with a distinct local or remote IP surface"
-    zh-CN: "在具有不同本地或远端 IP 表面的第二条 QUIC 路径上发送经过认证的 L2 FEC 校验包"
   port_forward:
     en: "forward local port to remote port in virtual network. e.g.: udp://0.0.0.0:12345/10.126.126.1:23456, means forward local udp port 12345 to 10.126.126.1:23456 in the virtual network. can specify multiple."
     zh-CN: "将本地端口转发到虚拟网络中的远程端口。例如：udp://0.0.0.0:12345/10.126.126.1:23456，表示将本地UDP端口12345转发到虚拟网络中的10.126.126.1:23456。可以指定多个。"

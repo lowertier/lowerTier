@@ -110,9 +110,11 @@ message NetworkConfig {
   optional uint32 l2_fdb_capacity = 77;
   optional uint64 l2_fdb_age_seconds = 78;
   optional uint64 l2_flood_bps = 79;
-  optional uint32 quic_datagram_fec_parity = 80;
+  reserved 80;
+  reserved "quic_datagram_fec_parity";
   reserved 81;
-  optional bool quic_datagram_alternate_path_parity = 82;
+  reserved 82;
+  reserved "quic_datagram_alternate_path_parity";
   optional string socks5_server = 83;
   optional string outbound_http_proxy_listen = 84;
   optional bool speed_first = 85;

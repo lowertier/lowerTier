@@ -46,7 +46,6 @@ use socket2::Protocol;
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
 
 pub(crate) const PROCESS_RETAINED_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const FEC_INSTANCE_MAX_RETAINED_BYTES: usize = 512 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct ProcessMemoryGovernor {
@@ -145,94 +144,6 @@ impl ProcessMemoryGovernor {
                         self.released.notify_waiters();
                     }
                     return;
-                }
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained(&self) -> usize {
-        self.retained.load(Ordering::Acquire)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct FecResourceBudget {
-    limit: usize,
-    retained: AtomicUsize,
-    process: Option<Arc<ProcessMemoryGovernor>>,
-}
-
-impl FecResourceBudget {
-    pub(crate) fn new() -> Self {
-        Self::with_limit(FEC_INSTANCE_MAX_RETAINED_BYTES)
-    }
-
-    pub(crate) fn with_limit(limit: usize) -> Self {
-        Self {
-            limit,
-            retained: AtomicUsize::new(0),
-            process: None,
-        }
-    }
-
-    pub(crate) fn with_process(limit: usize, process: Arc<ProcessMemoryGovernor>) -> Self {
-        Self {
-            limit,
-            retained: AtomicUsize::new(0),
-            process: Some(process),
-        }
-    }
-
-    pub(crate) fn reserve(&self, bytes: usize) -> bool {
-        if self
-            .process
-            .as_ref()
-            .is_some_and(|process| !process.reserve(bytes))
-        {
-            return false;
-        }
-        let reserved = self
-            .retained
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(bytes)
-                    .filter(|total| *total <= self.limit)
-            })
-            .is_ok();
-        if !reserved && let Some(process) = self.process.as_ref() {
-            process.release(bytes);
-        }
-        reserved
-    }
-
-    pub(crate) fn release(&self, bytes: usize) -> bool {
-        let mut current = self.retained.load(Ordering::Acquire);
-        loop {
-            let Some(next) = current.checked_sub(bytes) else {
-                tracing::error!(
-                    retained = current,
-                    release = bytes,
-                    "alternate FEC resource budget underflow"
-                );
-                debug_assert!(
-                    false,
-                    "alternate FEC resource budget released more bytes than retained"
-                );
-                return false;
-            };
-            match self.retained.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if let Some(process) = self.process.as_ref() {
-                        process.release(bytes);
-                    }
-                    return true;
                 }
                 Err(observed) => current = observed,
             }
@@ -447,7 +358,6 @@ pub struct GlobalCtx {
     /// Stored in ArcSwap for lock-free reads and atomic batch updates
     trusted_keys: Arc<TrustedKeyMapManager>,
 
-    fec_resource_budget: Arc<FecResourceBudget>,
     process_memory_governor: Arc<ProcessMemoryGovernor>,
 }
 
@@ -831,10 +741,6 @@ impl GlobalCtx {
 
             trusted_keys: Arc::new(TrustedKeyMapManager::new()),
 
-            fec_resource_budget: Arc::new(FecResourceBudget::with_process(
-                FEC_INSTANCE_MAX_RETAINED_BYTES,
-                process_memory_governor.clone(),
-            )),
             process_memory_governor,
         }
     }
@@ -1193,9 +1099,6 @@ impl GlobalCtx {
         self.flags.load().as_ref().clone()
     }
 
-    pub(crate) fn fec_resource_budget(&self) -> Arc<FecResourceBudget> {
-        self.fec_resource_budget.clone()
-    }
 
     pub(crate) fn process_memory_governor(&self) -> Arc<ProcessMemoryGovernor> {
         self.process_memory_governor.clone()

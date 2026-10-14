@@ -1,29 +1,19 @@
 use std::sync::Arc;
 
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crossbeam::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
-use parking_lot::Mutex;
 use parking_lot::RwLock;
 
 use tokio::{select, sync::mpsc};
 
 use tracing::Instrument;
 
-use super::alternate_fec::{
-    AlternateFecDecoder, AlternateFecEncoder, CompletedAlternateFecBlock, FEC_FLUSH_DELAY,
-    parity_packets, source_metadata, wrap_source_packet,
-};
 use super::{
     PacketRecvChan,
     flow::{FlowPathCache, classify_packet_flow, stamp_critical_l2_control, stamp_packet_flow},
     peer_conn::{PeerConn, PeerConnId},
     route_trait::NextHopPolicy,
-};
-use crate::{
-    common::dataplane_telemetry::{DataplaneFec, DataplaneTelemetry},
-    tunnel::packet_def::PacketType,
 };
 use crate::{common::shrink_dashmap, proto::api::instance::PeerConnInfo};
 use crate::{
@@ -39,14 +29,6 @@ use tokio_util::task::AbortOnDropHandle;
 
 pub(crate) type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
-
-const ALTERNATE_FEC_PARITY_QUEUE_CAPACITY: usize = 32;
-
-struct AlternateFecParityWork {
-    conn: ArcPeerConn,
-    local_peer_id: PeerId,
-    block: CompletedAlternateFecBlock,
-}
 
 pub(crate) type OriginAuthUpdate =
     Arc<dyn Fn(PeerId, Option<(PeerIdentityType, Vec<u8>, SecureAuthLevel)>) + Send + Sync>;
@@ -70,210 +52,6 @@ pub struct Peer {
     origin_auth_update: Arc<RwLock<OriginAuthUpdate>>,
     default_conn_refresh_task: AbortOnDropHandle<()>,
 
-    alternate_fec_encoder: Option<Arc<Mutex<AlternateFecEncoder>>>,
-    alternate_fec_decoder: Option<Arc<Mutex<AlternateFecDecoder>>>,
-    alternate_fec_primary: Arc<AtomicCell<PeerConnId>>,
-    alternate_fec_local_peer_id: Arc<AtomicU32>,
-    alternate_fec_notify: Option<Arc<tokio::sync::Notify>>,
-    alternate_fec_parity_sender: Option<mpsc::Sender<AlternateFecParityWork>>,
-    alternate_fec_worker_task: Option<AbortOnDropHandle<()>>,
-}
-
-fn select_alternate_conn(conns: &ConnMap, primary: &ArcPeerConn) -> Option<ArcPeerConn> {
-    conns
-        .iter()
-        .filter(|candidate| {
-            !candidate.value().is_closed()
-                && candidate.get_conn_id() != primary.get_conn_id()
-                && candidate.value().alternate_fec_remote_receive_ready()
-                && candidate.value().alternate_parity_path_allowed()
-                && primary.has_distinct_quic_surface(candidate.value())
-        })
-        .min_by_key(|candidate| {
-            let latency = candidate.value().get_stats().latency_us;
-            if latency == 0 { u64::MAX } else { latency }
-        })
-        .map(|candidate| candidate.clone())
-}
-
-fn is_alternate_fec_source(packet: &ZCPacket, peer_node_id: PeerId) -> bool {
-    packet.peer_manager_header().is_some_and(|header| {
-        header.packet_type == PacketType::Ethernet as u8
-            && header.to_peer_id.get() == peer_node_id
-            && !header.is_critical_l2_control()
-    })
-}
-
-fn alternate_fec_capture_allowed(
-    primary: &ArcPeerConn,
-    alternate: &ArcPeerConn,
-    packet: &ZCPacket,
-    encoder: &AlternateFecEncoder,
-) -> bool {
-    let Some(source_payload_len) = primary.alternate_fec_source_payload_len(packet) else {
-        return false;
-    };
-    let Some((source_record_len, parity_record_len)) =
-        encoder.record_lengths_for_source(source_payload_len)
-    else {
-        return false;
-    };
-    primary.alternate_fec_record_fits(source_record_len)
-        && alternate.alternate_fec_record_fits(parity_record_len)
-}
-
-async fn send_alternate_parity(
-    remote_peer_id: PeerId,
-    work: AlternateFecParityWork,
-    telemetry: &DataplaneTelemetry,
-) {
-    let AlternateFecParityWork {
-        conn,
-        local_peer_id,
-        block,
-    } = work;
-    let block_id = block.block_id;
-    let source_count = block.source_count;
-    let packets = parity_packets(local_peer_id, remote_peer_id, &block);
-    let mut batch = PacketBatch::with_capacity(packets.len());
-    for packet in packets {
-        if !conn.alternate_fec_record_fits(packet.payload().len()) {
-            tracing::debug!(
-                block_id,
-                record_len = packet.payload().len(),
-                budget = conn.alternate_fec_datagram_budget(),
-                "dropping alternate-path parity record above current DATAGRAM budget"
-            );
-            continue;
-        }
-        batch
-            .try_push(packet)
-            .expect("alternate parity batch is bounded to three packets");
-    }
-    if batch.is_empty() {
-        return;
-    }
-    let packets = batch.len();
-    let bytes = batch.buffer_byte_len();
-    if let Err(error) = conn.send_msg_batch(batch).await {
-        tracing::warn!(
-            ?error,
-            block_id,
-            source_count,
-            "alternate-path parity send failed"
-        );
-    } else {
-        telemetry.record_fec(DataplaneFec::ParityTx, packets, bytes);
-    }
-}
-
-fn enqueue_alternate_parity(
-    sender: &mpsc::Sender<AlternateFecParityWork>,
-    work: AlternateFecParityWork,
-) {
-    match sender.try_send(work) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(work)) => {
-            tracing::debug!(
-                block_id = work.block.block_id,
-                "alternate-path parity queue is full; dropping parity block"
-            );
-        }
-        Err(mpsc::error::TrySendError::Closed(work)) => {
-            tracing::debug!(
-                block_id = work.block.block_id,
-                "alternate-path parity owner is closed"
-            );
-        }
-    }
-}
-
-fn timer_alternate_parity_work(
-    conns: &ConnMap,
-    primary_id: &Arc<AtomicCell<PeerConnId>>,
-    local_peer_id: &Arc<AtomicU32>,
-    block: CompletedAlternateFecBlock,
-) -> Option<AlternateFecParityWork> {
-    let primary = conns.get(&primary_id.load()).map(|conn| conn.clone())?;
-    let conn = select_alternate_conn(conns, &primary)?;
-    let local_peer_id = local_peer_id.load(Ordering::Relaxed);
-    (local_peer_id != 0).then_some(AlternateFecParityWork {
-        conn,
-        local_peer_id,
-        block,
-    })
-}
-
-async fn run_alternate_fec_owner(
-    encoder: Arc<Mutex<AlternateFecEncoder>>,
-    mut parity_receiver: mpsc::Receiver<AlternateFecParityWork>,
-    notify: Arc<tokio::sync::Notify>,
-    shutdown: Arc<tokio::sync::Notify>,
-    conns: ConnMap,
-    primary_id: Arc<AtomicCell<PeerConnId>>,
-    local_peer_id: Arc<AtomicU32>,
-    remote_peer_id: PeerId,
-    telemetry: Arc<DataplaneTelemetry>,
-) {
-    loop {
-        let deadline = encoder.lock().next_flush_at();
-        match deadline {
-            Some(deadline) => {
-                let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
-                tokio::pin!(sleep);
-                tokio::select! {
-                    biased;
-                    work = parity_receiver.recv() => {
-                        let Some(work) = work else { break };
-                        send_alternate_parity(remote_peer_id, work, &telemetry).await;
-                    }
-                    _ = shutdown.notified() => break,
-                    _ = &mut sleep => {
-                        let block = match encoder.lock().take_due(std::time::Instant::now()) {
-                            Ok(Some(block)) => block,
-                            Ok(None) => continue,
-                            Err(error) => {
-                                tracing::warn!(?error, "alternate-path FEC flush failed");
-                                continue;
-                            }
-                        };
-                        if let Some(work) = timer_alternate_parity_work(
-                            &conns,
-                            &primary_id,
-                            &local_peer_id,
-                            block,
-                        ) {
-                            send_alternate_parity(remote_peer_id, work, &telemetry).await;
-                        }
-                    }
-                }
-            }
-            None => {
-                tokio::select! {
-                    biased;
-                    work = parity_receiver.recv() => {
-                        let Some(work) = work else { break };
-                        send_alternate_parity(remote_peer_id, work, &telemetry).await;
-                    }
-                    _ = shutdown.notified() => break,
-                    _ = notify.notified() => {}
-                }
-            }
-        }
-    }
-}
-
-async fn wait_for_alternate_fec_deadline(
-    encoder: Arc<Mutex<AlternateFecEncoder>>,
-    notify: Arc<tokio::sync::Notify>,
-) -> std::time::Instant {
-    loop {
-        let notified = notify.notified();
-        if let Some(deadline) = encoder.lock().next_flush_at() {
-            return deadline;
-        }
-        notified.await;
-    }
 }
 
 impl Peer {
@@ -386,69 +164,6 @@ impl Peer {
             }
         }));
 
-        let (alternate_fec_encoder, alternate_fec_decoder) = {
-            let flags = global_ctx.get_flags();
-            if flags.quic_datagram_alternate_path_parity
-                && matches!(flags.quic_datagram_fec_parity, 2 | 3)
-            {
-                (
-                    Some(Arc::new(Mutex::new(
-                        AlternateFecEncoder::new_with_budget(
-                            flags.quic_datagram_fec_parity as usize,
-                            FEC_FLUSH_DELAY,
-                            global_ctx.fec_resource_budget(),
-                        )
-                        .expect("validated alternate FEC configuration"),
-                    ))),
-                    Some(Arc::new(Mutex::new(AlternateFecDecoder::new(
-                        global_ctx.fec_resource_budget(),
-                    )))),
-                )
-            } else {
-                (None, None)
-            }
-        };
-        let alternate_fec_primary = Arc::new(AtomicCell::new(PeerConnId::default()));
-        let alternate_fec_local_peer_id = Arc::new(AtomicU32::new(0));
-        let alternate_fec_notify = alternate_fec_encoder
-            .as_ref()
-            .map(|_| Arc::new(tokio::sync::Notify::new()));
-        let (alternate_fec_parity_sender, alternate_fec_parity_receiver) =
-            if alternate_fec_encoder.is_some() {
-                let (sender, receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
-                (Some(sender), Some(receiver))
-            } else {
-                (None, None)
-            };
-        let alternate_fec_worker_task = match (
-            alternate_fec_encoder.clone(),
-            alternate_fec_parity_receiver,
-            alternate_fec_notify.clone(),
-            alternate_fec_parity_sender.clone(),
-        ) {
-            (Some(encoder), Some(receiver), Some(notify), Some(_sender)) => {
-                let conns = conns.clone();
-                let primary_id = alternate_fec_primary.clone();
-                let local_peer_id = alternate_fec_local_peer_id.clone();
-                let shutdown = shutdown_notifier.clone();
-                let telemetry = global_ctx.dataplane_telemetry().clone();
-                Some(AbortOnDropHandle::new(tokio::spawn(
-                    run_alternate_fec_owner(
-                        encoder,
-                        receiver,
-                        notify,
-                        shutdown,
-                        conns,
-                        primary_id,
-                        local_peer_id,
-                        peer_node_id,
-                        telemetry,
-                    ),
-                )))
-            }
-            _ => None,
-        };
-
         Peer {
             peer_node_id,
             conns,
@@ -466,13 +181,6 @@ impl Peer {
             origin_auth_update,
             default_conn_refresh_task,
 
-            alternate_fec_encoder,
-            alternate_fec_decoder,
-            alternate_fec_primary,
-            alternate_fec_local_peer_id,
-            alternate_fec_notify,
-            alternate_fec_parity_sender,
-            alternate_fec_worker_task,
         }
     }
 
@@ -509,7 +217,6 @@ impl Peer {
             }
         }
 
-        conn.set_alternate_fec_decoder(self.alternate_fec_decoder.clone());
         conn.start_recv_loop(self.packet_recv_chan.clone()).await;
         conn.start_pingpong();
         self.conns.insert(conn.get_conn_id(), Arc::new(conn));
@@ -662,57 +369,6 @@ impl Peer {
         let Some(conn) = self.select_conn_for_flow(policy, flow_hash) else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
-        if let Some(encoder) = self.alternate_fec_encoder.as_ref()
-            && conn.alternate_fec_remote_receive_ready()
-            && is_alternate_fec_source(&msg, self.peer_node_id)
-            && let Some(alternate) = select_alternate_conn(&self.conns, &conn)
-            && alternate.alternate_fec_remote_receive_ready()
-        {
-            let capture_allowed = {
-                let encoder = encoder.lock();
-                alternate_fec_capture_allowed(&conn, &alternate, &msg, &encoder)
-            };
-            if capture_allowed {
-                conn.encrypt_alternate_fec_source(&mut msg)?;
-                let metadata = source_metadata(&msg)?;
-                let local_peer_id = msg.peer_manager_header().unwrap().from_peer_id.get();
-                self.alternate_fec_primary.store(conn.get_conn_id());
-                self.alternate_fec_local_peer_id
-                    .store(local_peer_id, Ordering::Relaxed);
-                let parity_sender = self.alternate_fec_parity_sender.as_ref();
-                let source = {
-                    let mut encoder = encoder.lock();
-                    let output =
-                        encoder.push(msg.tunnel_payload_into_bytes(), std::time::Instant::now())?;
-                    if let Some(block) = output.completed
-                        && let Some(sender) = parity_sender.as_ref()
-                    {
-                        enqueue_alternate_parity(
-                            sender,
-                            AlternateFecParityWork {
-                                conn: alternate.clone(),
-                                local_peer_id,
-                                block,
-                            },
-                        );
-                    }
-                    output.source
-                };
-                if let Some(notify) = self.alternate_fec_notify.as_ref() {
-                    notify.notify_one();
-                }
-                let wrapped = wrap_source_packet(metadata, source);
-                let source_bytes = wrapped.buf_len();
-                conn.send_msg(wrapped).await?;
-                self.global_ctx.dataplane_telemetry().record_fec(
-                    DataplaneFec::SourceTx,
-                    1,
-                    source_bytes,
-                );
-                return Ok(());
-            }
-        }
-
         conn.send_msg(msg).await?;
 
         Ok(())
@@ -741,78 +397,6 @@ impl Peer {
         conn: ArcPeerConn,
         batch: PacketBatch,
     ) -> Result<(), Error> {
-        if let Some(encoder) = self.alternate_fec_encoder.as_ref()
-            && conn.alternate_fec_remote_receive_ready()
-            && batch
-                .iter()
-                .any(|packet| is_alternate_fec_source(packet, self.peer_node_id))
-            && let Some(alternate) = select_alternate_conn(&self.conns, &conn)
-            && alternate.alternate_fec_remote_receive_ready()
-        {
-            let parity_sender = self.alternate_fec_parity_sender.as_ref();
-            let (primary_batch, local_peer_id, source_records, source_bytes) = {
-                let mut primary_batch = PacketBatch::with_capacity(batch.len());
-                let mut local_peer_id = 0;
-                let mut source_records = 0;
-                let mut source_bytes = 0;
-                let mut encoder = encoder.lock();
-                for mut packet in batch {
-                    if is_alternate_fec_source(&packet, self.peer_node_id)
-                        && alternate_fec_capture_allowed(&conn, &alternate, &packet, &encoder)
-                    {
-                        conn.encrypt_alternate_fec_source(&mut packet)?;
-                        let metadata = source_metadata(&packet)?;
-                        local_peer_id = packet.peer_manager_header().unwrap().from_peer_id.get();
-                        source_records += 1;
-                        let output = encoder.push(
-                            packet.tunnel_payload_into_bytes(),
-                            std::time::Instant::now(),
-                        )?;
-                        let completed = output.completed;
-                        let wrapped = wrap_source_packet(metadata, output.source);
-                        source_bytes += wrapped.buf_len();
-                        primary_batch
-                            .try_push(wrapped)
-                            .expect("alternate FEC source preserves the input batch bound");
-                        if let Some(block) = completed
-                            && let Some(sender) = parity_sender
-                        {
-                            enqueue_alternate_parity(
-                                sender,
-                                AlternateFecParityWork {
-                                    conn: alternate.clone(),
-                                    local_peer_id,
-                                    block,
-                                },
-                            );
-                        }
-                    } else {
-                        primary_batch
-                            .try_push(packet)
-                            .expect("alternate FEC preserves the input batch bound");
-                    }
-                }
-                (primary_batch, local_peer_id, source_records, source_bytes)
-            };
-            self.alternate_fec_primary.store(conn.get_conn_id());
-            self.alternate_fec_local_peer_id
-                .store(local_peer_id, Ordering::Relaxed);
-            if source_records != 0
-                && let Some(notify) = self.alternate_fec_notify.as_ref()
-            {
-                notify.notify_one();
-            }
-            conn.send_msg_batch(primary_batch).await?;
-            if source_records != 0 {
-                self.global_ctx.dataplane_telemetry().record_fec(
-                    DataplaneFec::SourceTx,
-                    source_records,
-                    source_bytes,
-                );
-            }
-            return Ok(());
-        }
-
         conn.send_msg_batch(batch).await?;
 
         Ok(())
@@ -1023,112 +607,6 @@ mod tests {
     };
 
     use super::Peer;
-    use super::{
-        ALTERNATE_FEC_PARITY_QUEUE_CAPACITY, AlternateFecParityWork, enqueue_alternate_parity,
-        is_alternate_fec_source, wait_for_alternate_fec_deadline,
-    };
-    use crate::peers::alternate_fec::CompletedAlternateFecBlock;
-
-    #[test]
-    fn critical_l2_control_bypasses_alternate_fec() {
-        let mut frame = vec![0_u8; 14 + 28];
-        frame[12..14].copy_from_slice(&0x0806_u16.to_be_bytes());
-        let mut packet = ZCPacket::new_with_payload(&frame);
-        packet.fill_peer_manager_hdr(11, 22, PacketType::Ethernet as u8);
-
-        assert!(crate::peers::flow::stamp_critical_l2_control(&mut packet));
-        assert!(!is_alternate_fec_source(&packet, 22));
-    }
-
-    #[tokio::test]
-    async fn alternate_fec_waiter_stays_idle_until_data_arrives() {
-        let now = std::time::Instant::now();
-        let delay = std::time::Duration::from_millis(40);
-        let encoder = Arc::new(parking_lot::Mutex::new(
-            crate::peers::alternate_fec::AlternateFecEncoder::new(2, delay).unwrap(),
-        ));
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let wait = wait_for_alternate_fec_deadline(encoder.clone(), notify.clone());
-        tokio::pin!(wait);
-
-        assert!(futures::poll!(wait.as_mut()).is_pending());
-        encoder
-            .lock()
-            .push(bytes::Bytes::from_static(b"source"), now)
-            .unwrap();
-        notify.notify_one();
-
-        assert_eq!(wait.await, now + delay);
-    }
-
-    fn parity_work(
-        conn: Arc<PeerConn>,
-        block_id: u64,
-        local_peer_id: crate::common::PeerId,
-    ) -> AlternateFecParityWork {
-        AlternateFecParityWork {
-            conn,
-            local_peer_id,
-            block: CompletedAlternateFecBlock::for_test(
-                block_id,
-                1,
-                vec![bytes::Bytes::from_static(b"parity")],
-            ),
-        }
-    }
-
-    #[tokio::test]
-    async fn alternate_fec_primary_enqueue_does_not_wait_for_blocked_sink() {
-        let global_ctx = get_mock_global_ctx();
-        let conn = Arc::new(unstarted_peer_conn(global_ctx));
-        let (sender, _receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
-        for block_id in 1..=ALTERNATE_FEC_PARITY_QUEUE_CAPACITY as u64 {
-            enqueue_alternate_parity(&sender, parity_work(conn.clone(), block_id, 11));
-        }
-
-        let result = timeout(Duration::from_millis(50), async {
-            enqueue_alternate_parity(&sender, parity_work(conn.clone(), 10_000, 11));
-        })
-        .await;
-        assert!(result.is_ok(), "primary enqueue waited for the parity sink");
-    }
-
-    #[tokio::test]
-    async fn alternate_fec_parity_queue_preserves_block_order() {
-        let global_ctx = get_mock_global_ctx();
-        let conn = Arc::new(unstarted_peer_conn(global_ctx));
-        let (sender, mut receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
-        for block_id in 1..=3 {
-            enqueue_alternate_parity(&sender, parity_work(conn.clone(), block_id, 11));
-        }
-
-        let mut received = Vec::new();
-        while let Some(work) = receiver.recv().await {
-            received.push(work.block.block_id);
-            if received.len() == 3 {
-                break;
-            }
-        }
-        assert_eq!(received, vec![1, 2, 3]);
-    }
-
-    #[tokio::test]
-    async fn alternate_fec_parity_queue_is_bounded_and_releases_work_on_shutdown() {
-        let global_ctx = get_mock_global_ctx();
-        let conn = Arc::new(unstarted_peer_conn(global_ctx));
-        let (sender, receiver) = mpsc::channel(ALTERNATE_FEC_PARITY_QUEUE_CAPACITY);
-        for block_id in 1..=ALTERNATE_FEC_PARITY_QUEUE_CAPACITY as u64 {
-            enqueue_alternate_parity(&sender, parity_work(conn.clone(), block_id, 11));
-        }
-        assert!(matches!(
-            sender.try_send(parity_work(conn.clone(), 10_000, 11)),
-            Err(mpsc::error::TrySendError::Full(_))
-        ));
-        assert!(Arc::strong_count(&conn) > 1);
-        drop(receiver);
-        assert_eq!(Arc::strong_count(&conn), 1);
-    }
-
     fn unstarted_peer_conn(global_ctx: Arc<GlobalCtx>) -> PeerConn {
         let (tunnel, _other_end) = create_ring_tunnel_pair();
         PeerConn::new(
@@ -1148,110 +626,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn l2_parity_uses_the_distinct_authenticated_connection() {
-        let peer_a_id = new_peer_id();
-        let peer_b_id = new_peer_id();
-        let ctx_a = get_mock_global_ctx();
-        let ctx_b = get_mock_global_ctx();
-        for ctx in [&ctx_a, &ctx_b] {
-            let mut flags = ctx.get_flags().clone();
-            flags.quic_datagram_fec_parity = 2;
-            flags.quic_datagram_alternate_path_parity = true;
-            ctx.set_flags(flags);
-        }
-        let (send_a, _recv_a) = create_packet_recv_chan();
-        let (send_b, mut recv_b) = create_packet_recv_chan();
-        let peer_a = Peer::new(peer_b_id, send_a, ctx_a.clone());
-        let peer_b = Peer::new(peer_a_id, send_b, ctx_b.clone());
-        let sessions_a = Arc::new(PeerSessionStore::new());
-        let sessions_b = Arc::new(PeerSessionStore::new());
-
-        let mut local_ids = Vec::new();
-        for (index, (local_ip, remote_ip)) in [
-            ("192.0.2.10", "198.51.100.20"),
-            ("192.0.2.11", "203.0.113.50"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let (tunnel_a, tunnel_b) = create_ring_tunnel_pair();
-            let mut conn_a = PeerConn::new(peer_a_id, ctx_a.clone(), tunnel_a, sessions_a.clone());
-            let mut conn_b = PeerConn::new(peer_b_id, ctx_b.clone(), tunnel_b, sessions_b.clone());
-            let (client, server) = tokio::join!(
-                conn_a.do_handshake_as_client(),
-                conn_b.do_handshake_as_server()
-            );
-            client.unwrap();
-            server.unwrap();
-            conn_a.set_tunnel_info_for_test(test_tunnel_info(
-                "quic",
-                &format!("quic://{local_ip}:{}", 31000 + index),
-                &format!("quic://{remote_ip}:11010"),
-            ));
-            conn_b.set_tunnel_info_for_test(test_tunnel_info(
-                "quic",
-                &format!("quic://{remote_ip}:11010"),
-                &format!("quic://{local_ip}:{}", 31000 + index),
-            ));
-            conn_a.record_latency_for_test(1_000 + index as u32 * 1_000);
-            let local_id = conn_a.get_conn_id();
-            local_ids.push(local_id);
-            peer_a.add_peer_conn(conn_a).await.unwrap();
-            peer_b.add_peer_conn(conn_b).await.unwrap();
-        }
-        peer_a.default_conn_id.store(local_ids[0]);
-        let alternate_before = peer_a
-            .conns
-            .get(&local_ids[1])
-            .unwrap()
-            .get_stats()
-            .tx_packets;
-
-        let mut batch = PacketBatch::with_capacity(16);
-        for index in 0_u8..16 {
-            let mut packet = ZCPacket::new_with_payload(&[index; 128]);
-            packet.fill_peer_manager_hdr(peer_a_id, peer_b_id, PacketType::Ethernet as u8);
-            batch.try_push(packet).unwrap();
-        }
-        let selected_primary = peer_a.conns.get(&local_ids[0]).unwrap().clone();
-        let primary_before = selected_primary.get_stats().tx_packets;
-        peer_a
-            .send_msg_batch_on_conn(&selected_primary, batch)
-            .await
-            .unwrap();
-
-        let mut received = Vec::new();
-        timeout(std::time::Duration::from_secs(2), async {
-            while received.len() < 16 {
-                received.push(recv_b.recv().await.unwrap().payload()[0]);
-            }
-        })
-        .await
-        .unwrap();
-        received.sort_unstable();
-        assert_eq!(received, (0_u8..16).collect::<Vec<_>>());
-        assert!(
-            selected_primary.get_stats().tx_packets >= primary_before + 16,
-            "source records must stay on the selected primary connection"
-        );
-        timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let alternate_after = peer_a
-                    .conns
-                    .get(&local_ids[1])
-                    .unwrap()
-                    .get_stats()
-                    .tx_packets;
-                if alternate_after >= alternate_before + 2 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
 
     fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
         if !enabled {

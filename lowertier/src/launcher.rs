@@ -1059,14 +1059,6 @@ impl NetworkConfig {
         if let Some(quic_sni_passthrough) = self.quic_sni_passthrough {
             flags.quic_sni_passthrough = quic_sni_passthrough;
         }
-        if let Some(quic_datagram_fec_parity) = self.quic_datagram_fec_parity {
-            flags.quic_datagram_fec_parity = quic_datagram_fec_parity;
-        }
-        if let Some(quic_datagram_alternate_path_parity) = self.quic_datagram_alternate_path_parity
-        {
-            flags.quic_datagram_alternate_path_parity = quic_datagram_alternate_path_parity;
-        }
-
         if let Some(no_tun) = self.no_tun {
             flags.no_tun = no_tun;
         }
@@ -1328,12 +1320,6 @@ impl NetworkConfig {
         result.quic_sni_passthrough = (flags.quic_sni_passthrough
             != default_flags.quic_sni_passthrough)
             .then_some(flags.quic_sni_passthrough);
-        result.quic_datagram_fec_parity = (flags.quic_datagram_fec_parity
-            != default_flags.quic_datagram_fec_parity)
-            .then_some(flags.quic_datagram_fec_parity);
-        result.quic_datagram_alternate_path_parity = (flags.quic_datagram_alternate_path_parity
-            != default_flags.quic_datagram_alternate_path_parity)
-            .then_some(flags.quic_datagram_alternate_path_parity);
         result.no_tun = Some(flags.no_tun);
         result.enable_exit_node = Some(flags.enable_exit_node);
         result.relay_all_peer_rpc = Some(flags.relay_all_peer_rpc);
@@ -1405,8 +1391,6 @@ mod tests {
         flags.underlay_deny_cidrs = vec!["100.64.0.0/10".into(), "fd7a:115c:a1e0::/48".into()];
         flags.quic_initial_receive_window = 8 * 1024 * 1024;
         flags.quic_receive_window = 32 * 1024 * 1024;
-        flags.quic_datagram_fec_parity = 3;
-        flags.quic_datagram_alternate_path_parity = false;
         flags.l2_fdb_capacity = 32_768;
         flags.l2_fdb_age_seconds = 600;
         flags.l2_flood_bps = 128 * 1024 * 1024;
@@ -1422,8 +1406,6 @@ mod tests {
             network_config.underlay_deny_interfaces,
             ["utun5", "tailscale0"]
         );
-        assert_eq!(network_config.quic_datagram_fec_parity, Some(3));
-        assert_eq!(network_config.quic_datagram_alternate_path_parity, None);
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
         assert_eq!(network_config.l2_fdb_age_seconds, Some(600));
         assert_eq!(network_config.l2_flood_bps, Some(128 * 1024 * 1024));
@@ -1459,14 +1441,6 @@ mod tests {
         assert_eq!(
             regenerated_flags.quic_receive_window,
             flags.quic_receive_window
-        );
-        assert_eq!(
-            regenerated_flags.quic_datagram_fec_parity,
-            flags.quic_datagram_fec_parity
-        );
-        assert_eq!(
-            regenerated_flags.quic_datagram_alternate_path_parity,
-            flags.quic_datagram_alternate_path_parity
         );
         assert_eq!(regenerated_flags.l2_fdb_capacity, flags.l2_fdb_capacity);
         assert_eq!(

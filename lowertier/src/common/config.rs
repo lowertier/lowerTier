@@ -77,8 +77,6 @@ pub fn gen_default_flags() -> Flags {
         underlay_deny_cidrs: Vec::new(),
         quic_initial_receive_window: 2 * 1024 * 1024,
         quic_receive_window: 4 * 1024 * 1024,
-        quic_datagram_fec_parity: 0,
-        quic_datagram_alternate_path_parity: false,
         speed_first: false,
         speed_probe_interval_seconds: 30,
         speed_probe_budget_bps: 0,
@@ -232,9 +230,6 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
         anyhow::bail!(
             "quic_receive_window must be at least quic_initial_receive_window and no more than {MAX_QUIC_VARINT}"
         );
-    }
-    if !matches!(flags.quic_datagram_fec_parity, 0 | 2 | 3) {
-        anyhow::bail!("quic_datagram_fec_parity must be 0 (off), 2 (16+2), or 3 (16+3)");
     }
     if flags.speed_first && flags.speed_probe_budget_bps == 0 {
         anyhow::bail!("speed_first requires a positive speed_probe_budget_bps");
@@ -1180,6 +1175,13 @@ impl TomlConfigLoader {
     fn gen_flags(
         flags_hashmap: serde_json::Map<String, serde_json::Value>,
     ) -> serde_json::Result<Flags> {
+        for option in ["quic_datagram_fec_parity", "quic_datagram_alternate_path_parity"] {
+            if flags_hashmap.contains_key(option) {
+                return Err(<serde_json::Error as serde::de::Error>::custom(format!(
+                    "removed option '{option}': QUIC FEC is no longer supported"
+                )));
+            }
+        }
         let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => serde_json::Map::new(),
@@ -1987,8 +1989,6 @@ socket_mark = 66
         assert!(flags.underlay_deny_cidrs.is_empty());
         assert_eq!(flags.quic_initial_receive_window, 2 * 1024 * 1024);
         assert_eq!(flags.quic_receive_window, 4 * 1024 * 1024);
-        assert_eq!(flags.quic_datagram_fec_parity, 0);
-        assert!(!flags.quic_datagram_alternate_path_parity);
         assert!(flags.quic_tls_cert.is_empty());
         assert!(flags.quic_tls_key.is_empty());
         assert!(flags.quic_server_name.is_empty());
@@ -2125,8 +2125,6 @@ underlay_deny_interfaces = ["utun5"]
 underlay_deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 quic_initial_receive_window = 8388608
 quic_receive_window = 33554432
-quic_datagram_fec_parity = 3
-quic_datagram_alternate_path_parity = false
 "#,
         )
         .unwrap();
@@ -2142,20 +2140,21 @@ quic_datagram_alternate_path_parity = false
         );
         assert_eq!(flags.quic_initial_receive_window, 8_388_608);
         assert_eq!(flags.quic_receive_window, 33_554_432);
-        assert_eq!(flags.quic_datagram_fec_parity, 3);
-        assert!(!flags.quic_datagram_alternate_path_parity);
 
         let dumped = cfg.dump();
         let reloaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
         assert_eq!(reloaded.get_flags(), flags);
     }
 
+
     #[test]
-    fn rejects_unsupported_alternate_fec_profile() {
-        let mut flags = gen_default_flags();
-        flags.quic_datagram_fec_parity = 1;
-        let error = validate_flags(&flags).unwrap_err();
-        assert!(error.to_string().contains("quic_datagram_fec_parity"));
+    fn rejects_removed_fec_options() {
+        for option in ["quic_datagram_fec_parity", "quic_datagram_alternate_path_parity"] {
+            let error = TomlConfigLoader::new_from_str(&format!("[flags]\n{option} = 0\n"))
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(option));
+            assert!(format!("{error:#}").contains("removed option"));
+        }
     }
 
     #[test]
