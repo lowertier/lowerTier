@@ -119,7 +119,10 @@ impl Datagrams<'_> {
                 trace!(len = prev.frame.data.len(), "dropping outgoing datagram");
                 self.conn.datagrams.outgoing_total -= prev.frame.data.len();
             }
-        } else if self.conn.datagrams.outgoing_total + data.len() > limit && !group_admitted {
+        } else if self.conn.datagrams.outgoing_total + data.len()
+            > self.conn.config.datagram_send_buffer_size
+            || (self.conn.datagrams.outgoing_total + data.len() > limit && !group_admitted)
+        {
             self.conn.datagrams.send_blocked = true;
             return Err(SendDatagramError::Blocked(data));
         }
@@ -296,19 +299,32 @@ impl DatagramState {
     ///
     /// Used to ensure that reductions in MTU don't get us stuck in a state where we have a datagram
     /// queued but can't send it.
-    pub(super) fn drop_oversized(&mut self, max_payload: usize) {
-        self.outgoing.retain(|datagram| {
-            let result = datagram.frame.data.len() <= max_payload;
-            if !result {
-                trace!(
-                    "dropping {} byte datagram violating {} byte limit",
-                    datagram.frame.data.len(),
-                    max_payload
-                );
-                self.outgoing_total -= datagram.frame.data.len();
+    pub(super) fn drop_oversized(&mut self, max_payload: usize) -> bool {
+        let before = self.outgoing_total;
+        let mut index = 0;
+        while index < self.outgoing.len() {
+            let group = self.outgoing[index].group;
+            let count = if let Some(group) = group {
+                self.outgoing
+                    .range(index..)
+                    .take_while(|datagram| datagram.group == Some(group))
+                    .count()
+            } else {
+                1
+            };
+            if self
+                .outgoing
+                .range(index..index + count)
+                .any(|datagram| datagram.frame.data.len() > max_payload)
+            {
+                for datagram in self.outgoing.drain(index..index + count) {
+                    self.outgoing_total -= datagram.frame.data.len();
+                }
+            } else {
+                index += count;
             }
-            result
-        });
+        }
+        self.outgoing_total != before
     }
 
     /// Attempt to write a datagram frame into `buf`, consuming it from `self.outgoing`
@@ -423,6 +439,19 @@ mod mtu_limit_tests {
         assert!(state.write(&mut buffer, 1200));
         assert_eq!(state.outgoing_total, 0);
         assert_eq!(state.expired_packets, 2);
+        for length in [7, 1201] {
+            state.outgoing.push_back(OutgoingDatagram {
+                frame: Datagram {
+                    data: Bytes::from(vec![0; length]),
+                },
+                group: Some(3),
+                deadline: None,
+            });
+            state.outgoing_total += length;
+        }
+        assert!(state.drop_oversized(1200));
+        assert!(state.is_send_empty());
+        assert_eq!(state.outgoing_total, 0);
     }
 
     #[test]
