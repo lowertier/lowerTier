@@ -475,8 +475,3 @@ impl Drop for MachineIdWriteLock {
         let _ = std::fs::remove_file(&self.path);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

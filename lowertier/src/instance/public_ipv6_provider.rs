@@ -128,6 +128,7 @@ fn ensure_public_ipv6_provider_supported() -> Result<(), Error> {
     .into())
 }
 
+#[cfg(target_os = "linux")]
 fn public_ipv6_provider_auto_detect_error() -> Error {
     anyhow::anyhow!(
         "no public IPv6 prefix found on this system; set --ipv6-public-addr-prefix manually, or check that your ISP has delegated an IPv6 prefix and a default-from route exists in the kernel routing table"
@@ -491,11 +492,7 @@ async fn detect_public_ipv6_prefix_linux() -> Result<Option<DetectedPublicIpv6Pr
     Ok(detect_public_ipv6_prefix_from_interfaces(&routes))
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn detect_public_ipv6_prefix_linux() -> Result<Option<Ipv6Cidr>, Error> {
-    Ok(None)
-}
-
+#[cfg(target_os = "linux")]
 fn invalid_public_ipv6_prefix_state(
     prefix: Ipv6Cidr,
     source: &str,
@@ -1115,168 +1112,4 @@ pub(super) fn run_public_ipv6_provider_reconcile_task(
         cancel_token,
         handle,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(target_os = "linux")]
-    use std::fs;
-    #[cfg(target_os = "linux")]
-    use std::path::PathBuf;
-    #[cfg(target_os = "linux")]
-    use std::process::Command;
-    use std::sync::Arc;
-
-    #[cfg(target_os = "linux")]
-    use netlink_packet_route::route::RouteType;
-
-    #[cfg(target_os = "linux")]
-    use super::{
-        DefaultRouteIpv6InterfaceCandidate, DetectedIpv6Route,
-        detect_public_ipv6_prefix_from_interfaces, detect_public_ipv6_prefix_from_routes,
-        detect_public_ipv6_prefix_linux, ensure_linux_ipv6_forwarding_at_paths,
-        ensure_public_ipv6_provider_supported, public_ipv6_provider_auto_detect_error,
-        select_default_route_ipv6_interfaces,
-        select_public_ipv6_prefix_from_default_route_interfaces, sync_ndp_proxy_entries,
-    };
-
-    use super::{
-        PublicIpv6ProviderConfigSnapshot, PublicIpv6ProviderRuntimeState,
-        active_public_ipv6_provider_state, read_public_ipv6_provider_config_snapshot,
-        should_run_public_ipv6_provider_reconcile_task,
-        try_apply_public_ipv6_provider_runtime_state,
-    };
-    #[cfg(not(target_os = "linux"))]
-    use super::{ensure_public_ipv6_provider_supported, public_ipv6_provider_auto_detect_error};
-    #[cfg(target_os = "linux")]
-    use crate::common::error::Error;
-    use crate::common::{
-        config::{ConfigLoader, TomlConfigLoader},
-        global_ctx::{GlobalCtx, GlobalCtxEvent},
-    };
-
-    #[cfg(target_os = "linux")]
-    fn run_ip(args: &[&str]) {
-        let output = Command::new("ip")
-            .args(args)
-            .output()
-            .expect("failed to execute ip process");
-        assert!(
-            output.status.success(),
-            "ip command failed: {:?}\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    fn test_iface_name(tag: &str) -> String {
-        format!("et{}{:x}", tag, std::process::id() & 0xffff)
-    }
-
-    #[cfg(target_os = "linux")]
-    struct ScopedDummyLink {
-        name: String,
-    }
-
-    #[cfg(target_os = "linux")]
-    impl ScopedDummyLink {
-        fn new(name: &str) -> Self {
-            let _ = Command::new("ip").args(["link", "del", name]).output();
-            run_ip(&["link", "add", name, "type", "dummy"]);
-            run_ip(&["link", "set", name, "up"]);
-            Self {
-                name: name.to_string(),
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    impl Drop for ScopedDummyLink {
-        fn drop(&mut self) {
-            let _ = Command::new("ip")
-                .args(["link", "del", &self.name])
-                .output();
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn temp_forwarding_paths(
-        all_value: &str,
-        default_value: &str,
-    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let all_path = dir.path().join("all_forwarding");
-        let default_path = dir.path().join("default_forwarding");
-        fs::write(&all_path, all_value).unwrap();
-        fs::write(&default_path, default_value).unwrap();
-        (dir, all_path, default_path)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn route(
-        dst: Option<&str>,
-        src: Option<&str>,
-        ifindex: Option<u32>,
-        kind: RouteType,
-    ) -> DetectedIpv6Route {
-        DetectedIpv6Route {
-            dst: dst.map(|cidr| cidr.parse().unwrap()),
-            src: src.map(|cidr| cidr.parse().unwrap()),
-            ifindex,
-            kind,
-        }
-    }
-
-    fn active_state(prefix: cidr::Ipv6Cidr) -> PublicIpv6ProviderRuntimeState {
-        #[cfg(target_os = "linux")]
-        {
-            active_public_ipv6_provider_state(prefix, None)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            active_public_ipv6_provider_state(prefix)
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn detected_prefix(
-        detected: Option<super::DetectedPublicIpv6Prefix>,
-    ) -> Option<cidr::Ipv6Cidr> {
-        detected.map(|detected| detected.prefix)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn iface_candidate(
-        interface_name: &str,
-        ifindex: u32,
-        address: &str,
-        prefix_len: u8,
-    ) -> DefaultRouteIpv6InterfaceCandidate {
-        DefaultRouteIpv6InterfaceCandidate {
-            interface_name: interface_name.to_string(),
-            ifindex,
-            address: address.parse().unwrap(),
-            prefix_len,
-        }
-    }
-
-    fn test_global_ctx() -> Arc<GlobalCtx> {
-        Arc::new(GlobalCtx::new(TomlConfigLoader::default()))
-    }
-
-    #[cfg(target_os = "linux")]
-    async fn wait_for_ndp_proxy_entry(wan_if: &str, addr: std::net::Ipv6Addr, present: bool) {
-        for _ in 0..50 {
-            let current = crate::common::ifcfg::list_ipv6_ndp_proxy(wan_if).unwrap();
-            if current.contains(&addr) == present {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-
-        let current = crate::common::ifcfg::list_ipv6_ndp_proxy(wan_if).unwrap();
-        assert_eq!(current.contains(&addr), present);
-    }
 }

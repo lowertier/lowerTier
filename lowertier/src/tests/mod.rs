@@ -12,14 +12,17 @@ pub fn remove_env_var<K: AsRef<std::ffi::OsStr>>(key: K) {
     unsafe { std::env::remove_var(key) }
 }
 
+#[cfg(target_os = "linux")]
 pub fn get_guest_veth_name(net_ns: &str) -> &str {
     Box::leak(format!("veth_{}_g", net_ns).into_boxed_str())
 }
 
+#[cfg(target_os = "linux")]
 pub fn get_host_veth_name(net_ns: &str) -> &str {
     Box::leak(format!("veth_{}_h", net_ns).into_boxed_str())
 }
 
+#[cfg(target_os = "linux")]
 pub fn del_netns(name: &str) {
     // del veth host
     let _ = std::process::Command::new("ip")
@@ -31,6 +34,7 @@ pub fn del_netns(name: &str) {
         .output();
 }
 
+#[cfg(target_os = "linux")]
 pub fn create_netns(name: &str, ipv4: &str, ipv6: &str) {
     // create netns
     let _ = std::process::Command::new("ip")
@@ -100,70 +104,7 @@ pub fn create_netns(name: &str, ipv4: &str, ipv6: &str) {
     }
 }
 
-pub struct TestNetnsGuard {
-    name: String,
-    host_ipv4: Option<String>,
-}
-
-impl TestNetnsGuard {
-    fn run_ip(args: &[&str]) {
-        let status = std::process::Command::new("ip")
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "ip command failed: {:?}", args);
-    }
-
-    pub fn new(name: &str, guest_ipv4: &str, guest_ipv6: &str) -> Self {
-        del_netns(name);
-        create_netns(name, guest_ipv4, guest_ipv6);
-        Self {
-            name: name.to_string(),
-            host_ipv4: None,
-        }
-    }
-
-    pub fn set_host_ipv4(&mut self, host_ipv4: &str) {
-        Self::run_ip(&[
-            "addr",
-            "add",
-            host_ipv4,
-            "dev",
-            get_host_veth_name(&self.name),
-        ]);
-        self.host_ipv4 = Some(host_ipv4.to_string());
-    }
-}
-
-impl Drop for TestNetnsGuard {
-    fn drop(&mut self) {
-        if let Some(host_ipv4) = self.host_ipv4.as_deref() {
-            let _ = std::process::Command::new("ip")
-                .args([
-                    "addr",
-                    "del",
-                    host_ipv4,
-                    "dev",
-                    get_host_veth_name(&self.name),
-                ])
-                .status();
-        }
-        del_netns(&self.name);
-    }
-}
-
-pub fn prepare_bridge(name: &str) {
-    // del bridge with brctl
-    let _ = std::process::Command::new("brctl")
-        .args(["delbr", name])
-        .output();
-
-    // create new br
-    let _ = std::process::Command::new("brctl")
-        .args(["addbr", name])
-        .output();
-}
-
+#[cfg(target_os = "linux")]
 pub fn add_ns_to_bridge(br_name: &str, ns_name: &str) {
     // use brctl to add ns to bridge
     let _ = std::process::Command::new("brctl")
@@ -178,75 +119,7 @@ pub fn add_ns_to_bridge(br_name: &str, ns_name: &str) {
         .unwrap();
 }
 
-fn check_route(ipv4: &str, dst_peer_id: PeerId, routes: Vec<crate::proto::api::instance::Route>) {
-    let mut found = false;
-    for r in routes.iter() {
-        if r.ipv4_addr == Some(ipv4.parse().unwrap()) {
-            found = true;
-            assert_eq!(r.peer_id, dst_peer_id, "{:?}", routes);
-        }
-    }
-    assert!(
-        found,
-        "routes: {:?}, dst_peer_id: {}, ipv4: {}",
-        routes, dst_peer_id, ipv4
-    );
-}
-
-fn check_route_ex(
-    routes: Vec<crate::proto::api::instance::Route>,
-    peer_id: PeerId,
-    checker: impl Fn(&crate::proto::api::instance::Route) -> bool,
-) {
-    let mut found = false;
-    for r in routes.iter() {
-        if r.peer_id == peer_id {
-            found = true;
-            assert!(checker(r), "{:?}", routes);
-        }
-    }
-    assert!(found, "routes: {:?}, dst_peer_id: {}", routes, peer_id);
-}
-
-async fn wait_proxy_route_appear(
-    mgr: &std::sync::Arc<PeerManager>,
-    ipv4: &str,
-    dst_peer_id: PeerId,
-    proxy_cidr: &str,
-) {
-    let now = std::time::Instant::now();
-    loop {
-        for r in mgr.list_routes().await.iter() {
-            if r.proxy_cidrs.contains(&proxy_cidr.to_owned()) {
-                assert_eq!(r.peer_id, dst_peer_id);
-                assert_eq!(r.ipv4_addr, Some(ipv4.parse().unwrap()));
-                return;
-            }
-        }
-        if now.elapsed().as_secs() > 5 {
-            panic!("wait proxy route appear timeout");
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-}
-
-fn set_link_status(net_ns: &str, up: bool) {
-    let ret = std::process::Command::new("ip")
-        .args([
-            "netns",
-            "exec",
-            net_ns,
-            "ip",
-            "link",
-            "set",
-            get_guest_veth_name(net_ns),
-            if up { "up" } else { "down" },
-        ])
-        .output()
-        .unwrap();
-    tracing::info!("set link status: {:?}, net_ns: {}, up: {}", ret, net_ns, up);
-}
-
+#[cfg(target_os = "linux")]
 pub async fn drop_insts(insts: Vec<crate::instance::instance::Instance>) {
     let mut set = tokio::task::JoinSet::new();
     for mut inst in insts {
@@ -264,6 +137,7 @@ pub async fn drop_insts(insts: Vec<crate::instance::instance::Instance>) {
     while set.join_next().await.is_some() {}
 }
 
+#[cfg(target_os = "linux")]
 pub async fn ping_test(from_netns: &str, target_ip: &str, payload_size: Option<usize>) -> bool {
     use crate::common::netns::{NetNS, ROOT_NETNS_NAME};
     let _g = NetNS::new(Some(ROOT_NETNS_NAME.to_owned())).guard();

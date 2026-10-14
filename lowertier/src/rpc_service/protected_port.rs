@@ -24,16 +24,3 @@ pub fn unregister_protected_tcp_port(port: u16) {
 pub fn is_protected_tcp_port(port: u16) -> bool {
     PROTECTED_TCP_PORTS.lock().unwrap().contains_key(&port)
 }
-
-#[cfg(test)]
-pub fn clear_protected_tcp_ports_for_test() {
-    PROTECTED_TCP_PORTS.lock().unwrap().clear();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        clear_protected_tcp_ports_for_test, is_protected_tcp_port, register_protected_tcp_port,
-        unregister_protected_tcp_port,
-    };
-}

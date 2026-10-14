@@ -164,47 +164,5 @@ impl RollingFileAppenderBase {
 pub type RollingFileAppenderBase = RollingFileAppender<RollingConditionBase>;
 
 // LCOV_EXCL_START
-#[cfg(test)]
-mod test {
-    use super::*;
 
-    struct Context {
-        _tempdir: tempfile::TempDir,
-        rolling: RollingFileAppenderBase,
-    }
-
-    impl Context {
-        fn verify_contains(&mut self, needle: &str, n: usize) {
-            self.rolling.flush().unwrap();
-            let p = self.rolling.filename_for(n);
-            let haystack = fs::read_to_string(&p).unwrap();
-            if !haystack.contains(needle) {
-                panic!("file {:?} did not contain expected contents {}", p, needle);
-            }
-        }
-    }
-
-    fn build_context(condition: RollingConditionBase, max_files: usize) -> Context {
-        let tempdir = tempfile::tempdir().unwrap();
-        let filename = tempdir.path().join("test.log");
-        let rolling = RollingFileAppenderBase::new(filename, condition, max_files).unwrap();
-        Context {
-            _tempdir: tempdir,
-            rolling,
-        }
-    }
-
-    fn build_builder_context(mut builder: RollingFileAppenderBaseBuilder) -> Context {
-        if builder.filename.is_empty() {
-            builder = builder.filename(String::from("test.log"));
-        }
-        let tempdir = tempfile::tempdir().unwrap();
-        let filename = tempdir.path().join(&builder.filename);
-        builder = builder.filename(String::from(filename.as_os_str().to_str().unwrap()));
-        Context {
-            _tempdir: tempdir,
-            rolling: builder.build().unwrap(),
-        }
-    }
-}
 // LCOV_EXCL_STOP

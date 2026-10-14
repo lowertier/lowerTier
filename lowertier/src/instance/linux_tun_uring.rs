@@ -240,12 +240,3 @@ fn submit_batch(
         Ok((total_bytes, buffers.len()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::{os::fd::AsRawFd, os::unix::net::UnixDatagram, time::Duration};
-
-    use bytes::BytesMut;
-
-    use super::{IoUringTunWriter, RING_ENTRIES, enabled};
-}

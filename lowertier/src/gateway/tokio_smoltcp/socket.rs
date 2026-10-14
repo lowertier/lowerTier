@@ -59,34 +59,9 @@ impl TcpListener {
     pub async fn accept(&mut self) -> io::Result<(TcpStream, SocketAddr)> {
         poll_fn(|cx| self.poll_accept(cx)).await
     }
-    pub fn incoming(self) -> Incoming {
-        Incoming(self)
-    }
+    #[cfg(feature = "ffi-dataplane")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
-    }
-
-    pub fn relisten(&self) {
-        let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
-        let local_endpoint = socket.local_endpoint().unwrap();
-        socket.abort();
-        socket.listen(local_endpoint).unwrap();
-        self.reactor.notify();
-    }
-
-    pub fn is_listening(&self) -> bool {
-        let socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
-        socket.is_listening()
-    }
-}
-
-pub struct Incoming(TcpListener);
-
-impl Stream for Incoming {
-    type Item = io::Result<TcpStream>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let (tcp, _) = ready!(self.0.poll_accept(cx))?;
-        Poll::Ready(Some(Ok(tcp)))
     }
 }
 
@@ -103,8 +78,8 @@ fn ep2sa(ep: &IpEndpoint) -> SocketAddr {
 pub struct TcpStream {
     handle: SocketHandle,
     reactor: Arc<Reactor>,
+    #[cfg(feature = "ffi-dataplane")]
     local_addr: SocketAddr,
-    peer_addr: SocketAddr,
 }
 
 impl TcpStream {
@@ -134,8 +109,8 @@ impl TcpStream {
         let tcp = TcpStream {
             handle,
             reactor,
+            #[cfg(feature = "ffi-dataplane")]
             local_addr,
-            peer_addr,
         };
 
         tcp.reactor.notify();
@@ -167,18 +142,16 @@ impl TcpStream {
             TcpStream {
                 handle: replace(&mut listener.handle, new_handle),
                 reactor,
+                #[cfg(feature = "ffi-dataplane")]
                 local_addr,
-                peer_addr,
             },
             peer_addr,
         ))
     }
 
+    #[cfg(feature = "ffi-dataplane")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
-    }
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        Ok(self.peer_addr)
     }
     pub fn poll_connected(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
         let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
@@ -657,6 +630,7 @@ mod tcp_tests {
 pub struct UdpSocket {
     handle: SocketHandle,
     reactor: Arc<Reactor>,
+    #[cfg(feature = "ffi-dataplane")]
     local_addr: SocketAddr,
 }
 
@@ -676,6 +650,7 @@ impl UdpSocket {
         Ok(UdpSocket {
             handle,
             reactor,
+            #[cfg(feature = "ffi-dataplane")]
             local_addr,
         })
     }
@@ -731,6 +706,7 @@ impl UdpSocket {
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         poll_fn(|cx| self.poll_recv_from(cx, buf)).await
     }
+    #[cfg(feature = "ffi-dataplane")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
     }

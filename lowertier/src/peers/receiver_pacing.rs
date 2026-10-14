@@ -301,16 +301,6 @@ impl ReceiverPacer {
             tokio::time::sleep(wait).await;
         }
     }
-
-    #[cfg(test)]
-    fn state_for_test(&self) -> (bool, u64, u64) {
-        let state = self.state.lock();
-        (
-            state.active,
-            state.smoothed_service_bytes_per_second,
-            state.target_bytes_per_second,
-        )
-    }
 }
 
 fn env_flag_enabled(value: Option<&str>) -> bool {
@@ -374,34 +364,4 @@ pub(crate) fn paced_packet_bytes(packet: &ZCPacket) -> usize {
 
 pub(crate) fn paced_batch_bytes(batch: &PacketBatch) -> usize {
     batch.iter().map(paced_packet_bytes).sum()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use crate::tunnel::{
-        batch::PacketBatch,
-        packet_def::{PacketType, ZCPacket},
-    };
-
-    use super::{
-        ReceiverPacer, ReceiverPressureReport, paced_batch_bytes, paced_packet_bytes,
-        receiver_pacing_enabled_from_env,
-    };
-
-    fn report(
-        sample_micros: u64,
-        delivered_bytes: u64,
-        occupancy_packets: u32,
-        stall_ns: u64,
-    ) -> ReceiverPressureReport {
-        ReceiverPressureReport {
-            sample_micros,
-            delivered_bytes,
-            occupancy_packets,
-            capacity_packets: 192,
-            stall_ns,
-        }
-    }
 }

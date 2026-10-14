@@ -2177,8 +2177,6 @@ impl std::fmt::Debug for PeerSession {
 }
 
 impl PeerSession {
-    const SYNC_RX_GRACE_AFTER_MS: u64 = SecureDatagramSession::SYNC_RX_GRACE_AFTER_MS;
-
     pub fn new(
         peer_id: PeerId,
         root_key: [u8; 32],
@@ -2575,8 +2573,6 @@ impl PeerSession {
         )
     }
 
-
-
     pub fn decrypt_payload(
         &self,
         sender_peer_id: PeerId,
@@ -2609,7 +2605,6 @@ impl PeerSession {
             packets,
         )
     }
-
 }
 
 #[cfg(test)]
@@ -4017,14 +4012,6 @@ mod tests {
         sb.encrypt_payload(b, a, &mut pkt2).unwrap();
         sa.decrypt_payload(b, a, &mut pkt2).unwrap();
         assert_eq!(pkt2.payload(), plaintext2);
-    }
-
-    #[test]
-    fn sync_root_key_preserves_generic_grace_window_constant() {
-        assert_eq!(
-            PeerSession::SYNC_RX_GRACE_AFTER_MS,
-            SecureDatagramSession::SYNC_RX_GRACE_AFTER_MS
-        );
     }
 
     #[test]

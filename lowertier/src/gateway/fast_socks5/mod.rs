@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Fast SOCKS5 client/server implementation written in Rust async/.await (with tokio).
 //!
 //! This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
@@ -63,7 +61,6 @@ pub mod consts {
     pub const SOCKS5_VERSION:                          u8 = 0x05;
 
     pub const SOCKS5_AUTH_METHOD_NONE:                 u8 = 0x00;
-    pub const SOCKS5_AUTH_METHOD_GSSAPI:               u8 = 0x01;
     pub const SOCKS5_AUTH_METHOD_PASSWORD:             u8 = 0x02;
     pub const SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE:       u8 = 0xff;
 
@@ -79,9 +76,8 @@ pub mod consts {
     pub const SOCKS5_REPLY_GENERAL_FAILURE:            u8 = 0x01;
     pub const SOCKS5_REPLY_CONNECTION_NOT_ALLOWED:     u8 = 0x02;
     pub const SOCKS5_REPLY_NETWORK_UNREACHABLE:        u8 = 0x03;
-    pub const SOCKS5_REPLY_HOST_UNREACHABLE:           u8 = 0x04;
-    pub const SOCKS5_REPLY_CONNECTION_REFUSED:         u8 = 0x05;
     pub const SOCKS5_REPLY_TTL_EXPIRED:                u8 = 0x06;
+    pub const SOCKS5_REPLY_CONNECTION_REFUSED:         u8 = 0x05;
     pub const SOCKS5_REPLY_COMMAND_NOT_SUPPORTED:      u8 = 0x07;
     pub const SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
 }
@@ -93,18 +89,7 @@ pub enum Socks5Command {
     UDPAssociate,
 }
 
-#[allow(dead_code)]
 impl Socks5Command {
-    #[inline]
-    #[rustfmt::skip]
-    fn as_u8(&self) -> u8 {
-        match self {
-            Socks5Command::TCPConnect   => consts::SOCKS5_CMD_TCP_CONNECT,
-            Socks5Command::TCPBind      => consts::SOCKS5_CMD_TCP_BIND,
-            Socks5Command::UDPAssociate => consts::SOCKS5_CMD_UDP_ASSOCIATE,
-        }
-    }
-
     #[inline]
     #[rustfmt::skip]
     fn from_u8(code: u8) -> Option<Socks5Command> {
@@ -124,16 +109,6 @@ pub enum AuthenticationMethod {
 }
 
 impl AuthenticationMethod {
-    #[inline]
-    #[rustfmt::skip]
-    fn as_u8(&self) -> u8 {
-        match self {
-            AuthenticationMethod::None => consts::SOCKS5_AUTH_METHOD_NONE,
-            AuthenticationMethod::Password {..} =>
-                consts::SOCKS5_AUTH_METHOD_PASSWORD
-        }
-    }
-
     #[inline]
     #[rustfmt::skip]
     fn from_u8(code: u8) -> Option<AuthenticationMethod> {
@@ -170,10 +145,6 @@ impl fmt::Display for AuthenticationMethod {
 pub enum SocksError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
-    #[error("the data for key `{0}` is not available")]
-    Redaction(String),
-    #[error("invalid header (expected {expected:?}, found {found:?})")]
-    InvalidHeader { expected: String, found: String },
 
     #[error("Auth method unacceptable `{0:?}`.")]
     AuthMethodUnacceptable(Vec<u8>),
@@ -188,9 +159,6 @@ pub enum SocksError {
 
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),
-
-    #[error("Argument input error: `{0}`.")]
-    ArgumentInputError(&'static str),
 
     //    #[error("Other: `{0}`.")]
     #[error(transparent)]
@@ -210,14 +178,10 @@ pub enum ReplyError {
     ConnectionNotAllowed,
     #[error("Network unreachable")]
     NetworkUnreachable,
-    #[error("Host unreachable")]
-    HostUnreachable,
     #[error("Connection refused")]
     ConnectionRefused,
     #[error("Connection timeout")]
     ConnectionTimeout,
-    #[error("TTL expired")]
-    TtlExpired,
     #[error("Command not supported")]
     CommandNotSupported,
     #[error("Address type not supported")]
@@ -226,39 +190,17 @@ pub enum ReplyError {
 }
 
 impl ReplyError {
-    #[inline]
-    #[rustfmt::skip]
     pub fn as_u8(self) -> u8 {
         match self {
-            ReplyError::Succeeded               => consts::SOCKS5_REPLY_SUCCEEDED,
-            ReplyError::GeneralFailure          => consts::SOCKS5_REPLY_GENERAL_FAILURE,
-            ReplyError::ConnectionNotAllowed    => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
-            ReplyError::NetworkUnreachable      => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
-            ReplyError::HostUnreachable         => consts::SOCKS5_REPLY_HOST_UNREACHABLE,
-            ReplyError::ConnectionRefused       => consts::SOCKS5_REPLY_CONNECTION_REFUSED,
-            ReplyError::ConnectionTimeout       => consts::SOCKS5_REPLY_TTL_EXPIRED,
-            ReplyError::TtlExpired              => consts::SOCKS5_REPLY_TTL_EXPIRED,
-            ReplyError::CommandNotSupported     => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
+            ReplyError::Succeeded => consts::SOCKS5_REPLY_SUCCEEDED,
+            ReplyError::GeneralFailure => consts::SOCKS5_REPLY_GENERAL_FAILURE,
+            ReplyError::ConnectionNotAllowed => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
+            ReplyError::NetworkUnreachable => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
+            ReplyError::ConnectionRefused => consts::SOCKS5_REPLY_CONNECTION_REFUSED,
+            ReplyError::ConnectionTimeout => consts::SOCKS5_REPLY_TTL_EXPIRED,
+            ReplyError::CommandNotSupported => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
             ReplyError::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
-//            ReplyError::OtherReply(c)           => c,
-        }
-    }
-
-    #[inline]
-    #[rustfmt::skip]
-    pub fn from_u8(code: u8) -> ReplyError {
-        match code {
-            consts::SOCKS5_REPLY_SUCCEEDED                  => ReplyError::Succeeded,
-            consts::SOCKS5_REPLY_GENERAL_FAILURE            => ReplyError::GeneralFailure,
-            consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED     => ReplyError::ConnectionNotAllowed,
-            consts::SOCKS5_REPLY_NETWORK_UNREACHABLE        => ReplyError::NetworkUnreachable,
-            consts::SOCKS5_REPLY_HOST_UNREACHABLE           => ReplyError::HostUnreachable,
-            consts::SOCKS5_REPLY_CONNECTION_REFUSED         => ReplyError::ConnectionRefused,
-            consts::SOCKS5_REPLY_TTL_EXPIRED                => ReplyError::TtlExpired,
-            consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED      => ReplyError::CommandNotSupported,
-            consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED => ReplyError::AddressTypeNotSupported,
-//            _                                               => ReplyError::OtherReply(code),
-            _                                               => unreachable!("ReplyError code unsupported."),
+            //            ReplyError::OtherReply(c)           => c,
         }
     }
 }

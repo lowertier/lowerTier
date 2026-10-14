@@ -652,7 +652,7 @@ pub struct DirectConnectorManager {
     global_ctx: ArcGlobalCtx,
     data: Arc<DirectConnectorManagerData>,
     client: PeerTaskManager<DirectConnectorLauncher>,
-    tasks: JoinSet<()>,
+    _tasks: JoinSet<()>,
 }
 
 #[derive(Clone)]
@@ -714,7 +714,7 @@ impl DirectConnectorManager {
             global_ctx,
             data,
             client,
-            tasks: JoinSet::new(),
+            _tasks: JoinSet::new(),
         }
     }
 
@@ -739,137 +739,5 @@ impl DirectConnectorManager {
 
     pub fn run_as_client(&mut self) {
         self.client.start();
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn try_direct_connect_with_ip_list(
-        &self,
-        dst_peer_id: PeerId,
-        ip_list: GetIpListResponse,
-    ) -> Result<(), Error> {
-        self.data
-            .do_try_direct_connect_internal(dst_peer_id, ip_list)
-            .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::BTreeSet,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
-    };
-
-    use crate::{
-        common::global_ctx::tests::get_mock_global_ctx,
-        connector::direct::{
-            DirectConnectorManager, DirectConnectorManagerData, DstListenerUrlBlackListItem,
-        },
-        instance::listeners::ListenerManager,
-        peers::tests::{
-            connect_peer_manager, create_mock_peer_manager, wait_route_appear,
-            wait_route_appear_with_cost,
-        },
-        proto::peer_rpc::GetIpListResponse,
-        tunnel::IpScheme,
-    };
-
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-
-    use super::{
-        TESTING, direct_protocol_priority, mapped_listener_port, resolve_mapped_listener_addrs,
-    };
-
-    async fn run_direct_connector_mapped_listener_test(
-        mapped_listener: &str,
-        target_listener: &str,
-    ) {
-        TESTING.store(true, std::sync::atomic::Ordering::Relaxed);
-        let p_a = create_mock_peer_manager().await;
-        let p_b = create_mock_peer_manager().await;
-        let p_c = create_mock_peer_manager().await;
-        let p_x = create_mock_peer_manager().await;
-        connect_peer_manager(p_a.clone(), p_b.clone()).await;
-        connect_peer_manager(p_b.clone(), p_c.clone()).await;
-        connect_peer_manager(p_c.clone(), p_x.clone()).await;
-
-        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
-        wait_route_appear(p_a.clone(), p_x.clone()).await.unwrap();
-
-        let mut f = p_a.get_global_ctx().get_flags();
-        f.bind_device = false;
-        p_a.get_global_ctx().set_flags(f);
-
-        p_c.get_global_ctx()
-            .config
-            .set_mapped_listeners(Some(vec![mapped_listener.parse().unwrap()]));
-
-        p_x.get_global_ctx()
-            .config
-            .set_listeners(vec![target_listener.parse().unwrap()]);
-        let mut lis_x = ListenerManager::new(p_x.get_global_ctx(), p_x.clone());
-        lis_x.prepare_listeners().await.unwrap();
-        lis_x.run().await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let mut dm_a = DirectConnectorManager::new(p_a.get_global_ctx(), p_a.clone());
-        let mut dm_c = DirectConnectorManager::new(p_c.get_global_ctx(), p_c.clone());
-        dm_a.run_as_client();
-        dm_c.run_as_server();
-        // p_c's mapped listener is p_x's listener, so p_a should connect to p_x directly
-
-        wait_route_appear_with_cost(p_a.clone(), p_x.my_peer_id(), Some(1))
-            .await
-            .unwrap();
-    }
-
-    async fn run_direct_connector_basic_test(proto: &str, ipv6: bool) {
-        TESTING.store(true, std::sync::atomic::Ordering::Relaxed);
-
-        let p_a = create_mock_peer_manager().await;
-        let p_b = create_mock_peer_manager().await;
-        let p_c = create_mock_peer_manager().await;
-        connect_peer_manager(p_a.clone(), p_b.clone()).await;
-        connect_peer_manager(p_b.clone(), p_c.clone()).await;
-
-        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
-
-        p_c.get_global_ctx()
-            .get_ip_collector()
-            .collect_ip_addrs()
-            .await;
-
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-
-        let mut dm_a = DirectConnectorManager::new(p_a.get_global_ctx(), p_a.clone());
-        let mut dm_c = DirectConnectorManager::new(p_c.get_global_ctx(), p_c.clone());
-
-        dm_a.run_as_client();
-        dm_c.run_as_server();
-
-        let port = 11041;
-        if !ipv6 {
-            p_c.get_global_ctx().config.set_listeners(vec![
-                format!("{}://0.0.0.0:{}", proto, port).parse().unwrap(),
-            ]);
-        } else {
-            p_c.get_global_ctx()
-                .config
-                .set_listeners(vec![format!("{}://[::]:{}", proto, port).parse().unwrap()]);
-        }
-        let mut f = p_c.get_global_ctx().config.get_flags();
-        f.enable_ipv6 = ipv6;
-        p_c.get_global_ctx().set_flags(f);
-        let mut lis_c = ListenerManager::new(p_c.get_global_ctx(), p_c.clone());
-        lis_c.prepare_listeners().await.unwrap();
-
-        lis_c.run().await.unwrap();
-
-        wait_route_appear_with_cost(p_a.clone(), p_c.my_peer_id(), Some(1))
-            .await
-            .unwrap();
     }
 }

@@ -109,15 +109,6 @@ impl ReceiveSlot {
         unsafe { self.packet.set_len(self.payload_offset + payload_len) };
         Ok(ZCPacket::new_from_buf(self.packet, ZCPacketType::NIC))
     }
-
-    #[cfg(test)]
-    fn write_payload_for_test(&mut self, payload: &[u8]) {
-        assert!(payload.len() <= self.mtu);
-        // The test mirrors recvmsg_x by initializing the slot's spare payload capacity.
-        unsafe {
-            std::ptr::copy_nonoverlapping(payload.as_ptr(), self.payload_ptr(), payload.len());
-        }
-    }
 }
 
 fn completed_batch_bytes(packet_lengths: &[usize], completed_messages: usize) -> usize {
@@ -383,10 +374,4 @@ pub(super) fn split_device(
         DarwinTunStream::new(device.clone(), payload_prefix_len, mtu),
         DarwinTunAsyncWrite::new(device),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ReceiveSlot, UTUN_HEADER_LEN, completed_batch_bytes};
-    use crate::tunnel::packet_def::ZCPacketType;
 }

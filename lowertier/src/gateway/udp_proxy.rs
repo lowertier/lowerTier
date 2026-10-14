@@ -64,7 +64,7 @@ struct UdpNatEntry {
     socket: Option<UdpSocket>,
     forward_task: Mutex<Option<JoinHandle<()>>>,
     stopped: AtomicBool,
-    start_time: Instant,
+
     last_active_time: AtomicCell<Instant>,
     denied: bool,
 }
@@ -89,7 +89,7 @@ impl UdpNatEntry {
             socket,
             forward_task: Mutex::new(None),
             stopped: AtomicBool::new(false),
-            start_time: Instant::now(),
+
             last_active_time: AtomicCell::new(Instant::now()),
             denied,
         })
@@ -560,150 +560,6 @@ impl Drop for UdpProxy {
     fn drop(&mut self) {
         for v in self.nat_table.iter() {
             v.stop();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        net::{Ipv4Addr, SocketAddr},
-        sync::Arc,
-        time::Duration,
-    };
-
-    use pnet::packet::{
-        MutablePacket, Packet,
-        ip::IpNextHeaderProtocols,
-        ipv4::{self, Ipv4Packet, MutableIpv4Packet},
-        udp::{self, MutableUdpPacket, UdpPacket},
-    };
-    use tokio::{net::UdpSocket, sync::mpsc::Receiver, time::timeout};
-
-    use crate::{
-        common::{config::ConfigLoader, global_ctx::tests::get_mock_global_ctx},
-        peers::{
-            create_packet_recv_chan,
-            peer_manager::{PeerManager, RouteAlgoType},
-        },
-        tunnel::packet_def::{PacketType, ZCPacket},
-    };
-
-    use super::UdpProxy;
-
-    fn build_udp_proxy_packet(
-        src_ip: Ipv4Addr,
-        src_port: u16,
-        dst_socket: SocketAddr,
-        payload: &[u8],
-    ) -> ZCPacket {
-        let SocketAddr::V4(dst_socket) = dst_socket else {
-            panic!("test only builds IPv4 UDP packets");
-        };
-        let dst_ip = *dst_socket.ip();
-        let mut packet = vec![0; 20 + 8 + payload.len()];
-        let packet_len = packet.len() as u16;
-
-        {
-            let mut ipv4_packet = MutableIpv4Packet::new(&mut packet).unwrap();
-            ipv4_packet.set_version(4);
-            ipv4_packet.set_header_length(5);
-            ipv4_packet.set_total_length(packet_len);
-            ipv4_packet.set_ttl(64);
-            ipv4_packet.set_next_level_protocol(IpNextHeaderProtocols::Udp);
-            ipv4_packet.set_source(src_ip);
-            ipv4_packet.set_destination(dst_ip);
-        }
-
-        {
-            let mut udp_packet = MutableUdpPacket::new(&mut packet[20..]).unwrap();
-            udp_packet.set_source(src_port);
-            udp_packet.set_destination(dst_socket.port());
-            udp_packet.set_length((8 + payload.len()) as u16);
-            udp_packet.payload_mut().copy_from_slice(payload);
-            udp_packet.set_checksum(udp::ipv4_checksum(
-                &udp_packet.to_immutable(),
-                &src_ip,
-                &dst_ip,
-            ));
-        }
-
-        {
-            let mut ipv4_packet = MutableIpv4Packet::new(&mut packet).unwrap();
-            ipv4_packet.set_checksum(ipv4::checksum(&ipv4_packet.to_immutable()));
-        }
-
-        let mut packet = ZCPacket::new_with_payload(&packet);
-        packet.fill_peer_manager_hdr(1009867077, 3831440917, PacketType::Data as u8);
-        packet
-    }
-
-    async fn wait_proxy_cidr_loaded(proxy: &UdpProxy) {
-        timeout(Duration::from_secs(1), async {
-            while proxy.cidr_set.is_empty() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    async fn recv_payload(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
-        let mut buf = [0; 64];
-        let (len, addr) = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
-            .await
-            .unwrap()
-            .unwrap();
-        (buf[..len].to_vec(), addr)
-    }
-
-    async fn recv_response_packet(receiver: &mut Receiver<ZCPacket>) -> ZCPacket {
-        timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    }
-
-    fn assert_udp_response(
-        packet: ZCPacket,
-        src_socket: SocketAddr,
-        dst_ip: Ipv4Addr,
-        dst_port: u16,
-        payload: &[u8],
-    ) {
-        let SocketAddr::V4(src_socket) = src_socket else {
-            panic!("test only checks IPv4 UDP packets");
-        };
-        let ipv4_packet = Ipv4Packet::new(packet.payload()).unwrap();
-        assert_eq!(ipv4_packet.get_source(), *src_socket.ip());
-        assert_eq!(ipv4_packet.get_destination(), dst_ip);
-
-        let udp_packet = UdpPacket::new(ipv4_packet.payload()).unwrap();
-        assert_eq!(udp_packet.get_source(), src_socket.port());
-        assert_eq!(udp_packet.get_destination(), dst_port);
-        assert_eq!(udp_packet.payload(), payload);
-    }
-
-    async fn stop_nat_entries(proxy: &UdpProxy) {
-        let nat_socket_addrs = proxy
-            .nat_table
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .socket
-                    .as_ref()
-                    .and_then(|socket| socket.local_addr().ok())
-                    .map(|addr| SocketAddr::from((Ipv4Addr::LOCALHOST, addr.port())))
-            })
-            .collect::<Vec<_>>();
-
-        for entry in proxy.nat_table.iter() {
-            entry.stop();
-        }
-
-        let wake_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        for addr in nat_socket_addrs {
-            let _ = wake_socket.send_to(b"wake", addr).await;
         }
     }
 }

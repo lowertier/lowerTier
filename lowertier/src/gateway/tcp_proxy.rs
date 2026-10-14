@@ -140,7 +140,7 @@ struct SmolTcpListener {
     stream_tx: mpsc::UnboundedSender<SmolTcpAcceptResult>,
     stream_rx: mpsc::UnboundedReceiver<SmolTcpAcceptResult>,
 
-    tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
+    _tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
 }
 
 #[cfg(feature = "smoltcp")]
@@ -154,7 +154,7 @@ impl SmolTcpListener {
         Self {
             stream_tx: tx,
             stream_rx: rx,
-            tasks,
+            _tasks: tasks,
         }
     }
 
@@ -857,10 +857,6 @@ impl TcpProxy {
         }
     }
 
-    pub fn get_global_ctx(&self) -> &ArcGlobalCtx {
-        &self.global_ctx
-    }
-
     pub fn is_smoltcp_enabled(&self) -> bool {
         self.enable_smoltcp
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -974,10 +970,6 @@ impl TcpProxy {
         tracing::trace!(?source, ?ipv4_addr, ?packet, "tcp packet after modified");
 
         Some(())
-    }
-
-    pub fn is_tcp_proxy_connection(&self, src: SocketAddr) -> bool {
-        self.syn_map.contains_key(&src) || self.addr_conn_map.contains_key(&src)
     }
 
     pub fn list_proxy_entries(&self) -> Vec<TcpProxyEntry> {

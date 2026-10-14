@@ -313,7 +313,6 @@ pub(crate) fn remove_data_plane_handles_by_instance_ids(_ids: &[uuid::Uuid]) {}
 
 #[cfg(feature = "ffi-dataplane")]
 pub(crate) fn enter_data_plane_operation() -> Option<std::sync::RwLockReadGuard<'static, ()>> {
-
     let guard = match DATA_PLANE_USAGE_LOCK.read() {
         Ok(guard) => guard,
         Err(err) => {

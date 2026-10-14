@@ -70,13 +70,3 @@ impl UnderlayPolicy {
         self.allows_ip(addr)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::UnderlayPolicy;
-    use std::net::IpAddr;
-
-    fn ip(value: &str) -> IpAddr {
-        value.parse().unwrap()
-    }
-}

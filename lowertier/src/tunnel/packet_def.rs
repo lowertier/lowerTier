@@ -552,6 +552,7 @@ impl std::fmt::Debug for ReusableBufferPool {
 }
 
 impl ReusableBufferPool {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn new(buffer_len: usize, buffer_count: usize) -> Self {
         assert!(buffer_len > 0);
         assert!(buffer_count > 0);
@@ -570,10 +571,12 @@ impl ReusableBufferPool {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn try_take(&self) -> Option<BytesMut> {
         self.inner.buffers.pop()
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn take_or_allocate(&self) -> BytesMut {
         // Receive APIs expose slices before writing. Recycling can restore the full slab length.
         self.try_take()
@@ -874,6 +877,7 @@ impl ZCPacket {
         packet
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn new_from_reusable_buf(
         buf: BytesMut,
         packet_type: ZCPacketType,
@@ -1126,10 +1130,6 @@ impl ZCPacket {
 
     pub(crate) fn set_flow_hash(&mut self, flow_hash: u64) {
         self.flow_hash = Some(flow_hash);
-    }
-
-    pub(crate) fn clear_flow_hash(&mut self) {
-        self.flow_hash = None;
     }
 
     pub(crate) fn batch_key(&self) -> Option<usize> {
@@ -1395,6 +1395,7 @@ impl ZCPacket {
         bytes.freeze()
     }
 
+    #[cfg(test)]
     pub(crate) fn convert_type_in_place(
         &mut self,
         target_packet_type: ZCPacketType,
@@ -1541,6 +1542,7 @@ impl ZCPacket {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_lossy_hint(&mut self, lossy: bool) {
         self.lossy_hint = Some(lossy);
     }
@@ -2102,7 +2104,6 @@ mod tests {
         assert!(!header.is_speed_first());
         assert!(!header.is_latency_first());
     }
-
 
     #[test]
     fn into_bytes_drops_spare_capacity_before_freeze() {

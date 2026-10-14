@@ -321,7 +321,6 @@ pub struct GlobalCtx {
     public_ipv6_lease: AtomicCell<Option<cidr::Ipv6Inet>>,
     public_ipv6_routes: Mutex<BTreeSet<std::net::Ipv6Addr>>,
     multicast_membership_state: Mutex<MulticastMembershipState>,
-    cached_proxy_cidrs: AtomicCell<Option<Vec<ProxyNetworkConfig>>>,
 
     ip_collector: Mutex<Option<Arc<IPCollector>>>,
 
@@ -706,7 +705,6 @@ impl GlobalCtx {
             public_ipv6_lease: AtomicCell::new(None),
             public_ipv6_routes: Mutex::new(BTreeSet::new()),
             multicast_membership_state: Mutex::new(MulticastMembershipState::new()),
-            cached_proxy_cidrs: AtomicCell::new(None),
 
             ip_collector: Mutex::new(Some(Arc::new(IPCollector::new(
                 net_ns,
@@ -808,17 +806,6 @@ impl GlobalCtx {
         true
     }
 
-    /// Updates one reporter membership and returns whether the advertised group set changed.
-    pub(crate) fn update_multicast_membership(
-        &self,
-        reporter: MulticastReporterKey,
-        group: IpAddr,
-        joined: bool,
-        now: Instant,
-    ) -> bool {
-        self.update_multicast_memberships(&[(reporter, group, joined)], now)
-    }
-
     /// Updates a batch of reporter memberships while holding each state lock once.
     pub(crate) fn update_multicast_memberships(
         &self,
@@ -897,10 +884,6 @@ impl GlobalCtx {
             .expiry_notify
             .clone();
         notify
-    }
-
-    pub(crate) fn multicast_membership_work_counters(&self) -> MulticastMembershipWorkCounters {
-        self.multicast_membership_state.lock().unwrap().work
     }
 
     pub fn check_network_in_whitelist(&self, network_name: &str) -> Result<(), anyhow::Error> {
@@ -1098,7 +1081,6 @@ impl GlobalCtx {
     pub fn get_flags(&self) -> Flags {
         self.flags.load().as_ref().clone()
     }
-
 
     pub(crate) fn process_memory_governor(&self) -> Arc<ProcessMemoryGovernor> {
         self.process_memory_governor.clone()

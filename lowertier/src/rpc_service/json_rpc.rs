@@ -119,12 +119,3 @@ pub async fn call_json_rpc(
         )),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn manager() -> Arc<NetworkInstanceManager> {
-        Arc::new(NetworkInstanceManager::new())
-    }
-}

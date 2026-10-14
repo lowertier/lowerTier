@@ -114,34 +114,3 @@ impl ReplayWindow {
         self.max_sequence
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    fn reference_accept(
-        accepted: &mut HashSet<u64>,
-        max_sequence: &mut Option<u64>,
-        sequence: u64,
-    ) -> bool {
-        if let Some(current_max) = *max_sequence {
-            if sequence <= current_max
-                && (current_max - sequence >= REPLAY_WINDOW_BITS as u64
-                    || accepted.contains(&sequence))
-            {
-                return false;
-            }
-        }
-
-        accepted.insert(sequence);
-        if max_sequence.is_none_or(|current_max| sequence > current_max) {
-            *max_sequence = Some(sequence);
-            accepted.retain(|accepted_sequence| {
-                sequence - *accepted_sequence < REPLAY_WINDOW_BITS as u64
-            });
-        }
-        true
-    }
-}

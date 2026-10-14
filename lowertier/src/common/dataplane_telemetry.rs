@@ -311,7 +311,6 @@ impl DataplaneTelemetry {
         stats.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
-
     pub fn receiver_pressure_snapshot(&self) -> ReceiverPressureSnapshot {
         let queue = &self.queues[queue_slot(DataplaneQueueClass::DirectNic, 0)];
         let tun_write = &self.io[DataplaneIo::TunWrite as usize];
@@ -497,13 +496,4 @@ fn atomic_max(target: &AtomicU64, value: u64) {
             Err(observed) => current = observed,
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::{
-        DataplaneIo, DataplaneQueueClass, DataplaneStage, DataplaneTelemetry,
-    };
 }

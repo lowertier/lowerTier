@@ -28,6 +28,8 @@ use crate::common::{error::Error, underlay_policy::UnderlayPolicy};
 use super::dns::resolve_txt_record;
 use super::stun_codec_ext::*;
 
+// TODO(tracker): remove this allowance after discovery integration.
+#[allow(dead_code)]
 pub(crate) fn is_stun_binding_success(data: &[u8]) -> bool {
     if data.len() < 20 {
         return false;
@@ -224,9 +226,15 @@ struct BindRequestResponse {
 
     recv_from_addr: SocketAddr,
     mapped_socket_addr: Option<SocketAddr>,
+    // TODO(tracker): remove this allowance after discovery integration.
+    #[allow(dead_code)]
     changed_socket_addr: Option<SocketAddr>,
 
+    // TODO(tracker): remove this allowance after discovery integration.
+    #[allow(dead_code)]
     change_ip: bool,
+    // TODO(tracker): remove this allowance after discovery integration.
+    #[allow(dead_code)]
     change_port: bool,
 
     real_ip_changed: bool,
@@ -236,6 +244,8 @@ struct BindRequestResponse {
 }
 
 impl BindRequestResponse {
+    // TODO(tracker): remove this allowance after discovery integration.
+    #[allow(dead_code)]
     pub fn get_mapped_addr_no_check(&self) -> &SocketAddr {
         self.mapped_socket_addr.as_ref().unwrap()
     }

@@ -444,12 +444,6 @@ impl UnsafeCounter {
         }
     }
 
-    pub fn new_with_value(initial: u64) -> Self {
-        Self {
-            value: UnsafeCell::new(initial),
-        }
-    }
-
     /// Increment the counter by the given amount
     /// # Safety
     /// This method is unsafe because it uses UnsafeCell. The caller must ensure
@@ -519,13 +513,6 @@ impl MetricData {
     fn new() -> Self {
         Self {
             counter: UnsafeCounter::new(),
-            last_updated: UnsafeCell::new(Instant::now()),
-        }
-    }
-
-    fn new_with_value(initial: u64) -> Self {
-        Self {
-            counter: UnsafeCounter::new_with_value(initial),
             last_updated: UnsafeCell::new(Instant::now()),
         }
     }
@@ -650,7 +637,7 @@ impl MetricSnapshot {
 /// StatsManager manages global statistics with high performance counters
 pub struct StatsManager {
     counters: Arc<DashMap<MetricKey, Arc<MetricData>>>,
-    cleanup_task: Option<AbortOnDropHandle<()>>,
+    _cleanup_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl StatsManager {
@@ -685,7 +672,7 @@ impl StatsManager {
 
         Self {
             counters,
-            cleanup_task,
+            _cleanup_task: cleanup_task,
         }
     }
 
@@ -816,14 +803,4 @@ impl Default for StatsManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::stats_manager::{LabelSet, LabelType, MetricName, StatsManager};
-    use crate::proto::api::instance::{
-        GetPrometheusStatsRequest, GetPrometheusStatsResponse, GetStatsRequest, GetStatsResponse,
-    };
-    use std::collections::BTreeMap;
 }

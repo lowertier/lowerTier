@@ -117,8 +117,3 @@ pub(crate) fn verify_slices_are_equal(left: &[u8], right: &[u8]) -> Result<(), (
         Err(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

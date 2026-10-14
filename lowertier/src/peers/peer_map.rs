@@ -110,6 +110,8 @@ pub(crate) enum OriginAuthSource {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum OriginAuthCapability {
+    // TODO(l2fix): remove this allowance after origin-auth integration.
+    #[allow(dead_code)]
     GenericRelayOrigin,
     FullEthernetBridge,
 }
@@ -387,6 +389,8 @@ impl PeerMap {
             })
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn publish_dataplane_descriptor(
         &self,
         forwarding_snapshot: Option<ForwardingDecisionSnapshotHandle>,
@@ -572,6 +576,8 @@ impl PeerMap {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     pub(crate) fn start_origin_auth_listener(self: &Arc<Self>) {
         let mut events = self.global_ctx.subscribe();
         let weak_peer_map = Arc::downgrade(self);
@@ -1288,6 +1294,8 @@ impl PeerMap {
         true
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn publish_origin_auth_grant(&self, grant: Option<OriginAuthGrant>) -> Option<OriginAuthGrant> {
         let _publish_guard = self.origin_auth_publish_lock.lock();
         if !self.auth_generation_available() {
@@ -1333,6 +1341,8 @@ impl PeerMap {
         Some(grant)
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn revoke_origin_auth_grant(
         &self,
         peer_id: PeerId,
@@ -1391,6 +1401,8 @@ impl PeerMap {
         );
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     pub(crate) fn publish_bridge_route_evidence(&self, evidence: BridgeRoutePeerEvidence) -> bool {
         if !evidence.validate_for(evidence.peer_id, QuantaInstant::now()) {
             return false;
@@ -1412,6 +1424,8 @@ impl PeerMap {
         .is_some()
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     pub(crate) fn revoke_bridge_route_evidence(
         &self,
         peer_id: PeerId,
@@ -1431,6 +1445,8 @@ impl PeerMap {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     pub(crate) fn install_test_origin_auth_evidence(
         &self,
         peer_id: PeerId,
@@ -2310,83 +2326,6 @@ impl ForwardingSnapshotPublishHook for PeerMapForwardingSnapshotHook {
     fn discard_forwarding_snapshot(&self, source_token: ForwardingSnapshotSourceToken) {
         if let Some(peer_map) = self.peer_map.upgrade() {
             peer_map.discard_route_source(source_token);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-    };
-
-    use prefix_trie::PrefixMap;
-    use tokio::sync::Notify;
-
-    use super::{
-        MAX_LIVE_CONNECTIONS_PER_PEER, OriginAuthCapability, OriginAuthSource,
-        PeerConnectionAdmission, PeerMap, merge_authenticated_route_peer_evidence,
-    };
-    use crate::{
-        common::global_ctx::tests::get_mock_global_ctx,
-        peers::{
-            create_packet_recv_chan,
-            peer::Peer,
-            route_trait::{
-                ArcRoute, AuthenticatedRoutePeerEvidence, BridgeRoutePeerEvidence,
-                ForwardingDecisionSnapshot, ForwardingNextHop, ForwardingPeerTable, MockRoute,
-                NextHopPolicy, OriginAuthPublication, Route,
-            },
-        },
-        proto::peer_rpc::{PeerIdentityType, SecureAuthLevel},
-        tunnel::{batch::PacketBatch, packet_def::ZCPacket},
-    };
-
-    fn forwarding_snapshot(
-        generation: u64,
-        destination: u32,
-        least_hop: u32,
-        least_cost: u32,
-        max_goodput: u32,
-    ) -> Arc<ForwardingDecisionSnapshot> {
-        let next_hop = |peer_id| ForwardingNextHop {
-            next_hop_peer_id: peer_id,
-            ..Default::default()
-        };
-        ForwardingDecisionSnapshot::from_parts(
-            generation,
-            Arc::new(ForwardingPeerTable::default()),
-            Arc::new(HashSet::new()),
-            None,
-            Arc::new(HashMap::from([(destination, next_hop(least_hop))])),
-            Arc::new(HashMap::from([(destination, next_hop(least_cost))])),
-            Arc::new(HashMap::from([(destination, next_hop(max_goodput))])),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(PrefixMap::new()),
-            Arc::new(PrefixMap::new()),
-        )
-    }
-
-    async fn install_panicking_route(peer_map: &PeerMap) {
-        let route: ArcRoute = Arc::new(Box::new(MockRoute {}) as Box<dyn Route + Send + Sync>);
-        peer_map.routes.write().await.push(route);
-    }
-
-    fn evidence(
-        peer_id: u32,
-        identity_type: PeerIdentityType,
-        secure_auth_level: SecureAuthLevel,
-    ) -> super::AuthenticatedRoutePeerEvidence {
-        super::AuthenticatedRoutePeerEvidence {
-            peer_id,
-            identity_type,
-            noise_static_pubkey: vec![7; 32],
-            secure_auth_level,
         }
     }
 }

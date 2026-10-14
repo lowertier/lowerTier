@@ -12,9 +12,3 @@ pub fn convert_idn_to_ascii(mut url: url::Url) -> anyhow::Result<url::Url> {
     }
     Ok(url)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rstest::rstest;
-}

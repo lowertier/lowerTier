@@ -453,17 +453,6 @@ impl ForwardingDecisionSnapshot {
                 .map(|entry| *entry.1),
         }
     }
-
-    pub(crate) fn next_hop_map_arc(
-        &self,
-        policy: NextHopPolicy,
-    ) -> &Arc<HashMap<PeerId, ForwardingNextHop>> {
-        match policy {
-            NextHopPolicy::LeastHop => &self.least_hop,
-            NextHopPolicy::LeastCost => &self.least_cost,
-            NextHopPolicy::MaxGoodput => &self.max_goodput,
-        }
-    }
 }
 
 pub type ForwardingDecisionSnapshotHandle = Arc<ForwardingDecisionSnapshot>;
@@ -1254,39 +1243,5 @@ impl Route for MockRoute {
 
     fn get_peer_groups(&self, _peer_id: PeerId) -> Arc<Vec<String>> {
         panic!("mock route")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn snapshot(generation: u64) -> ForwardingDecisionSnapshotHandle {
-        ForwardingDecisionSnapshot::from_parts(
-            generation,
-            Arc::new(ForwardingPeerTable::default()),
-            Arc::new(HashSet::new()),
-            None,
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(PrefixMap::new()),
-            Arc::new(PrefixMap::new()),
-        )
-    }
-
-    fn evidence(
-        peer_id: PeerId,
-        identity_type: PeerIdentityType,
-        secure_auth_level: SecureAuthLevel,
-    ) -> AuthenticatedRoutePeerEvidence {
-        AuthenticatedRoutePeerEvidence {
-            peer_id,
-            identity_type,
-            noise_static_pubkey: vec![7; 32],
-            secure_auth_level,
-        }
     }
 }

@@ -71,9 +71,7 @@ pub struct SimpleUserPassword {
 }
 
 /// The struct returned when the user has successfully authenticated
-pub struct AuthSucceeded {
-    pub username: String,
-}
+pub struct AuthSucceeded {}
 
 /// This is an example to auth via simple credentials.
 /// If the auth succeed, we return the username authenticated with, for further uses.
@@ -87,7 +85,7 @@ impl Authentication for SimpleUserPassword {
             if username == self.username && password == self.password {
                 // Some() will allow the authentication and the credentials
                 // will be forwarded to the socket
-                Some(AuthSucceeded { username })
+                Some(AuthSucceeded {})
             } else {
                 // Credentials incorrect, we deny the auth
                 None
@@ -141,31 +139,10 @@ impl<A: Authentication> Config<A> {
         self
     }
 
-    /// Enable authentication
-    /// 'static lifetime for Authentication avoid us to use `dyn Authentication`
-    /// and set the Arc before calling the function.
-    pub fn with_authentication<T: Authentication + 'static>(self, authentication: T) -> Config<T> {
-        Config {
-            request_timeout: self.request_timeout,
-            skip_auth: self.skip_auth,
-            dns_resolve: self.dns_resolve,
-            execute_command: self.execute_command,
-            allow_udp: self.allow_udp,
-            allow_no_auth: self.allow_no_auth,
-            auth: Some(Arc::new(authentication)),
-        }
-    }
-
     /// For some complex scenarios, we may want to either accept Username/Password configuration
     /// or IP Whitelisting, in case the client send only 2 auth methods rather than 3 (with auth)
     pub fn set_allow_no_auth(&mut self, value: bool) -> &mut Self {
         self.allow_no_auth = value;
-        self
-    }
-
-    /// Set whether or not to execute commands
-    pub fn set_execute_command(&mut self, value: bool) -> &mut Self {
-        self.execute_command = value;
         self
     }
 
@@ -239,46 +216,6 @@ pub trait AsyncUdpConnector: Send + Sync {
     }
 }
 
-pub struct DefaultTcpConnector {}
-
-#[async_trait::async_trait]
-impl AsyncTcpConnector for DefaultTcpConnector {
-    type S = TcpStream;
-
-    async fn tcp_connect(&self, addr: SocketAddr, timeout_s: u64) -> Result<TcpStream> {
-        tcp_connect_with_timeout(addr, timeout_s).await
-    }
-}
-
-pub struct DefaultUdpSocket(UdpSocket);
-
-#[async_trait::async_trait]
-impl AsyncUdpSocket for DefaultUdpSocket {
-    async fn send(&self, data: &[u8]) -> io::Result<usize> {
-        self.0.send(data).await
-    }
-
-    async fn recv(&self, data: &mut [u8]) -> io::Result<usize> {
-        self.0.recv(data).await
-    }
-}
-
-#[async_trait::async_trait]
-impl AsyncUdpConnector for DefaultTcpConnector {
-    type S = DefaultUdpSocket;
-
-    async fn udp_connect(&self, addr: SocketAddr, _timeout_s: u64) -> Result<Self::S> {
-        let bind_addr = if addr.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
-        let socket = UdpSocket::bind(bind_addr).await?;
-        socket.connect(addr).await?;
-        Ok(DefaultUdpSocket(socket))
-    }
-}
-
 /// Wrap TcpStream and contains Socks5 protocol implementation.
 pub struct Socks5Socket<
     T: AsyncRead + AsyncWrite + Unpin,
@@ -287,7 +224,7 @@ pub struct Socks5Socket<
 > {
     inner: T,
     config: Arc<Config<A>>,
-    auth: AuthenticationMethod,
+
     target_addr: Option<TargetAddr>,
     cmd: Option<Socks5Command>,
     /// Socket address which will be used in the reply message.
@@ -308,7 +245,7 @@ impl<
         Socks5Socket {
             inner: socket,
             config,
-            auth: AuthenticationMethod::None,
+
             target_addr: None,
             cmd: None,
             reply_ip: None,
@@ -363,11 +300,6 @@ impl<
         };
 
         Ok(self)
-    }
-
-    /// Consumes the `Socks5Socket`, returning the wrapped stream.
-    pub fn into_inner(self) -> T {
-        self.inner
     }
 
     /// Read the authentication method provided by the client.
@@ -754,35 +686,6 @@ impl<
         }
 
         Ok(())
-    }
-
-    pub fn target_addr(&self) -> Option<&TargetAddr> {
-        self.target_addr.as_ref()
-    }
-
-    pub fn auth(&self) -> &AuthenticationMethod {
-        &self.auth
-    }
-
-    pub fn cmd(&self) -> &Option<Socks5Command> {
-        &self.cmd
-    }
-
-    /// Borrow the credentials of the user has authenticated with
-    pub fn get_credentials(&self) -> Option<&<<A as Authentication>::Item as Deref>::Target>
-    where
-        <A as Authentication>::Item: Deref,
-    {
-        self.credentials.as_deref()
-    }
-
-    /// Get the credentials of the user has authenticated with
-    pub fn take_credentials(&mut self) -> Option<A::Item> {
-        self.credentials.take()
-    }
-
-    pub fn tcp_connector(&self) -> &C {
-        &self.tcp_connector
     }
 }
 

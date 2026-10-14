@@ -160,18 +160,6 @@ impl ServiceRouteStore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn selection_count(&self) -> usize {
-        self.selection_count
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reset_selection_count(&self) {
-        self.selection_count
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub fn snapshot(&self) -> Arc<ServiceRouteSnapshot> {
         self.snapshot.load_full()
     }
@@ -364,26 +352,6 @@ impl ServiceRouteStore {
             .collect::<Vec<_>>();
         for key in keys {
             self.plans.remove(&key);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{cell::Cell, collections::HashSet, net::IpAddr, time::Duration};
-
-    use cidr::IpCidr;
-
-    use super::{RouteSource, ServiceRoute, ServiceRouteAction, ServiceRouteStore};
-
-    fn route(prefix: &str, gateway: u32, preference: u32, metric: u32) -> ServiceRoute {
-        ServiceRoute {
-            prefix: prefix.parse::<IpCidr>().unwrap(),
-            gateway,
-            preference,
-            metric,
-            path_id: gateway as u64,
-            action: ServiceRouteAction::Forward,
         }
     }
 }

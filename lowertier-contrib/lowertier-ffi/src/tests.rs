@@ -5,9 +5,7 @@ use crate::{
     },
     *,
 };
-use lowertier::{
-    common::config::{ConfigFileControl, ConfigLoader as _, TomlConfigLoader},
-};
+use lowertier::common::config::{ConfigFileControl, ConfigLoader as _, TomlConfigLoader};
 use serde_json::Value;
 use std::{
     collections::HashSet,

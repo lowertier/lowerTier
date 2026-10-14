@@ -10,33 +10,27 @@ use crate::common::error::Error;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IpFragment {
-    id: u16,
     offset: u16,
     data: Vec<u8>,
 }
 
 impl<'a> From<&Ipv4Packet<'a>> for IpFragment {
     fn from(packet: &Ipv4Packet<'a>) -> Self {
-        let id = packet.get_identification();
         let offset = packet.get_fragment_offset() * 8;
         let data = packet.payload().to_vec();
-        IpFragment { id, offset, data }
+        IpFragment { offset, data }
     }
 }
 
 #[derive(Debug, Clone)]
 struct IpPacket {
-    source: Ipv4Addr,
-    destination: Ipv4Addr,
     total_length: Option<u16>,
     fragments: Vec<IpFragment>,
 }
 
 impl IpPacket {
-    fn new(source: Ipv4Addr, destination: Ipv4Addr) -> Self {
+    fn new() -> Self {
         IpPacket {
-            source,
-            destination,
             total_length: None,
             fragments: Vec::new(),
         }
@@ -147,7 +141,6 @@ impl IpReassembler {
         destination: Ipv4Addr,
         packet: &Ipv4Packet,
     ) -> Option<Vec<u8>> {
-        let id = packet.get_identification();
         let total_length = packet.get_total_length() - packet.get_header_length() as u16 * 4;
         if total_length != packet.payload().len() as u16 {
             tracing::trace!(
@@ -160,6 +153,7 @@ impl IpReassembler {
         }
 
         let fragment: IpFragment = packet.into();
+        let id = packet.get_identification();
         let key = IpResemblerKey {
             source,
             destination,
@@ -174,7 +168,7 @@ impl IpReassembler {
         );
 
         let mut entry = self.packets.entry(key.clone()).or_insert_with(|| {
-            let packet = IpPacket::new(source, destination);
+            let packet = IpPacket::new();
             let timestamp = Instant::now();
             IpResemblerValue { packet, timestamp }
         });
@@ -263,9 +257,4 @@ where
         cur_piece += 1;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 }

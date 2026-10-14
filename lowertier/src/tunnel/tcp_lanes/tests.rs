@@ -889,4 +889,3 @@ fn colliding_wire_shards_remain_distinct_and_flow_mapping_stays_bounded() {
     assert_eq!(writer.packet_lane(&packet(5000, 2)), late);
     assert_eq!(writer.flow_lanes.len(), MAX_TRACKED_FLOWS);
 }
-

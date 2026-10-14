@@ -235,8 +235,6 @@ impl SecureDatagramSession {
         self.decrypt_fail_count.store(0, Ordering::Release);
     }
 
-
-
     pub fn session_generation(&self) -> u32 {
         self.session_generation.load(Ordering::Relaxed)
     }
@@ -355,7 +353,6 @@ impl SecureDatagramSession {
         self.hkdf_traffic_key_with_label(epoch, dir, b"et-traffic")
     }
 
-
     fn hkdf_traffic_key_with_label(
         &self,
         epoch: u32,
@@ -426,7 +423,6 @@ impl SecureDatagramSession {
 
         ret
     }
-
 
     fn maybe_rotate_epoch(&self, now_ms: u64, packet_count: u64) {
         let mut packets = self.send_packets_since_epoch.load(Ordering::Acquire);
@@ -500,7 +496,6 @@ impl SecureDatagramSession {
         Ok((epoch, seq))
     }
 
-
     fn nonce(epoch: u32, seq: u64) -> [u8; 12] {
         let mut nonce = [0u8; 12];
         nonce[..4].copy_from_slice(&epoch.to_be_bytes());
@@ -558,9 +553,6 @@ impl SecureDatagramSession {
         }
         (rx, grace)
     }
-
-
-
 
     fn precheck_replay_state(
         rx: &[[EpochRxSlot; 2]; 2],
@@ -740,9 +732,7 @@ impl SecureDatagramSession {
         }
 
         if rx[dir_idx][0].valid && epoch > rx[dir_idx][0].epoch {
-            let mut baseline_epoch = self
-                .send_epoch
-                .load(Ordering::Relaxed);
+            let mut baseline_epoch = self.send_epoch.load(Ordering::Relaxed);
             if rx[dir_idx][0].valid {
                 baseline_epoch = baseline_epoch.max(rx[dir_idx][0].epoch);
             }
@@ -818,9 +808,7 @@ impl SecureDatagramSession {
                 rx[dir_idx][1].last_rx_ms = now_ms;
                 rx[dir_idx][1].window.accept(seq)
             } else if rx[dir_idx][0].valid && epoch > rx[dir_idx][0].epoch {
-                let mut baseline_epoch = self
-                    .send_epoch
-                    .load(Ordering::Relaxed);
+                let mut baseline_epoch = self.send_epoch.load(Ordering::Relaxed);
                 if rx[dir_idx][0].valid {
                     baseline_epoch = baseline_epoch.max(rx[dir_idx][0].epoch);
                 }
@@ -850,6 +838,7 @@ impl SecureDatagramSession {
         accepted
     }
 
+    #[cfg(test)]
     fn check_replay(
         &self,
         epoch: u32,
@@ -863,10 +852,6 @@ impl SecureDatagramSession {
 
         false
     }
-
-
-
-
 
     pub fn encrypt_payload(
         &self,
@@ -923,8 +908,6 @@ impl SecureDatagramSession {
         Ok(())
     }
 
-
-
     pub fn decrypt_payload(
         &self,
         dir: SecureDatagramDirection,
@@ -965,7 +948,6 @@ impl SecureDatagramSession {
 
         Ok(())
     }
-
 
     /// Decrypt one batch with one replay snapshot and one replay commit.
     ///
@@ -1058,14 +1040,8 @@ impl SecureDatagramSession {
                 outcomes[index] = Some(Err(anyhow!("duplicate nonce in secure datagram batch")));
                 continue;
             }
-            if !Self::precheck_replay_state(
-                &rx_snapshot,
-                grace,
-                send_epoch,
-                *epoch,
-                *seq,
-                dir_idx,
-            ) {
+            if !Self::precheck_replay_state(&rx_snapshot, grace, send_epoch, *epoch, *seq, dir_idx)
+            {
                 outcomes[index] = Some(Err(anyhow!("replay rejected")));
                 continue;
             }
@@ -1255,10 +1231,6 @@ mod tests {
             .unwrap();
         assert_eq!(pkt2.payload(), plaintext2);
     }
-
-
-
-
 
     #[test]
     fn batch_decrypt_reports_individual_forgery_without_discarding_valid_packets() {
@@ -1636,9 +1608,6 @@ mod tests {
         assert_ne!(ranges[0], ranges[1]);
     }
 
-
-
-
     #[test]
     fn first_standard_packet_rejects_far_future_epochs() {
         let root_key = SecureDatagramSession::new_root_key();
@@ -1671,8 +1640,6 @@ mod tests {
         assert!(receiver.is_valid());
         assert_eq!(receiver.decrypt_fail_count.load(Ordering::Relaxed), 0);
     }
-
-
 
     #[test]
     fn scalar_decrypt_rejects_stable_header_tampering() {

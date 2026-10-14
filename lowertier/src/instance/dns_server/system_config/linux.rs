@@ -348,8 +348,3 @@ fn is_libnss_resolve_used(env: &OSConfigEnv) -> Result<()> {
 
     Err(anyhow::anyhow!("libnss_resolve not used"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

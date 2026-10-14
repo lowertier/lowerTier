@@ -120,6 +120,7 @@ enum FrameDecodeError {
 }
 
 impl Frame {
+    #[cfg(test)]
     fn encode(&self) -> Bytes {
         let mut encoded = BytesMut::with_capacity(FRAME_HEADER_LEN + self.payload.len());
         encoded.put_u8(PROTOCOL_VERSION);
@@ -294,6 +295,7 @@ impl ReceiveWindow {
 
 const STREAM_WINDOW_BYTES: usize = 256 * 1024;
 const STREAM_DATA_BYTES: usize = 1120;
+#[cfg(test)]
 const MAX_STREAM_WIRE_OVERHEAD_BYTES: usize = 160;
 const APP_WRITE_QUEUE_CHUNKS: usize = 64;
 const APP_READ_QUEUE_CHUNKS: usize = STREAM_WINDOW_BYTES.div_ceil(STREAM_DATA_BYTES);

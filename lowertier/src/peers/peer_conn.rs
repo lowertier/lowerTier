@@ -87,7 +87,6 @@ use crate::{
     use_global_var,
 };
 
-
 pub type PeerConnId = uuid::Uuid;
 
 fn is_noise_handshake_packet_type(packet_type: u8) -> bool {
@@ -408,13 +407,6 @@ impl Drop for PreparedSessionGuard {
     }
 }
 
-/// The proof of client secret.
-#[derive(Debug)]
-struct SecretProof {
-    challenge: Vec<u8>,
-    proof: Vec<u8>,
-}
-
 fn admission_len_u32(value: usize) -> Result<[u8; 4], Error> {
     u32::try_from(value)
         .map(|value| value.to_be_bytes())
@@ -727,13 +719,8 @@ struct NoiseHandshakeResult {
     remote_network_name: String,
 
     secret_digest: Vec<u8>,
-
     // foreign network manager use this to verify peer.
     // the challenge will be sent to authorized peer and compare the proof against it.
-    client_secret_proof: Option<SecretProof>,
-
-    my_encrypt_algo: String,
-    remote_encrypt_algo: String,
 }
 
 #[derive(Clone)]
@@ -750,22 +737,6 @@ struct PeerSessionTunnelFilter {
 }
 
 impl PeerSessionTunnelFilter {
-    fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            data_protection_mode: Arc::new(AtomicU8::new(
-                PeerConnDataProtectionPb::SessionAead as u8,
-            )),
-            my_peer_id: Arc::new(AtomicCell::new(PeerId::default())),
-            peer_id: Arc::new(AtomicCell::new(None)),
-            session: Arc::new(ArcSwapOption::empty()),
-            #[cfg(test)]
-            batch_encrypt_calls: Arc::new(AtomicU32::new(0)),
-            #[cfg(test)]
-            batch_decrypt_calls: Arc::new(AtomicU32::new(0)),
-        }
-    }
-
     fn new_with_peer(my_peer_id: PeerId, enabled: bool) -> Self {
         Self {
             enabled,
@@ -872,13 +843,6 @@ impl PeerSessionTunnelFilter {
     }
 
     fn encrypt_batch_sequential(&self, batch: &mut PacketBatch) -> Result<(), anyhow::Error> {
-        let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
-            return Ok(());
-        };
-        self.encrypt_batch_grouped(batch, my_peer_id, peer_id, session)
-    }
-
-    fn encrypt_batch_parallel(&self, batch: &mut PacketBatch) -> Result<(), anyhow::Error> {
         let Some((my_peer_id, peer_id, session)) = self.encryption_context() else {
             return Ok(());
         };
@@ -1080,14 +1044,6 @@ impl PeerSessionTunnelFilter {
             ));
         }
         Ok(batch)
-    }
-
-    #[cfg(test)]
-    fn batch_crypto_call_counts(&self) -> (u32, u32) {
-        (
-            self.batch_encrypt_calls.load(Ordering::Relaxed),
-            self.batch_decrypt_calls.load(Ordering::Relaxed),
-        )
     }
 }
 
@@ -1309,13 +1265,14 @@ pub struct PeerConn {
     discovery_peer_hint: Option<Arc<DiscoveryPeerHint>>,
     global_ctx: ArcGlobalCtx,
 
+    my_encrypt_algo: String,
     secure_mode_cfg: SecureModeConfig,
     session_filter: PeerSessionTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
     private_admission: PrivateAdmission,
     connection_permit: Option<super::peer_map::PeerConnectionPermit>,
 
-    tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
+    _tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
     sink: DirectTunnelSender,
     recv: Mutex<Option<Pin<Box<dyn PacketBatchStream>>>>,
     pending_recv: parking_lot::Mutex<VecDeque<ZCPacket>>,
@@ -1345,8 +1302,6 @@ pub struct PeerConn {
     receiver_pacer: Option<Arc<ReceiverPacer>>,
 
     peer_session_store: Arc<PeerSessionStore>,
-    my_encrypt_algo: String,
-
 }
 
 impl Debug for PeerConn {
@@ -1431,7 +1386,7 @@ impl PeerConn {
             private_admission: PrivateAdmission::None,
             connection_permit: None,
 
-            tunnel: Arc::new(Mutex::new(
+            _tunnel: Arc::new(Mutex::new(
                 Box::new(direct_tunnel) as Box<dyn Any + Send + 'static>
             )),
             sink,
@@ -1463,7 +1418,6 @@ impl PeerConn {
 
             peer_session_store,
             my_encrypt_algo,
-
         }
     }
 
@@ -1642,7 +1596,6 @@ impl PeerConn {
     pub(crate) fn set_discovery_peer_hint(&mut self, hint: Arc<DiscoveryPeerHint>) {
         self.discovery_peer_hint = Some(hint);
     }
-
 
     pub(crate) fn discovery_order(&self) -> Option<(bool, [u8; 32])> {
         // The Noise transcript gives both endpoints the same order for simultaneous flows.
@@ -2879,10 +2832,6 @@ impl PeerConn {
             remote_network_name,
             // we have authorized the peer with noise handshake, so just set secret digest same as us even remote is a shared node.
             secret_digest,
-            client_secret_proof: None,
-
-            my_encrypt_algo: self.my_encrypt_algo.clone(),
-            remote_encrypt_algo: msg2_pb.server_encryption_algorithm.clone(),
         })
     }
 
@@ -2953,15 +2902,6 @@ impl PeerConn {
             .map_err(|e| Error::WaitRespError(format!("noise transport read failed: {e:?}")))?;
         MsgT::decode(&out[..out_len])
             .map_err(|e| Error::WaitRespError(format!("decode message failed: {e:?}")))
-    }
-
-    async fn read_next_message_with_timeout(
-        &mut self,
-        read_timeout: Duration,
-    ) -> Result<ZCPacket, Error> {
-        timeout(read_timeout, self.recv_next_peer_manager_packet(None))
-            .await
-            .map_err(|e| Error::WaitRespError(format!("read next message timeout: {e:?}")))?
     }
 
     async fn do_noise_handshake_as_server<Fn, Admit>(
@@ -3948,13 +3888,6 @@ impl PeerConn {
             peer_identity_type,
             remote_network_name,
             secret_digest: msg3_pb.secret_digest,
-            client_secret_proof: msg3_pb.secret_proof_32.as_ref().map(|p| SecretProof {
-                challenge: handshake_hash_for_proof,
-                proof: p.clone(),
-            }),
-
-            my_encrypt_algo: self.my_encrypt_algo.clone(),
-            remote_encrypt_algo: msg1_pb.client_encryption_algorithm.clone(),
         })
     }
 
@@ -4048,7 +3981,6 @@ impl PeerConn {
         self.session_filter.set_peer_id(noise.peer_id);
         self.session_filter
             .set_data_protection_mode(data_protection_mode);
-
 
         let handshake_rsp = self.build_handshake_rsp(&noise);
         self.noise_handshake_result = Some(noise);
@@ -4621,11 +4553,6 @@ impl PeerConn {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn record_speed_sample_for_test(&self, sample: SpeedSample) {
-        self.store_speed_sample(sample);
-    }
-
     pub(crate) async fn run_speed_probe(
         &self,
         generation: u64,
@@ -4836,16 +4763,6 @@ impl PeerConn {
     }
 
     #[cfg(test)]
-    pub(crate) fn record_latency_for_test(&self, latency_us: u32) {
-        self.latency_stats.record_latency(latency_us);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_tunnel_info_for_test(&mut self, tunnel_info: TunnelInfo) {
-        self.tunnel_info = Some(tunnel_info);
-    }
-
-    #[cfg(test)]
     pub(crate) fn inject_pending_recv_for_test(&self, packet: ZCPacket) {
         self.pending_recv.lock().push_back(packet);
     }
@@ -4939,7 +4856,6 @@ impl Drop for PeerConn {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::tunnel::batch::wait_for_delivery_with_bounded_prefetch;
     use std::{
         pin::Pin,
         sync::Arc,
@@ -5186,78 +5102,6 @@ pub mod tests {
         }
     }
 
-    struct FailAfterPacketSink {
-        inner: Pin<Box<dyn PacketBatchSink>>,
-        send_count: u32,
-        fail_at: u32,
-    }
-
-    impl Sink<PacketBatch> for FailAfterPacketSink {
-        type Error = SinkError;
-
-        fn poll_ready(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            self.inner.as_mut().poll_ready(cx)
-        }
-
-        fn start_send(mut self: Pin<&mut Self>, item: PacketBatch) -> Result<(), Self::Error> {
-            self.send_count = self.send_count.saturating_add(1);
-            if self.send_count == self.fail_at {
-                return Err(crate::tunnel::TunnelError::InternalError(
-                    "test sink failure".to_owned(),
-                ));
-            }
-            self.inner.as_mut().start_send(item)
-        }
-
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            self.inner.as_mut().poll_flush(cx)
-        }
-
-        fn poll_close(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            self.inner.as_mut().poll_close(cx)
-        }
-    }
-
-    struct FailAfterTunnel {
-        inner: Box<dyn Tunnel>,
-        fail_at: u32,
-    }
-
-    impl Tunnel for FailAfterTunnel {
-        fn split(&self) -> crate::tunnel::SplitTunnel {
-            let (stream, sink) = self.inner.split();
-            (
-                stream,
-                Box::pin(FailAfterPacketSink {
-                    inner: sink,
-                    send_count: 0,
-                    fail_at: self.fail_at,
-                }),
-            )
-        }
-
-        fn info(&self) -> Option<crate::proto::common::TunnelInfo> {
-            self.inner.info()
-        }
-
-        fn is_transport_authenticated(&self) -> bool {
-            self.inner.is_transport_authenticated()
-        }
-
-        fn transport_binding(&self) -> Option<crate::tunnel::TransportBinding> {
-            self.inner.transport_binding()
-        }
-    }
-
     pub fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
         if !enabled {
             global_ctx.config.set_secure_mode(None);
@@ -5273,230 +5117,6 @@ pub mod tests {
                 ..Default::default()
             }));
         }
-    }
-
-    fn metric_value(global_ctx: &GlobalCtx, metric: MetricName, network_name: &str) -> u64 {
-        global_ctx
-            .stats_manager()
-            .get_metric(
-                metric,
-                &LabelSet::new().with_label_type(LabelType::NetworkName(network_name.to_string())),
-            )
-            .map(|metric| metric.value)
-            .unwrap_or(0)
-    }
-
-    /// Assert that all received handshake traffic is accounted, across the
-    /// handshake label (matched packets) and the network label (duplicate
-    /// acknowledgement copies drained by the receive loop).
-    async fn assert_control_rx_metrics(
-        c_peer: &mut PeerConn,
-        s_peer: &mut PeerConn,
-        c_ctx: &ArcGlobalCtx,
-        s_ctx: &ArcGlobalCtx,
-        c_recorder: &Arc<PacketRecorderTunnelFilter>,
-        s_recorder: &Arc<PacketRecorderTunnelFilter>,
-    ) {
-        c_peer.start_recv_loop(create_packet_recv_chan().0).await;
-        s_peer.start_recv_loop(create_packet_recv_chan().0).await;
-        // Wait for the received byte totals to stop changing; a trailing
-        // acknowledgement copy can still be in flight right after the
-        // handshake.
-        let mut previous = None;
-        let (c_expected, s_expected) = loop {
-            let c_sum = c_recorder
-                .received
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|pkt| pkt.buf_len() as u64)
-                .sum::<u64>();
-            let s_sum = s_recorder
-                .received
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|pkt| pkt.buf_len() as u64)
-                .sum::<u64>();
-            if previous == Some((c_sum, s_sum)) {
-                break (c_sum, s_sum);
-            }
-            previous = Some((c_sum, s_sum));
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        let c_ctx = c_ctx.clone();
-        let s_ctx = s_ctx.clone();
-        wait_for_condition(
-            || async {
-                metric_value(
-                    &c_ctx,
-                    MetricName::TrafficControlBytesRx,
-                    PeerConn::HANDSHAKE_METRIC_NETWORK,
-                ) + metric_value(&c_ctx, MetricName::TrafficControlBytesRx, "default")
-                    == c_expected
-                    && metric_value(
-                        &s_ctx,
-                        MetricName::TrafficControlBytesRx,
-                        PeerConn::HANDSHAKE_METRIC_NETWORK,
-                    ) + metric_value(&s_ctx, MetricName::TrafficControlBytesRx, "default")
-                        == s_expected
-            },
-            Duration::from_secs(5),
-        )
-        .await;
-    }
-
-    async fn direct_handshake_with_drop(
-        drop_client: bool,
-        drop_start: u32,
-        drop_end: u32,
-    ) -> (
-        Result<(), Error>,
-        Result<(), Error>,
-        Arc<PeerSessionStore>,
-        PeerId,
-        PeerId,
-        ArcGlobalCtx,
-        ArcGlobalCtx,
-    ) {
-        let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
-        let client_tunnel: Box<dyn Tunnel> = if drop_client {
-            Box::new(TunnelWithFilter::new(
-                client_tunnel,
-                DropSendTunnelFilter::new(drop_start, drop_end),
-            ))
-        } else {
-            client_tunnel
-        };
-        let server_tunnel: Box<dyn Tunnel> = if drop_client {
-            server_tunnel
-        } else {
-            Box::new(TunnelWithFilter::new(
-                server_tunnel,
-                DropSendTunnelFilter::new(drop_start, drop_end),
-            ))
-        };
-        let sessions = Arc::new(PeerSessionStore::new());
-        let client_id = new_peer_id();
-        let server_id = new_peer_id();
-        // A reconnecting node keeps its static key. Reuse one context per
-        // node so the retry handshake presents the same identity.
-        let client_ctx = get_mock_global_ctx();
-        let server_ctx = get_mock_global_ctx();
-        let mut client = PeerConn::new(
-            client_id,
-            client_ctx.clone(),
-            client_tunnel,
-            sessions.clone(),
-        );
-        let mut server = PeerConn::new(
-            server_id,
-            server_ctx.clone(),
-            server_tunnel,
-            sessions.clone(),
-        );
-        let (client_result, server_result) = tokio::join!(
-            client.do_handshake_as_client(),
-            server.do_handshake_as_server()
-        );
-        (
-            client_result,
-            server_result,
-            sessions,
-            client_id,
-            server_id,
-            client_ctx,
-            server_ctx,
-        )
-    }
-
-    async fn peer_conn_pingpong_test_common(
-        drop_start: u32,
-        drop_end: u32,
-        conn_closed: bool,
-        drop_both: bool,
-    ) {
-        let (c, s) = create_ring_tunnel_pair();
-
-        // drop 1-3 packets should not affect pingpong
-        let c_recorder = Arc::new(DropSendTunnelFilter::new(drop_start, drop_end));
-        let c = TunnelWithFilter::new(c, c_recorder.clone());
-
-        let c_peer_id = new_peer_id();
-        let s_peer_id = new_peer_id();
-
-        let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone());
-
-        let (c_ret, s_ret) = tokio::join!(
-            c_peer.do_handshake_as_client(),
-            s_peer.do_handshake_as_server()
-        );
-
-        s_peer.start_recv_loop(create_packet_recv_chan().0).await;
-        // do not start ping for s, s only reponde to ping from c
-
-        assert!(c_ret.is_ok());
-        assert!(s_ret.is_ok());
-
-        let close_notifier = c_peer.get_close_notifier();
-        c_peer.start_pingpong();
-        c_peer.start_recv_loop(create_packet_recv_chan().0).await;
-
-        let throughput = c_peer.throughput.clone();
-        let _t = AbortOnDropHandle::new(tokio::spawn(async move {
-            // if not drop both, we mock some rx traffic for client peer to test pinger
-            if drop_both {
-                return;
-            }
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                throughput.record_rx_bytes(3);
-            }
-        }));
-
-        tokio::time::sleep(Duration::from_secs(15)).await;
-
-        if conn_closed {
-            assert!(close_notifier.is_closed());
-        } else {
-            assert!(!close_notifier.is_closed());
-        }
-    }
-
-    /// Helper: set up a credential node from a signed credential bundle.
-    fn credential_mode_global_ctx(network_name: &str, encoded_bundle: &str) -> ArcGlobalCtx {
-        use crate::{common::config::NetworkIdentity, proto::common::SecureModeConfig};
-        let bundle = CredentialManager::parse_credential_bundle(encoded_bundle)
-            .expect("credential bundle must be valid");
-        assert_eq!(bundle.network_name, network_name);
-        let private_key = credential_private_key_from_secret(encoded_bundle);
-        let public = x25519_dalek::PublicKey::from(&private_key);
-        let global_ctx = get_mock_global_ctx_with_network(Some(
-            NetworkIdentity::new_credential_with_root_fingerprint(
-                network_name.to_string(),
-                &bundle.root_fingerprint,
-            )
-            .expect("credential root fingerprint must be valid"),
-        ));
-        global_ctx.config.set_secure_mode(Some(SecureModeConfig {
-            enabled: true,
-            local_private_key: Some(BASE64_STANDARD.encode(private_key.as_bytes())),
-            local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
-            credential_bundle: Some(encoded_bundle.to_owned()),
-            credential_root_fingerprint: bundle.root_fingerprint,
-            credential_certificate: bundle
-                .certificate
-                .map(|certificate| prost::Message::encode_to_vec(&certificate))
-                .unwrap_or_default(),
-        }));
-        global_ctx
-    }
-
-    fn credential_private_key_from_secret(secret: &str) -> x25519_dalek::StaticSecret {
-        crate::peers::credential_manager::CredentialManager::private_key_from_bundle(secret)
-            .expect("credential bundle contains a valid private key")
     }
 
     fn test_packet(packet_type: u8) -> ZCPacket {

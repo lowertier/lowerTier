@@ -755,9 +755,7 @@ struct PreparedPacketBatch {
     uniform_direct_priority: bool,
 }
 
-fn prepare_packet_batch(
-    mut batch: PacketBatch,
-) -> Result<PreparedPacketBatch, Error> {
+fn prepare_packet_batch(mut batch: PacketBatch) -> Result<PreparedPacketBatch, Error> {
     let mut bytes_before = 0_u64;
     let mut contains_ethernet = false;
     let mut first_packet_type = 0;
@@ -793,6 +791,8 @@ fn prepare_packet_batch(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+// TODO(l2fix): remove this allowance after integration.
 pub(crate) fn benchmark_prepare_packet_batch(batch: PacketBatch) -> PacketBatch {
     prepare_packet_batch(batch)
         .expect("uncompressed benchmark packet preparation is infallible")
@@ -1717,6 +1717,8 @@ impl PeerManager {
     /// A route snapshot can outlive a capability revocation. The current
     /// immutable authority snapshot must therefore approve the same key.
     #[cfg(test)]
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn current_full_ethernet_destination_is_authorized(
         peers: &PeerMap,
         destination_peer_id: PeerId,
@@ -1763,6 +1765,8 @@ impl PeerManager {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn snapshot_and_current_full_ethernet_destination_is_authorized(
         peers: &PeerMap,
         snapshot: &ForwardingDecisionSnapshotHandle,
@@ -1827,6 +1831,8 @@ impl PeerManager {
     // connect attempt, without retaining extra per-task state in the hot path.
     const RECENT_HAVE_TRAFFIC_TTL: Duration = Duration::from_secs(30);
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn should_mark_recent_traffic_for_fanout(total_dst_peers: usize) -> bool {
         total_dst_peers <= 1
     }
@@ -2130,6 +2136,8 @@ impl PeerManager {
         self.p2p_demand_notify.clone()
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn gc_recent_traffic(&self) {
         Self::gc_recent_traffic_entries(&self.recent_have_traffic, Instant::now(), |peer_id| {
             self.has_directly_connected_conn(peer_id)
@@ -2262,6 +2270,8 @@ impl PeerManager {
         self.add_new_peer_conn(peer).await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     pub(crate) async fn add_discovered_tunnel(
         &self,
         tunnel: Box<dyn Tunnel>,
@@ -3259,7 +3269,10 @@ impl PeerManager {
                                 ));
                             }
 
-                            if ret.peer_manager_header().is_some_and(|header| header.is_compressed()) {
+                            if ret
+                                .peer_manager_header()
+                                .is_some_and(|header| header.is_compressed())
+                            {
                                 tracing::debug!(from_peer_id, "drop unsupported compressed packet");
                                 continue;
                             }
@@ -3880,6 +3893,8 @@ impl PeerManager {
         self.get_route().get_foreign_network_summary().await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn run_nic_packet_process_pipeline(&self, data: &mut ZCPacket) -> bool {
         if data
             .peer_manager_header()
@@ -3941,6 +3956,8 @@ impl PeerManager {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn get_local_data_policy(&self) -> NextHopPolicy {
         if self.global_ctx.speed_first() {
             NextHopPolicy::MaxGoodput
@@ -4059,6 +4076,8 @@ impl PeerManager {
             .await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn send_ethernet_to_selected_peers_with_descriptor(
         &self,
         mut msg: ZCPacket,
@@ -4127,6 +4146,8 @@ impl PeerManager {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn send_preclassified_ethernet_batch<I>(&self, inputs: I) -> Result<(), Error>
     where
         I: IntoIterator<Item = EthernetBatchInput>,
@@ -5030,6 +5051,8 @@ impl PeerManager {
         send_result
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn send_msg_internal_with_next_hop(
         peers: &Arc<PeerMap>,
         foreign_network_client: &Arc<ForeignNetworkClient>,
@@ -5052,6 +5075,8 @@ impl PeerManager {
         .await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn send_msg_internal_with_next_hop_authorized(
         peers: &Arc<PeerMap>,
         _foreign_network_client: &Arc<ForeignNetworkClient>,
@@ -5231,6 +5256,8 @@ impl PeerManager {
             })
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn combine_hybrid_delivery_results(
         compact: Result<(), Error>,
         full: Result<(), Error>,
@@ -5245,6 +5272,8 @@ impl PeerManager {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn rebuild_ethernet_from_accepted_ip(
         ip_packet: &ZCPacket,
         ethernet_header: &[u8],
@@ -5416,6 +5445,8 @@ impl PeerManager {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn filter_authorized_full_ethernet_peers(
         &self,
         full_peers: Vec<PeerId>,
@@ -5811,6 +5842,8 @@ impl PeerManager {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn capture_hybrid_forwarding_state(
         &self,
         ip_addr: IpAddr,
@@ -5908,7 +5941,6 @@ impl PeerManager {
         (dst_peers, is_exit_node)
     }
 
-
     fn prepare_packet(msg: &mut ZCPacket) {
         stamp_critical_l2_control(msg);
         stamp_packet_flow(msg);
@@ -5950,6 +5982,8 @@ impl PeerManager {
             .is_some_and(|features| features.hybrid_l3)
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn route_subscribes_to_multicast(route: &ForwardingPeerInfo, address: IpAddr) -> bool {
         route.feature_flag.as_ref().is_some_and(|features| {
             features.hybrid_l3
@@ -5981,6 +6015,8 @@ impl PeerManager {
         self.send_fabric_batch(FabricBatch::singleton(packet)).await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn send_compact_ip_to_peers_with_snapshot(
         &self,
         mut msg: ZCPacket,
@@ -6562,6 +6598,8 @@ impl PeerManager {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn finish_send_ip_with_snapshot(
         &self,
         mut msg: ZCPacket,
@@ -7159,7 +7197,6 @@ mod tests {
             peer_conn::tests::set_secure_mode_cfg,
             peer_manager::RouteAlgoType,
             peer_map::PeerMap,
-            peer_rpc::tests::register_service,
             route_trait::{
                 BridgeRoutePeerEvidence, ForwardingDecisionSnapshot, ForwardingPeerInfo,
                 ForwardingPeerTable, MockRoute, NextHopPolicy, Route, RouteCostCalculatorInterface,
@@ -7187,8 +7224,6 @@ mod tests {
         },
     };
 
-
-
     use super::{
         DIRECT_NIC_BATCH_CREDIT_BYTES, DIRECT_NIC_QUEUE_CREDIT_BYTES, DirectNicBatchWriter,
         DirectNicDelivery, DirectNicEndpoint, DirectNicQueueState, EthernetBatchInput,
@@ -7209,9 +7244,13 @@ mod tests {
         assert!(header.is_no_proxy());
     }
 
+    // TODO(l2fix): remove this allowance after test integration.
+    #[allow(dead_code)]
     struct CountingNicFilter(Arc<AtomicUsize>);
 
     #[derive(Clone)]
+    // TODO(l2fix): remove this allowance after test integration.
+    #[allow(dead_code)]
     struct ControlledRoute {
         peer_id: PeerId,
         block_open: bool,
@@ -7221,6 +7260,8 @@ mod tests {
         started: Arc<AtomicBool>,
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn controlled_route_snapshot(peer_id: PeerId) -> Arc<ForwardingDecisionSnapshot> {
         ForwardingDecisionSnapshot::from_parts(
             1,
@@ -7307,6 +7348,8 @@ mod tests {
         }
     }
 
+    // TODO(l2fix): remove this allowance after test integration.
+    #[allow(dead_code)]
     struct ClearingNicFilter;
 
     #[async_trait::async_trait]
@@ -7375,6 +7418,8 @@ mod tests {
     }
 
     impl<T> DelayedDataTunnel<T> {
+        #[allow(dead_code)]
+        // TODO(l2fix): remove this allowance after integration.
         fn new(inner: T, delay: Duration) -> Self {
             Self { inner, delay }
         }
@@ -7405,6 +7450,8 @@ mod tests {
         }
     }
 
+    // TODO(l2fix): remove this allowance after test integration.
+    #[allow(dead_code)]
     struct RewriteIpv4Destination(Ipv4Addr);
 
     #[async_trait::async_trait]
@@ -7419,6 +7466,8 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn deny_outbound_acl() -> Acl {
         Acl {
             acl_v1: Some(AclV1 {
@@ -7434,6 +7483,8 @@ mod tests {
         }
     }
 
+    // TODO(l2fix): remove this allowance after test integration.
+    #[allow(dead_code)]
     struct GatedDirectNicSink {
         sent: futures::channel::mpsc::UnboundedSender<PacketBatch>,
         released: Arc<AtomicBool>,
@@ -7539,6 +7590,8 @@ mod tests {
         plan_direct_nic_delivery(batch).unwrap()
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn direct_nic_control_delivery(marker: u8) -> DirectNicDelivery {
         let mut packet = ZCPacket::new_with_payload(&[marker, 0]);
         packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
@@ -7586,6 +7639,8 @@ mod tests {
         assert_eq!(events_rx.next().await, None);
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn direct_nic_ingress_batch(
         destination_peer_id: PeerId,
         marker: u8,
@@ -7650,6 +7705,8 @@ mod tests {
         (peer_manager, packet_recv)
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn create_routed_peer_manager_with_ipv4(ipv4: std::net::Ipv4Addr) -> Arc<PeerManager> {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
@@ -7670,12 +7727,16 @@ mod tests {
         peer_manager
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn create_hybrid_peer_manager_with_ipv4(
         ipv4: std::net::Ipv4Addr,
     ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
         create_hybrid_peer_manager_with_ipv4_and_bridge(ipv4, false).await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn create_hybrid_peer_manager_with_ipv4_and_bridge(
         ipv4: std::net::Ipv4Addr,
         enable_bridge: bool,
@@ -7683,6 +7744,8 @@ mod tests {
         create_hybrid_peer_manager_with_ipv4_and_bridge_and_flood(ipv4, enable_bridge, 0).await
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn create_hybrid_peer_manager_with_ipv4_and_bridge_and_flood(
         ipv4: std::net::Ipv4Addr,
         enable_bridge: bool,
@@ -7711,6 +7774,8 @@ mod tests {
         (peer_manager, packet_recv)
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn routed_ipv4_packet(
         source: std::net::Ipv4Addr,
         destination: std::net::Ipv4Addr,
@@ -8158,6 +8223,8 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn create_lazy_peer_manager() -> Arc<PeerManager> {
         let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
         let mut flags = peer_mgr.get_global_ctx().get_flags();
@@ -8166,6 +8233,8 @@ mod tests {
         peer_mgr
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn metric_value(peer_mgr: &PeerManager, metric: MetricName, labels: &LabelSet) -> u64 {
         peer_mgr
             .get_global_ctx()
@@ -8175,12 +8244,16 @@ mod tests {
             .unwrap_or(0)
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn network_labels(peer_mgr: &PeerManager) -> LabelSet {
         LabelSet::new().with_label_type(LabelType::NetworkName(
             peer_mgr.get_global_ctx().get_network_name(),
         ))
     }
 
+    // TODO(l2fix): remove this allowance after test integration.
+    #[allow(dead_code)]
     struct TestCostCalculator {
         costs: HashMap<(PeerId, PeerId), i32>,
     }
@@ -8191,6 +8264,8 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn route_with_ipv4(peer_id: u32, ipv4_addr: Option<std::net::Ipv4Addr>) -> ForwardingPeerInfo {
         ForwardingPeerInfo {
             peer_id,
@@ -8220,6 +8295,8 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     fn forwarding_snapshot_with_routes(
         routes: Vec<ForwardingPeerInfo>,
     ) -> Arc<ForwardingDecisionSnapshot> {
@@ -8251,6 +8328,8 @@ mod tests {
         assert_eq!(PeerManager::select_ethernet_peers(&routes, 3), vec![1, 4]);
     }
 
+    #[allow(dead_code)]
+    // TODO(l2fix): remove this allowance after integration.
     async fn connect_peer_manager_with<C: TunnelConnector + Debug + 'static, L: TunnelListener>(
         client_mgr: Arc<PeerManager>,
         server_mgr: &Arc<PeerManager>,

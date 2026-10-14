@@ -115,10 +115,6 @@ struct PeerCenterWriterState {
 }
 
 impl PeerCenterWriterState {
-    fn new() -> Self {
-        Self::with_generation(initial_generation())
-    }
-
     fn with_generation(generation: Digest) -> Self {
         Self {
             sources: HashMap::new(),
@@ -373,7 +369,7 @@ fn replace_source(
 #[derive(Clone, Debug)]
 pub struct PeerCenterServer {
     data: Arc<PeerCenterServerData>,
-    tasks: Arc<JoinSet<()>>,
+    _tasks: Arc<JoinSet<()>>,
 }
 
 impl std::fmt::Debug for PeerCenterServerData {
@@ -410,13 +406,8 @@ impl PeerCenterServer {
 
         PeerCenterServer {
             data,
-            tasks: Arc::new(tasks),
+            _tasks: Arc::new(tasks),
         }
-    }
-
-    #[cfg(test)]
-    fn with_generation(generation: Digest) -> Self {
-        Self::from_data(Arc::new(PeerCenterServerData::with_generation(generation)))
     }
 
     fn clean_outdated_peer_data(data: &PeerCenterServerData) {
@@ -659,22 +650,5 @@ impl PeerCenterRpc for PeerCenterServer {
         response.snapshot_residence_age_ms =
             u64::try_from(snapshot.published_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(response)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn authenticated(peer_id: PeerId) -> BaseController {
-        let mut ctrl = BaseController::default();
-        ctrl.set_authenticated_peer_id(Some(peer_id));
-        ctrl.set_authenticated_peer_identity_type(Some(
-            crate::proto::peer_rpc::PeerIdentityType::Admin,
-        ));
-        ctrl.set_authenticated_peer_secure_auth_level(Some(
-            crate::proto::peer_rpc::SecureAuthLevel::NetworkSecretConfirmed,
-        ));
-        ctrl
     }
 }

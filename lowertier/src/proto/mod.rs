@@ -9,8 +9,6 @@ pub mod error;
 pub mod magic_dns;
 pub mod peer_rpc;
 
-#[cfg(test)]
-pub mod tests;
 pub mod utils;
 
 pub const DESCRIPTOR_POOL_BYTES: &[u8] =

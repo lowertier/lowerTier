@@ -1172,31 +1172,3 @@ impl Server {
         self.transport.lock().unwrap().close();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::proto::{
-        common::{CompressionAlgoPb, RpcCompressionInfo, RpcDescriptor, RpcPacket},
-        peer_rpc::{PeerIdentityType, SecureAuthLevel},
-        rpc_impl::packet::{BuildRpcPacketArgs, build_rpc_packet},
-        rpc_impl::service_registry::ServiceRegistry,
-        rpc_types::error::Error,
-    };
-
-    use super::{
-        ExecutionBudgetPermit, MAX_RPC_MERGER_BYTES, MAX_RPC_MERGER_BYTES_PER_PEER,
-        MAX_RPC_MERGER_BYTES_PER_SESSION, MAX_RPC_MERGER_TRANSACTIONS_PER_SESSION,
-        MAX_RPC_TASKS_PER_SESSION, MergerBudget, MergerSessionKey, PacketMergerKey, Server,
-        foreign_relay_rpc_allowed, rpc_authentication_tuple_valid, rpc_budget_session,
-        rpc_source_matches_authenticated_peer,
-    };
-
-    fn descriptor(proto_name: &str, service_name: &str) -> RpcDescriptor {
-        RpcDescriptor {
-            domain_name: "foreign-test".to_owned(),
-            proto_name: proto_name.to_owned(),
-            service_name: service_name.to_owned(),
-            method_index: 1,
-        }
-    }
-}

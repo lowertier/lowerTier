@@ -91,7 +91,7 @@ struct ForeignNetworkEntry {
     network: NetworkIdentity,
     peer_map: Arc<PeerMap>,
     relay_peer_map: Arc<RelayPeerMap>,
-    peer_session_store: Arc<PeerSessionStore>,
+    _peer_session_store: Arc<PeerSessionStore>,
     // Static per-network permission from the whitelist check. disable_relay_data
     // is the node-wide runtime override layered on top of this value.
     relay_data: bool,
@@ -239,7 +239,7 @@ impl ForeignNetworkEntry {
             network,
             peer_map,
             relay_peer_map,
-            peer_session_store,
+            _peer_session_store: peer_session_store,
             relay_data,
             pm_packet_sender: Mutex::new(Some(pm_packet_sender)),
 
@@ -875,24 +875,6 @@ impl ForeignNetworkManagerData {
         peer_map.clean_peer_without_conn().await;
     }
 
-    fn remove_network(&self, network_name: &String) {
-        let _l = self.lock.lock().unwrap();
-        if let Some(old) = self.network_peer_maps.remove(network_name) {
-            old.1.traffic_metrics.clear_peer_cache();
-            let to_remove_peers = old.1.peer_map.list_peers();
-            for p in to_remove_peers {
-                self.peer_network_map.remove_if(&p, |_, v| {
-                    v.remove(network_name);
-                    v.is_empty()
-                });
-            }
-        }
-        self.network_peer_last_update.remove(network_name);
-        shrink_dashmap(&self.peer_network_map, None);
-        shrink_dashmap(&self.network_peer_maps, None);
-        shrink_dashmap(&self.network_peer_last_update, None);
-    }
-
     fn remove_network_if_current(
         &self,
         network_name: &String,
@@ -974,7 +956,6 @@ impl ForeignNetworkManagerData {
 pub const FOREIGN_NETWORK_SERVICE_ID: u32 = 1;
 
 pub struct ForeignNetworkManager {
-    my_peer_id: PeerId,
     global_ctx: ArcGlobalCtx,
     peer_session_store: Arc<PeerSessionStore>,
     packet_sender_to_mgr: PacketRecvChan,
@@ -1020,22 +1001,6 @@ impl ForeignNetworkManager {
         )
     }
 
-    pub(crate) fn is_existing_credential_pubkey_trusted(
-        &self,
-        network_name: &str,
-        remote_static_pubkey: &[u8],
-    ) -> bool {
-        self.data
-            .get_network_entry(network_name)
-            .is_some_and(|entry| {
-                Self::credential_pubkey_is_trusted(
-                    &entry.global_ctx,
-                    &entry.network.network_name,
-                    remote_static_pubkey,
-                )
-            })
-    }
-
     fn build_trusted_key_items(entry: &ForeignNetworkEntry) -> Vec<TrustedKeyInfoPb> {
         entry
             .global_ctx
@@ -1073,7 +1038,6 @@ impl ForeignNetworkManager {
         join_joinset_background(tasks.clone(), "ForeignNetworkManager".to_string());
 
         Self {
-            my_peer_id,
             global_ctx,
             peer_session_store,
             packet_sender_to_mgr,
@@ -1082,13 +1046,6 @@ impl ForeignNetworkManager {
 
             tasks,
         }
-    }
-
-    #[cfg(test)]
-    fn fail_next_add_peer_conn_after_entry_insert(&self) {
-        self.data
-            .fail_next_add_peer_conn_after_entry_insert
-            .store(true, Ordering::Release);
     }
 
     pub fn get_network_peer_id(&self, network_name: &str) -> Option<PeerId> {
@@ -1388,105 +1345,5 @@ impl Drop for ForeignNetworkManager {
     fn drop(&mut self) {
         self.data.peer_network_map.clear();
         self.data.network_peer_maps.clear();
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use crate::{
-        common::global_ctx::tests::get_mock_global_ctx_with_network,
-        common::stats_manager::{LabelSet, LabelType, MetricName},
-        peers::tests::{create_mock_peer_manager_with_mock_stun, replace_stun_info_collector},
-        peers::{
-            peer_conn::tests::set_secure_mode_cfg,
-            peer_manager::{PeerManager, RouteAlgoType},
-            tests::{connect_peer_manager, wait_route_appear},
-        },
-        proto::common::NatType,
-        set_global_var,
-        tunnel::{
-            common::tests::wait_for_condition,
-            packet_def::{PacketType, ZCPacket},
-        },
-    };
-    use std::{collections::HashMap, time::Duration};
-
-    use super::*;
-
-    fn metric_value(peer_mgr: &PeerManager, metric: MetricName, labels: LabelSet) -> u64 {
-        peer_mgr
-            .get_global_ctx()
-            .stats_manager()
-            .get_metric(metric, &labels)
-            .map(|metric| metric.value)
-            .unwrap_or(0)
-    }
-
-    async fn create_mock_peer_manager_for_foreign_network_ext(
-        network: &str,
-        secret: &str,
-    ) -> Arc<PeerManager> {
-        let (s, _r) = create_packet_recv_chan();
-        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-            network.to_string(),
-            secret.to_string(),
-        )));
-        set_secure_mode_cfg(&global_ctx, true);
-        let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, s));
-        replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
-        peer_mgr.run().await.unwrap();
-        peer_mgr
-    }
-
-    async fn create_mock_credential_peer_manager_for_foreign_network(
-        network: &str,
-    ) -> Arc<PeerManager> {
-        let (s, _r) = create_packet_recv_chan();
-        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new_credential(
-            network.to_string(),
-        )));
-        set_secure_mode_cfg(&global_ctx, true);
-        let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, s));
-        replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
-        peer_mgr.run().await.unwrap();
-        peer_mgr
-    }
-
-    pub async fn create_mock_peer_manager_for_foreign_network(network: &str) -> Arc<PeerManager> {
-        create_mock_peer_manager_for_foreign_network_ext(network, network).await
-    }
-
-    pub async fn create_mock_peer_manager_for_secure_foreign_network(
-        network: &str,
-    ) -> Arc<PeerManager> {
-        let (s, _r) = create_packet_recv_chan();
-        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-            network.to_string(),
-            network.to_string(),
-        )));
-        set_secure_mode_cfg(&global_ctx, true);
-        let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, s));
-        replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
-        peer_mgr.run().await.unwrap();
-        peer_mgr
-    }
-
-    async fn foreign_network_whitelist_helper(name: String) {
-        let pm_center = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        tracing::debug!("pm_center: {:?}", pm_center.my_peer_id());
-        let mut flag = pm_center.get_global_ctx().get_flags();
-        flag.relay_network_whitelist = ["net1".to_string(), "net2*".to_string()].join(" ");
-        pm_center.get_global_ctx().set_flags(flag);
-
-        let pma_net1 = create_mock_peer_manager_for_foreign_network(name.as_str()).await;
-
-        let (a_ring, b_ring) = crate::tunnel::ring::create_ring_tunnel_pair();
-        let b_mgr_copy = pm_center.clone();
-        let s_ret =
-            tokio::spawn(async move { b_mgr_copy.add_tunnel_as_server(b_ring, true).await });
-
-        pma_net1.add_client_tunnel(a_ring, false).await.unwrap();
-
-        s_ret.await.unwrap().unwrap();
     }
 }

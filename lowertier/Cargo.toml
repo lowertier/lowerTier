@@ -76,7 +76,6 @@ quanta = "0.12"
 
 delegate = "0.13.5"
 
-itertools = "0.14.0"
 
 strum = { version = "0.27.2", features = ["derive"] }
 
@@ -88,7 +87,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7.9", features = ["codec", "net", "io", "rt"] }
 
-async-stream = "0.3.5"
 async-trait = "0.1.74"
 
 dashmap = "6.0"
@@ -101,7 +99,6 @@ bytes = "1.5.0"
 smallvec = "=1.13.2"
 pin-project-lite = "0.2.13"
 
-atomic_refcell = "0.1.13"
 
 quinn = { version = "0.11.11", features = ["ring"] }
 quinn-proto = { version = "0.11.16" }
@@ -270,7 +267,6 @@ bon = "3.9.1"
 derive_builder = "0.20.2"
 humantime-serde = "1.1.1"
 multimap = "0.10.1"
-version-compare = "0.2.0"
 hmac = "0.12.1"
 sha2 = "0.10.8"
 shellexpand = "3.1.1"
@@ -288,6 +284,7 @@ netlink-packet-core = { version = "0.7.0" }
 netlink-packet-utils = "0.5.2"
 # for magic dns
 resolv-conf = "0.7.3"
+version-compare = "0.2.0"
 dbus = { version = "0.9.7", features = ["vendored"] }
 which = "7.0.3"
 
@@ -335,7 +332,6 @@ jemalloc-sys = { package = "tikv-jemalloc-sys", version = "0.6.0", features = [
 ], optional = true }
 
 [build-dependencies]
-cfg_aliases = "0.2.1"
 indoc = "2.0"
 globwalk = "0.8.1"
 regex = "1"

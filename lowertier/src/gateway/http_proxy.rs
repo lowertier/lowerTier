@@ -45,10 +45,6 @@ impl HttpProxyError {
             reason,
         }
     }
-
-    fn status_code(&self) -> u16 {
-        self.status_code
-    }
 }
 
 impl fmt::Display for HttpProxyError {
@@ -353,46 +349,4 @@ where
     }
 
     outbound.transfer(&mut inbound).await.map_err(Into::into)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gateway::fast_socks5::{
-        Result, server::AsyncTcpConnector, util::target_addr::TargetAddr,
-    };
-    use std::net::SocketAddr;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
-    };
-
-    struct DirectConnector;
-
-    #[async_trait::async_trait]
-    impl AsyncTcpConnector for DirectConnector {
-        type S = TcpStream;
-
-        async fn tcp_connect(&self, addr: SocketAddr, _timeout_s: u64) -> Result<Self::S> {
-            Ok(TcpStream::connect(addr).await?)
-        }
-    }
-
-    struct DomainConnector {
-        destination: SocketAddr,
-    }
-
-    #[async_trait::async_trait]
-    impl AsyncTcpConnector for DomainConnector {
-        type S = TcpStream;
-
-        async fn tcp_connect(&self, _addr: SocketAddr, _timeout_s: u64) -> Result<Self::S> {
-            panic!("the proxy resolved the target before the central dialer");
-        }
-
-        async fn tcp_connect_target(&self, target: TargetAddr, _timeout_s: u64) -> Result<Self::S> {
-            assert_eq!(target, TargetAddr::Domain("peer.et.net".to_string(), 443));
-            Ok(TcpStream::connect(self.destination).await?)
-        }
-    }
 }

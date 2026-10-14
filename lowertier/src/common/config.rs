@@ -1174,7 +1174,11 @@ impl TomlConfigLoader {
     fn gen_flags(
         flags_hashmap: serde_json::Map<String, serde_json::Value>,
     ) -> serde_json::Result<Flags> {
-        for option in ["quic_datagram_fec_parity", "quic_datagram_alternate_path_parity", "data_compress_algo"] {
+        for option in [
+            "quic_datagram_fec_parity",
+            "quic_datagram_alternate_path_parity",
+            "data_compress_algo",
+        ] {
             if flags_hashmap.contains_key(option) {
                 return Err(<serde_json::Error as serde::de::Error>::custom(format!(
                     "removed option '{option}': FEC and payload compression are no longer supported"
@@ -2142,12 +2146,14 @@ quic_receive_window = 33554432
         assert_eq!(reloaded.get_flags(), flags);
     }
 
-
     #[test]
     fn rejects_removed_fec_options() {
-        for option in ["quic_datagram_fec_parity", "quic_datagram_alternate_path_parity"] {
-            let error = TomlConfigLoader::new_from_str(&format!("[flags]\n{option} = 0\n"))
-                .unwrap_err();
+        for option in [
+            "quic_datagram_fec_parity",
+            "quic_datagram_alternate_path_parity",
+        ] {
+            let error =
+                TomlConfigLoader::new_from_str(&format!("[flags]\n{option} = 0\n")).unwrap_err();
             assert!(format!("{error:#}").contains(option));
             assert!(format!("{error:#}").contains("removed option"));
         }

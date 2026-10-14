@@ -574,11 +574,6 @@ fn format_sample_age(age_ms: Option<u64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
-
 #[derive(serde::Serialize)]
 struct PeerListData {
     node_info: NodeInfo,

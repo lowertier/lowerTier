@@ -442,34 +442,3 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicI32, Ordering};
-
-    use futures::SinkExt;
-
-    use crate::{
-        common::global_ctx::tests::get_mock_global_ctx,
-        tunnel::{TunnelError, packet_def::ZCPacket},
-    };
-
-    use super::*;
-
-    #[derive(Debug)]
-    struct MockListenerHandler {}
-
-    #[async_trait]
-    impl TunnelHandlerForListener for MockListenerHandler {
-        async fn handle_tunnel(&self, tunnel: Box<dyn Tunnel>) -> Result<(), Error> {
-            let data = "abc";
-            let (_recv, mut send) = tunnel.split();
-
-            let zc_packet = ZCPacket::new_with_payload(data.as_bytes());
-            send.send(crate::tunnel::batch::PacketBatch::singleton(zc_packet))
-                .await
-                .unwrap();
-            Err(Error::Unknown)
-        }
-    }
-}

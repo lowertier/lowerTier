@@ -452,8 +452,3 @@ fn check_rule_exists(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

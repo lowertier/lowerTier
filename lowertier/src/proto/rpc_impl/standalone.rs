@@ -218,14 +218,3 @@ impl<C: TunnelConnector> StandAloneClient<C> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        proto::rpc_impl::standalone::StandAloneServer,
-        tunnel::{
-            TunnelConnector as _,
-            tcp::{TcpTunnelConnector, TcpTunnelListener},
-        },
-    };
-}

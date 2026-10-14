@@ -138,9 +138,3 @@ where
 
     (scores, first_hop)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use petgraph::graph::DiGraph;
-}

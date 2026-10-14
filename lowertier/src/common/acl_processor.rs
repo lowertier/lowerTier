@@ -394,11 +394,6 @@ impl AclProcessor {
         processor
     }
 
-    #[cfg(test)]
-    pub(crate) fn background_task_count_for_test(&self) -> usize {
-        self.tasks.len()
-    }
-
     pub(crate) fn needs_src_groups(&self) -> bool {
         self.needs_src_groups
     }

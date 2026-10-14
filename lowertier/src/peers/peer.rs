@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-
 use crossbeam::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
@@ -41,7 +40,7 @@ pub struct Peer {
     packet_recv_chan: PacketRecvChan,
 
     close_event_sender: mpsc::Sender<PeerConnId>,
-    close_event_listener: AbortOnDropHandle<()>,
+    _close_event_listener: AbortOnDropHandle<()>,
 
     shutdown_notifier: Arc<tokio::sync::Notify>,
 
@@ -50,8 +49,7 @@ pub struct Peer {
     peer_identity_type: Arc<AtomicCell<Option<PeerIdentityType>>>,
     peer_public_key: Arc<RwLock<Option<Vec<u8>>>>,
     origin_auth_update: Arc<RwLock<OriginAuthUpdate>>,
-    default_conn_refresh_task: AbortOnDropHandle<()>,
-
+    _default_conn_refresh_task: AbortOnDropHandle<()>,
 }
 
 impl Peer {
@@ -171,7 +169,7 @@ impl Peer {
             global_ctx,
 
             close_event_sender,
-            close_event_listener,
+            _close_event_listener: close_event_listener,
 
             shutdown_notifier,
             default_conn_id,
@@ -179,8 +177,7 @@ impl Peer {
             peer_identity_type,
             peer_public_key,
             origin_auth_update,
-            default_conn_refresh_task,
-
+            _default_conn_refresh_task: default_conn_refresh_task,
         }
     }
 
@@ -412,18 +409,6 @@ impl Peer {
         conn.send_msg(msg).await
     }
 
-    pub(crate) async fn send_msg_batch_on_conn(
-        &self,
-        conn: &ArcPeerConn,
-        mut batch: PacketBatch,
-    ) -> Result<(), Error> {
-        for packet in batch.iter_mut() {
-            stamp_critical_l2_control(packet);
-            stamp_packet_flow(packet);
-        }
-        self.send_msg_batch_to_conn(conn.clone(), batch).await
-    }
-
     /// Sends a batch whose control and flow metadata was already stamped by
     /// `PeerManager::prepare_packet_batch`.
     pub(crate) async fn send_prepared_msg_batch_on_conn(
@@ -573,72 +558,5 @@ impl Drop for Peer {
         });
         self.shutdown_notifier.notify_one();
         tracing::info!("peer {} drop", self.peer_node_id);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-    use rand::rngs::OsRng;
-    use std::{sync::Arc, time::Duration};
-    use tokio::sync::mpsc;
-    use tokio::time::timeout;
-
-    use crate::proto::common::TunnelInfo;
-    use crate::tunnel::{
-        batch::PacketBatch,
-        packet_def::{PacketType, ZCPacket},
-    };
-    use crate::{
-        common::{
-            config::{NetworkIdentity, PeerConfig},
-            global_ctx::{
-                GlobalCtx,
-                tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
-            },
-            new_peer_id,
-        },
-        peers::{
-            create_packet_recv_chan, peer_conn::PeerConn, peer_session::PeerSessionStore,
-            route_trait::NextHopPolicy, speed_probe::SpeedSample,
-        },
-        proto::common::SecureModeConfig,
-        tunnel::ring::create_ring_tunnel_pair,
-    };
-
-    use super::Peer;
-    fn unstarted_peer_conn(global_ctx: Arc<GlobalCtx>) -> PeerConn {
-        let (tunnel, _other_end) = create_ring_tunnel_pair();
-        PeerConn::new(
-            new_peer_id(),
-            global_ctx,
-            Box::new(tunnel),
-            Arc::new(PeerSessionStore::new()),
-        )
-    }
-
-    fn test_tunnel_info(protocol: &str, local: &str, remote: &str) -> TunnelInfo {
-        TunnelInfo {
-            tunnel_type: protocol.into(),
-            local_addr: Some(url::Url::parse(local).unwrap().into()),
-            remote_addr: Some(url::Url::parse(remote).unwrap().into()),
-            resolved_remote_addr: Some(url::Url::parse(remote).unwrap().into()),
-        }
-    }
-
-
-    fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
-        if !enabled {
-            global_ctx.config.set_secure_mode(None);
-        } else {
-            let private = x25519_dalek::StaticSecret::random_from_rng(OsRng);
-            let public = x25519_dalek::PublicKey::from(&private);
-            global_ctx.config.set_secure_mode(Some(SecureModeConfig {
-                enabled: true,
-                local_private_key: Some(BASE64_STANDARD.encode(private.as_bytes())),
-                local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
-                ..Default::default()
-            }));
-        }
     }
 }

@@ -202,19 +202,6 @@ impl LogicalTrafficMetrics {
         }
     }
 
-    pub(crate) async fn record_with_resolver<F, Fut>(
-        &self,
-        peer_id: PeerId,
-        bytes: u64,
-        resolver: F,
-    ) where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Option<String>>,
-    {
-        self.record_batch_with_resolver(peer_id, bytes, 1, resolver)
-            .await;
-    }
-
     pub(crate) async fn record_batch_with_resolver<F, Fut>(
         &self,
         peer_id: PeerId,
@@ -288,16 +275,6 @@ impl LogicalTrafficMetrics {
     pub(crate) fn clear_peer_cache(&self) {
         self.per_peer.clear();
         shrink_dashmap(&self.per_peer, None);
-    }
-
-    #[cfg(test)]
-    fn peer_cache_size(&self) -> usize {
-        self.per_peer.len()
-    }
-
-    #[cfg(test)]
-    fn contains_peer_cache(&self, peer_id: PeerId) -> bool {
-        self.per_peer.contains_key(&peer_id)
     }
 
     fn build_peer_counters(&self, instance_id: &str) -> TrafficCounters {
@@ -487,14 +464,6 @@ impl TrafficMetricRecorder {
         self.rx_metrics.control.clear_peer_cache();
     }
 
-    #[cfg(test)]
-    pub(crate) fn contains_peer_cache(&self, peer_id: PeerId) -> bool {
-        self.tx_metrics.data.contains_peer_cache(peer_id)
-            || self.tx_metrics.control.contains_peer_cache(peer_id)
-            || self.rx_metrics.data.contains_peer_cache(peer_id)
-            || self.rx_metrics.control.contains_peer_cache(peer_id)
-    }
-
     fn resolve_instance_id(&self, peer_id: PeerId) -> BoxFuture<'static, Option<String>> {
         (self.resolve_instance_id)(peer_id)
     }
@@ -507,23 +476,5 @@ pub(crate) fn route_peer_info_instance_id(route_peer_info: &RoutePeerInfo) -> Op
         None
     } else {
         Some(instance_id.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-    use crate::common::stats_manager::LabelSet;
-
-    fn network_labels(network_name: &str) -> LabelSet {
-        LabelSet::new().with_label_type(LabelType::NetworkName(network_name.to_string()))
-    }
-
-    fn to_instance_labels(network_name: &str, instance_id: &str) -> LabelSet {
-        LabelSet::new()
-            .with_label_type(LabelType::NetworkName(network_name.to_string()))
-            .with_label_type(LabelType::ToInstanceId(instance_id.to_string()))
     }
 }

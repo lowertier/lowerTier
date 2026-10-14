@@ -110,8 +110,8 @@ impl Drop for OwnedRouteEntry {
 /// drop. An accepted stream instead inherits its port and peer from the
 /// listener, so it carries merely an [`OwnedRouteEntry`].
 enum DataPlaneTcpStreamRoute {
-    Outbound(Socks5AutoConnector),
-    Accepted(OwnedRouteEntry),
+    Outbound { _route: Socks5AutoConnector },
+    Accepted { _route: OwnedRouteEntry },
 }
 
 /// A TCP stream created by the data plane API.
@@ -177,7 +177,7 @@ impl DataPlaneTcpListener {
             stream: SocksTcpStream::SmolTcp(stream),
             local_addr,
             _data_plane_ref: self._data_plane_ref.clone(),
-            _route: DataPlaneTcpStreamRoute::Accepted(route),
+            _route: DataPlaneTcpStreamRoute::Accepted { _route: route },
         };
         Ok((accepted, peer_addr))
     }
@@ -338,7 +338,7 @@ impl Socks5Server {
             stream,
             local_addr,
             _data_plane_ref: data_plane_ref,
-            _route: DataPlaneTcpStreamRoute::Outbound(connector),
+            _route: DataPlaneTcpStreamRoute::Outbound { _route: connector },
         })
     }
 

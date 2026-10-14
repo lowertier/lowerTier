@@ -286,17 +286,3 @@ impl<T: Tunnel> MpscTunnel<T> {
         self.tunnel.info()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use futures::StreamExt;
-
-    use crate::tunnel::{
-        TunnelConnector, TunnelListener,
-        batch::PacketBatch,
-        ring::{RING_TUNNEL_CAP, create_ring_tunnel_pair},
-        tcp::{TcpTunnelConnector, TcpTunnelListener},
-    };
-
-    use super::*;
-}

@@ -28,20 +28,23 @@ const RPC_MERGER_MAP_ENTRY_OVERHEAD: usize = 64;
 // Account for the immutable envelope retained once per fragmented transaction.
 const RPC_MERGER_ENVELOPE_OVERHEAD: usize = 128;
 
-
-
-
-
 pub const fn supported_rpc_compression() -> CompressionAlgoPb {
     CompressionAlgoPb::None
 }
 
 pub(crate) fn logical_body_size(packet: &RpcPacket) -> Result<usize, Error> {
     if packet.body.len() > MAX_RPC_BODY_BYTES {
-        return Err(Error::MalformatRpcPacket("RPC body is too large".to_owned()));
+        return Err(Error::MalformatRpcPacket(
+            "RPC body is too large".to_owned(),
+        ));
     }
-    if packet.compression_info.is_some_and(|info| info.algo != CompressionAlgoPb::None as i32) {
-        return Err(Error::MalformatRpcPacket("RPC compression is no longer supported".to_owned()));
+    if packet
+        .compression_info
+        .is_some_and(|info| info.algo != CompressionAlgoPb::None as i32)
+    {
+        return Err(Error::MalformatRpcPacket(
+            "RPC compression is no longer supported".to_owned(),
+        ));
     }
     Ok(packet.body.len())
 }
@@ -58,10 +61,14 @@ pub async fn decompress_packet(
     content: &[u8],
 ) -> Result<Vec<u8>, Error> {
     if compression_algo != CompressionAlgoPb::None {
-        return Err(Error::MalformatRpcPacket("RPC compression is no longer supported".to_owned()));
+        return Err(Error::MalformatRpcPacket(
+            "RPC compression is no longer supported".to_owned(),
+        ));
     }
     if content.len() > MAX_RPC_BODY_BYTES {
-        return Err(Error::MalformatRpcPacket("RPC body is too large".to_owned()));
+        return Err(Error::MalformatRpcPacket(
+            "RPC body is too large".to_owned(),
+        ));
     }
     Ok(content.to_vec())
 }
@@ -298,10 +305,6 @@ impl PacketMerger {
         self.last_updated
     }
 
-    pub(crate) fn retained_body_bytes(&self) -> usize {
-        self.body_bytes
-    }
-
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -506,71 +509,4 @@ pub fn build_rpc_packet(args: BuildRpcPacketArgs<'_>) -> Vec<ZCPacket> {
     }
 
     ret
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fragment(
-        descriptor: RpcDescriptor,
-        total_pieces: u32,
-        piece_idx: u32,
-        body: &[u8],
-    ) -> RpcPacket {
-        RpcPacket {
-            from_peer: 1,
-            to_peer: 2,
-            transaction_id: 3,
-            descriptor: Some(descriptor),
-            is_request: true,
-            total_pieces,
-            piece_idx,
-            body: body.to_vec(),
-            compression_info: (piece_idx == 0).then_some(RpcCompressionInfo {
-                algo: CompressionAlgoPb::None as i32,
-                accepted_algo: CompressionAlgoPb::None as i32,
-            }),
-            ..Default::default()
-        }
-    }
-
-    fn test_descriptor(service_name: &str) -> RpcDescriptor {
-        RpcDescriptor {
-            domain_name: "test".to_string(),
-            proto_name: "TestRpc".to_string(),
-            service_name: service_name.to_string(),
-            method_index: 1,
-        }
-    }
-
-    fn build_test_args<'a>(
-        content: &'a [u8],
-        compression_algo: CompressionAlgoPb,
-    ) -> BuildRpcPacketArgs<'a> {
-        BuildRpcPacketArgs {
-            from_peer: 11,
-            to_peer: 22,
-            rpc_desc: RpcDescriptor {
-                domain_name: "very-long-domain-name-for-rpc-packet-budget-check".repeat(2),
-                proto_name: "extremely.verbose.proto.name.for.rpc.packet.tests".repeat(2),
-                service_name: "LargeMetadataServiceForRpcPacketBudget".repeat(2),
-                method_index: 7,
-            },
-            transaction_id: 33,
-            is_req: true,
-            content,
-            trace_id: 44,
-            compression_info: RpcCompressionInfo {
-                algo: compression_algo.into(),
-                accepted_algo: CompressionAlgoPb::Zstd.into(),
-            },
-        }
-    }
-
-    fn udp_packet_size_after_tail(packet: &ZCPacket) -> usize {
-        ZCPacketType::UDP.get_packet_offsets().payload_offset
-            + packet.payload_len()
-            + TAIL_RESERVED_SIZE
-    }
 }

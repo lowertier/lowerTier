@@ -70,9 +70,7 @@ pub unsafe extern "C" fn parse_config(cfg_str: *const c_char) -> c_int {
 
 /// Start one local LowTier network instance from a TOML config string.
 ///
-/// The config's `inst_name` must be unique among instances started through this
-/// FFI layer. This API is mutually exclusive with config-server callback
-/// execution and will fail if called from a config-server event callback.
+/// The config's `inst_name` must be unique among instances started through this FFI layer.
 ///
 /// # Safety
 /// `cfg_str` must be a non-null pointer to a null-terminated UTF-8 string.
@@ -93,7 +91,6 @@ pub unsafe extern "C" fn run_network_instance(cfg_str: *const c_char) -> c_int {
 /// retained are removed from the FFI name cache and any related data-plane
 /// handles are closed.
 ///
-/// This API fails if called from a config-server event callback.
 ///
 /// # Safety
 /// If `length > 0`, `inst_names` must be a non-null pointer to an array of
@@ -117,7 +114,6 @@ pub unsafe extern "C" fn retain_network_instance(
 /// Removed instances are also removed from the FFI name cache and any related
 /// data-plane handles are closed.
 ///
-/// This API fails if called from a config-server event callback.
 ///
 /// # Safety
 /// If `length > 0`, `inst_names` must be a non-null pointer to an array of
@@ -141,7 +137,6 @@ pub unsafe extern "C" fn delete_network_instance(
 /// key/value strings are allocated by this library and must be released with
 /// `free_string`.
 ///
-/// This API fails if called from a config-server event callback.
 ///
 /// # Safety
 /// If `max_length > 0`, `infos` must be a non-null pointer to writable storage
@@ -162,7 +157,6 @@ pub unsafe extern "C" fn list_instance(infos: *mut KeyValuePair, max_length: usi
 /// instance's running information. Returned key/value strings are allocated by
 /// this library and must be released with `free_string`.
 ///
-/// This API fails if called from a config-server event callback.
 ///
 /// # Safety
 /// If `max_length > 0`, `infos` must be a non-null pointer to writable storage
@@ -182,7 +176,7 @@ pub unsafe extern "C" fn collect_network_infos(
 /// Attach a TUN file descriptor to a named network instance.
 ///
 /// The instance must already have been registered in the FFI name cache by
-/// `run_network_instance` or by a managed config-server remote start event.
+/// `run_network_instance`.
 ///
 /// # Safety
 /// `inst_name` must be a non-null pointer to a null-terminated UTF-8 string.
@@ -211,7 +205,6 @@ pub unsafe extern "C" fn set_tun_fd(inst_name: *const c_char, fd: c_int) -> c_in
 /// On success, writes a newly allocated JSON response string to
 /// `out_response_json`. The caller must release it with `free_string`.
 ///
-/// This API fails if called from a config-server event callback.
 ///
 /// # Safety
 /// `service_name`, `method_name`, `payload_json`, and `out_response_json` must

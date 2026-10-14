@@ -10,9 +10,7 @@ use tokio_util::task::AbortOnDropHandle;
 use super::{PacketRecvChan, peer_conn::PeerConn, peer_map::PeerMap, peer_rpc::PeerRpcManager};
 
 pub struct ForeignNetworkClient {
-    global_ctx: ArcGlobalCtx,
-    peer_rpc: Arc<PeerRpcManager>,
-    my_peer_id: PeerId,
+    _peer_rpc: Arc<PeerRpcManager>,
 
     peer_map: Arc<PeerMap>,
     task: Mutex<Option<AbortOnDropHandle<()>>>,
@@ -31,9 +29,7 @@ impl ForeignNetworkClient {
             my_peer_id,
         ));
         Self {
-            global_ctx,
-            peer_rpc,
-            my_peer_id,
+            _peer_rpc: peer_rpc,
 
             peer_map,
             task: Mutex::new(None),

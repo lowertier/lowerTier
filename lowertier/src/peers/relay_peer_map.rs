@@ -466,6 +466,7 @@ enum EnqueueBatchResult {
 }
 
 impl RelaySendState {
+    #[cfg(test)]
     fn new(phase: RelaySendPhase) -> Self {
         Self::new_with_governor(
             phase,
@@ -750,6 +751,7 @@ impl RelaySendState {
         }
     }
 
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         let queue = self.queue.lock().unwrap();
         queue.packets.is_empty() && queue.in_flight == 0
@@ -772,11 +774,6 @@ impl RelaySendState {
     fn packet_count(&self) -> usize {
         let queue = self.queue.lock().unwrap();
         queue.packets.len() + queue.in_flight
-    }
-
-    fn set_in_flight_for_test(&self, value: bool) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.in_flight = usize::from(value);
     }
 }
 
@@ -848,7 +845,7 @@ struct PendingConfirmationAck {
 struct PendingReadyReceipt {
     identity: RelayReadyReceiptIdentity,
     session: Arc<PeerSession>,
-    expires_at: Instant,
+
     notify: Arc<Notify>,
     outcome: Arc<AtomicU8>,
     owner_running: Arc<AtomicBool>,
@@ -874,7 +871,7 @@ struct PendingResponderReset {
 
 struct PendingResetAck {
     handshake_id: [u8; RELAY_HANDSHAKE_ID_SIZE],
-    identity: InitiatorTransitionIdentity,
+
     response_tx: std::sync::Mutex<Option<oneshot::Sender<ZCPacket>>>,
 }
 
@@ -1494,7 +1491,7 @@ impl RelayPeerMap {
         let pending = PendingReadyReceipt {
             identity,
             session,
-            expires_at: Instant::now() + INITIATOR_RECOVERY_LIFETIME,
+
             notify: Arc::new(Notify::new()),
             outcome: Arc::new(AtomicU8::new(0)),
             owner_running: Arc::new(AtomicBool::new(false)),
@@ -2669,12 +2666,6 @@ impl RelayPeerMap {
         });
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_pending_packet_in_flight_for_test(&self, dst_peer_id: PeerId, value: bool) {
-        self.ensure_send_state(dst_peer_id, RelaySendPhase::AwaitingSession)
-            .set_in_flight_for_test(value);
-    }
-
     pub fn has_session(&self, dst_peer_id: PeerId) -> bool {
         self.peer_session_store
             .get(&SessionKey::new(
@@ -3091,7 +3082,7 @@ impl RelayPeerMap {
                 dst_peer_id,
                 PendingResetAck {
                     handshake_id,
-                    identity: identity.clone(),
+
                     response_tx: std::sync::Mutex::new(Some(tx)),
                 },
             );

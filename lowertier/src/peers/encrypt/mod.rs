@@ -102,9 +102,3 @@ pub fn create_secure_datagram_encryptor(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::create_encryptor;
-    use crate::tunnel::packet_def::{StandardAeadTail, ZCPacket};
-}

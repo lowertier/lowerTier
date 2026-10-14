@@ -148,6 +148,8 @@ pub(super) async fn resolve_tracker_host(
     .context("tracker DNS lookup failed")
 }
 
+// TODO(tracker): remove this allowance after discovery integration.
+#[allow(dead_code)]
 pub async fn http_announce(
     url: &url::Url,
     announce: &Announce,

@@ -8,8 +8,6 @@ use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use super::{TunnelError, stealth_tls};
 
-pub(super) type TlsClientStream = TlsStream<TcpStream>;
-
 pub(super) async fn connect<S>(
     stream: S,
     server_name: &str,

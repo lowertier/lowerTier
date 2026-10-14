@@ -172,7 +172,7 @@ impl TokenBucket {
 pub struct TokenBucketManager {
     buckets: Arc<DashMap<String, Arc<TokenBucket>>>,
 
-    retain_task: Option<AbortOnDropHandle<()>>,
+    _retain_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl Default for TokenBucketManager {
@@ -206,7 +206,7 @@ impl TokenBucketManager {
 
         Self {
             buckets,
-            retain_task,
+            _retain_task: retain_task,
         }
     }
 
@@ -217,20 +217,4 @@ impl TokenBucketManager {
             .or_insert_with(|| TokenBucket::new_from_cfg(cfg))
             .clone()
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        peers::tests::create_mock_peer_manager_with_mock_stun,
-        peers::{
-            foreign_network_manager::tests::create_mock_peer_manager_for_foreign_network,
-            tests::connect_peer_manager,
-        },
-        proto::common::NatType,
-        tunnel::common::tests::wait_for_condition,
-    };
-
-    use super::*;
-    use tokio::time::{Duration, sleep};
 }

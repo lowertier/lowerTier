@@ -1267,8 +1267,3 @@ fn status_signing_bytes(status: &CredentialCertificateStatus) -> Vec<u8> {
 fn encode_bundle(bundle: &CredentialBundle) -> String {
     URL_SAFE_NO_PAD.encode(bundle.encode_to_vec())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

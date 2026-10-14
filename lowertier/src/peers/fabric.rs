@@ -69,11 +69,3 @@ impl FabricBatch {
         self.packets
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        peers::fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
-        tunnel::packet_def::ZCPacket,
-    };
-}

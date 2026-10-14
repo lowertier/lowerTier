@@ -189,12 +189,6 @@ impl AclFilter {
         tracing::info!("ACL rules hot reloaded with preserved state (lock-free)");
     }
 
-    #[cfg(test)]
-    fn background_task_count_for_test(&self) -> usize {
-        usize::from(self.clean_task.lock().is_some())
-            + self.acl_processor.load().background_task_count_for_test()
-    }
-
     /// Get current processor for processing packets
     pub fn get_processor(&self) -> Arc<AclProcessor> {
         self.acl_processor.load_full()
@@ -566,41 +560,6 @@ impl AclFilter {
 
                 false
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
-        sync::Arc,
-    };
-
-    use quanta::Instant;
-
-    use crate::{
-        common::acl_processor::PacketInfo,
-        peers::route_trait::MockRoute,
-        proto::acl::{Acl, AclV1, Action, Chain, ChainType, Protocol},
-        tunnel::{
-            batch::PacketBatch,
-            packet_def::{PacketType, ZCPacket},
-        },
-    };
-
-    use super::{AclFilter, OutboundAllowRecord, packet_batch_contains_acl_data};
-
-    fn packet_info(dst_ip: IpAddr) -> PacketInfo {
-        PacketInfo {
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            dst_ip,
-            src_port: Some(1234),
-            dst_port: Some(80),
-            protocol: Protocol::Tcp,
-            packet_size: 64,
-            src_groups: Arc::new(Vec::new()),
-            dst_groups: Arc::new(Vec::new()),
         }
     }
 }

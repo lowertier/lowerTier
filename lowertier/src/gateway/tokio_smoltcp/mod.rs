@@ -1,6 +1,5 @@
 //! An asynchronous wrapper for smoltcp.
 // most code is copied from https://github.com/spacemeowx2/tokio-smoltcp
-#![allow(dead_code)]
 
 use std::{
     io,
@@ -34,14 +33,6 @@ mod tcp_buffers;
 
 /// Can be used to create a forever timestamp in neighbor.
 // The 60_000 is the same as NeighborCache::ENTRY_LIFETIME.
-pub const FOREVER: Instant =
-    Instant::from_micros_const(i64::MAX - Duration::from_millis(60_000).micros() as i64);
-
-pub struct Neighbor {
-    pub protocol_addr: IpAddress,
-    pub hardware_addr: HardwareAddress,
-    pub timestamp: Instant,
-}
 
 /// A config for a `Net`.
 ///
@@ -79,7 +70,7 @@ pub struct Net {
     ip_addr: IpCidr,
     from_port: AtomicU16,
     stopper: Arc<Notify>,
-    fut: AbortOnDropHandle<io::Result<()>>,
+    _fut: AbortOnDropHandle<io::Result<()>>,
 }
 
 impl std::fmt::Debug for Net {
@@ -131,7 +122,7 @@ impl Net {
             ip_addr: config.ip_addr,
             from_port: AtomicU16::new(10001),
             stopper,
-            fut: AbortOnDropHandle::new(tokio::spawn(fut)),
+            _fut: AbortOnDropHandle::new(tokio::spawn(fut)),
         }
     }
     pub fn get_address(&self) -> IpAddr {
@@ -186,27 +177,6 @@ impl Net {
         let mut iface: parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, Interface> =
             iface.lock();
         iface.set_any_ip(any_ip);
-    }
-
-    /// Get whether AnyIP is enabled.
-    pub fn any_ip(&self) -> bool {
-        let iface = self.reactor.iface().clone();
-        let iface = iface.lock();
-        iface.any_ip()
-    }
-
-    pub fn routes<F: FnOnce(&Routes)>(&self, f: F) {
-        let iface = self.reactor.iface().clone();
-        let iface = iface.lock();
-        let routes = iface.routes();
-        f(routes)
-    }
-
-    pub fn routes_mut<F: FnOnce(&mut Routes)>(&self, f: F) {
-        let iface = self.reactor.iface().clone();
-        let mut iface = iface.lock();
-        let routes = iface.routes_mut();
-        f(routes)
     }
 }
 

@@ -509,7 +509,6 @@ struct NetworkOptions {
     )]
     outbound_http_proxy_listen: Option<String>,
 
-
     #[arg(
         long,
         env = "ET_BIND_DEVICE",
@@ -663,8 +662,6 @@ struct NetworkOptions {
         default_missing_value = "true"
     )]
     quic_sni_passthrough: Option<bool>,
-
-
 
     #[arg(
         long,
@@ -1811,11 +1808,4 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
 }

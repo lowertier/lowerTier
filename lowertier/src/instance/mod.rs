@@ -1,7 +1,7 @@
 pub mod dns_server;
 #[allow(clippy::module_inception)]
 pub mod instance;
-#[cfg(any(all(target_os = "linux", feature = "tun"), test))]
+#[cfg(all(target_os = "linux", feature = "tun"))]
 pub(crate) mod tun_scheduler;
 
 pub mod listeners;
@@ -30,5 +30,5 @@ mod tap_mac;
 #[cfg(feature = "tun")]
 pub mod virtual_nic;
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) mod windows_udp_broadcast;

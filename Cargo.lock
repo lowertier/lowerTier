@@ -445,12 +445,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atomic_refcell"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41e67cd8309bbd06cd603a9e693a784ac2e5d1e955f11286e355089fcab3047c"
-
-[[package]]
 name = "auto_impl"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3223,10 +3217,8 @@ dependencies = [
  "ariadne",
  "async-recursion",
  "async-ringbuf",
- "async-stream",
  "async-trait",
  "atomic-shim",
- "atomic_refcell",
  "auto_impl",
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -3234,7 +3226,6 @@ dependencies = [
  "bytecodec",
  "byteorder",
  "bytes",
- "cfg_aliases",
  "chrono",
  "cidr",
  "clap",
@@ -3275,7 +3266,6 @@ dependencies = [
  "idna",
  "indoc",
  "io-uring",
- "itertools 0.14.0",
  "lowertier-tracker",
  "machine-uid",
  "maplit",

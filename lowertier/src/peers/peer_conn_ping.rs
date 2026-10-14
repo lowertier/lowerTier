@@ -382,8 +382,3 @@ impl PeerConnPinger {
         ping_res_receiver.close();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

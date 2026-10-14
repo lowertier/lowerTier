@@ -19,14 +19,6 @@ pub(crate) static ASYNC_RUNTIME: once_cell::sync::Lazy<Runtime> =
 pub(crate) static INSTANCE_MUTATION_LOCK: once_cell::sync::Lazy<Mutex<()>> =
     once_cell::sync::Lazy::new(|| Mutex::new(()));
 
-pub(crate) fn remove_instance_name_ids(ids: &[Uuid]) {
-    if ids.is_empty() {
-        return;
-    }
-
-    INSTANCE_NAME_ID_MAP.retain(|_, instance_id| !ids.contains(instance_id));
-}
-
 pub(crate) fn lock_remote_instance_mutation() -> tokio::sync::OwnedMutexGuard<()> {
     INSTANCE_MANAGER
         .remote_mutation_lock()
@@ -35,6 +27,15 @@ pub(crate) fn lock_remote_instance_mutation() -> tokio::sync::OwnedMutexGuard<()
 
 pub(crate) fn instance_name_exists(inst_name: &str) -> bool {
     find_instance_id_by_name(inst_name).is_some()
+}
+
+#[cfg(test)]
+pub(crate) fn remove_instance_name_ids(ids: &[Uuid]) {
+    if ids.is_empty() {
+        return;
+    }
+
+    INSTANCE_NAME_ID_MAP.retain(|_, instance_id| !ids.contains(instance_id));
 }
 
 pub(crate) fn find_instance_id_by_name(inst_name: &str) -> Option<Uuid> {

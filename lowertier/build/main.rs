@@ -157,7 +157,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let proto_files = [
         "src/proto/error.proto",
-        "src/proto/tests.proto",
         "src/proto/api_instance.proto",
         "src/proto/api_logger.proto",
         "src/proto/api_config.proto",

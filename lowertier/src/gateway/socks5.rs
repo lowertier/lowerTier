@@ -172,7 +172,10 @@ impl AsyncWrite for SocksTcpStream {
 }
 
 enum Socks5EntryData {
-    Tcp(TcpListener), // hold a binded socket to hold the tcp port
+    // Keep the listener alive until the routing entry drops.
+    Tcp {
+        _port: TcpListener,
+    },
     #[cfg(feature = "ffi-dataplane")]
     // a data-plane routing entry that owns no resource. the entry_type in the
     // key distinguishes a listen route from an actively outbound route.
@@ -307,7 +310,9 @@ impl AsyncTcpConnector for SmolTcpConnector {
             &self.entries,
             &self.entry_count,
             entry.clone(),
-            Socks5EntryData::Tcp(tmp_listener),
+            Socks5EntryData::Tcp {
+                _port: tmp_listener,
+            },
         );
         tracing::trace!(
             ?entry,
@@ -789,12 +794,9 @@ impl AsyncUdpConnector for Socks5AutoConnector {
 
 struct Socks5ServerNet {
     ipv4_addr: cidr::Ipv4Inet,
-    auth: Option<SimpleUserPassword>,
 
     smoltcp_net: Arc<Net>,
     forward_tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
-
-    entries: Socks5EntrySet,
 }
 
 impl Socks5ServerNet {
@@ -880,12 +882,9 @@ impl Socks5ServerNet {
 
         Self {
             ipv4_addr,
-            auth,
 
             smoltcp_net: Arc::new(net),
             forward_tasks,
-
-            entries,
         }
     }
 
@@ -962,11 +961,10 @@ impl Socks5ServerNet {
 }
 
 struct UdpClientInfo {
-    client_addr: SocketAddr,
     port_holder_socket: Arc<UdpSocket>,
     local_addr: SocketAddr,
     last_active: AtomicCell<Instant>,
-    entries: Socks5EntrySet,
+
     entry_key: Socks5Entry,
 }
 
@@ -979,7 +977,6 @@ struct UdpClientKey {
 pub struct Socks5Server {
     global_ctx: Arc<GlobalCtx>,
     peer_manager: Weak<PeerManager>,
-    auth: Option<SimpleUserPassword>,
 
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
     packet_sender: mpsc::Sender<PacketBatch>,
@@ -1321,7 +1318,6 @@ impl Socks5Server {
         Arc::new(Self {
             global_ctx,
             peer_manager: Arc::downgrade(&peer_manager),
-            auth,
 
             tasks: Arc::new(std::sync::Mutex::new(JoinSet::new())),
             packet_recv: Arc::new(Mutex::new(packet_recv)),
@@ -1621,10 +1617,6 @@ impl Socks5Server {
         Ok(())
     }
 
-    pub fn remove_port_forward(&self, cfg: PortForwardConfig) {
-        let _ = self.cancel_tokens.remove(&cfg);
-    }
-
     pub async fn add_tcp_port_forward(&self, cfg: &PortForwardConfig) -> Result<(), Error> {
         let (bind_addr, dst_addr) = (cfg.bind_addr, cfg.dst_addr);
         let listener = bind::<TcpListener>()
@@ -1790,11 +1782,11 @@ impl Socks5Server {
                         tracing::debug!("udp port forward binded socket = {:?}, entry_key = {:?}", local_addr, entry_key);
 
                         let client_info = Arc::new(UdpClientInfo {
-                            client_addr: addr,
+
                             port_holder_socket: Arc::new(binded_socket),
                             local_addr,
                             last_active: AtomicCell::new(Instant::now()),
-                            entries: entries.clone(),
+
                             entry_key,
                         });
                         udp_client_map.insert(udp_client_key.clone(), client_info.clone());
@@ -1916,81 +1908,5 @@ impl Socks5Server {
         });
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    use pnet::packet::{
-        MutablePacket,
-        ip::IpNextHeaderProtocols,
-        ipv4::{self, MutableIpv4Packet},
-        tcp::{self, MutableTcpPacket, TcpFlags},
-    };
-
-    use super::*;
-    use crate::peers::tests::create_mock_peer_manager;
-
-    fn build_tcp_packet(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
-        let mut buf = vec![0u8; 40];
-        let src_ip = match src.ip() {
-            IpAddr::V4(ip) => ip,
-            IpAddr::V6(_) => panic!("test only supports ipv4"),
-        };
-        let dst_ip = match dst.ip() {
-            IpAddr::V4(ip) => ip,
-            IpAddr::V6(_) => panic!("test only supports ipv4"),
-        };
-
-        {
-            let mut ip_packet = MutableIpv4Packet::new(&mut buf).unwrap();
-            ip_packet.set_version(4);
-            ip_packet.set_header_length(5);
-            ip_packet.set_total_length(40);
-            ip_packet.set_ttl(64);
-            ip_packet.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
-            ip_packet.set_source(src_ip);
-            ip_packet.set_destination(dst_ip);
-
-            let mut tcp_packet = MutableTcpPacket::new(ip_packet.payload_mut()).unwrap();
-            tcp_packet.set_source(src.port());
-            tcp_packet.set_destination(dst.port());
-            tcp_packet.set_data_offset(5);
-            tcp_packet.set_flags(TcpFlags::SYN | TcpFlags::ACK);
-            tcp_packet.set_window(65535);
-            tcp_packet.set_checksum(tcp::ipv4_checksum(
-                &tcp_packet.to_immutable(),
-                &src_ip,
-                &dst_ip,
-            ));
-
-            ip_packet.set_checksum(ipv4::checksum(&ip_packet.to_immutable()));
-        }
-
-        buf
-    }
-
-    fn build_udp_followup_fragment(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
-        let mut buf = vec![0u8; 28];
-        {
-            let mut ip_packet = MutableIpv4Packet::new(&mut buf).unwrap();
-            ip_packet.set_version(4);
-            ip_packet.set_header_length(5);
-            ip_packet.set_total_length(28);
-            ip_packet.set_ttl(64);
-            ip_packet.set_next_level_protocol(IpNextHeaderProtocols::Udp);
-            ip_packet.set_fragment_offset(1);
-            ip_packet.set_source(src);
-            ip_packet.set_destination(dst);
-            ip_packet
-                .payload_mut()
-                .copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe]);
-
-            ip_packet.set_checksum(ipv4::checksum(&ip_packet.to_immutable()));
-        }
-
-        buf
     }
 }

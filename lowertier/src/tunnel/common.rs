@@ -12,9 +12,8 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{
-    DatagramSizeBudget, PacketBatchSink, PacketBatchStream, ReceiveBackpressure, SinkItem,
-    SplitTunnel, StreamItem, TransportBinding, Tunnel, TunnelError, TunnelInfo, ZCPacketSink,
-    ZCPacketStream,
+    PacketBatchSink, PacketBatchStream, ReceiveBackpressure, SinkItem, SplitTunnel, StreamItem,
+    TransportBinding, Tunnel, TunnelError, TunnelInfo, ZCPacketSink, ZCPacketStream,
     batch::{ScalarToBatchSink, ScalarToBatchStream},
     buf::BufList,
     packet_def::{TCP_TUNNEL_HEADER_SIZE, TCPTunnelHeader, ZCPacketType},
@@ -240,10 +239,9 @@ pub struct BatchTunnelWrapper<R, W> {
     reader: Arc<Mutex<Option<R>>>,
     writer: Arc<Mutex<Option<W>>>,
     info: Option<TunnelInfo>,
-    associate_data: Option<Box<dyn Any + Send + 'static>>,
+    _associate_data: Option<Box<dyn Any + Send + 'static>>,
     transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
-    datagram_size_budget: Option<DatagramSizeBudget>,
     receive_backpressure: Option<ReceiveBackpressure>,
 }
 
@@ -253,10 +251,9 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             reader: Arc::new(Mutex::new(Some(reader))),
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
-            associate_data: None,
+            _associate_data: None,
             transport_binding: None,
             transport_authenticated: false,
-            datagram_size_budget: None,
             receive_backpressure: None,
         }
     }
@@ -271,49 +268,27 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             reader: Arc::new(Mutex::new(Some(reader))),
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
-            associate_data: None,
+            _associate_data: None,
             transport_binding: None,
             transport_authenticated,
-            datagram_size_budget: None,
             receive_backpressure: None,
         }
     }
 
-    pub fn new_with_transport_authentication_and_datagram_size_budget(
+    pub fn new_with_transport_authentication_and_binding(
         reader: R,
         writer: W,
         info: Option<TunnelInfo>,
         transport_authenticated: bool,
-        datagram_size_budget: Option<DatagramSizeBudget>,
-    ) -> Self {
-        Self {
-            reader: Arc::new(Mutex::new(Some(reader))),
-            writer: Arc::new(Mutex::new(Some(writer))),
-            info,
-            associate_data: None,
-            transport_binding: None,
-            transport_authenticated,
-            datagram_size_budget,
-            receive_backpressure: None,
-        }
-    }
-
-    pub fn new_with_transport_authentication_and_datagram_size_budget_and_binding(
-        reader: R,
-        writer: W,
-        info: Option<TunnelInfo>,
-        transport_authenticated: bool,
-        datagram_size_budget: Option<DatagramSizeBudget>,
         transport_binding: Option<TransportBinding>,
     ) -> Self {
         Self {
             reader: Arc::new(Mutex::new(Some(reader))),
             writer: Arc::new(Mutex::new(Some(writer))),
             info,
-            associate_data: None,
+            _associate_data: None,
             transport_binding,
             transport_authenticated,
-            datagram_size_budget,
             receive_backpressure: None,
         }
     }
@@ -337,10 +312,6 @@ where
 
     fn info(&self) -> Option<TunnelInfo> {
         self.info.clone()
-    }
-
-    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
-        self.datagram_size_budget.clone()
     }
 
     fn transport_binding(&self) -> Option<TransportBinding> {
@@ -452,10 +423,6 @@ impl<R> FramedReader<R> {
         // extract one packet
         let packet_buf = buf.split_to(frame_len);
         Some(Ok(ZCPacket::new_from_buf(packet_buf, ZCPacketType::TCP)))
-    }
-
-    pub(crate) fn into_inner(self) -> R {
-        self.reader
     }
 }
 
@@ -799,17 +766,6 @@ impl Bindable for UdpSocket {
 // liveness timeouts. Size buffers to match the QUIC transport.
 const PLAIN_UDP_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 
-fn reported_plain_udp_buffer_meets_target(reported: Option<usize>, target: usize) -> bool {
-    let Some(reported) = reported else {
-        return false;
-    };
-    #[cfg(target_os = "linux")]
-    // Linux doubles the value for bookkeeping before reporting it.
-    return reported >= target.saturating_mul(2);
-    #[cfg(not(target_os = "linux"))]
-    return reported >= target;
-}
-
 #[cfg(target_os = "linux")]
 fn force_linux_socket_buffer(
     socket: &socket2::Socket,
@@ -896,6 +852,18 @@ pub(crate) fn size_tcp_socket_buffers(#[allow(unused_variables)] socket: &socket
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn reported_plain_udp_buffer_meets_target(reported: Option<usize>, target: usize) -> bool {
+    let Some(reported) = reported else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    // Linux doubles the value for bookkeeping before reporting it.
+    return reported >= target.saturating_mul(2);
+    #[cfg(not(target_os = "linux"))]
+    return reported >= target;
 }
 
 fn size_plain_udp_socket_buffers(socket: &socket2::Socket) {

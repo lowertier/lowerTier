@@ -39,25 +39,20 @@ use super::create_connector_by_url;
 type ConnectorMap = Arc<DashSet<url::Url>>;
 
 #[derive(Debug, Clone)]
-struct ReconnResult {
-    dead_url: String,
-    peer_id: PeerId,
-    conn_id: PeerConnId,
-}
+struct ReconnResult {}
 
 struct ConnectorManagerData {
     connectors: ConnectorMap,
     reconnecting: DashSet<url::Url>,
     peer_manager: Weak<PeerManager>,
-    alive_conn_urls: Arc<DashSet<url::Url>>,
+    _alive_conn_urls: Arc<DashSet<url::Url>>,
     // user removed connector urls
     removed_conn_urls: Arc<DashSet<url::Url>>,
-    net_ns: NetNS,
+    _net_ns: NetNS,
     global_ctx: ArcGlobalCtx,
 }
 
 pub struct ManualConnectorManager {
-    global_ctx: ArcGlobalCtx,
     data: Arc<ConnectorManagerData>,
     tasks: JoinSet<()>,
 }
@@ -68,14 +63,13 @@ impl ManualConnectorManager {
         let tasks = JoinSet::new();
 
         let mut ret = Self {
-            global_ctx: global_ctx.clone(),
             data: Arc::new(ConnectorManagerData {
                 connectors,
                 reconnecting: DashSet::new(),
                 peer_manager: Arc::downgrade(&peer_manager),
-                alive_conn_urls: Arc::new(DashSet::new()),
+                _alive_conn_urls: Arc::new(DashSet::new()),
                 removed_conn_urls: Arc::new(DashSet::new()),
-                net_ns: global_ctx.net_ns.clone(),
+                _net_ns: global_ctx.net_ns.clone(),
                 global_ctx,
             }),
             tasks,
@@ -353,11 +347,7 @@ impl ManualConnectorManager {
         .await?;
 
         tracing::info!("reconnect succ: {} {} {}", peer_id, conn_id, dead_url);
-        Ok(ReconnResult {
-            dead_url: dead_url.to_string(),
-            peer_id,
-            conn_id,
-        })
+        Ok(ReconnResult {})
     }
 
     async fn conn_reconnect(

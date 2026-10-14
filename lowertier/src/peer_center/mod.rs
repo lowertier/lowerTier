@@ -84,26 +84,3 @@ impl From<Vec<PeerInfo>> for PeerInfoForGlobalMap {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::proto::api::instance::{PeerConnInfo, PeerConnStats};
-
-    use super::*;
-
-    fn connection(id: &str, latency_us: u64, delivery_bps: Option<u64>) -> PeerConnInfo {
-        PeerConnInfo {
-            conn_id: id.to_string(),
-            stats: Some(PeerConnStats {
-                latency_us,
-                ..Default::default()
-            }),
-            tx_delivery_bps: delivery_bps,
-            tx_loss_ppm: delivery_bps.map(|_| 100),
-            speed_sample_age_ms: delivery_bps.map(|_| 1_000),
-            speed_sample_ttl_ms: delivery_bps.map(|_| 90_000),
-            speed_probe_generation: delivery_bps.map(|_| 9),
-            ..Default::default()
-        }
-    }
-}

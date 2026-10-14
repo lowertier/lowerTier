@@ -456,6 +456,7 @@ pub(crate) fn stamp_packet_flow(packet: &mut ZCPacket) -> PacketFlow {
 /// Splits a bounded vector into stable per-shard vectors without copying any
 /// packet backing buffers. First-seen shard order and packet order within a
 /// shard are both retained.
+#[cfg(test)]
 pub(crate) fn split_packet_batch_by_flow_shard(
     batch: PacketBatch,
 ) -> SmallVec<[(PacketFlow, PacketBatch); 4]> {
@@ -578,6 +579,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn select<F>(&self, destination: PeerId, flow: u64, candidate: P, eligible: F) -> P
     where
         F: Fn(P) -> bool,
@@ -666,6 +668,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn lookup<F>(&self, destination: PeerId, flow: u64, eligible: F) -> Option<P>
     where
         F: Fn(P) -> bool,
@@ -673,6 +676,7 @@ where
         self.lookup_at_generation(destination, flow, 0, None, eligible)
     }
 
+    #[cfg(test)]
     pub(crate) fn lookup_at_generation<F>(
         &self,
         destination: PeerId,
@@ -693,6 +697,7 @@ where
         )
     }
 
+    #[cfg(test)]
     fn lookup_key<F>(
         &self,
         key: FlowPathKey,
@@ -740,11 +745,6 @@ where
         for key in keys {
             self.entries.remove(&key);
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 

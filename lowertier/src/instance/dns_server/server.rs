@@ -249,18 +249,3 @@ impl Server {
         self.catalog.write().await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::instance::dns_server::config::{
-        GeneralConfigBuilder, RecordBuilder, RecordType, RunConfigBuilder,
-    };
-    use anyhow::Result;
-    use hickory_client::client::{Client, ClientHandle};
-    use hickory_proto::rr;
-    use hickory_proto::runtime::TokioRuntimeProvider;
-    use hickory_proto::udp::UdpClientStream;
-    use maplit::hashmap;
-    use std::time::Duration;
-}

@@ -108,9 +108,3 @@ pub async fn socket_addrs(
         .map(|ip| SocketAddr::new(ip, port))
         .collect::<Vec<_>>())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use guarden::defer;
-}

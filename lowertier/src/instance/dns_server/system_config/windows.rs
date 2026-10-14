@@ -162,8 +162,3 @@ impl SystemConfig for WindowsDNSManager {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use cidr::Ipv4Inet;
-}

@@ -196,6 +196,7 @@ fn native_root_store() -> Result<&'static RootCertStore, TunnelError> {
     Ok(ROOTS.get_or_init(|| roots))
 }
 
+#[cfg(test)]
 pub fn rustls_client_config(
     flags: &Flags,
     alpn: &[&[u8]],

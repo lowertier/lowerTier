@@ -26,16 +26,6 @@ use super::{
 pub static RING_TUNNEL_CAP: usize = 128;
 static RING_TUNNEL_RESERVED_CAP: usize = 4;
 
-type RingLock = parking_lot::Mutex<()>;
-
-type PacketPermitFuture = Pin<Box<dyn Future<Output = OwnedSemaphorePermit> + Send + Sync>>;
-
-struct BatchPermitWait {
-    packet_count: usize,
-    reserved_packets: usize,
-    future: PacketPermitFuture,
-}
-
 struct RingItem {
     batch: PacketBatch,
     _packet_permits: OwnedSemaphorePermit,
@@ -50,10 +40,6 @@ pub struct RingTunnel {
 }
 
 impl RingTunnel {
-    fn id(&self) -> &Uuid {
-        &self.id
-    }
-
     pub fn new(cap: usize) -> Self {
         let id = Uuid::new_v4();
         let capacity = std::cmp::max(RING_TUNNEL_RESERVED_CAP * 2, cap);
@@ -172,8 +158,6 @@ pub struct RingSink {
     packet_capacity: usize,
     permit_wait: Option<Pin<Box<dyn Future<Output = OwnedSemaphorePermit> + Send + Sync>>>,
     ready_permit: Option<OwnedSemaphorePermit>,
-    batch_permit_wait: Option<BatchPermitWait>,
-    ready_batch_permits: Option<OwnedSemaphorePermit>,
     pending: PacketBatch,
     pending_permits: Option<OwnedSemaphorePermit>,
 }
@@ -187,8 +171,6 @@ impl RingSink {
             packet_capacity: tunnel.packet_permits.available_permits(),
             permit_wait: None,
             ready_permit: None,
-            batch_permit_wait: None,
-            ready_batch_permits: None,
             pending: PacketBatch::new(),
             pending_permits: None,
         }
@@ -262,118 +244,6 @@ impl RingSink {
         let item = self.take_pending().expect("pending batch is not empty");
         self.ring_prod_impl
             .start_send_unpin(item)
-            .map_err(|_| TunnelError::Shutdown)
-    }
-
-    fn set_ready_batch_permits(&mut self, mut permits: OwnedSemaphorePermit, packet_count: usize) {
-        let packet_permits = permits
-            .split(packet_count)
-            .expect("the batch reservation includes all packet credits");
-        drop(permits);
-        self.ready_batch_permits = Some(packet_permits);
-    }
-
-    pub(crate) fn poll_reserve_batch(
-        &mut self,
-        cx: &mut Context<'_>,
-        packet_count: usize,
-        reserved_packets: usize,
-    ) -> Poll<Result<(), SinkError>> {
-        if packet_count == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        let required = packet_count
-            .checked_add(reserved_packets)
-            .ok_or(TunnelError::BufferFull)?;
-        if required > self.packet_capacity {
-            return Poll::Ready(Err(TunnelError::BufferFull));
-        }
-        if let Some(permits) = self.ready_batch_permits.as_ref() {
-            debug_assert_eq!(permits.num_permits(), packet_count);
-            return Poll::Ready(Ok(()));
-        }
-
-        ready!(self.ring_prod_impl.poll_ready_unpin(cx)).map_err(|_| TunnelError::Shutdown)?;
-
-        if self.batch_permit_wait.is_none() {
-            let required = u32::try_from(required).map_err(|_| TunnelError::BufferFull)?;
-            match self.packet_permits.clone().try_acquire_many_owned(required) {
-                Ok(permits) => {
-                    self.set_ready_batch_permits(permits, packet_count);
-                    return Poll::Ready(Ok(()));
-                }
-                Err(TryAcquireError::Closed) => {
-                    return Poll::Ready(Err(TunnelError::Shutdown));
-                }
-                Err(TryAcquireError::NoPermits) => {}
-            }
-            let permits = self.packet_permits.clone();
-            self.batch_permit_wait = Some(BatchPermitWait {
-                packet_count,
-                reserved_packets,
-                future: Box::pin(async move {
-                    permits
-                        .acquire_many_owned(required)
-                        .await
-                        .expect("ring packet semaphore is never closed")
-                }),
-            });
-        }
-
-        let permit_wait = self
-            .batch_permit_wait
-            .as_mut()
-            .expect("the batch permit future was installed");
-        debug_assert_eq!(permit_wait.packet_count, packet_count);
-        debug_assert_eq!(permit_wait.reserved_packets, reserved_packets);
-        self.ring_prod_impl.register_waker(cx.waker());
-        let permits = ready!(permit_wait.future.as_mut().poll(cx));
-        self.batch_permit_wait = None;
-        self.set_ready_batch_permits(permits, packet_count);
-        Poll::Ready(Ok(()))
-    }
-
-    pub(crate) fn poll_reserve_batch_prefix(
-        &mut self,
-        cx: &mut Context<'_>,
-        max_packet_count: usize,
-        reserved_packets: usize,
-    ) -> Poll<Result<usize, SinkError>> {
-        if max_packet_count == 0 {
-            return Poll::Ready(Ok(0));
-        }
-        let packet_count = if let Some(wait) = self.batch_permit_wait.as_ref() {
-            wait.packet_count
-        } else if let Some(permits) = self.ready_batch_permits.as_ref() {
-            permits.num_permits()
-        } else {
-            let available = self
-                .packet_permits
-                .available_permits()
-                .saturating_sub(reserved_packets);
-            max_packet_count.min(available).max(1)
-        };
-        ready!(self.poll_reserve_batch(cx, packet_count, reserved_packets))?;
-        Poll::Ready(Ok(packet_count))
-    }
-
-    pub(crate) fn start_send_reserved_batch(
-        &mut self,
-        batch: PacketBatch,
-    ) -> Result<(), SinkError> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-        let packet_permits = self
-            .ready_batch_permits
-            .take()
-            .expect("batch send follows a successful batch reservation");
-        debug_assert_eq!(packet_permits.num_permits(), batch.len());
-        self.ring_prod_impl
-            .start_send_unpin(RingItem {
-                batch,
-                _packet_permits: packet_permits,
-            })
             .map_err(|_| TunnelError::Shutdown)
     }
 
@@ -609,12 +479,4 @@ pub fn create_ring_tunnel_pair() -> (Box<dyn Tunnel>, Box<dyn Tunnel>) {
         Box::new(get_tunnel_for_server(conn.clone())),
         Box::new(get_tunnel_for_client(conn)),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use futures::{SinkExt, StreamExt};
-    use tokio::time::timeout;
-
-    use super::*;
 }

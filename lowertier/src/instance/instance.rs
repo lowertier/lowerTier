@@ -80,7 +80,7 @@ struct MagicDnsContainer {
 // nic container will be cleared when dhcp ip changed
 #[cfg(feature = "tun")]
 pub struct NicCtxContainer {
-    nic_ctx: Option<Box<dyn Any + 'static + Send>>,
+    _nic_ctx: Option<Box<dyn Any + 'static + Send>>,
     #[cfg(feature = "magic-dns")]
     magic_dns: Option<MagicDnsContainer>,
 }
@@ -90,7 +90,7 @@ impl NicCtxContainer {
     #[cfg(not(feature = "magic-dns"))]
     fn new(nic_ctx: NicCtx) -> Self {
         Self {
-            nic_ctx: Some(Box::new(nic_ctx)),
+            _nic_ctx: Some(Box::new(nic_ctx)),
         }
     }
 
@@ -103,7 +103,7 @@ impl NicCtxContainer {
                 let _ = dns_runner.run(token_clone).await;
             });
             Self {
-                nic_ctx: Some(Box::new(nic_ctx)),
+                _nic_ctx: Some(Box::new(nic_ctx)),
                 magic_dns: Some(MagicDnsContainer {
                     dns_runner_task: AbortOnDropHandle::new(task),
                     dns_runner_cancel_token: token,
@@ -111,7 +111,7 @@ impl NicCtxContainer {
             }
         } else {
             Self {
-                nic_ctx: Some(Box::new(nic_ctx)),
+                _nic_ctx: Some(Box::new(nic_ctx)),
                 magic_dns: None,
             }
         }
@@ -119,7 +119,7 @@ impl NicCtxContainer {
 
     fn new_with_any<T: 'static + Send>(ctx: T) -> Self {
         Self {
-            nic_ctx: Some(Box::new(ctx)),
+            _nic_ctx: Some(Box::new(ctx)),
             #[cfg(feature = "magic-dns")]
             magic_dns: None,
         }
@@ -588,8 +588,6 @@ impl InstanceConfigPatcher {
 }
 
 pub struct Instance {
-    inst_name: String,
-
     id: uuid::Uuid,
 
     #[cfg(feature = "tun")]
@@ -599,7 +597,7 @@ pub struct Instance {
     peer_manager: Arc<PeerManager>,
     listener_manager: Arc<Mutex<ListenerManager<PeerManager>>>,
     conn_manager: Arc<ManualConnectorManager>,
-    direct_conn_manager: Arc<DirectConnectorManager>,
+    _direct_conn_manager: Arc<DirectConnectorManager>,
     tcp_hole_puncher: Option<Arc<Mutex<TcpHolePunchConnector>>>,
     quic_hole_puncher: Option<Arc<Mutex<QuicHolePunchConnector>>>,
     tracker_discovery: Option<AbortOnDropHandle<()>>,
@@ -673,7 +671,6 @@ impl Instance {
         let socks5_server = Socks5Server::new(global_ctx.clone(), peer_manager.clone(), None);
 
         Instance {
-            inst_name: global_ctx.inst_name.clone(),
             id,
 
             peer_packet_receiver: Arc::new(Mutex::new(peer_packet_receiver)),
@@ -683,7 +680,7 @@ impl Instance {
             peer_manager,
             listener_manager,
             conn_manager,
-            direct_conn_manager,
+            _direct_conn_manager: direct_conn_manager,
             tcp_hole_puncher,
             quic_hole_puncher,
             tracker_discovery: None,
@@ -1155,7 +1152,7 @@ impl Instance {
         pub struct PortForwardManagerRpcService {
             global_ctx: Weak<GlobalCtx>,
             #[cfg(feature = "socks5")]
-            socks5_server: Weak<Socks5Server>,
+            _socks5_server: Weak<Socks5Server>,
         }
 
         #[async_trait::async_trait]
@@ -1176,7 +1173,7 @@ impl Instance {
         PortForwardManagerRpcService {
             global_ctx: Arc::downgrade(&self.global_ctx),
             #[cfg(feature = "socks5")]
-            socks5_server: Arc::downgrade(&self.socks5_server),
+            _socks5_server: Arc::downgrade(&self.socks5_server),
         }
     }
 
@@ -1500,15 +1497,6 @@ impl Drop for Instance {
             );
         });
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        common::global_ctx::tests::get_mock_global_ctx,
-        instance::instance::{InstanceConfigPatcher, InstanceRpcServerHook},
-        proto::{api::config::InstanceConfigPatch, rpc_impl::standalone::RpcServerHook},
-    };
 }
 
 #[cfg(test)]

@@ -98,7 +98,6 @@ impl std::fmt::Debug for InflightRequest {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PeerInfo {
-    pub peer_id: PeerId,
     pub compression_info: RpcCompressionInfo,
     pub last_active: Option<Instant>,
 }
@@ -495,7 +494,6 @@ impl Client {
                     self.peer_info.insert(
                         self.to_peer_id,
                         PeerInfo {
-                            peer_id: self.to_peer_id,
                             compression_info,
                             last_active: Some(Instant::now()),
                         },
@@ -567,44 +565,5 @@ impl Client {
 
     pub fn inflight_count(&self) -> usize {
         self.inflight_requests.len()
-    }
-
-    pub(crate) fn peer_info_table(&self) -> PeerInfoTable {
-        self.peer_info.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::common::{CompressionAlgoPb, RpcCompressionInfo, RpcPacket, RpcResponse};
-    use crate::tunnel::packet_def::{PacketType, ZCPacket};
-
-    fn response(from_peer: PeerId, to_peer: PeerId) -> RpcPacket {
-        RpcPacket {
-            from_peer,
-            to_peer,
-            transaction_id: 17,
-            ..Default::default()
-        }
-    }
-
-    fn response_zc_packet(transaction_id: RpcTransactId) -> ZCPacket {
-        let body = RpcResponse::default().encode_to_vec();
-        let mut packets = build_rpc_packet(BuildRpcPacketArgs {
-            from_peer: 7,
-            to_peer: 1,
-            rpc_desc: RpcDescriptor::default(),
-            transaction_id,
-            is_req: false,
-            content: &body,
-            trace_id: 0,
-            compression_info: RpcCompressionInfo {
-                algo: CompressionAlgoPb::None.into(),
-                accepted_algo: CompressionAlgoPb::None.into(),
-            },
-        });
-        assert_eq!(packets.len(), 1);
-        packets.remove(0)
     }
 }

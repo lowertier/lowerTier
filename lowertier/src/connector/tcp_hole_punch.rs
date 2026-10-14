@@ -398,6 +398,7 @@ impl TcpBootstrap {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn accept(&self, stream: TcpStream) -> Result<Box<dyn Tunnel>> {
         establish(stream, self.ctx.clone(), self.protocol, false).await
     }

@@ -38,9 +38,3 @@ pub fn expand_env_vars(text: &str) -> (String, bool) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::{remove_env_var, set_env_var};
-}

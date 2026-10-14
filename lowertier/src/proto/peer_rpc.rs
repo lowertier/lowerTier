@@ -102,8 +102,3 @@ impl From<RouteConnPeerList> for sync_route_info_request::ConnInfo {
         Self::ConnPeerList(val)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

@@ -21,6 +21,7 @@ use crate::{
         rpc_impl::{service_registry::ServiceRegistry, standalone::StandAloneServer},
         rpc_types::error::Error,
     },
+    rpc_service::instance_manage::{DefaultHooks, WebClientHooks},
     rpc_service::{
         acl_manage::AclManageRpcService, config::ConfigRpcService,
         connector_manage::ConnectorManageRpcService, credential_manage::CredentialManageRpcService,
@@ -31,7 +32,6 @@ use crate::{
         proxy::TcpProxyRpcService, stats::StatsRpcService,
     },
     tunnel::{TunnelListener, tcp::TcpTunnelListener},
-    rpc_service::instance_manage::{DefaultHooks, WebClientHooks},
 };
 
 pub struct ApiRpcServer<T: TunnelListener + 'static> {

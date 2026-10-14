@@ -234,10 +234,6 @@ impl NetlinkIfConfiger {
         Ok(unsafe { ifr.ifr_ifru.ifru_mtu as u32 })
     }
 
-    fn mtu(name: &str) -> Result<u32, Error> {
-        Self::mtu_op(name, SIOCGIFMTU, 0)
-    }
-
     pub fn list_addresses(name: &str) -> Result<Vec<IpInet>, Error> {
         let mut result = vec![];
 
@@ -688,88 +684,5 @@ impl IfConfiguerTrait for NetlinkIfConfiger {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::process::Command;
-
-    const DUMMY_IFACE_NAME: &str = "dummy";
-
-    fn run_cmd(cmd: &str) -> String {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .expect("failed to execute process");
-        assert!(
-            output.status.success(),
-            "command failed: {cmd}\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    fn run_ip(args: &[&str]) {
-        let output = Command::new("ip")
-            .args(args)
-            .output()
-            .expect("failed to execute ip process");
-        assert!(
-            output.status.success(),
-            "ip command failed: {:?}\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
-    fn test_iface_name(tag: &str) -> String {
-        format!("et{}{:x}", tag, std::process::id() & 0xffff)
-    }
-
-    struct ScopedDummyLink {
-        name: String,
-    }
-
-    impl ScopedDummyLink {
-        fn new(name: &str) -> Self {
-            let _ = Command::new("ip").args(["link", "del", name]).output();
-            run_ip(&["link", "add", name, "type", "dummy"]);
-            run_ip(&["link", "set", name, "up"]);
-            Self {
-                name: name.to_string(),
-            }
-        }
-    }
-
-    impl Drop for ScopedDummyLink {
-        fn drop(&mut self) {
-            let _ = Command::new("ip")
-                .args(["link", "del", &self.name])
-                .output();
-        }
-    }
-
-    struct PrepareEnv {}
-    impl PrepareEnv {
-        fn new() -> Self {
-            let _ = Command::new("ip")
-                .args(["link", "del", DUMMY_IFACE_NAME])
-                .output();
-            let _ = run_cmd(&format!("ip link add {} type dummy", DUMMY_IFACE_NAME));
-            PrepareEnv {}
-        }
-    }
-
-    impl Drop for PrepareEnv {
-        fn drop(&mut self) {
-            let _ = Command::new("ip")
-                .args(["link", "del", DUMMY_IFACE_NAME])
-                .output();
-        }
     }
 }

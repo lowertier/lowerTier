@@ -511,16 +511,3 @@ impl SecureModeConfig {
         Ok(x25519_dalek::PublicKey::from(k))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{TunnelInfo, Url, normalize_tunnel_url};
-
-    fn assert_ipv6_tunnel_normalization(scheme: &str, port: u16) {
-        let expected = format!("{scheme}6://[2001:db8::1]:{port}");
-        assert_eq!(
-            normalize_tunnel_url(&format!("{scheme}://[2001:db8::1]:{port}"), None).as_deref(),
-            Some(expected.as_str())
-        );
-    }
-}

@@ -132,11 +132,8 @@ impl PeerCenterRpc for LocalPeerCenterClient {
     }
 }
 
-// static SERVICE_ID: u32 = 5; for compatibility with the original code
-static SERVICE_ID: u32 = 50;
-
 struct PeridicJobCtx<T> {
-    peer_mgr: Arc<dyn PeerCenterPeerManagerTrait>,
+    _peer_mgr: Arc<dyn PeerCenterPeerManagerTrait>,
     my_peer_id: PeerId,
     center_peer: AtomicCell<PeerId>,
     job_ctx: T,
@@ -222,7 +219,7 @@ impl PeerCenterBase {
         self.tasks.lock().await.spawn(
             async move {
                 let ctx = Arc::new(PeridicJobCtx {
-                    peer_mgr: peer_mgr.clone(),
+                    _peer_mgr: peer_mgr.clone(),
                     my_peer_id,
                     center_peer: AtomicCell::new(PeerId::default()),
                     job_ctx,

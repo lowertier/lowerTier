@@ -351,8 +351,6 @@ mod vector_channel_tests {
 
     use super::{PeerPacketFilter, create_packet_recv_chan, recv_packet_batch_from_chan};
 
-    struct KeepOddPackets;
-
     #[tokio::test]
     async fn full_ingress_cannot_block_nic_delivery() {
         use std::task::Poll;
@@ -408,12 +406,5 @@ mod vector_channel_tests {
             futures::poll!(&mut blocked_ingress),
             Poll::Ready(Ok(()))
         ));
-    }
-
-    #[async_trait::async_trait]
-    impl PeerPacketFilter for KeepOddPackets {
-        async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
-            (packet.payload()[0] % 2 == 1).then_some(packet)
-        }
     }
 }

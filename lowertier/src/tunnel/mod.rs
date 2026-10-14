@@ -112,11 +112,6 @@ pub struct TransportBinding {
     pub bytes: [u8; 32],
 }
 
-/// Read-only access to the current QUIC DATAGRAM payload budget.
-///
-/// The callback reads the transport state without changing it. Non-QUIC
-/// tunnels return no budget and use the conservative FEC fallback.
-pub type DatagramSizeBudget = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
 pub type ReceiveBackpressure = Arc<AtomicBool>;
 
 pub trait ZCPacketStream: Stream<Item = StreamItem> + Send {}
@@ -156,10 +151,6 @@ pub trait Tunnel: Send {
     }
 
     fn info(&self) -> Option<TunnelInfo>;
-
-    fn datagram_size_budget(&self) -> Option<DatagramSizeBudget> {
-        None
-    }
 
     /// Return the binding for this transport connection, when one exists.
     ///

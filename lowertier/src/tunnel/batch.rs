@@ -26,6 +26,7 @@ pub const MAX_PACKET_BATCH_SIZE: usize = 64;
 pub(crate) const SEND_PIPELINE_SLOT_COUNT: usize = 8;
 
 /// Maximum packet count for one unflushed kernel I/O operation.
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) const IO_FLUSH_PACKET_BUDGET: usize = 8;
 
 const RETAINED_PACKET_BATCH_CONTAINERS: usize = 32;
@@ -34,103 +35,11 @@ pub(crate) const fn packet_batch_limit() -> usize {
     MAX_PACKET_BATCH_SIZE
 }
 
-pub(crate) fn drain_ready_count<F>(
-    mut count: usize,
-    capacity: usize,
-    mut receive: F,
-) -> (usize, Option<io::Error>)
-where
-    F: FnMut(usize) -> io::Result<usize>,
-{
-    while count < capacity {
-        match receive(count) {
-            Ok(0) => {
-                return (
-                    count,
-                    Some(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "a ready packet read returned no packets",
-                    )),
-                );
-            }
-            Ok(received) if received <= capacity - count => count += received,
-            Ok(_) => {
-                return (
-                    count,
-                    Some(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "a ready packet read exceeded the batch capacity",
-                    )),
-                );
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-            Err(error) => return (count, Some(error)),
-        }
-    }
-    (count, None)
-}
-
 /// Maximum number of owned receive batches held while one delivery runs.
 ///
 /// Slot 0 is the batch currently writing to TUN. The remaining slots keep QUIC
 /// application drain moving without an unbounded queue.
 pub const RECEIVE_PREFETCH_BATCHES: usize = 3;
-
-/// Deliver one batch while continuously prefetching ready stream items.
-///
-/// `max_prefetch` bounds the number of fully received items held beside the
-/// in-flight delivery. When the stream ends, the function stops polling it and
-/// waits only for delivery. The third return value is true when the stream
-/// ended during this wait.
-pub(crate) async fn wait_for_delivery_with_bounded_prefetch<S, F, T, E>(
-    stream: &mut S,
-    delivery: F,
-    max_prefetch: usize,
-) -> (Result<(), E>, VecDeque<T>, bool)
-where
-    S: Stream<Item = T> + Unpin,
-    F: Future<Output = Result<(), E>>,
-{
-    tokio::pin!(delivery);
-    let mut prefetched = VecDeque::with_capacity(max_prefetch.min(8));
-    let mut stream_open = true;
-    let mut stream_ended = false;
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut delivery => return (result, prefetched, stream_ended),
-            next = stream.next(), if stream_open && prefetched.len() < max_prefetch => {
-                match next {
-                    Some(item) => prefetched.push_back(item),
-                    None => {
-                        stream_open = false;
-                        stream_ended = true;
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub(crate) async fn wait_for_delivery_with_one_prefetch<S, F, T, E>(
-    stream: &mut S,
-    delivery: F,
-) -> (Result<(), E>, Option<Option<T>>)
-where
-    S: Stream<Item = T> + Unpin,
-    F: Future<Output = Result<(), E>>,
-{
-    let (result, mut prefetched, stream_ended) =
-        wait_for_delivery_with_bounded_prefetch(stream, delivery, 1).await;
-    let prefetched = if let Some(item) = prefetched.pop_front() {
-        Some(Some(item))
-    } else if stream_ended {
-        Some(None)
-    } else {
-        None
-    };
-    (result, prefetched)
-}
 
 struct PacketBatchPool {
     containers: ArrayQueue<Vec<ZCPacket>>,
@@ -195,11 +104,7 @@ impl PacketBatch {
         batch
     }
 
-    pub(crate) fn from_vec(packets: Vec<ZCPacket>) -> Self {
-        assert!(packets.len() <= MAX_PACKET_BATCH_SIZE);
-        Self { packets }
-    }
-
+    #[cfg(test)]
     pub(crate) fn into_vec(mut self) -> Vec<ZCPacket> {
         mem::take(&mut self.packets)
     }
@@ -670,18 +575,6 @@ where
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         ready!(self.as_mut().poll_pending(cx))?;
         Pin::new(&mut self.inner).poll_close(cx)
-    }
-}
-
-#[cfg(test)]
-mod batch_interface_tests {
-    use futures::{SinkExt, StreamExt, channel::mpsc, stream};
-
-    use super::{BatchToScalarStream, PacketBatch, ScalarToBatchSink, ScalarToBatchStream};
-    use crate::tunnel::{Tunnel, packet_def::ZCPacket, ring::create_ring_tunnel_pair};
-
-    fn packet(value: u8) -> ZCPacket {
-        ZCPacket::new_with_payload(&[value])
     }
 }
 

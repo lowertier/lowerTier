@@ -439,10 +439,3 @@ impl CredentialManageRpc for PeerManagerRpcService {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::proto::api::instance::{LocalBgpRoute, LocalBgpRouteAction};
-
-    use super::PeerManagerRpcService;
-}

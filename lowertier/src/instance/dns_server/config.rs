@@ -126,9 +126,3 @@ impl TryFrom<&Record> for rr::Record {
         Ok(record)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::anyhow;
-}

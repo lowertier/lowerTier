@@ -59,19 +59,3 @@ impl PeerCenterRpc for PeerCenterManageRpcService {
         Err(anyhow::anyhow!("not implemented for management API").into())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        instance_manager::NetworkInstanceManager,
-        proto::{
-            peer_rpc::{GetGlobalPeerMapRequest, ReportPeersRequest},
-            rpc_types::controller::BaseController,
-        },
-    };
-
-    fn make_service() -> PeerCenterManageRpcService {
-        PeerCenterManageRpcService::new(Arc::new(NetworkInstanceManager::new()))
-    }
-}

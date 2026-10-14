@@ -100,11 +100,3 @@ impl AsyncDevice for ChannelDevice {
         &self.caps
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use futures::{SinkExt, StreamExt};
-
-    use super::*;
-    use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
-}

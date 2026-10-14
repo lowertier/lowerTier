@@ -399,11 +399,6 @@ unsafe fn write_addr(
 }
 
 #[cfg(feature = "ffi-dataplane")]
-pub(crate) fn has_live_ops() -> bool {
-    !DATA_PLANE_OPS.is_empty()
-}
-
-#[cfg(feature = "ffi-dataplane")]
 pub(crate) fn cancel_ops_for_handle(handle: u64) {
     let ops = DATA_PLANE_OPS
         .iter()

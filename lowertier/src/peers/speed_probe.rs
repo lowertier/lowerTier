@@ -297,14 +297,6 @@ pub(crate) struct ProbeReceiver {
 }
 
 impl ProbeReceiver {
-    pub(crate) fn receive(
-        &mut self,
-        encoded: &[u8],
-        now: Instant,
-    ) -> Result<Option<ProbeAck>, ProbeError> {
-        self.receive_wire(encoded, encoded.len(), now)
-    }
-
     pub(crate) fn receive_wire(
         &mut self,
         encoded: &[u8],
@@ -374,71 +366,6 @@ impl ProbeReceiver {
             .filter(|active| active.receipt_challenge.is_some())
             .map(|active| active.acknowledgement())
     }
-
-    pub(crate) fn active_generation(&self) -> Option<u64> {
-        self.active
-            .as_ref()
-            .map(|active| active.metadata.generation)
-    }
-}
-
-pub(crate) fn build_probe_train(
-    generation: u64,
-    reserved_bytes: u64,
-    packet_size: usize,
-    receipt_challenge: [u8; 16],
-) -> Result<Vec<Vec<u8>>, ProbeError> {
-    build_probe_train_with_overhead(
-        generation,
-        reserved_bytes,
-        packet_size,
-        0,
-        receipt_challenge,
-    )
-}
-
-pub(crate) fn build_probe_train_with_overhead(
-    generation: u64,
-    reserved_bytes: u64,
-    wire_packet_size: usize,
-    per_packet_overhead: usize,
-    receipt_challenge: [u8; 16],
-) -> Result<Vec<Vec<u8>>, ProbeError> {
-    let encoded_size = wire_packet_size
-        .checked_sub(per_packet_overhead)
-        .ok_or(ProbeError::PayloadTooShort)?;
-    if encoded_size < PROBE_HEADER_SIZE {
-        return Err(ProbeError::PayloadTooShort);
-    }
-    let packet_size_u64 = wire_packet_size as u64;
-    let packet_count = (reserved_bytes / packet_size_u64).min(u64::from(MAX_PROBE_PACKETS));
-    if packet_count < 2 {
-        return Ok(Vec::new());
-    }
-    let expected_packets =
-        u32::try_from(packet_count).map_err(|_| ProbeError::ArithmeticOverflow)?;
-    let expected_bytes = packet_count
-        .checked_mul(packet_size_u64)
-        .ok_or(ProbeError::ArithmeticOverflow)?;
-    let mut train = Vec::with_capacity(expected_packets as usize);
-    for sequence in 0..expected_packets {
-        train.push(
-            ProbeData {
-                generation,
-                sequence,
-                expected_packets,
-                expected_bytes,
-                final_marker: sequence + 1 == expected_packets,
-                receipt_challenge: if sequence + 1 == expected_packets {
-                    receipt_challenge
-                } else {
-                    [0_u8; 16]
-                },
-            }
-            .encode_with_size(encoded_size)?,
-        );
-    }
-    Ok(train)
 }
 
 pub(crate) fn probe_train_metadata(
@@ -566,14 +493,6 @@ impl ProbeBudget {
             .saturating_add(bytes)
             .min(self.capacity_bytes);
     }
-
-    pub(crate) fn capacity_bytes(&self) -> u64 {
-        self.capacity_bytes
-    }
-
-    pub(crate) fn available_bytes(&self) -> u64 {
-        self.available_bytes
-    }
 }
 
 #[derive(Debug)]
@@ -662,16 +581,4 @@ impl ProbeReservation {
             && ack.received_bytes <= self.sent_bytes
             && ack.received_packets <= self.sent_packets
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::{
-        MAX_SPEED_SAMPLE_TTL, ProbeAck, ProbeBudget, ProbeData, ProbeReceiver, ProbeReservation,
-        SpeedSample, build_probe_train, speed_sample_ttl, split_cycle_budget,
-    };
-
-    const RECEIPT_CHALLENGE: [u8; 16] = [0x5a; 16];
 }

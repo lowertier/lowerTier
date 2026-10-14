@@ -113,8 +113,3 @@ impl SystemConfig for DarwinConfigurator {
         self.do_close()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

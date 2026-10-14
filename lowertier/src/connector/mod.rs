@@ -323,17 +323,3 @@ pub async fn create_connector_by_url(
 
     Ok(connector)
 }
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use crate::{
-        common::global_ctx::tests::get_mock_global_ctx, proto::common::PeerFeatureFlag,
-        tunnel::IpVersion,
-    };
-
-    use super::{
-        create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
-    };
-}

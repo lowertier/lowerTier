@@ -180,7 +180,7 @@ fn linux_tun_offload_enabled() -> bool {
     )
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn linux_tun_offload_auto_supported_for(arch: &str) -> bool {
     match arch {
         // Keep the existing well-covered x86_64 behavior.
@@ -192,7 +192,7 @@ fn linux_tun_offload_auto_supported_for(arch: &str) -> bool {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn linux_tun_offload_configured(
     explicitly_enabled: bool,
     explicitly_disabled: bool,
@@ -335,7 +335,7 @@ enum PacketProtocol {
     #[default]
     IPv4,
     IPv6,
-    Other(u8),
+    Other,
 }
 
 // Note: the protocol in the packet information header is platform dependent.
@@ -346,7 +346,7 @@ impl PacketProtocol {
         match self {
             PacketProtocol::IPv4 => Ok(libc::ETH_P_IP as u16),
             PacketProtocol::IPv6 => Ok(libc::ETH_P_IPV6 as u16),
-            PacketProtocol::Other(_) => Err(io::Error::other("neither an IPv4 nor IPv6 packet")),
+            PacketProtocol::Other => Err(io::Error::other("neither an IPv4 nor IPv6 packet")),
         }
     }
 
@@ -356,7 +356,7 @@ impl PacketProtocol {
         match self {
             PacketProtocol::IPv4 => Ok(libc::PF_INET as u16),
             PacketProtocol::IPv6 => Ok(libc::PF_INET6 as u16),
-            PacketProtocol::Other(_) => Err(io::Error::other("neither an IPv4 nor IPv6 packet")),
+            PacketProtocol::Other => Err(io::Error::other("neither an IPv4 nor IPv6 packet")),
         }
     }
 
@@ -371,7 +371,7 @@ fn infer_proto(buf: &[u8]) -> PacketProtocol {
     match buf[0] >> 4 {
         4 => PacketProtocol::IPv4,
         6 => PacketProtocol::IPv6,
-        p => PacketProtocol::Other(p),
+        _ => PacketProtocol::Other,
     }
 }
 
@@ -1294,6 +1294,7 @@ impl NicCtx {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn do_forward_nic_to_peers(
         ret: ZCPacket,
         mgr: &PeerManager,
@@ -2208,17 +2209,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(bytes.as_ref(), frame.as_slice());
-    }
-
-    async fn run_test_helper() -> Result<VirtualNic, Error> {
-        let mut dev = VirtualNic::new(get_mock_global_ctx());
-        let _tunnel = dev.create_dev().await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        dev.link_up().await?;
-        dev.remove_ip(None).await?;
-        dev.add_ip("10.144.111.1".parse().unwrap(), 24).await?;
-        Ok(dev)
     }
 }
