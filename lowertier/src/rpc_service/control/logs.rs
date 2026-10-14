@@ -36,7 +36,21 @@ pub(crate) fn set_level(level: tracing::level_filters::LevelFilter) {
         LevelFilter::DEBUG => 4,
         _ => 5,
     };
+    let _update = crate::common::log::LOG_FILTER_UPDATE.lock().unwrap();
     LEVEL.store(value, std::sync::atomic::Ordering::Relaxed);
+    tracing::callsite::rebuild_interest_cache();
+}
+
+fn current_level() -> tracing::level_filters::LevelFilter {
+    use tracing::level_filters::LevelFilter;
+    match LEVEL.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => LevelFilter::OFF,
+        1 => LevelFilter::ERROR,
+        2 => LevelFilter::WARN,
+        3 => LevelFilter::INFO,
+        4 => LevelFilter::DEBUG,
+        _ => LevelFilter::TRACE,
+    }
 }
 
 pub(crate) struct ControlLogFilter;
@@ -47,21 +61,67 @@ impl<S> tracing_subscriber::layer::Filter<S> for ControlLogFilter {
         metadata: &tracing::Metadata<'_>,
         _: &tracing_subscriber::layer::Context<'_, S>,
     ) -> bool {
-        let value = match *metadata.level() {
-            tracing::Level::ERROR => 1,
-            tracing::Level::WARN => 2,
-            tracing::Level::INFO => 3,
-            tracing::Level::DEBUG => 4,
-            tracing::Level::TRACE => 5,
-        };
-        value <= LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+        metadata.level() <= &current_level()
     }
 
     fn callsite_enabled(
         &self,
         _: &'static tracing::Metadata<'static>,
     ) -> tracing::subscriber::Interest {
+        // A new callsite can register during a level change. Keep its decision dynamic.
         tracing::subscriber::Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(current_level())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+    struct Counter(Arc<AtomicUsize>);
+    impl<S: Subscriber> Layer<S> for Counter {
+        fn on_event(&self, _: &Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn trace_event(fields: &AtomicUsize) {
+        tracing::trace!(
+            field = fields.fetch_add(1, Ordering::Relaxed),
+            "packet event"
+        );
+    }
+
+    #[test]
+    fn level_changes_refresh_cached_packet_callsites() {
+        let previous = current_level();
+        let events = Arc::new(AtomicUsize::new(0));
+        let fields = AtomicUsize::new(0);
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(Counter(events.clone()).with_filter(ControlLogFilter));
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        set_level(LevelFilter::INFO);
+        trace_event(&fields);
+        assert_eq!(fields.load(Ordering::Relaxed), 0);
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+        set_level(LevelFilter::TRACE);
+        trace_event(&fields);
+        assert_eq!(fields.load(Ordering::Relaxed), 1);
+        assert_eq!(events.load(Ordering::Relaxed), 1);
+        set_level(LevelFilter::OFF);
+        trace_event(&fields);
+        assert_eq!(fields.load(Ordering::Relaxed), 1);
+        assert_eq!(events.load(Ordering::Relaxed), 1);
+        set_level(previous);
     }
 }
 

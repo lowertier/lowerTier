@@ -79,6 +79,9 @@ fn is_log(meta: &Metadata) -> bool {
 
 pub type NewFilterSender = std::sync::mpsc::Sender<String>;
 
+// Keep filter changes and their global callsite cache rebuilds in the same order.
+pub(crate) static LOG_FILTER_UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 macro_rules! tracing_layer {
     ($layer:expr) => {
         $layer.with_filter(filter_fn(is_log).not()).boxed()
@@ -274,11 +277,15 @@ fn file_layers(
                 }
             };
 
-            match file_filter_reloader.modify(|f| {
-                *f = new_filter
-                    .take()
-                    .expect("log filter reloader only applies one filter per reload");
-            }) {
+            let result = {
+                let _update = LOG_FILTER_UPDATE.lock().unwrap();
+                file_filter_reloader.modify(|f| {
+                    *f = new_filter
+                        .take()
+                        .expect("log filter reloader only applies one filter per reload");
+                })
+            };
+            match result {
                 Ok(()) => {
                     info!("Reload log filter succeed, new filter level: {:?}", lf);
                 }
