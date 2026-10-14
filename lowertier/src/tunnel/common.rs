@@ -973,7 +973,8 @@ fn setup_socket2_ext(
     }
 
     socket2_socket.set_nonblocking(true)?;
-    socket2_socket.set_reuse_address(reuse_address.unwrap_or(!cfg!(target_os = "windows") || reuse_port))?;
+    socket2_socket
+        .set_reuse_address(reuse_address.unwrap_or(!cfg!(target_os = "windows") || reuse_port))?;
     #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
     if reuse_port {
         socket2_socket.set_reuse_port(true)?;
@@ -1010,8 +1011,8 @@ fn setup_socket2_ext(
         })?;
         // if_nametoindex requires a terminated C string. Index zero would remove the binding.
         let dev_idx = unsafe { nix::libc::if_nametoindex(name.as_ptr()) };
-        let dev_idx = std::num::NonZeroU32::new(dev_idx)
-            .ok_or_else(std::io::Error::last_os_error)?;
+        let dev_idx =
+            std::num::NonZeroU32::new(dev_idx).ok_or_else(std::io::Error::last_os_error)?;
         tracing::trace!(?dev_idx, ?dev_name, "bind device");
         if bind_addr.is_ipv4() {
             socket2_socket.bind_device_by_index_v4(Some(dev_idx))?;
@@ -1125,7 +1126,15 @@ pub fn bind<B: Bindable>(
         BindDev::Custom(s) => Some(s),
     };
     let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
-    setup_socket2_ext(&socket, &addr, dev, only_v6, socket_mark, reuse_port, reuse_address)?;
+    setup_socket2_ext(
+        &socket,
+        &addr,
+        dev,
+        only_v6,
+        socket_mark,
+        reuse_port,
+        reuse_address,
+    )?;
     B::finalize(socket)
 }
 

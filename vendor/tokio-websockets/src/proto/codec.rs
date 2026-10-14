@@ -199,8 +199,8 @@ impl Decoder for WebSocketProtocol {
             }
 
             if opcode == OpCode::Close {
-                // SAFETY: Close frames with a non-zero payload length are validated to not have
-                // a length of 1
+                // SAFETY: Close frames with a non-zero payload length are
+                // validated to not have a length of 1
                 // A conversion from two u8s to a u16 cannot fail
                 let code = CloseCode::try_from(u16::from_be_bytes(unsafe {
                     src.get_unchecked(offset..offset + 2).try_into().unwrap()
@@ -222,16 +222,16 @@ impl Decoder for WebSocketProtocol {
         let mut payload = Payload::from(src.split_to(payload_length));
         payload.set_utf8_validated(opcode == OpCode::Text && fin);
 
-        // It is possible to receive intermediate control frames between a large other
-        // frame. We therefore can't simply reset the fragmented opcode after we receive
-        // a "final" frame.
+        // It is possible to receive intermediate control frames between a large
+        // other frame. We therefore can't simply reset the fragmented
+        // opcode after we receive a "final" frame.
         if (fin && opcode == OpCode::Continuation) || (!fin && opcode != OpCode::Continuation) {
             // Full chunked message received (and opcode is Continuation)
             // or first frame of a multi-frame message received
             self.fragmented_message_opcode = opcode;
         }
-        // In all other cases, we have either a continuation or control frame, neither
-        // of which change change the opcode being assembled
+        // In all other cases, we have either a continuation or control frame,
+        // neither of which change change the opcode being assembled
 
         self.payload_processed = 0;
 

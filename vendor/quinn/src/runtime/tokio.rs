@@ -3,13 +3,13 @@ use std::{
     io,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
     time::Instant,
 };
 
 use tokio::{
     io::Interest,
-    time::{Sleep, sleep_until},
+    time::{sleep_until, Sleep},
 };
 
 use super::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPollHelper};

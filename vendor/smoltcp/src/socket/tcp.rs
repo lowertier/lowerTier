@@ -13,8 +13,8 @@ use crate::socket::{Context, PollAt};
 use crate::storage::{Assembler, RingBuffer};
 use crate::time::{Duration, Instant};
 use crate::wire::{
-    IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, TCP_HEADER_LEN, TcpControl,
-    TcpRepr, TcpSeqNumber, TcpTimestampGenerator, TcpTimestampRepr,
+    IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber,
+    TcpTimestampGenerator, TcpTimestampRepr, TCP_HEADER_LEN,
 };
 
 mod congestion;

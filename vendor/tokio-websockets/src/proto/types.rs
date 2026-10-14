@@ -198,9 +198,10 @@ impl Payload {
 
     /// Splits the buffer into two at the given index.
     fn split_to(&mut self, at: usize) -> Self {
-        // This is only used by the outgoing message frame iterator, so we do not care
-        // about the value of utf8_validated. For the sake of correctness (in case we
-        // split a utf8 codepoint), we set it to false.
+        // This is only used by the outgoing message frame iterator, so we do
+        // not care about the value of utf8_validated. For the sake of
+        // correctness (in case we split a utf8 codepoint), we set it to
+        // false.
         self.utf8_validated = false;
         Self {
             data: self.data.split_to(at),
@@ -255,9 +256,9 @@ impl From<Payload> for BytesMut {
 
 impl From<Vec<u8>> for Payload {
     fn from(value: Vec<u8>) -> Self {
-        // BytesMut::from_iter goes through a specialization in std if the iterator is a
-        // Vec, effectively allowing us to use BytesMut::from_vec which isn't
-        // exposed in bytes. See https://github.com/tokio-rs/bytes/issues/723 for details.
+        // BytesMut::from_iter goes through a specialization in std if the
+        // iterator is a Vec, effectively allowing us to use
+        // BytesMut::from_vec which isn't exposed in bytes. See https://github.com/tokio-rs/bytes/issues/723 for details.
         Self {
             data: BytesMut::from_iter(value).freeze(),
             utf8_validated: false,
@@ -449,8 +450,8 @@ impl Message {
             let code = if self.payload.is_empty() {
                 CloseCode::NO_STATUS_RECEIVED
             } else {
-                // SAFETY: Opcode is Close with a non-empty payload so it's at least 2 bytes
-                // long
+                // SAFETY: Opcode is Close with a non-empty payload so it's at
+                // least 2 bytes long
                 unsafe {
                     CloseCode::try_from(u16::from_be_bytes(
                         self.payload
