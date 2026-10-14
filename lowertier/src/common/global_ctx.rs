@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -463,6 +463,7 @@ pub struct GlobalCtx {
     flags: ArcSwap<Flags>,
     transit_budget: std::sync::Mutex<super::transit_budget::TransitBudget>,
     receive_budget: std::sync::Mutex<super::transit_budget::TransitBudget>,
+    receive_limited: AtomicBool,
     pub(crate) transit_parent: std::sync::Weak<GlobalCtx>,
     underlay_policy: Arc<ArcSwap<UnderlayPolicy>>,
 
@@ -865,6 +866,7 @@ impl GlobalCtx {
                     ..Default::default()
                 },
             )),
+            receive_limited: AtomicBool::new(flags.receive_bps().is_some()),
             flags: ArcSwap::new(Arc::new(flags)),
             underlay_policy,
 
@@ -1346,6 +1348,9 @@ impl GlobalCtx {
                 transit_bps_limit: flags.receive_bps(),
                 ..Default::default()
             });
+        // Publish the fast-path flag after the budget accepts the new limit.
+        self.receive_limited
+            .store(flags.receive_bps().is_some(), Ordering::Release);
         self.flags.store(Arc::new(flags));
         self.issue_event(GlobalCtxEvent::ConfigPatched(Default::default()));
     }
@@ -1408,7 +1413,7 @@ impl GlobalCtx {
     pub(crate) async fn pace_receive(&self, mut bytes: usize) {
         let parent = self.transit_parent.upgrade();
         let context = parent.as_deref().unwrap_or(self);
-        if bytes == 0 || context.flags.load().receive_bps().is_none() {
+        if bytes == 0 || !context.receive_limited.load(Ordering::Acquire) {
             return;
         }
         while bytes > 0 {

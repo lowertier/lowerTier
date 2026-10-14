@@ -114,6 +114,23 @@ async fn queued_transit_observes_denial_before_framing() {
         .start_send(PacketBatch::singleton(local))
         .unwrap();
     assert_eq!(sent.load(Ordering::Relaxed), 1);
+
+    let mut child = crate::common::global_ctx::tests::get_mock_global_ctx();
+    Arc::get_mut(&mut child).unwrap().transit_parent = Arc::downgrade(&context);
+    assert!(child.pace_receive(1).now_or_never().is_some());
+    let mut flags = context.get_flags();
+    flags
+        .limits
+        .get_or_insert_with(Default::default)
+        .receive_bps = Some(1);
+    context.set_flags(flags.clone());
+    let burst = crate::common::control_config::MAX_TRANSIT_PACKET_BYTES as usize;
+    assert!(context.pace_receive(burst + 1).now_or_never().is_none());
+    assert!(child.pace_receive(1).now_or_never().is_none());
+    flags.limits.as_mut().unwrap().receive_bps = None;
+    context.set_flags(flags);
+    assert!(context.pace_receive(1).now_or_never().is_some());
+    assert!(child.pace_receive(1).now_or_never().is_some());
 }
 
 #[tokio::test]

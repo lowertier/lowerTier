@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
+use crossbeam::utils::CachePadded;
+
 pub struct WindowLatency {
     latency_us_window: Vec<AtomicU32>,
     latency_us_window_index: AtomicU32,
@@ -60,21 +62,35 @@ impl WindowLatency {
 
 #[derive(Debug, Default)]
 pub struct Throughput {
-    tx_bytes: AtomicU64,
-    rx_bytes: AtomicU64,
-    tx_packets: AtomicU64,
-    rx_packets: AtomicU64,
-    tx_data_packets: AtomicU64,
+    tx: CachePadded<TxThroughput>,
+    rx: CachePadded<RxThroughput>,
+}
+
+#[derive(Debug, Default)]
+struct TxThroughput {
+    bytes: AtomicU64,
+    packets: AtomicU64,
+    data_packets: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct RxThroughput {
+    bytes: AtomicU64,
+    packets: AtomicU64,
 }
 
 impl Clone for Throughput {
     fn clone(&self) -> Self {
         Self {
-            tx_bytes: AtomicU64::new(self.tx_bytes()),
-            rx_bytes: AtomicU64::new(self.rx_bytes()),
-            tx_packets: AtomicU64::new(self.tx_packets()),
-            rx_packets: AtomicU64::new(self.rx_packets()),
-            tx_data_packets: AtomicU64::new(self.tx_data_packets()),
+            tx: CachePadded::new(TxThroughput {
+                bytes: AtomicU64::new(self.tx_bytes()),
+                packets: AtomicU64::new(self.tx_packets()),
+                data_packets: AtomicU64::new(self.tx_data_packets()),
+            }),
+            rx: CachePadded::new(RxThroughput {
+                bytes: AtomicU64::new(self.rx_bytes()),
+                packets: AtomicU64::new(self.rx_packets()),
+            }),
         }
     }
 }
@@ -85,23 +101,23 @@ impl Throughput {
     }
 
     pub fn tx_bytes(&self) -> u64 {
-        self.tx_bytes.load(Relaxed)
+        self.tx.bytes.load(Relaxed)
     }
 
     pub fn rx_bytes(&self) -> u64 {
-        self.rx_bytes.load(Relaxed)
+        self.rx.bytes.load(Relaxed)
     }
 
     pub fn tx_packets(&self) -> u64 {
-        self.tx_packets.load(Relaxed)
+        self.tx.packets.load(Relaxed)
     }
 
     pub fn rx_packets(&self) -> u64 {
-        self.rx_packets.load(Relaxed)
+        self.rx.packets.load(Relaxed)
     }
 
     pub fn tx_data_packets(&self) -> u64 {
-        self.tx_data_packets.load(Relaxed)
+        self.tx.data_packets.load(Relaxed)
     }
 
     pub fn record_tx_bytes(&self, bytes: u64) {
@@ -109,12 +125,12 @@ impl Throughput {
     }
 
     pub fn record_tx_batch(&self, bytes: u64, packets: u64) {
-        self.tx_bytes.fetch_add(bytes, Relaxed);
-        self.tx_packets.fetch_add(packets, Relaxed);
+        self.tx.bytes.fetch_add(bytes, Relaxed);
+        self.tx.packets.fetch_add(packets, Relaxed);
     }
 
     pub fn record_tx_data_packets(&self, packets: u64) {
-        self.tx_data_packets.fetch_add(packets, Relaxed);
+        self.tx.data_packets.fetch_add(packets, Relaxed);
     }
 
     pub fn record_rx_bytes(&self, bytes: u64) {
@@ -122,7 +138,7 @@ impl Throughput {
     }
 
     pub fn record_rx_batch(&self, bytes: u64, packets: u64) {
-        self.rx_bytes.fetch_add(bytes, Relaxed);
-        self.rx_packets.fetch_add(packets, Relaxed);
+        self.rx.bytes.fetch_add(bytes, Relaxed);
+        self.rx.packets.fetch_add(packets, Relaxed);
     }
 }
