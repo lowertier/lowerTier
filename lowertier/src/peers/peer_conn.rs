@@ -1051,6 +1051,8 @@ impl TunnelFilter for PeerSessionTunnelFilter {
     type FilterOutput = ();
 
     fn before_send(&self, mut data: crate::tunnel::SinkItem) -> Option<crate::tunnel::SinkItem> {
+        // Authentication metadata belongs to the receiving connection, including on ring transports.
+        data.clear_authenticated_peer_id();
         if let Err(e) = self.encrypt_packet_if_needed(&mut data) {
             tracing::warn!(
                 ?e,
@@ -1137,11 +1139,13 @@ impl TunnelFilter for PeerSessionTunnelFilter {
         Some(Ok(data))
     }
 
-    fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
+    fn before_send_batch(&self, mut data: PacketBatch) -> Option<PacketBatch> {
+        for packet in data.iter_mut() {
+            packet.clear_authenticated_peer_id();
+        }
         if !self.enabled {
             return Some(data);
         }
-        let mut data = data;
         let result = self.encrypt_batch_sequential(&mut data);
         if let Err(error) = result {
             tracing::warn!(?error, "peer session batch encryption failed");
@@ -5099,6 +5103,43 @@ pub mod tests {
             };
             assert!(validate_transport_binding(Some("tcp"), Some(tcp_binding)).is_ok());
             assert_eq!(transport_binding_context(Some(tcp_binding)).0, 3);
+        }
+        for enabled in [false, true] {
+            let filter = PeerSessionTunnelFilter::new_with_peer(1, enabled);
+            let mut packet = test_packet(PacketType::Pong as u8);
+            let session = uuid::Uuid::new_v4();
+            assert!(packet.set_authenticated_peer_id(2));
+            assert!(packet.set_authenticated_peer_identity_type(PeerIdentityType::Admin));
+            assert!(
+                packet.set_authenticated_peer_secure_auth_level(
+                    SecureAuthLevel::NetworkSecretConfirmed
+                )
+            );
+            assert!(packet.set_authenticated_session_id(session));
+            assert!(packet.set_verified_origin(
+                2,
+                PeerIdentityType::Admin,
+                SecureAuthLevel::NetworkSecretConfirmed,
+                session,
+            ));
+            let scalar = filter.before_send(packet.clone()).unwrap();
+            let batch = filter
+                .before_send_batch(PacketBatch::singleton(packet))
+                .unwrap();
+            for outbound in [&scalar, &batch[0]] {
+                assert_eq!(outbound.authenticated_peer_id(), None);
+                assert_eq!(outbound.authenticated_peer_identity_type(), None);
+                assert_eq!(outbound.authenticated_peer_secure_auth_level(), None);
+                assert_eq!(outbound.authenticated_session_id(), None);
+                assert_eq!(outbound.verified_origin_peer_id(), None);
+                assert_eq!(outbound.verified_origin_peer_identity_type(), None);
+                assert_eq!(outbound.verified_origin_peer_secure_auth_level(), None);
+                assert_eq!(outbound.verified_origin_session_id(), None);
+                assert_eq!(
+                    outbound.payload(),
+                    test_packet(PacketType::Pong as u8).payload()
+                );
+            }
         }
     }
 
