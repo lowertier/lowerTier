@@ -21,7 +21,8 @@ message FlagsInConfig {
   // string ipv6_listener = 14; [deprecated = true]; use -l quic://[::]:12345
   // instead
   bool multi_thread = 15;
-  CompressionAlgoPb data_compress_algo = 16;
+  reserved 16;
+  reserved "data_compress_algo";
   bool bind_device = 17;
 
   reserved 18, 19, 20;

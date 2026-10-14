@@ -423,40 +423,7 @@ impl<const TAG_SIZE: usize, const NONCE_SIZE: usize> AeadTail<TAG_SIZE, NONCE_SI
 
 pub type StandardAeadTail = AeadTail<16, 12>;
 
-#[derive(AsBytes, FromZeroes, Clone, Debug, Copy, PartialEq, Hash, Eq)]
-#[repr(u8)]
-pub enum CompressorAlgo {
-    None = 0,
-    #[cfg(feature = "zstd")]
-    ZstdDefault = 1,
-}
-
-#[repr(C, packed)]
-#[derive(AsBytes, FromBytes, FromZeroes, Clone, Debug, Default)]
-pub struct CompressorTail {
-    pub algo: u8,
-}
-pub const COMPRESSOR_TAIL_SIZE: usize = std::mem::size_of::<CompressorTail>();
-
-impl CompressorTail {
-    pub fn get_algo(&self) -> Option<CompressorAlgo> {
-        match self.algo {
-            #[cfg(feature = "zstd")]
-            1 => Some(CompressorAlgo::ZstdDefault),
-            _ => None,
-        }
-    }
-
-    pub fn new(algo: CompressorAlgo) -> Self {
-        Self { algo: algo as u8 }
-    }
-}
-
-pub const LINK_ENVELOPE_RESERVED_SIZE: usize = 24;
-pub const TAIL_RESERVED_SIZE: usize = max(
-    max(StandardAeadTail::SIZE, COMPRESSOR_TAIL_SIZE),
-    LINK_ENVELOPE_RESERVED_SIZE,
-);
+pub const TAIL_RESERVED_SIZE: usize = StandardAeadTail::SIZE;
 
 /// Spare bytes that may stay behind a frozen TUN-pool packet. Larger leftover
 /// capacity is a GRO or poisoned slab and must be copied off before freeze so

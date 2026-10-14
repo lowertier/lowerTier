@@ -8,7 +8,6 @@ use tokio::{task::JoinSet, time::timeout};
 use tracing::Instrument;
 
 pub mod acl_processor;
-pub mod compressor;
 pub mod config;
 pub mod constants;
 pub mod dataplane_telemetry;

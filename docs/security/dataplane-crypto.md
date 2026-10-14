@@ -1,8 +1,10 @@
 # Dataplane cryptography
 
-LowTier peer traffic defaults to `chacha20-poly1305`, implemented by the audited `ring` AEAD
-implementation in lean builds and by OpenSSL when the `openssl-crypto` feature is selected. The
-primitive uses a 256-bit key, a 96-bit nonce, and a 128-bit authentication tag.
+LowTier peer traffic defaults to `chacha20-poly1305` through the `ring` AEAD implementation.
+The primitive uses a 256-bit key, a 96-bit nonce, and a 128-bit authentication tag.
+The `ring` backend also provides AES-128-GCM and AES-256-GCM.
+All algorithms keep the existing ciphertext, tag, and nonce layout.
+The optional `aes-gcm` and `openssl-crypto` backends are removed.
 
 This choice follows the established WireGuard dataplane primitive used by Tailscale. Tailscale
 delegates peer packet encryption to `wireguard-go`; its batched `magicsock` path carries already

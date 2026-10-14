@@ -24,7 +24,7 @@ use crate::{
     proto::{
         acl::Acl,
         api::manage::ConfigSource as RpcConfigSource,
-        common::{CompressionAlgoPb, PortForwardConfigPb, SecureModeConfig, SocketType},
+        common::{PortForwardConfigPb, SecureModeConfig, SocketType},
         peer_rpc::CredentialBundle,
     },
     tunnel::{IpScheme, generate_digest_from_str},
@@ -58,7 +58,6 @@ pub fn gen_default_flags() -> Flags {
         disable_tcp_hole_punching: false,
         disable_udp_hole_punching: false,
         multi_thread: true,
-        data_compress_algo: CompressionAlgoPb::None.into(),
         bind_device: true,
         accept_dns: false,
         private_mode: false,
@@ -1175,10 +1174,10 @@ impl TomlConfigLoader {
     fn gen_flags(
         flags_hashmap: serde_json::Map<String, serde_json::Value>,
     ) -> serde_json::Result<Flags> {
-        for option in ["quic_datagram_fec_parity", "quic_datagram_alternate_path_parity"] {
+        for option in ["quic_datagram_fec_parity", "quic_datagram_alternate_path_parity", "data_compress_algo"] {
             if flags_hashmap.contains_key(option) {
                 return Err(<serde_json::Error as serde::de::Error>::custom(format!(
-                    "removed option '{option}': QUIC FEC is no longer supported"
+                    "removed option '{option}': FEC and payload compression are no longer supported"
                 )));
             }
         }
@@ -1589,11 +1588,8 @@ impl ConfigLoader for TomlConfigLoader {
             .unwrap_or(ConfigSource::User)
     }
 
-    fn set_network_config_source(&self, source: Option<ConfigSource>) {
-        self.config.lock().unwrap().source = source.and_then(|source| match source {
-            ConfigSource::User => None,
-            other => Some(ConfigSourceConfig { source: other }),
-        });
+    fn set_network_config_source(&self, _source: Option<ConfigSource>) {
+        self.config.lock().unwrap().source = None;
     }
 
     fn dump(&self) -> String {

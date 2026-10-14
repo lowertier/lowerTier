@@ -208,8 +208,6 @@ ordered_hash_map = "0.5.0"
 ring = "0.17"
 subtle = "2.6"
 bitflags = "2.5"
-aes-gcm = { version = "0.10.3", optional = true }
-openssl = { version = "0.10", optional = true, features = ["vendored"] }
 snow = "0.10.0"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
@@ -257,7 +255,6 @@ async-ringbuf = "0.3.1"
 
 service-manager = { path = "../vendor/service-manager-rs" }
 
-zstd = { version = "0.13", optional = true }
 
 # for dns connector
 hickory-resolver = "0.25.2"
@@ -375,14 +372,9 @@ tokio-socks = "0.5.2"
 [features]
 default = ["tun", "socks5", "mimalloc"]
 full = [
-    "aes-gcm",
-    "openssl-crypto", # This feature requires OpenSSL development files.
     "magic-dns",
-    "zstd",
 ]
 mimalloc = ["dep:mimalloc"]
-aes-gcm = ["dep:aes-gcm"]
-openssl-crypto = ["dep:openssl"]
 tun = ["dep:tun", "dep:quincy-tun", "dep:io-uring"]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]
@@ -397,6 +389,5 @@ jemalloc-prof = [
 ]
 tracing = ["tokio/tracing", "dep:console-subscriber"]
 magic-dns = ["dep:hickory-client", "dep:hickory-server"]
-zstd = ["dep:zstd"]
 # For Network Extension on macOS
 macos-ne = []

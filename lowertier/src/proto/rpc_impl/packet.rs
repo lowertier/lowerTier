@@ -5,12 +5,12 @@ use prost::{Message as _, length_delimiter_len};
 use quanta::Instant;
 
 use crate::{
-    common::{PeerId, compressor::DefaultCompressor},
+    common::PeerId,
     proto::{
         common::{CompressionAlgoPb, RpcCompressionInfo, RpcDescriptor, RpcPacket},
         rpc_types::error::Error,
     },
-    tunnel::packet_def::{CompressorAlgo, PacketType, TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
+    tunnel::packet_def::{PacketType, TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
 };
 
 use super::RpcTransactId;
@@ -28,132 +28,42 @@ const RPC_MERGER_MAP_ENTRY_OVERHEAD: usize = 64;
 // Account for the immutable envelope retained once per fragmented transaction.
 const RPC_MERGER_ENVELOPE_OVERHEAD: usize = 128;
 
+
+
+
+
 pub const fn supported_rpc_compression() -> CompressionAlgoPb {
-    #[cfg(feature = "zstd")]
-    {
-        CompressionAlgoPb::Zstd
-    }
-    #[cfg(not(feature = "zstd"))]
-    {
-        CompressionAlgoPb::None
-    }
+    CompressionAlgoPb::None
 }
 
-/// Return the logical body size before a request enters RPC execution.
-///
-/// The size comes from the bounded zstd frame header when compression is used.
-/// This avoids decompression before admission and prevents a compressed body
-/// from bypassing the execution memory budget.
 pub(crate) fn logical_body_size(packet: &RpcPacket) -> Result<usize, Error> {
     if packet.body.len() > MAX_RPC_BODY_BYTES {
-        return Err(Error::MalformatRpcPacket(format!(
-            "RPC body is too large: {} bytes",
-            packet.body.len()
-        )));
+        return Err(Error::MalformatRpcPacket("RPC body is too large".to_owned()));
     }
-
-    let Some(compression_info) = packet.compression_info else {
-        return Ok(packet.body.len());
-    };
-    let compression_algo = CompressionAlgoPb::try_from(compression_info.algo).map_err(|_| {
-        Error::MalformatRpcPacket(format!(
-            "unknown RPC compression algorithm: {}",
-            compression_info.algo
-        ))
-    })?;
-
-    match compression_algo {
-        CompressionAlgoPb::None => Ok(packet.body.len()),
-        #[cfg(feature = "zstd")]
-        CompressionAlgoPb::Zstd => {
-            let frame_size =
-                zstd::zstd_safe::get_frame_content_size(&packet.body).map_err(|error| {
-                    Error::MalformatRpcPacket(format!("invalid zstd RPC frame: {error}"))
-                })?;
-            let Some(frame_size) = frame_size else {
-                return Err(Error::MalformatRpcPacket(
-                    "zstd RPC frame has no bounded content size".to_string(),
-                ));
-            };
-            let frame_size = usize::try_from(frame_size).map_err(|_| {
-                Error::MalformatRpcPacket(
-                    "zstd RPC frame size does not fit memory limits".to_string(),
-                )
-            })?;
-            if frame_size > MAX_RPC_BODY_BYTES {
-                return Err(Error::MalformatRpcPacket(format!(
-                    "decompressed RPC body is too large: {frame_size} bytes"
-                )));
-            }
-            Ok(frame_size)
-        }
-        #[cfg(not(feature = "zstd"))]
-        CompressionAlgoPb::Zstd => Err(Error::MalformatRpcPacket(
-            "zstd RPC compression is not available".to_string(),
-        )),
-        _ => Err(Error::MalformatRpcPacket(
-            "invalid RPC compression algorithm".to_string(),
-        )),
+    if packet.compression_info.is_some_and(|info| info.algo != CompressionAlgoPb::None as i32) {
+        return Err(Error::MalformatRpcPacket("RPC compression is no longer supported".to_owned()));
     }
+    Ok(packet.body.len())
 }
 
 pub async fn compress_packet(
-    accepted_compression_algo: CompressionAlgoPb,
+    _accepted_compression_algo: CompressionAlgoPb,
     content: &[u8],
 ) -> Result<(Vec<u8>, CompressionAlgoPb), Error> {
-    let compressor = DefaultCompressor::new();
-    let algo = accepted_compression_algo
-        .try_into()
-        .unwrap_or(CompressorAlgo::None);
-    let compressed = compressor.compress_raw(content, algo)?;
-    if compressed.len() >= content.len() {
-        Ok((content.to_vec(), CompressionAlgoPb::None))
-    } else {
-        Ok((compressed, algo.try_into().unwrap()))
-    }
+    Ok((content.to_vec(), CompressionAlgoPb::None))
 }
 
 pub async fn decompress_packet(
     compression_algo: CompressionAlgoPb,
     content: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let compressor = DefaultCompressor::new();
-    let algo = compression_algo.try_into()?;
+    if compression_algo != CompressionAlgoPb::None {
+        return Err(Error::MalformatRpcPacket("RPC compression is no longer supported".to_owned()));
+    }
     if content.len() > MAX_RPC_BODY_BYTES {
-        return Err(Error::MalformatRpcPacket(format!(
-            "compressed RPC body is too large: {} bytes",
-            content.len()
-        )));
+        return Err(Error::MalformatRpcPacket("RPC body is too large".to_owned()));
     }
-    #[cfg(feature = "zstd")]
-    if matches!(algo, CompressorAlgo::ZstdDefault) {
-        let frame_size = zstd::zstd_safe::get_frame_content_size(content).map_err(|error| {
-            Error::MalformatRpcPacket(format!("invalid zstd RPC frame: {error}"))
-        })?;
-        let Some(frame_size) = frame_size else {
-            return Err(Error::MalformatRpcPacket(
-                "zstd RPC frame has no bounded content size".to_string(),
-            ));
-        };
-        if frame_size > MAX_RPC_BODY_BYTES as u64 {
-            return Err(Error::MalformatRpcPacket(format!(
-                "decompressed RPC body is too large: {frame_size} bytes"
-            )));
-        }
-        let frame_size = usize::try_from(frame_size).map_err(|_| {
-            Error::MalformatRpcPacket("zstd RPC frame size does not fit memory limits".to_string())
-        })?;
-        return zstd::bulk::decompress(content, frame_size)
-            .map_err(|error| Error::ExecutionError(error.into()));
-    }
-    let decompressed = compressor.decompress_raw(content, algo)?;
-    if decompressed.len() > MAX_RPC_BODY_BYTES {
-        return Err(Error::MalformatRpcPacket(format!(
-            "decompressed RPC body is too large: {} bytes",
-            decompressed.len()
-        )));
-    }
-    Ok(decompressed)
+    Ok(content.to_vec())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

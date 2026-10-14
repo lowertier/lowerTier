@@ -31,7 +31,6 @@ use tokio::{
 use crate::{
     common::{
         PeerId,
-        compressor::{Compressor as _, DefaultCompressor},
         constants::LOWTIER_VERSION,
         dataplane_telemetry::{DataplaneQueueClass, DataplaneStage, DataplaneTelemetry},
         error::Error,
@@ -76,7 +75,7 @@ use crate::{
     tunnel::{
         PacketBatchSink, Tunnel, TunnelConnector, TunnelError,
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-        packet_def::{CompressorAlgo, PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
+        packet_def::{PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
     },
 };
 
@@ -757,7 +756,6 @@ struct PreparedPacketBatch {
 }
 
 fn prepare_packet_batch(
-    compress_algo: CompressorAlgo,
     mut batch: PacketBatch,
 ) -> Result<PreparedPacketBatch, Error> {
     let mut bytes_before = 0_u64;
@@ -783,30 +781,10 @@ fn prepare_packet_batch(
         first_is_data.get_or_insert(is_data);
     }
 
-    if compress_algo == CompressorAlgo::None {
-        return Ok(PreparedPacketBatch {
-            batch,
-            bytes_before,
-            bytes_after: bytes_before,
-            contains_ethernet,
-            first_packet_type,
-            first_is_hybrid_ip_ethernet,
-            uniform_direct_priority,
-        });
-    }
-
-    let compressor = DefaultCompressor {};
-    let mut bytes_after = 0_u64;
-    for packet in batch.iter_mut() {
-        compressor
-            .compress(packet, compress_algo)
-            .with_context(|| "compress failed")?;
-        bytes_after = bytes_after.saturating_add(packet.buf_len() as u64);
-    }
     Ok(PreparedPacketBatch {
         batch,
         bytes_before,
-        bytes_after,
+        bytes_after: bytes_before,
         contains_ethernet,
         first_packet_type,
         first_is_hybrid_ip_ethernet,
@@ -816,7 +794,7 @@ fn prepare_packet_batch(
 
 #[cfg(test)]
 pub(crate) fn benchmark_prepare_packet_batch(batch: PacketBatch) -> PacketBatch {
-    prepare_packet_batch(CompressorAlgo::None, batch)
+    prepare_packet_batch(batch)
         .expect("uncompressed benchmark packet preparation is infallible")
         .batch
 }
@@ -1451,7 +1429,6 @@ pub struct PeerManager {
     foreign_network_client: Arc<ForeignNetworkClient>,
     relay_peer_map: Arc<RelayPeerMap>,
 
-    data_compress_algo: CompressorAlgo,
     l2_fabric: Arc<L2Fabric>,
     service_routes: Arc<ServiceRouteStore>,
     local_bgp_routes_lock: SyncMutex<()>,
@@ -1940,11 +1917,6 @@ impl PeerManager {
             my_peer_id,
         ));
 
-        let data_compress_algo = global_ctx
-            .get_flags()
-            .data_compress_algo()
-            .try_into()
-            .expect("invalid data compress algo, maybe some features not enabled");
         let l2_flags = global_ctx.get_flags();
         let l2_fabric = Arc::new(L2Fabric::with_policy(
             l2_flags.l2_fdb_capacity as usize,
@@ -2084,7 +2056,6 @@ impl PeerManager {
             foreign_network_client,
             relay_peer_map,
 
-            data_compress_algo,
             l2_fabric,
             service_routes,
             local_bgp_routes_lock: SyncMutex::new(()),
@@ -2852,7 +2823,6 @@ impl PeerManager {
         let foreign_client = self.foreign_network_client.clone();
         let relay_peer_map = self.relay_peer_map.clone();
         let foreign_mgr = self.foreign_network_manager.clone();
-        let compress_algo = self.data_compress_algo;
         let acl_filter = self.global_ctx.get_acl_filter().clone();
         let global_ctx = self.global_ctx.clone();
         let stats_mgr = self.global_ctx.stats_manager().clone();
@@ -3156,7 +3126,7 @@ impl PeerManager {
                                     || packet_type == PacketType::Ethernet as u8
                                     || packet_type == PacketType::OverlayStream as u8
                                 {
-                                    let _ = Self::try_compress(compress_algo, &mut ret);
+                                    Self::prepare_packet(&mut ret);
                                 }
 
                                 compress_tx_bytes_after.add(ret.buf_len() as u64);
@@ -3289,12 +3259,10 @@ impl PeerManager {
                                 ));
                             }
 
-                            let compressor = DefaultCompressor {};
-                            if let Err(e) = compressor.decompress(&mut ret) {
-                                tracing::error!(?e, "decompress failed");
+                            if ret.peer_manager_header().is_some_and(|header| header.is_compressed()) {
+                                tracing::debug!(from_peer_id, "drop unsupported compressed packet");
                                 continue;
                             }
-
                             if packet_type == PacketType::Ethernet as u8 {
                                 if !Self::local_bridge_is_authorized(&global_ctx) {
                                     tracing::debug!(
@@ -4002,7 +3970,7 @@ impl PeerManager {
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
 
-        Self::try_compress(self.data_compress_algo, &mut msg)?;
+        Self::prepare_packet(&mut msg);
 
         self.self_tx_counters
             .compress_tx_bytes_after
@@ -4046,7 +4014,7 @@ impl PeerManager {
         self.self_tx_counters
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
-        Self::try_compress(self.data_compress_algo, &mut msg)?;
+        Self::prepare_packet(&mut msg);
         self.self_tx_counters
             .compress_tx_bytes_after
             .add(msg.buf_len() as u64);
@@ -4121,7 +4089,7 @@ impl PeerManager {
             self.self_tx_counters
                 .compress_tx_bytes_before
                 .add(msg.buf_len() as u64);
-            Self::try_compress(self.data_compress_algo, &mut msg)?;
+            Self::prepare_packet(&mut msg);
             self.self_tx_counters
                 .compress_tx_bytes_after
                 .add(msg.buf_len() as u64);
@@ -4422,7 +4390,7 @@ impl PeerManager {
                 errors.push(error);
                 continue;
             }
-            let prepared = match prepare_packet_batch(self.data_compress_algo, peer_batch) {
+            let prepared = match prepare_packet_batch(peer_batch) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     errors.push(error);
@@ -5940,14 +5908,10 @@ impl PeerManager {
         (dst_peers, is_exit_node)
     }
 
-    pub fn try_compress(compress_algo: CompressorAlgo, msg: &mut ZCPacket) -> Result<(), Error> {
+
+    fn prepare_packet(msg: &mut ZCPacket) {
         stamp_critical_l2_control(msg);
         stamp_packet_flow(msg);
-        let compressor = DefaultCompressor {};
-        compressor
-            .compress(msg, compress_algo)
-            .with_context(|| "compress failed")?;
-        Ok(())
     }
 
     pub(crate) fn routed_packet_destination(&self, packet: &ZCPacket) -> Option<(IpAddr, bool)> {
@@ -6614,7 +6578,7 @@ impl PeerManager {
                 .compress_tx_bytes_before
                 .add(msg.buf_len() as u64);
 
-            Self::try_compress(self.data_compress_algo, &mut msg)?;
+            Self::prepare_packet(&mut msg);
 
             self.self_tx_counters
                 .compress_tx_bytes_after
@@ -7223,11 +7187,7 @@ mod tests {
         },
     };
 
-    #[cfg(feature = "zstd")]
-    use crate::common::compressor::DefaultCompressor;
 
-    #[cfg(feature = "zstd")]
-    use crate::tunnel::packet_def::CompressorAlgo;
 
     use super::{
         DIRECT_NIC_BATCH_CREDIT_BYTES, DIRECT_NIC_QUEUE_CREDIT_BYTES, DirectNicBatchWriter,
@@ -7456,17 +7416,6 @@ mod tests {
             }
             payload[16..20].copy_from_slice(&self.0.octets());
             true
-        }
-    }
-
-    #[cfg(feature = "zstd")]
-    struct ResizingNicFilter;
-
-    #[cfg(feature = "zstd")]
-    #[async_trait::async_trait]
-    impl NicPacketFilter for ResizingNicFilter {
-        async fn try_process_packet_from_nic(&self, data: &mut ZCPacket) -> bool {
-            data.append_payload(b"magic-dns-response").is_ok()
         }
     }
 

@@ -6,12 +6,6 @@ use std::sync::Arc;
 
 pub mod ring;
 
-#[cfg(feature = "aes-gcm")]
-pub mod aes_gcm;
-
-#[cfg(feature = "openssl-crypto")]
-pub mod openssl;
-
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("packet is too short. len: {0}")]
@@ -68,7 +62,7 @@ impl Encryptor for NullCipher {
 pub fn create_encryptor(
     algorithm: &str,
     key_128: [u8; 16],
-    #[allow(unused_variables)] key_256: [u8; 32],
+    key_256: [u8; 32],
 ) -> Arc<dyn Encryptor> {
     let algorithm = match EncryptionAlgorithm::try_from(algorithm) {
         Ok(algorithm) => algorithm,
@@ -84,53 +78,17 @@ pub fn create_encryptor(
     };
 
     match algorithm {
-        EncryptionAlgorithm::AesGcm => {
-            #[cfg(feature = "openssl-crypto")]
-            {
-                Arc::new(openssl::OpenSslCipher::new_aes128_gcm(key_128))
-            }
-            #[cfg(all(not(feature = "openssl-crypto"), feature = "aes-gcm"))]
-            {
-                Arc::new(aes_gcm::AesGcmCipher::new_128(key_128))
-            }
-            #[cfg(not(any(feature = "openssl-crypto", feature = "aes-gcm")))]
-            {
-                Arc::new(ring::RingCipher::new_aes128_gcm(key_128))
-            }
-        }
-
-        EncryptionAlgorithm::Aes256Gcm => {
-            #[cfg(feature = "openssl-crypto")]
-            {
-                Arc::new(openssl::OpenSslCipher::new_aes256_gcm(key_256))
-            }
-            #[cfg(all(not(feature = "openssl-crypto"), feature = "aes-gcm"))]
-            {
-                Arc::new(aes_gcm::AesGcmCipher::new_256(key_256))
-            }
-            #[cfg(not(any(feature = "openssl-crypto", feature = "aes-gcm")))]
-            {
-                Arc::new(ring::RingCipher::new_aes256_gcm(key_256))
-            }
-        }
-
+        EncryptionAlgorithm::AesGcm => Arc::new(ring::RingCipher::new_aes128_gcm(key_128)),
+        EncryptionAlgorithm::Aes256Gcm => Arc::new(ring::RingCipher::new_aes256_gcm(key_256)),
         EncryptionAlgorithm::ChaCha20Poly1305 => {
-            #[cfg(feature = "openssl-crypto")]
-            {
-                Arc::new(openssl::OpenSslCipher::new_chacha20_poly1305(key_256))
-            }
-            #[cfg(not(feature = "openssl-crypto"))]
-            {
-                Arc::new(ring::RingCipher::new_chacha20_poly1305(key_256))
-            }
+            Arc::new(ring::RingCipher::new_chacha20_poly1305(key_256))
         }
     }
 }
 
 /// Create the in-place backend used by secure datagram sessions.
 ///
-/// Secure datagrams avoid the OpenSSL path because it allocates a second
-/// payload buffer for each packet. The ring backend supports all algorithms.
+/// The ring backend supports every negotiated algorithm and preserves the packet tail.
 pub fn create_secure_datagram_encryptor(
     algorithm: &str,
     key_128: [u8; 16],

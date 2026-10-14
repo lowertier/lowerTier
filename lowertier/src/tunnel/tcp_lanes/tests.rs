@@ -890,25 +890,3 @@ fn colliding_wire_shards_remain_distinct_and_flow_mapping_stays_bounded() {
     assert_eq!(writer.flow_lanes.len(), MAX_TRACKED_FLOWS);
 }
 
-#[cfg(feature = "zstd")]
-#[test]
-fn compression_preserves_lane_after_ethernet_flow_cache_changes() {
-    use crate::common::compressor::{Compressor, DefaultCompressor};
-    use crate::tunnel::packet_def::CompressorAlgo;
-    let mut writer = writer(&[Arc::new(Probe::default()), Arc::new(Probe::default())]);
-    assert_eq!(writer.packet_lane(&packet(7, 0)), 0);
-    let original = packet(3, 1);
-    let lane = writer.packet_lane(&original);
-    assert_eq!(lane, 1);
-    let mut compressed = packet(3, 2);
-    compressed.set_flow_hash(7);
-    DefaultCompressor::new()
-        .compress(&mut compressed, CompressorAlgo::ZstdDefault)
-        .unwrap();
-    assert!(compressed.peer_manager_header().unwrap().is_compressed());
-    assert_eq!(writer.packet_lane(&compressed), lane);
-    DefaultCompressor::new()
-        .decompress(&mut compressed)
-        .unwrap();
-    assert_eq!(writer.packet_lane(&compressed), lane);
-}

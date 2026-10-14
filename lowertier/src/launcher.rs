@@ -1141,14 +1141,6 @@ impl NetworkConfig {
             cfg.set_acl(Some(acl.clone()));
         }
 
-        if let Some(data_compress_algo) = self.data_compress_algo {
-            if data_compress_algo < 1 {
-                flags.data_compress_algo = 1;
-            } else {
-                flags.data_compress_algo = data_compress_algo
-            }
-        }
-
         validate_flags(&flags)?;
         cfg.set_flags(flags);
         Ok(cfg)
@@ -1334,8 +1326,6 @@ impl NetworkConfig {
         result.disable_sym_hole_punching = Some(flags.disable_sym_hole_punching);
         result.enable_magic_dns = Some(flags.accept_dns);
         result.mtu = Some(flags.mtu as i32);
-        result.data_compress_algo = (flags.data_compress_algo != default_flags.data_compress_algo)
-            .then_some(flags.data_compress_algo);
         result.encryption_algorithm = (flags.encryption_algorithm
             != default_flags.encryption_algorithm)
             .then_some(flags.encryption_algorithm.clone());
@@ -1957,26 +1947,17 @@ mod tests {
     -> Result<(), anyhow::Error> {
         let config = gen_default_config();
         let mut flags = config.get_flags();
-        flags.data_compress_algo = CompressionAlgoPb::Zstd.into();
         flags.encryption_algorithm = "aes-256-gcm".to_string();
         config.set_flags(flags.clone());
 
         let network_config = super::NetworkConfig::new_from_config(&config)?;
 
         assert_eq!(
-            network_config.data_compress_algo,
-            Some(CompressionAlgoPb::Zstd as i32)
-        );
-        assert_eq!(
             network_config.encryption_algorithm.as_deref(),
             Some("aes-256-gcm")
         );
 
         let generated_config = network_config.gen_config()?;
-        assert_eq!(
-            generated_config.get_flags().data_compress_algo,
-            flags.data_compress_algo
-        );
         assert_eq!(
             generated_config.get_flags().encryption_algorithm,
             flags.encryption_algorithm

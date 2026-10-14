@@ -7,7 +7,7 @@ use std::{
 };
 use strum::VariantArray;
 
-use crate::tunnel::{IpScheme, packet_def::CompressorAlgo};
+use crate::tunnel::IpScheme;
 
 include!(concat!(env!("OUT_DIR"), "/common.rs"));
 include!(concat!(env!("OUT_DIR"), "/common.serde.rs"));
@@ -461,31 +461,6 @@ impl TunnelInfo {
     pub fn display_remote_addr(&self) -> Option<String> {
         self.effective_remote_addr()
             .map(Url::normalized_tunnel_display)
-    }
-}
-
-impl TryFrom<CompressionAlgoPb> for CompressorAlgo {
-    type Error = anyhow::Error;
-
-    fn try_from(value: CompressionAlgoPb) -> Result<Self, Self::Error> {
-        match value {
-            #[cfg(feature = "zstd")]
-            CompressionAlgoPb::Zstd => Ok(CompressorAlgo::ZstdDefault),
-            CompressionAlgoPb::None => Ok(CompressorAlgo::None),
-            _ => Err(anyhow::anyhow!("Invalid CompressionAlgoPb")),
-        }
-    }
-}
-
-impl TryFrom<CompressorAlgo> for CompressionAlgoPb {
-    type Error = anyhow::Error;
-
-    fn try_from(value: CompressorAlgo) -> Result<Self, Self::Error> {
-        match value {
-            #[cfg(feature = "zstd")]
-            CompressorAlgo::ZstdDefault => Ok(CompressionAlgoPb::Zstd),
-            CompressorAlgo::None => Ok(CompressionAlgoPb::None),
-        }
     }
 }
 

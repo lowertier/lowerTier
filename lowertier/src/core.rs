@@ -15,7 +15,7 @@ use crate::{
     instance_manager::NetworkInstanceManager,
     launcher::add_proxy_network_to_config,
     peers::credential_manager::CredentialManager,
-    proto::common::{CompressionAlgoPb, SecureModeConfig},
+    proto::common::SecureModeConfig,
     rpc_service::ApiRpcServer,
     utils::panic::setup_panic_handler,
 };
@@ -509,12 +509,6 @@ struct NetworkOptions {
     )]
     outbound_http_proxy_listen: Option<String>,
 
-    #[arg(
-        long,
-        env = "ET_COMPRESSION",
-        help = t!("core_clap.compression").to_string(),
-    )]
-    compression: Option<String>,
 
     #[arg(
         long,
@@ -1282,17 +1276,6 @@ impl NetworkOptions {
         f.relay_all_peer_rpc = self.relay_all_peer_rpc.unwrap_or(f.relay_all_peer_rpc);
         f.need_p2p = self.need_p2p.unwrap_or(f.need_p2p);
         f.multi_thread = self.multi_thread.unwrap_or(f.multi_thread);
-        if let Some(compression) = &self.compression {
-            f.data_compress_algo = match compression.as_str() {
-                "none" => CompressionAlgoPb::None,
-                "zstd" => CompressionAlgoPb::Zstd,
-                _ => panic!(
-                    "unknown compression algorithm: {}, supported: none, zstd",
-                    compression
-                ),
-            }
-            .into();
-        }
         f.bind_device = self.bind_device.unwrap_or(f.bind_device);
 
         #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
