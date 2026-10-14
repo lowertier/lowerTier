@@ -148,7 +148,7 @@ Permit UDP port `11012` through the host and network firewalls.
 Check the network from either node.
 
 ```bash
-lowertier-cli node info
+lowertier-cli node show
 lowertier-cli peer list
 lowertier-cli route list
 ping 10.44.0.2
@@ -741,35 +741,61 @@ The remaining security options configure keys, credentials, and port access.
 ## Complete `lowertier-cli` reference
 
 The CLI connects to `127.0.0.1:15888` by default.
-Use the root options to select another RPC portal or instance.
+Every portal request requires the process control token.
+Use `--control-token`, `LOWTIER_CONTROL_TOKEN`, or `--control-token-file`.
+The default token file is `~/.config/lowertier/control.token` on Unix and `%LOCALAPPDATA%/LowTier/control.token` on Windows.
+Set `LOWTIER_CONTROL_TOKEN_FILE` when the core uses another token file.
+The CLI selects a sole instance automatically.
+Use `--instance ID` when the process has multiple instances.
+Mutations always select one instance.
 
 | Root option | Purpose |
 | --- | --- |
 | `--rpc-portal`, `-p` | Select the core RPC address. |
-| `--verbose`, `-v` | Print additional command details. |
+| `--verbose`, `-v` | Increase diagnostics on stderr. |
 | `--output`, `-o` | Select `table` or `json`. |
-| `--no-trunc` | Disable table truncation. |
-| `--instance-id`, `-i` | Select an instance by ID. |
-| `--instance-name`, `-n` | Select an instance by name. |
+| `--instance`, `-i` | Select an instance by ID. |
+| `--control-token` | Supply the process control token. |
+| `--control-token-file` | Read the process control token from a file. |
+| `--admin-token` | Supply the additional network administrator token for credential commands. |
+
+JSON output uses one envelope with `schema_version`, `request_id`, `instance_id`, `revision`, `data`, and `error`.
+Exactly one of `data` or `error` contains a value.
+Protobuf field names use snake_case. Uint64 values use decimal strings. Bytes use base64.
+Watch and follow commands emit one envelope per line.
+JSON output preserves complete values. Tables preserve complete paths and show relayed peers as `via ID`.
+
+Exit codes are 0 for success, 1 for internal errors, 2 for arguments or validation, and 3 for authorization.
+Code 4 means missing or ambiguous resources. Code 5 means revision conflict or restart required.
+Code 6 means connection or deadline failure. Code 7 means partial failure.
 
 ### Inspection commands
 
 | Command | Purpose |
 | --- | --- |
 | `peer list` | List connected peers. |
-| `peer ipv6` | Show public IPv6 information. |
-| `peer list-foreign [--trusted-keys]` | List discovered foreign networks. |
-| `peer list-global-foreign` | List foreign networks from the peer center. |
+| `peer show ID_OR_PUBLIC_KEY` | Show one peer. |
 | `route list` | List propagated routes. |
-| `route dump` | Print routes as CIDRs. |
-| `peer-center` | Show global peer information. |
-| `node info` | Show local node information. |
-| `node config` | Show the active node configuration. |
-| `stun` | Run a STUN test. |
-| `proxy` | Show TCP and QUIC proxy status. |
+| `route show DESTINATION --path` | Show a route and its complete captured path. |
+| `node show` | Show local node information, including public IPv6 state. |
+| `relay show` | Show active policy, permissions, limits, counters, and paths. |
+| `l2 fdb`, `l2 stats` | Show forwarding entries or counters. |
+| `discovery status` | Show trackers, candidate counts, and mapping observations. |
+| `listener list` | Show listener authentication and transport state. |
+| `camouflage show` | Show camouflage settings and certificate verification. |
+| `config get` | Show desired configuration, active configuration, and pending restart fields. |
+| `acl get` | Show ACL configuration and port whitelists. |
 | `acl stats` | Show ACL rule counters. |
 | `stats show` | Show general counters. |
-| `stats prometheus` | Print counters in Prometheus text format. |
+| `stats show --prometheus` | Print protected Prometheus counters. JSON output wraps the text. |
+| `stats watch [--prometheus]` | Watch paced statistics changes until interrupted. |
+| `log read`, `log follow` | Read or follow the bounded process log. |
+| `log level [LEVEL]` | Show or set off, error, warn, info, debug, or trace. |
+| `instance list` | List running and stopped instances. |
+
+Paged commands accept `--limit 1..256` and `--page-token TOKEN`.
+Use the returned `next_page_token` to read another page.
+Add `--path` to `route list` when complete paths are required.
 
 ### Goodput routing
 
@@ -802,32 +828,52 @@ See [control configuration and migration](docs/control-config.md) for units, def
 
 | Command | Purpose |
 | --- | --- |
-| `connector add URL` | Add an initial connector. |
-| `connector remove URL` | Remove a connector. |
-| `connector list` | List connectors. |
-| `mapped-listener add URL` | Add an advertised mapped listener. |
-| `mapped-listener remove URL` | Remove a mapped listener. |
-| `mapped-listener list` | List mapped listeners. |
+| `peer add URL [--public-key KEY]` | Add a configured peer. |
+| `peer remove URL` | Remove a configured peer. |
+| `listener add URL` | Add a configured listener. |
+| `listener remove URL_OR_ID` | Remove a configured listener. |
+| `relay set FIELD=JSON...` | Change relay fields. |
+| `camouflage set FIELD=JSON...` | Change camouflage fields. |
+| `config set PATH=JSON...` | Change configuration fields. |
+| `config validate PATH=JSON...` | Validate a change and report apply classes without publication. |
 | `port-forward add PROTOCOL BIND_ADDR DST_ADDR` | Add a TCP or UDP forwarding rule. |
-| `port-forward remove PROTOCOL BIND_ADDR [DST_ADDR]` | Remove a forwarding rule. |
+| `port-forward remove PROTOCOL BIND_ADDR` | Remove a forwarding rule. |
 | `port-forward list` | List forwarding rules. |
-| `whitelist set-tcp PORTS` | Replace the TCP port whitelist. |
-| `whitelist set-udp PORTS` | Replace the UDP port whitelist. |
-| `whitelist clear-tcp` | Remove the TCP whitelist. |
-| `whitelist clear-udp` | Remove the UDP whitelist. |
-| `whitelist show` | Show both port whitelists. |
-| `logger get` | Show the active logger configuration. |
-| `logger set LEVEL` | Set `disabled`, `error`, `warning`, `info`, `debug`, or `trace`. |
+| `acl set --file FILE` | Replace ACL and whitelists from JSON. |
+| `instance create --file FILE` | Create a stopped instance from NodeConfig JSON. |
+| `instance start`, `instance stop`, `instance delete` | Change the selected instance lifecycle. Deletion requires a stopped instance. |
+
+Configuration mutations read a revision before changing state.
+Use `--expected-revision N` to require a specific revision. Conflicts do not trigger automatic retries.
+Use `--persist` to write desired settings to an existing configuration file.
+Use `--stage` to store restart fields while their active values stay unchanged.
+The response lists `live_fields`, `new_connection_fields`, and `restart_fields`.
+Staged instance fields activate after stop/start. Process fields require process restart.
+See [control configuration](docs/control-config.md) for apply classifications and persistence limits.
+
+Assignments accept JSON values and unquoted strings.
+Arrays replace completely. Use `--clear PATH` to remove optional fields.
+Alternatively, use `--values FILE --field PATH` with NodeConfig JSON.
+Relay and camouflage commands accept relative field paths; values files always contain NodeConfig objects.
+
+```bash
+lowertier-cli relay set policy=latency use_relays=true
+lowertier-cli config validate hostname=office
+lowertier-cli camouflage set wss_path=/vpn
+lowertier-cli listener add 'tcp://0.0.0.0:11010' --stage
+lowertier-cli --instance INSTANCE_ID instance stop
+```
 
 ### Credential commands
 
 | Command | Purpose |
 | --- | --- |
-| `credential generate --ttl SECONDS` | Create a temporary credential. |
+| `credential issue --ttl SECONDS` | Create a temporary credential. |
 | `credential revoke CREDENTIAL_ID` | Revoke a credential. |
 | `credential list` | List active credentials. |
 
-`credential generate` also accepts these options.
+Credential commands require `--admin-token` or `LOWTIER_ADMIN_TOKEN`, in addition to the control token.
+`credential issue` also accepts these options.
 
 | Option | Purpose |
 | --- | --- |
@@ -851,7 +897,8 @@ Select a service name with `lowertier-cli service --name NAME`.
 The install command accepts `--description`, `--display-name`, `--core-path`, and `--service-work-dir`.
 The install command also accepts `--disable-autostart` and `--disable-restart-on-failure`.
 
-Generate shell completions with `lowertier-cli gen-autocomplete SHELL`.
+Service and completion commands run locally without a control token.
+Generate shell completions with `lowertier-cli completion SHELL`.
 
 ## L2 forwarding behavior
 
@@ -960,8 +1007,8 @@ The error report includes the file, line, and invalid field.
 ### Confirm the selected interface
 
 ```bash
-lowertier-cli node config
-lowertier-cli node info
+lowertier-cli config get
+lowertier-cli node show
 ```
 
 Check the reported interface name and link type.
@@ -970,13 +1017,13 @@ Check the reported interface name and link type.
 
 ```bash
 lowertier-cli peer list
-lowertier-cli connector list
-lowertier-cli route list
-lowertier-cli stun
+lowertier-cli listener list
+lowertier-cli route list --path
+lowertier-cli discovery status
 ```
 
 Check firewall access to every configured listener.
-Try an explicit UDP or TCP peer URL when automatic discovery cannot connect.
+Try an explicit QUIC, TCP, or WSS peer URL when automatic discovery cannot connect.
 
 ### Check L2 discovery
 
@@ -989,10 +1036,10 @@ VLAN, QinQ, LLDP, and unknown EtherTypes require native Ethernet on both local e
 ### Check RPC access
 
 ```bash
-lowertier-cli --rpc-portal 127.0.0.1:15888 node info
+lowertier-cli --rpc-portal 127.0.0.1:15888 node show
 ```
 
-Confirm the core RPC address and whitelist.
+Confirm the core RPC address, control token file, and whitelist.
 Do not expose the RPC portal to an untrusted network.
 
 ### Get complete generated help
