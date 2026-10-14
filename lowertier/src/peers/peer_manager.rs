@@ -876,6 +876,9 @@ impl PeerManager {
         local_broadcast: Option<Ipv4Addr>,
         now: std::time::Instant,
     ) -> bool {
+        if !fabric.needs_tap_admission() {
+            return true;
+        }
         let is_flood = match payload.first().map(|byte| byte >> 4) {
             Some(4) => Ipv4Packet::new(payload).is_some_and(|packet| {
                 let destination = packet.get_destination();
@@ -2818,47 +2821,50 @@ impl PeerManager {
                     .global_ctx
                     .get_ipv4()
                     .map(|network| network.last_address());
-                if self.local_bridge_authorized
-                    && batch.iter().all(|packet| {
-                        packet.peer_manager_header().is_some_and(|header| {
-                            header.packet_type != PacketType::Ethernet as u8
-                                || PeerManager::full_ethernet_receive_is_authorized_fast(
+                let mut needs_admission = self.l2_fabric.needs_tap_admission();
+                if batch.iter().all(|packet| {
+                    packet.peer_manager_header().is_some_and(|header| {
+                        needs_admission |= header.packet_type == PacketType::Ethernet as u8;
+                        header.packet_type != PacketType::Ethernet as u8
+                            || (self.local_bridge_authorized
+                                && PeerManager::full_ethernet_receive_is_authorized_fast(
                                     &self.peers,
                                     Some(&self.relay_peer_map),
                                     &self.global_ctx,
                                     self.my_peer_id,
                                     packet,
-                                )
-                        })
+                                ))
                     })
-                    && prepare_direct_nic_batch(&batch, self.ethernet_input, |_, _| {})
+                }) && prepare_direct_nic_batch(&batch, self.ethernet_input, |_, _| {})
                 {
-                    let mut ingress_batch = L2IngressBatch::default();
-                    let keep: SmallVec<[bool; 64]> = batch
-                        .iter()
-                        .map(|packet| {
-                            let header = packet.peer_manager_header().unwrap();
-                            if header.packet_type == PacketType::Ethernet as u8 {
-                                self.l2_fabric.admit_ingress_batch_at(
-                                    packet.payload(),
-                                    header.from_peer_id.get(),
-                                    self.my_peer_id,
-                                    batch_time,
-                                    &mut ingress_batch,
-                                )
-                            } else {
-                                !self.ethernet_input
-                                    || PeerManager::admit_compact_to_tap(
-                                        &self.l2_fabric,
+                    if needs_admission {
+                        let mut ingress_batch = L2IngressBatch::default();
+                        let keep: SmallVec<[bool; 64]> = batch
+                            .iter()
+                            .map(|packet| {
+                                let header = packet.peer_manager_header().unwrap();
+                                if header.packet_type == PacketType::Ethernet as u8 {
+                                    self.l2_fabric.admit_ingress_batch_at(
                                         packet.payload(),
                                         header.from_peer_id.get(),
-                                        local_broadcast,
+                                        self.my_peer_id,
                                         batch_time,
+                                        &mut ingress_batch,
                                     )
-                            }
-                        })
-                        .collect();
-                    batch.retain_flags(&keep);
+                                } else {
+                                    !self.ethernet_input
+                                        || PeerManager::admit_compact_to_tap(
+                                            &self.l2_fabric,
+                                            packet.payload(),
+                                            header.from_peer_id.get(),
+                                            local_broadcast,
+                                            batch_time,
+                                        )
+                                }
+                            })
+                            .collect();
+                        batch.retain_flags(&keep);
+                    }
                     tracing::trace!(
                         packets = batch.len(),
                         "send owned packet batch to nic channel"
@@ -5144,14 +5150,17 @@ impl PeerManager {
         let mut metadata = TapBatchMetadata::new();
         let policy_time = std::time::Instant::now();
         let mut source_batch = L2SourceBatch::default();
+        let admit_sources = self.l2_fabric.needs_tap_admission();
         for packet in batch {
             let frame = packet.payload();
-            if !self.l2_fabric.admit_source_batch_at(
-                frame,
-                self.my_peer_id,
-                policy_time,
-                &mut source_batch,
-            ) {
+            if admit_sources
+                && !self.l2_fabric.admit_source_batch_at(
+                    frame,
+                    self.my_peer_id,
+                    policy_time,
+                    &mut source_batch,
+                )
+            {
                 continue;
             }
             #[cfg(feature = "tun")]
@@ -6342,6 +6351,21 @@ mod tests {
     #[tokio::test]
     async fn l2_direct_nic_policy_checks_compact_ip_types() {
         let mut flags = crate::common::config::gen_default_flags();
+        let fabric = crate::peers::l2_fabric::L2Fabric::from_flags(&flags);
+        assert!(!fabric.needs_tap_admission());
+        assert!(PeerManager::admit_compact_to_tap(
+            &fabric,
+            routed_ipv4_packet(
+                "10.77.0.2".parse().unwrap(),
+                "10.77.0.255".parse().unwrap(),
+                1
+            )
+            .payload(),
+            42,
+            Some("10.77.0.255".parse().unwrap()),
+            std::time::Instant::now(),
+        ));
+        flags.enable_bridge = true;
         flags.l2_flood_bytes_per_second = 40;
         let fabric = crate::peers::l2_fabric::L2Fabric::from_flags(&flags);
         let broadcast = "10.77.0.255".parse().unwrap();
@@ -6363,6 +6387,7 @@ mod tests {
         ));
         for allowed_type in [0x0800, 0x86dd] {
             let (peer, _legacy_nic) = create_tap_peer_manager_with_policy(0, None, |flags| {
+                flags.enable_bridge = false;
                 flags.l2_allowed_ether_types = vec![allowed_type];
             })
             .await;

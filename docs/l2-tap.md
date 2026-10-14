@@ -78,6 +78,8 @@ VLAN zero includes untagged frames.
 Every VLAN tag must be allowed, including inner QinQ tags.
 EtherType policy checks the final type after the tags.
 Compact IP received by TAP must also pass the untagged VLAN and IPv4/IPv6 EtherType policy.
+With `enable_bridge = false`, ordinary TAP IP traffic skips source learning and bridge flood admission.
+Explicit VLAN and EtherType lists still apply in this mode.
 The example permits IPv4, ARP, IPv6, and LLDP.
 Use an empty EtherType list to permit arbitrary Ethernet protocols.
 Restart the instance after changing bridge policy.

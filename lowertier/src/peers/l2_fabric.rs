@@ -132,6 +132,7 @@ pub struct L2Fabric {
     policy_drops: AtomicU64,
     maintenance: Mutex<FdbMaintenance>,
     policy: L2Policy,
+    bridge_enabled: bool,
 }
 
 #[derive(Default)]
@@ -231,12 +232,14 @@ pub const MAX_FANOUT_RECIPIENTS: usize = 4_096;
 
 impl L2Fabric {
     pub fn from_flags(flags: &crate::common::config::Flags) -> Self {
-        Self::with_policy(
+        let mut fabric = Self::with_policy(
             flags.l2_fdb_capacity as usize,
             Duration::from_secs(flags.l2_fdb_age_seconds),
             flags.l2_flood_bytes_per_second,
             L2Policy::from_flags(flags),
-        )
+        );
+        fabric.bridge_enabled = flags.enable_bridge;
+        fabric
     }
 
     pub fn new(capacity: usize, age: Duration, flood_bytes_per_second: u64) -> Self {
@@ -267,7 +270,15 @@ impl L2Fabric {
                 next_expiry: Instant::now(),
             }),
             policy,
+            bridge_enabled: true,
         }
+    }
+
+    pub(crate) fn needs_tap_admission(&self) -> bool {
+        // Ownership and flood checks protect an attached LAN. Explicit filters also apply without a bridge.
+        self.bridge_enabled
+            || !self.policy.allowed_vlans.is_empty()
+            || !self.policy.allowed_ether_types.is_empty()
     }
 
     pub(crate) fn has_policy(&self) -> bool {

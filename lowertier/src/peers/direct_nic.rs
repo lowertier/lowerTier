@@ -562,8 +562,10 @@ impl DirectNicIngress {
             }
         }
 
-        let now = std::time::Instant::now();
-        if self.ethernet_input {
+        if self.ethernet_input
+            && (packet_type == PacketType::Ethernet as u8 || self.l2_fabric.needs_tap_admission())
+        {
+            let now = std::time::Instant::now();
             let local_broadcast = local_ipv4.map(|network| network.last_address());
             let mut ingress_batch = L2IngressBatch::default();
             let keep: SmallVec<[bool; 64]> = batch
