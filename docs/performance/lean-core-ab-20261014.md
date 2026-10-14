@@ -352,3 +352,117 @@ Transport batch sizes and other bottlenecks can change the cost of shared work p
 The first valid confirmation measures the first three commits. It still shows the regression.
 The final approved confirmation measures `0386ae55`. H2 meets the gate, while QUIC remains 3.3% through 3.8% below baseline.
 No measured percentage can be assigned to an individual function from the current evidence.
+
+### Remaining packet overhead repair
+
+The `perf2` confirmation does not meet the complete performance gate.
+QUIC forward is 2.34% below baseline. QUIC reverse is 0.71% above baseline and uses less daemon CPU per delivered Gbit.
+H2 is 2.41% below baseline forward and 2.40% below baseline reverse.
+Daemon CPU cost remains above baseline in the three slower cells.
+All 16 transfers pass validation. No further measurements ran.
+
+Worker `perf2` reviewed the remaining paths from `bca6da2d` before changing the source.
+The repair uses `enable_bridge` at fabric creation to select TAP admission.
+Without bridging or explicit VLAN/EtherType filters, local TAP traffic skips source learning.
+Received compact IP also skips flood classification, keep flags, and retention traversal in that mode.
+Explicit filters still apply without bridging.
+Enabled bridges retain source ownership, move holds, MAC quotas, ingress flood limits, and complete Ethernet authorization.
+Bridge policy changes require an instance restart, as before.
+The control API classifies flag changes as restart changes and rejects direct application to a running instance.
+
+Quinn now passes an owned UDP allocation to `Endpoint::handle_owned`.
+The allocation capacity is read before conversion to `BytesMut`.
+Partial decoding retains that capacity through every coalesced packet.
+This removes the `BytesMut` to `Vec` capacity-recovery conversion from normal socket reception.
+Coalesced tails also avoid normalization and payload copies.
+The existing `Endpoint::handle` and public decoder still normalize external `BytesMut` slices.
+DATAGRAM admission still bounds payload bytes, retained allocation bytes, and entry metadata.
+Each queued DATAGRAM conservatively charges the full original allocation.
+An allocation larger than the receive window still requires a compact payload copy.
+
+Throughput counters use separate `CachePadded` TX and RX groups.
+All counters remain atomic.
+On aarch64, the counter object occupies 256 bytes instead of 40 bytes, from its declared layout.
+This adds 216 bytes per counter object and prevents concurrent direction writers from sharing a cache line.
+Receive pacing uses an atomic limit flag instead of loading the flags through ArcSwap.
+Runtime updates publish this flag after updating the budget.
+Foreign contexts still use their parent's receive budget.
+
+The local transit scan and outbound source check remain.
+These checks distinguish forwarded traffic from local traffic without changing authentication or queued transit admission.
+Local packets already return before transit network allocation and destination writes.
+Outbound session filters still clear incoming authentication metadata.
+That boundary must remain when a received packet is forwarded.
+
+For N data packets and B packets per batch, the default non-bridge path removes N source-policy parses.
+It also removes N receive-policy parses and classification operations, plus the keep-flag and retention passes.
+QUIC removes one ownership-conversion sequence per UDP packet and copies of shared coalesced tails.
+The retained-memory charge remains O(1) per DATAGRAM.
+Counter accounting still performs the same atomic additions per batch, with separate direction storage.
+No queue, resource limit, fixture threshold, or transport parameter was added.
+
+### Perf2 confirming comparison
+
+The candidate is `da6ba2aa`, with the preceding changes in `fe652ea2` and `93f5f09f`.
+The baseline remains `10e33193`, with the original retained Linux binary.
+Both use Rust 1.95.0, release fat LTO, no default features, and `tun`.
+Colima uses aarch64 VZ, three vCPUs, 8 GiB RAM, and a 1500-byte underlay MTU.
+The clean matrix uses QUIC and H2, one inner TCP stream, forward and reverse, and two interleaved repetitions.
+Repetition one runs baseline then candidate. Repetition two runs candidate then baseline.
+Warmup lasts ten seconds. The measurement window lasts twenty seconds.
+Configured TAP MTU is 1360. Both binaries use an actual TAP MTU of 1340.
+Secure mode, private admission, encryption configuration, and TLS exporter binding remain enabled.
+
+Each cell reports the arithmetic mean and the range of its two repetitions.
+CPU cost sums daemon CPU at both endpoints and divides by delivered Gbit.
+The gate requires throughput within 2% of baseline and CPU cost no greater than baseline.
+
+| Transport | Direction | Baseline Gbit/s [range] | Candidate Gbit/s [range] | Delta | Baseline CPU s/Gbit [range] | Candidate CPU s/Gbit [range] |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| QUIC | forward | 6.692 [6.503, 6.880] | 6.535 [6.292, 6.778] | -2.34% | 0.318 [0.307, 0.328] | 0.327 [0.313, 0.341] |
+| QUIC | reverse | 6.644 [6.494, 6.794] | 6.691 [6.659, 6.722] | +0.71% | 0.323 [0.316, 0.331] | 0.318 [0.317, 0.319] |
+| H2 | forward | 8.617 [8.530, 8.703] | 8.409 [8.319, 8.500] | -2.41% | 0.257 [0.255, 0.260] | 0.265 [0.262, 0.268] |
+| H2 | reverse | 8.579 [8.524, 8.635] | 8.374 [8.257, 8.490] | -2.40% | 0.259 [0.258, 0.260] | 0.266 [0.262, 0.270] |
+
+Only QUIC reverse meets both gates.
+The source changes remove identified work, but the complete gate remains unmet.
+Two repetitions do not establish a narrow confidence interval or an individual function's measured contribution.
+
+RSS gives the sampled minimum and maximum at endpoint A and endpoint B, in MiB.
+RTT is the mean of each repetition's loaded p50 / p95, in milliseconds.
+Retransmission cells give repetition one, then repetition two.
+H2 outer retransmissions include warmup and both endpoint sockets.
+
+| Transport | Direction | Binary | RSS A / B | RTT p50 / p95 | Inner retransmissions | Outer retransmissions or QUIC loss |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| QUIC | forward | baseline | 25.3, 25.7 / 26.6, 27.6 | 0.419 / 0.778 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | forward | candidate | 24.9, 25.8 / 27.1, 27.7 | 0.400 / 0.791 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | reverse | baseline | 25.6, 25.9 / 27.4, 28.3 | 0.387 / 0.760 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | reverse | candidate | 25.0, 26.1 / 28.0, 28.4 | 0.393 / 0.761 | 0, 0 | 0.0000%, 0.0000% |
+| H2 | forward | baseline | 22.1, 25.0 / 24.8, 27.1 | 0.912 / 1.964 | 177, 51 | 740, 1087 |
+| H2 | forward | candidate | 22.1, 25.8 / 25.5, 26.8 | 0.896 / 2.019 | 723, 28 | 1220, 910 |
+| H2 | reverse | baseline | 23.2, 24.5 / 25.4, 28.6 | 0.887 / 1.850 | 78, 375 | 866, 980 |
+| H2 | reverse | candidate | 24.8, 26.0 / 26.7, 29.5 | 0.934 / 1.950 | 1048, 850 | 1414, 1530 |
+
+Each transfer passed binary SHA256, connection count, duration, MTU, and CPU-sample checks.
+Each endpoint supplied 79 or 80 CPU samples per measured window.
+Every ping summary recorded complete delivery. Every sampled QUIC window recorded zero outer loss.
+Receiver/sender byte accounting ratios ranged from 0.999956 to 1.000134.
+These ratios do not measure packet loss.
+CPU excludes iperf and kernel work outside daemon accounting. RSS excludes kernel socket memory.
+The requested retained-memory limits remain unchanged; no process peak-memory bound is inferred from these RSS samples.
+
+The baseline SHA256 is `c8c708fb47cce00d9ca5cb9e8405ed96d22d9f6d3722bee21c48bb5aad2092e0`.
+The candidate SHA256 is `b9f5d85252aca3e1546473214e5844354125bff2a0457cc9a24eabcef9e4a5f8`.
+Raw logs, configurations, invocation records, binaries, source patch, scripts, and summaries are in
+`/Users/boyu/code/lowertier-wt/perf2/benchmark-results/lean-perf2-20261014/`.
+The campaign command was `python3 /private/tmp/perf2-run.py confirm 1200 python3 /private/tmp/perf2-confirm.py`.
+The validation command was `python3 /private/tmp/perf2-run.py analyze 120 python3 /private/tmp/perf2-summary.py`.
+Both commands completed successfully. `summary.json` records the failed performance gate separately.
+
+Host and aarch64 Linux checks, locked metadata, and formatting of all changed Rust files pass.
+The focused tests pass: 38 L2 cases, seven direct-sink cases, 12 Quinn DATAGRAM cases, and one coalesced-header case.
+The existing tests now also check non-bridge filter behavior, shared allocation charges, and local/foreign runtime receive-limit changes.
+No new test marker was added.
+WAN, WSS, four-stream, full bridge performance, and a broad Caddy matrix remain unmeasured for this candidate.
+The benchmark containers and network have stopped. No resident LowTier node was changed.
