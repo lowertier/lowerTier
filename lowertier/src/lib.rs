@@ -13,6 +13,7 @@ mod gateway;
 pub mod instance;
 mod peer_center;
 
+pub mod cli;
 pub mod common;
 pub mod connector;
 pub mod core;
