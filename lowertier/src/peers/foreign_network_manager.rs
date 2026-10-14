@@ -67,9 +67,6 @@ use super::{
     },
 };
 
-#[cfg(test)]
-use super::create_packet_recv_chan;
-
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(&, Box, Arc)]
 pub trait GlobalForeignNetworkAccessor: Send + Sync + 'static {
@@ -975,7 +972,7 @@ impl ForeignNetworkManager {
     }
 
     pub fn new(
-        my_peer_id: PeerId,
+        _my_peer_id: PeerId,
         global_ctx: ArcGlobalCtx,
         peer_session_store: Arc<PeerSessionStore>,
         packet_sender_to_mgr: PacketRecvChan,

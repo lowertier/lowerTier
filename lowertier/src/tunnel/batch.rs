@@ -1,7 +1,6 @@
 use std::{
     collections::VecDeque,
-    future::Future,
-    io, mem,
+    mem,
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr, slice,
@@ -10,7 +9,7 @@ use std::{
 };
 
 use crossbeam::queue::ArrayQueue;
-use futures::{Sink, Stream, StreamExt, ready};
+use futures::{Sink, Stream, ready};
 use pin_project_lite::pin_project;
 use smallvec::SmallVec;
 
@@ -593,11 +592,8 @@ impl<'a> IntoIterator for &'a mut PacketBatch {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
-    use futures::StreamExt;
-
-    use super::{MAX_PACKET_BATCH_SIZE, PacketBatch, PacketBatchPool};
+    use super::{MAX_PACKET_BATCH_SIZE, PacketBatchPool};
 
     #[test]
     fn pool_exhaustion_preserves_the_requested_allocation_size() {

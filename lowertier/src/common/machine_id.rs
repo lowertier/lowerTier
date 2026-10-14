@@ -1,6 +1,6 @@
+#[cfg(not(any(target_os = "ios", all(target_os = "macos", feature = "macos-ne"))))]
+use std::{env, ffi::OsString};
 use std::{
-    env,
-    ffi::OsString,
     io::Write as _,
     path::{Path, PathBuf},
     time::{Duration, Instant},

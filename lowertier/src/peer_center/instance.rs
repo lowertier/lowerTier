@@ -708,12 +708,7 @@ impl PeerCenterPeerManagerTrait for PeerMapWithPeerRpcManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        peers::tests::{connect_peer_manager, create_mock_peer_manager, wait_route_appear},
-        proto::peer_rpc::DirectConnectedPeerInfo,
-        proto::{api::instance::Route, common::PeerFeatureFlag},
-        tunnel::common::tests::wait_for_condition,
-    };
+    use crate::peers::tests::create_mock_peer_manager;
 
     use super::*;
 

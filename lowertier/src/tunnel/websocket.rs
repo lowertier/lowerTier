@@ -19,7 +19,6 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_websockets::{ClientBuilder, Config as WebSocketConfig, Limits, Message, ServerBuilder};
-use zerocopy::AsBytes;
 
 mod cdn;
 

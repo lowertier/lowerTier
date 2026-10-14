@@ -23,7 +23,7 @@ use crate::{
     instance::proxy_cidrs_monitor::ProxyCidrsMonitor,
     peers::{
         PacketRecvChanReceiver,
-        fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
+        fabric::{FabricBatch, FabricPayloadKind},
         flow::classify_nic_packet_flow,
         peer_manager::{DirectNicEndpoint, PeerManager},
     },
@@ -35,6 +35,8 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+use crate::peers::fabric::FabricPacket;
 #[cfg(test)]
 use crate::tunnel::batch::MAX_PACKET_BATCH_SIZE;
 
@@ -2054,9 +2056,8 @@ impl NicCtx {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::Arc;
 
-    use crate::common::{error::Error, global_ctx::tests::get_mock_global_ctx};
     use crate::instance::l2_tun::{ETHERNET_HEADER_LEN, prepare_ip_frame};
     use crate::tunnel::{
         TunnelError,
@@ -2066,8 +2067,7 @@ mod tests {
     use futures::{StreamExt as _, stream};
 
     use super::{
-        NicCtx, TUN_READ_SPARE_BYTES, TunZCPacketToBytes, VirtualNic, parse_interface_mac,
-        prepare_tun_read_buffer, read_ready_packet_batch, restore_compact_ip_for_tap,
+        TunZCPacketToBytes, VirtualNic, read_ready_packet_batch, restore_compact_ip_for_tap,
     };
 
     #[test]

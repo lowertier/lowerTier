@@ -1,32 +1,21 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::{
     common::{
         PeerId,
         error::Error,
         global_ctx::{
-            NetworkIdentity, TrustedKeySource,
+            NetworkIdentity,
             tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
         },
-        stats_manager::{LabelSet, LabelType, MetricName},
     },
-    proto::api::instance::TrustedKeySourcePb,
-    tunnel::{
-        common::tests::wait_for_condition,
-        packet_def::{PacketType, ZCPacket},
-        ring::create_ring_tunnel_pair,
-    },
+    tunnel::ring::create_ring_tunnel_pair,
 };
 
 use super::{
     create_packet_recv_chan,
     peer_conn::tests::set_secure_mode_cfg,
     peer_manager::{PeerManager, RouteAlgoType},
-    peer_map::PeerMap,
-    peer_session::{PeerSession, PeerSessionStore, SessionKey},
-    relay_peer_map::RelayPeerMap,
-    route_trait::NextHopPolicy,
 };
 
 fn credential_private_key_from_secret(secret: &str) -> x25519_dalek::StaticSecret {
@@ -48,7 +37,7 @@ pub async fn create_mock_peer_manager_with_mock_stun(
     udp_nat_type: crate::proto::common::NatType,
 ) -> Arc<PeerManager> {
     let peer_mgr = create_mock_peer_manager().await;
-    let mut flags = peer_mgr.get_global_ctx().get_flags();
+    let flags = peer_mgr.get_global_ctx().get_flags();
     peer_mgr.get_global_ctx().set_flags(flags);
     replace_stun_info_collector(peer_mgr.clone(), udp_nat_type);
     peer_mgr
@@ -178,22 +167,4 @@ pub async fn create_mock_peer_manager_unknown_credential(network_name: String) -
     let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
     peer_mgr.run().await.unwrap();
     peer_mgr
-}
-
-mod speed_first {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
-
-    use crate::{
-        common::PeerId,
-        peers::{
-            peer_manager::PeerManager,
-            route_trait::{NextHopPolicy, Route, RouteCostCalculatorInterface},
-            speed_probe::SpeedSample,
-        },
-        tunnel::packet_def::{PacketType, ZCPacket},
-    };
-
-    use super::{
-        connect_peer_manager, create_mock_peer_manager, wait_for_condition, wait_route_appear,
-    };
 }

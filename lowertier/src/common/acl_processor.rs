@@ -11,7 +11,7 @@ use std::{
 
 use quanta::Instant;
 
-use crate::common::{config::ConfigLoader, global_ctx::ArcGlobalCtx, token_bucket::TokenBucket};
+use crate::common::{global_ctx::ArcGlobalCtx, token_bucket::TokenBucket};
 use crate::proto::acl::*;
 use anyhow::Context as _;
 use dashmap::DashMap;

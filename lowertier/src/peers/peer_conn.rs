@@ -4879,34 +4879,20 @@ impl Drop for PeerConn {
 
 #[cfg(test)]
 pub mod tests {
-    use std::{
-        pin::Pin,
-        sync::Arc,
-        task::{Context, Poll},
-        time::Duration,
-    };
+    use std::{sync::Arc, time::Duration};
 
-    use bytes::Bytes;
-    use futures::Sink;
-
-    use prost::Message;
     use rand::rngs::OsRng;
 
     use super::*;
-    use crate::common::config::PeerConfig;
+
     use crate::common::global_ctx::GlobalCtx;
     use crate::common::global_ctx::tests::{get_mock_global_ctx, get_mock_global_ctx_with_network};
     use crate::common::new_peer_id;
-    use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
 
     use crate::peers::create_packet_recv_chan;
     use crate::peers::recv_packet_from_chan;
-    use crate::tunnel::common::tests::wait_for_condition;
-    use crate::tunnel::filter::PacketRecorderTunnelFilter;
-    use crate::tunnel::filter::tests::DropSendTunnelFilter;
+
     use crate::tunnel::ring::create_ring_tunnel_pair;
-    use crate::tunnel::{PacketBatchSink, SinkError};
-    use tokio_util::task::AbortOnDropHandle;
 
     async fn asymmetric_session_expiry_handshake(retained_by_client: bool) {
         let client_id = 1001;

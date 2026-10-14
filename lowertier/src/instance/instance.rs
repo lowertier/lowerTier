@@ -4,15 +4,17 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
-#[cfg(feature = "tun")]
+#[cfg(all(not(mobile), feature = "tun"))]
 use std::time::Duration;
 
 use anyhow::Context;
 use cidr::{IpCidr, Ipv4Inet};
 use futures::FutureExt;
+#[cfg(all(not(mobile), feature = "tun"))]
+use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify};
 #[cfg(feature = "tun")]
-use tokio::{sync::oneshot, task::JoinSet};
+use tokio::task::JoinSet;
 #[cfg(feature = "magic-dns")]
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;

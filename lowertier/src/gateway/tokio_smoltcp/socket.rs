@@ -1,6 +1,5 @@
 use super::{reactor::Reactor, socket_allocator::SocketHandle};
 use futures::future::{self, poll_fn};
-use futures::{Stream, ready};
 pub use smoltcp::socket::tcp;
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpAddress, IpEndpoint};
@@ -105,7 +104,6 @@ impl TcpStream {
         connect_result.map_err(map_err)?;
 
         let local_addr = ep2sa(&local_endpoint);
-        let peer_addr = ep2sa(&remote_endpoint);
         let tcp = TcpStream {
             handle,
             reactor,

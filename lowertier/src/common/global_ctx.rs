@@ -25,8 +25,8 @@ use super::{
 };
 use crate::{
     common::{
-        config::ProxyNetworkConfig, dataplane_telemetry::DataplaneTelemetry, shrink_dashmap,
-        stats_manager::StatsManager, token_bucket::TokenBucketManager,
+        dataplane_telemetry::DataplaneTelemetry, shrink_dashmap, stats_manager::StatsManager,
+        token_bucket::TokenBucketManager,
     },
     peers::{acl_filter::AclFilter, credential_manager::CredentialManager},
     proto::{
@@ -1699,7 +1699,7 @@ pub mod tests {
     }
 
     use crate::{
-        common::{config::TomlConfigLoader, new_peer_id, stun::MockStunInfoCollector},
+        common::{config::TomlConfigLoader, stun::MockStunInfoCollector},
         proto::common::NatType,
     };
 

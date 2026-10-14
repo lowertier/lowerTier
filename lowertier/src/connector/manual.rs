@@ -11,8 +11,7 @@ use quanta::Instant;
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 use crate::{
-    common::{PeerId, dns::socket_addrs, join_joinset_background},
-    peers::peer_conn::PeerConnId,
+    common::{dns::socket_addrs, join_joinset_background},
     proto::api::instance::{Connector, ConnectorStatus},
     tunnel::{IpVersion, TunnelConnector},
 };
@@ -431,11 +430,6 @@ impl ManualConnectorManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        peers::tests::create_mock_peer_manager,
-        set_global_var,
-        tunnel::{Tunnel, TunnelError},
-    };
 
     use super::*;
     #[test]

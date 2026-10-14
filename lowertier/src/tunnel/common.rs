@@ -1143,10 +1143,7 @@ pub mod tests {
     use crate::common::underlay_policy::UnderlayPolicy;
 
     #[cfg(test)]
-    use crate::tunnel::{
-        TunnelError,
-        packet_def::{PEER_MANAGER_HEADER_SIZE, TCP_TUNNEL_HEADER_SIZE},
-    };
+    use crate::tunnel::TunnelError;
 
     #[cfg(test)]
     #[test]

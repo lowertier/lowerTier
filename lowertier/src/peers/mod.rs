@@ -348,7 +348,7 @@ pub const PUBLIC_SERVER_HOSTNAME_PREFIX: &str = "PublicServer_";
 mod vector_channel_tests {
     use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
 
-    use super::{PeerPacketFilter, create_packet_recv_chan, recv_packet_batch_from_chan};
+    use super::create_packet_recv_chan;
 
     #[tokio::test]
     async fn full_ingress_cannot_block_nic_delivery() {

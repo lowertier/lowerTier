@@ -29,7 +29,7 @@ use netlink_packet_route::{
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
 use nix::{
     ifaddrs::getifaddrs,
-    libc::{self, Ioctl, SIOCGIFFLAGS, SIOCGIFMTU, SIOCSIFFLAGS, SIOCSIFMTU, ifreq, ioctl},
+    libc::{self, Ioctl, SIOCGIFFLAGS, SIOCSIFFLAGS, SIOCSIFMTU, ifreq, ioctl},
     net::if_::InterfaceFlags,
     sys::socket::SockaddrLike as _,
 };

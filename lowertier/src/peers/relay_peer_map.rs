@@ -4772,34 +4772,19 @@ impl RelayPeerMap {
 
 #[cfg(test)]
 mod relay_origin_proof_tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    };
+    use std::sync::{Arc, atomic::Ordering};
 
-    use quanta::Instant;
-    use tokio::sync::Notify;
     use tokio::time::Duration;
 
     use super::{
-        HANDSHAKE_CONFIRM_RETRY_MS, PendingConfirmationAck, RELAY_HANDSHAKE_ID_SIZE,
-        RELAY_NOISE_VERSION, RELAY_QUEUE_MAX_BYTES_PER_PEER, RELAY_TRANSITION_ID_SIZE,
-        RelayConfirmationIdentity, RelayPeerMap, RelaySendPhase, RelaySendState,
-        attach_relay_origin_proof, recovery_identity_from_pb, recovery_identity_matches_wire,
-        recovery_pb_from_identity, transition_id_from_wire, validate_relay_protocol_version,
-        verify_and_remove_relay_origin_proof,
+        RELAY_HANDSHAKE_ID_SIZE, RELAY_TRANSITION_ID_SIZE, RelayConfirmationIdentity, RelayPeerMap,
+        RelaySendPhase, RelaySendState, attach_relay_origin_proof,
     };
-    use crate::common::{
-        PeerId,
-        global_ctx::{NetworkIdentity, tests::get_mock_global_ctx_with_network},
-    };
+    use crate::common::global_ctx::{NetworkIdentity, tests::get_mock_global_ctx_with_network};
     use crate::peers::{
         create_packet_recv_chan,
         peer_map::PeerMap,
-        peer_session::{
-            INITIATOR_RECOVERY_LIFETIME, InitiatorTransitionIdentity, PeerSession,
-            PeerSessionAction, PeerSessionStore, SessionKey,
-        },
+        peer_session::{PeerSession, PeerSessionAction, PeerSessionStore, SessionKey},
         route_trait::NextHopPolicy,
     };
     use crate::tunnel::{

@@ -22,18 +22,18 @@ use crate::tunnel::common::{
 use crate::tunnel::{
     TunnelInfo,
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, packet_batch_limit},
-    common::{BatchTunnelWrapper, FramedReader},
+    common::BatchTunnelWrapper,
 };
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
-use futures::{Future, FutureExt, Sink, Stream, StreamExt};
+use futures::{Future, Sink, Stream, StreamExt};
 use parking_lot::{Mutex as ParkingMutex, RwLock};
 use quinn::{
     AckFrequencyConfig, AsyncUdpSocket, ClientConfig, ConnectError, Connection, ConnectionId,
-    DatagramReceiveDropPolicy, Endpoint, EndpointConfig, Incoming, RecvStream, SendStream,
-    ServerConfig, TransportConfig, VarInt,
+    DatagramReceiveDropPolicy, Endpoint, EndpointConfig, Incoming, ServerConfig, TransportConfig,
+    VarInt,
 };
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -51,14 +51,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::AsyncWriteExt as _,
     net::UdpSocket,
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 
-#[cfg(test)]
-use super::common::TcpZCPacketToBytes;
 use super::packet_def::ZCPacketType;
 use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
 
@@ -756,7 +753,8 @@ fn connect_ip_bearer(global_ctx: &ArcGlobalCtx) -> Option<String> {
 
 // region config
 mod tls {
-    use std::{path::PathBuf, sync::Arc};
+    #[cfg(test)]
+    use std::path::PathBuf;
 
     use anyhow::Context as _;
     use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -3980,7 +3978,7 @@ mod tests {
     };
     use crate::tunnel::{
         TunnelConnector,
-        common::{ZCPacketToBytes, tests::_tunnel_pingpong},
+        common::tests::_tunnel_pingpong,
         packet_def::{PacketType, ZCPacket},
     };
     use futures::{SinkExt, StreamExt};

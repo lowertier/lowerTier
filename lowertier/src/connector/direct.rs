@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::{
         Arc, Weak,
@@ -16,10 +16,9 @@ use quanta::Instant;
 use crate::{
     common::{
         PeerId, dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx,
-        stun::StunInfoCollectorTrait, underlay_policy::UnderlayPolicy,
+        underlay_policy::UnderlayPolicy,
     },
     peers::{
-        peer_conn::PeerConnId,
         peer_manager::PeerManager,
         peer_rpc::PeerRpcManager,
         peer_rpc_service::DirectConnectorManagerRpcServer,
@@ -32,7 +31,7 @@ use crate::{
         },
         rpc_types::controller::BaseController,
     },
-    tunnel::{IpVersion, TunnelConnector, TunnelError, matches_protocol},
+    tunnel::{IpVersion, matches_protocol},
     use_global_var,
 };
 

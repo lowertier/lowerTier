@@ -264,14 +264,6 @@ impl std::fmt::Debug for dyn TunnelListener {
     }
 }
 
-#[cfg(test)]
-mod packet_batch_contract_tests {
-    use super::{
-        batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-        packet_def::ZCPacket,
-    };
-}
-
 #[async_trait::async_trait]
 pub(crate) trait FromUrl {
     async fn from_url(url: url::Url, ip_version: IpVersion) -> Result<Self, TunnelError>

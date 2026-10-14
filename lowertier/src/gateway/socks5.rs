@@ -802,10 +802,10 @@ struct Socks5ServerNet {
 impl Socks5ServerNet {
     pub fn new(
         ipv4_addr: cidr::Ipv4Inet,
-        auth: Option<SimpleUserPassword>,
+        _auth: Option<SimpleUserPassword>,
         peer_manager: Weak<PeerManager>,
         packet_recv: Arc<Mutex<mpsc::Receiver<PacketBatch>>>,
-        entries: Socks5EntrySet,
+        _entries: Socks5EntrySet,
     ) -> Self {
         let mut forward_tasks = JoinSet::new();
         let mut cap = smoltcp::phy::DeviceCapabilities::default();
@@ -1312,7 +1312,7 @@ impl Socks5Server {
     pub fn new(
         global_ctx: Arc<GlobalCtx>,
         peer_manager: Arc<PeerManager>,
-        auth: Option<SimpleUserPassword>,
+        _auth: Option<SimpleUserPassword>,
     ) -> Arc<Self> {
         let (packet_sender, packet_recv) = mpsc::channel(1024);
         Arc::new(Self {

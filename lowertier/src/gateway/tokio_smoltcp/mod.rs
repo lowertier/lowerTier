@@ -14,9 +14,9 @@ use device::BufferDevice;
 use reactor::Reactor;
 pub use smoltcp;
 use smoltcp::{
-    iface::{Config, Interface, Routes},
-    time::{Duration, Instant},
-    wire::{HardwareAddress, IpAddress, IpCidr},
+    iface::{Config, Interface},
+    time::Instant,
+    wire::{IpAddress, IpCidr},
 };
 pub use socket::{TcpListener, TcpStream, UdpSocket};
 pub use socket_allocator::BufferSize;

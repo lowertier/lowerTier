@@ -1,9 +1,6 @@
 #[cfg(target_os = "linux")]
 mod credential_tests;
 
-use crate::common::PeerId;
-use crate::peers::peer_manager::PeerManager;
-
 pub fn set_env_var<K: AsRef<std::ffi::OsStr>, V: AsRef<std::ffi::OsStr>>(key: K, value: V) {
     unsafe { std::env::set_var(key, value) }
 }

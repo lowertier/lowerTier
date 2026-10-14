@@ -8,9 +8,8 @@ use crate::{
 use lowertier::common::config::{ConfigFileControl, ConfigLoader as _, TomlConfigLoader};
 use serde_json::Value;
 use std::{
-    collections::HashSet,
-    ffi::{CStr, CString, c_char, c_void},
-    sync::{Mutex, mpsc},
+    ffi::{CStr, CString, c_char},
+    sync::mpsc,
     time::Duration,
 };
 use uuid::Uuid;

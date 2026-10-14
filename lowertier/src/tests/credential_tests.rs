@@ -23,8 +23,6 @@ use crate::{
 
 use super::{add_ns_to_bridge, create_netns, del_netns, drop_insts, ping_test};
 
-use rstest::rstest;
-
 fn generate_secure_mode_config() -> SecureModeConfig {
     let private = StaticSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&private);

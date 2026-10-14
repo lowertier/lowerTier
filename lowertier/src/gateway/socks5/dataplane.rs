@@ -401,8 +401,6 @@ impl Socks5Server {
 mod tests {
     use std::time::Duration;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     use super::Socks5Server;
     use crate::peers::peer_manager::PeerManager;
     use crate::peers::tests::{connect_peer_manager, create_mock_peer_manager};

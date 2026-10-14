@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use rustls::pki_types::ServerName;
-use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use super::{TunnelError, stealth_tls};
@@ -33,7 +32,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         time::{Duration, timeout},
     };
 

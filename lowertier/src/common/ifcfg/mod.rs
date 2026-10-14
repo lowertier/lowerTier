@@ -14,6 +14,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use async_trait::async_trait;
 use cidr::{Ipv4Inet, Ipv6Inet};
+#[cfg(any(
+    all(target_os = "macos", not(feature = "macos-ne")),
+    target_os = "freebsd"
+))]
 use tokio::process::Command;
 
 use super::error::Error;

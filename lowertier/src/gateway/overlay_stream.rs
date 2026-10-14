@@ -13,7 +13,9 @@ use std::{
 };
 
 use anyhow::{Context as _, anyhow, bail};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(test)]
+use bytes::BufMut;
+use bytes::{Buf, Bytes, BytesMut};
 use dashmap::{DashMap, DashSet};
 use prost::Message;
 use tokio::{

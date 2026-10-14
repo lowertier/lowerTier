@@ -12,7 +12,7 @@ use crossbeam::atomic::AtomicCell;
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use quanta::Instant;
 use rand::seq::IteratorRandom;
-use socket2::{SockAddr, SockRef};
+use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::sync::{Mutex, broadcast};
@@ -1810,9 +1810,6 @@ impl StunInfoCollectorTrait for MockStunInfoCollector {
 
 #[cfg(test)]
 mod tests {
-    use crate::{common::underlay_policy::UnderlayPolicy, tunnel::TunnelListener};
-    use tokio::time::{sleep, timeout};
-    use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
 
