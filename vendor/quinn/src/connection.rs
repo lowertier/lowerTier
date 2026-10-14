@@ -7,10 +7,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
-    task::{ready, Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::Bytes;
@@ -18,21 +18,23 @@ use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::sync::{
+    Notify,
     futures::{Notified, OwnedNotified},
-    mpsc, oneshot, Notify,
+    mpsc, oneshot,
 };
-use tracing::{debug_span, Instrument, Span};
+use tracing::{Instrument, Span, debug_span};
 
 use crate::{
+    ConnectionEvent, Duration, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPoller},
     send_stream::SendStream,
-    udp_transmit, ConnectionEvent, Duration, Instant, VarInt,
+    udp_transmit,
 };
 use proto::{
-    congestion::Controller, ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent,
-    Side, StreamEvent, StreamId,
+    ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
+    StreamId, congestion::Controller,
 };
 
 /// In-progress connection attempt future
@@ -1077,7 +1079,7 @@ impl Future for SendDatagrams<'_> {
         if queued {
             state.wake();
         }
-        if this.data.is_empty() {
+        if this.data.is_empty() && state.inner.datagrams().send_queue_drained() {
             return Poll::Ready((Ok(()), std::mem::take(this.data)));
         }
         // Keep the connection locked until the waiter is registered. Otherwise the
@@ -1682,7 +1684,7 @@ fn transmit_segment_capacity(platform_capacity: usize) -> usize {
 
 #[cfg(test)]
 mod transmit_segment_tests {
-    use super::{transmit_segment_capacity, MAX_TRANSMIT_SEGMENTS};
+    use super::{MAX_TRANSMIT_SEGMENTS, transmit_segment_capacity};
 
     #[test]
     fn respects_transmit_segment_limit() {

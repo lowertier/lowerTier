@@ -61,6 +61,7 @@ pub struct TransportConfig {
     pub(crate) datagram_receive_buffer_size: Option<usize>,
     pub(crate) datagram_receive_drop_policy: DatagramReceiveDropPolicy,
     pub(crate) datagram_send_buffer_size: usize,
+    pub(crate) datagram_send_queue_time: Option<Duration>,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
 
@@ -337,6 +338,13 @@ impl TransportConfig {
         self
     }
 
+    /// Bound unsent DATAGRAM bytes by the path rate and this queue duration.
+    /// Three 64-datagram batches form the scheduling floor. The memory limit still applies.
+    pub fn datagram_send_queue_time(&mut self, value: Option<Duration>) -> &mut Self {
+        self.datagram_send_queue_time = value;
+        self
+    }
+
     /// Whether to force every packet number to be used
     ///
     /// By default, packet numbers are occasionally skipped to ensure peers aren't ACKing packets
@@ -425,6 +433,7 @@ impl Default for TransportConfig {
             datagram_receive_buffer_size: Some(STREAM_RWND as usize),
             datagram_receive_drop_policy: DatagramReceiveDropPolicy::Oldest,
             datagram_send_buffer_size: 1024 * 1024,
+            datagram_send_queue_time: None,
             #[cfg(test)]
             deterministic_packet_numbers: false,
 
@@ -464,6 +473,7 @@ impl fmt::Debug for TransportConfig {
             datagram_receive_buffer_size,
             datagram_receive_drop_policy,
             datagram_send_buffer_size,
+            datagram_send_queue_time,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
             congestion_controller_factory: _,
@@ -499,6 +509,7 @@ impl fmt::Debug for TransportConfig {
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_receive_drop_policy", datagram_receive_drop_policy)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
+            .field("datagram_send_queue_time", datagram_send_queue_time)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

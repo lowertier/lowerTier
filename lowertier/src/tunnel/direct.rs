@@ -22,6 +22,8 @@ const DIRECT_CONTROL_PACKET_BUDGET: usize = MAX_PACKET_BATCH_SIZE;
 const DIRECT_DATA_PACKET_BUDGET: usize = MAX_PACKET_BATCH_SIZE * SEND_PIPELINE_SLOT_COUNT;
 const DIRECT_CONTROL_BYTE_BUDGET: usize = 16 * 1024;
 const DIRECT_DATA_BYTE_BUDGET: usize = 128 * 1024 * SEND_PIPELINE_SLOT_COUNT;
+const DIRECT_QUEUE_TARGET: Duration = Duration::from_millis(4);
+const DIRECT_QUEUE_FLOOR: usize = 3 * 128 * 1024;
 const DIRECT_PACKET_OVERHEAD: usize = std::mem::size_of::<ZCPacket>();
 const MAX_CONSECUTIVE_CONTROL_SENDS: usize = 8;
 // A scalar producer can fill every packet position in the stable job window.
@@ -127,6 +129,7 @@ struct AdmissionBudget {
     usage: parking_lot::Mutex<AdmissionUsage>,
     wake: Notify,
     process_memory: Option<Arc<ProcessMemoryGovernor>>,
+    timed_data: bool,
 }
 
 #[derive(Default)]
@@ -134,6 +137,8 @@ struct AdmissionUsage {
     packets: usize,
     bytes: usize,
     runs: usize,
+    byte_rate: f64,
+    drain_started: Option<Instant>,
 }
 
 struct AdmissionPermit {
@@ -222,6 +227,7 @@ impl AdmissionBudget {
             usage: parking_lot::Mutex::new(AdmissionUsage::default()),
             wake: Notify::new(),
             process_memory,
+            timed_data: run_capacity.is_some(),
         }
     }
 
@@ -241,8 +247,18 @@ impl AdmissionBudget {
         let bytes = usage.bytes.checked_add(byte_count)?;
         let run_count = usize::from(self.run_capacity.is_some());
         let runs = usage.runs.checked_add(run_count)?;
+        let byte_limit = if self.timed_data {
+            (usage.byte_rate * DIRECT_QUEUE_TARGET.as_secs_f64()) as usize
+        } else {
+            self.byte_capacity
+        };
+        // A single legal batch must fit even when it exceeds the scheduling floor.
+        let byte_limit = byte_limit
+            .max(DIRECT_QUEUE_FLOOR)
+            .max(byte_count)
+            .min(self.byte_capacity);
         if packets > self.packet_capacity
-            || bytes > self.byte_capacity
+            || bytes > byte_limit
             || self.run_capacity.is_some_and(|limit| runs > limit)
         {
             return None;
@@ -254,11 +270,12 @@ impl AdmissionBudget {
         } else {
             None
         };
-        *usage = AdmissionUsage {
-            packets,
-            bytes,
-            runs,
-        };
+        if usage.bytes == 0 {
+            usage.drain_started = Some(Instant::now());
+        }
+        usage.packets = packets;
+        usage.bytes = bytes;
+        usage.runs = runs;
         Some(AdmissionPermit {
             budget: self.clone(),
             packet_count,
@@ -266,6 +283,25 @@ impl AdmissionBudget {
             run_count,
             _process_memory: process_memory,
         })
+    }
+
+    fn record_drain(&self, bytes: usize) {
+        if !self.timed_data || bytes == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let mut usage = self.usage.lock();
+        if let Some(started) = usage.drain_started.replace(now) {
+            let elapsed = now.duration_since(started).as_secs_f64();
+            if elapsed > 0.0 {
+                let rate = bytes as f64 / elapsed;
+                usage.byte_rate = if usage.byte_rate == 0.0 {
+                    rate
+                } else {
+                    (usage.byte_rate + rate) * 0.5
+                };
+            }
+        }
     }
 }
 
@@ -603,7 +639,17 @@ async fn run_direct_sink_owner(
         }
 
         match run_until(poll_fn(|cx| sink.as_mut().poll_flush(cx)), flush_deadline).await {
-            Ok(()) => started_ownerships.clear(),
+            Ok(()) => {
+                if let Some(state) = state.upgrade() {
+                    let bytes = started_ownerships
+                        .iter()
+                        .filter(|permit| Arc::ptr_eq(&permit.budget, &state.ownership_budget))
+                        .map(|permit| permit.byte_count)
+                        .sum();
+                    state.ownership_budget.record_drain(bytes);
+                }
+                started_ownerships.clear();
+            }
             Err(error) => {
                 let message = format!("direct tunnel sink failed: {error}");
                 started_ownerships.clear();

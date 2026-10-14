@@ -16,6 +16,38 @@ pub struct Datagrams<'a> {
 }
 
 impl Datagrams<'_> {
+    fn send_buffer_limit(&self) -> usize {
+        let hard_limit = self.conn.config.datagram_send_buffer_size;
+        let Some(target) = self.conn.config.datagram_send_queue_time else {
+            return hard_limit;
+        };
+        let rate = self
+            .conn
+            .path
+            .congestion
+            .metrics()
+            .pacing_rate
+            .map(|bits| bits as f64 / 8.0)
+            .unwrap_or_else(|| {
+                self.conn.path.congestion.window() as f64
+                    / self.conn.path.rtt.get().as_secs_f64().max(0.001)
+            });
+        ((rate * target.as_secs_f64()) as usize)
+            .max(3 * 64 * usize::from(self.conn.path.current_mtu()))
+            .min(hard_limit)
+    }
+
+    /// Wait for actual FIFO drain when queue-time admission is enabled.
+    pub fn send_queue_drained(&mut self) -> bool {
+        if self.conn.config.datagram_send_queue_time.is_none()
+            || self.conn.datagrams.outgoing_total == 0
+        {
+            true
+        } else {
+            self.conn.datagrams.send_blocked = true;
+            false
+        }
+    }
     /// Queue an unreliable, unordered datagram for immediate transmission
     ///
     /// If `drop` is true, previously queued datagrams which are still unsent may be discarded to
@@ -35,8 +67,9 @@ impl Datagrams<'_> {
         if data.len() > max {
             return Err(SendDatagramError::TooLarge);
         }
+        let limit = self.send_buffer_limit();
         if drop {
-            while self.conn.datagrams.outgoing_total > self.conn.config.datagram_send_buffer_size {
+            while self.conn.datagrams.outgoing_total > limit {
                 let prev = self
                     .conn
                     .datagrams
@@ -46,9 +79,7 @@ impl Datagrams<'_> {
                 trace!(len = prev.data.len(), "dropping outgoing datagram");
                 self.conn.datagrams.outgoing_total -= prev.data.len();
             }
-        } else if self.conn.datagrams.outgoing_total + data.len()
-            > self.conn.config.datagram_send_buffer_size
-        {
+        } else if self.conn.datagrams.outgoing_total + data.len() > limit {
             self.conn.datagrams.send_blocked = true;
             return Err(SendDatagramError::Blocked(data));
         }
@@ -92,9 +123,7 @@ impl Datagrams<'_> {
     /// When greater than zero, [`send`](Self::send)ing a datagram of at most this size is
     /// guaranteed not to cause older datagrams to be dropped.
     pub fn send_buffer_space(&self) -> usize {
-        self.conn
-            .config
-            .datagram_send_buffer_size
+        self.send_buffer_limit()
             .saturating_sub(self.conn.datagrams.outgoing_total)
     }
 }
