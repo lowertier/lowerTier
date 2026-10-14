@@ -55,11 +55,53 @@ struct PathOwnership {
 
 #[derive(Default)]
 struct PathConnections {
-    entries: std::sync::Mutex<HashMap<SocketAddr, DiscoveryConnection>>,
-    hints: std::sync::Mutex<HashMap<SocketAddr, Arc<DiscoveryPeerHint>>>,
+    candidates: std::sync::Mutex<HashMap<SocketAddr, CandidateState>>,
     ownership: std::sync::Mutex<PathOwnership>,
     admission: tokio::sync::Mutex<()>,
     changed: tokio::sync::Notify,
+}
+
+struct CandidateState {
+    expires: Option<Instant>,
+    retry_at: Instant,
+    attempted: Option<Instant>,
+    active_generation: Option<u64>,
+    upgrade: Option<oneshot::Sender<u32>>,
+    probe: Option<([u8; 16], Instant)>,
+    responded: Option<Instant>,
+    connection: Option<DiscoveryConnection>,
+    hint: Arc<DiscoveryPeerHint>,
+}
+
+impl CandidateState {
+    fn new() -> Self {
+        Self {
+            expires: None,
+            retry_at: Instant::now(),
+            attempted: None,
+            active_generation: None,
+            upgrade: None,
+            probe: None,
+            responded: None,
+            connection: None,
+            hint: Arc::default(),
+        }
+    }
+
+    fn retry_now(&mut self) {
+        self.retry_at = Instant::now();
+        if self.active_generation.is_none() {
+            self.attempted = None;
+            self.probe = None;
+            self.upgrade = None;
+        }
+    }
+
+    fn live_peer(&self, peers: &PeerManager) -> bool {
+        self.hint
+            .recent_peer_id(Duration::from_secs(30))
+            .is_some_and(|peer| peers.has_live_peer_connection(peer))
+    }
 }
 
 struct PathLifetime {
@@ -89,34 +131,49 @@ impl Drop for PathLifetime {
 }
 
 impl PathConnections {
-    fn hint(&self, address: SocketAddr) -> Arc<DiscoveryPeerHint> {
-        let mut hints = self.hints.lock().unwrap();
-        if let Some(hint) = hints.get(&address) {
-            return hint.clone();
-        }
-        if hints.len() >= 64 {
-            if let Some(address) = hints
+    fn entry(
+        candidates: &mut HashMap<SocketAddr, CandidateState>,
+        address: SocketAddr,
+    ) -> Option<&mut CandidateState> {
+        if !candidates.contains_key(&address) && candidates.len() >= 64 {
+            let idle = candidates
                 .iter()
-                .find_map(|(address, hint)| (Arc::strong_count(hint) == 1).then_some(*address))
-            {
-                hints.remove(&address);
+                .filter(|(_, state)| {
+                    state.active_generation.is_none()
+                        && state.connection.is_none()
+                        && Arc::strong_count(&state.hint) == 1
+                        && state
+                            .probe
+                            .is_none_or(|(_, sent)| sent.elapsed() >= Duration::from_secs(15))
+                })
+                .min_by_key(|(_, state)| state.retry_at)
+                .map(|(address, _)| *address);
+            if let Some(idle) = idle {
+                candidates.remove(&idle);
+            } else {
+                return None;
             }
         }
-        let hint = Arc::new(DiscoveryPeerHint::default());
-        if hints.len() < 64 {
-            hints.insert(address, hint.clone());
-        }
-        hint
+        Some(
+            candidates
+                .entry(address)
+                .or_insert_with(CandidateState::new),
+        )
+    }
+
+    fn hint(&self, address: SocketAddr) -> Arc<DiscoveryPeerHint> {
+        Self::entry(&mut self.candidates.lock().unwrap(), address)
+            .map(|state| state.hint.clone())
+            .unwrap_or_default()
     }
 
     fn known_live_peer(&self, peers: &PeerManager, address: SocketAddr) -> bool {
         // Recheck old endpoint identities. A different node can reuse the same endpoint.
-        self.hints
+        self.candidates
             .lock()
             .unwrap()
             .get(&address)
-            .and_then(|hint| hint.recent_peer_id(Duration::from_secs(30)))
-            .is_some_and(|peer| peers.has_live_peer_connection(peer))
+            .is_some_and(|state| state.live_peer(peers))
     }
 
     fn publish_listener(
@@ -134,11 +191,11 @@ impl PathConnections {
     }
 
     fn live(&self, peers: &PeerManager, address: SocketAddr) -> Option<DiscoveryConnection> {
-        self.entries
+        self.candidates
             .lock()
             .unwrap()
             .get(&address)
-            .copied()
+            .and_then(|state| state.connection)
             .filter(|connection| connection_alive(peers, *connection))
     }
 
@@ -174,16 +231,17 @@ impl PathConnections {
             return connection;
         }
         let existing = self
-            .entries
+            .candidates
             .lock()
             .unwrap()
             .iter()
-            .find_map(|(remote, old)| {
+            .find_map(|(remote, state)| {
+                let old = state.connection?;
                 (remote.ip() == address.ip()
                     && old.0 == connection.0
-                    && *old != connection
-                    && connection_alive(peers, *old))
-                .then_some(*old)
+                    && old != connection
+                    && connection_alive(peers, old))
+                .then_some(old)
             });
         let mut selected = connection;
         if let Some(existing) = existing {
@@ -202,16 +260,15 @@ impl PathConnections {
                 connection
             };
             let _ = peers.close_peer_conn(discarded.0, &discarded.1).await;
-            for entry in self.entries.lock().unwrap().values_mut() {
-                if *entry == discarded {
-                    *entry = selected;
+            for state in self.candidates.lock().unwrap().values_mut() {
+                if state.connection == Some(discarded) {
+                    state.connection = Some(selected);
                 }
             }
         }
-        let mut entries = self.entries.lock().unwrap();
-        entries.retain(|_, connection| connection_alive(peers, *connection));
-        if entries.len() < 64 || entries.contains_key(&address) {
-            entries.insert(address, selected);
+        let mut entries = self.candidates.lock().unwrap();
+        if let Some(state) = Self::entry(&mut entries, address) {
+            state.connection = Some(selected);
         }
         drop(entries);
         self.changed.notify_waiters();
@@ -682,7 +739,6 @@ async fn run_path(
         endpoint,
         tcp,
         candidate_rx,
-        candidate_tx,
         key,
         connections,
     ));
@@ -957,7 +1013,6 @@ mod tests {
             Some(endpoint),
             None,
             receiver,
-            candidates.clone(),
             key,
             Arc::default(),
         )));
@@ -1078,7 +1133,6 @@ mod tests {
             Some(endpoint),
             None,
             receiver,
-            candidates.clone(),
             key,
             Arc::default(),
         )));
@@ -1243,7 +1297,6 @@ mod tests {
                 Some(endpoint),
                 None,
                 receiver,
-                candidates.clone(),
                 key,
                 Arc::default(),
             ))));
@@ -1338,7 +1391,6 @@ mod tests {
                 Some(endpoint),
                 None,
                 receiver,
-                candidates.clone(),
                 key,
                 Arc::default(),
             ))));
@@ -1424,7 +1476,6 @@ mod tests {
             Some(client_endpoint),
             None,
             rx,
-            tx.clone(),
             key,
             Arc::default(),
         )));
@@ -1617,143 +1668,85 @@ async fn candidate_loop(
     endpoint: Option<quinn::Endpoint>,
     tcp: Option<Arc<TcpBootstrap>>,
     mut candidates: mpsc::Receiver<Candidate>,
-    retry_sender: mpsc::Sender<Candidate>,
     key: [u8; 32],
     connections: Arc<PathConnections>,
 ) -> Result<()> {
     let mut incoming = packets.subscribe();
     let mut attempts = JoinSet::new();
-    let mut active = HashMap::new();
     let mut released = peers.get_peer_map().connection_release_generation();
     let mut punch_tasks = JoinSet::new();
     let (fallback_tx, mut fallbacks) = mpsc::channel(64);
-    let mut recent = HashMap::<SocketAddr, (Instant, Option<oneshot::Sender<u32>>)>::new();
-    let mut probes = HashMap::<SocketAddr, ([u8; 16], Instant)>::new();
-    let mut responses = HashMap::<SocketAddr, Instant>::new();
-    let mut cached_candidates = HashMap::<SocketAddr, (Instant, Instant)>::new();
-    let mut connected = HashMap::<SocketAddr, DiscoveryConnection>::new();
-    let (success_tx, mut success_rx) = mpsc::channel::<(SocketAddr, DiscoveryConnection)>(16);
     let mut retry = tokio::time::interval(Duration::from_secs(1));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let my_id = peers.my_peer_id();
     let local_ip = udp.local_addr()?.ip();
     loop {
         let mut connect = None;
+        let mut candidate = None;
         tokio::select! {
             Some(result) = attempts.join_next(), if !attempts.is_empty() => {
                 if let Ok(address) = result {
-                    if active.remove(&address).is_some_and(|generation| generation != peers.get_peer_map().connection_release_generation()) {
-                        recent.remove(&address);
-                        probes.remove(&address);
-                        if let Some((attempt, _)) = cached_candidates.get_mut(&address) {
-                            *attempt = Instant::now() - Duration::from_secs(30);
+                    if let Some(state) = connections.candidates.lock().unwrap().get_mut(&address) {
+                        if state.active_generation.take().is_some_and(|generation| generation != peers.get_peer_map().connection_release_generation()) {
+                            state.retry_now();
                         }
                     }
                 }
             }
             Some(_) = punch_tasks.join_next(), if !punch_tasks.is_empty() => {}
-            Some((address, peer)) = success_rx.recv() => {
-                if connected.len() < 64 { connected.insert(address, peer); }
-            }
             Some(address) = fallbacks.recv(), if attempts.len() < 8 => {
                 // Other healthy peers do not establish reachability to this candidate.
-                if connections.live(&peers, address).is_none() && !active.contains_key(&address) {
+                if connections.live(&peers, address).is_none() && connections.candidates.lock().unwrap()
+                    .get(&address).is_some_and(|state| state.active_generation.is_none()) {
                     connect = Some((address, None));
                 }
             }
             _ = retry.tick() => {
                 let generation = peers.get_peer_map().connection_release_generation();
-                if generation != released {
-                    released = generation;
-                    // Permit destruction follows connection removal. Retry only completed attempts after actual release.
-                    recent.retain(|address, _| {
-                        if active.contains_key(address) { return true; }
-                        probes.remove(address);
-                        if let Some((attempt, _)) = cached_candidates.get_mut(address) {
-                            *attempt = Instant::now() - Duration::from_secs(30);
-                        }
-                        false
-                    });
+                let mut entries = connections.candidates.lock().unwrap();
+                for state in entries.values_mut() {
+                    let lost = state.connection.is_some_and(|connection| !connection_alive(&peers, connection));
+                    if lost { state.connection = None; }
+                    if lost || (generation != released && state.active_generation.is_none() && state.attempted.is_some()) {
+                        state.retry_now();
+                    }
+                    if state.probe.is_some_and(|(_, sent)| sent.elapsed() >= Duration::from_secs(15)) { state.probe = None; }
+                    if state.expires.is_some_and(|expires| expires <= Instant::now()) { state.expires = None; }
                 }
-                for (&address, &connection) in connections.entries.lock().unwrap().iter() {
-                    if connection_alive(&peers, connection) { connected.insert(address, connection); }
-                }
-                connected.retain(|address, connection| {
-                    if connection_alive(&peers, *connection) { return true; }
-                    if !active.contains_key(address) {
-                        recent.remove(address);
-                        probes.remove(address);
-                    }
-                    if let Some((attempt, _)) = cached_candidates.get_mut(address) {
-                        *attempt = Instant::now() - Duration::from_secs(30);
-                    }
-                    false
-                });
-                cached_candidates.retain(|_, (_, expires)| *expires > Instant::now());
-                connections.hints.lock().unwrap().retain(|address, hint| Arc::strong_count(hint) > 1 || cached_candidates.contains_key(address) || connected.contains_key(address));
-                if let Some((&address, (_, expires))) = cached_candidates.iter()
-                    .filter(|(address, (time, _))| !connected.contains_key(*address) && !active.contains_key(*address)
-                        && !connections.known_live_peer(&peers, **address)
-                        && time.elapsed() >= Duration::from_secs(30)
-                        && recent.get(*address).is_none_or(|(attempt, _)| attempt.elapsed() >= Duration::from_secs(30)))
-                    .min_by_key(|(_, (time, _))| *time) {
-                    let expires = *expires;
-                    if retry_sender.try_send(Candidate { address, expires }).is_ok() {
-                        cached_candidates.insert(address, (Instant::now(), expires));
-                    }
+                released = generation;
+                entries.retain(|_, state| state.expires.is_some() || state.connection.is_some()
+                    || state.active_generation.is_some() || state.probe.is_some()
+                    || state.attempted.is_some_and(|time| time.elapsed() < Duration::from_secs(30))
+                    || state.responded.is_some_and(|time| time.elapsed() < Duration::from_secs(1))
+                    || Arc::strong_count(&state.hint) > 1);
+                if attempts.len() < 8 && punch_tasks.len() < 16 {
+                    candidate = entries.iter()
+                        .filter(|(_, state)| state.expires.is_some() && state.connection.is_none()
+                            && state.active_generation.is_none() && !state.live_peer(&peers)
+                            && state.retry_at <= Instant::now())
+                        .min_by_key(|(_, state)| state.retry_at)
+                        .map(|(address, state)| Candidate { address: *address, expires: state.expires.unwrap() });
                 }
             }
             Some(Candidate { address, expires }) = candidates.recv(), if attempts.len() < 8 && punch_tasks.len() < 16 => {
-                if expires <= Instant::now() { continue; }
-                if let Some(tcp) = tcp.as_ref() { tcp.register_candidate(address); }
-                if cached_candidates.len() >= 64 && !cached_candidates.contains_key(&address) {
-                    if let Some((&oldest, _)) = cached_candidates.iter().min_by_key(|(_, (time, _))| *time) {
-                        cached_candidates.remove(&oldest);
-                    }
-                }
-                // Repeated announcements and suppressed retries must not extend
-                // the retry deadline of a candidate that has already been seen.
-                cached_candidates.entry(address)
-                    .and_modify(|(_, old_expiry)| *old_expiry = (*old_expiry).max(expires))
-                    .or_insert_with(|| (Instant::now(), expires));
-                if connections.known_live_peer(&peers, address) { continue; }
-                if connections.live(&peers, address).is_some() || active.contains_key(&address) { continue; }
-                recent.retain(|address, (time, _)| active.contains_key(address) || time.elapsed() < Duration::from_secs(30));
-                if recent.contains_key(&address) { continue; }
-                if endpoint.is_some() {
-                    probes.retain(|_, (_, time)| time.elapsed() < Duration::from_secs(15));
-                    // Duplicate tracker results must retain the challenge accepted by the responder.
-                    if probes.contains_key(&address) || probes.len() >= 64 { continue; }
-                    cached_candidates.get_mut(&address).unwrap().0 = Instant::now();
-                    let nonce = rand::random();
-                    probes.insert(address, (nonce, Instant::now()));
-                    let udp = udp.clone();
-                    let fallback = fallback_tx.clone();
-                    punch_tasks.spawn(async move {
-                        let start = Instant::now();
-                        for millis in [0, 50, 150, 350, 750] {
-                            tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
-                            let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), false), address).await;
-                        }
-                        // A reachable peer can accept QUIC even when the path drops custom probes.
-                        let _ = fallback.try_send(address);
-                    });
-                } else {
-                    cached_candidates.get_mut(&address).unwrap().0 = Instant::now();
-                    connect = Some((address, None));
-                }
+                candidate = Some(Candidate { address, expires });
             }
             packet = incoming.recv(), if endpoint.is_some() => {
                 let packet = match packet { Ok(packet) => packet, Err(broadcast::error::RecvError::Lagged(_)) => continue, Err(error) => return Err(error.into()) };
                 if ensure_remote_allowed(&ctx.get_underlay_policy(), packet.addr).is_err() { continue; }
                 let Ok((peer, nonce, reply)) = wire::read_punch(&packet.data, &key, unix_seconds()) else { continue; };
                 if peer == my_id { continue; }
-                if reply {
-                    if !probes.get(&packet.addr).is_some_and(|(sent, time)| *sent == nonce && time.elapsed() < Duration::from_secs(15)) { continue; }
-                } else {
-                    responses.retain(|_, time| time.elapsed() < Duration::from_secs(1));
-                    if responses.len() >= 64 || responses.contains_key(&packet.addr) { continue; }
-                    responses.insert(packet.addr, Instant::now());
+                {
+                    let mut entries = connections.candidates.lock().unwrap();
+                    let Some(state) = PathConnections::entry(&mut entries, packet.addr) else { continue; };
+                    if reply {
+                        if !state.probe.is_some_and(|(sent, time)| sent == nonce && time.elapsed() < Duration::from_secs(15)) { continue; }
+                    } else {
+                        if state.responded.is_some_and(|time| time.elapsed() < Duration::from_secs(1)) { continue; }
+                        state.responded = Some(Instant::now());
+                    }
+                }
+                if !reply {
                     let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), true), packet.addr).await;
                 }
                 // Retain the authenticated identity for session recovery on every interface.
@@ -1764,42 +1757,100 @@ async fn candidate_loop(
                 }
             }
         }
+        if let Some(Candidate { address, expires }) = candidate {
+            if expires <= Instant::now() {
+                continue;
+            }
+            if let Some(tcp) = tcp.as_ref() {
+                tcp.register_candidate(address);
+            }
+            let mut entries = connections.candidates.lock().unwrap();
+            let Some(state) = PathConnections::entry(&mut entries, address) else {
+                continue;
+            };
+            state.expires = Some(state.expires.unwrap_or(expires).max(expires));
+            if state.live_peer(&peers)
+                || state
+                    .connection
+                    .is_some_and(|connection| connection_alive(&peers, connection))
+                || state.active_generation.is_some()
+                || state
+                    .attempted
+                    .is_some_and(|time| time.elapsed() < Duration::from_secs(30))
+            {
+                continue;
+            }
+            if endpoint.is_some() {
+                if state
+                    .probe
+                    .is_some_and(|(_, time)| time.elapsed() < Duration::from_secs(15))
+                {
+                    continue;
+                }
+                let nonce = rand::random();
+                state.probe = Some((nonce, Instant::now()));
+                state.retry_at = Instant::now() + Duration::from_secs(30);
+                let udp = udp.clone();
+                let fallback = fallback_tx.clone();
+                punch_tasks.spawn(async move {
+                    let start = Instant::now();
+                    for millis in [0, 50, 150, 350, 750] {
+                        tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+                        let _ = udp
+                            .send_to(
+                                &wire::punch(&key, my_id, nonce, unix_seconds(), false),
+                                address,
+                            )
+                            .await;
+                    }
+                    let _ = fallback.try_send(address);
+                });
+            } else {
+                state.retry_at = Instant::now() + Duration::from_secs(30);
+                connect = Some((address, None));
+            }
+        }
         let Some((address, expected)) = connect else {
             continue;
         };
         if connections.known_live_peer(&peers, address) {
             continue;
         }
-        recent.retain(|address, (time, _)| {
-            active.contains_key(address) || time.elapsed() < Duration::from_secs(30)
-        });
-        if let Some((_, upgrade)) = recent.get_mut(&address) {
-            if let Some(peer) = expected {
-                if let Some(upgrade) = upgrade.take() {
-                    // A verified probe can recover the mapped flow after a fresh-port fallback starts.
-                    let _ = upgrade.send(peer);
+        let mut upgrade_rx = {
+            let mut entries = connections.candidates.lock().unwrap();
+            let Some(state) = PathConnections::entry(&mut entries, address) else {
+                continue;
+            };
+            if state.active_generation.is_some()
+                || state
+                    .attempted
+                    .is_some_and(|time| time.elapsed() < Duration::from_secs(30))
+            {
+                if let Some(peer) = expected {
+                    if let Some(upgrade) = state.upgrade.take() {
+                        let _ = upgrade.send(peer);
+                    }
                 }
+                continue;
             }
-            continue;
-        }
-        if active.contains_key(&address) || attempts.len() >= 8 || recent.len() >= 64 {
-            continue;
-        }
-        let (upgrade_tx, mut upgrade_rx) = if endpoint.is_some() && expected.is_none() {
-            let (sender, receiver) = oneshot::channel();
-            (Some(sender), Some(receiver))
-        } else {
-            (None, None)
+            if attempts.len() >= 8 {
+                continue;
+            }
+            let upgrade = if endpoint.is_some() && expected.is_none() {
+                let (sender, receiver) = oneshot::channel();
+                state.upgrade = Some(sender);
+                Some(receiver)
+            } else {
+                None
+            };
+            state.attempted = Some(Instant::now());
+            state.retry_at = Instant::now() + Duration::from_secs(30);
+            state.active_generation = Some(peers.get_peer_map().connection_release_generation());
+            upgrade
         };
-        recent.insert(address, (Instant::now(), upgrade_tx));
         let (ctx, peers, endpoint, tcp) =
             (ctx.clone(), peers.clone(), endpoint.clone(), tcp.clone());
-        let success_tx = success_tx.clone();
         let connections = connections.clone();
-        active.insert(
-            address,
-            peers.get_peer_map().connection_release_generation(),
-        );
         attempts.spawn(async move {
             let mut expected = expected;
             let _permit = if endpoint.is_some() {
@@ -1816,8 +1867,7 @@ async fn candidate_loop(
             } else {
                 None
             };
-            if let Some(connection) = connections.live(&peers, address) {
-                let _ = success_tx.try_send((address, connection));
+            if connections.live(&peers, address).is_some() {
                 return address;
             }
             if connections.known_live_peer(&peers, address) {
@@ -1889,8 +1939,7 @@ async fn candidate_loop(
                     )
                     .await?
                 };
-                let peer = connections.record(&peers, address, peer).await;
-                let _ = success_tx.try_send((address, peer));
+                connections.record(&peers, address, peer).await;
                 Ok::<(), anyhow::Error>(())
             })
             .await;
