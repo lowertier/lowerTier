@@ -1812,6 +1812,12 @@ pub mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
+    fn configuration_cases_encryption() {
+        encryption_default_is_chacha20_poly1305();
+        encryption_accepts_only_the_standard_chacha_name();
+        encryption_rejects_xor_as_an_algorithm();
+    }
+
     fn encryption_default_is_chacha20_poly1305() {
         assert_eq!(
             EncryptionAlgorithm::default().to_string(),
@@ -1819,7 +1825,6 @@ pub mod tests {
         );
     }
 
-    #[test]
     fn encryption_accepts_only_the_standard_chacha_name() {
         let standard: EncryptionAlgorithm = "chacha20-poly1305".parse().unwrap();
 
@@ -1827,12 +1832,20 @@ pub mod tests {
         assert!("chacha20".parse::<EncryptionAlgorithm>().is_err());
     }
 
-    #[test]
     fn encryption_rejects_xor_as_an_algorithm() {
         assert!("xor".parse::<EncryptionAlgorithm>().is_err());
     }
 
     #[test]
+    fn configuration_cases_errors() {
+        invalid_toml_error_includes_location_and_source_line();
+        invalid_file_toml_error_includes_config_source();
+        invalid_stdin_toml_error_includes_config_source_in_display();
+        invalid_toml_error_handles_non_ascii_before_error();
+        invalid_toml_error_handles_non_ascii_before_error_on_same_line();
+        invalid_file_flags_error_includes_config_source_in_display();
+    }
+
     fn invalid_toml_error_includes_location_and_source_line() {
         let error = TomlConfigLoader::new_from_str("dhcp = \"yes\"").unwrap_err();
         let display = error.to_string();
@@ -1850,7 +1863,6 @@ pub mod tests {
         );
     }
 
-    #[test]
     fn invalid_file_toml_error_includes_config_source() {
         let mut config_file = NamedTempFile::new().unwrap();
         writeln!(config_file, "dhcp = \"yes\"").unwrap();
@@ -1866,7 +1878,6 @@ pub mod tests {
         assert!(!error.contains("<unknown>"));
     }
 
-    #[test]
     fn invalid_stdin_toml_error_includes_config_source_in_display() {
         let error = TomlConfigLoader::new_from_str_with_source("stdin", "dhcp = \"yes\"")
             .unwrap_err()
@@ -1880,7 +1891,6 @@ pub mod tests {
         assert!(!error.contains("<unknown>"));
     }
 
-    #[test]
     fn invalid_toml_error_handles_non_ascii_before_error() {
         let error = TomlConfigLoader::new_from_str("hostname = \"节点\"\ndhcp = \"yes\"")
             .unwrap_err()
@@ -1891,7 +1901,6 @@ pub mod tests {
         assert!(error.contains("invalid type: string"));
     }
 
-    #[test]
     fn invalid_toml_error_handles_non_ascii_before_error_on_same_line() {
         let error = TomlConfigLoader::new_from_str("hostname = \"节点\" dhcp = \"yes\"")
             .unwrap_err()
@@ -1904,7 +1913,6 @@ pub mod tests {
         assert!(!error.contains("<unknown>"));
     }
 
-    #[test]
     fn invalid_file_flags_error_includes_config_source_in_display() {
         let mut config_file = NamedTempFile::new().unwrap();
         writeln!(config_file, "[flags]").unwrap();
@@ -1923,6 +1931,24 @@ pub mod tests {
     }
 
     #[test]
+    fn configuration_cases_flags() {
+        socket_mark_config_file_roundtrip_none_some_and_zero();
+        underlay_and_quic_flags_have_safe_defaults();
+        speed_first_requires_a_positive_probe_budget();
+        quic_decoy_requires_and_accepts_complete_routing_configuration();
+        rejects_an_unknown_encryption_algorithm();
+        speed_probes_require_a_positive_interval();
+        speed_probe_interval_has_a_protocol_bound();
+        automatic_adapter_uses_the_platform_capability();
+        obsolete_adapter_fields_are_removed_during_config_load();
+        obsolete_adapter_fields_are_removed_from_runtime_updates();
+        underlay_and_quic_flags_roundtrip_through_toml();
+        rejects_invalid_l2_flags();
+        dump_preserves_flags_that_differ_from_lowertier_defaults();
+        test_network_config_source_user_is_implicit();
+        test_ipv6_public_addr_config_roundtrip();
+    }
+
     fn socket_mark_config_file_roundtrip_none_some_and_zero() {
         // Omitting the flag leaves socket_mark unset (None) -> SO_MARK untouched.
         let cfg = TomlConfigLoader::new_from_str(
@@ -1973,7 +1999,6 @@ socket_mark = 66
         assert_eq!(cfg.get_flags().socket_mark, None);
     }
 
-    #[test]
     #[allow(deprecated)]
     fn underlay_and_quic_flags_have_safe_defaults() {
         let flags = gen_default_flags();
@@ -2001,7 +2026,6 @@ socket_mark = 66
         assert_eq!(flags.speed_probe_budget_bps, 0);
     }
 
-    #[test]
     fn speed_first_requires_a_positive_probe_budget() {
         let mut flags = gen_default_flags();
         flags.speed_first = true;
@@ -2011,7 +2035,6 @@ socket_mark = 66
         assert!(error.to_string().contains("speed_probe_budget_bps"));
     }
 
-    #[test]
     fn quic_decoy_requires_and_accepts_complete_routing_configuration() {
         let mut flags = gen_default_flags();
         flags.quic_server_name = "challenges.cloudflare.com".to_owned();
@@ -2030,7 +2053,6 @@ socket_mark = 66
         assert!(error.to_string().contains("quic_sni_passthrough"));
     }
 
-    #[test]
     fn rejects_an_unknown_encryption_algorithm() {
         let mut flags = gen_default_flags();
         flags.encryption_algorithm = "unknown-cipher".to_owned();
@@ -2044,7 +2066,6 @@ socket_mark = 66
         );
     }
 
-    #[test]
     fn speed_probes_require_a_positive_interval() {
         let mut flags = gen_default_flags();
         flags.speed_probe_budget_bps = 1;
@@ -2055,7 +2076,6 @@ socket_mark = 66
         assert!(error.to_string().contains("speed_probe_interval_seconds"));
     }
 
-    #[test]
     fn speed_probe_interval_has_a_protocol_bound() {
         let mut flags = gen_default_flags();
         flags.speed_probe_budget_bps = 1;
@@ -2071,7 +2091,6 @@ socket_mark = 66
         );
     }
 
-    #[test]
     fn automatic_adapter_uses_the_platform_capability() {
         assert_eq!(
             InterfaceAdapter::automatic().uses_native_ethernet(),
@@ -2079,7 +2098,6 @@ socket_mark = 66
         );
     }
 
-    #[test]
     #[allow(deprecated)]
     fn obsolete_adapter_fields_are_removed_during_config_load() {
         let config = TomlConfigLoader::new_from_str(
@@ -2098,7 +2116,6 @@ interface_adapter = "also-removed"
         assert!(!config.dump().contains("interface_adapter"));
     }
 
-    #[test]
     #[allow(deprecated)]
     fn obsolete_adapter_fields_are_removed_from_runtime_updates() {
         let config = TomlConfigLoader::default();
@@ -2113,7 +2130,6 @@ interface_adapter = "also-removed"
         assert!(flags.interface_adapter.is_empty());
     }
 
-    #[test]
     fn underlay_and_quic_flags_roundtrip_through_toml() {
         let cfg = TomlConfigLoader::new_from_str(
             r#"
@@ -2159,7 +2175,6 @@ quic_receive_window = 33554432
         }
     }
 
-    #[test]
     fn rejects_invalid_l2_flags() {
         for (key, value) in [
             ("l2_fdb_capacity", "0"),
@@ -2176,7 +2191,6 @@ quic_receive_window = 33554432
         }
     }
 
-    #[test]
     fn dump_preserves_flags_that_differ_from_lowertier_defaults() {
         let cfg = TomlConfigLoader::default();
         let mut flags = gen_default_flags();
@@ -2260,6 +2274,13 @@ tcp_stun_servers = ["192.0.2.1:3478"]"#;
     }
 
     #[test]
+    fn configuration_cases_listeners() {
+        userspace_proxy_addresses_round_trip_through_toml();
+        test_parse_mapped_listener_urls_allows_wss_without_port();
+        test_parse_mapped_listener_urls_allows_tcp_without_port();
+        test_parse_mapped_listener_urls_requires_port_for_non_ip_scheme();
+    }
+
     fn userspace_proxy_addresses_round_trip_through_toml() {
         let config = TomlConfigLoader::new_from_str(
             r#"
@@ -2286,6 +2307,15 @@ outbound_http_proxy = "http://localhost:1055"
     }
 
     #[test]
+    fn configuration_cases_credentials() {
+        test_toml_credential_mode_omits_network_secret();
+        test_toml_secure_mode_without_network_identity_uses_no_secret();
+        credential_startup_rejects_a_mismatched_pinned_root();
+        config_rejects_a_network_secret_with_a_credential_bundle();
+        credential_identity_rejects_an_all_zero_root_fingerprint();
+        secure_mode_from_toml_generates_a_key_pair();
+    }
+
     fn test_toml_credential_mode_omits_network_secret() {
         for network_secret in ["", r#"network_secret = """#] {
             let result = TomlConfigLoader::new_from_str(&format!(
@@ -2302,7 +2332,6 @@ enabled = true
         }
     }
 
-    #[test]
     fn test_toml_secure_mode_without_network_identity_uses_no_secret() {
         let config = TomlConfigLoader::new_from_str(
             r#"
@@ -2318,7 +2347,6 @@ enabled = true
         assert!(identity.network_secret_digest.is_none());
     }
 
-    #[test]
     fn credential_startup_rejects_a_mismatched_pinned_root() {
         let issuer =
             CredentialManager::new_with_network(None, "credential-network", Some("secret"));
@@ -2344,7 +2372,6 @@ enabled = true
         assert!(process_secure_mode_cfg(secure_mode).is_err());
     }
 
-    #[test]
     fn config_rejects_a_network_secret_with_a_credential_bundle() {
         let issuer = CredentialManager::new_with_network(None, "mixed-network", Some("secret"));
         let (_, encoded_bundle) = issuer
@@ -2372,7 +2399,6 @@ credential_bundle = "{encoded_bundle}"
         assert!(TomlConfigLoader::new_from_str(&config).is_err());
     }
 
-    #[test]
     fn credential_identity_rejects_an_all_zero_root_fingerprint() {
         assert!(
             NetworkIdentity::new_credential_with_root_fingerprint(
@@ -2383,7 +2409,6 @@ credential_bundle = "{encoded_bundle}"
         );
     }
 
-    #[test]
     fn secure_mode_from_toml_generates_a_key_pair() {
         let config = TomlConfigLoader::new_from_str(
             r#"
@@ -2398,7 +2423,6 @@ enabled = true
         assert!(secure_mode.local_public_key.is_some());
     }
 
-    #[test]
     fn test_parse_mapped_listener_urls_allows_wss_without_port() {
         let parsed = parse_mapped_listener_urls(&["wss://example.com/path".to_string()]).unwrap();
 
@@ -2407,7 +2431,6 @@ enabled = true
         assert_eq!(parsed[0].port(), None);
     }
 
-    #[test]
     fn test_parse_mapped_listener_urls_allows_tcp_without_port() {
         let parsed = parse_mapped_listener_urls(&["tcp://127.0.0.1".to_string()]).unwrap();
 
@@ -2416,7 +2439,6 @@ enabled = true
         assert_eq!(parsed[0].port(), None);
     }
 
-    #[test]
     fn test_parse_mapped_listener_urls_requires_port_for_non_ip_scheme() {
         let err = parse_mapped_listener_urls(&["https://peer-id".to_string()]).unwrap_err();
 
@@ -2424,6 +2446,11 @@ enabled = true
     }
 
     #[test]
+    fn configuration_cases_acl() {
+        test_acl_toml_rule_uses_defaults_for_omitted_fields();
+        test_acl_toml_group_can_omit_declares_or_members();
+    }
+
     fn test_acl_toml_rule_uses_defaults_for_omitted_fields() {
         use crate::proto::acl::{Action, ChainType, Protocol};
 
@@ -2464,7 +2491,6 @@ enabled = true
         assert!(!rule.stateful);
     }
 
-    #[test]
     fn test_acl_toml_group_can_omit_declares_or_members() {
         let declares_only = r#"
 [acl.acl_v1.group]
@@ -2488,7 +2514,6 @@ members = ["admin"]
         assert_eq!(group.members, vec!["admin"]);
     }
 
-    #[test]
     fn test_network_config_source_user_is_implicit() {
         let config = TomlConfigLoader::default();
         config.set_network_config_source(Some(ConfigSource::User));
@@ -2513,7 +2538,6 @@ source = "user"
         assert!(!explicit_user.dump().contains("[source]"));
     }
 
-    #[test]
     fn test_ipv6_public_addr_config_roundtrip() {
         let config = TomlConfigLoader::default();
         let prefix: cidr::Ipv6Cidr = "2001:db8:100::/64".parse().unwrap();
@@ -3162,7 +3186,15 @@ enable_encryption = ${MIXED_ENCRYPTION}
 #[cfg(test)]
 mod protocol_memory_tests {
     use super::*;
+
     #[test]
+    fn configuration_cases_protocols() {
+        allowlist_is_explicit_and_empty_is_backwards_compatible();
+        allowlist_rejects_typos_duplicates_and_disabled_default();
+        disabled_listener_and_bootstrap_are_rejected_before_startup();
+        allowlist_round_trips_through_config();
+    }
+
     fn allowlist_is_explicit_and_empty_is_backwards_compatible() {
         let mut flags = gen_default_flags();
         for protocol in ["quic", "tcp", "wss"] {
@@ -3177,7 +3209,6 @@ mod protocol_memory_tests {
             }
         }
     }
-    #[test]
     fn allowlist_rejects_typos_duplicates_and_disabled_default() {
         let mut flags = gen_default_flags();
         for values in [vec!["udp"], vec!["QUIC"], vec!["quic", "quic"], vec!["tcp"]] {
@@ -3187,7 +3218,6 @@ mod protocol_memory_tests {
         flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
         validate_flags(&flags).unwrap();
     }
-    #[test]
     fn disabled_listener_and_bootstrap_are_rejected_before_startup() {
         for prefix in [
             "listeners = [\"tcp://127.0.0.1:0\"]\n",
@@ -3202,7 +3232,6 @@ mod protocol_memory_tests {
         }
     }
 
-    #[test]
     fn allowlist_round_trips_through_config() {
         let config = TomlConfigLoader::new_from_str(
             "[flags]\ndefault_protocol = \"wss\"\nenabled_protocols = [\"wss\"]\n",
