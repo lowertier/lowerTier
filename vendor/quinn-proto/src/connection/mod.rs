@@ -385,7 +385,11 @@ impl Connection {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&mut self) -> Option<Instant> {
-        self.timers.next_timeout()
+        self.timers
+            .next_timeout()
+            .into_iter()
+            .chain(self.datagrams.next_expiry())
+            .min()
     }
 
     /// Returns application-facing events
@@ -464,6 +468,7 @@ impl Connection {
         max_datagrams: usize,
         buf: &mut Vec<u8>,
     ) -> Option<Transmit> {
+        self.expire_datagrams(now);
         assert!(max_datagrams != 0);
         let max_datagrams = match self.config.enable_segmentation_offload {
             false => 1,
@@ -903,7 +908,7 @@ impl Connection {
                     && !can_send.acks
                     && can_send.other
                     && (buf_capacity - builder.datagram_start) == self.path.current_mtu() as usize
-                    && self.datagrams.outgoing.is_empty()),
+                    && self.datagrams.is_send_empty()),
                 "SendableFrames was {can_send:?}, but only ACKs have been written"
             );
             pad_datagram |= sent.requires_padding;
@@ -1191,6 +1196,7 @@ impl Connection {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
+        self.expire_datagrams(now);
         for &timer in &Timer::VALUES {
             if !self.timers.is_expired(timer, now) {
                 continue;
@@ -1299,8 +1305,18 @@ impl Connection {
         stats.path.app_limited = self.app_limited;
         stats.path.in_flight = self.path.in_flight.bytes;
         stats.path.current_mtu = self.path.mtud.current_mtu();
+        stats.path.datagram_expired_packets = self.datagrams.expired_packets;
+        stats.path.datagram_expired_datagrams = self.datagrams.expired_datagrams;
+        stats.path.datagram_expired_bytes = self.datagrams.expired_bytes;
 
         stats
+    }
+
+    fn expire_datagrams(&mut self, now: Instant) {
+        if self.datagrams.expire(now) && self.datagrams.send_blocked {
+            self.datagrams.send_blocked = false;
+            self.events.push_back(Event::DatagramsUnblocked);
+        }
     }
 
     /// Count UDP datagrams sent outside [`poll_transmit`].
@@ -4145,11 +4161,7 @@ impl Connection {
                 .as_ref()
                 .is_some_and(|(_, x)| x.challenge_pending)
             || !self.path_responses.is_empty()
-            || self
-                .datagrams
-                .outgoing
-                .front()
-                .is_some_and(|x| x.size(true) <= max_size)
+            || self.datagrams.can_send(max_size)
     }
 
     /// Update counters to account for a packet becoming acknowledged, lost, or abandoned

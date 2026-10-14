@@ -14,6 +14,7 @@ pub enum MetricName {
     NicAqmDrops,
     NicQueueSojournUs,
     NicQueueDequeued,
+    QuicDatagramsExpired,
     /// QUIC path changes rejected by authentication, policy, or migration limits.
     QuicMigrationsRejected,
     RelayBytes,
@@ -143,6 +144,7 @@ impl fmt::Display for MetricName {
             MetricName::NicAqmDrops => write!(f, "nic_aqm_drops"),
             MetricName::NicQueueSojournUs => write!(f, "nic_queue_sojourn_us"),
             MetricName::NicQueueDequeued => write!(f, "nic_queue_dequeued"),
+            MetricName::QuicDatagramsExpired => write!(f, "quic_datagrams_expired"),
             MetricName::QuicMigrationsRejected => write!(f, "quic_migrations_rejected"),
             MetricName::RelayBytes => write!(f, "relay_bytes"),
             MetricName::RelayDrops => write!(f, "relay_drops"),

@@ -40,3 +40,14 @@ At a 1,500-byte path MTU, the QUIC floor is 288,000 bytes, or 5.12 ms.
 The previous QUIC FIFO ceiling was 18.64 ms.
 The direct floor is 393,216 charged bytes, or 6.99 ms if all charges represented wire bytes.
 Actual payload queue time is lower because charges include allocation capacity and packet metadata.
+
+QUIC expires unsent application packets after 10 ms, before packet sealing.
+Fragments of one packet enter Quinn together and share an expiry deadline.
+Once Quinn seals the first fragment, the remaining fragments retain transmission permission.
+This prevents expiry from sending only part of a packet.
+Expiry uses the connection timer and wakes blocked senders when capacity becomes available.
+Writer staging uses the same deadline, including time before Quinn admission.
+The `quic_datagrams_expired` statistic counts complete expired application packets.
+Quinn path statistics also report expired fragment and byte counts.
+The 10 ms bound covers packets whose transmission has not started.
+It does not bound network flight or socket submission delay.

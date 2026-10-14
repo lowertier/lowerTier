@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 
 use super::Connection;
 use crate::{
-    DatagramReceiveDropPolicy, TransportError,
+    DatagramReceiveDropPolicy, Instant, TransportError,
     frame::{Datagram, FrameStruct},
 };
 
@@ -15,7 +15,37 @@ pub struct Datagrams<'a> {
     pub(super) conn: &'a mut Connection,
 }
 
+fn queue_byte_limit(rate: f64, target: std::time::Duration, mtu: u16, hard_limit: usize) -> usize {
+    ((rate * target.as_secs_f64()) as usize)
+        .max(3 * 64 * usize::from(mtu))
+        .min(hard_limit)
+}
+
 impl Datagrams<'_> {
+    /// Return the configured maximum unsent residence time.
+    pub fn max_send_time(&self) -> Option<std::time::Duration> {
+        self.conn.config.datagram_send_max_time
+    }
+
+    /// Reserve capacity for all fragments of one application packet.
+    pub fn can_send_group(&mut self, bytes: usize) -> bool {
+        if bytes <= self.send_buffer_space()
+            || (self.conn.datagrams.outgoing_total == 0
+                && bytes <= self.conn.config.datagram_send_buffer_size)
+        {
+            true
+        } else {
+            self.conn.datagrams.send_blocked = true;
+            false
+        }
+    }
+
+    /// Count a complete application packet discarded by the external sender.
+    pub fn record_expired_packet(&mut self, datagrams: usize, bytes: usize) {
+        self.conn.datagrams.expired_packets += 1;
+        self.conn.datagrams.expired_datagrams += datagrams as u64;
+        self.conn.datagrams.expired_bytes += bytes as u64;
+    }
     fn send_buffer_limit(&self) -> usize {
         let hard_limit = self.conn.config.datagram_send_buffer_size;
         let Some(target) = self.conn.config.datagram_send_queue_time else {
@@ -32,9 +62,7 @@ impl Datagrams<'_> {
                 self.conn.path.congestion.window() as f64
                     / self.conn.path.rtt.get().as_secs_f64().max(0.001)
             });
-        ((rate * target.as_secs_f64()) as usize)
-            .max(3 * 64 * usize::from(self.conn.path.current_mtu()))
-            .min(hard_limit)
+        queue_byte_limit(rate, target, self.conn.path.current_mtu(), hard_limit)
     }
 
     /// Wait for actual FIFO drain when queue-time admission is enabled.
@@ -58,6 +86,18 @@ impl Datagrams<'_> {
     ///
     /// Returns `Err` iff a `len`-byte datagram cannot currently be sent.
     pub fn send(&mut self, data: Bytes, drop: bool) -> Result<(), SendDatagramError> {
+        self.send_with_deadline(data, drop, None, None, false)
+    }
+
+    /// Queue one fragment after its complete packet has passed capacity admission.
+    pub fn send_with_deadline(
+        &mut self,
+        data: Bytes,
+        drop: bool,
+        deadline: Option<Instant>,
+        group: Option<u64>,
+        group_admitted: bool,
+    ) -> Result<(), SendDatagramError> {
         if self.conn.config.datagram_receive_buffer_size.is_none() {
             return Err(SendDatagramError::Disabled);
         }
@@ -76,15 +116,19 @@ impl Datagrams<'_> {
                     .outgoing
                     .pop_front()
                     .expect("datagrams.outgoing_total desynchronized");
-                trace!(len = prev.data.len(), "dropping outgoing datagram");
-                self.conn.datagrams.outgoing_total -= prev.data.len();
+                trace!(len = prev.frame.data.len(), "dropping outgoing datagram");
+                self.conn.datagrams.outgoing_total -= prev.frame.data.len();
             }
-        } else if self.conn.datagrams.outgoing_total + data.len() > limit {
+        } else if self.conn.datagrams.outgoing_total + data.len() > limit && !group_admitted {
             self.conn.datagrams.send_blocked = true;
             return Err(SendDatagramError::Blocked(data));
         }
         self.conn.datagrams.outgoing_total += data.len();
-        self.conn.datagrams.outgoing.push_back(Datagram { data });
+        self.conn.datagrams.outgoing.push_back(OutgoingDatagram {
+            frame: Datagram { data },
+            deadline,
+            group,
+        });
         Ok(())
     }
 
@@ -134,12 +178,21 @@ pub(super) struct DatagramState {
     pub(super) recv_buffered: usize,
     recv_retained: usize,
     incoming: VecDeque<ReceivedDatagram>,
-    pub(super) outgoing: VecDeque<Datagram>,
+    outgoing: VecDeque<OutgoingDatagram>,
     pub(super) outgoing_total: usize,
     pub(super) send_blocked: bool,
     pub(super) fast_send_blocked: bool,
     /// Payloads remain with the external sender until its next seal call.
     pub(super) fast_send_pending: bool,
+    pub(super) expired_packets: u64,
+    pub(super) expired_datagrams: u64,
+    pub(super) expired_bytes: u64,
+}
+
+struct OutgoingDatagram {
+    frame: Datagram,
+    deadline: Option<Instant>,
+    group: Option<u64>,
 }
 
 struct ReceivedDatagram {
@@ -148,6 +201,41 @@ struct ReceivedDatagram {
 }
 
 impl DatagramState {
+    pub(super) fn is_send_empty(&self) -> bool {
+        self.outgoing.is_empty()
+    }
+
+    pub(super) fn can_send(&self, max_size: usize) -> bool {
+        self.outgoing
+            .front()
+            .is_some_and(|datagram| datagram.frame.size(true) <= max_size)
+    }
+
+    pub(super) fn next_expiry(&self) -> Option<Instant> {
+        self.outgoing.iter().find_map(|datagram| datagram.deadline)
+    }
+
+    pub(super) fn expire(&mut self, now: Instant) -> bool {
+        if self.next_expiry().is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        let before = self.outgoing_total;
+        let mut last_group = None;
+        self.outgoing.retain(|datagram| {
+            if datagram.deadline.is_none_or(|deadline| now < deadline) {
+                return true;
+            }
+            if datagram.group.is_none() || datagram.group != last_group {
+                self.expired_packets += 1;
+            }
+            last_group = datagram.group;
+            self.expired_datagrams += 1;
+            self.expired_bytes += datagram.frame.data.len() as u64;
+            self.outgoing_total -= datagram.frame.data.len();
+            false
+        });
+        self.outgoing_total != before
+    }
     pub(super) fn received(
         &mut self,
         mut datagram: Datagram,
@@ -210,14 +298,14 @@ impl DatagramState {
     /// queued but can't send it.
     pub(super) fn drop_oversized(&mut self, max_payload: usize) {
         self.outgoing.retain(|datagram| {
-            let result = datagram.data.len() <= max_payload;
+            let result = datagram.frame.data.len() <= max_payload;
             if !result {
                 trace!(
                     "dropping {} byte datagram violating {} byte limit",
-                    datagram.data.len(),
+                    datagram.frame.data.len(),
                     max_payload
                 );
-                self.outgoing_total -= datagram.data.len();
+                self.outgoing_total -= datagram.frame.data.len();
             }
             result
         });
@@ -233,17 +321,27 @@ impl DatagramState {
             None => return false,
         };
 
-        if buf.len() + datagram.size(true) > max_size {
+        if buf.len() + datagram.frame.size(true) > max_size {
             // Future work: we could be more clever about cramming small datagrams into
             // mostly-full packets when a larger one is queued first
             self.outgoing.push_front(datagram);
             return false;
         }
 
-        trace!(len = datagram.data.len(), "DATAGRAM");
+        if let Some(group) = datagram.group.filter(|_| datagram.deadline.is_some()) {
+            // Once transmission starts, preserve all remaining fragments of this packet.
+            for remaining in self
+                .outgoing
+                .iter_mut()
+                .take_while(|remaining| remaining.group == Some(group))
+            {
+                remaining.deadline = None;
+            }
+        }
+        trace!(len = datagram.frame.data.len(), "DATAGRAM");
 
-        self.outgoing_total -= datagram.data.len();
-        datagram.encode(true, buf);
+        self.outgoing_total -= datagram.frame.data.len();
+        datagram.frame.encode(true, buf);
         true
     }
 
@@ -278,6 +376,54 @@ pub enum SendDatagramError {
 #[cfg(test)]
 mod mtu_limit_tests {
     use super::*;
+
+    #[test]
+    fn expiry_discards_whole_unstarted_groups_and_releases_capacity() {
+        let target = std::time::Duration::from_millis(4);
+        assert_eq!(
+            queue_byte_limit(450_000_000.0 / 8.0, target, 1500, 1_048_576),
+            288_000
+        );
+        assert_eq!(
+            queue_byte_limit(10_000_000_000.0 / 8.0, target, 1500, 1_048_576),
+            1_048_576
+        );
+        assert_eq!(queue_byte_limit(1.0, target, 1500, 4096), 4096);
+        let now = Instant::now();
+        let mut state = DatagramState::default();
+        for (group, deadline) in [
+            (Some(1), now),
+            (Some(1), now),
+            (None, now),
+            (Some(2), now + std::time::Duration::from_millis(1)),
+            (Some(2), now + std::time::Duration::from_millis(1)),
+        ] {
+            state.outgoing.push_back(OutgoingDatagram {
+                frame: Datagram {
+                    data: Bytes::from_static(b"payload"),
+                },
+                group,
+                deadline: Some(deadline),
+            });
+            state.outgoing_total += 7;
+        }
+        assert!(state.expire(now));
+        assert_eq!(state.outgoing_total, 14);
+        assert_eq!(
+            (
+                state.expired_packets,
+                state.expired_datagrams,
+                state.expired_bytes
+            ),
+            (2, 3, 21)
+        );
+        let mut buffer = Vec::new();
+        assert!(state.write(&mut buffer, 1200));
+        assert!(!state.expire(now + std::time::Duration::from_millis(10)));
+        assert!(state.write(&mut buffer, 1200));
+        assert_eq!(state.outgoing_total, 0);
+        assert_eq!(state.expired_packets, 2);
+    }
 
     #[test]
     fn mtu_reduction_retains_datagrams_at_the_new_limit() {
@@ -382,8 +528,12 @@ mod mtu_limit_tests {
         }
         let mut state = DatagramState::default();
         for length in [1199, 1200, 1201] {
-            state.outgoing.push_back(Datagram {
-                data: Bytes::from(vec![0; length]),
+            state.outgoing.push_back(OutgoingDatagram {
+                frame: Datagram {
+                    data: Bytes::from(vec![0; length]),
+                },
+                deadline: None,
+                group: None,
             });
             state.outgoing_total += length;
         }
@@ -393,7 +543,7 @@ mod mtu_limit_tests {
         let sizes: Vec<_> = state
             .outgoing
             .iter()
-            .map(|packet| packet.data.len())
+            .map(|packet| packet.frame.data.len())
             .collect();
         assert_eq!(sizes, [1199, 1200]);
         assert_eq!(state.outgoing_total, 2399);

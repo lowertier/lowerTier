@@ -134,6 +134,12 @@ impl std::fmt::Debug for FrameStats {
 #[derive(Debug, Default, Copy, Clone)]
 #[non_exhaustive]
 pub struct PathStats {
+    /// Complete application packets expired before transmission started.
+    pub datagram_expired_packets: u64,
+    /// DATAGRAM fragments discarded with expired application packets.
+    pub datagram_expired_datagrams: u64,
+    /// Payload bytes discarded with expired application packets.
+    pub datagram_expired_bytes: u64,
     /// Remote path changes and local socket changes rejected on this connection.
     pub migration_rejections: u64,
     /// Current best estimate of this connection's latency (round-trip-time)

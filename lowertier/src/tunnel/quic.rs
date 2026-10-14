@@ -937,6 +937,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .datagram_receive_drop_policy(DatagramReceiveDropPolicy::Newest)
         .datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_BYTES)
         .datagram_send_queue_time(Some(Duration::from_millis(4)))
+        .datagram_send_max_time(Some(Duration::from_millis(10)))
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
         .receive_window(receive_window)
@@ -1696,6 +1697,8 @@ struct ConnWrapper {
     migration_policy: Arc<QuicMigrationPolicy>,
     migration_rejections: crate::common::stats_manager::CounterHandle,
     observed_migration_rejections: AtomicU64,
+    expired_datagrams: crate::common::stats_manager::CounterHandle,
+    observed_expired_datagrams: AtomicU64,
     _memory_permit: Option<ProcessMemoryPermit>,
     _source_permit: Option<QuicSourcePermit>,
     _endpoint_manager: Option<Arc<QuicEndpointManager>>,
@@ -1704,6 +1707,14 @@ struct ConnWrapper {
 
 impl ConnWrapper {
     fn record_io_stats(&self, stats: &quinn::ConnectionStats) {
+        if stats.path.datagram_expired_packets
+            != self.observed_expired_datagrams.load(Ordering::Relaxed)
+        {
+            self.expired_datagrams.add(counter_delta(
+                &self.observed_expired_datagrams,
+                stats.path.datagram_expired_packets,
+            ) as u64);
+        }
         if stats.path.migration_rejections
             != self.observed_migration_rejections.load(Ordering::Relaxed)
         {
@@ -1968,6 +1979,18 @@ fn encode_lossy_quic_datagrams(
     }
 }
 
+fn datagram_packet_group(bytes: &Bytes) -> Option<u64> {
+    let (_, quarter_length) = decode_quic_varint(bytes)?;
+    let (context, context_length) = decode_quic_varint(&bytes[quarter_length..])?;
+    if context != DATAGRAM_CONTEXT_FRAGMENT {
+        return None;
+    }
+    let body = bytes.get(quarter_length + context_length..)?;
+    Some(u64::from(u32::from_le_bytes(
+        body.get(..4)?.try_into().ok()?,
+    )))
+}
+
 fn packet_from_tunnel_payload(bytes: Bytes, header_length: usize) -> Result<ZCPacket, TunnelError> {
     if bytes.len().saturating_sub(header_length) < PEER_MANAGER_HEADER_SIZE {
         return Err(TunnelError::InvalidPacket(format!(
@@ -2165,6 +2188,7 @@ impl Stream for QuicHybridReader {
 struct QuicHybridWriter {
     connection: Arc<ConnWrapper>,
     pending_datagrams: Option<VecDeque<Bytes>>,
+    pending_datagrams_since: Option<std::time::Instant>,
     pending_datagram_send: Option<DatagramBatchSend>,
     spare_datagrams: VecDeque<Bytes>,
     spare_datagram_send: Option<DatagramBatchSend>,
@@ -2386,6 +2410,7 @@ impl QuicHybridWriter {
         Self {
             connection,
             pending_datagrams: Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE)),
+            pending_datagrams_since: None,
             pending_datagram_send: None,
             spare_datagrams: VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE),
             spare_datagram_send: None,
@@ -2412,7 +2437,21 @@ impl QuicHybridWriter {
             std::mem::swap(&mut datagrams, queued);
         } else {
             // Fragmentation can expand one input batch past the send bound.
-            datagrams.extend(queued.drain(..batch_limit));
+            let mut end = batch_limit;
+            if let Some(group) = datagram_packet_group(&queued[end - 1]) {
+                if datagram_packet_group(&queued[end]) == Some(group) {
+                    while end > 0 && datagram_packet_group(&queued[end - 1]) == Some(group) {
+                        end -= 1;
+                    }
+                    if end == 0 {
+                        end = queued
+                            .iter()
+                            .take_while(|data| datagram_packet_group(data) == Some(group))
+                            .count();
+                    }
+                }
+            }
+            datagrams.extend(queued.drain(..end));
         }
         datagrams
     }
@@ -2431,6 +2470,12 @@ impl QuicHybridWriter {
             .as_mut()
             .expect("the pending QUIC batch is available before a flush");
         let datagrams = Self::take_datagram_batch(queued, &mut self.spare_datagrams);
+        let queued_at = self
+            .pending_datagrams_since
+            .unwrap_or_else(std::time::Instant::now);
+        if queued.is_empty() {
+            self.pending_datagrams_since = None;
+        }
         let packet_count = datagrams.len();
         let byte_count = datagrams.iter().map(Bytes::len).sum::<usize>();
         let started = DataplaneTelemetry::sample_start();
@@ -2438,7 +2483,9 @@ impl QuicHybridWriter {
         // blocked socket must not let newer control packets overtake sealed data.
         let connection = self.connection.conn.clone();
         let future = async move {
-            let (result, datagrams) = connection.send_datagrams_wait(datagrams).await;
+            let (result, datagrams) = connection
+                .send_datagrams_wait_grouped(datagrams, queued_at, datagram_packet_group)
+                .await;
             (result, datagrams, started, packet_count, byte_count)
         };
         // This async expression has a stable layout, so set reuses its box.
@@ -2654,6 +2701,7 @@ impl Sink<PacketBatch> for QuicHybridWriter {
                 "QUIC batch started without sink readiness".to_owned(),
             ));
         }
+        writer.pending_datagrams_since = Some(std::time::Instant::now());
 
         for packet in batch {
             match select_quic_delivery(&packet, maximum) {
@@ -2766,6 +2814,10 @@ fn build_connect_ip_tunnel(
             .stats_manager()
             .get_simple_counter(crate::common::stats_manager::MetricName::QuicMigrationsRejected),
         observed_migration_rejections: AtomicU64::new(0),
+        expired_datagrams: global_ctx
+            .stats_manager()
+            .get_simple_counter(crate::common::stats_manager::MetricName::QuicDatagramsExpired),
+        observed_expired_datagrams: AtomicU64::new(0),
         _memory_permit: memory_permit,
         _source_permit: source_permit,
         _endpoint_manager: endpoint_manager,
@@ -4035,6 +4087,10 @@ mod tests {
                 crate::common::stats_manager::MetricName::QuicMigrationsRejected,
             ),
             observed_migration_rejections: AtomicU64::new(0),
+            expired_datagrams: ctx
+                .stats_manager()
+                .get_simple_counter(crate::common::stats_manager::MetricName::QuicDatagramsExpired),
+            observed_expired_datagrams: AtomicU64::new(0),
             _endpoint_manager: None,
             _endpoint_owner: None,
             _memory_permit: None,

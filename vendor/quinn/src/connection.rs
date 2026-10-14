@@ -597,7 +597,24 @@ impl Connection {
             conn: &self.0,
             data,
             notify: self.0.shared.datagrams_unblocked.notified(),
+            queued_at: None,
+            packet_group: None,
+            expiry: None,
         }
+    }
+
+    /// Send complete packet groups with bounded unsent residence time.
+    /// The callback returns a shared identifier for contiguous fragments of one packet.
+    pub fn send_datagrams_wait_grouped(
+        &self,
+        data: VecDeque<Bytes>,
+        queued_at: Instant,
+        packet_group: fn(&Bytes) -> Option<u64>,
+    ) -> SendDatagrams<'_> {
+        let mut send = self.send_datagrams_wait(data);
+        send.queued_at = Some(queued_at);
+        send.packet_group = Some(packet_group);
+        send
     }
 
     /// Compute the maximum size of datagrams that may be passed to [`send_datagram()`].
@@ -1037,6 +1054,9 @@ pin_project! {
         data: VecDeque<Bytes>,
         #[pin]
         notify: Notified<'a>,
+        queued_at: Option<Instant>,
+        packet_group: Option<fn(&Bytes) -> Option<u64>>,
+        expiry: Option<Pin<Box<dyn AsyncTimer>>>,
     }
 }
 
@@ -1052,27 +1072,80 @@ impl Future for SendDatagrams<'_> {
         }
 
         let mut queued = false;
-        while let Some(data) = this.data.pop_front() {
-            use proto::SendDatagramError::*;
-            match state.inner.datagrams().send(data, false) {
-                Ok(()) => queued = true,
-                Err(Blocked(data)) => {
-                    this.data.push_front(data);
-                    break;
-                }
-                Err(error) => {
-                    if queued {
-                        state.wake();
+        let now = state.runtime.now();
+        let deadline = this.queued_at.and_then(|queued_at| {
+            state
+                .inner
+                .datagrams()
+                .max_send_time()
+                .map(|age| queued_at + age)
+        });
+        'packets: while let Some(front) = this.data.front() {
+            let group = this.packet_group.and_then(|group| group(front));
+            let count = if let Some(group) = group {
+                this.data
+                    .iter()
+                    .take_while(|data| this.packet_group.unwrap()(data) == Some(group))
+                    .count()
+            } else {
+                1
+            };
+            let bytes = this.data.iter().take(count).map(Bytes::len).sum();
+            if deadline.is_some_and(|deadline| now >= deadline) {
+                this.data.drain(..count);
+                state.inner.datagrams().record_expired_packet(count, bytes);
+                continue;
+            }
+            if this.packet_group.is_some() && !state.inner.datagrams().can_send_group(bytes) {
+                break;
+            }
+            let maximum = state.inner.datagrams().max_size();
+            if this.packet_group.is_some()
+                && maximum.is_some_and(|maximum| {
+                    this.data
+                        .iter()
+                        .take(count)
+                        .any(|data| data.len() > maximum)
+                })
+            {
+                this.data.drain(..count);
+                continue;
+            }
+            for _ in 0..count {
+                let data = this
+                    .data
+                    .pop_front()
+                    .expect("packet group has a checked length");
+                use proto::SendDatagramError::*;
+                match state.inner.datagrams().send_with_deadline(
+                    data,
+                    false,
+                    deadline,
+                    group,
+                    this.packet_group.is_some(),
+                ) {
+                    Ok(()) => queued = true,
+                    Err(Blocked(data)) => {
+                        this.data.push_front(data);
+                        break 'packets;
                     }
-                    let error = match error {
-                        UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
-                        Disabled => SendDatagramError::Disabled,
-                        TooLarge => SendDatagramError::TooLarge,
-                        Blocked(_) => unreachable!(),
-                    };
-                    let data = std::mem::take(this.data);
-                    return Poll::Ready((Err(error), data));
+                    Err(error) => {
+                        if queued {
+                            state.wake();
+                        }
+                        let error = match error {
+                            UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
+                            Disabled => SendDatagramError::Disabled,
+                            TooLarge => SendDatagramError::TooLarge,
+                            Blocked(_) => unreachable!(),
+                        };
+                        let data = std::mem::take(this.data);
+                        return Poll::Ready((Err(error), data));
+                    }
                 }
+            }
+            if this.packet_group.is_none() && state.inner.datagrams().send_buffer_space() == 0 {
+                break;
             }
         }
 
@@ -1081,6 +1154,14 @@ impl Future for SendDatagrams<'_> {
         }
         if this.data.is_empty() && state.inner.datagrams().send_queue_drained() {
             return Poll::Ready((Ok(()), std::mem::take(this.data)));
+        }
+        if let Some(deadline) = deadline.filter(|_| !this.data.is_empty()) {
+            let timer = this
+                .expiry
+                .get_or_insert_with(|| state.runtime.new_timer(deadline));
+            if timer.as_mut().poll(ctx).is_ready() {
+                ctx.waker().wake_by_ref();
+            }
         }
         // Keep the connection locked until the waiter is registered. Otherwise the
         // driver can drain the queue here, and we consume its only wakeup as stale.
