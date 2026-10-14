@@ -87,8 +87,8 @@ message FlagsInConfig {
   uint64 quic_initial_receive_window = 49;
   uint64 quic_receive_window = 50;
 
-  // Removed adapter selector. Readers ignore this compatibility field.
-  string port_mode = 51 [deprecated = true];
+  reserved 51;
+  reserved "port_mode";
   uint32 l2_fdb_capacity = 52;
   uint64 l2_fdb_age_seconds = 53;
   // Maximum unknown-unicast, broadcast, and multicast bytes per second.
@@ -106,8 +106,8 @@ message FlagsInConfig {
   reserved "speed_first", "speed_probe_interval_seconds", "speed_probe_budget_bps";
   // Permit complete Ethernet frames from this authenticated admin node.
   bool enable_bridge = 61;
-  // Removed adapter selector. Readers ignore this compatibility field.
-  string interface_adapter = 62 [deprecated = true];
+  reserved 62;
+  reserved "interface_adapter";
   reserved 63 to 69;
   reserved "quic_tls_cert", "quic_tls_key", "quic_server_name", "quic_admission_secret";
   reserved "quic_fallback_root", "quic_decoy_upstream", "quic_sni_passthrough";
@@ -330,16 +330,6 @@ message PortForwardConfigPb {
   SocketAddr bind_addr = 1;
   SocketAddr dst_addr = 2;
   SocketType socket_type = 3;
-}
-
-message ProxyDstInfo { SocketAddr dst_addr = 1; }
-
-message LimiterConfig {
-  optional uint64 burst_rate =
-      1; // default 1 means no burst (capacity is same with bps)
-  optional uint64 bps = 2; // default 0 means no limit (unit is B/s)
-  optional uint64 fill_duration_ms =
-      3; // default 10ms, the period to fill the bucket
 }
 
 message SecureModeConfig {

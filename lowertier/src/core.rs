@@ -90,13 +90,6 @@ fn dump_profile(_cur_allocated: usize) {
 #[command(name = "lowertier-core", author, version = LOWTIER_VERSION , about, long_about = None)]
 struct Cli {
     #[arg(
-        long,
-        env = "ET_MACHINE_ID",
-        help = t!("core_clap.machine_id").to_string()
-    )]
-    machine_id: Option<String>,
-
-    #[arg(
         short,
         long,
         env = "ET_CONFIG_FILE",

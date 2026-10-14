@@ -19,7 +19,6 @@ pub mod global_ctx;
 pub mod idn;
 pub mod ifcfg;
 pub mod log;
-pub mod machine_id;
 pub mod netns;
 pub mod network;
 pub mod stats_manager;
@@ -29,8 +28,6 @@ pub mod token_bucket;
 pub mod tracing_rolling_appender;
 pub(crate) mod transit_budget;
 pub mod underlay_policy;
-
-pub use machine_id::{MachineIdOptions, resolve_machine_id};
 
 pub fn get_logger_timer<F: time::formatting::Formattable>(
     format: F,

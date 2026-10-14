@@ -91,13 +91,7 @@ fn typed_value(config: &NodeConfig) -> anyhow::Result<Value> {
         .skip_default_fields(false);
     let mut value = message.serialize_with_options(serde_json::value::Serializer, &options)?;
     prune_nulls(&mut value);
-    for path in [
-        "flags.relay",
-        "flags.camouflage",
-        "flags.limits",
-        "flags.port_mode",
-        "flags.interface_adapter",
-    ] {
+    for path in ["flags.relay", "flags.camouflage", "flags.limits"] {
         set_path(&mut value, path, None);
     }
     Ok(value)
@@ -105,19 +99,12 @@ fn typed_value(config: &NodeConfig) -> anyhow::Result<Value> {
 
 fn document(config: &TomlConfigLoader) -> anyhow::Result<Value> {
     let mut document = serde_json::to_value(config.dump().parse::<toml::Value>()?)?;
-    document.as_object_mut().unwrap().remove("source");
     document["flags"] = typed_value(&NodeConfig {
         flags: Some(config.get_flags()),
         ..Default::default()
     })?["flags"]
         .clone();
-    for path in [
-        "flags.relay",
-        "flags.camouflage",
-        "flags.limits",
-        "flags.port_mode",
-        "flags.interface_adapter",
-    ] {
+    for path in ["flags.relay", "flags.camouflage", "flags.limits"] {
         set_path(&mut document, path, None);
     }
     Ok(document)

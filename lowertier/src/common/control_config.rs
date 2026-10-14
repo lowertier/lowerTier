@@ -9,6 +9,9 @@ pub use crate::proto::common::{
 };
 
 pub const LEGACY_KEYS: &[(&str, &str)] = &[
+    ("port_mode", "automatic platform adapter selection"),
+    ("interface_adapter", "automatic platform adapter selection"),
+    ("source", "local configuration files"),
     ("instance_recv_bps_limit", "limits.receive_bps"),
     ("latency_first", "relay.policy"),
     ("speed_first", "relay.policy"),

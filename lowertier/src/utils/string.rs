@@ -1,11 +1,3 @@
-pub fn cost_to_str(cost: i32) -> String {
-    if cost == 1 {
-        "p2p".to_string()
-    } else {
-        format!("relay({})", cost)
-    }
-}
-
 #[cfg(target_os = "windows")]
 pub fn utf8_or_gbk_to_string(s: &[u8]) -> String {
     use encoding::{DecoderTrap, Encoding, all::GBK};

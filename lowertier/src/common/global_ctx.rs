@@ -14,10 +14,7 @@ use dashmap::DashMap;
 
 use super::{
     PeerId,
-    config::{
-        ConfigLoader, Flags, InterfaceAdapter, process_secure_mode_cfg,
-        remove_obsolete_adapter_flags, validate_flags,
-    },
+    config::{ConfigLoader, Flags, InterfaceAdapter, process_secure_mode_cfg, validate_flags},
     netns::NetNS,
     network::IPCollector,
     stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -26,7 +23,6 @@ use super::{
 use crate::{
     common::{
         dataplane_telemetry::DataplaneTelemetry, shrink_dashmap, stats_manager::StatsManager,
-        token_bucket::TokenBucketManager,
     },
     peers::{acl_filter::AclFilter, credential_manager::CredentialManager},
     proto::{
@@ -478,8 +474,6 @@ pub struct GlobalCtx {
 
     feature_flags: AtomicCell<PeerFeatureFlag>,
 
-    token_bucket_manager: TokenBucketManager,
-
     stats_manager: Arc<StatsManager>,
     dataplane_telemetry: Arc<DataplaneTelemetry>,
 
@@ -877,8 +871,6 @@ impl GlobalCtx {
             base_feature_flags: AtomicCell::new(base_feature_flags),
 
             feature_flags: AtomicCell::new(feature_flags),
-
-            token_bucket_manager: TokenBucketManager::new(),
 
             stats_manager: Arc::new(StatsManager::new()),
             dataplane_telemetry: Arc::new(DataplaneTelemetry::new()),
@@ -1313,8 +1305,7 @@ impl GlobalCtx {
         self.process_memory_governor.clone()
     }
 
-    pub fn set_flags(&self, mut flags: Flags) {
-        remove_obsolete_adapter_flags(&mut flags);
+    pub fn set_flags(&self, flags: Flags) {
         let secure_mode = self.config.get_secure_mode();
         if let Err(error) = validate_flags(&flags)
             .and_then(|_| {
@@ -1527,10 +1518,6 @@ impl GlobalCtx {
         feature_flags.ipv6_public_addr_provider = enabled;
         self.feature_flags.store(feature_flags);
         true
-    }
-
-    pub fn token_bucket_manager(&self) -> &TokenBucketManager {
-        &self.token_bucket_manager
     }
 
     pub fn stats_manager(&self) -> &Arc<StatsManager> {

@@ -1,4 +1,4 @@
-use crate::common::config::{ConfigFileControl, ConfigSource};
+use crate::common::config::ConfigFileControl;
 #[cfg(feature = "ffi-dataplane")]
 use crate::gateway::socks5::Socks5Server;
 #[cfg(feature = "ffi-dataplane")]
@@ -514,10 +514,6 @@ impl NetworkInstance {
 
     pub fn get_config(&self) -> TomlConfigLoader {
         self.config.clone()
-    }
-
-    pub fn get_network_config_source(&self) -> ConfigSource {
-        self.config.get_network_config_source()
     }
 
     pub fn get_latest_error_msg(&self) -> Option<String> {

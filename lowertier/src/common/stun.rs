@@ -28,19 +28,12 @@ use crate::common::{error::Error, underlay_policy::UnderlayPolicy};
 use super::dns::resolve_txt_record;
 use super::stun_codec_ext::*;
 
-// TODO(tracker): remove this allowance after discovery integration.
-#[allow(dead_code)]
-pub(crate) fn is_stun_binding_success(data: &[u8]) -> bool {
-    if data.len() < 20 {
-        return false;
-    }
-    MessageDecoder::<Attribute>::new()
-        .decode_from_bytes(data)
-        .ok()
-        .and_then(Result::ok)
-        .is_some_and(|message| {
-            message.class() == MessageClass::SuccessResponse && message.method() == BINDING
-        })
+fn extract_mapped_addr(msg: &Message<Attribute>) -> Option<SocketAddr> {
+    msg.attributes().find_map(|attribute| match attribute {
+        Attribute::MappedAddress(addr) => Some(addr.address()),
+        Attribute::XorMappedAddress(addr) => Some(addr.address()),
+        _ => None,
+    })
 }
 
 const DEFAULT_UDP_STUN_SERVERS: &[&str] = &[
@@ -226,29 +219,10 @@ struct BindRequestResponse {
 
     recv_from_addr: SocketAddr,
     mapped_socket_addr: Option<SocketAddr>,
-    // TODO(tracker): remove this allowance after discovery integration.
-    #[allow(dead_code)]
-    changed_socket_addr: Option<SocketAddr>,
-
-    // TODO(tracker): remove this allowance after discovery integration.
-    #[allow(dead_code)]
-    change_ip: bool,
-    // TODO(tracker): remove this allowance after discovery integration.
-    #[allow(dead_code)]
-    change_port: bool,
-
     real_ip_changed: bool,
     real_port_changed: bool,
 
     latency_us: u32,
-}
-
-impl BindRequestResponse {
-    // TODO(tracker): remove this allowance after discovery integration.
-    #[allow(dead_code)]
-    pub fn get_mapped_addr_no_check(&self) -> &SocketAddr {
-        self.mapped_socket_addr.as_ref().unwrap()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -328,22 +302,6 @@ impl StunClient {
         Err(Error::Unknown)
     }
 
-    fn extrace_mapped_addr(msg: &Message<Attribute>) -> Option<SocketAddr> {
-        let mut mapped_addr = None;
-        for x in msg.attributes() {
-            match x {
-                Attribute::MappedAddress(addr) if mapped_addr.is_none() => {
-                    let _ = mapped_addr.insert(addr.address());
-                }
-                Attribute::XorMappedAddress(addr) if mapped_addr.is_none() => {
-                    let _ = mapped_addr.insert(addr.address());
-                }
-                _ => {}
-            }
-        }
-        mapped_addr
-    }
-
     fn extract_changed_addr(msg: &Message<Attribute>) -> Option<SocketAddr> {
         let mut changed_addr = None;
         for x in msg.attributes() {
@@ -406,10 +364,7 @@ impl StunClient {
             local_addr: self.socket.local_addr()?,
             stun_server_addr: stun_host,
             recv_from_addr: recv_addr,
-            mapped_socket_addr: Self::extrace_mapped_addr(&msg),
-            changed_socket_addr,
-            change_ip,
-            change_port,
+            mapped_socket_addr: extract_mapped_addr(&msg),
 
             real_ip_changed,
             real_port_changed,
@@ -828,22 +783,6 @@ impl TcpStunClient {
         self
     }
 
-    fn extract_mapped_addr(msg: &Message<Attribute>) -> Option<SocketAddr> {
-        let mut mapped_addr = None;
-        for x in msg.attributes() {
-            match x {
-                Attribute::MappedAddress(addr) if mapped_addr.is_none() => {
-                    let _ = mapped_addr.insert(addr.address());
-                }
-                Attribute::XorMappedAddress(addr) if mapped_addr.is_none() => {
-                    let _ = mapped_addr.insert(addr.address());
-                }
-                _ => {}
-            }
-        }
-        mapped_addr
-    }
-
     fn message_size_from_header(header: &[u8; 20]) -> Result<usize, Error> {
         if (header[0] & 0b1100_0000) != 0 {
             return Err(Error::MessageDecodeError(
@@ -961,10 +900,7 @@ impl TcpStunClient {
             local_addr,
             stun_server_addr: stun_host,
             recv_from_addr: stun_host,
-            mapped_socket_addr: Self::extract_mapped_addr(&msg),
-            changed_socket_addr: None,
-            change_ip: false,
-            change_port: false,
+            mapped_socket_addr: extract_mapped_addr(&msg),
             real_ip_changed: false,
             real_port_changed: false,
             latency_us: now.elapsed().as_micros() as u32,

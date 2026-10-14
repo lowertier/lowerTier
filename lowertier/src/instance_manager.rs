@@ -7,7 +7,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     common::{
-        config::{ConfigFileControl, ConfigLoader, ConfigSource, TomlConfigLoader},
+        config::{ConfigFileControl, ConfigLoader, TomlConfigLoader},
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
         log,
     },
@@ -352,15 +352,6 @@ impl NetworkInstanceManager {
         self.instance_map
             .get(instance_id)
             .map(|instance| instance.value().get_config())
-    }
-
-    pub fn get_instance_network_config_source(
-        &self,
-        instance_id: &uuid::Uuid,
-    ) -> Option<ConfigSource> {
-        self.instance_map
-            .get(instance_id)
-            .map(|instance| instance.value().get_network_config_source())
     }
 
     pub fn get_instance_service(&self, instance_id: &uuid::Uuid) -> Option<Arc<ControlInstance>> {

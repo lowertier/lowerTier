@@ -23,7 +23,6 @@ use crate::{
     peers::credential_manager::CredentialManager,
     proto::{
         acl::Acl,
-        api::manage::ConfigSource as RpcConfigSource,
         common::{PortForwardConfigPb, SecureModeConfig, SocketType},
         peer_rpc::CredentialBundle,
     },
@@ -36,7 +35,6 @@ use super::env_parser;
 pub type Flags = crate::proto::common::FlagsInConfig;
 
 pub fn gen_default_flags() -> Flags {
-    #[allow(deprecated)]
     Flags {
         default_protocol: "quic".to_string(),
         enabled_protocols: Vec::new(),
@@ -69,8 +67,6 @@ pub fn gen_default_flags() -> Flags {
         underlay_deny_cidrs: Vec::new(),
         quic_initial_receive_window: 2 * 1024 * 1024,
         quic_receive_window: 4 * 1024 * 1024,
-        port_mode: String::new(),
-        interface_adapter: String::new(),
         l2_fdb_capacity: 16_384,
         l2_fdb_age_seconds: 300,
         l2_flood_bytes_per_second: 64 * 1024 * 1024,
@@ -95,6 +91,10 @@ pub fn transport_protocol_enabled(flags: &Flags, protocol: &str) -> bool {
 }
 
 pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(protocol, "quic" | "tcp" | "wss"),
+        "unsupported transport {protocol:?}; expected quic, tcp, or wss"
+    );
     anyhow::ensure!(
         transport_protocol_enabled(flags, protocol),
         "transport {protocol:?} is disabled by enabled_protocols"
@@ -186,12 +186,6 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-#[allow(deprecated)]
-pub(crate) fn remove_obsolete_adapter_flags(flags: &mut Flags) {
-    flags.port_mode.clear();
-    flags.interface_adapter.clear();
 }
 
 pub fn parse_proxy_listener_url(value: &str, scheme: &str) -> anyhow::Result<url::Url> {
@@ -478,11 +472,6 @@ pub trait ConfigLoader: Send + Sync {
     }
     fn set_credential_file(&self, _path: Option<std::path::PathBuf>) {}
 
-    fn get_network_config_source(&self) -> ConfigSource {
-        ConfigSource::User
-    }
-    fn set_network_config_source(&self, _source: Option<ConfigSource>) {}
-
     fn dump(&self) -> String;
 }
 
@@ -518,50 +507,6 @@ impl std::fmt::Debug for NetworkIdentity {
             )
             .finish()
     }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigSource {
-    #[default]
-    User,
-}
-
-impl ConfigSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-        }
-    }
-
-    pub fn from_rpc(source: i32) -> Option<Self> {
-        match RpcConfigSource::try_from(source).ok() {
-            Some(RpcConfigSource::User) => Some(Self::User),
-            _ => None,
-        }
-    }
-
-    pub fn to_rpc(self) -> i32 {
-        match self {
-            Self::User => RpcConfigSource::User as i32,
-        }
-    }
-}
-
-impl std::str::FromStr for ConfigSource {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "user" => Ok(Self::User),
-            other => Err(format!("unknown network config source: {other}")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-struct ConfigSourceConfig {
-    source: ConfigSource,
 }
 
 #[derive(Eq, PartialEq, Hash)]
@@ -928,7 +873,6 @@ struct Config {
     stun_servers_v6: Option<Vec<String>>,
 
     credential_file: Option<PathBuf>,
-    source: Option<ConfigSourceConfig>,
     #[serde(
         flatten,
         default,
@@ -988,15 +932,6 @@ impl TomlConfigLoader {
         let config = candidate.config.lock().unwrap().clone();
         *self.config.lock().unwrap() = config;
     }
-    fn normalize_config_source(config: &mut Config) {
-        if matches!(
-            config.source.as_ref().map(|source| source.source),
-            Some(ConfigSource::User)
-        ) {
-            config.source = None;
-        }
-    }
-
     pub fn new_from_str(config_str: &str) -> Result<Self, anyhow::Error> {
         Self::new_from_str_with_source("inline config", config_str)
     }
@@ -1013,7 +948,7 @@ impl TomlConfigLoader {
         source_name: &str,
         config_str: &str,
     ) -> Result<Self, anyhow::Error> {
-        let mut config = toml::de::from_str::<Config>(config_str).map_err(|err| {
+        let config = toml::de::from_str::<Config>(config_str).map_err(|err| {
             let message = format_toml_parse_error(source_name, config_str, &err);
             anyhow::Error::new(err).context(message)
         })?;
@@ -1029,7 +964,6 @@ impl TomlConfigLoader {
             "unknown configuration keys: {:?}",
             config.unknown_keys.keys()
         );
-        Self::normalize_config_source(&mut config);
 
         Self::new_from_config(config).map_err(|err| {
             let message = format!("failed to load config from {source_name}: {err}");
@@ -1043,7 +977,6 @@ impl TomlConfigLoader {
         flags.relay = config.relay.clone();
         flags.camouflage = config.camouflage.clone();
         flags.limits = config.limits.clone();
-        remove_obsolete_adapter_flags(&mut flags);
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         crate::common::control_config::validate_camouflage_listeners(
             &flags,
@@ -1463,8 +1396,7 @@ impl ConfigLoader for TomlConfigLoader {
             .unwrap_or_default()
     }
 
-    fn set_flags(&self, mut flags: Flags) {
-        remove_obsolete_adapter_flags(&mut flags);
+    fn set_flags(&self, flags: Flags) {
         self.config.lock().unwrap().flags_struct = Some(flags);
     }
 
@@ -1592,23 +1524,8 @@ impl ConfigLoader for TomlConfigLoader {
         self.config.lock().unwrap().credential_file = path;
     }
 
-    fn get_network_config_source(&self) -> ConfigSource {
-        self.config
-            .lock()
-            .unwrap()
-            .source
-            .as_ref()
-            .map(|source| source.source)
-            .unwrap_or(ConfigSource::User)
-    }
-
-    fn set_network_config_source(&self, _source: Option<ConfigSource>) {
-        self.config.lock().unwrap().source = None;
-    }
-
     fn dump(&self) -> String {
         let mut config = self.config.lock().unwrap().clone();
-        Self::normalize_config_source(&mut config);
         let flags = self.get_flags();
         config.flags = Some(flags_diff_from_default(&flags));
         config.relay = flags.relay.clone();
@@ -1953,12 +1870,10 @@ pub mod tests {
         crate::common::transit_budget::check_budget_units();
         crate::common::control_config::tests::rejects_legacy_control_keys_with_replacement_names();
         automatic_adapter_uses_the_platform_capability();
-        obsolete_adapter_fields_are_removed_during_config_load();
-        obsolete_adapter_fields_are_removed_from_runtime_updates();
+        rejects_removed_transport_schemes();
         underlay_and_quic_flags_roundtrip_through_toml();
         rejects_invalid_l2_flags();
         dump_preserves_flags_that_differ_from_lowertier_defaults();
-        test_network_config_source_user_is_implicit();
         test_ipv6_public_addr_config_roundtrip();
     }
 
@@ -2069,36 +1984,23 @@ socket_mark = 66
         );
     }
 
-    #[allow(deprecated)]
-    fn obsolete_adapter_fields_are_removed_during_config_load() {
-        let config = TomlConfigLoader::new_from_str(
-            r#"
-[flags]
-port_mode = "removed-value"
-interface_adapter = "also-removed"
-"#,
-        )
-        .unwrap();
-        let flags = config.get_flags();
-
-        assert!(flags.port_mode.is_empty());
-        assert!(flags.interface_adapter.is_empty());
-        assert!(!config.dump().contains("port_mode"));
-        assert!(!config.dump().contains("interface_adapter"));
-    }
-
-    #[allow(deprecated)]
-    fn obsolete_adapter_fields_are_removed_from_runtime_updates() {
-        let config = TomlConfigLoader::default();
-        let mut flags = config.get_flags();
-        flags.port_mode = "removed-value".to_string();
-        flags.interface_adapter = "also-removed".to_string();
-
-        config.set_flags(flags);
-        let flags = config.get_flags();
-
-        assert!(flags.port_mode.is_empty());
-        assert!(flags.interface_adapter.is_empty());
+    fn rejects_removed_transport_schemes() {
+        for scheme in ["udp", "ws", "ring", "wg", "unknown"] {
+            for text in [
+                format!("listeners = [\"{scheme}://127.0.0.1:11010\"]"),
+                format!("mapped_listeners = [\"{scheme}://127.0.0.1:11010\"]"),
+                format!("[[peer]]\nuri = \"{scheme}://127.0.0.1:11010\""),
+            ] {
+                let error = TomlConfigLoader::new_from_str(&text).unwrap_err();
+                assert!(format!("{error:#}").contains("unsupported transport"));
+            }
+        }
+        for scheme in ["quic", "tcp", "wss"] {
+            TomlConfigLoader::new_from_str(&format!(
+                "listeners = [\"{scheme}://127.0.0.1:11010\"]"
+            ))
+            .unwrap();
+        }
     }
 
     fn underlay_and_quic_flags_roundtrip_through_toml() {
@@ -2495,30 +2397,6 @@ members = ["admin"]
         let group = config.get_acl().unwrap().acl_v1.unwrap().group.unwrap();
         assert!(group.declares.is_empty());
         assert_eq!(group.members, vec!["admin"]);
-    }
-
-    fn test_network_config_source_user_is_implicit() {
-        let config = TomlConfigLoader::default();
-        config.set_network_config_source(Some(ConfigSource::User));
-        let dumped = config.dump();
-
-        assert!(!dumped.contains("[source]"));
-
-        let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
-        assert_eq!(loaded.get_network_config_source(), ConfigSource::User);
-
-        let explicit_user = TomlConfigLoader::new_from_str(
-            r#"
-[source]
-source = "user"
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            explicit_user.get_network_config_source(),
-            ConfigSource::User
-        );
-        assert!(!explicit_user.dump().contains("[source]"));
     }
 
     fn test_ipv6_public_addr_config_roundtrip() {

@@ -1,11 +1,6 @@
 _version: 2
 
 core_clap:
-  machine_id:
-    en: |+
-      the machine id to identify this machine, used for config recovery after disconnection, must be unique and fixed. by default it is loaded from persisted local state; on first start it may be migrated from system information or generated, then remains fixed.
-    zh-CN: |+
-      Web 配置服务器通过 machine id 来识别机器，用于断线重连后的配置恢复，需要保证唯一且固定不变。默认从本地持久化状态读取；首次启动时可能基于系统信息迁移或生成，之后保持固定不变。
   config_file:
     en: "path to the config file, NOTE: the options set by cmdline args will override options in config file"
     zh-CN: "配置文件路径，注意：命令行中的配置的选项会覆盖配置文件中的选项"
@@ -58,22 +53,20 @@ core_clap:
       还支持将代理网络映射到其他CIDR，例如：10.0.0.0/24->192.168.0.0/24
       其他对等节点可以通过 IP 192.168.0.1 来访问 10.0.0.1
   rpc_portal:
-    en: "rpc portal address to listen for management. 0 means random port, 12345 means listen on 12345 of localhost, 0.0.0.0:12345 means listen on 12345 of all interfaces. default is 0 and will try 15888 first"
-    zh-CN: "用于管理的RPC门户地址。0表示随机端口，12345表示在localhost的12345上监听，0.0.0.0:12345表示在所有接口的12345上监听。默认是0，首先尝试15888"
+    en: "Loopback control address. Use 0 for an available port or host:port for an explicit address. The default tries 15888 first."
+    zh-CN: "回环控制地址。0 表示可用端口，host:port 指定地址。默认先尝试 15888。"
   rpc_portal_whitelist:
     en: "rpc portal whitelist, only allow these addresses to access rpc portal, e.g.: 127.0.0.1,127.0.0.0/8,::1/128"
     zh-CN: "RPC门户白名单，仅允许这些地址访问RPC门户，例如：127.0.0.1/32,127.0.0.0/8,::1/128"
   listeners:
     en: |+
-        listeners to accept connections, allow format:
-        port number: <11010>. means tcp/udp will listen on 11010 and ws/wss use their standard offsets
-        url: <tcp://0.0.0.0:11010>. tcp can be tcp, udp, ring, ws, wss, or quic\n
-        proto & port pair: <proto:port>. for example quic:11012; url and proto:port can occur multiple times.
+      Accept connections through quic, tcp (HTTP/2), or wss.
+      Use a port number, a URL such as quic://0.0.0.0:11012, or a protocol:port pair.
+      A port number selects QUIC and TCP on that port, with WSS on port + 1.
     zh-CN: |+
-      监听器用于接受连接，允许以下格式：
-      端口号：<11010>，意味着tcp/udp将在11010端口监听，ws/wss使用其标准偏移端口。
-      url：<tcp://0.0.0.0:11010>，其中tcp可以是tcp、udp、ring、ws、wss或quic协议。
-      协议和端口对：<proto:port>，例如quic:11012。URL 和协议端口对可以多次出现。
+      通过 quic、tcp（HTTP/2）或 wss 接受连接。
+      使用端口号、URL（如 quic://0.0.0.0:11012）或协议:端口。
+      端口号在该端口启用 QUIC 和 TCP，并在端口 + 1 启用 WSS。
   no_listener:
     en: "do not listen on any port, only connect to peers"
     zh-CN: "不监听任何端口，只连接到对等节点"
@@ -100,7 +93,7 @@ core_clap:
     zh-CN: "禁用对等节点通信的加密，默认为false，必须与对等节点相同"
   encryption_algorithm:
     en: "authenticated encryption algorithm for peer traffic. Default: chacha20-poly1305. Also supported: aes-gcm and aes-256-gcm"
-    zh-CN: "对等流量使用的认证加密算法。默认：chacha20-poly1305。还支持：aes-gcm、aes-256-gcm；chacha20 是兼容旧配置的别名"
+    zh-CN: "对等流量使用的认证加密算法。默认：chacha20-poly1305。还支持：aes-gcm、aes-256-gcm"
   multi_thread:
     en: "use multi-thread runtime, default is single-thread"
     zh-CN: "使用多线程运行时，默认为单线程"
@@ -119,18 +112,6 @@ core_clap:
   mtu:
     en: "mtu of the TUN device, default is 1380 for non-encryption, 1360 for encryption"
     zh-CN: "TUN设备的MTU，默认为非加密时为1380，加密时为1360"
-  latency_first:
-    en: "latency first mode, will try to relay traffic with lowest latency path, default is using shortest path"
-    zh-CN: "延迟优先模式，将尝试使用最低延迟路径转发流量，默认使用最短路径"
-  speed_first:
-    en: "prefer the freshest route with the highest measured delivery rate"
-    zh-CN: "优先使用具有最高最新实测传输速率的路由"
-  speed_probe_interval_seconds:
-    en: "seconds between directional speed probe cycles"
-    zh-CN: "定向速度探测周期的秒数"
-  speed_probe_budget_bps:
-    en: "maximum node-wide speed probe traffic in bits per second"
-    zh-CN: "节点范围速度探测流量的最大比特率"
   exit_nodes:
     en: "exit nodes to forward all traffic to, a virtual ipv4 address, priority is determined by the order of the list"
     zh-CN: "转发所有流量的出口节点，虚拟IPv4地址，优先级由列表顺序决定"
@@ -149,23 +130,9 @@ core_clap:
   manual_routes:
     en: "assign routes cidr manually and disable propagated subnet-proxy routes. e.g.: 192.168.0.0/16"
     zh-CN: "手动分配路由CIDR，并禁用对等节点传播的子网代理路由。例如：192.168.0.0/16"
-  relay_network_whitelist:
-    en: |+
-        only forward traffic from the whitelist networks, supporting wildcard strings, multiple network names can be separated by spaces.
-        if local network (assigned with network_name) is not in the whitelist, the traffic can still be forwarded if no other route path is available.
-        if this parameter is empty, forwarding is disabled. by default, all networks are allowed.
-        e.g.: '*' (all networks), 'def*' (networks with the prefix 'def'), 'net1 net2' (only allow net1 and net2)"
-    zh-CN: |+
-        仅转发白名单网络的流量，支持通配符字符串。多个网络名称间可以使用英文空格间隔。
-        如果本地网络（使用 network_name 分配）不在白名单中，如果没有其他路由路径可用，流量仍然可以转发。
-        如果该参数为空，则禁用转发。默认允许所有网络。
-        例如：'*'（所有网络），'def*'（以def为前缀的网络），'net1 net2'（只允许net1和net2）"
   disable_p2p:
     en: "disable ordinary automatic p2p; still establish p2p with peers marked as need-p2p, and other peers should not proactively connect to this node"
     zh-CN: "禁用普通自动P2P；仍会与标记为 need-p2p 的节点建立P2P连接，其他节点不应主动与当前节点建立P2P"
-  p2p_only:
-    en: "only communicate with peers that already establish p2p connection"
-    zh-CN: "仅与已经建立P2P连接的对等节点通信"
   lazy_p2p:
     en: "only try to establish p2p when traffic actually needs the peer; peers marked as need-p2p are still connected proactively"
     zh-CN: "仅在实际流量需要某个对等节点时才尝试建立P2P；被标记为 need-p2p 的节点仍会主动建立连接"
@@ -196,9 +163,6 @@ core_clap:
   outbound_http_proxy_listen:
     en: "HTTP proxy listener in host:port format"
     zh-CN: "HTTP代理监听地址，格式为 host:port"
-  ipv6_listener:
-    en: "the url of the ipv6 listener, e.g.: tcp://[::]:11010, if not set, will listen on random udp port"
-    zh-CN: "IPv6 监听器的URL，例如：tcp://[::]:11010，如果未设置，将在随机UDP端口上监听"
   bind_device:
     en: "bind the connector socket to physical devices to avoid routing issues. e.g.: subnet proxy segment conflicts with a node's segment, after binding the physical device, it can communicate with the node normally."
     zh-CN: "将连接器的套接字绑定到物理设备以避免路由问题。比如子网代理网段与某节点的网段冲突，绑定物理设备后可以与该节点正常通信。"
@@ -241,12 +205,6 @@ core_clap:
   private_mode:
     en: "if true, foreign networks are only allowed when this node can verify they use the same network secret, or when a foreign credential node is already trusted via admin-issued credential propagation; different or missing secrets are otherwise rejected."
     zh-CN: "如果为true，则仅允许两类 foreign network 接入：本节点能验证其使用相同 network secret 的节点，或已通过 foreign network 管理节点传播而被信任的 credential 节点；否则 secret 不同或缺失时会被拒绝。"
-  foreign_relay_bps_limit:
-    en: "the maximum bps limit for foreign network relay, default is no limit. unit: BPS (bytes per second)"
-    zh-CN: "作为共享节点时，限制非本地网络的流量转发速率，默认无限制，单位 BPS （字节每秒）"
-  instance_recv_bps_limit:
-    en: "the maximum total receive bps limit for this instance, default is no limit. unit: BPS (bytes per second)"
-    zh-CN: "限制当前网络实例整体入站流量的总接收速率，默认无限制，单位 BPS （字节每秒）"
   tcp_whitelist:
     en: "tcp port whitelist. Supports single ports (80) and ranges (8000-9000)"
     zh-CN: "TCP 端口白名单。支持单个端口（80）和范围（8000-9000）"

@@ -1,13 +1,10 @@
 use atomic_shim::AtomicU64;
-use dashmap::DashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tokio::time;
 use tokio_util::task::AbortOnDropHandle;
-
-use crate::proto::common::LimiterConfig;
 
 /// Token Bucket rate limiter using atomic operations
 pub struct TokenBucket {
@@ -25,22 +22,6 @@ pub struct BucketConfig {
     capacity: u64,             // Maximum token capacity
     fill_rate: u64,            // Tokens added per second
     refill_interval: Duration, // Time between refill operations
-}
-
-impl From<LimiterConfig> for BucketConfig {
-    fn from(cfg: LimiterConfig) -> Self {
-        let burst_rate = 1.max(cfg.burst_rate.unwrap_or(1));
-        let fill_rate = 8196.max(cfg.bps.unwrap_or(u64::MAX / burst_rate));
-        let refill_interval = cfg
-            .fill_duration_ms
-            .map(|x| Duration::from_millis(1.max(x)))
-            .unwrap_or(Duration::from_millis(10));
-        BucketConfig {
-            capacity: burst_rate * fill_rate,
-            fill_rate,
-            refill_interval,
-        }
-    }
 }
 
 impl TokenBucket {
@@ -166,55 +147,5 @@ impl TokenBucket {
         while !self.try_consume(tokens) {
             self.refill_notifier.notified().await;
         }
-    }
-}
-
-pub struct TokenBucketManager {
-    buckets: Arc<DashMap<String, Arc<TokenBucket>>>,
-
-    _retain_task: Option<AbortOnDropHandle<()>>,
-}
-
-impl Default for TokenBucketManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TokenBucketManager {
-    /// Creates a new TokenBucketManager
-    pub fn new() -> Self {
-        let buckets = Arc::new(DashMap::new());
-
-        let retain_task = tokio::runtime::Handle::try_current().ok().map(|runtime| {
-            let buckets_clone = buckets.clone();
-            AbortOnDropHandle::new(runtime.spawn(async move {
-                loop {
-                    // Retain only buckets that are still in use.
-                    let old_len = buckets_clone.len();
-                    buckets_clone.retain(|_, bucket| Arc::<TokenBucket>::strong_count(bucket) > 1);
-                    buckets_clone.shrink_to_fit();
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    tracing::info!(
-                        "Retained buckets: {} ({} dropped)",
-                        buckets_clone.len(),
-                        old_len.saturating_sub(buckets_clone.len())
-                    );
-                }
-            }))
-        });
-
-        Self {
-            buckets,
-            _retain_task: retain_task,
-        }
-    }
-
-    /// Get or create a token bucket for the given key
-    pub fn get_or_create(&self, key: &str, cfg: BucketConfig) -> Arc<TokenBucket> {
-        self.buckets
-            .entry(key.to_string())
-            .or_insert_with(|| TokenBucket::new_from_cfg(cfg))
-            .clone()
     }
 }
