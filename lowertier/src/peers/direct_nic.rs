@@ -531,13 +531,14 @@ impl DirectNicIngress {
             }
         }
 
+        let local_ipv4 = self.global_ctx.get_ipv4();
         let batch = self
             .global_ctx
             .get_acl_filter()
             .process_packet_batch_with_acl(
                 batch,
                 true,
-                self.global_ctx.get_ipv4().map(|address| address.address()),
+                local_ipv4.map(|address| address.address()),
                 |destination| self.global_ctx.is_ip_local_ipv6(&destination),
                 self.route.as_ref(),
             );
@@ -563,6 +564,7 @@ impl DirectNicIngress {
 
         let now = std::time::Instant::now();
         if self.ethernet_input {
+            let local_broadcast = local_ipv4.map(|network| network.last_address());
             let mut ingress_batch = L2IngressBatch::default();
             let keep: SmallVec<[bool; 64]> = batch
                 .iter()
@@ -580,7 +582,7 @@ impl DirectNicIngress {
                             &self.l2_fabric,
                             packet.payload(),
                             from_peer_id,
-                            &self.global_ctx,
+                            local_broadcast,
                             now,
                         )
                     }

@@ -873,7 +873,7 @@ impl PeerManager {
         fabric: &L2Fabric,
         payload: &[u8],
         peer_id: PeerId,
-        global_ctx: &ArcGlobalCtx,
+        local_broadcast: Option<Ipv4Addr>,
         now: std::time::Instant,
     ) -> bool {
         let is_flood = match payload.first().map(|byte| byte >> 4) {
@@ -881,9 +881,7 @@ impl PeerManager {
                 let destination = packet.get_destination();
                 destination.is_multicast()
                     || destination.is_broadcast()
-                    || global_ctx
-                        .get_ipv4()
-                        .is_some_and(|network| destination == network.last_address())
+                    || local_broadcast == Some(destination)
             }),
             Some(6) => Ipv6Packet::new(payload)
                 .is_some_and(|packet| packet.get_destination().is_multicast()),
@@ -2710,7 +2708,12 @@ impl PeerManager {
         }
 
         impl NicPacketProcessor {
-            fn classify_at(&self, packet: ZCPacket, now: std::time::Instant) -> NicPacketAction {
+            fn classify_at(
+                &self,
+                packet: ZCPacket,
+                now: std::time::Instant,
+                local_broadcast: Option<Ipv4Addr>,
+            ) -> NicPacketAction {
                 let hdr = packet.peer_manager_header().unwrap();
                 let packet_type = hdr.packet_type;
                 let from_peer_id = hdr.from_peer_id.get();
@@ -2773,7 +2776,7 @@ impl PeerManager {
                         &self.l2_fabric,
                         packet.payload(),
                         from_peer_id,
-                        &self.global_ctx,
+                        local_broadcast,
                         now,
                     )
                 {
@@ -2783,7 +2786,11 @@ impl PeerManager {
             }
 
             fn classify(&self, packet: ZCPacket) -> NicPacketAction {
-                self.classify_at(packet, std::time::Instant::now())
+                let local_broadcast = self
+                    .global_ctx
+                    .get_ipv4()
+                    .map(|network| network.last_address());
+                self.classify_at(packet, std::time::Instant::now(), local_broadcast)
             }
         }
 
@@ -2807,6 +2814,10 @@ impl PeerManager {
 
             async fn try_process_batch_from_peer(&self, mut batch: PacketBatch) -> PacketBatch {
                 let batch_time = std::time::Instant::now();
+                let local_broadcast = self
+                    .global_ctx
+                    .get_ipv4()
+                    .map(|network| network.last_address());
                 if self.local_bridge_authorized
                     && batch.iter().all(|packet| {
                         packet.peer_manager_header().is_some_and(|header| {
@@ -2841,7 +2852,7 @@ impl PeerManager {
                                         &self.l2_fabric,
                                         packet.payload(),
                                         header.from_peer_id.get(),
-                                        &self.global_ctx,
+                                        local_broadcast,
                                         batch_time,
                                     )
                             }
@@ -2861,7 +2872,7 @@ impl PeerManager {
                 let mut to_nic = PacketBatch::new();
                 let mut remaining = PacketBatch::new();
                 for packet in batch {
-                    match self.classify_at(packet, batch_time) {
+                    match self.classify_at(packet, batch_time, local_broadcast) {
                         NicPacketAction::Send(packet) => to_nic
                             .try_push(packet)
                             .expect("a NIC batch cannot exceed its input batch"),
@@ -4932,22 +4943,6 @@ impl PeerManager {
         (peers, is_exit_node, false)
     }
 
-    fn hybrid_destination_from_packet_snapshot(
-        &self,
-        packet: &ZCPacket,
-        snapshot: &ForwardingDecisionSnapshotHandle,
-        ip_addr: IpAddr,
-        configured_exit_nodes: &[IpAddr],
-    ) -> (Vec<PeerId>, bool, bool) {
-        self.sync_topology_service_routes(snapshot);
-        self.hybrid_destination_from_packet_snapshot_with_synced_routes(
-            packet,
-            snapshot,
-            ip_addr,
-            configured_exit_nodes,
-        )
-    }
-
     pub async fn plan_user_route(&self, ip_addr: IpAddr) -> Result<UserRoutePlan, Error> {
         let snapshot = self
             .peers
@@ -6346,6 +6341,26 @@ mod tests {
 
     #[tokio::test]
     async fn l2_direct_nic_policy_checks_compact_ip_types() {
+        let mut flags = crate::common::config::gen_default_flags();
+        flags.l2_flood_bytes_per_second = 40;
+        let fabric = crate::peers::l2_fabric::L2Fabric::from_flags(&flags);
+        let broadcast = "10.77.0.255".parse().unwrap();
+        let packet = routed_ipv4_packet("10.77.0.2".parse().unwrap(), broadcast, 1);
+        let now = std::time::Instant::now();
+        assert!(!PeerManager::admit_compact_to_tap(
+            &fabric,
+            packet.payload(),
+            42,
+            Some(broadcast),
+            now,
+        ));
+        assert!(PeerManager::admit_compact_to_tap(
+            &fabric,
+            packet.payload(),
+            42,
+            Some("10.78.0.255".parse().unwrap()),
+            now,
+        ));
         for allowed_type in [0x0800, 0x86dd] {
             let (peer, _legacy_nic) = create_tap_peer_manager_with_policy(0, None, |flags| {
                 flags.l2_allowed_ether_types = vec![allowed_type];
