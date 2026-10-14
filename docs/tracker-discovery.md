@@ -55,7 +55,7 @@ The seed needs the same network secret as its peers.
 
 1. Start STUN and independent tracker requests concurrently.
 2. Send BEP 15 CONNECT before STUN completes.
-3. Announce after the mapped transport port becomes available.
+3. Announce the bound transport port provisionally while STUN collects a mapping.
 4. Attempt returned candidates immediately.
 5. Complete VPN authentication before accepting membership.
 6. Use existing encrypted routing and rendezvous RPCs to discover and connect additional peers.
@@ -114,7 +114,8 @@ The method remains probabilistic and depends on NAT TCP behavior.
 An observed UDP mapping does not establish a TCP mapping.
 Automatic TCP mappings refresh every 30 seconds through the retained STUN connections.
 Failed connections close before the client reacquires mappings from the same reserved source port.
-The client pauses announcements when it has no valid mapping.
+The client uses its bound port provisionally when it has no valid mapping.
+The provisional port can be unreachable behind NAT. Outbound bootstrap remains available.
 Locally assigned public ports retain their listeners while valid and acquire replacement listeners when needed.
 The advertised local public endpoint matches the bound listener.
 Established VPN sessions remain independent of this mapping maintenance.

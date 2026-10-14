@@ -283,13 +283,24 @@ impl TcpBootstrap {
                 candidates: vec![advertised],
             }
         } else {
-            reserve_addresses(&ctx, vec![local]).await?
+            let listener = listen(&ctx, local)?;
+            let local = listener.local_addr()?;
+            Reservation {
+                listener,
+                mapped_listeners: Vec::new(),
+                mapping: TcpPortMappings {
+                    addresses: Vec::new(),
+                    connections: Vec::new(),
+                },
+                candidates: vec![local],
+            }
         };
         let advertised = reservation
             .mapped_listeners
             .first()
             .and_then(|listener| listener.local_addr().ok())
             .or_else(|| reservation.mapping.addresses.first().copied())
+            .or_else(|| reservation.listener.local_addr().ok())
             .context("no TCP bootstrap mapping")?;
         let (mapped_listeners, _) = tokio::sync::watch::channel(reservation.mapped_listeners);
         Ok(Self {

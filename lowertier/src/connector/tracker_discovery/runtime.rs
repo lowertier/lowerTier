@@ -30,6 +30,7 @@ static QUIC_DISCOVERY_HANDSHAKES: tokio::sync::Semaphore = tokio::sync::Semaphor
         / 4,
 );
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
+const MAPPING_EVENT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 struct Candidate {
@@ -497,10 +498,20 @@ async fn run_path(
         });
         (None, udp)
     };
-    let native_v6 = (protocol == "quic" && local.is_ipv6())
-        .then(|| udp.local_addr())
-        .transpose()?;
-    let (mapped_tx, mapped_rx) = watch::channel(config.advertise.or(native_v6));
+    let bootstrap_tcp = if protocol != "quic" {
+        Some(Arc::new(
+            TcpBootstrap::new(ctx.clone(), local, config.advertise).await?,
+        ))
+    } else {
+        None
+    };
+    let bound = if let Some(tcp) = &bootstrap_tcp {
+        tcp.local_addr()?
+    } else {
+        udp.local_addr()?
+    };
+    // A provisional port permits outbound bootstrap before any observer replies.
+    let (mapped_tx, mapped_rx) = watch::channel(Some(config.advertise.unwrap_or(bound)));
     let (candidate_tx, candidate_rx) = mpsc::channel(64);
     let hash = wire::rendezvous_id(&key, &protocol);
     // CONNECT requests start while STUN is still in flight.
@@ -524,13 +535,14 @@ async fn run_path(
                 hash,
                 peer_session,
                 connected,
+                bound,
             )
             .await
         });
     }
     let connections = Arc::new(PathConnections::default());
     let tcp = if protocol != "quic" {
-        let tcp = Arc::new(TcpBootstrap::new(ctx.clone(), local, config.advertise).await?);
+        let tcp = bootstrap_tcp.unwrap();
         mapped_tx.send_replace(Some(tcp.mapped().await?));
         if config.advertise.is_none() && local.is_ipv4() {
             let tcp = tcp.clone();
@@ -539,7 +551,6 @@ async fn run_path(
             let connections = connections.clone();
             tasks.spawn(async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
                     let previous = *mapped_tx.borrow();
                     let mapped = match tcp.refresh_mapping(previous).await {
                         Ok(address) => Some(address),
@@ -557,6 +568,12 @@ async fn run_path(
                             true
                         }
                     });
+                    tokio::time::sleep(if mapped.is_some() {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_secs(5)
+                    })
+                    .await;
                 }
                 #[allow(unreachable_code)]
                 Ok::<(), anyhow::Error>(())
@@ -568,9 +585,10 @@ async fn run_path(
             let (ctx, udp, packets) = (ctx.clone(), udp.clone(), packets.clone());
             let connections = connections.clone();
             tasks.spawn(async move {
+                let mut observed = false;
                 loop {
                     let current = *mapped_tx.borrow();
-                    let mapping = if let Some(current) = current {
+                    let mapping = if let Some(current) = current.filter(|_| observed) {
                         ctx.get_stun_info_collector()
                             .get_udp_port_mappings_with_socket_receiver(
                                 udp.clone(),
@@ -597,6 +615,7 @@ async fn run_path(
                             None
                         }
                     };
+                    observed = mapped.is_some();
                     connections.publish_listener(&ctx, udp.local_addr()?, "quic", mapped);
                     let delay = publish_udp_mapping(&mapped_tx, mapped);
                     tokio::time::sleep(delay).await;
@@ -684,6 +703,7 @@ async fn tracker_loop(
     hash: wire::Id,
     peer: wire::Id,
     mut connected: watch::Receiver<bool>,
+    bound: SocketAddr,
 ) -> Result<()> {
     let local = udp.local_addr()?;
     let tracker_name = url.host_str().unwrap().to_owned();
@@ -691,10 +711,14 @@ async fn tracker_loop(
     let mut cached_tracker = None;
     let mut address_index = 0usize;
     let mut mapping_changes = mapped.clone();
+    let mut next_event = Instant::now();
     loop {
         mapping_changes.borrow_and_update();
         let idle = *connected.borrow_and_update() && !started;
         let result = async {
+            if started {
+                tokio::time::sleep_until(next_event).await;
+            }
             if url.scheme() == "udp" && cached_tracker.is_none() {
                 let host = match url.host().unwrap() {
                     url::Host::Domain(host) => host.to_owned(),
@@ -718,12 +742,7 @@ async fn tracker_loop(
                 tracker.connect().await?;
                 cached_tracker = Some(tracker);
             }
-            // Hold the watch read lock until the valid mapping has been copied.
-            // Refresh can withdraw a mapping between separate check and read operations.
-            let address = mapped
-                .wait_for(Option::is_some)
-                .await?
-                .expect("wait_for retains the matching mapping until it is copied");
+            let address = (*mapped.borrow_and_update()).unwrap_or(bound);
             let announce = Announce {
                 hash,
                 peer,
@@ -742,6 +761,7 @@ async fn tracker_loop(
                 )
                 .await??
             };
+            next_event = Instant::now() + MAPPING_EVENT_INTERVAL;
             tracing::info!(tracker = %tracker_name, protocol = %ctx.get_flags().default_protocol, count = peers.addresses.len(), interval = peers.interval, ?address, "tracker discovery announce succeeded");
             for peer in peers.addresses {
                 if peer.is_ipv4() == local.is_ipv4()
@@ -808,6 +828,56 @@ mod tests {
     use super::super::server::TrackerServer;
     use super::*;
     use crate::peers::tests::create_mock_peer_manager_secure;
+
+    #[tokio::test]
+    async fn blocked_stun_does_not_block_quic_tracker_bootstrap() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let tracker = TrackerServer::new(1).unwrap();
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let url: url::Url = format!("udp://{}/announce", udp.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            let _tracker = AbortOnDropHandle::new(tokio::spawn(tracker.clone().serve_udp(udp)));
+            let blackhole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let a = create_mock_peer_manager_secure("no-stun".into(), "secret".into()).await;
+            let b = create_mock_peer_manager_secure("no-stun".into(), "secret".into()).await;
+            let mut paths = Vec::new();
+            for peer in [&a, &b] {
+                let ctx = peer.get_global_ctx();
+                let mut flags = ctx.get_flags();
+                flags.default_protocol = "quic".into();
+                ctx.set_flags(flags);
+                ctx.replace_stun_info_collector(Box::new(
+                    crate::common::stun::StunInfoCollector::new(
+                        vec![blackhole.local_addr().unwrap().to_string()],
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ));
+                paths.push(
+                    start(
+                        peer.clone(),
+                        TrackerDiscoveryConfig {
+                            trackers: vec![url.clone()],
+                            bind: Some("127.0.0.1:0".parse().unwrap()),
+                            advertise: None,
+                        },
+                    )
+                    .unwrap(),
+                );
+                while tracker.peer_count() < paths.len() {
+                    tokio::task::yield_now().await;
+                }
+            }
+            while !a.has_live_peer_connection(b.my_peer_id())
+                || !b.has_live_peer_connection(a.my_peer_id())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("STUN delayed tracker bootstrap");
+    }
 
     #[tokio::test]
     async fn udp_mapping_failure_withdraws_and_same_address_recovery_notifies() {

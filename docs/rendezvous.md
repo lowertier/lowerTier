@@ -72,7 +72,9 @@ Each address family needs a reachable tracker address in that family.
 Configure both A and AAAA records, or provide explicit IPv4 and IPv6 tracker URLs.
 An IPv4-only service cannot observe a node's IPv6 source address.
 Native IPv6 listeners advertise their bound ports without waiting for IPv4 STUN.
-IPv4 NAT mappings still use STUN.
+IPv4 paths announce their bound port provisionally while STUN collects the mapped port.
+This port can be unreachable behind NAT, but outbound bootstrap to a reachable peer can still succeed.
+Mapping observations trigger a new announcement, with at least five seconds between successful mapping events.
 
 The client attempts candidates from each permitted source interface.
 Connection state refers to a specific authenticated connection.
@@ -83,7 +85,8 @@ The existing process and peer connection limits still apply.
 Discovery candidates do not allocate unlimited VPN connections.
 
 QUIC retains its authenticated peer probes and mapped UDP socket.
-H2 and WSS retain their mapped TCP listening sockets.
+H2 and WSS bind TCP listeners before collecting mappings.
+STUN failures do not block tracker replies, outbound seed connections, or relay bootstrap.
 Both endpoints select opposite TLS roles for coordinated TCP attempts.
 Mapped TCP attempts remain active through one default private polling interval and the existing handshake allowance.
 The caller limits this complete attempt to 45 seconds.
