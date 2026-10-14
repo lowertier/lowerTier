@@ -121,6 +121,8 @@ Stop and start the instance to recreate those endpoints.
 
 Endpoint URLs retain `via=cdn`, `lanes=1,2,4`, and WSS paths.
 An explicit WSS URL path overrides `camouflage.wss_path`. The listener rejects a different request path.
+WSS peer URLs with an empty or root path use `camouflage.wss_path`, which defaults to `/ws`.
+Manual connectors retain this effective path so an active connection prevents repeated dialing.
 Multiple lanes are unavailable in CDN mode. Trusted proxy CIDRs default to none.
 CIDR and interface restrictions remain enforced. Strict underlay policy continues to reject peer hostnames.
 VPN/SNI examples use `challenges.cloudflare.com`. This name does not establish certificate ownership.

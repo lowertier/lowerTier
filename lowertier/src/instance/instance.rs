@@ -308,7 +308,8 @@ impl InstanceConfigPatcher {
         self.patch_routes(patch.routes).await?;
         self.patch_exit_nodes(patch.exit_nodes).await?;
         self.patch_mapped_listeners(patch.mapped_listeners).await?;
-        self.patch_connector(patch.connectors).await?;
+        self.patch_connector(patch.connectors, &candidate_flags)
+            .await?;
 
         let mut provider_config_changed = false;
         if let Some(hostname) = patch.hostname {
@@ -566,6 +567,7 @@ impl InstanceConfigPatcher {
     async fn patch_connector(
         &self,
         connectors: Vec<crate::proto::api::config::UrlPatch>,
+        flags: &crate::common::config::Flags,
     ) -> Result<(), anyhow::Error> {
         if connectors.is_empty() {
             return Ok(());
@@ -579,7 +581,8 @@ impl InstanceConfigPatcher {
             match ConfigPatchAction::try_from(connector.action) {
                 Ok(ConfigPatchAction::Add) => {
                     tracing::info!("Connector added: {}", url);
-                    conn_manager.add_connector_by_url(url).await?;
+                    // Resolve new paths with this patch before its flags become active.
+                    conn_manager.add_connector_by_url_with_flags(url, flags);
                 }
                 Ok(ConfigPatchAction::Remove) => {
                     tracing::info!("Connector removed: {}", url);

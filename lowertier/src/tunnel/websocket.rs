@@ -36,9 +36,12 @@ fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
     }
 }
 
-fn normalize_ws_url(mut addr: url::Url) -> url::Url {
-    if addr.path().is_empty() || addr.path() == "/" {
-        addr.set_path("/ws");
+pub(crate) fn effective_wss_url(
+    mut addr: url::Url,
+    flags: &crate::common::config::Flags,
+) -> url::Url {
+    if addr.scheme() == "wss" && (addr.path().is_empty() || addr.path() == "/") {
+        addr.set_path(flags.camouflage_config().websocket_path());
     }
     addr
 }
@@ -50,7 +53,7 @@ fn ws_via_cdn(url: &url::Url) -> bool {
 }
 
 fn ws_http_url(url: &url::Url) -> url::Url {
-    let mut url = normalize_ws_url(url.clone());
+    let mut url = url.clone();
     let rest: Vec<(String, String)> = url
         .query_pairs()
         .filter(|(key, _)| key != "via")
@@ -199,11 +202,14 @@ impl std::fmt::Debug for WsTunnelListener {
 
 impl WsTunnelListener {
     pub fn new(addr: url::Url) -> Self {
+        let endpoint_path = !addr.path().is_empty() && addr.path() != "/";
+        let flags = crate::common::config::gen_default_flags();
+        let addr = effective_wss_url(addr, &flags);
         WsTunnelListener {
-            endpoint_path: !addr.path().is_empty() && addr.path() != "/",
-            flags: crate::common::config::gen_default_flags(),
+            endpoint_path,
+            flags,
             global_ctx: std::sync::Weak::new(),
-            addr: normalize_ws_url(addr),
+            addr,
             listener: None,
             socket_mark: None,
             tls_acceptor: None,
@@ -463,10 +469,6 @@ impl WsTunnelConnector {
     }
 
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
-        if self.addr.path().is_empty() || self.addr.path() == "/" {
-            self.addr
-                .set_path(flags.camouflage_config().websocket_path());
-        }
         self.flags = flags;
     }
 
@@ -489,6 +491,7 @@ impl WsTunnelConnector {
         net_ns: Option<crate::common::netns::NetNS>,
         flags: crate::common::config::Flags,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let addr = effective_wss_url(addr, &flags);
         let is_wss = is_wss(&addr)?;
         let socket_addr = stream.peer_addr()?;
         {
@@ -558,10 +561,7 @@ impl WsTunnelConnector {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let mut request_addr = addr.clone();
-        if request_addr.path().is_empty() || request_addr.path() == "/" {
-            request_addr.set_path(flags.camouflage_config().websocket_path());
-        }
+        let mut request_addr = effective_wss_url(addr.clone(), flags);
         if !flags.camouflage_config().http_host.is_empty() {
             let authority = flags
                 .camouflage_config()
@@ -680,7 +680,7 @@ impl TunnelConnector for WsTunnelConnector {
     }
 
     fn remote_url(&self) -> url::Url {
-        self.addr.clone()
+        effective_wss_url(self.addr.clone(), &self.flags)
     }
 
     fn set_ip_version(&mut self, ip_version: IpVersion) {
@@ -832,18 +832,18 @@ pub mod tests {
     }
 
     #[test]
-    fn websocket_connector_preserves_registered_urls() {
-        for scheme in ["wss"] {
-            for path in ["/", "/?via=cdn", "/ws", "/custom?n=1"] {
-                let url: url::Url = format!("{scheme}://localhost:11010{path}").parse().unwrap();
-                let connector = WsTunnelConnector::new(url.clone());
-                assert_eq!(connector.remote_url(), url);
-                let request = ws_http_url(&url);
-                assert_eq!(
-                    request.path(),
-                    if url.path() == "/" { "/ws" } else { url.path() }
-                );
-            }
+    fn websocket_connector_registers_the_effective_request_url() {
+        for (path, expected) in [
+            ("/", "/ws"),
+            ("/?via=cdn", "/ws?via=cdn"),
+            ("/ws", "/ws"),
+            ("/custom?n=1", "/custom?n=1"),
+        ] {
+            let url = format!("wss://localhost:11010{path}").parse().unwrap();
+            let expected: url::Url = format!("wss://localhost:11010{expected}").parse().unwrap();
+            let connector = WsTunnelConnector::new(url);
+            assert_eq!(connector.remote_url(), expected);
+            assert_eq!(ws_http_url(&connector.remote_url()).path(), expected.path());
         }
     }
 

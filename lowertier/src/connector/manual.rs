@@ -146,15 +146,32 @@ impl ManualConnectorManager {
         T: TunnelConnector + 'static,
     {
         tracing::info!("add_connector: {}", connector.remote_url());
-        self.data.connectors.insert(connector.remote_url());
+        self.data
+            .connectors
+            .insert(crate::tunnel::websocket::effective_wss_url(
+                connector.remote_url(),
+                &self.data.global_ctx.get_flags(),
+            ));
     }
 
     pub async fn add_connector_by_url(&self, url: url::Url) -> Result<(), Error> {
-        self.data.connectors.insert(url);
+        self.add_connector_by_url_with_flags(url, &self.data.global_ctx.get_flags());
         Ok(())
     }
 
+    pub(crate) fn add_connector_by_url_with_flags(
+        &self,
+        url: url::Url,
+        flags: &crate::common::config::Flags,
+    ) {
+        self.data
+            .connectors
+            .insert(crate::tunnel::websocket::effective_wss_url(url, flags));
+    }
+
     pub async fn remove_connector(&self, url: url::Url) -> Result<(), Error> {
+        let url =
+            crate::tunnel::websocket::effective_wss_url(url, &self.data.global_ctx.get_flags());
         tracing::info!("remove_connector: {}", url);
         let url = url.into();
         if !self
@@ -432,6 +449,123 @@ impl ManualConnectorManager {
 mod tests {
 
     use super::*;
+
+    #[tokio::test]
+    async fn wss_effective_path_matches_the_retained_connector_and_live_connection() {
+        use crate::{
+            common::config::TomlConfigLoader,
+            instance::instance::Instance,
+            peers::tests::create_mock_peer_manager_secure,
+            proto::api::config::{ConfigPatchAction, InstanceConfigPatch, UrlPatch},
+            tunnel::{
+                TunnelListener,
+                websocket::{WsTunnelConnector, WsTunnelListener},
+            },
+        };
+
+        timeout(Duration::from_secs(20), async {
+            for (configured, explicit, expected) in [
+                ("", "", "/ws"),
+                ("/vpn", "", "/vpn"),
+                ("/vpn", "/custom", "/custom"),
+                ("/", "", "/"),
+            ] {
+                let client =
+                    create_mock_peer_manager_secure("wss-path".into(), "secret".into()).await;
+                let server =
+                    create_mock_peer_manager_secure("wss-path".into(), "secret".into()).await;
+                let ctx = client.get_global_ctx();
+                let mut flags = ctx.get_flags();
+                flags.bind_device = false;
+                flags.camouflage_config_mut().wss_path = configured.into();
+                ctx.set_flags(flags.clone());
+                let mut listener = WsTunnelListener::new(
+                    format!("wss://127.0.0.1:0{explicit}?lanes=1")
+                        .parse()
+                        .unwrap(),
+                );
+                listener.set_flags(flags.clone());
+                listener.listen().await.unwrap();
+                let original: url::Url = format!(
+                    "wss://127.0.0.1:{}{explicit}?lanes=1",
+                    listener.local_url().port().unwrap(),
+                )
+                .parse()
+                .unwrap();
+                let connector = create_connector_by_url(original.as_str(), &ctx, IpVersion::V4)
+                    .await
+                    .unwrap();
+                let effective = connector.remote_url();
+                assert_eq!(effective.path(), expected);
+                assert_eq!(effective, listener.local_url());
+                let accepting_server = server.clone();
+                let accepting = tokio::spawn(async move {
+                    accepting_server
+                        .add_tunnel_as_server(listener.accept().await.unwrap(), true)
+                        .await
+                        .unwrap();
+                });
+                let tunnel = client.connect_tunnel(connector).await.unwrap();
+                assert_eq!(
+                    url::Url::from(tunnel.info().unwrap().remote_addr.unwrap()),
+                    effective
+                );
+                client.add_client_tunnel(tunnel, true).await.unwrap();
+                accepting.await.unwrap();
+
+                let manager = ManualConnectorManager::new(ctx, client.clone());
+                manager
+                    .add_connector_by_url(original.clone())
+                    .await
+                    .unwrap();
+                let mut connector = WsTunnelConnector::new(original.clone());
+                connector.set_flags(flags);
+                manager.add_connector(connector);
+                assert!(
+                    ManualConnectorManager::collect_dead_conns(manager.data.clone())
+                        .await
+                        .is_empty()
+                );
+                let listed = manager.list_connectors().await;
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].url, Some(effective.into()));
+                assert_eq!(listed[0].status, ConnectorStatus::Connected as i32);
+                manager.remove_connector(original).await.unwrap();
+                ManualConnectorManager::handle_remove_connector(manager.data.clone());
+                assert!(manager.list_connectors().await.is_empty());
+            }
+
+            let mut instance = Instance::new(TomlConfigLoader::default());
+            let mut camouflage = instance
+                .get_global_ctx()
+                .get_flags()
+                .camouflage_config()
+                .clone();
+            camouflage.wss_path = "/vpn".into();
+            instance
+                .get_config_patcher()
+                .apply_patch(InstanceConfigPatch {
+                    camouflage: Some(camouflage),
+                    connectors: vec![UrlPatch {
+                        url: Some("wss://127.0.0.1:9".parse::<url::Url>().unwrap().into()),
+                        action: ConfigPatchAction::Add as i32,
+                    }],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let listed = instance.get_conn_manager().list_connectors().await;
+            assert_eq!(listed.len(), 1);
+            assert_eq!(
+                listed[0].url,
+                Some("wss://127.0.0.1:9/vpn".parse::<url::Url>().unwrap().into())
+            );
+            instance.clear_resources().await;
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn multi_lane_tcp_has_time_for_noise_after_tls_joins() {
         for (url, seconds) in [
