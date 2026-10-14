@@ -1161,7 +1161,7 @@ impl TomlConfigLoader {
     }
 
     fn gen_flags(
-        mut flags_hashmap: serde_json::Map<String, serde_json::Value>,
+        flags_hashmap: serde_json::Map<String, serde_json::Value>,
     ) -> serde_json::Result<Flags> {
         for option in [
             "quic_datagram_fec_parity",
@@ -1174,11 +1174,10 @@ impl TomlConfigLoader {
                 )));
             }
         }
-        if let Some(value) = flags_hashmap.remove("l2_flood_bps") {
-            tracing::warn!("l2_flood_bps is deprecated; use l2_flood_bytes_per_second");
-            flags_hashmap
-                .entry("l2_flood_bytes_per_second")
-                .or_insert(value);
+        if flags_hashmap.contains_key("l2_flood_bps") {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "removed option 'l2_flood_bps': use l2_flood_bytes_per_second",
+            ));
         }
         let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
             Ok(serde_json::Value::Object(map)) => map,
@@ -2128,13 +2127,15 @@ interface_adapter = "also-removed"
     }
 
     fn underlay_and_quic_flags_roundtrip_through_toml() {
-        let legacy = TomlConfigLoader::new_from_str("[flags]\nl2_flood_bps = 1234\n").unwrap();
-        assert_eq!(legacy.get_flags().l2_flood_bytes_per_second, 1234);
-        let both = TomlConfigLoader::new_from_str(
+        for retired in [
+            "[flags]\nl2_flood_bps = 1234\n",
             "[flags]\nl2_flood_bps = 1234\nl2_flood_bytes_per_second = 5678\n",
-        )
-        .unwrap();
-        assert_eq!(both.get_flags().l2_flood_bytes_per_second, 5678);
+        ] {
+            let error = TomlConfigLoader::new_from_str(retired).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("removed option 'l2_flood_bps'"));
+            assert!(message.contains("use l2_flood_bytes_per_second"));
+        }
         let cfg = TomlConfigLoader::new_from_str(
             r#"
 [flags]

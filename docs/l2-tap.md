@@ -45,7 +45,7 @@ The ingress bucket counts complete Ethernet frame bytes.
 Compact IP broadcast and multicast share that bucket and include the reconstructed Ethernet header.
 Ingress unknown unicast uses the receiving node's FDB state.
 Zero disables both byte limits.
-The old TOML key `l2_flood_bps` remains accepted with a deprecation warning.
+The retired TOML key `l2_flood_bps` produces an error naming `l2_flood_bytes_per_second`.
 The new CLI option is `--l2-flood-bytes-per-second`.
 The new environment variable is `ET_L2_FLOOD_BYTES_PER_SECOND`.
 
