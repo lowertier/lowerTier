@@ -22,7 +22,6 @@ use uuid::Uuid;
 
 #[cfg(feature = "ffi-dataplane")]
 use crate::{
-    config_server::{in_config_server_callback, is_config_server_active_or_stopping},
     error::{free_string, set_error_msg},
     state::{INSTANCE_MANAGER, INSTANCE_NAME_ID_MAP},
 };
@@ -313,23 +312,7 @@ pub(crate) fn remove_data_plane_handles_by_instance_ids(ids: &[Uuid]) {
 pub(crate) fn remove_data_plane_handles_by_instance_ids(_ids: &[uuid::Uuid]) {}
 
 #[cfg(feature = "ffi-dataplane")]
-pub(crate) fn data_plane_rejected() -> bool {
-    if in_config_server_callback() {
-        set_error_msg("cannot use data plane from config server callback");
-        true
-    } else if is_config_server_active_or_stopping() {
-        set_error_msg("cannot use data plane while config server client is active");
-        true
-    } else {
-        false
-    }
-}
-
-#[cfg(feature = "ffi-dataplane")]
 pub(crate) fn enter_data_plane_operation() -> Option<std::sync::RwLockReadGuard<'static, ()>> {
-    if data_plane_rejected() {
-        return None;
-    }
 
     let guard = match DATA_PLANE_USAGE_LOCK.read() {
         Ok(guard) => guard,
@@ -338,9 +321,6 @@ pub(crate) fn enter_data_plane_operation() -> Option<std::sync::RwLockReadGuard<
             return None;
         }
     };
-    if data_plane_rejected() {
-        return None;
-    }
     Some(guard)
 }
 
@@ -372,17 +352,6 @@ where
     }
 }
 
-#[cfg(feature = "ffi-dataplane")]
-pub(crate) fn lock_for_config_server_start()
--> Result<std::sync::RwLockWriteGuard<'static, ()>, String> {
-    let guard = DATA_PLANE_USAGE_LOCK
-        .write()
-        .map_err(|err| format!("failed to lock data plane usage: {}", err))?;
-    if !DATA_PLANE_HANDLES.is_empty() || crate::data_plane_async::has_live_ops() {
-        return Err("cannot start config server client while data plane is in use".to_string());
-    }
-    Ok(guard)
-}
 /// # Safety
 /// Open a TCP stream through an LowTier instance data plane. Returns 0 on
 /// failure. On success, writes the local socket address chosen for this
@@ -894,21 +863,6 @@ pub(crate) fn data_plane_udp_close(handle: u64) -> std::ffi::c_int {
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
-
-    #[test]
-    fn config_server_start_waits_for_data_plane_operation() {
-        let read_guard = DATA_PLANE_USAGE_LOCK.read().unwrap();
-        let (done_tx, done_rx) = mpsc::channel();
-        let waiter = std::thread::spawn(move || {
-            let _write_guard = lock_for_config_server_start().unwrap();
-            done_tx.send(()).unwrap();
-        });
-
-        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
-        drop(read_guard);
-        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        waiter.join().unwrap();
-    }
 
     #[test]
     fn instance_cleanup_waits_for_data_plane_operation() {

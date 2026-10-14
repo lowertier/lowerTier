@@ -14,7 +14,6 @@ mod stats;
 pub mod api;
 pub mod instance_manage;
 pub mod logger;
-pub mod remote_client;
 
 pub type ApiRpcServer<T> = self::api::ApiRpcServer<T>;
 pub use json_rpc::call_json_rpc;

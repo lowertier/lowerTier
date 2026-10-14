@@ -18,7 +18,6 @@ use crate::{
     proto::common::{CompressionAlgoPb, SecureModeConfig},
     rpc_service::ApiRpcServer,
     utils::panic::setup_panic_handler,
-    web_client,
 };
 use anyhow::Context;
 use base64::{Engine as _, prelude::BASE64_STANDARD};
@@ -90,14 +89,6 @@ fn dump_profile(_cur_allocated: usize) {
 #[derive(Parser, Debug)]
 #[command(name = "lowertier-core", author, version = LOWTIER_VERSION , about, long_about = None)]
 struct Cli {
-    #[arg(
-        short = 'w',
-        long,
-        env = "ET_CONFIG_SERVER",
-        help = t!("core_clap.config_server").to_string()
-    )]
-    config_server: Option<String>,
-
     #[arg(
         long,
         env = "ET_MACHINE_ID",
@@ -1592,33 +1583,6 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     .serve()
     .await?;
 
-    let _web_client = if let Some(config_server_url_s) = cli.config_server.as_ref() {
-        let wc = web_client::run_web_client(
-            config_server_url_s,
-            crate::common::MachineIdOptions {
-                explicit_machine_id: cli.machine_id.clone(),
-                state_dir: None,
-            },
-            cli.network_options.hostname.clone(),
-            true,
-            manager.clone(),
-            None,
-        )
-        .await
-        .inspect(|_| {
-            log::info!(
-                server = config_server_url_s,
-                "Web client started successfully...",
-            );
-
-            log::info!("Project website: https://github.com/lowertier/lowertier");
-        })?;
-
-        Some(wc)
-    } else {
-        None
-    };
-
     let _daemon_guard = if cli.daemon {
         Some(manager.register_daemon())
     } else {
@@ -1660,7 +1624,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     let mut crate_cli_network = {
         if cli.daemon {
             false
-        } else if config_file_count == 0 && cli.config_server.is_none() {
+        } else if config_file_count == 0 {
             true
         } else {
             cli.network_options.network_name.is_some()

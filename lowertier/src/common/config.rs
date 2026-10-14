@@ -597,20 +597,17 @@ impl std::fmt::Debug for NetworkIdentity {
 pub enum ConfigSource {
     #[default]
     User,
-    Web,
 }
 
 impl ConfigSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::Web => "web",
         }
     }
 
     pub fn from_rpc(source: i32) -> Option<Self> {
         match RpcConfigSource::try_from(source).ok() {
-            Some(RpcConfigSource::Web) => Some(Self::Web),
             Some(RpcConfigSource::User) => Some(Self::User),
             _ => None,
         }
@@ -619,7 +616,6 @@ impl ConfigSource {
     pub fn to_rpc(self) -> i32 {
         match self {
             Self::User => RpcConfigSource::User as i32,
-            Self::Web => RpcConfigSource::Web as i32,
         }
     }
 }
@@ -630,7 +626,6 @@ impl std::str::FromStr for ConfigSource {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "user" => Ok(Self::User),
-            "web" => Ok(Self::Web),
             other => Err(format!("unknown network config source: {other}")),
         }
     }
@@ -2287,21 +2282,6 @@ outbound_http_proxy = "http://localhost:1055"
             reloaded.get_outbound_http_proxy(),
             config.get_outbound_http_proxy()
         );
-    }
-
-    #[test]
-    fn test_network_config_source_toml_roundtrip() {
-        let config = TomlConfigLoader::default();
-        assert_eq!(config.get_network_config_source(), ConfigSource::User);
-
-        config.set_network_config_source(Some(ConfigSource::Web));
-        let dumped = config.dump();
-
-        assert!(dumped.contains("[source]"));
-        assert!(dumped.contains("source = \"web\""));
-
-        let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
-        assert_eq!(loaded.get_network_config_source(), ConfigSource::Web);
     }
 
     #[test]

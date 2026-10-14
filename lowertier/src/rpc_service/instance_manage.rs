@@ -22,8 +22,31 @@ use crate::{
         },
         rpc_types::{self, controller::BaseController},
     },
-    web_client::WebClientHooks,
 };
+
+#[async_trait::async_trait]
+pub trait WebClientHooks: Send + Sync {
+    fn manages_remote_config_instances(&self) -> bool {
+        false
+    }
+
+    async fn pre_run_network_instance(&self, _cfg: &TomlConfigLoader) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn post_run_network_instance(&self, _id: &uuid::Uuid) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn post_remove_network_instances(&self, _ids: &[uuid::Uuid]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+pub struct DefaultHooks;
+
+#[async_trait::async_trait]
+impl WebClientHooks for DefaultHooks {}
 
 #[derive(Clone)]
 pub struct InstanceManageRpcService {
@@ -611,7 +634,7 @@ mod tests {
     use super::*;
     use crate::common::config::TomlConfigLoader;
     use crate::proto::api::manage::{NetworkConfig, NetworkingMethod};
-    use crate::web_client::DefaultHooks;
+    use super::DefaultHooks;
     use std::{path::PathBuf, sync::Mutex};
     use uuid::Uuid;
 

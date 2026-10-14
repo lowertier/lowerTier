@@ -32,20 +32,7 @@ fn thread_local_error_msg() -> Option<String> {
 }
 
 pub(crate) unsafe fn get_error_msg(out: *mut *const c_char) {
-    let msg = match (
-        thread_local_error_msg(),
-        crate::config_server::last_callback_error(),
-    ) {
-        (Some(error), Some(callback_error)) => Some(format!(
-            "{}; config server callback error: {}",
-            error, callback_error
-        )),
-        (Some(error), None) => Some(error),
-        (None, Some(callback_error)) => {
-            Some(format!("config server callback error: {}", callback_error))
-        }
-        (None, None) => None,
-    };
+    let msg = thread_local_error_msg();
     let cstr = msg.and_then(|msg| CString::new(msg).ok());
     unsafe {
         *out = match cstr {

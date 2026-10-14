@@ -1,8 +1,6 @@
 //! C ABI facade for LowTier.
 //!
-//! The exported API is intentionally kept in this file so C users and JNI
-//! bindings can see the full callable surface without reading the internal
-//! implementation modules.
+//! This file exposes the C API. Internal modules implement the operations.
 //!
 //! Network management APIs:
 //! - `parse_config`: validate a TOML network config string.
@@ -13,11 +11,6 @@
 //! - `collect_network_infos`: collect running instance info as key/value pairs.
 //! - `set_tun_fd`: attach a TUN file descriptor to a named instance.
 //! - `call_json_rpc`: call an exposed LowTier RPC service with JSON payload.
-//!
-//! Config server client APIs:
-//! - `start_config_server_client`: start the managed remote config client.
-//! - `stop_config_server_client`: stop the remote config client and its managed instances.
-//! - `is_config_server_client_connected`: report whether the client is connected.
 //!
 //! Data plane APIs, enabled by the `ffi-dataplane` feature:
 //! - `data_plane_tcp_connect`: open an outbound TCP data-plane stream.
@@ -35,10 +28,9 @@
 //! - `data_plane_async_op_*`: poll, wait, cancel, and free asynchronous operations.
 //!
 //! Shared FFI helper APIs:
-//! - `get_error_msg`: copy the last FFI or config-server callback error message.
+//! - `get_error_msg`: copy the last FFI error message.
 //! - `free_string`: release strings allocated by this library.
 
-mod config_server;
 mod data_plane;
 #[cfg(feature = "ffi-dataplane")]
 mod data_plane_async;
@@ -52,10 +44,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use config_server::{in_config_server_callback, validate_config_server_client_options};
-pub use types::{ConfigServerEventCallback, KeyValuePair};
+pub use types::KeyValuePair;
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int};
 #[cfg(feature = "ffi-dataplane")]
 use std::ffi::{c_uchar, c_ushort};
 
@@ -249,74 +240,6 @@ pub unsafe extern "C" fn call_json_rpc(
     }
 }
 
-// ===== Config Server Client API =====
-
-/// Start the managed config-server client.
-///
-/// The client reuses LowTier's web-client path and applies remote config
-/// changes through the shared `NetworkInstanceManager`. Successful remote run
-/// and delete operations are delivered to `callback` as JSON event strings, one
-/// callback per affected instance. The event string is valid only for the
-/// duration of the callback; callers must copy it if they need to keep it.
-///
-/// The config-server client is mutually exclusive with the FFI data plane. If a
-/// data-plane handle exists or is being created, this function returns `-1`.
-///
-/// # Safety
-/// `config_server_url` and `machine_id` must be non-null pointers to
-/// null-terminated UTF-8 strings. `hostname` may be null; when non-null it must
-/// also point to a null-terminated UTF-8 string. `user_data` is passed back to
-/// `callback` unchanged and must remain valid for the callback's expectations.
-///
-/// # Return
-/// Returns `0` after the client starts successfully, or `-1` on failure. On
-/// failure, call `get_error_msg` on the same thread to retrieve details.
-#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
-pub unsafe extern "C" fn start_config_server_client(
-    config_server_url: *const c_char,
-    hostname: *const c_char,
-    machine_id: *const c_char,
-    secure_mode: bool,
-    callback: ConfigServerEventCallback,
-    user_data: *mut c_void,
-) -> c_int {
-    unsafe {
-        config_server::start_config_server_client(
-            config_server_url,
-            hostname,
-            machine_id,
-            secure_mode,
-            callback,
-            user_data,
-        )
-    }
-}
-
-/// Stop the managed config-server client.
-///
-/// This stops the client, removes instances tracked as remote config-server
-/// instances, waits for in-flight callback delivery when safe to do so, and
-/// releases the config-server/data-plane mutual exclusion state.
-///
-/// # Return
-/// Returns `0` if no client exists or if the active client is stopped
-/// successfully. Returns `-1` on failure. On failure, call `get_error_msg` on
-/// the same thread to retrieve details.
-#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
-pub extern "C" fn stop_config_server_client() -> c_int {
-    config_server::stop_config_server_client()
-}
-
-/// Report whether the managed config-server client is currently connected.
-///
-/// # Return
-/// Returns `1` when a client exists and reports connected, otherwise returns
-/// `0`.
-#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
-pub extern "C" fn is_config_server_client_connected() -> c_int {
-    config_server::is_config_server_client_connected()
-}
-
 // ===== Data Plane API =====
 
 /// Open an outbound TCP stream through an LowTier instance data plane.
@@ -324,9 +247,6 @@ pub extern "C" fn is_config_server_client_connected() -> c_int {
 /// On success, writes the local address selected for the connection into
 /// `out_local_ip` and `out_local_port`. The returned IP string is allocated by
 /// this library and must be released with `free_string`.
-///
-/// The data plane is mutually exclusive with the config-server client. This
-/// function returns `0` if the config-server client is active or stopping.
 ///
 /// # Safety
 /// `inst_name`, `dst_ip`, `out_local_ip`, and `out_local_port` must be non-null.

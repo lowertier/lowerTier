@@ -26,7 +26,6 @@ pub mod rpc_service;
 pub mod service_manager;
 pub mod tunnel;
 pub mod utils;
-pub mod web_client;
 
 #[cfg(test)]
 mod tests;

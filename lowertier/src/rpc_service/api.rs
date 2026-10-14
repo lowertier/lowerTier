@@ -31,7 +31,7 @@ use crate::{
         proxy::TcpProxyRpcService, stats::StatsRpcService,
     },
     tunnel::{TunnelListener, tcp::TcpTunnelListener},
-    web_client::{DefaultHooks, WebClientHooks},
+    rpc_service::instance_manage::{DefaultHooks, WebClientHooks},
 };
 
 pub struct ApiRpcServer<T: TunnelListener + 'static> {

@@ -3,10 +3,6 @@ use std::ffi::{CString, c_char, c_int};
 use lowertier::common::config::{ConfigFileControl, ConfigLoader as _, TomlConfigLoader};
 
 use crate::{
-    config_server::{
-        in_config_server_callback, remove_config_server_tracked_instance_ids,
-        wait_for_config_server_delivery,
-    },
     data_plane::remove_data_plane_handles_by_instance_ids,
     error::set_error_msg,
     state::{
@@ -62,11 +58,6 @@ pub(crate) unsafe fn parse_config(cfg_str: *const std::ffi::c_char) -> std::ffi:
 /// # Safety
 /// Run the network instance
 pub(crate) unsafe fn run_network_instance(cfg_str: *const std::ffi::c_char) -> std::ffi::c_int {
-    if in_config_server_callback() {
-        set_error_msg("cannot run network instance from config server callback");
-        return -1;
-    }
-
     let cfg_str = unsafe {
         assert!(!cfg_str.is_null());
         std::ffi::CStr::from_ptr(cfg_str)
@@ -83,7 +74,6 @@ pub(crate) unsafe fn run_network_instance(cfg_str: *const std::ffi::c_char) -> s
 
     let inst_name = cfg.get_inst_name();
 
-    wait_for_config_server_delivery();
     let _remote_mutation_guard = lock_remote_instance_mutation();
     let _mutation_guard = match INSTANCE_MUTATION_LOCK.lock() {
         Ok(guard) => guard,
@@ -146,12 +136,6 @@ pub(crate) unsafe fn retain_network_instance(
     inst_names: *const *const std::ffi::c_char,
     length: usize,
 ) -> std::ffi::c_int {
-    if in_config_server_callback() {
-        set_error_msg("cannot retain network instances from config server callback");
-        return -1;
-    }
-
-    wait_for_config_server_delivery();
     let _remote_mutation_guard = lock_remote_instance_mutation();
     let _mutation_guard = match INSTANCE_MUTATION_LOCK.lock() {
         Ok(guard) => guard,
@@ -167,7 +151,6 @@ pub(crate) unsafe fn retain_network_instance(
             set_error_msg(&format!("failed to delete instances: {}", e));
             return -1;
         }
-        remove_config_server_tracked_instance_ids(&removed_ids);
         remove_data_plane_handles_by_instance_ids(&removed_ids);
         INSTANCE_NAME_ID_MAP.clear();
         return 0;
@@ -191,8 +174,6 @@ pub(crate) unsafe fn retain_network_instance(
         set_error_msg(&format!("failed to delete instances: {}", e));
         return -1;
     }
-
-    remove_config_server_tracked_instance_ids(&removed_ids);
     remove_data_plane_handles_by_instance_ids(&removed_ids);
     INSTANCE_NAME_ID_MAP.retain(|k, _| inst_names.contains(k));
 
@@ -205,12 +186,6 @@ pub(crate) unsafe fn delete_network_instance(
     inst_names: *const *const std::ffi::c_char,
     length: usize,
 ) -> std::ffi::c_int {
-    if in_config_server_callback() {
-        set_error_msg("cannot delete network instances from config server callback");
-        return -1;
-    }
-
-    wait_for_config_server_delivery();
     let _remote_mutation_guard = lock_remote_instance_mutation();
     let _mutation_guard = match INSTANCE_MUTATION_LOCK.lock() {
         Ok(guard) => guard,
@@ -237,8 +212,6 @@ pub(crate) unsafe fn delete_network_instance(
         set_error_msg(&format!("failed to delete instances: {}", e));
         return -1;
     }
-
-    remove_config_server_tracked_instance_ids(&removed_ids);
     remove_data_plane_handles_by_instance_ids(&removed_ids);
     for name in inst_names {
         INSTANCE_NAME_ID_MAP.remove(&name);
@@ -253,11 +226,6 @@ pub(crate) unsafe fn collect_network_infos(
     infos: *mut KeyValuePair,
     max_length: usize,
 ) -> std::ffi::c_int {
-    if in_config_server_callback() {
-        set_error_msg("cannot collect network infos from config server callback");
-        return -1;
-    }
-
     if max_length == 0 {
         return 0;
     }
@@ -305,11 +273,6 @@ pub(crate) unsafe fn collect_network_infos(
 /// # Safety
 /// List the instance names and IDs known by the FFI instance manager.
 pub(crate) unsafe fn list_instance(infos: *mut KeyValuePair, max_length: usize) -> std::ffi::c_int {
-    if in_config_server_callback() {
-        set_error_msg("cannot list instances from config server callback");
-        return -1;
-    }
-
     if max_length == 0 {
         return 0;
     }

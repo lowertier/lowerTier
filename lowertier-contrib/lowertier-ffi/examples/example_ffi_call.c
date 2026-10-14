@@ -10,32 +10,11 @@ typedef struct {
     const char* value;
 } KeyValuePair;
 
-typedef void (*config_server_event_callback)(
-    const char* event_json,
-    void* user_data
-);
-
 extern int parse_config(const char* cfg_str);
 extern int run_network_instance(const char* cfg_str);
 extern void get_error_msg(const char** out);
 extern void free_string(const char* s);
 extern int collect_network_infos(KeyValuePair* infos, size_t max_length);
-extern int start_config_server_client(
-    const char* config_server_url,
-    const char* hostname,
-    const char* machine_id,
-    bool secure_mode,
-    config_server_event_callback callback,
-    void* user_data
-);
-extern int stop_config_server_client(void);
-extern int is_config_server_client_connected(void);
-
-static void on_config_server_event(const char* event_json, void* user_data) {
-    (void)user_data;
-    printf("config server event: %s\n", event_json);
-}
-
 int main() {
     const char* config = "inst_name = \"test\"\nnetwork = \"test_network\"\n";
     int ret;
