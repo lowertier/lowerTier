@@ -15,10 +15,9 @@ use crate::{
 
 use super::RpcTransactId;
 
-// Budget the final UDP payload size on the wire for peer RPC.
-// This includes LowTier's UDP tunnel header, peer header, and reserved tail
-// space for encryption/compression metadata, but excludes the outer IP header.
-const RPC_PACKET_UDP_PAYLOAD_BUDGET: usize = 1300;
+// Bound each RPC record after the retained transport prefix, peer header, and AEAD tail.
+// QUIC fragments records to its path MTU. H2 and WSS use stream framing.
+const RPC_PACKET_RECORD_BUDGET: usize = 1300;
 
 /// Maximum logical RPC body after fragment reassembly or decompression.
 pub(crate) const MAX_RPC_BODY_BYTES: usize = 256 * 1024;
@@ -340,24 +339,13 @@ pub struct BuildRpcPacketArgs<'a> {
     pub compression_info: RpcCompressionInfo,
 }
 
-// Fixed transport overhead for peer RPC carried by LowTier's UDP tunnel:
-//
-//   UDP payload budget
-//   +-------------------------------------------------------------------------+
-//   | LowTier UDP tunnel hdr | PeerManager hdr | RpcPacket bytes | tail room |
-//   +-------------------------------------------------------------------------+
-//   |<------ ZCPacketType::UDP payload_offset ------>|<-- TAIL_RESERVED_SIZE -->|
-//
-// `udp_rpc_tunnel_overhead()` is everything except `RpcPacket bytes`.
-fn udp_rpc_tunnel_overhead() -> usize {
-    ZCPacketType::UDP.get_packet_offsets().payload_offset + TAIL_RESERVED_SIZE
+// NIC headroom covers the largest retained transport prefix.
+fn rpc_record_overhead() -> usize {
+    ZCPacketType::NIC.get_packet_offsets().payload_offset + TAIL_RESERVED_SIZE
 }
 
-// Maximum encoded RpcPacket size we can admit before adding it to a UDP tunnel.
-// This budget excludes the outer UDP/IP headers because the caller only controls
-// the LowTier payload carried inside the UDP datagram.
-fn max_rpc_packet_encoded_len_for_udp() -> usize {
-    RPC_PACKET_UDP_PAYLOAD_BUDGET.saturating_sub(udp_rpc_tunnel_overhead())
+fn max_rpc_packet_encoded_len() -> usize {
+    RPC_PACKET_RECORD_BUDGET.saturating_sub(rpc_record_overhead())
 }
 
 // Build one logical RpcPacket piece. This is reused both for the actual output
@@ -403,7 +391,7 @@ fn pick_piece_len_for_budget(
         tracing::warn!(
             base_encoded_len_without_body,
             max_encoded_len,
-            "rpc metadata exceeds udp payload budget; falling back to a minimal piece"
+            "rpc metadata exceeds record budget; falling back to a minimal piece"
         );
         return 1;
     }
@@ -424,7 +412,7 @@ fn pick_piece_len_for_budget(
     //   `- base_encoded_len_without_body
     //
     // This is intentionally conservative. A few bytes may be left unused, but
-    // every piece stays within the UDP payload budget without iterative sizing.
+    // every piece stays within the record budget without iterative sizing.
     let reserved_for_body_header = 1 + length_delimiter_len(budget);
     remaining
         .min(budget.saturating_sub(reserved_for_body_header))
@@ -450,12 +438,12 @@ fn pick_piece_len_for_budget(
 //
 // The result is only a slicing plan. Actual RpcPacket objects are built later
 // with the real `total_pieces`.
-fn split_rpc_content_for_udp_budget(args: &BuildRpcPacketArgs<'_>) -> Vec<(usize, usize)> {
+fn split_rpc_content_for_record_budget(args: &BuildRpcPacketArgs<'_>) -> Vec<(usize, usize)> {
     if args.content.is_empty() {
         return vec![(0, 0)];
     }
 
-    let max_encoded_len = max_rpc_packet_encoded_len_for_udp().max(1);
+    let max_encoded_len = max_rpc_packet_encoded_len().max(1);
     // Use the worst-case varint width for piece counters so the budget remains
     // valid without iterating on `total_pieces`/`piece_idx`.
     let first_piece_base_len = build_rpc_piece(args, u32::MAX, 0, &[]).encoded_len();
@@ -485,7 +473,7 @@ fn split_rpc_content_for_udp_budget(args: &BuildRpcPacketArgs<'_>) -> Vec<(usize
 // while the earlier sizing step remains simple and conservatively safe.
 pub fn build_rpc_packet(args: BuildRpcPacketArgs<'_>) -> Vec<ZCPacket> {
     let mut ret = Vec::new();
-    let pieces = split_rpc_content_for_udp_budget(&args);
+    let pieces = split_rpc_content_for_record_budget(&args);
     let total_pieces = pieces.len() as u32;
     for (piece_idx, (offset, len)) in pieces.into_iter().enumerate() {
         let cur_packet = build_rpc_piece(

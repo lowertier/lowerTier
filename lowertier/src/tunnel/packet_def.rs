@@ -14,10 +14,6 @@ use crate::{
 
 type DefaultEndian = LittleEndian;
 
-const fn max(a: usize, b: usize) -> usize {
-    [a, b][(a < b) as usize]
-}
-
 // TCP TunnelHeader
 #[repr(C, packed)]
 #[derive(AsBytes, FromBytes, FromZeroes, Clone, Debug, Default)]
@@ -25,47 +21,6 @@ pub struct TCPTunnelHeader {
     pub len: U32<DefaultEndian>,
 }
 pub const TCP_TUNNEL_HEADER_SIZE: usize = std::mem::size_of::<TCPTunnelHeader>();
-
-#[derive(AsBytes, FromZeroes, Clone, Debug)]
-#[repr(u8)]
-pub enum UdpPacketType {
-    Invalid = 0,
-    Syn = 1,
-    Sack = 2,
-    Data = 3,
-    Fin = 4,
-    HolePunch = 5,
-    V4HolePunch = 6, // when receiving v4 hole punch packet, the packet contains a socket addr of other peer, we
-    // will send a hole punch packet to that peer. we only accept this packet from loopback interface.
-    V6HolePunch = 7, // when receiving v6 hole punch packet, the packet contains a socket addr of other peer, we
-                     // will send a hole punch packet to that peer. we only accept this packet from lookback interface.
-}
-
-#[repr(C, packed)]
-#[derive(AsBytes, FromBytes, FromZeroes, Clone, Debug, Default)]
-pub struct V4HolePunchPacket {
-    pub dst_ipv4: [u8; 4],
-    pub dst_port: U16<DefaultEndian>,
-}
-
-#[repr(C, packed)]
-#[derive(AsBytes, FromBytes, FromZeroes, Clone, Debug, Default)]
-pub struct V6HolePunchPacket {
-    pub dst_ipv6: [u8; 16],
-    pub dst_port: U16<DefaultEndian>,
-    pub preferred_src_ipv6: [u8; 16],
-    pub preferred_src_ifindex: U32<DefaultEndian>,
-}
-
-#[repr(C, packed)]
-#[derive(AsBytes, FromBytes, FromZeroes, Clone, Debug, Default)]
-pub struct UDPTunnelHeader {
-    pub conn_id: U32<DefaultEndian>,
-    pub msg_type: u8,
-    pub padding: u8,
-    pub len: U16<DefaultEndian>,
-}
-pub const UDP_TUNNEL_HEADER_SIZE: usize = std::mem::size_of::<UDPTunnelHeader>();
 
 #[derive(AsBytes, FromZeroes, Copy, Clone, Debug)]
 #[repr(u8)]
@@ -455,7 +410,6 @@ pub struct ZCPacketOffsets {
     pub payload_offset: usize,
     pub peer_manager_header_offset: usize,
     pub tcp_tunnel_header_offset: usize,
-    pub udp_tunnel_header_offset: usize,
     pub dummy_tunnel_header_offset: usize,
 }
 
@@ -463,19 +417,15 @@ pub struct ZCPacketOffsets {
 pub enum ZCPacketType {
     // received from peer tcp connection
     TCP,
-    // received from peer udp connection
-    UDP,
-    // received from local tun device, should reserve header space for tcp or udp tunnel
+    // Received from the local NIC with headroom for retained transport framing.
     NIC,
     // tunnel without header
     DummyTunnel,
 }
 
-const PAYLOAD_OFFSET_FOR_NIC_PACKET: usize =
-    max(TCP_TUNNEL_HEADER_SIZE, UDP_TUNNEL_HEADER_SIZE) + PEER_MANAGER_HEADER_SIZE;
-
-// UDP Tunnel: TUN MTU + 24 (Easy) + 20 (Encrypted) + 8(UDP) + 20(IP) = TUN MTU + 72
-// TCP Tunnel: TUN MTU + 20 (Easy) + 20 (Encrypted) + 20(TCP) + 20(IP) = TUN MTU + 80
+// Reserve space for both CONNECT-IP varints and the TCP record header.
+pub(crate) const NIC_TUNNEL_HEADROOM: usize = 18;
+const PAYLOAD_OFFSET_FOR_NIC_PACKET: usize = NIC_TUNNEL_HEADROOM + PEER_MANAGER_HEADER_SIZE;
 
 const INVALID_OFFSET: usize = usize::MAX;
 
@@ -494,21 +444,7 @@ impl ZCPacketType {
                 payload_offset: TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE,
                 peer_manager_header_offset: TCP_TUNNEL_HEADER_SIZE,
                 tcp_tunnel_header_offset: 0,
-                udp_tunnel_header_offset: get_converted_offset(
-                    TCP_TUNNEL_HEADER_SIZE,
-                    UDP_TUNNEL_HEADER_SIZE,
-                ),
                 dummy_tunnel_header_offset: get_converted_offset(TCP_TUNNEL_HEADER_SIZE, 0),
-            },
-            ZCPacketType::UDP => ZCPacketOffsets {
-                payload_offset: UDP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE,
-                peer_manager_header_offset: UDP_TUNNEL_HEADER_SIZE,
-                tcp_tunnel_header_offset: get_converted_offset(
-                    UDP_TUNNEL_HEADER_SIZE,
-                    TCP_TUNNEL_HEADER_SIZE,
-                ),
-                udp_tunnel_header_offset: 0,
-                dummy_tunnel_header_offset: get_converted_offset(UDP_TUNNEL_HEADER_SIZE, 0),
             },
             ZCPacketType::NIC => ZCPacketOffsets {
                 payload_offset: PAYLOAD_OFFSET_FOR_NIC_PACKET,
@@ -517,9 +453,6 @@ impl ZCPacketType {
                 tcp_tunnel_header_offset: PAYLOAD_OFFSET_FOR_NIC_PACKET
                     - PEER_MANAGER_HEADER_SIZE
                     - TCP_TUNNEL_HEADER_SIZE,
-                udp_tunnel_header_offset: PAYLOAD_OFFSET_FOR_NIC_PACKET
-                    - PEER_MANAGER_HEADER_SIZE
-                    - UDP_TUNNEL_HEADER_SIZE,
                 dummy_tunnel_header_offset: PAYLOAD_OFFSET_FOR_NIC_PACKET
                     - PEER_MANAGER_HEADER_SIZE,
             },
@@ -527,7 +460,6 @@ impl ZCPacketType {
                 payload_offset: PEER_MANAGER_HEADER_SIZE,
                 peer_manager_header_offset: 0,
                 tcp_tunnel_header_offset: get_converted_offset(0, TCP_TUNNEL_HEADER_SIZE),
-                udp_tunnel_header_offset: get_converted_offset(0, UDP_TUNNEL_HEADER_SIZE),
                 dummy_tunnel_header_offset: 0,
             },
         }
@@ -1096,15 +1028,6 @@ impl ZCPacket {
         TCPTunnelHeader::mut_from_prefix(bytes)
     }
 
-    pub fn mut_udp_tunnel_header(&mut self) -> Option<&mut UDPTunnelHeader> {
-        let offset = self
-            .packet_type
-            .get_packet_offsets()
-            .udp_tunnel_header_offset;
-        let bytes = self.mut_bytes_from_offset(offset)?;
-        UDPTunnelHeader::mut_from_prefix(bytes)
-    }
-
     // ref versions
     pub fn payload(&self) -> &[u8] {
         &self.inner[self.payload_offset()..]
@@ -1132,23 +1055,6 @@ impl ZCPacket {
             .tcp_tunnel_header_offset;
         let bytes = self.bytes_from_offset(offset)?;
         TCPTunnelHeader::ref_from_prefix(bytes)
-    }
-
-    pub fn udp_tunnel_header(&self) -> Option<&UDPTunnelHeader> {
-        let offset = self
-            .packet_type
-            .get_packet_offsets()
-            .udp_tunnel_header_offset;
-        let bytes = self.bytes_from_offset(offset)?;
-        UDPTunnelHeader::ref_from_prefix(bytes)
-    }
-
-    pub fn udp_payload(&self) -> &[u8] {
-        &self.inner[self
-            .packet_type
-            .get_packet_offsets()
-            .udp_tunnel_header_offset
-            + UDP_TUNNEL_HEADER_SIZE..]
     }
 
     pub fn payload_len(&self) -> usize {
@@ -1447,11 +1353,6 @@ impl ZCPacket {
                     .get_packet_offsets()
                     .tcp_tunnel_header_offset
             }
-            ZCPacketType::UDP => {
-                self.packet_type
-                    .get_packet_offsets()
-                    .udp_tunnel_header_offset
-            }
             ZCPacketType::DummyTunnel => {
                 self.packet_type
                     .get_packet_offsets()
@@ -1478,11 +1379,6 @@ impl ZCPacket {
                 self.packet_type
                     .get_packet_offsets()
                     .tcp_tunnel_header_offset
-            }
-            ZCPacketType::UDP => {
-                self.packet_type
-                    .get_packet_offsets()
-                    .udp_tunnel_header_offset
             }
             ZCPacketType::DummyTunnel => {
                 self.packet_type
@@ -1990,11 +1886,6 @@ mod tests {
         let tcp_tunnel_header = packet.mut_tcp_tunnel_header().unwrap();
         tcp_tunnel_header.len.set(payload.len() as u32);
 
-        // let udp_tunnel_header = packet.mut_udp_tunnel_header().unwrap();
-        // udp_tunnel_header.conn_id = 1;
-        // udp_tunnel_header.msg_type = 2;
-        // udp_tunnel_header.len = payload.len() as u32;
-
         assert_eq!(packet.payload(), b"hello world");
         assert_eq!(packet.payload_len(), 11);
         println!("{:?}", packet.inner);
@@ -2010,16 +1901,15 @@ mod tests {
 
         assert!(packet.peer_manager_header().is_none());
         assert!(packet.tcp_tunnel_header().is_none());
-        assert!(packet.udp_tunnel_header().is_none());
         assert!(packet.mut_peer_manager_header().is_none());
         assert!(packet.mut_tcp_tunnel_header().is_none());
-        assert!(packet.mut_udp_tunnel_header().is_none());
     }
 
     #[test]
     fn test_invalid_converted_header_offset_is_safe() {
-        let mut packet = ZCPacket::new_from_buf(BytesMut::from(&b"\x01"[..]), ZCPacketType::TCP);
-        assert!(packet.convert_type_in_place(ZCPacketType::UDP).is_err());
+        let mut packet =
+            ZCPacket::new_from_buf(BytesMut::from(&b"\x01"[..]), ZCPacketType::DummyTunnel);
+        assert!(packet.convert_type_in_place(ZCPacketType::TCP).is_err());
     }
 
     #[test]
@@ -2240,7 +2130,7 @@ mod tests {
         packet.set_lossy_hint(true);
 
         let packet = packet.convert_type(ZCPacketType::DummyTunnel);
-        let packet = packet.convert_type(ZCPacketType::UDP);
+        let packet = packet.convert_type(ZCPacketType::TCP);
 
         assert!(packet.is_lossy());
     }

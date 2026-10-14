@@ -57,7 +57,7 @@ use tokio::{
 };
 
 use super::packet_def::ZCPacketType;
-use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
+use super::packet_def::{NIC_TUNNEL_HEADROOM, PEER_MANAGER_HEADER_SIZE, ZCPacket};
 
 #[cfg(test)]
 mod decoy_tests;
@@ -1911,8 +1911,11 @@ fn connect_ip_datagram_overhead(stream_id: u64) -> usize {
     quarter_length + 1
 }
 
-fn encode_quic_datagram_prefix(stream_id: u64, context_id: u64) -> ([u8; 18], usize) {
-    let mut prefix = [0_u8; 18];
+fn encode_quic_datagram_prefix(
+    stream_id: u64,
+    context_id: u64,
+) -> ([u8; NIC_TUNNEL_HEADROOM], usize) {
+    let mut prefix = [0_u8; NIC_TUNNEL_HEADROOM];
     let mut length = put_quic_varint_at(&mut prefix, 0, stream_id / 4);
     length += put_quic_varint_at(&mut prefix, length, context_id);
     (prefix, length)
