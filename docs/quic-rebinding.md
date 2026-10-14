@@ -17,6 +17,8 @@ This does not create a route entry or an upstream socket.
 Quinn checks packet protection and the authenticated path policy before accepting the new endpoint.
 An unknown connection ID can receive a standard stateless reset.
 Quinn limits reset frequency and sends fewer bytes than the triggering packet.
+An existing decoy route retains priority for its cached UDP tuple.
+Rebinding into that tuple can therefore require reconnect or relay recovery before the decoy route expires.
 
 A policy denial leaves the previous path available.
 Failed validation restores the previous path through Quinn's existing timeout handling.
