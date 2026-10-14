@@ -21,7 +21,7 @@ use crate::{
         fast_socks5::{
             server::{
                 AcceptAuthentication, AsyncTcpConnector, AsyncUdpConnector, AsyncUdpSocket, Config,
-                ProxyTcpStream, SimpleUserPassword, Socks5Socket,
+                ProxyTcpStream, Socks5Socket,
             },
             util::{stream::tcp_connect_with_timeout, target_addr::TargetAddr},
         },
@@ -802,10 +802,8 @@ struct Socks5ServerNet {
 impl Socks5ServerNet {
     pub fn new(
         ipv4_addr: cidr::Ipv4Inet,
-        _auth: Option<SimpleUserPassword>,
         peer_manager: Weak<PeerManager>,
         packet_recv: Arc<Mutex<mpsc::Receiver<PacketBatch>>>,
-        _entries: Socks5EntrySet,
     ) -> Self {
         let mut forward_tasks = JoinSet::new();
         let mut cap = smoltcp::phy::DeviceCapabilities::default();
@@ -1309,11 +1307,7 @@ impl Socks5Server {
             && self.entries.is_empty()
     }
 
-    pub fn new(
-        global_ctx: Arc<GlobalCtx>,
-        peer_manager: Arc<PeerManager>,
-        _auth: Option<SimpleUserPassword>,
-    ) -> Arc<Self> {
+    pub fn new(global_ctx: Arc<GlobalCtx>, peer_manager: Arc<PeerManager>) -> Arc<Self> {
         let (packet_sender, packet_recv) = mpsc::channel(1024);
         Arc::new(Self {
             global_ctx,
@@ -1423,10 +1417,8 @@ impl Socks5Server {
                     if let Some(cur_ipv4) = cur_ipv4 {
                         net.lock().await.replace(Socks5ServerNet::new(
                             cur_ipv4,
-                            None,
                             peer_manager.clone(),
                             packet_recv.clone(),
-                            entries.clone(),
                         ));
                         tracing::trace!(
                             ?cur_ipv4,

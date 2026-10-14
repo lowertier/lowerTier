@@ -679,7 +679,7 @@ impl Instance {
         let peer_center = Arc::new(PeerCenterInstance::new(peer_manager.clone()));
 
         #[cfg(feature = "socks5")]
-        let socks5_server = Socks5Server::new(global_ctx.clone(), peer_manager.clone(), None);
+        let socks5_server = Socks5Server::new(global_ctx.clone(), peer_manager.clone());
 
         Instance {
             id,
