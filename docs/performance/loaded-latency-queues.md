@@ -51,3 +51,13 @@ The `quic_datagrams_expired` statistic counts complete expired application packe
 Quinn path statistics also report expired fragment and byte counts.
 The 10 ms bound covers packets whose transmission has not started.
 It does not bound network flight or socket submission delay.
+
+At a CoDel congestion signal, ECT inner IPv4 and IPv6 packets receive CE before encryption.
+IPv4 marking recomputes the header checksum, including options.
+IPv6 marking preserves the DSCP bits and flow label.
+Native Ethernet marking uses the IP payload after the Ethernet and VLAN headers.
+Marking preserves the flow hash.
+Non-ECT, malformed, and non-IP packets retain the drop fallback.
+Hard-limit overflow always drops.
+The `nic_aqm_marks` statistic counts successful congestion marks.
+ECN signaling follows [RFC 3168](https://www.rfc-editor.org/rfc/rfc3168).

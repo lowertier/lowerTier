@@ -12,6 +12,7 @@ use tokio_util::task::AbortOnDropHandle;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetricName {
     NicAqmDrops,
+    NicAqmMarks,
     NicQueueSojournUs,
     NicQueueDequeued,
     QuicDatagramsExpired,
@@ -142,6 +143,7 @@ impl fmt::Display for MetricName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MetricName::NicAqmDrops => write!(f, "nic_aqm_drops"),
+            MetricName::NicAqmMarks => write!(f, "nic_aqm_marks"),
             MetricName::NicQueueSojournUs => write!(f, "nic_queue_sojourn_us"),
             MetricName::NicQueueDequeued => write!(f, "nic_queue_dequeued"),
             MetricName::QuicDatagramsExpired => write!(f, "quic_datagrams_expired"),

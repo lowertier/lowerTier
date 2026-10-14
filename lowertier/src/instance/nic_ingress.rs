@@ -7,7 +7,7 @@ use crate::common::stats_manager::{CounterHandle, MetricName, StatsManager};
 
 use crate::tunnel::{
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-    packet_def::ZCPacket,
+    packet_def::{ZCPacket, ethernet_network_metadata},
 };
 
 const FLOW_LIMIT: usize = 128;
@@ -84,6 +84,7 @@ impl Codel {
 
 struct IngressMetrics {
     drops: CounterHandle,
+    marks: CounterHandle,
     sojourn_us: CounterHandle,
     dequeued: CounterHandle,
 }
@@ -110,6 +111,8 @@ pub(super) struct NicIngressQueue {
     peak_queued_bytes: usize,
     peak_active_bytes: usize,
     aqm_drops: u64,
+    aqm_marks: u64,
+    native_ethernet: bool,
     metrics: Option<IngressMetrics>,
 }
 
@@ -128,21 +131,24 @@ impl Default for NicIngressQueue {
             peak_queued_bytes: 0,
             peak_active_bytes: 0,
             aqm_drops: 0,
+            aqm_marks: 0,
+            native_ethernet: false,
             metrics: None,
         }
     }
 }
 
 impl NicIngressQueue {
-    pub(super) fn new(stats: &StatsManager) -> Self {
-        Self {
-            metrics: Some(IngressMetrics {
-                drops: stats.get_simple_counter(MetricName::NicAqmDrops),
-                sojourn_us: stats.get_simple_counter(MetricName::NicQueueSojournUs),
-                dequeued: stats.get_simple_counter(MetricName::NicQueueDequeued),
-            }),
-            ..Self::default()
-        }
+    pub(super) fn new(stats: &StatsManager, native_ethernet: bool) -> Self {
+        let mut queue = Self::default();
+        queue.native_ethernet = native_ethernet;
+        queue.metrics = Some(IngressMetrics {
+            drops: stats.get_simple_counter(MetricName::NicAqmDrops),
+            marks: stats.get_simple_counter(MetricName::NicAqmMarks),
+            sojourn_us: stats.get_simple_counter(MetricName::NicQueueSojournUs),
+            dequeued: stats.get_simple_counter(MetricName::NicQueueDequeued),
+        });
+        queue
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -150,7 +156,7 @@ impl NicIngressQueue {
     }
 
     #[cfg(test)]
-    fn push(&mut self, hash: u64, packet: ZCPacket) {
+    pub(super) fn push(&mut self, hash: u64, packet: ZCPacket) {
         self.push_at(hash, packet, Instant::now());
     }
 
@@ -219,6 +225,7 @@ impl NicIngressQueue {
         let available = ACTIVE_BYTE_LIMIT - self.active_bytes;
         let now = Instant::now();
         let mut drops = 0;
+        let mut marks = 0;
         let mut sojourn_us = 0;
         let mut dequeued = 0;
         for _ in 0..self.ready.len() {
@@ -239,7 +246,7 @@ impl NicIngressQueue {
                 if retained + bytes > available {
                     break;
                 }
-                let packet = flow.packets.pop_front().expect("front packet exists");
+                let mut packet = flow.packets.pop_front().expect("front packet exists");
                 flow.bytes -= bytes;
                 self.bytes -= bytes;
                 self.packets -= 1;
@@ -247,8 +254,12 @@ impl NicIngressQueue {
                 sojourn_us += sojourn.as_micros().min(u64::MAX as u128) as u64;
                 dequeued += 1;
                 if flow.codel.signal(now, sojourn, flow.bytes, flow.max_packet) {
-                    drops += 1;
-                    continue;
+                    if mark_inner_ce(&mut packet.packet, self.native_ethernet) {
+                        marks += 1;
+                    } else {
+                        drops += 1;
+                        continue;
+                    }
                 }
                 retained += bytes;
                 batch.try_push(packet.packet).expect("batch length checked");
@@ -265,17 +276,19 @@ impl NicIngressQueue {
             self.active_bytes += retained;
             self.active_flows += 1;
             self.peak_active_bytes = self.peak_active_bytes.max(self.active_bytes);
-            self.record_dequeue(drops, sojourn_us, dequeued);
+            self.record_dequeue(drops, marks, sojourn_us, dequeued);
             return Some((hash, batch));
         }
-        self.record_dequeue(drops, sojourn_us, dequeued);
+        self.record_dequeue(drops, marks, sojourn_us, dequeued);
         None
     }
 
-    fn record_dequeue(&mut self, drops: u64, sojourn_us: u64, dequeued: u64) {
+    fn record_dequeue(&mut self, drops: u64, marks: u64, sojourn_us: u64, dequeued: u64) {
         self.aqm_drops += drops;
+        self.aqm_marks += marks;
         if let Some(metrics) = &self.metrics {
             metrics.drops.add(drops);
+            metrics.marks.add(marks);
             metrics.sojourn_us.add(sojourn_us);
             metrics.dequeued.add(dequeued);
         }
@@ -305,6 +318,7 @@ impl NicIngressQueue {
             evicted = self.evicted,
             rejected = self.rejected,
             aqm_drops = self.aqm_drops,
+            aqm_marks = self.aqm_marks,
             queued_packets = self.packets,
             queued_bytes = self.bytes,
             active_flows = self.active_flows,
@@ -313,6 +327,65 @@ impl NicIngressQueue {
             peak_active_bytes = self.peak_active_bytes,
             "NIC ingress queue counters"
         );
+    }
+}
+
+fn mark_inner_ce(packet: &mut ZCPacket, native_ethernet: bool) -> bool {
+    let offset = if native_ethernet {
+        let Some(metadata) = ethernet_network_metadata(packet.payload()) else {
+            return false;
+        };
+        if !matches!(metadata.ether_type, 0x0800 | 0x86dd) {
+            return false;
+        }
+        metadata.payload_offset
+    } else {
+        0
+    };
+    let Some(ip) = packet.payload().get(offset..) else {
+        return false;
+    };
+    match ip.first().map(|byte| byte >> 4) {
+        Some(4) => {
+            if ip.len() < 20 {
+                return false;
+            }
+            let header_len = usize::from(ip[0] & 0x0f) * 4;
+            let total_len = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
+            if header_len < 20
+                || header_len > ip.len()
+                || total_len < header_len
+                || total_len > ip.len()
+                || ip[1] & 3 == 0
+            {
+                return false;
+            }
+            let ip = &mut packet.mut_payload_preserving_flow_hash()[offset..];
+            ip[1] |= 3;
+            ip[10] = 0;
+            ip[11] = 0;
+            // Recompute the complete header, including IPv4 options.
+            let sum = ip[..header_len]
+                .chunks_exact(2)
+                .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
+                .sum::<u32>();
+            let sum = (sum & 0xffff) + (sum >> 16);
+            let checksum = !((sum & 0xffff) + (sum >> 16)) as u16;
+            ip[10..12].copy_from_slice(&checksum.to_be_bytes());
+            true
+        }
+        Some(6) => {
+            if ip.len() < 40 || ip[1] & 0x30 == 0 {
+                return false;
+            }
+            let payload_len = usize::from(u16::from_be_bytes([ip[4], ip[5]]));
+            if payload_len != 0 && payload_len + 40 > ip.len() {
+                return false;
+            }
+            packet.mut_payload_preserving_flow_hash()[offset + 1] |= 0x30;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -337,6 +410,52 @@ mod tests {
 
     fn packet(sequence: u8) -> ZCPacket {
         ZCPacket::new_with_payload(&[sequence; 1200])
+    }
+
+    #[test]
+    fn ecn_marks_preserve_ipv4_checksum_and_ipv6_flow_label() {
+        let mut ip = [0_u8; 24];
+        ip[0] = 0x46;
+        ip[1] = 0xb9;
+        ip[2..4].copy_from_slice(&24_u16.to_be_bytes());
+        ip[8] = 64;
+        ip[9] = 6;
+        ip[12..20].copy_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+        ip[20..24].copy_from_slice(&[1, 1, 0, 0]);
+        for ethernet in [false, true] {
+            let mut payload = Vec::new();
+            if ethernet {
+                payload.extend_from_slice(&[0; 12]);
+                payload.extend_from_slice(&[0x81, 0, 0, 1, 8, 0]);
+            }
+            payload.extend_from_slice(&ip);
+            let mut packet = ZCPacket::new_with_payload(&payload);
+            packet.set_flow_hash(7);
+            assert!(mark_inner_ce(&mut packet, ethernet));
+            assert_eq!(packet.flow_hash(), Some(7));
+            let offset = if ethernet { 18 } else { 0 };
+            let marked = &packet.payload()[offset..];
+            assert_eq!(marked[1], 0xbb);
+            let sum: u32 = marked
+                .chunks_exact(2)
+                .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
+                .sum();
+            let sum = (sum & 0xffff) + (sum >> 16);
+            assert_eq!((sum & 0xffff) + (sum >> 16), 0xffff);
+            packet.mut_payload_preserving_flow_hash()[offset + 1] &= !3;
+            let original = packet.payload().to_vec();
+            assert!(!mark_inner_ce(&mut packet, ethernet));
+            assert_eq!(packet.payload(), original);
+        }
+        let mut ipv6 = [0_u8; 40];
+        ipv6[..4].copy_from_slice(&[0x6a, 0x2b, 0xcd, 0xef]);
+        let mut packet = ZCPacket::new_with_payload(&ipv6);
+        assert!(mark_inner_ce(&mut packet, false));
+        assert_eq!(&packet.payload()[..4], &[0x6a, 0x3b, 0xcd, 0xef]);
+        assert!(!mark_inner_ce(
+            &mut ZCPacket::new_with_payload(&[0x45; 10]),
+            false
+        ));
     }
 
     #[test]

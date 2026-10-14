@@ -1462,8 +1462,10 @@ impl NicCtx {
         reported: Arc<AtomicBool>,
     ) {
         let mut stream = futures::stream::select_all(streams);
-        let mut queues =
-            super::nic_ingress::NicIngressQueue::new(mgr.get_global_ctx_ref().stats_manager());
+        let mut queues = super::nic_ingress::NicIngressQueue::new(
+            mgr.get_global_ctx_ref().stats_manager(),
+            adapter.uses_native_ethernet(),
+        );
         let mut deliveries = persistent_nic_deliveries(&mgr, adapter);
         let native_ethernet = adapter.uses_native_ethernet();
         let mut open = true;
