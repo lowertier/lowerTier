@@ -9,8 +9,8 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     task::{Context, Poll, Waker},
 };
@@ -18,9 +18,8 @@ use std::{
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
 use crate::runtime::default_runtime;
 use crate::{
-    Instant,
     runtime::{AsyncUdpSocket, Runtime},
-    udp_transmit,
+    udp_transmit, Instant,
 };
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
@@ -31,13 +30,13 @@ use proto::{
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{Notify, futures::Notified, mpsc};
+use tokio::sync::{futures::Notified, mpsc, Notify};
 use tracing::{Instrument, Span};
-use udp::{BATCH_SIZE, RecvMeta};
+use udp::{RecvMeta, BATCH_SIZE};
 
 use crate::{
-    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, VarInt, connection::Connecting,
-    incoming::Incoming,
+    connection::Connecting, incoming::Incoming, ConnectionEvent, EndpointConfig, VarInt,
+    IO_LOOP_BOUND,
 };
 
 /// A QUIC endpoint.
@@ -955,7 +954,7 @@ struct PollProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReceiveBuffer, logical_datagram_count, receive_cycle_complete};
+    use super::{logical_datagram_count, receive_cycle_complete, ReceiveBuffer};
     use crate::IO_LOOP_BOUND;
     use udp::BATCH_SIZE;
 
