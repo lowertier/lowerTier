@@ -63,6 +63,7 @@ pub struct TransportConfig {
     pub(crate) datagram_send_buffer_size: usize,
     pub(crate) datagram_send_queue_time: Option<Duration>,
     pub(crate) datagram_send_max_time: Option<Duration>,
+    pub(crate) datagram_send_queue_control: Option<(Duration, Duration)>,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
 
@@ -353,6 +354,15 @@ impl TransportConfig {
         self
     }
 
+    /// Pause new DATAGRAM admission after persistent head delay. Admitted frames remain queued.
+    pub fn datagram_send_queue_control(
+        &mut self,
+        value: Option<(Duration, Duration)>,
+    ) -> &mut Self {
+        self.datagram_send_queue_control = value;
+        self
+    }
+
     /// Whether to force every packet number to be used
     ///
     /// By default, packet numbers are occasionally skipped to ensure peers aren't ACKing packets
@@ -443,6 +453,7 @@ impl Default for TransportConfig {
             datagram_send_buffer_size: 1024 * 1024,
             datagram_send_queue_time: None,
             datagram_send_max_time: None,
+            datagram_send_queue_control: None,
             #[cfg(test)]
             deterministic_packet_numbers: false,
 
@@ -484,6 +495,7 @@ impl fmt::Debug for TransportConfig {
             datagram_send_buffer_size,
             datagram_send_queue_time,
             datagram_send_max_time,
+            datagram_send_queue_control,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
             congestion_controller_factory: _,
@@ -521,6 +533,7 @@ impl fmt::Debug for TransportConfig {
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
             .field("datagram_send_queue_time", datagram_send_queue_time)
             .field("datagram_send_max_time", datagram_send_max_time)
+            .field("datagram_send_queue_control", datagram_send_queue_control)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

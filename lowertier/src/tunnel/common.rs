@@ -646,7 +646,10 @@ where
         }
     }
 
-    fn start_send(self: Pin<&mut Self>, item: ZCPacket) -> Result<(), Self::Error> {
+    fn start_send(self: Pin<&mut Self>, mut item: ZCPacket) -> Result<(), Self::Error> {
+        if let Some(feedback) = item.queue_feedback.take() {
+            feedback.clear();
+        }
         let pinned = self.project();
         pinned
             .sending_bufs

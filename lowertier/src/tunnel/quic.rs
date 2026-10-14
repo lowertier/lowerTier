@@ -937,6 +937,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .datagram_receive_drop_policy(DatagramReceiveDropPolicy::Newest)
         .datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_BYTES)
         .datagram_send_queue_time(Some(Duration::from_millis(4)))
+        .datagram_send_queue_control(Some((Duration::from_millis(5), Duration::from_millis(100))))
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
         .receive_window(receive_window)
@@ -1822,6 +1823,11 @@ fn observe_quic_path(connection: &Arc<ConnWrapper>) {
                     sent_packets = stats.path.sent_packets,
                     mtu = stats.path.current_mtu,
                     send_buffer_space = connection.conn.datagram_send_buffer_space(),
+                    datagram_queue_sojourn_us = stats.path.datagram_queue_sojourn_us,
+                    datagram_queue_dequeued = stats.path.datagram_queue_dequeued,
+                    datagram_queue_congestions = stats.path.datagram_queue_congestions,
+                    datagram_queue_head_sojourn_us = stats.path.datagram_queue_head_sojourn_us,
+                    datagram_queue_paused = stats.path.datagram_queue_paused,
                     "QUIC path statistics"
                 );
                 if let Some(period) = log_period {
@@ -2186,6 +2192,7 @@ impl Stream for QuicHybridReader {
 
 struct QuicHybridWriter {
     connection: Arc<ConnWrapper>,
+    queue_feedback: Arc<quinn::DatagramQueueFeedback>,
     pending_datagrams: Option<VecDeque<Bytes>>,
     pending_datagrams_since: Option<std::time::Instant>,
     pending_datagram_send: Option<DatagramBatchSend>,
@@ -2407,6 +2414,7 @@ impl QuicHybridWriter {
         connect_stream_id: u64,
     ) -> Self {
         Self {
+            queue_feedback: connection.conn.datagram_queue_feedback(),
             connection,
             pending_datagrams: Some(VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE)),
             pending_datagrams_since: None,
@@ -2717,9 +2725,12 @@ impl Sink<PacketBatch> for QuicHybridWriter {
         }
         writer.pending_datagrams_since = Some(std::time::Instant::now());
 
-        for packet in batch {
+        for mut packet in batch {
             match select_quic_delivery(&packet, maximum) {
                 QuicDelivery::PlainDatagram => {
+                    if let Some(feedback) = &packet.queue_feedback {
+                        feedback.bind(&writer.queue_feedback);
+                    }
                     encode_lossy_quic_datagrams(
                         packet,
                         writer.connect_stream_id,
@@ -2727,9 +2738,14 @@ impl Sink<PacketBatch> for QuicHybridWriter {
                         datagrams,
                     );
                 }
-                QuicDelivery::ReliableStream => reliable
-                    .try_push(packet)
-                    .expect("the reliable subset cannot exceed its input batch"),
+                QuicDelivery::ReliableStream => {
+                    if let Some(feedback) = packet.queue_feedback.take() {
+                        feedback.clear();
+                    }
+                    reliable
+                        .try_push(packet)
+                        .expect("the reliable subset cannot exceed its input batch");
+                }
             }
         }
 

@@ -134,6 +134,16 @@ impl std::fmt::Debug for FrameStats {
 #[derive(Debug, Default, Copy, Clone)]
 #[non_exhaustive]
 pub struct PathStats {
+    /// Sum of unsent FIFO residence time in microseconds for sealed DATAGRAM frames.
+    pub datagram_queue_sojourn_us: u64,
+    /// DATAGRAM frames removed from the FIFO for sealing.
+    pub datagram_queue_dequeued: u64,
+    /// Persistent FIFO delay episodes that paused new admission.
+    pub datagram_queue_congestions: u64,
+    /// Most recently observed head residence time in microseconds.
+    pub datagram_queue_head_sojourn_us: u64,
+    /// Whether persistent FIFO delay currently pauses new admission.
+    pub datagram_queue_paused: bool,
     /// Complete application packets expired before transmission started.
     pub datagram_expired_packets: u64,
     /// DATAGRAM fragments discarded with expired application packets.

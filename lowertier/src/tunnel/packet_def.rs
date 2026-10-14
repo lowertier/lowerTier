@@ -677,6 +677,7 @@ pub struct ZCPacket {
     flow_hash: Option<u64>,
     /// Local-only identity used to join a packet with batch sidecar metadata.
     batch_key: Option<usize>,
+    pub(crate) queue_feedback: Option<std::sync::Arc<super::queue_feedback::FlowQueueFeedback>>,
     parsed_metadata: Option<ParsedPacketMetadata>,
     reusable_pool: Option<ReusableBufferPool>,
     reusable_prefix: Option<BytesMut>,
@@ -702,6 +703,7 @@ impl Clone for ZCPacket {
             verified_origin_session_id: self.verified_origin_session_id,
             flow_hash: self.flow_hash,
             batch_key: self.batch_key,
+            queue_feedback: self.queue_feedback.clone(),
             parsed_metadata: self.parsed_metadata,
             reusable_pool: None,
             reusable_prefix: None,
@@ -777,6 +779,7 @@ impl ZCPacket {
             verified_origin_session_id: None,
             flow_hash: None,
             batch_key: None,
+            queue_feedback: None,
             parsed_metadata: None,
             reusable_pool: None,
             reusable_prefix: None,
@@ -808,6 +811,7 @@ impl ZCPacket {
             verified_origin_session_id: None,
             flow_hash: None,
             batch_key: None,
+            queue_feedback: None,
             parsed_metadata: None,
             reusable_pool: None,
             reusable_prefix: None,
@@ -850,6 +854,7 @@ impl ZCPacket {
             verified_origin_session_id: None,
             flow_hash: None,
             batch_key: None,
+            queue_feedback: None,
             parsed_metadata: None,
             reusable_pool: Some(reusable_pool),
             reusable_prefix: None,
@@ -1412,6 +1417,7 @@ impl ZCPacket {
             packet.verified_origin_session_id = self.verified_origin_session_id;
             packet.flow_hash = self.flow_hash;
             packet.batch_key = self.batch_key;
+            packet.queue_feedback = self.queue_feedback.take();
             self.recycle_reusable_buffer();
             return packet;
         }
@@ -2128,11 +2134,17 @@ mod tests {
     fn lossy_hint_survives_tunnel_type_conversion() {
         let mut packet = ZCPacket::new_with_payload(b"protected data");
         packet.set_lossy_hint(true);
+        let feedback = Arc::new(super::super::queue_feedback::FlowQueueFeedback::default());
+        packet.queue_feedback = Some(feedback.clone());
 
         let packet = packet.convert_type(ZCPacketType::DummyTunnel);
         let packet = packet.convert_type(ZCPacketType::TCP);
 
         assert!(packet.is_lossy());
+        assert!(Arc::ptr_eq(
+            packet.queue_feedback.as_ref().unwrap(),
+            &feedback
+        ));
     }
 
     #[test]

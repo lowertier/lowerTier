@@ -667,6 +667,16 @@ impl Connection {
             .send_buffer_space()
     }
 
+    /// Return shared unsent FIFO delay feedback for upstream flow admission.
+    pub fn datagram_queue_feedback(&self) -> Arc<proto::DatagramQueueFeedback> {
+        self.0
+            .state
+            .lock("datagram_queue_feedback")
+            .inner
+            .datagrams()
+            .queue_feedback()
+    }
+
     /// The side of the connection (client or server)
     pub fn side(&self) -> Side {
         self.0.state.lock("side").inner.side()
@@ -1091,6 +1101,7 @@ impl Future for SendDatagrams<'_> {
         let mut queued = false;
         let now = state.runtime.now();
         state.inner.datagrams().refresh_send_rate(now);
+        state.inner.datagrams().refresh_send_queue(now);
         let deadline = this.queued_at.and_then(|queued_at| {
             state
                 .inner
@@ -1141,6 +1152,7 @@ impl Future for SendDatagrams<'_> {
                     deadline,
                     group,
                     this.packet_group.is_some(),
+                    now,
                 ) {
                     Ok(()) => queued = true,
                     Err(Blocked(data)) => {

@@ -1,6 +1,8 @@
 //! Bounded NIC admission. A blocked flow retains its ordering independently of
 //! other flows; queued overload is charged to the largest queued flow.
+use crate::tunnel::queue_feedback::FlowQueueFeedback;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::common::stats_manager::{CounterHandle, MetricName, StatsManager};
@@ -34,6 +36,21 @@ struct Codel {
 }
 
 impl Codel {
+    fn signal_with_downstream(
+        &mut self,
+        now: Instant,
+        sojourn: Duration,
+        downstream: (Duration, bool),
+        backlog: usize,
+        max_packet: usize,
+    ) -> bool {
+        if downstream.1 {
+            // The transport already observed the full interval. Do not wait for a second interval here.
+            self.first_above = Some(self.first_above.map_or(now, |deadline| deadline.min(now)));
+        }
+        self.signal(now, sojourn.max(downstream.0), backlog, max_packet)
+    }
+
     fn control_law(time: Instant, count: u32) -> Instant {
         time + CODEL_INTERVAL.div_f64(f64::from(count.max(1)).sqrt())
     }
@@ -92,6 +109,7 @@ struct IngressMetrics {
 
 #[derive(Default)]
 struct Flow {
+    feedback: Arc<FlowQueueFeedback>,
     packets: VecDeque<QueuedPacket>,
     bytes: usize,
     active_bytes: Option<usize>,
@@ -238,6 +256,7 @@ impl NicIngressQueue {
                 self.flows.remove(&hash);
                 continue;
             }
+            let mut downstream = None;
             let mut batch = PacketBatch::new();
             let mut retained = 0;
             while batch.len() < MAX_PACKET_BATCH_SIZE {
@@ -254,6 +273,7 @@ impl NicIngressQueue {
                 if retained + bytes > packet_available {
                     break;
                 }
+                let downstream = *downstream.get_or_insert_with(|| flow.feedback.snapshot());
                 let mut packet = flow.packets.pop_front().expect("front packet exists");
                 flow.bytes -= bytes;
                 self.bytes -= bytes;
@@ -261,7 +281,13 @@ impl NicIngressQueue {
                 let sojourn = now.saturating_duration_since(packet.enqueued);
                 sojourn_us += sojourn.as_micros().min(u64::MAX as u128) as u64;
                 dequeued += 1;
-                if flow.codel.signal(now, sojourn, flow.bytes, flow.max_packet) {
+                if flow.codel.signal_with_downstream(
+                    now,
+                    sojourn,
+                    downstream,
+                    flow.bytes,
+                    flow.max_packet,
+                ) {
                     if mark_inner_ce(&mut packet.packet, self.native_ethernet) {
                         marks += 1;
                     } else {
@@ -281,6 +307,12 @@ impl NicIngressQueue {
                 continue;
             }
             flow.active_bytes = Some(retained);
+            // One tag per flow batch binds downstream feedback without one Arc clone per packet.
+            batch
+                .iter_mut()
+                .next()
+                .expect("nonempty delivery")
+                .queue_feedback = Some(flow.feedback.clone());
             self.active_bytes += retained;
             self.active_flows += 1;
             self.peak_active_bytes = self.peak_active_bytes.max(self.active_bytes);
@@ -489,6 +521,30 @@ mod tests {
         assert!(!codel.signal(next, CODEL_TARGET, 1500, 1500));
         assert!(!codel.dropping);
         assert!(codel.first_above.is_none());
+        let mut downstream = Codel::default();
+        assert!(downstream.signal_with_downstream(
+            start,
+            Duration::ZERO,
+            (CODEL_TARGET, true),
+            4000,
+            1500
+        ));
+        assert_eq!(downstream.count, 1);
+        assert!(!downstream.signal_with_downstream(
+            start,
+            Duration::ZERO,
+            (Duration::ZERO, false),
+            4000,
+            1500
+        ));
+        assert!(!downstream.dropping);
+        assert!(!downstream.signal_with_downstream(
+            start,
+            Duration::ZERO,
+            (CODEL_TARGET, true),
+            1500,
+            1500
+        ));
     }
 
     #[test]

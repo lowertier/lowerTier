@@ -1,4 +1,10 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -15,6 +21,37 @@ pub struct Datagrams<'a> {
     pub(super) conn: &'a mut Connection,
 }
 
+/// Shared observation of the unsent DATAGRAM FIFO. No payload ownership crosses this interface.
+#[derive(Debug, Default)]
+pub struct DatagramQueueFeedback {
+    // One atomic keeps delay and persistence from different observations from mixing.
+    state: AtomicU64,
+    congestions: AtomicU64,
+}
+
+impl DatagramQueueFeedback {
+    /// Count persistent episodes so a blocked upstream flow can observe them after drain.
+    pub fn congestion_events(&self) -> u64 {
+        self.congestions.load(Ordering::Acquire)
+    }
+
+    /// Current head residence time, or zero when the FIFO is empty.
+    pub fn sojourn(&self) -> std::time::Duration {
+        self.snapshot().0
+    }
+
+    /// Whether head delay remained above the target for the configured interval.
+    pub fn persistent(&self) -> bool {
+        self.snapshot().1
+    }
+
+    /// Read residence time and persistence from one consistent observation.
+    pub fn snapshot(&self) -> (std::time::Duration, bool) {
+        let state = self.state.load(Ordering::Relaxed);
+        (std::time::Duration::from_micros(state >> 1), state & 1 != 0)
+    }
+}
+
 fn queue_byte_limit(rate: f64, target: std::time::Duration, mtu: u16, hard_limit: usize) -> usize {
     ((rate * target.as_secs_f64()) as usize)
         .max(3 * 64 * usize::from(mtu))
@@ -29,6 +66,18 @@ impl Datagrams<'_> {
         }
     }
 
+    /// Observe head delay before admitting another complete packet group.
+    pub fn refresh_send_queue(&mut self, now: Instant) {
+        self.conn
+            .datagrams
+            .observe_send_queue(now, self.conn.config.datagram_send_queue_control);
+    }
+
+    /// Return shared FIFO delay feedback for upstream admission.
+    pub fn queue_feedback(&self) -> Arc<DatagramQueueFeedback> {
+        self.conn.datagrams.feedback.clone()
+    }
+
     /// Return the configured maximum unsent residence time.
     pub fn max_send_time(&self) -> Option<std::time::Duration> {
         self.conn.config.datagram_send_max_time
@@ -36,6 +85,10 @@ impl Datagrams<'_> {
 
     /// Reserve capacity for all fragments of one application packet.
     pub fn can_send_group(&mut self, bytes: usize) -> bool {
+        if self.conn.datagrams.feedback.persistent() {
+            self.conn.datagrams.send_blocked = true;
+            return false;
+        }
         if bytes <= self.send_buffer_space()
             || (self.conn.datagrams.outgoing_total == 0
                 && bytes <= self.conn.config.datagram_send_buffer_size)
@@ -98,7 +151,7 @@ impl Datagrams<'_> {
     ///
     /// Returns `Err` iff a `len`-byte datagram cannot currently be sent.
     pub fn send(&mut self, data: Bytes, drop: bool) -> Result<(), SendDatagramError> {
-        self.send_with_deadline(data, drop, None, None, false)
+        self.send_with_deadline(data, drop, None, None, false, Instant::now())
     }
 
     /// Queue one fragment after its complete packet has passed capacity admission.
@@ -109,6 +162,7 @@ impl Datagrams<'_> {
         deadline: Option<Instant>,
         group: Option<u64>,
         group_admitted: bool,
+        queued_at: Instant,
     ) -> Result<(), SendDatagramError> {
         if self.conn.config.datagram_receive_buffer_size.is_none() {
             return Err(SendDatagramError::Disabled);
@@ -131,8 +185,9 @@ impl Datagrams<'_> {
                 trace!(len = prev.frame.data.len(), "dropping outgoing datagram");
                 self.conn.datagrams.outgoing_total -= prev.frame.data.len();
             }
-        } else if self.conn.datagrams.outgoing_total + data.len()
-            > self.conn.config.datagram_send_buffer_size
+        } else if (self.conn.datagrams.feedback.persistent() && !group_admitted)
+            || self.conn.datagrams.outgoing_total + data.len()
+                > self.conn.config.datagram_send_buffer_size
             || (self.conn.datagrams.outgoing_total + data.len() > limit && !group_admitted)
         {
             self.conn.datagrams.send_blocked = true;
@@ -143,6 +198,7 @@ impl Datagrams<'_> {
             frame: Datagram { data },
             deadline,
             group,
+            queued_at,
         });
         Ok(())
     }
@@ -182,6 +238,9 @@ impl Datagrams<'_> {
     /// When greater than zero, [`send`](Self::send)ing a datagram of at most this size is
     /// guaranteed not to cause older datagrams to be dropped.
     pub fn send_buffer_space(&self) -> usize {
+        if self.conn.datagrams.feedback.persistent() {
+            return 0;
+        }
         self.send_buffer_limit()
             .saturating_sub(self.conn.datagrams.outgoing_total)
     }
@@ -190,6 +249,11 @@ impl Datagrams<'_> {
 #[derive(Default)]
 pub(super) struct DatagramState {
     pub(super) send_rate: SendRate,
+    pub(super) feedback: Arc<DatagramQueueFeedback>,
+    above_since: Option<Instant>,
+    pub(super) queue_sojourn_us: u64,
+    pub(super) queue_dequeued: u64,
+    pub(super) queue_congestions: u64,
     /// Payload bytes not yet delivered to the application.
     pub(super) recv_buffered: usize,
     recv_retained: usize,
@@ -239,6 +303,7 @@ struct OutgoingDatagram {
     frame: Datagram,
     deadline: Option<Instant>,
     group: Option<u64>,
+    queued_at: Instant,
 }
 
 struct ReceivedDatagram {
@@ -247,6 +312,54 @@ struct ReceivedDatagram {
 }
 
 impl DatagramState {
+    pub(super) fn observe_send_queue(
+        &mut self,
+        now: Instant,
+        control: Option<(std::time::Duration, std::time::Duration)>,
+    ) -> bool {
+        let was_persistent = self.feedback.persistent();
+        let delay = self
+            .outgoing
+            .front()
+            .map_or(std::time::Duration::ZERO, |head| {
+                now.saturating_duration_since(head.queued_at)
+            });
+        let persistent = if let Some((target, interval)) = control {
+            if delay < target || self.outgoing.is_empty() {
+                self.above_since = None;
+                false
+            } else {
+                let since = self.above_since.get_or_insert(now);
+                now.saturating_duration_since(*since) >= interval
+            }
+        } else {
+            false
+        };
+        let micros = delay.as_micros().min((u64::MAX >> 1) as u128) as u64;
+        self.feedback
+            .state
+            .store((micros << 1) | u64::from(persistent), Ordering::Relaxed);
+        if persistent && !was_persistent {
+            self.queue_congestions += 1;
+            self.feedback.congestions.fetch_add(1, Ordering::Release);
+        }
+        was_persistent && !persistent
+    }
+
+    pub(super) fn next_queue_check(
+        &self,
+        control: Option<(std::time::Duration, std::time::Duration)>,
+    ) -> Option<Instant> {
+        let (target, interval) = control?;
+        if self.feedback.persistent() {
+            return None;
+        }
+        let head = self.outgoing.front()?;
+        Some(
+            self.above_since
+                .map_or(head.queued_at + target, |since| since + interval),
+        )
+    }
     pub(super) fn is_send_empty(&self) -> bool {
         self.outgoing.is_empty()
     }
@@ -377,7 +490,7 @@ impl DatagramState {
     ///
     /// Returns whether a frame was written. At most `max_size` bytes will be written, including
     /// framing.
-    pub(super) fn write(&mut self, buf: &mut Vec<u8>, max_size: usize) -> bool {
+    pub(super) fn write(&mut self, buf: &mut Vec<u8>, max_size: usize, now: Instant) -> bool {
         let datagram = match self.outgoing.pop_front() {
             Some(x) => x,
             None => return false,
@@ -403,6 +516,12 @@ impl DatagramState {
         trace!(len = datagram.frame.data.len(), "DATAGRAM");
 
         self.outgoing_total -= datagram.frame.data.len();
+        self.queue_sojourn_us = self.queue_sojourn_us.saturating_add(
+            now.saturating_duration_since(datagram.queued_at)
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        );
+        self.queue_dequeued += 1;
         datagram.frame.encode(true, buf);
         true
     }
@@ -438,6 +557,58 @@ pub enum SendDatagramError {
 #[cfg(test)]
 mod mtu_limit_tests {
     use super::*;
+
+    #[test]
+    fn persistent_queue_delay_pauses_admission_without_discarding_frames() {
+        let now = Instant::now();
+        let control = Some((
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(100),
+        ));
+        let mut state = DatagramState::default();
+        for _ in 0..2 {
+            state.outgoing.push_back(OutgoingDatagram {
+                frame: Datagram {
+                    data: Bytes::from_static(b"payload"),
+                },
+                deadline: None,
+                group: Some(1),
+                queued_at: now,
+            });
+            state.outgoing_total += 7;
+        }
+        assert_eq!(
+            state.next_queue_check(control),
+            Some(now + std::time::Duration::from_millis(5))
+        );
+        let first = now + std::time::Duration::from_millis(5);
+        assert!(!state.observe_send_queue(first, control));
+        assert!(!state.feedback.persistent());
+        assert_eq!(
+            state.next_queue_check(control),
+            Some(first + std::time::Duration::from_millis(100))
+        );
+        let delayed = first + std::time::Duration::from_millis(100);
+        assert!(!state.observe_send_queue(delayed, control));
+        assert!(state.feedback.persistent());
+        assert_eq!(
+            state.feedback.sojourn(),
+            std::time::Duration::from_millis(105)
+        );
+        assert_eq!(state.outgoing_total, 14);
+        assert_eq!(state.expired_packets, 0);
+        assert_eq!(state.queue_congestions, 1);
+        let mut buffer = Vec::new();
+        while state.write(&mut buffer, 1200, delayed) {}
+        assert!(state.observe_send_queue(delayed, control));
+        assert!(!state.feedback.persistent());
+        assert_eq!(state.feedback.sojourn(), std::time::Duration::ZERO);
+        assert_eq!(state.feedback.congestion_events(), 1);
+        assert_eq!(state.queue_dequeued, 2);
+        assert_eq!(state.queue_sojourn_us, 210_000);
+        assert_eq!(state.expired_packets, 0);
+        assert_eq!(state.next_queue_check(control), None);
+    }
 
     #[test]
     fn expiry_discards_whole_unstarted_groups_and_releases_capacity() {
@@ -477,6 +648,7 @@ mod mtu_limit_tests {
                 },
                 group,
                 deadline: Some(deadline),
+                queued_at: now,
             });
             state.outgoing_total += 7;
         }
@@ -491,9 +663,9 @@ mod mtu_limit_tests {
             (2, 3, 21)
         );
         let mut buffer = Vec::new();
-        assert!(state.write(&mut buffer, 1200));
+        assert!(state.write(&mut buffer, 1200, now));
         assert!(!state.expire(now + std::time::Duration::from_millis(10)));
-        assert!(state.write(&mut buffer, 1200));
+        assert!(state.write(&mut buffer, 1200, now));
         assert_eq!(state.outgoing_total, 0);
         assert_eq!(state.expired_packets, 2);
         for length in [7, 1201] {
@@ -503,6 +675,7 @@ mod mtu_limit_tests {
                 },
                 group: Some(3),
                 deadline: None,
+                queued_at: now,
             });
             state.outgoing_total += length;
         }
@@ -516,6 +689,7 @@ mod mtu_limit_tests {
                 },
                 group: None,
                 deadline: Some(deadline),
+                queued_at: now,
             });
             state.outgoing_total += 7;
         }
@@ -634,6 +808,7 @@ mod mtu_limit_tests {
                 },
                 deadline: None,
                 group: None,
+                queued_at: Instant::now(),
             });
             state.outgoing_total += length;
         }

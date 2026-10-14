@@ -31,6 +31,7 @@ pub mod direct;
 pub mod filter;
 pub mod mpsc;
 pub mod packet_def;
+pub(crate) mod queue_feedback;
 pub mod ring;
 pub mod stats;
 pub mod tcp;

@@ -48,7 +48,7 @@ use cid_state::CidState;
 
 mod datagrams;
 use datagrams::DatagramState;
-pub use datagrams::{Datagrams, SendDatagramError};
+pub use datagrams::{DatagramQueueFeedback, Datagrams, SendDatagramError};
 
 mod mtud;
 mod pacing;
@@ -389,6 +389,10 @@ impl Connection {
             .next_timeout()
             .into_iter()
             .chain(self.datagrams.next_expiry())
+            .chain(
+                self.datagrams
+                    .next_queue_check(self.config.datagram_send_queue_control),
+            )
             .min()
     }
 
@@ -1308,12 +1312,23 @@ impl Connection {
         stats.path.datagram_expired_packets = self.datagrams.expired_packets;
         stats.path.datagram_expired_datagrams = self.datagrams.expired_datagrams;
         stats.path.datagram_expired_bytes = self.datagrams.expired_bytes;
+        stats.path.datagram_queue_sojourn_us = self.datagrams.queue_sojourn_us;
+        stats.path.datagram_queue_dequeued = self.datagrams.queue_dequeued;
+        stats.path.datagram_queue_congestions = self.datagrams.queue_congestions;
+        let feedback = &self.datagrams.feedback;
+        let (sojourn, paused) = feedback.snapshot();
+        stats.path.datagram_queue_head_sojourn_us = sojourn.as_micros() as u64;
+        stats.path.datagram_queue_paused = paused;
 
         stats
     }
 
     fn expire_datagrams(&mut self, now: Instant) {
-        if self.datagrams.expire(now) && self.datagrams.send_blocked {
+        let expired = self.datagrams.expire(now);
+        let resumed = self
+            .datagrams
+            .observe_send_queue(now, self.config.datagram_send_queue_control);
+        if (expired || resumed) && self.datagrams.send_blocked {
             self.datagrams.send_blocked = false;
             self.events.push_back(Event::DatagramsUnblocked);
         }
@@ -3800,7 +3815,7 @@ impl Connection {
         // DATAGRAM
         let mut sent_datagrams = false;
         while buf.len() + Datagram::SIZE_BOUND < max_size && space_id == SpaceId::Data {
-            match self.datagrams.write(buf, max_size) {
+            match self.datagrams.write(buf, max_size, now) {
                 true => {
                     sent_datagrams = true;
                     sent.non_retransmits = true;
@@ -3809,6 +3824,8 @@ impl Connection {
                 false => break,
             }
         }
+        self.datagrams
+            .observe_send_queue(now, self.config.datagram_send_queue_control);
         if self.datagrams.send_blocked && sent_datagrams {
             self.events.push_back(Event::DatagramsUnblocked);
             self.datagrams.send_blocked = false;

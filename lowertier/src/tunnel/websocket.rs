@@ -145,7 +145,10 @@ fn browser_ws_client(addr: &url::Url) -> Result<ClientBuilder<'_>, TunnelError> 
         .map_err(Into::into)
 }
 
-fn sink_from_zc_packet<E>(msg: ZCPacket) -> futures::future::Ready<Result<Message, E>> {
+fn sink_from_zc_packet<E>(mut msg: ZCPacket) -> futures::future::Ready<Result<Message, E>> {
+    if let Some(feedback) = msg.queue_feedback.take() {
+        feedback.clear();
+    }
     futures::future::ready(Ok(Message::binary(msg.tunnel_payload_into_bytes())))
 }
 
@@ -835,6 +838,13 @@ pub mod tests {
 
     #[test]
     fn websocket_connector_registers_the_effective_request_url() {
+        let transport = Arc::new(quinn::DatagramQueueFeedback::default());
+        let feedback = Arc::new(crate::tunnel::queue_feedback::FlowQueueFeedback::default());
+        feedback.bind(&transport);
+        let mut packet = ZCPacket::new_with_payload(b"wss");
+        packet.queue_feedback = Some(feedback);
+        let _ = sink_from_zc_packet::<TunnelError>(packet);
+        assert_eq!(Arc::weak_count(&transport), 0);
         for (path, expected) in [
             ("/", "/ws"),
             ("/?via=cdn", "/ws?via=cdn"),

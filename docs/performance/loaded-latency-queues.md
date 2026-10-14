@@ -44,6 +44,26 @@ This prevents BBR drain and ProbeRTT from immediately reducing the scheduling bu
 Three 64-datagram batches at the path MTU form the scheduling floor.
 The 1 MiB DATAGRAM memory ceiling still applies.
 Quinn reports this capacity through `datagram_send_buffer_space()`.
+Each admitted DATAGRAM carries its Quinn enqueue timestamp.
+The connection observes FIFO head residence on transmission, admission, and its next timeout.
+Head residence above 5 ms for a 100 ms interval pauses new packet-group admission.
+Admission resumes when the FIFO head falls below 5 ms or the FIFO becomes empty.
+The controller preserves all admitted DATAGRAMs and keeps the peak-rate byte cap.
+It does not add expiry or change congestion-control pacing.
+
+Each NIC flow holds a weak binding to its current DATAGRAM connection.
+One metadata tag per delivery batch establishes that binding before serialization.
+Reliable QUIC, H2, and WSS clear the binding when the flow changes transport.
+The binding does not retain the connection or payload buffers.
+Persistent FIFO delay primes that flow's existing NIC CoDel interval.
+NIC CoDel then marks ECN-capable packets or drops unmarked head packets under its existing control law.
+The one-maximum-packet exemption remains in effect.
+A monotonic congestion count preserves an episode while direct-send credits block the NIC delivery.
+Each flow consumes that retained signal independently after delivery resumes.
+The dequeue consumes feedback only after packet capacity becomes available.
+This prevents FIFO drain from erasing the signal before NIC dequeue.
+Queue statistics record summed FIFO residence, dequeued fragments, and persistent episodes.
+
 The writer waits for FIFO drain before flush completes.
 Batch admission can fill the rate budget before flush waits for drain.
 Congestion windows and reliable stream windows remain unchanged.
@@ -73,6 +93,14 @@ The 288,000-byte floor therefore dominates that budget. The confirmation does no
 The recent peak can increase that budget during controller probe gains, within the same memory ceiling.
 Removing expiry preserves queued packets through temporary congestion-controller pauses.
 It does not change the congestion window, pacing algorithm, wire format, or network flight capacity.
+
+The feedback adds one timestamp per queued DATAGRAM and two atomic values per connection.
+NIC binding adds one weak reference and one observed generation per flow.
+One packet metadata field carries the flow reference, with one reference clone per NIC delivery batch.
+The controller reads the existing clock once per transmit or admission operation, rather than once per fragment.
+It adds no payload queue or payload copy.
+Darwin removes one readiness syscall per write and adds at most one kernel sample per 50 ms of active writing.
+For `W` writes per second, this removes `W` readiness queries and retains approximately 20 kernel samples per socket.
 
 At a CoDel congestion signal, ECT inner IPv4 and IPv6 packets receive CE before encryption.
 IPv4 marking recomputes the header checksum, including options.

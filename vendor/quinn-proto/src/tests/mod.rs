@@ -2022,6 +2022,54 @@ fn datagram_send_recv() {
 }
 
 #[test]
+fn datagram_queue_timer_pauses_admission_and_drain_wakes_sender() {
+    let mut pair = Pair::default();
+    let mut config = client_config();
+    config.transport = Arc::new(TransportConfig {
+        datagram_send_queue_control: Some((Duration::from_millis(5), Duration::from_millis(100))),
+        ..TransportConfig::default()
+    });
+    let (client_ch, _) = pair.connect_with(config);
+    let now = pair.time;
+    let conn = pair.client_conn_mut(client_ch);
+    let feedback = conn.datagrams().queue_feedback();
+    conn.datagrams()
+        .send_with_deadline(
+            Bytes::from_static(b"payload"),
+            false,
+            None,
+            None,
+            false,
+            now,
+        )
+        .unwrap();
+    assert!(conn.poll_timeout().unwrap() <= now + Duration::from_millis(5));
+    conn.handle_timeout(now + Duration::from_millis(5));
+    assert!(!feedback.persistent());
+    assert!(conn.poll_timeout().unwrap() <= now + Duration::from_millis(105));
+    let delayed = now + Duration::from_millis(105);
+    conn.handle_timeout(delayed);
+    assert!(feedback.persistent());
+    assert!(!conn.datagrams().can_send_group(7));
+    assert_eq!(conn.datagrams().send_buffer_space(), 0);
+    assert_eq!(conn.stats().path.datagram_queue_dequeued, 0);
+    let mut buffer = Vec::new();
+    while conn.poll_transmit(delayed, 1, &mut buffer).is_some() {
+        buffer.clear();
+    }
+    assert_eq!(feedback.snapshot(), (Duration::ZERO, false));
+    assert_eq!(feedback.congestion_events(), 1);
+    assert_eq!(conn.stats().path.datagram_queue_dequeued, 1);
+    assert_eq!(conn.stats().path.datagram_expired_packets, 0);
+    let mut resumed = false;
+    while let Some(event) = conn.poll() {
+        resumed |= matches!(event, Event::DatagramsUnblocked);
+    }
+    assert!(resumed);
+    assert!(conn.datagrams().can_send_group(7));
+}
+
+#[test]
 fn datagram_fast_seal_keeps_queue_and_flight_budgets_separate() {
     let mut pair = Pair::default();
     pair.latency = Duration::from_millis(40);
