@@ -4,8 +4,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use thiserror::Error;
 
 use crate::{
+    ConnectionId,
     coding::{self, BufExt, BufMutExt},
-    crypto, ConnectionId,
+    crypto,
 };
 
 /// Decodes a QUIC packet's invariant header
@@ -25,6 +26,7 @@ use crate::{
 pub struct PartialDecode {
     plain_header: ProtectedHeader,
     buf: io::Cursor<BytesMut>,
+    retained_bytes: usize,
 }
 
 #[allow(clippy::len_without_is_empty)]
@@ -36,7 +38,10 @@ impl PartialDecode {
         supported_versions: &[u32],
         grease_quic_bit: bool,
     ) -> Result<(Self, Option<BytesMut>), PacketDecodeError> {
-        let mut buf = io::Cursor::new(bytes);
+        // Normalize shared slices before splitting. Capacity then bounds the retained allocation.
+        let storage: Vec<u8> = bytes.into();
+        let retained_bytes = storage.capacity();
+        let mut buf = io::Cursor::new(BytesMut::from(Bytes::from(storage)));
         let plain_header =
             ProtectedHeader::decode(&mut buf, cid_parser, supported_versions, grease_quic_bit)?;
         let dgram_len = buf.get_ref().len();
@@ -45,13 +50,27 @@ impl PartialDecode {
             .map(|len| (buf.position() + len) as usize)
             .unwrap_or(dgram_len);
         match dgram_len.cmp(&packet_len) {
-            Ordering::Equal => Ok((Self { plain_header, buf }, None)),
+            Ordering::Equal => Ok((
+                Self {
+                    plain_header,
+                    buf,
+                    retained_bytes,
+                },
+                None,
+            )),
             Ordering::Less => Err(PacketDecodeError::InvalidHeader(
                 "packet too short to contain payload length",
             )),
             Ordering::Greater => {
                 let rest = Some(buf.get_mut().split_off(packet_len));
-                Ok((Self { plain_header, buf }, rest))
+                Ok((
+                    Self {
+                        plain_header,
+                        buf,
+                        retained_bytes,
+                    },
+                    rest,
+                ))
             }
         }
     }
@@ -116,6 +135,7 @@ impl PartialDecode {
         let Self {
             plain_header,
             mut buf,
+            retained_bytes,
         } = self;
 
         if let Initial(ProtectedInitialHeader {
@@ -142,6 +162,7 @@ impl PartialDecode {
                 }),
                 header_data,
                 payload: bytes,
+                retained_bytes,
             });
         }
 
@@ -196,6 +217,7 @@ impl PartialDecode {
             header,
             header_data: bytes.split_to(header_len).freeze(),
             payload: bytes,
+            retained_bytes,
         })
     }
 
@@ -222,6 +244,7 @@ pub(crate) struct Packet {
     pub(crate) header: Header,
     pub(crate) header_data: Bytes,
     pub(crate) payload: BytesMut,
+    pub(crate) retained_bytes: usize,
 }
 
 impl Packet {
@@ -238,6 +261,7 @@ pub(crate) struct InitialPacket {
     pub(crate) header: InitialHeader,
     pub(crate) header_data: Bytes,
     pub(crate) payload: BytesMut,
+    pub(crate) retained_bytes: usize,
 }
 
 impl From<InitialPacket> for Packet {
@@ -246,6 +270,7 @@ impl From<InitialPacket> for Packet {
             header: Header::Initial(x.header),
             header_data: x.header_data,
             payload: x.payload,
+            retained_bytes: x.retained_bytes,
         }
     }
 }
@@ -937,8 +962,8 @@ mod tests {
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     #[test]
     fn header_encoding() {
-        use crate::crypto::rustls::{initial_keys, initial_suite_from_provider};
         use crate::Side;
+        use crate::crypto::rustls::{initial_keys, initial_suite_from_provider};
         #[cfg(all(feature = "rustls-aws-lc-rs", not(feature = "rustls-ring")))]
         use rustls::crypto::aws_lc_rs::default_provider;
         #[cfg(feature = "rustls-ring")]

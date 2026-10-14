@@ -93,6 +93,20 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
     assert!(mixed[..local_len].iter().all(|byte| *byte == 0x40));
     assert_eq!(decoy.decoy_tx.capacity(), 63);
     assert_eq!(decoy.routes.len(), 1);
+    let original = mixed.clone();
+    assert_eq!(
+        decoy.route_received(
+            quinn::udp::RecvMeta {
+                addr: "127.0.0.1:16000".parse().unwrap(),
+                len: mixed.len(),
+                stride: 1200,
+                ..Default::default()
+            },
+            &mut mixed,
+        ),
+        original.len()
+    );
+    assert_eq!(mixed, original);
 
     // A pending decoy packet may lose the race to a marked client. Even if
     // admission then fails, the pending packet must not erase that local route.

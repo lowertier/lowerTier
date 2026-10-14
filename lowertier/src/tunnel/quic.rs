@@ -2999,6 +2999,18 @@ impl QuicDecoySocket {
     }
 
     fn route_received(&self, received: quinn::udp::RecvMeta, bytes: &mut [u8]) -> usize {
+        if let Some(entry) = self.routes.get(&received.addr) {
+            entry
+                .last_seen_seconds
+                .store(Self::now_seconds(), Ordering::Relaxed);
+            match entry.route {
+                QuicSocketRoute::Local => return received.len,
+                QuicSocketRoute::Decoy => {
+                    self.forward_decoy(received, &bytes[..received.len]);
+                    return 0;
+                }
+            }
+        }
         let stride = received.stride.max(1);
         let mut local_len = 0;
         // A GRO buffer can mix established traffic and a new Initial packet.

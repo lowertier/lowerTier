@@ -3334,6 +3334,7 @@ impl Connection {
                 Frame::Datagram(datagram) => {
                     if self.datagrams.received(
                         datagram,
+                        packet.retained_bytes,
                         &self.config.datagram_receive_buffer_size,
                         self.config.datagram_receive_drop_policy,
                     )? {

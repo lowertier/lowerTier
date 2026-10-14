@@ -526,6 +526,7 @@ impl Endpoint {
                 header,
                 header_data: packet.header_data,
                 payload: packet.payload,
+                retained_bytes: packet.retained_bytes,
             },
             rest: event.remaining,
             crypto,
