@@ -433,10 +433,13 @@ async fn run_direct_sink_owner(
     let mut consecutive_control = 0_usize;
     let mut pending_work: Option<(DirectSendWork, bool)> = None;
     let mut started_ownerships = Vec::with_capacity(DIRECT_INFLIGHT_RUN_CAPACITY);
+    // Only recv() returning None proves that a closed channel has drained.
+    let mut control_open = true;
+    let mut data_open = true;
 
     loop {
         debug_assert!(started_ownerships.is_empty());
-        if pending_work.is_none() && control_rx.is_closed() && data_rx.is_closed() {
+        if pending_work.is_none() && !control_open && !data_open {
             close_sink(&mut sink, close_timeout).await;
             break;
         }
@@ -457,19 +460,31 @@ async fn run_direct_sink_owner(
         } else if consecutive_control >= MAX_CONSECUTIVE_CONTROL_SENDS {
             tokio::select! {
                 biased;
-                work = data_rx.recv(), if !data_rx.is_closed() => work.map(|work| (work, false)),
-                work = control_rx.recv(), if !control_rx.is_closed() => work.map(|work| (work, true)),
+                work = data_rx.recv(), if data_open => {
+                    data_open = work.is_some();
+                    work.map(|work| (work, false))
+                },
+                work = control_rx.recv(), if control_open => {
+                    control_open = work.is_some();
+                    work.map(|work| (work, true))
+                },
             }
         } else {
             tokio::select! {
                 biased;
-                work = control_rx.recv(), if !control_rx.is_closed() => work.map(|work| (work, true)),
-                work = data_rx.recv(), if !data_rx.is_closed() => work.map(|work| (work, false)),
+                work = control_rx.recv(), if control_open => {
+                    control_open = work.is_some();
+                    work.map(|work| (work, true))
+                },
+                work = data_rx.recv(), if data_open => {
+                    data_open = work.is_some();
+                    work.map(|work| (work, false))
+                },
             }
         };
 
         let Some((work, control_lane)) = next else {
-            if control_rx.is_closed() && data_rx.is_closed() {
+            if !control_open && !data_open {
                 close_sink(&mut sink, close_timeout).await;
                 break;
             }

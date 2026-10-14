@@ -2,6 +2,50 @@ use super::*;
 use futures::{FutureExt, SinkExt};
 
 #[tokio::test]
+async fn sink_owner_drains_closed_lanes_and_exits() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for controls in [0, MAX_CONSECUTIVE_CONTROL_SENDS] {
+        let (control_tx, control_rx) = mpsc::channel(MAX_CONSECUTIVE_CONTROL_SENDS);
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let budget = Arc::new(AdmissionBudget::with_process(controls + 1, 4096, None));
+        for sender in std::iter::repeat_n(&control_tx, controls).chain(std::iter::once(&data_tx)) {
+            sender
+                .send(DirectSendWork {
+                    batch: PacketBatch::singleton(ZCPacket::new_with_payload(&[0; 16])),
+                    ownership: budget.try_acquire(1, 16).unwrap(),
+                    deadline: None,
+                })
+                .await
+                .unwrap();
+        }
+        drop(control_tx);
+        let sent = Arc::new(AtomicUsize::new(0));
+        let sink = futures::sink::unfold(sent.clone(), |sent, batch: PacketBatch| async move {
+            sent.fetch_add(batch.len(), Ordering::Relaxed);
+            Ok::<_, TunnelError>(sent)
+        });
+        let owner = run_direct_sink_owner(
+            std::sync::Weak::new(),
+            Box::pin(sink),
+            control_rx,
+            data_rx,
+            Some(Duration::from_secs(1)),
+        );
+        tokio::pin!(owner);
+        // The closed control lane must drain while the data lane remains open.
+        assert!(futures::poll!(owner.as_mut()).is_pending());
+        drop(data_tx);
+        tokio::time::timeout(Duration::from_secs(1), owner)
+            .await
+            .unwrap();
+        assert_eq!(sent.load(Ordering::Relaxed), controls + 1);
+        let usage = budget.usage.lock();
+        assert_eq!((usage.packets, usage.bytes, usage.runs), (0, 0, 0));
+    }
+}
+
+#[tokio::test]
 async fn queued_transit_observes_denial_before_framing() {
     use std::{
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
