@@ -88,6 +88,8 @@ Failed persistence leaves the previous configuration and revision active.
 Relay, limits, hostname, and ACL fields apply live.
 `limits.memory_bytes` requires a process restart because instances share the strictest explicit memory limit.
 Instance stop/start does not activate a staged process memory limit.
+Changes to `control.token_file` also require a process restart because the portal owns one process token.
+Persist staged process settings before the process restarts.
 Camouflage HTTP authority, WSS path, and trusted proxy CIDRs affect new connections.
 TLS identity, SNI classification, admission secret, website root, and decoy endpoints require restart when QUIC is enabled.
 This includes QUIC endpoints created by discovery. Existing authenticated connections keep their transport binding.

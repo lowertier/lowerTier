@@ -260,7 +260,7 @@ fn changed_paths(before: &Value, after: &Value, path: &str, changed: &mut Vec<St
 }
 
 fn classify(path: &str, quic: bool) -> &'static str {
-    if path == "limits.memory_bytes" {
+    if matches!(path, "limits.memory_bytes" | "control.token_file") {
         return "restart";
     }
     if path == "hostname"
@@ -337,6 +337,9 @@ fn prepare(
         }
     }
     let before = document(current)?;
+    if let Some(values) = &patch.values {
+        validate_flag_sections(values)?;
+    }
     let values = typed_value(&patch.values.clone().unwrap_or_default())?;
     let mut after = before.clone();
     for path in &patch.field_mask {
@@ -450,6 +453,19 @@ fn prepare(
         }
     }
     Ok((candidate, result))
+}
+
+fn validate_flag_sections(values: &NodeConfig) -> anyhow::Result<()> {
+    if values.flags.as_ref().is_some_and(|flags| {
+        flags.relay.is_some() || flags.camouflage.is_some() || flags.limits.is_some()
+    }) {
+        return Err(failure(
+            "INVALID_ARGUMENT",
+            "Use the canonical relay, camouflage, and limits sections.",
+            "flags",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_values(config: &TomlConfigLoader, document: &Value) -> anyhow::Result<()> {
@@ -688,7 +704,7 @@ fn select_apply(
         || crate::common::config::transport_protocol_enabled(&desired.get_flags(), "quic");
     let mut published = before;
     for path in changed {
-        match if running || path == "limits.memory_bytes" {
+        match if running || matches!(path.as_str(), "limits.memory_bytes" | "control.token_file") {
             classify(&path, quic)
         } else {
             "live"
@@ -838,6 +854,7 @@ impl ControlPlaneService {
                 "config",
             )
         })?;
+        validate_flag_sections(&values)?;
         let value = typed_value(&values)?;
         if contains_placeholder(&value) {
             return Err(failure(
@@ -920,12 +937,12 @@ impl ControlPlaneService {
         if state
             .restart_fields
             .iter()
-            .any(|path| path == "limits.memory_bytes")
+            .any(|path| matches!(path.as_str(), "limits.memory_bytes" | "control.token_file"))
         {
             return Err(failure(
                 "RESTART_REQUIRED",
-                "Restart the process to apply the staged memory limit.",
-                "limits.memory_bytes",
+                "Restart the process to apply staged process settings.",
+                "restart_fields",
             ));
         }
         if let Some(desired) = &state.desired {
