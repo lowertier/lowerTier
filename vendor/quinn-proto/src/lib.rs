@@ -45,9 +45,9 @@ pub use bloom_token_log::BloomTokenLog;
 mod connection;
 pub use crate::connection::{
     Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Datagrams, Event,
-    FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream, RttEstimator,
-    SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError,
-    Written,
+    FinishError, FrameStats, PathPolicy, PathStats, ReadError, ReadableError, RecvStream,
+    RttEstimator, SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats,
+    WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
@@ -268,11 +268,7 @@ impl StreamId {
     }
     /// Which directions data flows in
     pub fn dir(self) -> Dir {
-        if self.0 & 0x2 == 0 {
-            Dir::Bi
-        } else {
-            Dir::Uni
-        }
+        if self.0 & 0x2 == 0 { Dir::Bi } else { Dir::Uni }
     }
     /// Distinguishes streams of the same initiator and directionality
     pub fn index(self) -> u64 {

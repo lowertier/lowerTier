@@ -18,19 +18,19 @@ use rustls::crypto::aws_lc_rs::default_provider;
 #[cfg(feature = "rustls-ring")]
 use rustls::crypto::ring::default_provider;
 use rustls::{
+    AlertDescription, RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     server::WebPkiClientVerifier,
-    AlertDescription, RootCertStore,
 };
 use tracing::info;
 
 use super::*;
 use crate::{
+    Duration, Instant,
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
     crypto::rustls::QuicServerConfig,
     frame::FrameStruct,
     transport_parameters::TransportParameters,
-    Duration, Instant,
 };
 mod util;
 use util::*;
@@ -1291,6 +1291,66 @@ fn migration() {
     );
 }
 
+#[test]
+fn rebinding_policy_revocation_preserves_coalesced_stream_data() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Policy {
+        allowed: AtomicBool,
+        notified: AtomicBool,
+    }
+    impl PathPolicy for Policy {
+        fn allow(&self, current: SocketAddr, candidate: SocketAddr) -> bool {
+            current.ip() == candidate.ip() && self.allowed.load(Ordering::Acquire)
+        }
+        fn validated(&self, _remote: SocketAddr) {
+            self.notified.store(true, Ordering::Release);
+        }
+    }
+
+    let _guard = subscribe();
+    let mut config = server_config();
+    config.migration(false);
+    let mut pair = Pair::new(Default::default(), config);
+    let (client, server) = pair.connect();
+    let old_remote = pair.client.addr;
+    let policy = Arc::new(Policy {
+        allowed: AtomicBool::new(true),
+        notified: AtomicBool::new(false),
+    });
+    pair.server_conn_mut(server).set_path_policy(policy.clone());
+    pair.client
+        .addr
+        .set_port(CLIENT_PORTS.lock().unwrap().next().unwrap());
+    pair.client_conn_mut(client).ping();
+    pair.drive_client();
+    pair.drive_server();
+    assert_eq!(
+        pair.server_conn_mut(server).remote_address(),
+        pair.client.addr
+    );
+    assert!(!policy.notified.load(Ordering::Acquire));
+
+    // Quinn puts PATH_RESPONSE before STREAM in the same packet.
+    policy.allowed.store(false, Ordering::Release);
+    let stream = pair.client_streams(client).open(Dir::Uni).unwrap();
+    let payload = b"reliable data after denied response";
+    pair.client_send(client, stream).write(payload).unwrap();
+    pair.drive_client();
+    pair.drive_server();
+    let connection = pair.server_conn_mut(server);
+    assert_eq!(connection.remote_address(), old_remote);
+    assert!(connection.stats().frame_rx.path_response > 0);
+    assert!(!policy.notified.load(Ordering::Acquire));
+    let mut receive = pair.server_recv(server, stream);
+    let mut chunks = receive.read(true).unwrap();
+    assert_eq!(
+        chunks.next(usize::MAX).unwrap().unwrap().bytes.as_ref(),
+        payload
+    );
+    chunks.finalize();
+}
+
 fn test_flow_control(config: TransportConfig, window_size: usize) {
     let _guard = subscribe();
     let mut pair = Pair::new(
@@ -1558,8 +1618,8 @@ fn cid_rotation() {
     let mut stop = pair.time;
     let end = pair.time + 5 * CID_TIMEOUT;
 
-    use crate::cid_queue::CidQueue;
     use crate::LOC_CID_COUNT;
+    use crate::cid_queue::CidQueue;
     let mut active_cid_num = CidQueue::LEN as u64 + 1;
     active_cid_num = active_cid_num.min(LOC_CID_COUNT);
     let mut left_bound = 0;
@@ -1606,8 +1666,8 @@ fn cid_retirement() {
     assert!(!pair.server_conn_mut(server_ch).is_closed());
     assert_matches!(pair.client_conn_mut(client_ch).active_rem_cid_seq(), 1);
 
-    use crate::cid_queue::CidQueue;
     use crate::LOC_CID_COUNT;
+    use crate::cid_queue::CidQueue;
     let mut active_cid_num = CidQueue::LEN as u64;
     active_cid_num = active_cid_num.min(LOC_CID_COUNT);
 
@@ -1874,7 +1934,6 @@ fn tail_loss_respect_max_datagrams() {
     assert_eq!(client_stats.udp_tx.ios, client_stats.udp_tx.datagrams);
 }
 
-
 #[test]
 fn datagram_send_recv() {
     let _guard = subscribe();
@@ -2014,8 +2073,11 @@ fn datagram_fast_seal_unblocks_after_ack_or_loss() {
             assert!(pair.client_conn_mut(client_ch).stats().path.lost_packets > 0);
         }
         let now = pair.time;
-        pair.client_conn_mut(client_ch)
-            .seal_application_datagrams(now, &mut payloads, &mut packets);
+        pair.client_conn_mut(client_ch).seal_application_datagrams(
+            now,
+            &mut payloads,
+            &mut packets,
+        );
         assert!(!packets.is_empty());
     }
 }

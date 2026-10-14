@@ -1281,6 +1281,7 @@ pub struct PeerConn {
     recv: Mutex<Option<Pin<Box<dyn PacketBatchStream>>>>,
     pending_recv: parking_lot::Mutex<VecDeque<ZCPacket>>,
     tunnel_info: Option<TunnelInfo>,
+    tunnel_path_state: Option<Arc<crate::tunnel::TunnelPathState>>,
     transport_binding: Option<TransportBinding>,
     receive_backpressure: Option<crate::tunnel::ReceiveBackpressure>,
 
@@ -1349,6 +1350,7 @@ impl PeerConn {
     ) -> Self {
         let flags = global_ctx.get_flags();
         let tunnel_info = tunnel.info();
+        let tunnel_path_state = tunnel.path_state();
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
@@ -1397,6 +1399,7 @@ impl PeerConn {
             recv: Mutex::new(Some(recv)),
             pending_recv: parking_lot::Mutex::new(VecDeque::new()),
             tunnel_info,
+            tunnel_path_state,
             transport_binding,
             receive_backpressure,
 
@@ -3967,6 +3970,7 @@ impl PeerConn {
         if self.get_peer_id() == self.my_peer_id {
             Err(Error::WaitRespError("peer id conflict".to_owned()))
         } else {
+            self.enable_authenticated_path();
             Ok(())
         }
     }
@@ -3996,8 +4000,22 @@ impl PeerConn {
                 "peer id conflict, are you connecting to yourself?".to_owned(),
             ))
         } else {
+            self.enable_authenticated_path();
             Ok(())
         }
+    }
+
+    fn enable_authenticated_path(&self) {
+        if let Some(state) = &self.tunnel_path_state {
+            state.peer_authenticated.store(true, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn current_tunnel_info(&self) -> Option<TunnelInfo> {
+        self.tunnel_path_state
+            .as_ref()
+            .map(|state| state.info.read().clone())
+            .or_else(|| self.tunnel_info.clone())
     }
 
     pub fn handshake_done(&self) -> bool {
@@ -4780,7 +4798,7 @@ impl PeerConn {
             my_peer_id: self.my_peer_id,
             peer_id: self.get_peer_id(),
             features: info.features.clone(),
-            tunnel: self.tunnel_info.clone(),
+            tunnel: self.current_tunnel_info(),
             stats: Some(self.get_stats()),
             loss_rate: (f64::from(self.loss_rate_stats.load(Ordering::Relaxed)) / 100.0) as f32,
             is_client: self.is_client.unwrap_or_default(),

@@ -67,6 +67,29 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
         Some(QuicSocketRoute::Local)
     );
     assert_eq!(decoy.routes.len(), 1);
+    // A new tuple can reach Quinn's CID lookup without consuming a route slot.
+    assert_eq!(
+        decoy.route("127.0.0.1:16002".parse().unwrap(), &[0x40; 64]),
+        Some(QuicSocketRoute::Local)
+    );
+    assert_eq!(decoy.routes.len(), 1);
+
+    let mut mixed = vec![0x40; 1200];
+    mixed.extend_from_slice(&initial);
+    let local_len = decoy.route_received(
+        quinn::udp::RecvMeta {
+            addr: "127.0.0.1:16003".parse().unwrap(),
+            len: mixed.len(),
+            stride: 1200,
+            ecn: None,
+            dst_ip: None,
+        },
+        &mut mixed,
+    );
+    assert_eq!(local_len, 1200);
+    assert!(mixed[..local_len].iter().all(|byte| *byte == 0x40));
+    assert_eq!(decoy.decoy_tx.capacity(), 63);
+    assert_eq!(decoy.routes.len(), 1);
 
     // A pending decoy packet may lose the race to a marked client. Even if
     // admission then fails, the pending packet must not erase that local route.
@@ -205,7 +228,11 @@ async fn http3_decoy_large_certificate_and_body_are_lossless_and_rate_limited() 
             let _server = AbortOnDropHandle::new(tokio::spawn(async move {
                 let connection = upstream.accept().await.unwrap().await.unwrap();
                 connection_tx.send(connection.clone()).unwrap();
-                let _ = accept_connect_ip_request(&connection, None, Some(root)).await;
+                if let Ok(ConnectIpAccept::Website(website)) =
+                    accept_connect_ip_request(&connection, None, Some(root.clone())).await
+                {
+                    serve_http3_requests(website.connection, Some(root), Some(website.first)).await;
+                }
             }));
 
             // The test client explicitly uses the local ephemeral-identity mode.

@@ -270,6 +270,62 @@ impl PathConnections {
             .filter(|connection| connection_alive(peers, *connection))
     }
 
+    fn refresh_validated_addresses(&self, peers: &PeerManager) {
+        let mut entries = self.candidates.lock().unwrap();
+        let changed = entries
+            .iter()
+            .filter_map(|(address, state)| {
+                let connection = state.connection?;
+                let peer = peers
+                    .get_peer_map()
+                    .get_live_direct_conn(connection.0, connection.1)?;
+                let info = peer.current_tunnel_info()?;
+                if info.tunnel_type != "quic" {
+                    return None;
+                }
+                let url = url::Url::parse(&info.resolved_remote_addr?.url).ok()?;
+                let ip = match url.host()? {
+                    url::Host::Ipv4(ip) => ip.into(),
+                    url::Host::Ipv6(ip) => ip.into(),
+                    url::Host::Domain(_) => return None,
+                };
+                let remote = SocketAddr::new(ip, url.port()?);
+                (remote != *address).then_some((*address, remote, connection))
+            })
+            .collect::<Vec<_>>();
+        for (old, _, connection) in &changed {
+            if let Some(state) = entries.get_mut(&old) {
+                if state.connection == Some(*connection) {
+                    state.connection = None;
+                }
+            }
+        }
+        let mut published = false;
+        for (_, remote, connection) in &changed {
+            // Reuse a vacated source slot before the candidate table exceeds its limit.
+            if !entries.contains_key(remote) && entries.len() >= 64 {
+                let vacated = changed.iter().find_map(|(old, _, _)| {
+                    entries
+                        .get(old)
+                        .is_some_and(|state| state.connection.is_none())
+                        .then_some(*old)
+                });
+                if let Some(vacated) = vacated {
+                    entries.remove(&vacated);
+                }
+            }
+            if let Some(state) = Self::entry(&mut entries, *remote) {
+                state.connection = Some(*connection);
+                state.hint.observe(connection.0);
+                published = true;
+            }
+        }
+        drop(entries);
+        if published {
+            self.changed.notify_waiters();
+        }
+    }
+
     async fn record(
         &self,
         peers: &Arc<PeerManager>,
@@ -1817,6 +1873,7 @@ async fn candidate_loop(
                 }
             }
             _ = retry.tick() => {
+                connections.refresh_validated_addresses(&peers);
                 let generation = peers.get_peer_map().connection_release_generation();
                 let mut entries = connections.candidates.lock().unwrap();
                 for state in entries.values_mut() {

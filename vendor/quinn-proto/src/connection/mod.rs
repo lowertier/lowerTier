@@ -150,6 +150,7 @@ pub struct Connection {
     /// Whether MTU detection is supported in this environment
     allow_mtud: bool,
     prev_path: Option<(ConnectionId, PathData)>,
+    path_policy: Option<Arc<dyn PathPolicy>>,
     state: State,
     side: ConnectionSide,
     /// Whether or not 0-RTT was enabled during the handshake. Does not imply acceptance.
@@ -289,6 +290,7 @@ impl Connection {
             allow_mtud,
             local_ip,
             prev_path: None,
+            path_policy: None,
             state,
             side: connection_side,
             zero_rtt_enabled: false,
@@ -616,7 +618,9 @@ impl Connection {
                     }
 
                     // Check whether the next datagram is blocked by pacing
-                    self.path.pacing.set_rate(self.path.congestion.metrics().pacing_rate);
+                    self.path
+                        .pacing
+                        .set_rate(self.path.congestion.metrics().pacing_rate);
                     let smoothed_rtt = self.path.rtt.get();
                     if let Some(delay) = self.path.pacing.delay(
                         smoothed_rtt,
@@ -1107,10 +1111,7 @@ impl Connection {
                 first_decode,
                 remaining,
             }) => {
-                // If this packet could initiate a migration and we're a client or a server that
-                // forbids migration, drop the datagram. This could be relaxed to heuristically
-                // permit NAT-rebinding-like migration.
-                if remote != self.path.remote && !self.side.remote_may_migrate() {
+                if remote != self.path.remote && !self.remote_path_allowed(remote) {
                     trace!("discarding packet from unrecognized peer {}", remote);
                     return;
                 }
@@ -1322,7 +1323,9 @@ impl Connection {
         };
         let mtu = usize::from(self.path.current_mtu());
         let in_flight_limit = self.path.congestion.window();
-        self.path.pacing.set_rate(self.path.congestion.metrics().pacing_rate);
+        self.path
+            .pacing
+            .set_rate(self.path.congestion.metrics().pacing_rate);
         let mut blocked = false;
         let mut last_packet_number = None;
         let mut sent_bytes = 0;
@@ -1406,7 +1409,9 @@ impl Connection {
         // A wakeup permits another attempt. It does not consume queued payloads.
         self.datagrams.fast_send_pending = !payloads.is_empty();
         if let Some(last_packet_number) = last_packet_number {
-            self.path.congestion.on_sent(now, sent_bytes, last_packet_number);
+            self.path
+                .congestion
+                .on_sent(now, sent_bytes, last_packet_number);
             self.stats.udp_tx.datagrams += (packets.len() - first_packet) as u64;
             self.stats.udp_tx.bytes += sent_bytes;
         }
@@ -1592,6 +1597,27 @@ impl Connection {
     /// The latest socket address for this connection's peer
     pub fn remote_address(&self) -> SocketAddr {
         self.path.remote
+    }
+
+    /// Set the application policy for remote path changes on a server connection.
+    ///
+    /// The policy can permit NAT rebinding when active migration is disabled.
+    /// Clients and connections that are still handshaking cannot change remote paths.
+    pub fn set_path_policy(&mut self, policy: Arc<dyn PathPolicy>) {
+        self.path_policy = Some(policy);
+    }
+
+    fn remote_path_allowed(&self, remote: SocketAddr) -> bool {
+        if self.is_handshaking() || self.side.is_client() {
+            return false;
+        }
+        match &self.path_policy {
+            Some(policy) => {
+                (self.side.remote_may_migrate() || remote.ip() == self.path.remote.ip())
+                    && policy.allow(self.path.remote, remote)
+            }
+            None => self.side.remote_may_migrate(),
+        }
     }
 
     /// The local IP address which was used when the peer established
@@ -2956,6 +2982,7 @@ impl Connection {
     ) -> Result<(), TransportError> {
         let payload = packet.payload.freeze();
         let mut is_probing_packet = true;
+        let mut path_denied = false;
         let mut close = None;
         let payload_len = payload.len();
         let mut ack_eliciting = false;
@@ -3036,6 +3063,24 @@ impl Connection {
                 }
                 Frame::PathResponse(token) => {
                     if self.path.challenge == Some(token) && remote == self.path.remote {
+                        // A policy can change while validation is in progress.
+                        if self.path_policy.as_ref().is_some_and(|policy| {
+                            let previous = self
+                                .prev_path
+                                .as_ref()
+                                .map_or(remote, |(_, path)| path.remote);
+                            !policy.allow(previous, remote)
+                        }) {
+                            self.timers.stop(Timer::PathValidation);
+                            if let Some((_, previous)) = self.prev_path.take() {
+                                self.path = previous;
+                            }
+                            self.path.challenge = None;
+                            self.path.challenge_pending = false;
+                            // The packet is already acknowledged. Process its remaining frames.
+                            path_denied = true;
+                            continue;
+                        }
                         trace!("new path validated");
                         self.timers.stop(Timer::PathValidation);
                         self.path.challenge = None;
@@ -3043,6 +3088,9 @@ impl Connection {
                         if let Some((_, ref mut prev_path)) = self.prev_path {
                             prev_path.challenge = None;
                             prev_path.challenge_pending = false;
+                        }
+                        if let Some(policy) = &self.path_policy {
+                            policy.validated(remote);
                         }
                     } else {
                         debug!(token, "ignoring invalid PATH_RESPONSE");
@@ -3262,14 +3310,13 @@ impl Connection {
         }
 
         if remote != self.path.remote
+            && !path_denied
             && !is_probing_packet
             && number == self.spaces[SpaceId::Data].rx_packet
         {
-            let ConnectionSide::Server { ref server_config } = self.side else {
-                panic!("packets from unknown remote should be dropped by clients");
-            };
             debug_assert!(
-                server_config.migration,
+                self.side.is_server()
+                    && (self.side.remote_may_migrate() || self.path_policy.is_some()),
                 "migration-initiating packets should have been dropped immediately"
             );
             self.migrate(now, remote);
@@ -4212,6 +4259,17 @@ mod state {
     }
 }
 
+/// Application policy for remote path changes on an established server connection.
+///
+/// Callbacks run inside protocol processing. They must not block or access the connection.
+pub trait PathPolicy: Send + Sync {
+    /// Decide whether an address can start path validation.
+    fn allow(&self, current: SocketAddr, candidate: SocketAddr) -> bool;
+
+    /// Report an address after a matching PATH_RESPONSE validates the path.
+    fn validated(&self, remote: SocketAddr);
+}
+
 /// Events of interest to the application
 #[derive(Debug)]
 pub enum Event {
@@ -4265,12 +4323,7 @@ const KEY_UPDATE_MARGIN: u64 = 10_000;
 const SEAL_BUF_POOL: usize = 64;
 
 fn ack_frame_size_bound(range_count: usize, ecn: bool) -> usize {
-    1 + 8
-        + 8
-        + 8
-        + 8
-        + range_count.saturating_sub(1).saturating_mul(16)
-        + if ecn { 24 } else { 0 }
+    1 + 8 + 8 + 8 + 8 + range_count.saturating_sub(1).saturating_mul(16) + if ecn { 24 } else { 0 }
 }
 
 #[derive(Default)]

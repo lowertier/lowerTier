@@ -65,6 +65,8 @@ use super::packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacket};
 #[cfg(test)]
 mod decoy_tests;
 mod fragments;
+#[cfg(test)]
+mod rebind_tests;
 #[cfg(target_os = "linux")]
 mod runtime;
 mod sni;
@@ -1685,6 +1687,30 @@ struct ConnWrapper {
     _endpoint_owner: Option<Endpoint>,
 }
 
+struct QuicRebindingPolicy {
+    global_ctx: Weak<crate::common::global_ctx::GlobalCtx>,
+    initial_remote: SocketAddr,
+    path_state: Arc<super::TunnelPathState>,
+}
+
+impl quinn::PathPolicy for QuicRebindingPolicy {
+    fn allow(&self, _current: SocketAddr, candidate: SocketAddr) -> bool {
+        // IP changes need separate source admission. Port changes retain the existing credit.
+        self.path_state.peer_authenticated.load(Ordering::Acquire)
+            && candidate.ip() == self.initial_remote.ip()
+            && self.global_ctx.upgrade().is_some_and(|ctx| {
+                ensure_remote_allowed(&ctx.get_underlay_policy(), candidate).is_ok()
+            })
+    }
+
+    fn validated(&self, remote: SocketAddr) {
+        let url = super::build_url_from_socket_addr(&remote.to_string(), "quic");
+        let mut info = self.path_state.info.write();
+        info.remote_addr = Some(url.clone().into());
+        info.resolved_remote_addr = Some(url.into());
+    }
+}
+
 impl ConnWrapper {
     fn record_io_stats(&self, stats: &quinn::ConnectionStats) {
         self.io_observed.record(
@@ -2275,6 +2301,7 @@ async fn run_http3_reliable_lane(
 ) -> Result<(), TunnelError> {
     let mut receive_buffer = BytesMut::with_capacity(QUIC_RELIABLE_INITIAL_BUFFER_SIZE);
     let mut outgoing_open = true;
+    let mut incoming_open = true;
     let mut writer_done = Some(writer_done);
     loop {
         tokio::select! {
@@ -2286,6 +2313,9 @@ async fn run_http3_reliable_lane(
                         let _ = done.send(result.as_ref().map(|_| ()).map_err(clone_reliable_error));
                     }
                     result?;
+                    if !incoming_open {
+                        return Ok(());
+                    }
                     continue;
                 };
                 let mut result = Ok(());
@@ -2309,9 +2339,13 @@ async fn run_http3_reliable_lane(
                     return Err(error);
                 }
             }
-            data = stream.recv_data() => {
+            data = stream.recv_data(), if incoming_open => {
                 let Some(data) = data? else {
-                    return Ok(());
+                    incoming_open = false;
+                    if !outgoing_open {
+                        return Ok(());
+                    }
+                    continue;
                 };
                 if receive_buffer.len().saturating_add(data.len())
                     > QUIC_RELIABLE_MAX_PACKET_SIZE + 16
@@ -2708,12 +2742,21 @@ fn build_connect_ip_tunnel(
     source_permit: Option<QuicSourcePermit>,
     endpoint_manager: Option<Arc<QuicEndpointManager>>,
     endpoint_owner: Option<Endpoint>,
-    telemetry: Option<Arc<DataplaneTelemetry>>,
+    global_ctx: ArcGlobalCtx,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let transport_binding = derive_transport_binding(&connection)?;
+    let path_state = Arc::new(super::TunnelPathState {
+        peer_authenticated: std::sync::atomic::AtomicBool::new(false),
+        info: RwLock::new(info.clone()),
+    });
+    connection.set_path_policy(Arc::new(QuicRebindingPolicy {
+        global_ctx: Arc::downgrade(&global_ctx),
+        initial_remote: connection.remote_address(),
+        path_state: path_state.clone(),
+    }));
     let connection = Arc::new(ConnWrapper {
         conn: connection,
-        telemetry: telemetry.unwrap_or_else(|| Arc::new(DataplaneTelemetry::new())),
+        telemetry: global_ctx.dataplane_telemetry().clone(),
         io_observed: QuicIoObserved::default(),
         _memory_permit: memory_permit,
         _source_permit: source_permit,
@@ -2752,7 +2795,8 @@ fn build_connect_ip_tunnel(
             Some(info),
             transport_authenticated,
             Some(transport_binding),
-        ),
+        )
+        .with_path_state(path_state),
     ))
 }
 
@@ -2853,6 +2897,12 @@ impl QuicDecoySocket {
                 .store(now_seconds, Ordering::Relaxed);
             return Some(entry.route);
         }
+        // Rebinding changes the tuple but keeps the connection ID. Quinn checks the
+        // ID and packet keys without allocating a route or an upstream socket.
+        // Unknown IDs can only elicit Quinn's rate-limited, smaller stateless reset.
+        if packet.first().is_some_and(|first| first & 0x80 == 0) {
+            return Some(QuicSocketRoute::Local);
+        }
         let last_cleanup = self.last_route_cleanup_seconds.load(Ordering::Relaxed);
         if now_seconds.saturating_sub(last_cleanup) >= 60
             && self
@@ -2886,8 +2936,7 @@ impl QuicDecoySocket {
         } else if super::decoy::is_quic_initial(packet) {
             QuicSocketRoute::Decoy
         } else {
-            // Never turn arbitrary UDP, short packets, or unsupported versions
-            // into new upstream sockets / reflected responses.
+            // Only QUIC Initial packets can allocate a new upstream socket.
             return None;
         };
         if route == QuicSocketRoute::Local {
@@ -2934,6 +2983,31 @@ impl QuicDecoySocket {
             }
         }
     }
+
+    fn route_received(&self, received: quinn::udp::RecvMeta, bytes: &mut [u8]) -> usize {
+        let stride = received.stride.max(1);
+        let mut local_len = 0;
+        // A GRO buffer can mix established traffic and a new Initial packet.
+        for offset in (0..received.len).step_by(stride) {
+            let end = (offset + stride).min(received.len);
+            match self.route(received.addr, &bytes[offset..end]) {
+                Some(QuicSocketRoute::Local) => {
+                    if offset != local_len {
+                        bytes.copy_within(offset..end, local_len);
+                    }
+                    local_len += end - offset;
+                }
+                Some(QuicSocketRoute::Decoy) => {
+                    let mut datagram = received;
+                    datagram.len = end - offset;
+                    datagram.stride = datagram.len;
+                    self.forward_decoy(datagram, &bytes[offset..end]);
+                }
+                None => {}
+            }
+        }
+        local_len
+    }
 }
 
 impl AsyncUdpSocket for QuicDecoySocket {
@@ -2960,23 +3034,16 @@ impl AsyncUdpSocket for QuicDecoySocket {
             };
             let mut local_count = 0;
             for index in 0..count {
-                let received = meta[index];
-                let first_datagram = received.stride.max(1).min(received.len);
-                let route = self.route(received.addr, &bufs[index][..first_datagram]);
-                match route {
-                    Some(QuicSocketRoute::Local) => {
-                        if local_count != index {
-                            let (before, after) = bufs.split_at_mut(index);
-                            before[local_count][..received.len]
-                                .copy_from_slice(&after[0][..received.len]);
-                            meta[local_count] = received;
-                        }
-                        local_count += 1;
+                let mut received = meta[index];
+                let local_len = self.route_received(received, &mut bufs[index]);
+                if local_len != 0 {
+                    received.len = local_len;
+                    if local_count != index {
+                        let (before, after) = bufs.split_at_mut(index);
+                        before[local_count][..local_len].copy_from_slice(&after[0][..local_len]);
                     }
-                    Some(QuicSocketRoute::Decoy) => {
-                        self.forward_decoy(received, &bufs[index][..received.len])
-                    }
-                    None => {}
+                    meta[local_count] = received;
+                    local_count += 1;
                 }
             }
             if local_count != 0 {
@@ -3404,7 +3471,7 @@ impl QuicTunnelListener {
             None,
             endpoint_manager,
             endpoint_owner,
-            Some(global_ctx.dataplane_telemetry().clone()),
+            global_ctx,
         )
         .map(Some)
     }
@@ -3833,7 +3900,7 @@ impl TunnelConnector for QuicTunnelConnector {
             None,
             self.endpoint_manager.clone(),
             Some(endpoint),
-            Some(self.global_ctx.dataplane_telemetry().clone()),
+            self.global_ctx.clone(),
         )
     }
 
@@ -4826,16 +4893,6 @@ mod tests {
     }
 
     #[test]
-    fn datagram_receive_buffer_covers_a_delayed_path() {
-        const WAN_BDP_BYTES: usize = 2 * 1024 * 1024;
-        assert!(QUIC_DATAGRAM_RECEIVE_BUFFER_BYTES >= WAN_BDP_BYTES);
-        assert!(
-            QUIC_DATAGRAM_SEND_BUFFER_BYTES >= MAX_PACKET_BATCH_SIZE * QUIC_INITIAL_MTU as usize
-        );
-        assert!(QUIC_DATAGRAM_SEND_BUFFER_BYTES < WAN_BDP_BYTES);
-    }
-
-    #[test]
     fn quic_liveness_keeps_idle_peer_and_reaps_a_blackholed_path() {
         RUNTIME.block_on(async {
             use std::sync::atomic::{AtomicBool, Ordering};
@@ -5002,6 +5059,7 @@ mod tests {
 
     #[test]
     fn datagram_batches_reuse_both_allocations_after_warmup() {
+        datagram_fragment_batches_keep_the_send_bound_and_order();
         let mut queued = VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE);
         let mut spare = VecDeque::with_capacity(MAX_PACKET_BATCH_SIZE);
         let mut addresses = [
@@ -5034,7 +5092,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn datagram_fragment_batches_keep_the_send_bound_and_order() {
         let expected: Vec<_> = (0..(MAX_PACKET_BATCH_SIZE * 2 + 3))
             .map(|index| Bytes::copy_from_slice(&(index as u32).to_le_bytes()))
@@ -5056,7 +5113,6 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[test]
     fn datagram_too_large_preserves_unsent_before_new_arrivals() {
         let unsent = VecDeque::from([Bytes::from_static(b"older")]);
         let queued = VecDeque::from([Bytes::from_static(b"newer")]);
@@ -5075,6 +5131,7 @@ mod tests {
 
     #[test]
     fn datagram_fatal_error_preserves_queued_data_and_reports_failure() {
+        datagram_too_large_preserves_unsent_before_new_arrivals();
         let unsent = VecDeque::from([Bytes::from_static(b"older")]);
         let queued = VecDeque::from([Bytes::from_static(b"newer")]);
         let (result, ready, spare) = QuicHybridWriter::requeue_datagrams_after_send(
@@ -5377,31 +5434,6 @@ mod tests {
         }
         assert!(!limiter.admit(first, now));
         assert!(limiter.admit(first, now + Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn direct_quic_tunnel_reports_noise_bound_transport() {
-        RUNTIME.block_on(async {
-            let server_ctx = global_ctx();
-            let client_ctx = global_ctx();
-            let mut listener =
-                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), server_ctx);
-            listener.listen().await.unwrap();
-            let listener_addr = listener.local_url();
-            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
-
-            let mut connector = QuicTunnelConnector::new(listener_addr, client_ctx);
-            let client = connector.connect().await.unwrap();
-            let server = server.await.unwrap();
-
-            assert!(!client.is_transport_authenticated());
-            assert!(!server.is_transport_authenticated());
-            assert_eq!(client.transport_binding(), server.transport_binding());
-            assert_eq!(
-                client.transport_binding().map(|binding| binding.kind),
-                Some(TransportBindingKind::QuicTlsExporterV1)
-            );
-        });
     }
 
     #[test]

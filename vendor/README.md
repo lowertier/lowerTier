@@ -18,3 +18,20 @@ Local path dependencies preserve the patches used by the core build.
 The import changes package names and metadata where the LowTier build requires them.
 The repository formatter also formats the imported Rust source.
 Each dependency keeps its included license files and package license metadata.
+
+## QUIC rebinding policy
+
+`quinn-proto::Connection::set_path_policy` installs a per-connection `PathPolicy`.
+The policy checks a new remote endpoint before protocol processing.
+It receives a notification only after a matching `PATH_RESPONSE` validates the path.
+The policy is checked again at validation because runtime deny rules can change.
+A denial preserves the previous path.
+Quinn retains its standard path challenges, anti-amplification limit, validation timeout, and congestion handling.
+
+`quinn::Connection::set_path_policy` exposes this hook to the async transport.
+LowTier enables same-IP port rebinding only after CONNECT-IP admission and the Noise handshake.
+Active IP migration remains disabled.
+Port changes preserve the TLS exporter, Noise session, and process memory credit.
+Validated endpoint information supplies peer status and tracker candidate observations.
+The default Quinn behavior remains unchanged when no policy is installed.
+The protocol regression test also checks reliable frames after a denied validation response.

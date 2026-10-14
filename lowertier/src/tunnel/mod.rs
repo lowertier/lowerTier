@@ -114,6 +114,12 @@ pub struct TransportBinding {
 
 pub type ReceiveBackpressure = Arc<AtomicBool>;
 
+/// Authentication state and validated endpoint information for a movable transport path.
+pub struct TunnelPathState {
+    pub(crate) peer_authenticated: AtomicBool,
+    pub(crate) info: parking_lot::RwLock<TunnelInfo>,
+}
+
 pub trait ZCPacketStream: Stream<Item = StreamItem> + Send {}
 impl<T> ZCPacketStream for T where T: Stream<Item = StreamItem> + Send {}
 pub trait ZCPacketSink: Sink<SinkItem, Error = SinkError> + Send {}
@@ -151,6 +157,11 @@ pub trait Tunnel: Send {
     }
 
     fn info(&self) -> Option<TunnelInfo>;
+
+    /// Return shared path state when the transport supports validated endpoint changes.
+    fn path_state(&self) -> Option<Arc<TunnelPathState>> {
+        None
+    }
 
     /// Return the binding for this transport connection, when one exists.
     ///

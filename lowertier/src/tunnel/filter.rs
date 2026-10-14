@@ -272,6 +272,10 @@ where
         self.inner.transport_binding()
     }
 
+    fn path_state(&self) -> Option<Arc<super::TunnelPathState>> {
+        self.inner.path_state()
+    }
+
     fn is_transport_authenticated(&self) -> bool {
         self.inner.is_transport_authenticated()
     }

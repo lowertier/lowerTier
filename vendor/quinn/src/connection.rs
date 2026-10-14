@@ -7,10 +7,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
-    task::{ready, Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::Bytes;
@@ -18,21 +18,23 @@ use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::sync::{
+    Notify,
     futures::{Notified, OwnedNotified},
-    mpsc, oneshot, Notify,
+    mpsc, oneshot,
 };
-use tracing::{debug_span, Instrument, Span};
+use tracing::{Instrument, Span, debug_span};
 
 use crate::{
+    ConnectionEvent, Duration, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPoller},
     send_stream::SendStream,
-    udp_transmit, ConnectionEvent, Duration, Instant, VarInt,
+    udp_transmit,
 };
 use proto::{
-    congestion::Controller, ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent,
-    Side, StreamEvent, StreamId,
+    ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
+    StreamId, congestion::Controller,
 };
 
 /// In-progress connection attempt future
@@ -642,6 +644,15 @@ impl Connection {
     /// switching to a cellular internet connection.
     pub fn remote_address(&self) -> SocketAddr {
         self.0.state.lock("remote_address").inner.remote_address()
+    }
+
+    /// Set the application policy for remote path changes on this server connection.
+    pub fn set_path_policy(&self, policy: Arc<dyn proto::PathPolicy>) {
+        self.0
+            .state
+            .lock("set_path_policy")
+            .inner
+            .set_path_policy(policy);
     }
 
     /// The local IP address which was used when the peer established
@@ -1639,7 +1650,7 @@ fn transmit_segment_capacity(platform_capacity: usize) -> usize {
 
 #[cfg(test)]
 mod transmit_segment_tests {
-    use super::{transmit_segment_capacity, MAX_TRANSMIT_SEGMENTS};
+    use super::{MAX_TRANSMIT_SEGMENTS, transmit_segment_capacity};
 
     #[test]
     fn respects_transmit_segment_limit() {

@@ -243,6 +243,7 @@ pub struct BatchTunnelWrapper<R, W> {
     transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
     receive_backpressure: Option<ReceiveBackpressure>,
+    path_state: Option<Arc<super::TunnelPathState>>,
 }
 
 impl<R, W> BatchTunnelWrapper<R, W> {
@@ -255,6 +256,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated: false,
             receive_backpressure: None,
+            path_state: None,
         }
     }
 
@@ -272,6 +274,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated,
             receive_backpressure: None,
+            path_state: None,
         }
     }
 
@@ -290,11 +293,17 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_binding,
             transport_authenticated,
             receive_backpressure: None,
+            path_state: None,
         }
     }
 
     pub fn with_receive_backpressure(mut self, signal: ReceiveBackpressure) -> Self {
         self.receive_backpressure = Some(signal);
+        self
+    }
+
+    pub(crate) fn with_path_state(mut self, state: Arc<super::TunnelPathState>) -> Self {
+        self.path_state = Some(state);
         self
     }
 }
@@ -311,7 +320,14 @@ where
     }
 
     fn info(&self) -> Option<TunnelInfo> {
-        self.info.clone()
+        self.path_state
+            .as_ref()
+            .map(|state| state.info.read().clone())
+            .or_else(|| self.info.clone())
+    }
+
+    fn path_state(&self) -> Option<Arc<super::TunnelPathState>> {
+        self.path_state.clone()
     }
 
     fn transport_binding(&self) -> Option<TransportBinding> {
