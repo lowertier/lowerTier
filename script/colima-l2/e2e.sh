@@ -242,7 +242,7 @@ start_node() {
         --enable-bridge
         --l2-fdb-capacity 1024
         --l2-fdb-age-seconds 120
-        --l2-flood-bps 8388608
+        --l2-flood-bytes-per-second 8388608
         --l2-mac-move-hold-seconds 2
     )
     if [[ -n "${peer_url}" ]]; then

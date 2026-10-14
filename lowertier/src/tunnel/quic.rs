@@ -1806,7 +1806,7 @@ fn select_quic_delivery(packet: &ZCPacket, _max_datagram_size: Option<usize>) ->
     if packet.is_lossy() && !critical_l2 {
         // Lossy TAP/IP must stay unordered. A PMTUD shrink must not move
         // them onto the reliable CONNECT-IP STREAM (HOL + hidden loss).
-        // Oversized datagrams are dropped at send, like UDP.
+        // Oversized packets use DATAGRAM fragments at the current path limit.
         return QuicDelivery::PlainDatagram;
     }
     QuicDelivery::ReliableStream

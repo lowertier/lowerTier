@@ -83,10 +83,10 @@ pub fn gen_default_flags() -> Flags {
         interface_adapter: String::new(),
         l2_fdb_capacity: 16_384,
         l2_fdb_age_seconds: 300,
-        l2_flood_bps: 64 * 1024 * 1024,
+        l2_flood_bytes_per_second: 64 * 1024 * 1024,
         enable_bridge: false,
-        l2_max_macs_per_peer: 0,
-        l2_mac_move_hold_seconds: 0,
+        l2_max_macs_per_peer: 256,
+        l2_mac_move_hold_seconds: 5,
         l2_allowed_vlans: Vec::new(),
         l2_allowed_ether_types: Vec::new(),
         quic_tls_cert: String::new(),
@@ -302,13 +302,6 @@ impl InterfaceAdapter {
         }
     }
 
-    pub fn uses_ethernet_overlay(self) -> bool {
-        match self {
-            Self::Tun => false,
-            Self::Tap => true,
-        }
-    }
-
     pub fn uses_native_ethernet(self) -> bool {
         match self {
             Self::Tap => true,
@@ -318,10 +311,6 @@ impl InterfaceAdapter {
 
     pub fn allows_bridge_input(self, enable_bridge: bool) -> bool {
         self.uses_native_ethernet() && enable_bridge
-    }
-
-    pub fn uses_ethernet(self) -> bool {
-        self.uses_ethernet_overlay()
     }
 }
 
@@ -1172,7 +1161,7 @@ impl TomlConfigLoader {
     }
 
     fn gen_flags(
-        flags_hashmap: serde_json::Map<String, serde_json::Value>,
+        mut flags_hashmap: serde_json::Map<String, serde_json::Value>,
     ) -> serde_json::Result<Flags> {
         for option in [
             "quic_datagram_fec_parity",
@@ -1184,6 +1173,12 @@ impl TomlConfigLoader {
                     "removed option '{option}': FEC and payload compression are no longer supported"
                 )));
             }
+        }
+        if let Some(value) = flags_hashmap.remove("l2_flood_bps") {
+            tracing::warn!("l2_flood_bps is deprecated; use l2_flood_bytes_per_second");
+            flags_hashmap
+                .entry("l2_flood_bytes_per_second")
+                .or_insert(value);
         }
         let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
             Ok(serde_json::Value::Object(map)) => map,
@@ -2009,7 +2004,9 @@ socket_mark = 66
         assert!(!flags.enable_bridge);
         assert_eq!(flags.l2_fdb_capacity, 16_384);
         assert_eq!(flags.l2_fdb_age_seconds, 300);
-        assert_eq!(flags.l2_flood_bps, 64 * 1024 * 1024);
+        assert_eq!(flags.l2_flood_bytes_per_second, 64 * 1024 * 1024);
+        assert_eq!(flags.l2_max_macs_per_peer, 256);
+        assert_eq!(flags.l2_mac_move_hold_seconds, 5);
         assert!(flags.underlay_deny_interfaces.is_empty());
         assert!(flags.underlay_deny_cidrs.is_empty());
         assert_eq!(flags.quic_initial_receive_window, 2 * 1024 * 1024);
@@ -2131,12 +2128,19 @@ interface_adapter = "also-removed"
     }
 
     fn underlay_and_quic_flags_roundtrip_through_toml() {
+        let legacy = TomlConfigLoader::new_from_str("[flags]\nl2_flood_bps = 1234\n").unwrap();
+        assert_eq!(legacy.get_flags().l2_flood_bytes_per_second, 1234);
+        let both = TomlConfigLoader::new_from_str(
+            "[flags]\nl2_flood_bps = 1234\nl2_flood_bytes_per_second = 5678\n",
+        )
+        .unwrap();
+        assert_eq!(both.get_flags().l2_flood_bytes_per_second, 5678);
         let cfg = TomlConfigLoader::new_from_str(
             r#"
 [flags]
 l2_fdb_capacity = 32768
 l2_fdb_age_seconds = 600
-l2_flood_bps = 134217728
+l2_flood_bytes_per_second = 134217728
 underlay_deny_interfaces = ["utun5"]
 underlay_deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 quic_initial_receive_window = 8388608
@@ -2148,7 +2152,7 @@ quic_receive_window = 33554432
 
         assert_eq!(flags.l2_fdb_capacity, 32_768);
         assert_eq!(flags.l2_fdb_age_seconds, 600);
-        assert_eq!(flags.l2_flood_bps, 134_217_728);
+        assert_eq!(flags.l2_flood_bytes_per_second, 134_217_728);
         assert_eq!(flags.underlay_deny_interfaces, ["utun5"]);
         assert_eq!(
             flags.underlay_deny_cidrs,

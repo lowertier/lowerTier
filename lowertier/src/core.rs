@@ -561,10 +561,10 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_L2_FLOOD_BPS",
-        help = t!("core_clap.l2_flood_bps").to_string()
+        env = "ET_L2_FLOOD_BYTES_PER_SECOND",
+        help = t!("core_clap.l2_flood_bytes_per_second").to_string()
     )]
-    l2_flood_bps: Option<u64>,
+    l2_flood_bytes_per_second: Option<u64>,
 
     #[arg(
         long,
@@ -1287,7 +1287,9 @@ impl NetworkOptions {
         }
         f.l2_fdb_capacity = self.l2_fdb_capacity.unwrap_or(f.l2_fdb_capacity);
         f.l2_fdb_age_seconds = self.l2_fdb_age_seconds.unwrap_or(f.l2_fdb_age_seconds);
-        f.l2_flood_bps = self.l2_flood_bps.unwrap_or(f.l2_flood_bps);
+        f.l2_flood_bytes_per_second = self
+            .l2_flood_bytes_per_second
+            .unwrap_or(f.l2_flood_bytes_per_second);
         f.enable_bridge = self.enable_bridge.unwrap_or(f.enable_bridge);
         f.l2_max_macs_per_peer = self.l2_max_macs_per_peer.unwrap_or(f.l2_max_macs_per_peer);
         f.l2_mac_move_hold_seconds = self

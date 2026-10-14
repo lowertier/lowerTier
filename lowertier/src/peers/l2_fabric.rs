@@ -1,9 +1,7 @@
 use std::{
-    collections::HashMap,
-    hint::spin_loop,
-    sync::Mutex,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -27,10 +25,19 @@ pub enum L2FrameError {
     TooShort,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct FdbEntry {
     peer_id: PeerId,
     last_seen: Instant,
+    owner_count: Option<Arc<AtomicUsize>>,
+}
+
+impl Drop for FdbEntry {
+    fn drop(&mut self) {
+        if let Some(count) = &self.owner_count {
+            count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -40,13 +47,19 @@ struct FdbKey {
 }
 
 #[derive(Default)]
-pub(crate) struct L2SourceBatch {
+struct L2SourceBatch {
     sources: SmallVec<[(VlanStack, MacAddress, PeerId); 4]>,
 }
 
 #[derive(Default)]
 pub(crate) struct L2DestinationBatch {
     destinations: SmallVec<[(VlanStack, MacAddress, EthernetDestination); 4]>,
+}
+
+#[derive(Default)]
+pub(crate) struct L2IngressBatch {
+    sources: L2SourceBatch,
+    destinations: L2DestinationBatch,
 }
 
 impl L2DestinationBatch {
@@ -90,18 +103,6 @@ impl L2SourceBatch {
         }
         self.sources.push((vlan, source, peer_id));
     }
-
-    pub(crate) fn record(&mut self, frame: &[u8], peer_id: PeerId) {
-        let Ok((vlan, _, source)) = ethernet_addresses(frame) else {
-            return;
-        };
-        self.record_source(vlan, source, peer_id);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.sources.len()
-    }
 }
 
 /// Concurrent Ethernet forwarding database used by the peer fast path.
@@ -114,9 +115,14 @@ pub struct L2Fabric {
     entry_count: AtomicUsize,
     capacity: usize,
     age: Duration,
-    flood_bps: u64,
-    flood_epoch: AtomicU64,
-    flood_bytes: AtomicU64,
+    flood_bytes_per_second: u64,
+    flood: Mutex<FloodBucket>,
+    ingress: DashMap<PeerId, Mutex<FloodBucket>>,
+    per_peer_counts: DashMap<PeerId, Arc<AtomicUsize>>,
+    flood_drops: AtomicU64,
+    ingress_flood_drops: AtomicU64,
+    loop_drops: AtomicU64,
+    policy_drops: AtomicU64,
     maintenance: Mutex<FdbMaintenance>,
     policy: L2Policy,
 }
@@ -155,35 +161,85 @@ impl L2Policy {
 
 struct FdbMaintenance {
     next_expiry: Instant,
-    // Counts exist only when the optional per-peer limit is enabled.
-    per_peer: HashMap<PeerId, usize>,
 }
 
-impl FdbMaintenance {
-    fn remove_peer_entry(&mut self, peer: PeerId) {
-        if let Some(count) = self.per_peer.get_mut(&peer) {
-            *count -= 1;
-            if *count == 0 {
-                self.per_peer.remove(&peer);
-            }
+struct FloodBucket {
+    last_refill: Instant,
+    // Nanobytes retain fractional refill credit without floating-point rounding.
+    tokens: u128,
+}
+
+impl FloodBucket {
+    fn new(rate: u64, now: Instant) -> Self {
+        Self {
+            last_refill: now,
+            tokens: u128::from(rate) * 1_000_000_000,
         }
     }
+
+    fn consume_at(&mut self, bytes: usize, rate: u64, now: Instant) -> bool {
+        if rate == 0 {
+            return true;
+        }
+        let elapsed = now.saturating_duration_since(self.last_refill).as_nanos();
+        self.last_refill = self.last_refill.max(now);
+        let capacity = u128::from(rate) * 1_000_000_000;
+        self.tokens = self
+            .tokens
+            .saturating_add(elapsed.saturating_mul(u128::from(rate)))
+            .min(capacity);
+        let cost = (bytes as u128) * 1_000_000_000;
+        if cost > self.tokens {
+            return false;
+        }
+        self.tokens -= cost;
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct L2Counters {
+    pub flood_drops: u64,
+    pub ingress_flood_drops: u64,
+    pub loop_drops: u64,
+    pub policy_drops: u64,
+}
+
+#[derive(Debug)]
+pub struct L2FdbSnapshotEntry {
+    pub vlans: SmallVec<[u16; 4]>,
+    pub mac: MacAddress,
+    pub peer_id: PeerId,
+    pub idle: Duration,
+}
+
+#[derive(Debug)]
+pub struct L2Snapshot {
+    pub entries: Vec<L2FdbSnapshotEntry>,
+    pub counters: L2Counters,
 }
 
 /// Keep one packet fanout within the maximum peer set accepted by route sync.
 pub const MAX_FANOUT_RECIPIENTS: usize = 4_096;
 
 impl L2Fabric {
-    const FLOOD_EPOCH_RESETTING: u64 = 1 << 63;
+    pub fn from_flags(flags: &crate::common::config::Flags) -> Self {
+        Self::with_policy(
+            flags.l2_fdb_capacity as usize,
+            Duration::from_secs(flags.l2_fdb_age_seconds),
+            flags.l2_flood_bytes_per_second,
+            L2Policy::from_flags(flags),
+        )
+    }
 
-    pub fn new(capacity: usize, age: Duration, flood_bps: u64) -> Self {
-        Self::with_policy(capacity, age, flood_bps, L2Policy::default())
+    pub fn new(capacity: usize, age: Duration, flood_bytes_per_second: u64) -> Self {
+        Self::with_policy(capacity, age, flood_bytes_per_second, L2Policy::default())
     }
 
     pub(crate) fn with_policy(
         capacity: usize,
         age: Duration,
-        flood_bps: u64,
+        flood_bytes_per_second: u64,
         policy: L2Policy,
     ) -> Self {
         Self {
@@ -191,12 +247,16 @@ impl L2Fabric {
             entry_count: AtomicUsize::new(0),
             capacity,
             age,
-            flood_bps,
-            flood_epoch: AtomicU64::new(0),
-            flood_bytes: AtomicU64::new(0),
+            flood_bytes_per_second,
+            flood: Mutex::new(FloodBucket::new(flood_bytes_per_second, Instant::now())),
+            ingress: DashMap::new(),
+            per_peer_counts: DashMap::new(),
+            flood_drops: AtomicU64::new(0),
+            ingress_flood_drops: AtomicU64::new(0),
+            loop_drops: AtomicU64::new(0),
+            policy_drops: AtomicU64::new(0),
             maintenance: Mutex::new(FdbMaintenance {
                 next_expiry: Instant::now(),
-                per_peer: HashMap::new(),
             }),
             policy,
         }
@@ -225,10 +285,31 @@ impl L2Fabric {
                     .is_ok())
     }
 
+    pub(crate) fn admit_compact_ingress_at(
+        &self,
+        payload: &[u8],
+        peer_id: PeerId,
+        now: Instant,
+        is_flood: bool,
+    ) -> bool {
+        if !self.allows_compact_ip(payload) {
+            self.policy_drops.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        !is_flood || self.allow_ingress_flood_at(payload.len().saturating_add(14), peer_id, now)
+    }
+
     /// Apply bridge policy before forwarding or learning an Ethernet source.
     pub(crate) fn admit_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) -> bool {
-        let Some(metadata) = ethernet_network_metadata(frame) else {
+        let Some((vlan, source)) = self.permitted_source(frame) else {
             return false;
+        };
+        self.learn_address_at(vlan, source, peer_id, now)
+    }
+
+    fn permitted_source(&self, frame: &[u8]) -> Option<(VlanStack, MacAddress)> {
+        let Some(metadata) = ethernet_network_metadata(frame) else {
+            return None;
         };
         if !self.policy.allowed_ether_types.is_empty()
             && self
@@ -237,7 +318,7 @@ impl L2Fabric {
                 .binary_search(&metadata.ether_type)
                 .is_err()
         {
-            return false;
+            return None;
         }
         if !self.policy.allowed_vlans.is_empty() {
             // Check every tag, so an allowed outer VLAN cannot hide a denied inner VLAN.
@@ -250,16 +331,16 @@ impl L2Fabric {
                 tagged = true;
                 let vlan = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]) & 0x0fff;
                 if self.policy.allowed_vlans.binary_search(&vlan).is_err() {
-                    return false;
+                    return None;
                 }
                 offset += 4;
             }
             if !tagged && self.policy.allowed_vlans.binary_search(&0).is_err() {
-                return false;
+                return None;
             }
         }
         let source = frame[6..12].try_into().unwrap();
-        is_unicast(source) && self.learn_address_at(metadata.vlan_stack, source, peer_id, now)
+        is_unicast(source).then_some((metadata.vlan_stack, source))
     }
 
     fn reclaim_expired_at(&self, now: Instant, state: &mut FdbMaintenance) {
@@ -273,7 +354,6 @@ impl L2Fabric {
             if now.saturating_duration_since(entry.last_seen) <= self.age {
                 return true;
             }
-            state.remove_peer_entry(entry.peer_id);
             self.entry_count.fetch_sub(1, Ordering::AcqRel);
             false
         });
@@ -300,22 +380,156 @@ impl L2Fabric {
     ///
     /// Callers use this for mixed compact and full Ethernet fanout.
     pub fn allow_flood_output_bytes(&self, output_bytes: usize, recipient_count: usize) -> bool {
-        if recipient_count > MAX_FANOUT_RECIPIENTS {
-            return false;
+        let allowed = recipient_count <= MAX_FANOUT_RECIPIENTS
+            && self.allow_flood_at(output_bytes, Instant::now());
+        if !allowed {
+            self.flood_drops.fetch_add(1, Ordering::Relaxed);
         }
-        self.allow_flood_bytes(output_bytes)
+        allowed
     }
 
-    fn allow_flood_bytes(&self, frame_len: usize) -> bool {
-        let epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.allow_flood_at(frame_len, epoch)
+    pub fn counters(&self) -> L2Counters {
+        L2Counters {
+            flood_drops: self.flood_drops.load(Ordering::Relaxed),
+            ingress_flood_drops: self.ingress_flood_drops.load(Ordering::Relaxed),
+            loop_drops: self.loop_drops.load(Ordering::Relaxed),
+            policy_drops: self.policy_drops.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn snapshot(&self) -> L2Snapshot {
+        let now = Instant::now();
+        L2Snapshot {
+            entries: self
+                .fdb
+                .iter()
+                .filter_map(|entry| {
+                    let idle = now.saturating_duration_since(entry.last_seen);
+                    (idle <= self.age).then_some(L2FdbSnapshotEntry {
+                        vlans: SmallVec::from_slice(entry.key().vlan.as_slice()),
+                        mac: entry.key().mac,
+                        peer_id: entry.peer_id,
+                        idle,
+                    })
+                })
+                .collect(),
+            counters: self.counters(),
+        }
+    }
+
+    pub(crate) fn admit_ingress_at(
+        &self,
+        frame: &[u8],
+        peer_id: PeerId,
+        local_peer_id: PeerId,
+        now: Instant,
+    ) -> bool {
+        self.admit_ingress_batch_at(
+            frame,
+            peer_id,
+            local_peer_id,
+            now,
+            &mut L2IngressBatch::default(),
+        )
+    }
+
+    pub(crate) fn admit_ingress_batch_at(
+        &self,
+        frame: &[u8],
+        peer_id: PeerId,
+        local_peer_id: PeerId,
+        now: Instant,
+        batch: &mut L2IngressBatch,
+    ) -> bool {
+        let Ok((vlan, _, source)) = ethernet_addresses(frame) else {
+            return false;
+        };
+        if self.has_policy() && self.permitted_source(frame).is_none() {
+            self.policy_drops.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let learned = batch.sources.sources.contains(&(vlan, source, peer_id));
+        let is_flood =
+            batch.destinations.resolve_at(self, frame, now).unwrap() == EthernetDestination::Flood;
+        if !learned
+            && is_flood
+            && peer_id != local_peer_id
+            && self
+                .fdb
+                .get(&FdbKey { vlan, mac: source })
+                .is_some_and(|entry| {
+                    entry.peer_id == local_peer_id
+                        && now.saturating_duration_since(entry.last_seen) < self.policy.move_hold
+                })
+        {
+            self.loop_drops.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if is_flood && !self.allow_ingress_flood_at(frame.len(), peer_id, now) {
+            return false;
+        }
+        if !learned && is_unicast(source) {
+            let admitted = self.learn_address_at(vlan, source, peer_id, now);
+            if !admitted {
+                self.policy_drops.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            batch.sources.record_source(vlan, source, peer_id);
+        }
+        true
+    }
+
+    pub(crate) fn allow_ingress_flood_at(
+        &self,
+        bytes: usize,
+        peer_id: PeerId,
+        now: Instant,
+    ) -> bool {
+        if self.flood_bytes_per_second == 0 {
+            return true;
+        }
+        let bucket = self
+            .ingress
+            .entry(peer_id)
+            .or_insert_with(|| Mutex::new(FloodBucket::new(self.flood_bytes_per_second, now)));
+        let allowed = bucket
+            .lock()
+            .unwrap()
+            .consume_at(bytes, self.flood_bytes_per_second, now);
+        if !allowed {
+            self.ingress_flood_drops.fetch_add(1, Ordering::Relaxed);
+        }
+        allowed
+    }
+
+    /// Route publication removes unreachable or unauthorized owners without a timer.
+    pub(crate) fn retain_peers(
+        &self,
+        mut reachable: impl FnMut(PeerId) -> bool,
+        mut bridge: impl FnMut(PeerId) -> bool,
+    ) {
+        let _maintenance = self.maintenance.lock().unwrap();
+        let invalid_owner = self.policy.max_macs_per_peer == 0
+            || self
+                .per_peer_counts
+                .iter()
+                .any(|entry| entry.load(Ordering::Acquire) != 0 && !bridge(*entry.key()));
+        if invalid_owner {
+            self.fdb.retain(|_, entry| {
+                if bridge(entry.peer_id) {
+                    return true;
+                }
+                self.entry_count.fetch_sub(1, Ordering::AcqRel);
+                false
+            });
+        }
+        self.ingress.retain(|peer, _| reachable(*peer));
+        self.per_peer_counts
+            .retain(|_, count| count.load(Ordering::Acquire) != 0 || Arc::strong_count(count) != 1);
     }
 
     pub fn forget_peer(&self, peer_id: PeerId) {
-        let mut maintenance = self.maintenance.lock().unwrap();
+        let _maintenance = self.maintenance.lock().unwrap();
         let keys = self
             .fdb
             .iter()
@@ -328,24 +542,24 @@ impl L2Fabric {
                 .is_some()
             {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
-                maintenance.remove_peer_entry(peer_id);
             }
         }
+        self.ingress.remove(&peer_id);
     }
 
     pub fn clear(&self) {
-        let mut maintenance = self.maintenance.lock().unwrap();
+        let _maintenance = self.maintenance.lock().unwrap();
         let keys = self
             .fdb
             .iter()
             .map(|entry| *entry.key())
             .collect::<Vec<_>>();
         for key in keys {
-            if let Some((_, entry)) = self.fdb.remove(&key) {
+            if self.fdb.remove(&key).is_some() {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
-                maintenance.remove_peer_entry(entry.peer_id);
             }
         }
+        self.ingress.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -363,12 +577,6 @@ impl L2Fabric {
         self.learn_address_at(vlan, source, peer_id, now);
     }
 
-    pub(crate) fn learn_source_batch_at(&self, batch: L2SourceBatch, now: Instant) {
-        for (vlan, source, peer_id) in batch.sources {
-            self.learn_address_at(vlan, source, peer_id, now);
-        }
-    }
-
     fn learn_address_at(
         &self,
         vlan: VlanStack,
@@ -377,59 +585,79 @@ impl L2Fabric {
         now: Instant,
     ) -> bool {
         let key = FdbKey { vlan, mac: source };
-        let mut maintenance =
-            (self.policy.max_macs_per_peer != 0).then(|| self.maintenance.lock().unwrap());
-        let peer_full = maintenance.as_ref().is_some_and(|state| {
-            state.per_peer.get(&peer_id).copied().unwrap_or(0) >= self.policy.max_macs_per_peer
-        });
+        if let Some(mut entry) = self.fdb.get_mut(&key)
+            && entry.peer_id == peer_id
+        {
+            entry.last_seen = now;
+            return true;
+        }
+        let peer_full = self.policy.max_macs_per_peer != 0
+            && self.per_peer_counts.get(&peer_id).is_some_and(|count| {
+                count.load(Ordering::Acquire) >= self.policy.max_macs_per_peer
+            });
         if peer_full || (self.len() >= self.capacity && !self.fdb.contains_key(&key)) {
-            if let Some(state) = maintenance.as_mut() {
-                self.reclaim_expired_at(now, state);
-            } else if let Ok(mut state) = self.maintenance.try_lock() {
+            if let Ok(mut state) = self.maintenance.try_lock() {
                 self.reclaim_expired_at(now, &mut state);
             }
         }
-        let peer_has_capacity = maintenance.as_ref().is_none_or(|state| {
-            state.per_peer.get(&peer_id).copied().unwrap_or(0) < self.policy.max_macs_per_peer
-        });
         match self.fdb.entry(key) {
             Entry::Occupied(mut occupied) => {
-                let previous = *occupied.get();
+                let previous = occupied.get();
                 if previous.peer_id != peer_id {
-                    if now.saturating_duration_since(previous.last_seen) < self.policy.move_hold
-                        || !peer_has_capacity
-                    {
+                    if now.saturating_duration_since(previous.last_seen) < self.policy.move_hold {
                         return false;
                     }
-                    if let Some(state) = maintenance.as_mut() {
-                        state.remove_peer_entry(previous.peer_id);
-                        *state.per_peer.entry(peer_id).or_default() += 1;
-                    }
+                    let Ok(owner_count) = self.try_reserve_peer(peer_id) else {
+                        return false;
+                    };
+                    *occupied.get_mut() = FdbEntry {
+                        peer_id,
+                        last_seen: now,
+                        owner_count,
+                    };
+                } else {
+                    occupied.get_mut().last_seen = now;
                 }
-                *occupied.get_mut() = FdbEntry {
-                    peer_id,
-                    last_seen: now,
-                };
             }
             Entry::Vacant(vacant) => {
-                if !peer_has_capacity {
+                let Ok(owner_count) = self.try_reserve_peer(peer_id) else {
                     return false;
-                }
+                };
                 if self.try_reserve_entry() {
                     vacant.insert(FdbEntry {
                         peer_id,
                         last_seen: now,
+                        owner_count,
                     });
-                    if let Some(state) = maintenance.as_mut() {
-                        *state.per_peer.entry(peer_id).or_default() += 1;
+                } else {
+                    if let Some(count) = owner_count {
+                        count.fetch_sub(1, Ordering::AcqRel);
                     }
-                } else if self.policy.max_macs_per_peer != 0 || !self.policy.move_hold.is_zero() {
-                    // Ownership policies require a recorded source before forwarding.
-                    return false;
+                    if self.policy.max_macs_per_peer != 0 || !self.policy.move_hold.is_zero() {
+                        // Ownership policies require a recorded source before forwarding.
+                        return false;
+                    }
                 }
             }
         }
         true
+    }
+
+    fn try_reserve_peer(&self, peer_id: PeerId) -> Result<Option<Arc<AtomicUsize>>, ()> {
+        if self.policy.max_macs_per_peer == 0 {
+            return Ok(None);
+        }
+        let count = self
+            .per_peer_counts
+            .entry(peer_id)
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        count
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < self.policy.max_macs_per_peer).then_some(count + 1)
+            })
+            .map_err(|_| ())?;
+        Ok(Some(count))
     }
 
     pub(crate) fn destination_at(
@@ -462,12 +690,15 @@ impl L2Fabric {
             return EthernetDestination::Known(entry.peer_id);
         }
         drop(entry);
-        let mut maintenance = self.maintenance.lock().unwrap();
-        if let Some((_, entry)) = self.fdb.remove_if(&key, |_, entry| {
-            now.saturating_duration_since(entry.last_seen) > self.age
-        }) {
+        let _maintenance = self.maintenance.lock().unwrap();
+        if self
+            .fdb
+            .remove_if(&key, |_, entry| {
+                now.saturating_duration_since(entry.last_seen) > self.age
+            })
+            .is_some()
+        {
             self.entry_count.fetch_sub(1, Ordering::AcqRel);
-            maintenance.remove_peer_entry(entry.peer_id);
         }
         EthernetDestination::Flood
     }
@@ -480,44 +711,14 @@ impl L2Fabric {
             .is_ok()
     }
 
-    fn allow_flood_at(&self, frame_len: usize, epoch: u64) -> bool {
-        if self.flood_bps == 0 {
+    fn allow_flood_at(&self, frame_len: usize, now: Instant) -> bool {
+        if self.flood_bytes_per_second == 0 {
             return true;
         }
-
-        let epoch = epoch & !Self::FLOOD_EPOCH_RESETTING;
-        loop {
-            let observed = self.flood_epoch.load(Ordering::Acquire);
-            if observed & Self::FLOOD_EPOCH_RESETTING != 0 {
-                spin_loop();
-                continue;
-            }
-            if observed != epoch {
-                if self
-                    .flood_epoch
-                    .compare_exchange(
-                        observed,
-                        epoch | Self::FLOOD_EPOCH_RESETTING,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
-                    self.flood_bytes.store(0, Ordering::Release);
-                    self.flood_epoch.store(epoch, Ordering::Release);
-                }
-                continue;
-            }
-
-            let frame_len = u64::try_from(frame_len).unwrap_or(u64::MAX);
-            return self
-                .flood_bytes
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                    used.checked_add(frame_len)
-                        .filter(|next| *next <= self.flood_bps)
-                })
-                .is_ok();
-        }
+        self.flood
+            .lock()
+            .unwrap()
+            .consume_at(frame_len, self.flood_bytes_per_second, now)
     }
 }
 
@@ -542,9 +743,7 @@ fn is_unicast(address: MacAddress) -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{
-        EthernetDestination, L2DestinationBatch, L2Fabric, L2SourceBatch, MAX_FANOUT_RECIPIENTS,
-    };
+    use super::{EthernetDestination, L2DestinationBatch, L2Fabric, MAX_FANOUT_RECIPIENTS};
 
     fn frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
         let mut bytes = vec![0_u8; 64];
@@ -577,25 +776,6 @@ mod tests {
             Ok(EthernetDestination::Known(7))
         );
         assert_eq!(fabric.len(), 1);
-    }
-
-    #[test]
-    fn batch_learning_writes_each_source_once_with_the_latest_peer() {
-        let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
-        let now = Instant::now();
-        let source = [0x02, 0, 0, 0, 0, 9];
-        let learned = frame([0xff; 6], source);
-        let mut sources = L2SourceBatch::default();
-
-        sources.record(&learned, 7);
-        sources.record(&learned, 8);
-        assert_eq!(sources.len(), 1);
-        fabric.learn_source_batch_at(sources, now);
-
-        assert_eq!(
-            fabric.destination_at(&frame(source, [0x02, 0, 0, 0, 0, 1]), now),
-            Ok(EthernetDestination::Known(8))
-        );
     }
 
     #[test]
@@ -787,20 +967,77 @@ mod tests {
     }
 
     #[test]
-    fn flood_budget_resets_at_the_next_second() {
+    fn flood_budget_refills_without_a_second_boundary_burst() {
         let fabric = L2Fabric::new(16, Duration::from_secs(300), 100);
-
-        assert!(fabric.allow_flood_at(60, 10));
-        assert!(!fabric.allow_flood_at(60, 10));
-        assert!(fabric.allow_flood_at(60, 11));
+        let now = Instant::now();
+        assert!(fabric.allow_flood_at(100, now + Duration::from_millis(999)));
+        assert!(!fabric.allow_flood_at(100, now + Duration::from_millis(1001)));
+        assert!(!fabric.allow_flood_at(1, now + Duration::from_millis(1001)));
+        assert!(fabric.allow_flood_at(50, now + Duration::from_millis(1499)));
+        assert!(!fabric.allow_flood_at(1, now + Duration::from_millis(1498)));
+        assert!(fabric.allow_flood_at(100, now + Duration::from_millis(2499)));
     }
 
     #[test]
     fn zero_flood_budget_is_unlimited() {
         let fabric = L2Fabric::new(16, Duration::from_secs(300), 0);
 
-        assert!(fabric.allow_flood_at(usize::MAX, 10));
-        assert!(fabric.allow_flood_at(usize::MAX, 10));
+        assert!(fabric.allow_flood_at(usize::MAX, Instant::now()));
+        assert!(fabric.allow_flood_at(usize::MAX, Instant::now()));
+    }
+
+    #[test]
+    fn ingress_buckets_isolate_peers_and_count_local_reflection() {
+        let mut flags = crate::common::config::gen_default_flags();
+        flags.l2_flood_bytes_per_second = 100;
+        let fabric = L2Fabric::from_flags(&flags);
+        let now = Instant::now();
+        let frame_a = frame([0xff; 6], [2, 0, 0, 0, 0, 1]);
+        assert!(fabric.admit_ingress_at(&frame_a, 7, 1, now));
+        assert!(!fabric.admit_ingress_at(&frame_a, 7, 1, now));
+        assert!(fabric.admit_ingress_at(&frame([0xff; 6], [2, 0, 0, 0, 0, 2]), 8, 1, now));
+        let local_frame = frame([0xff; 6], [2, 0, 0, 0, 0, 3]);
+        fabric.learn_source_at(&local_frame, 1, now);
+        assert!(!fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(4)));
+        assert!(fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(6)));
+        assert_eq!(fabric.counters().ingress_flood_drops, 1);
+        assert_eq!(fabric.counters().loop_drops, 1);
+        assert!(!fabric.allow_flood_output_bytes(101, 1));
+        assert_eq!(fabric.snapshot().counters.flood_drops, 1);
+    }
+
+    #[test]
+    fn concurrent_learning_keeps_peer_limits_and_releases_reservations() {
+        let mut flags = crate::common::config::gen_default_flags();
+        flags.l2_max_macs_per_peer = 8;
+        flags.l2_fdb_capacity = 8;
+        let fabric = L2Fabric::from_flags(&flags);
+        std::thread::scope(|scope| {
+            for n in 1..=32 {
+                let fabric = &fabric;
+                scope.spawn(move || fabric.learn_source(&frame([0xff; 6], [2, 0, 0, 0, 0, n]), 7));
+            }
+        });
+        assert_eq!(fabric.len(), 8);
+        assert_eq!(
+            fabric
+                .per_peer_counts
+                .get(&7)
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Acquire),
+            8
+        );
+        fabric.forget_peer(7);
+        assert_eq!(
+            fabric
+                .per_peer_counts
+                .get(&7)
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        fabric.learn_source(&frame([0xff; 6], [2, 0, 0, 0, 0, 33]), 8);
+        assert_eq!(fabric.len(), 1);
     }
 
     #[test]

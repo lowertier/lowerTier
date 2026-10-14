@@ -1018,8 +1018,8 @@ impl NetworkConfig {
         if let Some(l2_fdb_age_seconds) = self.l2_fdb_age_seconds {
             flags.l2_fdb_age_seconds = l2_fdb_age_seconds;
         }
-        if let Some(l2_flood_bps) = self.l2_flood_bps {
-            flags.l2_flood_bps = l2_flood_bps;
+        if let Some(l2_flood_bytes_per_second) = self.l2_flood_bytes_per_second {
+            flags.l2_flood_bytes_per_second = l2_flood_bytes_per_second;
         }
         if let Some(enable_bridge) = self.enable_bridge {
             flags.enable_bridge = enable_bridge;
@@ -1281,8 +1281,9 @@ impl NetworkConfig {
             .then_some(flags.l2_fdb_capacity);
         result.l2_fdb_age_seconds = (flags.l2_fdb_age_seconds != default_flags.l2_fdb_age_seconds)
             .then_some(flags.l2_fdb_age_seconds);
-        result.l2_flood_bps =
-            (flags.l2_flood_bps != default_flags.l2_flood_bps).then_some(flags.l2_flood_bps);
+        result.l2_flood_bytes_per_second = (flags.l2_flood_bytes_per_second
+            != default_flags.l2_flood_bytes_per_second)
+            .then_some(flags.l2_flood_bytes_per_second);
         result.enable_bridge =
             (flags.enable_bridge != default_flags.enable_bridge).then_some(flags.enable_bridge);
         result.l2_max_macs_per_peer =
@@ -1383,7 +1384,7 @@ mod tests {
         flags.quic_receive_window = 32 * 1024 * 1024;
         flags.l2_fdb_capacity = 32_768;
         flags.l2_fdb_age_seconds = 600;
-        flags.l2_flood_bps = 128 * 1024 * 1024;
+        flags.l2_flood_bytes_per_second = 128 * 1024 * 1024;
         flags.enable_bridge = true;
         flags.l2_max_macs_per_peer = 128;
         flags.l2_mac_move_hold_seconds = 30;
@@ -1398,7 +1399,10 @@ mod tests {
         );
         assert_eq!(network_config.l2_fdb_capacity, Some(32_768));
         assert_eq!(network_config.l2_fdb_age_seconds, Some(600));
-        assert_eq!(network_config.l2_flood_bps, Some(128 * 1024 * 1024));
+        assert_eq!(
+            network_config.l2_flood_bytes_per_second,
+            Some(128 * 1024 * 1024)
+        );
         assert_eq!(network_config.enable_bridge, Some(true));
 
         let regenerated = network_config.gen_config()?;
@@ -1437,7 +1441,10 @@ mod tests {
             regenerated_flags.l2_fdb_age_seconds,
             flags.l2_fdb_age_seconds
         );
-        assert_eq!(regenerated_flags.l2_flood_bps, flags.l2_flood_bps);
+        assert_eq!(
+            regenerated_flags.l2_flood_bytes_per_second,
+            flags.l2_flood_bytes_per_second
+        );
         assert_eq!(regenerated_flags.enable_bridge, flags.enable_bridge);
         Ok(())
     }

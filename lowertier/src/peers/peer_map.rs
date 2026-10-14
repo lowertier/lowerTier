@@ -317,6 +317,7 @@ pub struct PeerMap {
     connection_flow_paths: Arc<FlowPathCache<PeerConnId>>,
     route_flow_paths: Arc<FlowPathCache<PeerId>>,
     connection_admission: Arc<PeerConnectionAdmission>,
+    l2_fabric: std::sync::OnceLock<Arc<super::l2_fabric::L2Fabric>>,
 }
 
 impl PeerMap {
@@ -350,6 +351,7 @@ impl PeerMap {
             connection_flow_paths: Arc::new(FlowPathCache::new(4096, Duration::from_secs(120))),
             route_flow_paths: Arc::new(FlowPathCache::new(1024, Duration::from_secs(120))),
             connection_admission: Arc::new(PeerConnectionAdmission::new()),
+            l2_fabric: std::sync::OnceLock::new(),
         }
     }
 
@@ -370,6 +372,10 @@ impl PeerMap {
 
     pub(crate) fn dataplane_descriptor(&self) -> Arc<PeerMapDataPlaneDescriptor> {
         self.load_dataplane_descriptor()
+    }
+
+    pub(crate) fn install_l2_fabric(&self, fabric: Arc<super::l2_fabric::L2Fabric>) {
+        let _ = self.l2_fabric.set(fabric);
     }
 
     pub(crate) fn authenticated_route_peer_evidence_from_descriptor(
@@ -420,13 +426,36 @@ impl PeerMap {
                 .map(|snapshot| snapshot.generation())
                 .unwrap_or_default(),
         ));
-        self.data_plane_descriptor
-            .store(Arc::new(PeerMapDataPlaneDescriptor {
-                forwarding_snapshot,
-                origin_auth_snapshot,
-                source_token,
-                route_trust,
-            }));
+        let descriptor = Arc::new(PeerMapDataPlaneDescriptor {
+            forwarding_snapshot,
+            origin_auth_snapshot,
+            source_token,
+            route_trust,
+        });
+        self.data_plane_descriptor.store(descriptor.clone());
+        if let Some(fabric) = self.l2_fabric.get() {
+            fabric.retain_peers(
+                |peer_id| {
+                    peer_id == self.my_peer_id
+                        || descriptor
+                            .forwarding_snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| {
+                                snapshot
+                                    .next_hop(peer_id, NextHopPolicy::LeastHop)
+                                    .is_some()
+                            })
+                },
+                |peer_id| {
+                    super::peer_manager::PeerManager::l2_destination_is_live(
+                        &descriptor,
+                        peer_id,
+                        self.my_peer_id,
+                        &self.global_ctx,
+                    )
+                },
+            );
+        }
     }
 
     fn publish_auth_snapshot(&self, origin_auth_snapshot: Arc<OriginAuthSnapshot>) {

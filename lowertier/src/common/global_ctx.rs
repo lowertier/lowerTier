@@ -570,7 +570,7 @@ impl GlobalCtx {
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
         let interface_adapter = InterfaceAdapter::automatic();
-        feature_flags.ethernet_input = interface_adapter.uses_ethernet_overlay();
+        feature_flags.ethernet_input = interface_adapter.uses_native_ethernet();
         feature_flags.hybrid_l3 = true;
         feature_flags.bridge_input = interface_adapter.allows_bridge_input(flags.enable_bridge);
         feature_flags.multicast_membership = true;

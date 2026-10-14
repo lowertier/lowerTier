@@ -46,10 +46,7 @@ use crate::{
             is_critical_l2_control, partition_packet_batch_by_flow, stamp_critical_control,
             stamp_critical_l2_control, stamp_packet_flow,
         },
-        l2_fabric::{
-            EthernetDestination, L2DestinationBatch, L2Fabric, L2Policy, L2SourceBatch,
-            MAX_FANOUT_RECIPIENTS,
-        },
+        l2_fabric::{EthernetDestination, L2DestinationBatch, L2Fabric, L2IngressBatch},
         peer_conn::PeerConn,
         peer_rpc::PeerRpcManagerTransport,
         peer_session::PeerSessionStore,
@@ -1265,15 +1262,9 @@ impl DirectNicIngress {
             }
         }
 
-        let mut source_batch = L2SourceBatch::default();
-        let Some((from_peer_id, packet_type)) = inspect_direct_nic_batch(
-            &batch,
-            self.my_peer_id,
-            self.ethernet_input,
-            &mut |frame, peer_id| {
-                source_batch.record(frame, peer_id);
-            },
-        ) else {
+        let Some((from_peer_id, packet_type)) =
+            inspect_direct_nic_batch(&batch, self.my_peer_id, self.ethernet_input, &mut |_, _| {})
+        else {
             return Err(batch);
         };
 
@@ -1338,15 +1329,27 @@ impl DirectNicIngress {
         }
 
         let now = std::time::Instant::now();
-        if self.ethernet_input && self.l2_fabric.has_policy() {
+        if self.ethernet_input {
+            let mut ingress_batch = L2IngressBatch::default();
             let keep: SmallVec<[bool; 64]> = batch
                 .iter()
                 .map(|packet| {
                     if packet_type == PacketType::Ethernet as u8 {
-                        self.l2_fabric
-                            .admit_source_at(packet.payload(), from_peer_id, now)
+                        self.l2_fabric.admit_ingress_batch_at(
+                            packet.payload(),
+                            from_peer_id,
+                            self.my_peer_id,
+                            now,
+                            &mut ingress_batch,
+                        )
                     } else {
-                        self.l2_fabric.allows_compact_ip(packet.payload())
+                        PeerManager::admit_compact_to_tap(
+                            &self.l2_fabric,
+                            packet.payload(),
+                            from_peer_id,
+                            &self.global_ctx,
+                            now,
+                        )
                     }
                 })
                 .collect();
@@ -1354,8 +1357,6 @@ impl DirectNicIngress {
             if batch.is_empty() {
                 return Ok(());
             }
-        } else if packet_type == PacketType::Ethernet as u8 {
-            self.l2_fabric.learn_source_batch_at(source_batch, now);
         }
         // Stamp flow shards, account bytes and size the bounded TUN admission
         // in one pass while the cleartext tuple is still available.
@@ -1461,6 +1462,68 @@ impl Debug for PeerManager {
 }
 
 impl PeerManager {
+    pub fn l2_snapshot(&self) -> super::l2_fabric::L2Snapshot {
+        self.l2_fabric.snapshot()
+    }
+
+    pub fn l2_counters(&self) -> super::l2_fabric::L2Counters {
+        self.l2_fabric.counters()
+    }
+
+    fn admit_compact_to_tap(
+        fabric: &L2Fabric,
+        payload: &[u8],
+        peer_id: PeerId,
+        global_ctx: &ArcGlobalCtx,
+        now: std::time::Instant,
+    ) -> bool {
+        let is_flood = match payload.first().map(|byte| byte >> 4) {
+            Some(4) => Ipv4Packet::new(payload).is_some_and(|packet| {
+                let destination = packet.get_destination();
+                destination.is_multicast()
+                    || destination.is_broadcast()
+                    || global_ctx
+                        .get_ipv4()
+                        .is_some_and(|network| destination == network.last_address())
+            }),
+            Some(6) => Ipv6Packet::new(payload)
+                .is_some_and(|packet| packet.get_destination().is_multicast()),
+            _ => false,
+        };
+        fabric.admit_compact_ingress_at(payload, peer_id, now, is_flood)
+    }
+
+    pub(crate) fn l2_destination_is_live(
+        descriptor: &PeerMapDataPlaneDescriptor,
+        peer_id: PeerId,
+        local_peer_id: PeerId,
+        global_ctx: &ArcGlobalCtx,
+    ) -> bool {
+        if peer_id == local_peer_id {
+            return Self::local_bridge_is_authorized(global_ctx);
+        }
+        descriptor.forwarding_snapshot.as_ref().is_some_and(|snapshot| {
+            (peer_id == local_peer_id || snapshot.next_hop(peer_id, NextHopPolicy::LeastHop).is_some())
+                && Self::snapshot_and_current_full_ethernet_destination_is_authorized_from_snapshot(
+                    descriptor.origin_auth_snapshot.as_ref(), snapshot, peer_id, local_peer_id, global_ctx,
+                )
+        })
+    }
+
+    fn live_l2_destination(
+        &self,
+        destination: EthernetDestination,
+        descriptor: &PeerMapDataPlaneDescriptor,
+    ) -> EthernetDestination {
+        if let EthernetDestination::Known(peer_id) = destination
+            && !Self::l2_destination_is_live(descriptor, peer_id, self.my_peer_id, &self.global_ctx)
+        {
+            self.l2_fabric.forget_peer(peer_id);
+            return EthernetDestination::Flood;
+        }
+        destination
+    }
+
     fn complete_ethernet_is_authorized(local: &crate::proto::common::PeerFeatureFlag) -> bool {
         local.ethernet_input && local.hybrid_l3 && local.bridge_input && !local.is_credential_peer
     }
@@ -1924,12 +1987,8 @@ impl PeerManager {
         ));
 
         let l2_flags = global_ctx.get_flags();
-        let l2_fabric = Arc::new(L2Fabric::with_policy(
-            l2_flags.l2_fdb_capacity as usize,
-            Duration::from_secs(l2_flags.l2_fdb_age_seconds),
-            l2_flags.l2_flood_bps,
-            L2Policy::from_flags(&l2_flags),
-        ));
+        let l2_fabric = Arc::new(L2Fabric::from_flags(&l2_flags));
+        peers.install_l2_fabric(l2_fabric.clone());
         let service_routes = Arc::new(ServiceRouteStore::new(65_536, Duration::from_secs(300)));
 
         let exit_nodes = global_ctx.config.get_exit_nodes();
@@ -3422,20 +3481,22 @@ impl PeerManager {
                     return NicPacketAction::Drop;
                 }
                 if is_ethernet {
-                    if self.l2_fabric.has_policy() {
-                        if !self
-                            .l2_fabric
-                            .admit_source_at(packet.payload(), from_peer_id, now)
-                        {
-                            return NicPacketAction::Drop;
-                        }
-                    } else {
-                        self.l2_fabric
-                            .learn_source_at(packet.payload(), from_peer_id, now);
+                    if !self.l2_fabric.admit_ingress_at(
+                        packet.payload(),
+                        from_peer_id,
+                        self.my_peer_id,
+                        now,
+                    ) {
+                        return NicPacketAction::Drop;
                     }
                 } else if self.ethernet_input
-                    && self.l2_fabric.has_policy()
-                    && !self.l2_fabric.allows_compact_ip(packet.payload())
+                    && !PeerManager::admit_compact_to_tap(
+                        &self.l2_fabric,
+                        packet.payload(),
+                        from_peer_id,
+                        &self.global_ctx,
+                        now,
+                    )
                 {
                     return NicPacketAction::Drop;
                 }
@@ -3465,11 +3526,9 @@ impl PeerManager {
                 }
             }
 
-            async fn try_process_batch_from_peer(&self, batch: PacketBatch) -> PacketBatch {
+            async fn try_process_batch_from_peer(&self, mut batch: PacketBatch) -> PacketBatch {
                 let batch_time = std::time::Instant::now();
-                let mut source_batch = L2SourceBatch::default();
                 if self.local_bridge_authorized
-                    && !self.l2_fabric.has_policy()
                     && batch.iter().all(|packet| {
                         packet.peer_manager_header().is_some_and(|header| {
                             header.packet_type != PacketType::Ethernet as u8
@@ -3482,17 +3541,41 @@ impl PeerManager {
                                 )
                         })
                     })
-                    && prepare_direct_nic_batch(&batch, self.ethernet_input, |frame, peer_id| {
-                        source_batch.record(frame, peer_id);
-                    })
+                    && prepare_direct_nic_batch(&batch, self.ethernet_input, |_, _| {})
                 {
-                    self.l2_fabric
-                        .learn_source_batch_at(source_batch, batch_time);
+                    let mut ingress_batch = L2IngressBatch::default();
+                    let keep: SmallVec<[bool; 64]> = batch
+                        .iter()
+                        .map(|packet| {
+                            let header = packet.peer_manager_header().unwrap();
+                            if header.packet_type == PacketType::Ethernet as u8 {
+                                self.l2_fabric.admit_ingress_batch_at(
+                                    packet.payload(),
+                                    header.from_peer_id.get(),
+                                    self.my_peer_id,
+                                    batch_time,
+                                    &mut ingress_batch,
+                                )
+                            } else {
+                                !self.ethernet_input
+                                    || PeerManager::admit_compact_to_tap(
+                                        &self.l2_fabric,
+                                        packet.payload(),
+                                        header.from_peer_id.get(),
+                                        &self.global_ctx,
+                                        batch_time,
+                                    )
+                            }
+                        })
+                        .collect();
+                    batch.retain_flags(&keep);
                     tracing::trace!(
                         packets = batch.len(),
                         "send owned packet batch to nic channel"
                     );
-                    let _ = self.nic_channel.send_batch(batch).await;
+                    if !batch.is_empty() {
+                        let _ = self.nic_channel.send_batch(batch).await;
+                    }
                     return PacketBatch::new();
                 }
 
@@ -4254,14 +4337,27 @@ impl PeerManager {
                     continue;
                 }
             };
+            let destination = self.live_l2_destination(destination, descriptor);
             let (dst_peers, known_unicast) = match destination {
                 EthernetDestination::Known(peer_id) => (vec![peer_id], true),
                 EthernetDestination::Flood => {
                     if flood_peers.is_none() {
-                        flood_peers = Some(Self::select_ethernet_peers(
-                            forwarding_snapshot.capabilities(),
-                            self.my_peer_id,
-                        ));
+                        flood_peers = Some(
+                            Self::select_ethernet_peers(
+                                forwarding_snapshot.capabilities(),
+                                self.my_peer_id,
+                            )
+                            .into_iter()
+                            .filter(|peer_id| {
+                                Self::l2_destination_is_live(
+                                    descriptor,
+                                    *peer_id,
+                                    self.my_peer_id,
+                                    &self.global_ctx,
+                                )
+                            })
+                            .collect(),
+                        );
                     }
                     let peers = flood_peers.as_ref().unwrap().clone();
                     if peers.is_empty() {
@@ -5642,10 +5738,8 @@ impl PeerManager {
     }
 
     fn reserve_fanout_output_bytes(&self, output_bytes: usize, recipient_count: usize) -> bool {
-        recipient_count <= MAX_FANOUT_RECIPIENTS
-            && self
-                .l2_fabric
-                .allow_flood_output_bytes(output_bytes, recipient_count)
+        self.l2_fabric
+            .allow_flood_output_bytes(output_bytes, recipient_count)
     }
 
     fn hybrid_delivery_requires_fanout_budget(
@@ -6092,6 +6186,10 @@ impl PeerManager {
             {
                 continue;
             }
+            if !self.l2_fabric.has_policy() {
+                self.l2_fabric
+                    .learn_source_at(frame, self.my_peer_id, policy_time);
+            }
             #[cfg(feature = "tun")]
             if crate::instance::virtual_nic::NicCtx::handle_hybrid_control_frame(&packet, self)
                 .await
@@ -6184,6 +6282,25 @@ impl PeerManager {
                 ));
                 continue;
             };
+            let fdb_destination = self.live_l2_destination(
+                destination_batch
+                    .resolve_at(&self.l2_fabric, &metadata.ethernet_header, fdb_batch_time)
+                    .map_err(|error| Error::InvalidEthernetFrame(error.to_string()))?,
+                &descriptor,
+            );
+            let bridged_peer = match fdb_destination {
+                EthernetDestination::Known(peer_id)
+                    if snapshot.peer_id_by_ip(&ip_addr).is_none()
+                        && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
+                        && metadata.ethernet_header[..6]
+                            != crate::instance::l2_tun::encode_peer_mac(self.my_peer_id)
+                        && metadata.ethernet_header[..6]
+                            != crate::instance::l2_tun::encode_peer_mac(peer_id) =>
+                {
+                    Some(peer_id)
+                }
+                _ => None,
+            };
             let (candidate_peers, is_exit_node, blackholed) = self
                 .hybrid_destination_from_packet_snapshot(
                     &ip_packet,
@@ -6194,6 +6311,16 @@ impl PeerManager {
             if blackholed {
                 continue;
             }
+            // Keep explicit policy destinations. The FDB takes priority over automatic IP routes.
+            let (candidate_peers, is_exit_node) = if bridged_peer.is_some()
+                && ip_packet
+                    .peer_manager_header()
+                    .is_some_and(|header| header.to_peer_id.get() == 0)
+            {
+                (Vec::new(), false)
+            } else {
+                (candidate_peers, is_exit_node)
+            };
             if let Some(peer_id) =
                 self.hybrid_compact_unicast_peer(&candidate_peers, ip_addr, snapshot)
             {
@@ -6212,13 +6339,7 @@ impl PeerManager {
                 }
                 continue;
             }
-            let fdb_destination = if candidate_peers.is_empty() {
-                destination_batch
-                    .resolve_at(&self.l2_fabric, &metadata.ethernet_header, fdb_batch_time)
-                    .ok()
-            } else {
-                None
-            };
+            let fdb_destination = candidate_peers.is_empty().then_some(fdb_destination);
             let sets = self.hybrid_recipient_sets(
                 candidate_peers,
                 is_exit_node,
@@ -6255,15 +6376,6 @@ impl PeerManager {
             let mut pending_packet = Some(ip_packet);
             let mut full_packet = None;
             if !full_peers.is_empty() {
-                let direct_full_peer = if full_peers.len() == 1
-                    && !sets.is_multicast
-                    && !sets.is_broadcast
-                    && !sets.bridge_fallback
-                {
-                    Some(full_peers[0])
-                } else {
-                    None
-                };
                 let source_packet = if compact_peers.is_empty() {
                     pending_packet
                         .take()
@@ -6278,9 +6390,7 @@ impl PeerManager {
                     source_packet,
                     &metadata.ethernet_header,
                 )?;
-                if let Some(peer_id) = direct_full_peer {
-                    self.prepare_hybrid_full_ethernet_frame(&mut packet, Some(peer_id))?;
-                }
+                // TAP supplied the destination MAC. Preserve this header for LAN hosts.
                 packet.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
                 packet
                     .mut_peer_manager_header()
@@ -7664,20 +7774,20 @@ mod tests {
     }
 
     async fn create_tap_peer_manager(
-        l2_flood_bps: u64,
+        l2_flood_bytes_per_second: u64,
     ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
-        create_tap_peer_manager_with_ipv4(l2_flood_bps, None).await
+        create_tap_peer_manager_with_ipv4(l2_flood_bytes_per_second, None).await
     }
 
     async fn create_tap_peer_manager_with_ipv4(
-        l2_flood_bps: u64,
+        l2_flood_bytes_per_second: u64,
         ipv4: Option<std::net::Ipv4Addr>,
     ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
-        create_tap_peer_manager_with_policy(l2_flood_bps, ipv4, |_| {}).await
+        create_tap_peer_manager_with_policy(l2_flood_bytes_per_second, ipv4, |_| {}).await
     }
 
     async fn create_tap_peer_manager_with_policy(
-        l2_flood_bps: u64,
+        l2_flood_bytes_per_second: u64,
         ipv4: Option<std::net::Ipv4Addr>,
         configure: impl FnOnce(&mut Flags),
     ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
@@ -7685,7 +7795,7 @@ mod tests {
         global_ctx.set_ipv4(ipv4.map(|address| cidr::Ipv4Inet::new(address, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
         flags.enable_bridge = true;
-        flags.l2_flood_bps = l2_flood_bps;
+        flags.l2_flood_bytes_per_second = l2_flood_bytes_per_second;
         configure(&mut flags);
         global_ctx.set_flags(flags);
         let mut features = global_ctx.get_feature_flags();
@@ -7749,13 +7859,13 @@ mod tests {
     async fn create_hybrid_peer_manager_with_ipv4_and_bridge_and_flood(
         ipv4: std::net::Ipv4Addr,
         enable_bridge: bool,
-        l2_flood_bps: u64,
+        l2_flood_bytes_per_second: u64,
     ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
         flags.enable_bridge = enable_bridge;
-        flags.l2_flood_bps = l2_flood_bps;
+        flags.l2_flood_bytes_per_second = l2_flood_bytes_per_second;
         global_ctx.set_flags(flags);
         let mut features = global_ctx.get_feature_flags();
         features.ethernet_input = true;
@@ -7974,6 +8084,214 @@ mod tests {
                 if allowed_type == 0x0800 { 4 } else { 6 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn l2_bridged_ip_preserves_hosts_before_and_after_learning() {
+        let (a, mut nic_a) =
+            create_tap_peer_manager_with_ipv4(0, Some("10.42.0.1".parse().unwrap())).await;
+        let (b, mut nic_b) =
+            create_tap_peer_manager_with_ipv4(0, Some("10.42.0.2".parse().unwrap())).await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        wait_route_appear(a.clone(), b.clone()).await.unwrap();
+        let mac_a = [2, 1, 1, 1, 1, 1];
+        let mac_b = [2, 1, 1, 1, 1, 2];
+        for ipv6 in [false, true] {
+            for learned in [false, true] {
+                for (sender, receiver, nic, source, destination) in [
+                    (&a, &b, &mut nic_b, mac_a, mac_b),
+                    (&b, &a, &mut nic_a, mac_b, mac_a),
+                ] {
+                    sender.l2_fabric.clear();
+                    if learned {
+                        sender.l2_fabric.learn_source(
+                            &ethernet_frame([0xff; 6], destination),
+                            receiver.my_peer_id(),
+                        );
+                    }
+                    let mut frame = ethernet_frame(destination, source);
+                    let ip = if ipv6 {
+                        let mut bytes = vec![0; 64];
+                        bytes[0] = 0x60;
+                        bytes[4..6].copy_from_slice(&24_u16.to_be_bytes());
+                        bytes[6] = 17;
+                        bytes[7] = 64;
+                        bytes[8..24].copy_from_slice(
+                            &"fd42::11".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                        );
+                        bytes[24..40].copy_from_slice(
+                            &"fd42::12".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                        );
+                        bytes
+                    } else {
+                        routed_ipv4_packet(
+                            "10.42.0.11".parse().unwrap(),
+                            "10.42.0.12".parse().unwrap(),
+                            1,
+                        )
+                        .payload()
+                        .to_vec()
+                    };
+                    frame.truncate(14);
+                    frame[12..14]
+                        .copy_from_slice(&(if ipv6 { 0x86dd_u16 } else { 0x0800 }).to_be_bytes());
+                    frame.extend_from_slice(&ip);
+                    sender
+                        .send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(
+                            ZCPacket::new_with_payload(&frame),
+                        ))
+                        .await
+                        .unwrap();
+                    let received = tokio::time::timeout(Duration::from_secs(5), nic.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(received.payload(), frame, "ipv6={ipv6}, learned={learned}");
+                }
+            }
+        }
+        let (exit, mut nic_exit) =
+            create_tap_peer_manager_with_ipv4(0, Some("10.42.0.3".parse().unwrap())).await;
+        connect_peer_manager(a.clone(), exit.clone()).await;
+        wait_route_appear(a.clone(), exit.clone()).await.unwrap();
+        a.exit_nodes
+            .store(Arc::new(vec!["10.42.0.3".parse().unwrap()]));
+        a.l2_fabric
+            .learn_source(&ethernet_frame([0xff; 6], mac_b), b.my_peer_id());
+        let mut frame = ethernet_frame(mac_b, mac_a);
+        frame.truncate(14);
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        frame.extend_from_slice(
+            routed_ipv4_packet(
+                "192.0.2.11".parse().unwrap(),
+                "192.0.2.12".parse().unwrap(),
+                2,
+            )
+            .payload(),
+        );
+        a.send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(ZCPacket::new_with_payload(
+            &frame,
+        )))
+        .await
+        .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.payload(), frame);
+        assert!(!received.peer_manager_header().unwrap().is_exit_node());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), nic_exit.recv())
+                .await
+                .is_err()
+        );
+        a.service_routes.replace_source(
+            crate::peers::service_route::RouteSource::Bgp,
+            vec![ServiceRoute {
+                prefix: "192.0.2.0/24".parse().unwrap(),
+                gateway: 0,
+                preference: 100,
+                metric: 0,
+                path_id: 1,
+                action: ServiceRouteAction::Blackhole,
+            }],
+        );
+        a.send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(ZCPacket::new_with_payload(
+            &frame,
+        )))
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn l2_stale_known_destination_floods_to_live_bridges() {
+        let (a, _nic_a) = create_tap_peer_manager(0).await;
+        let (b, mut nic_b) = create_tap_peer_manager(0).await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        wait_route_appear(a.clone(), b.clone()).await.unwrap();
+        let mac = [2, 1, 1, 1, 1, 2];
+        a.l2_fabric.learn_source(
+            &ethernet_frame([0xff; 6], mac),
+            b.my_peer_id().wrapping_add(1),
+        );
+        let frame = ethernet_frame(mac, [2, 1, 1, 1, 1, 1]);
+        a.send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.payload(), frame);
+    }
+
+    #[tokio::test]
+    async fn l2_route_publication_removes_invalid_fdb_owners() {
+        use crate::peers::l2_fabric::EthernetDestination;
+        let (a, _nic_a) = create_tap_peer_manager(0).await;
+        let (b, _nic_b) = create_tap_peer_manager(0).await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        wait_route_appear(a.clone(), b.clone()).await.unwrap();
+        let local_mac = [2, 1, 1, 1, 1, 1];
+        let remote_mac = [2, 1, 1, 1, 1, 2];
+        let learned = ethernet_frame([0xff; 6], remote_mac);
+        a.l2_fabric.learn_source(&learned, b.my_peer_id());
+        a.l2_fabric
+            .learn_source(&ethernet_frame([0xff; 6], local_mac), a.my_peer_id());
+        assert!(a.peers.revoke_bridge_route_evidence(b.my_peer_id(), None));
+        assert_eq!(
+            a.l2_fabric
+                .destination(&ethernet_frame(remote_mac, local_mac)),
+            Ok(EthernetDestination::Flood)
+        );
+        // A source replacement withdraws routes without removing a direct connection.
+        a.l2_fabric.learn_source(&learned, b.my_peer_id());
+        a.peers
+            .install_forwarding_snapshot_source()
+            .unwrap()
+            .revoke();
+        assert_eq!(
+            a.l2_fabric
+                .destination(&ethernet_frame(remote_mac, local_mac)),
+            Ok(EthernetDestination::Flood)
+        );
+        assert_eq!(
+            a.l2_fabric
+                .destination(&ethernet_frame(local_mac, remote_mac)),
+            Ok(EthernetDestination::Known(a.my_peer_id()))
+        );
+    }
+
+    #[tokio::test]
+    async fn l2_ingress_budget_filters_floods_in_a_batch() {
+        let (a, _nic_a) = create_tap_peer_manager(0).await;
+        let (b, mut nic_b) = create_tap_peer_manager(100).await;
+        connect_peer_manager(a.clone(), b.clone()).await;
+        wait_route_appear(a.clone(), b.clone()).await.unwrap();
+        let frame = ethernet_frame([0xff; 6], [2, 1, 1, 1, 1, 1]);
+        let mut batch = PacketBatch::new();
+        batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
+        batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
+        a.send_msg_by_ethernet_batch(batch).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .payload(),
+            frame
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(b.l2_counters().ingress_flood_drops, 1);
     }
 
     #[tokio::test]

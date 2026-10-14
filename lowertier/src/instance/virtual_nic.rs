@@ -129,6 +129,25 @@ fn restore_compact_ip_for_tap(
     packet.prepend_payload_preserving_flow_hash(&ethernet_header)
 }
 
+fn effective_nic_mtu(
+    flags: &crate::common::config::Flags,
+    adapter: InterfaceAdapter,
+) -> Result<u32, Error> {
+    if adapter.uses_native_ethernet() && flags.enable_bridge {
+        // The parser supports four VLAN tags outside a 1500-byte LAN payload.
+        return Ok(flags.mtu.max(1500 + 4 * 4));
+    }
+    if flags.enable_encryption {
+        flags
+            .mtu
+            .checked_sub(20)
+            .filter(|mtu| *mtu != 0)
+            .ok_or_else(|| anyhow::anyhow!("encrypted TUN MTU must exceed 20 bytes").into())
+    } else {
+        Ok(flags.mtu)
+    }
+}
+
 struct HybridTapSink {
     inner: Pin<Box<dyn PacketBatchSink>>,
     local_mac: Arc<TapMac>,
@@ -762,7 +781,14 @@ impl VirtualNic {
         let adapter = Self::interface_adapter();
         if adapter.uses_native_ethernet() {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            config.layer(Layer::L2);
+            {
+                config.layer(Layer::L2);
+                let mtu = effective_nic_mtu(&self.global_ctx.get_flags(), adapter)?;
+                config.mtu(
+                    u16::try_from(mtu)
+                        .map_err(|_| anyhow::anyhow!("TAP MTU exceeds u16 limits"))?,
+                );
+            }
 
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             return Err(anyhow::anyhow!(
@@ -900,10 +926,7 @@ impl VirtualNic {
     async fn create_linux_dev(&mut self, offload: bool) -> Result<Box<dyn Tunnel>, Error> {
         Self::ensure_tun_device_node().await;
         let flags = self.global_ctx.config.get_flags();
-        let mut effective_mtu = flags.mtu;
-        if flags.enable_encryption {
-            effective_mtu -= 20;
-        }
+        let effective_mtu = effective_nic_mtu(&flags, Self::interface_adapter())?;
         let kernel_mtu = u16::try_from(effective_mtu)
             .map_err(|_| anyhow::anyhow!("TUN MTU {effective_mtu} exceeds Linux u16 limits"))?;
 
@@ -1047,10 +1070,7 @@ impl VirtualNic {
         }
 
         let flags = self.global_ctx.config.get_flags();
-        let mut mtu_in_config = flags.mtu;
-        if flags.enable_encryption {
-            mtu_in_config -= 20;
-        }
+        let mtu_in_config = effective_nic_mtu(&flags, Self::interface_adapter())?;
         {
             // set mtu by ourselves, rust-tun does not handle it correctly on windows
             let _g = self.global_ctx.net_ns.guard();
@@ -2189,11 +2209,39 @@ mod tests {
     }
 
     #[test]
+    fn bridge_mtu_preserves_lan_payload_and_vlan_tags() {
+        use crate::common::config::InterfaceAdapter;
+        let mut flags = crate::common::config::gen_default_flags();
+        assert_eq!(
+            super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+            1360
+        );
+        flags.enable_bridge = true;
+        for encrypted in [false, true] {
+            flags.enable_encryption = encrypted;
+            assert_eq!(
+                super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+                1516
+            );
+        }
+        flags.mtu = 9000;
+        flags.enable_encryption = true;
+        assert_eq!(
+            super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+            9000
+        );
+        assert_eq!(
+            super::effective_nic_mtu(&flags, InterfaceAdapter::Tun).unwrap(),
+            8980
+        );
+    }
+
+    #[test]
     fn automatic_adapter_uses_native_ethernet_when_the_platform_supports_it() {
         let adapter = VirtualNic::interface_adapter();
         let native_ethernet = cfg!(any(target_os = "linux", target_os = "freebsd"));
 
-        assert_eq!(adapter.uses_ethernet_overlay(), native_ethernet);
+        assert_eq!(adapter.uses_native_ethernet(), native_ethernet);
         assert_eq!(VirtualNic::needs_tap_edge_adapter(adapter), native_ethernet);
     }
 

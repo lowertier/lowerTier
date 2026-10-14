@@ -90,7 +90,8 @@ message FlagsInConfig {
   uint64 l2_fdb_age_seconds = 53;
   // Maximum unknown-unicast, broadcast, and multicast bytes per second.
   // Zero disables the limit.
-  uint64 l2_flood_bps = 54;
+  reserved 54;
+  reserved "l2_flood_bps";
 
   reserved 55;
   reserved "quic_datagram_fec_parity";
@@ -133,6 +134,7 @@ message FlagsInConfig {
   repeated uint32 l2_allowed_vlans = 73;
   // Empty permits all. Values identify the final EtherType after VLAN tags.
   repeated uint32 l2_allowed_ether_types = 74;
+  uint64 l2_flood_bytes_per_second = 75;
 }
 
 message RpcDescriptor {
