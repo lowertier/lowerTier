@@ -1462,7 +1462,8 @@ impl NicCtx {
         reported: Arc<AtomicBool>,
     ) {
         let mut stream = futures::stream::select_all(streams);
-        let mut queues = super::nic_ingress::NicIngressQueue::default();
+        let mut queues =
+            super::nic_ingress::NicIngressQueue::new(mgr.get_global_ctx_ref().stats_manager());
         let mut deliveries = persistent_nic_deliveries(&mgr, adapter);
         let native_ethernet = adapter.uses_native_ethernet();
         let mut open = true;
@@ -1500,11 +1501,12 @@ impl NicCtx {
                 result = stream.next(), if open => {
                     match result {
                         Some(Ok(batch)) => {
+                            let enqueued = std::time::Instant::now();
                             for mut packet in batch {
                                 read_bytes += packet.buf_len();
                                 let flow = classify_nic_packet_flow(&packet, native_ethernet);
                                 packet.set_flow_hash(flow.hash);
-                                queues.push(flow.hash, packet);
+                                queues.push_at(flow.hash, packet, enqueued);
                             }
                             if read_bytes >= 256 * 1024 {
                                 read_bytes = 0;

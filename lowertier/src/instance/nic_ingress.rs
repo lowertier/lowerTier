@@ -1,6 +1,9 @@
 //! Bounded NIC admission. A blocked flow retains its ordering independently of
 //! other flows; queued overload is charged to the largest queued flow.
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
+use crate::common::stats_manager::{CounterHandle, MetricName, StatsManager};
 
 use crate::tunnel::{
     batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
@@ -12,12 +15,86 @@ const PACKET_LIMIT: usize = 2048;
 const QUEUED_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const ACTIVE_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 pub(super) const ACTIVE_FLOW_LIMIT: usize = 16;
+const CODEL_TARGET: Duration = Duration::from_millis(5);
+const CODEL_INTERVAL: Duration = Duration::from_millis(100);
+
+struct QueuedPacket {
+    packet: ZCPacket,
+    enqueued: Instant,
+}
+
+#[derive(Default)]
+struct Codel {
+    first_above: Option<Instant>,
+    next_drop: Option<Instant>,
+    dropping: bool,
+    count: u32,
+    last_count: u32,
+}
+
+impl Codel {
+    fn control_law(time: Instant, count: u32) -> Instant {
+        time + CODEL_INTERVAL.div_f64(f64::from(count.max(1)).sqrt())
+    }
+
+    fn signal(
+        &mut self,
+        now: Instant,
+        sojourn: Duration,
+        backlog: usize,
+        max_packet: usize,
+    ) -> bool {
+        // Keep one maximum-sized packet to avoid starving a slow link.
+        let above = if sojourn < CODEL_TARGET || backlog <= max_packet {
+            self.first_above = None;
+            false
+        } else if let Some(first_above) = self.first_above {
+            now >= first_above
+        } else {
+            self.first_above = Some(now + CODEL_INTERVAL);
+            false
+        };
+        if self.dropping {
+            if !above {
+                self.dropping = false;
+            } else if self.next_drop.is_some_and(|next| now >= next) {
+                self.count = self.count.saturating_add(1);
+                self.next_drop = Some(Self::control_law(self.next_drop.unwrap(), self.count));
+                return true;
+            }
+        } else if above {
+            let delta = self.count.saturating_sub(self.last_count);
+            self.count = if delta > 1
+                && self
+                    .next_drop
+                    .is_some_and(|next| now.saturating_duration_since(next) < CODEL_INTERVAL * 16)
+            {
+                delta
+            } else {
+                1
+            };
+            self.last_count = self.count;
+            self.dropping = true;
+            self.next_drop = Some(Self::control_law(now, self.count));
+            return true;
+        }
+        false
+    }
+}
+
+struct IngressMetrics {
+    drops: CounterHandle,
+    sojourn_us: CounterHandle,
+    dequeued: CounterHandle,
+}
 
 #[derive(Default)]
 struct Flow {
-    packets: VecDeque<ZCPacket>,
+    packets: VecDeque<QueuedPacket>,
     bytes: usize,
     active_bytes: Option<usize>,
+    max_packet: usize,
+    codel: Codel,
 }
 
 pub(super) struct NicIngressQueue {
@@ -32,6 +109,8 @@ pub(super) struct NicIngressQueue {
     rejected: u64,
     peak_queued_bytes: usize,
     peak_active_bytes: usize,
+    aqm_drops: u64,
+    metrics: Option<IngressMetrics>,
 }
 
 impl Default for NicIngressQueue {
@@ -48,16 +127,34 @@ impl Default for NicIngressQueue {
             rejected: 0,
             peak_queued_bytes: 0,
             peak_active_bytes: 0,
+            aqm_drops: 0,
+            metrics: None,
         }
     }
 }
 
 impl NicIngressQueue {
+    pub(super) fn new(stats: &StatsManager) -> Self {
+        Self {
+            metrics: Some(IngressMetrics {
+                drops: stats.get_simple_counter(MetricName::NicAqmDrops),
+                sojourn_us: stats.get_simple_counter(MetricName::NicQueueSojournUs),
+                dequeued: stats.get_simple_counter(MetricName::NicQueueDequeued),
+            }),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.packets == 0
     }
 
-    pub(super) fn push(&mut self, hash: u64, mut packet: ZCPacket) {
+    #[cfg(test)]
+    fn push(&mut self, hash: u64, packet: ZCPacket) {
+        self.push_at(hash, packet, Instant::now());
+    }
+
+    pub(super) fn push_at(&mut self, hash: u64, mut packet: ZCPacket, enqueued: Instant) {
         let mut bytes = packet.retained_buffer_capacity();
         // Every admitted packet must fit an otherwise empty active budget.
         // A short slice can retain a larger receive slab; compact that slab
@@ -71,6 +168,9 @@ impl NicIngressQueue {
             || (self.flows.len() >= FLOW_LIMIT && !self.flows.contains_key(&hash))
         {
             self.rejected += 1;
+            if let Some(metrics) = &self.metrics {
+                metrics.drops.inc();
+            }
             return;
         }
         while self.packets >= PACKET_LIMIT || self.bytes + bytes > QUEUED_BYTE_LIMIT {
@@ -81,15 +181,21 @@ impl NicIngressQueue {
                 .max_by_key(|(_, flow)| flow.bytes)
             else {
                 self.rejected += 1;
+                if let Some(metrics) = &self.metrics {
+                    metrics.drops.inc();
+                }
                 return;
             };
             let flow = self.flows.get_mut(&largest).expect("selected queued flow");
             let dropped = flow.packets.pop_front().expect("nonempty queued flow");
-            let retained = dropped.retained_buffer_capacity();
+            let retained = dropped.packet.retained_buffer_capacity();
             flow.bytes -= retained;
             self.bytes -= retained;
             self.packets -= 1;
             self.evicted += 1;
+            if let Some(metrics) = &self.metrics {
+                metrics.drops.inc();
+            }
         }
         let flow = self.flows.entry(hash).or_insert_with(|| {
             // FIFO rotation also bounds the wait of existing ready flows when
@@ -97,7 +203,8 @@ impl NicIngressQueue {
             self.ready.push_back(hash);
             Flow::default()
         });
-        flow.packets.push_back(packet);
+        flow.max_packet = flow.max_packet.max(bytes);
+        flow.packets.push_back(QueuedPacket { packet, enqueued });
         flow.bytes += bytes;
         self.bytes += bytes;
         self.packets += 1;
@@ -110,6 +217,10 @@ impl NicIngressQueue {
             return None;
         }
         let available = ACTIVE_BYTE_LIMIT - self.active_bytes;
+        let now = Instant::now();
+        let mut drops = 0;
+        let mut sojourn_us = 0;
+        let mut dequeued = 0;
         for _ in 0..self.ready.len() {
             let hash = self.ready.pop_front().expect("ready length is bounded");
             let flow = self.flows.get_mut(&hash).expect("ready flow exists");
@@ -124,28 +235,50 @@ impl NicIngressQueue {
                 let Some(packet) = flow.packets.front() else {
                     break;
                 };
-                let bytes = packet.retained_buffer_capacity();
+                let bytes = packet.packet.retained_buffer_capacity();
                 if retained + bytes > available {
                     break;
                 }
                 let packet = flow.packets.pop_front().expect("front packet exists");
-                retained += bytes;
                 flow.bytes -= bytes;
                 self.bytes -= bytes;
                 self.packets -= 1;
-                batch.try_push(packet).expect("batch length checked");
+                let sojourn = now.saturating_duration_since(packet.enqueued);
+                sojourn_us += sojourn.as_micros().min(u64::MAX as u128) as u64;
+                dequeued += 1;
+                if flow.codel.signal(now, sojourn, flow.bytes, flow.max_packet) {
+                    drops += 1;
+                    continue;
+                }
+                retained += bytes;
+                batch.try_push(packet.packet).expect("batch length checked");
             }
             if batch.is_empty() {
-                self.ready.push_back(hash);
+                if flow.packets.is_empty() {
+                    self.flows.remove(&hash);
+                } else {
+                    self.ready.push_back(hash);
+                }
                 continue;
             }
             flow.active_bytes = Some(retained);
             self.active_bytes += retained;
             self.active_flows += 1;
             self.peak_active_bytes = self.peak_active_bytes.max(self.active_bytes);
+            self.record_dequeue(drops, sojourn_us, dequeued);
             return Some((hash, batch));
         }
+        self.record_dequeue(drops, sojourn_us, dequeued);
         None
+    }
+
+    fn record_dequeue(&mut self, drops: u64, sojourn_us: u64, dequeued: u64) {
+        self.aqm_drops += drops;
+        if let Some(metrics) = &self.metrics {
+            metrics.drops.add(drops);
+            metrics.sojourn_us.add(sojourn_us);
+            metrics.dequeued.add(dequeued);
+        }
     }
 
     pub(super) fn complete(&mut self, hash: u64) {
@@ -171,6 +304,7 @@ impl NicIngressQueue {
             enqueued = self.enqueued,
             evicted = self.evicted,
             rejected = self.rejected,
+            aqm_drops = self.aqm_drops,
             queued_packets = self.packets,
             queued_bytes = self.bytes,
             active_flows = self.active_flows,
@@ -203,6 +337,31 @@ mod tests {
 
     fn packet(sequence: u8) -> ZCPacket {
         ZCPacket::new_with_payload(&[sequence; 1200])
+    }
+
+    #[test]
+    fn codel_persistent_delay_uses_inverse_square_root_control_law() {
+        let start = Instant::now();
+        let mut codel = Codel::default();
+        assert!(!codel.signal(start, CODEL_TARGET, 4000, 1500));
+        assert!(!codel.signal(
+            start + CODEL_INTERVAL - Duration::from_nanos(1),
+            CODEL_TARGET,
+            4000,
+            1500
+        ));
+        assert!(codel.signal(start + CODEL_INTERVAL, CODEL_TARGET, 4000, 1500));
+        assert_eq!(codel.count, 1);
+        let next = codel.next_drop.unwrap();
+        assert!(codel.signal(next, CODEL_TARGET, 4000, 1500));
+        assert_eq!(codel.count, 2);
+        assert_eq!(
+            Codel::control_law(start, 4) - start,
+            Duration::from_millis(50)
+        );
+        assert!(!codel.signal(next, CODEL_TARGET, 1500, 1500));
+        assert!(!codel.dropping);
+        assert!(codel.first_above.is_none());
     }
 
     #[test]

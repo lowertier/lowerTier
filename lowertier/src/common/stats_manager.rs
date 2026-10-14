@@ -11,6 +11,9 @@ use tokio_util::task::AbortOnDropHandle;
 /// Predefined metric names for type safety
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetricName {
+    NicAqmDrops,
+    NicQueueSojournUs,
+    NicQueueDequeued,
     /// QUIC path changes rejected by authentication, policy, or migration limits.
     QuicMigrationsRejected,
     RelayBytes,
@@ -137,6 +140,9 @@ impl MetricName {
 impl fmt::Display for MetricName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MetricName::NicAqmDrops => write!(f, "nic_aqm_drops"),
+            MetricName::NicQueueSojournUs => write!(f, "nic_queue_sojourn_us"),
+            MetricName::NicQueueDequeued => write!(f, "nic_queue_dequeued"),
             MetricName::QuicMigrationsRejected => write!(f, "quic_migrations_rejected"),
             MetricName::RelayBytes => write!(f, "relay_bytes"),
             MetricName::RelayDrops => write!(f, "relay_drops"),
