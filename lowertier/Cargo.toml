@@ -101,7 +101,9 @@ smallvec = "=1.13.2"
 pin-project-lite = "0.2.13"
 
 
-quinn = { version = "0.11.11", features = ["ring"] }
+quinn = { version = "0.11.11", default-features = false, features = [
+    "runtime-tokio", "rustls-ring", "ring", "log", "bloom"
+] }
 quinn-proto = { version = "0.11.16" }
 h3 = { version = "0.0.8" }
 h3-quinn = { version = "0.0.10" }
@@ -115,7 +117,6 @@ rustls-pemfile = { version = "2" }
 
 # for websocket
 tokio-websockets = { version = "0.13.2", path = "../vendor/tokio-websockets", features = [
-    "rustls-webpki-roots",
     "client",
     "server",
     "fastrand",

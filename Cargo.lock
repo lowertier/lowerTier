@@ -5973,12 +5973,9 @@ dependencies = [
  "http",
  "httparse",
  "ring",
- "rustls-pki-types",
  "simdutf8",
  "tokio",
- "tokio-rustls",
  "tokio-util",
- "webpki-roots",
 ]
 
 [[package]]
@@ -6618,15 +6615,6 @@ name = "webpki-root-certs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a83f7e1a9f8712695c03eabe9ed3fbca0feff0152f33f12593e5a6303cb1a4"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
 dependencies = [
  "rustls-pki-types",
 ]
