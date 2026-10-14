@@ -35,7 +35,6 @@ pub mod ring;
 pub mod stats;
 pub mod tcp;
 mod tcp_lanes;
-pub(crate) mod udp_vector_io;
 
 pub mod quic;
 
@@ -44,8 +43,6 @@ pub mod http2;
 pub(crate) mod stealth_tls;
 
 pub mod websocket;
-
-pub mod insecure_tls;
 
 #[derive(thiserror::Error, Debug)]
 pub enum TunnelError {

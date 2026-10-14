@@ -93,14 +93,10 @@ async fn set_bind_addr_for_peer_connector(
     is_ipv4: bool,
     global_ctx: &ArcGlobalCtx,
 ) {
-    if cfg!(any(
-        target_os = "android",
-        any(
-            target_os = "ios",
-            all(target_os = "macos", feature = "macos-ne")
-        ),
-        target_env = "ohos"
-    )) {
+    if cfg!(any(any(
+        target_os = "ios",
+        all(target_os = "macos", feature = "macos-ne")
+    ))) {
         return;
     }
 

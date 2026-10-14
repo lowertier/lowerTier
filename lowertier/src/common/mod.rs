@@ -29,7 +29,6 @@ pub mod stun_codec_ext;
 pub mod token_bucket;
 pub mod tracing_rolling_appender;
 pub mod underlay_policy;
-pub mod upnp;
 
 pub use machine_id::{MachineIdOptions, resolve_machine_id};
 

@@ -109,19 +109,14 @@ fn linux_underlay_interface(iface: &NetworkInterface, is_tun_tap: bool) -> bool 
         })
 }
 
-#[cfg(any(
-    target_os = "android",
-    target_os = "ios",
-    all(target_os = "macos", feature = "macos-ne"),
-    target_env = "ohos"
-))]
+#[cfg(any(target_os = "ios", all(target_os = "macos", feature = "macos-ne")))]
 impl InterfaceFilter {
     async fn filter_iface(&self) -> bool {
         true
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 impl InterfaceFilter {
     async fn is_tun_tap_device(&self) -> bool {
         let path = format!("/sys/class/net/{}/tun_flags", self.iface.name);

@@ -1021,12 +1021,7 @@ fn setup_socket2_ext(
         }
     }
 
-    #[cfg(any(
-        target_os = "android",
-        target_os = "fuchsia",
-        target_os = "linux",
-        target_env = "ohos"
-    ))]
+    #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
     if let Some(dev_name) = bind_dev {
         tracing::trace!(dev_name = ?dev_name, "bind device");
         socket2_socket.bind_device(Some(dev_name.as_bytes()))?;
@@ -1045,12 +1040,12 @@ pub fn apply_socket_mark(
     socket: &socket2::Socket,
     socket_mark: Option<u32>,
 ) -> Result<(), TunnelError> {
-    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
     if let Some(mark) = socket_mark {
         tracing::trace!(socket_mark = mark, "set SO_MARK on socket");
         socket.set_mark(mark)?;
     }
-    #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
+    #[cfg(not(any(target_os = "fuchsia", target_os = "linux")))]
     {
         let _ = (socket, socket_mark);
     }
@@ -1353,13 +1348,8 @@ pub mod tests {
         drop(send);
         drop(recv);
 
-        if ["udp", "wg"].contains(&connector.remote_url().scheme()) {
-            lis.abort();
-        } else {
-            // lis should finish in 1 second
-            let ret = tokio::time::timeout(tokio::time::Duration::from_secs(1), lis).await;
-            assert!(ret.is_ok());
-        }
+        let ret = tokio::time::timeout(tokio::time::Duration::from_secs(1), lis).await;
+        assert!(ret.is_ok());
     }
 
     pub(crate) async fn _tunnel_pingpong_netns_with_timeout<L, C>(

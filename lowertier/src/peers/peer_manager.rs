@@ -5593,7 +5593,6 @@ impl PeerManager {
             })?;
             header.to_peer_id.set(peer_id);
             header.set_exit_node(is_exit_node);
-            #[cfg(not(target_env = "ohos"))]
             if suppress_local_delivery && peer_id == self.my_peer_id {
                 suppress_local_tun_delivery(header);
             }
@@ -5903,18 +5902,6 @@ impl PeerManager {
                     is_exit_node = true;
                     break;
                 }
-            }
-        }
-        #[cfg(target_env = "ohos")]
-        {
-            if dst_peers.is_empty()
-                && !self
-                    .global_ctx
-                    .is_ip_in_same_network(&std::net::IpAddr::V4(*ipv4_addr))
-            {
-                tracing::trace!("no peer id for ipv4: {}, set exit_node for ohos", ipv4_addr);
-                dst_peers.push(self.my_peer_id.clone());
-                is_exit_node = true;
             }
         }
         (dst_peers, is_exit_node)
@@ -6667,7 +6654,6 @@ impl PeerManager {
             let hdr = msg.mut_peer_manager_header().unwrap();
             hdr.to_peer_id.set(*peer_id);
 
-            #[cfg(not(target_env = "ohos"))]
             {
                 if not_send_to_self
                     && *peer_id == self.my_peer_id

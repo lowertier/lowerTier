@@ -850,7 +850,7 @@ mod tests {
         dm_a.run_as_client();
         dm_c.run_as_server();
 
-        let port = if proto == "wg" { 11040 } else { 11041 };
+        let port = 11041;
         if !ipv6 {
             p_c.get_global_ctx().config.set_listeners(vec![
                 format!("{}://0.0.0.0:{}", proto, port).parse().unwrap(),

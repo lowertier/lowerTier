@@ -34,7 +34,6 @@ pub mod foreign_network_manager;
 
 pub mod encrypt;
 pub mod fabric;
-pub(crate) mod link_envelope;
 pub(crate) mod secure_datagram;
 
 pub mod peer_task;

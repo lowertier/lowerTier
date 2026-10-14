@@ -122,9 +122,6 @@ fn default_machine_id_state_dir() -> anyhow::Result<PathBuf> {
                 .join("share")
                 .join("lowertier"))
         }
-        target_os = "android" => {
-            anyhow::bail!("machine id state directory must be provided explicitly on Android");
-        }
         _ => anyhow::bail!("machine id state directory is unsupported on this platform"),
     }
 }

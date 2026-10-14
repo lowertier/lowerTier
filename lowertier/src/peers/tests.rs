@@ -49,7 +49,6 @@ pub async fn create_mock_peer_manager_with_mock_stun(
 ) -> Arc<PeerManager> {
     let peer_mgr = create_mock_peer_manager().await;
     let mut flags = peer_mgr.get_global_ctx().get_flags();
-    flags.disable_upnp = true;
     peer_mgr.get_global_ctx().set_flags(flags);
     replace_stun_info_collector(peer_mgr.clone(), udp_nat_type);
     peer_mgr

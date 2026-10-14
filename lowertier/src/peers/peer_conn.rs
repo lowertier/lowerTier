@@ -33,7 +33,6 @@ use snow::{HandshakeState, TransportState, params::NoiseParams};
 use super::alternate_fec::{AlternateFecDecoder, decode_alternate_fec_packet_with_stats};
 use super::{
     PacketRecvChan,
-    link_envelope::{LinkEnvelopeSession, LinkEnvelopeTunnelFilter},
     peer_conn_ping::PeerConnPinger,
     peer_session::{
         INITIATOR_RECOVERY_LIFETIME, InitiatorTransitionIdentity, PeerSession, PeerSessionAction,
@@ -90,26 +89,34 @@ use crate::{
     use_global_var,
 };
 
-use super::link_envelope::LINK_ENVELOPE_OVERHEAD;
 use crate::tunnel::DatagramSizeBudget;
 
 pub type PeerConnId = uuid::Uuid;
 
 const ALTERNATE_FEC_CONSERVATIVE_DATAGRAM_BUDGET: usize = 1200;
 
-fn alternate_fec_wire_len(
-    record_len: usize,
-    session_outer_encrypted: bool,
-    link_envelope_active: bool,
-) -> Option<usize> {
+fn alternate_fec_wire_len(record_len: usize, session_outer_encrypted: bool) -> Option<usize> {
     let mut wire_len = PEER_MANAGER_HEADER_SIZE.checked_add(record_len)?;
     if session_outer_encrypted {
         wire_len = wire_len.checked_add(crate::tunnel::packet_def::StandardAeadTail::SIZE)?;
     }
-    if link_envelope_active {
-        wire_len = wire_len.checked_add(LINK_ENVELOPE_OVERHEAD)?;
-    }
     Some(wire_len)
+}
+
+fn is_noise_handshake_packet_type(packet_type: u8) -> bool {
+    matches!(
+        packet_type,
+        value if value == PacketType::NoiseHandshakeMsg1 as u8
+            || value == PacketType::NoiseHandshakeMsg2 as u8
+            || value == PacketType::NoiseHandshakeMsg3 as u8
+            || value == PacketType::NoiseHandshakeCommit as u8
+            || value == PacketType::NoiseHandshakeCommitAck as u8
+            || value == PacketType::NoiseHandshakeCommitDone as u8
+            || value == PacketType::NoiseHandshakeReady as u8
+            || value == PacketType::NoiseHandshakeReadyAck as u8
+            || value == PacketType::NoiseHandshakeReadyReceipt as u8
+            || value == PacketType::NoiseHandshakeReadyReceiptAck as u8
+    )
 }
 
 const MAGIC: u32 = 0xd1e1a5e1;
@@ -253,7 +260,7 @@ fn packet_batch_is_direct_control(packet_type: u8) -> bool {
         || packet_type == PacketType::ReceiverPressure as u8
         || packet_type == PacketType::AlternateFecSource as u8
         || packet_type == PacketType::AlternateFecParity as u8
-        || crate::peers::link_envelope::is_noise_handshake_packet_type(packet_type)
+        || is_noise_handshake_packet_type(packet_type)
 }
 
 fn packet_batch_is_direct_peer_data(batch: &PacketBatch) -> bool {
@@ -758,7 +765,6 @@ struct NoiseHandshakeResult {
 #[derive(Clone)]
 struct PeerSessionTunnelFilter {
     enabled: bool,
-    link_protection_active: Arc<AtomicBool>,
     data_protection_mode: Arc<AtomicU8>,
     my_peer_id: Arc<AtomicCell<PeerId>>,
     peer_id: Arc<AtomicCell<Option<PeerId>>>,
@@ -773,7 +779,6 @@ impl PeerSessionTunnelFilter {
     fn new(enabled: bool) -> Self {
         Self {
             enabled,
-            link_protection_active: Arc::new(AtomicBool::new(false)),
             data_protection_mode: Arc::new(AtomicU8::new(
                 PeerConnDataProtectionPb::SessionAead as u8,
             )),
@@ -788,17 +793,8 @@ impl PeerSessionTunnelFilter {
     }
 
     fn new_with_peer(my_peer_id: PeerId, enabled: bool) -> Self {
-        Self::new_with_peer_and_link_active(my_peer_id, enabled, Arc::new(AtomicBool::new(false)))
-    }
-
-    fn new_with_peer_and_link_active(
-        my_peer_id: PeerId,
-        enabled: bool,
-        link_protection_active: Arc<AtomicBool>,
-    ) -> Self {
         Self {
             enabled,
-            link_protection_active,
             data_protection_mode: Arc::new(AtomicU8::new(
                 PeerConnDataProtectionPb::SessionAead as u8,
             )),
@@ -873,7 +869,7 @@ impl PeerSessionTunnelFilter {
     }
 
     fn encryption_context(&self) -> Option<(PeerId, PeerId, Arc<PeerSession>)> {
-        if !self.enabled || self.link_protection_active.load(Ordering::Acquire) {
+        if !self.enabled {
             return None;
         }
         Some((
@@ -946,10 +942,6 @@ impl PeerSessionTunnelFilter {
             ));
         }
 
-        let link_protection_active = self.link_protection_active.load(Ordering::Acquire);
-        if link_protection_active && !encrypted {
-            return Ok(());
-        }
         if !encrypted {
             return Err(anyhow::anyhow!(
                 "recovered FEC packet is unprotected on a raw peer stream"
@@ -1252,15 +1244,8 @@ impl TunnelFilter for PeerSessionTunnelFilter {
             }
             return Some(Ok(data));
         }
-        if self.link_protection_active.load(Ordering::Acquire) && !hdr.is_encrypted() {
-            return Some(Ok(data));
-        }
-
-        // The link envelope is the explicit plaintext exception. Raw streams
-        // have no authenticated outer envelope, so every established packet
-        // must carry the session AEAD tag. Do not trust packet type before
-        // decryption because an attacker can reclassify a data packet.
-        if !self.link_protection_active.load(Ordering::Acquire) && !hdr.is_encrypted() {
+        // Established raw streams require session authentication before packet classification.
+        if !hdr.is_encrypted() {
             tracing::debug!(
                 from_peer_id,
                 to_peer_id = my_peer_id,
@@ -1301,9 +1286,6 @@ impl TunnelFilter for PeerSessionTunnelFilter {
 
     fn after_received_batch(&self, data: BatchStreamItem) -> Option<BatchStreamItem> {
         if !self.enabled {
-            return Some(data);
-        }
-        if self.link_protection_active.load(Ordering::Acquire) {
             return Some(data);
         }
         if self.uses_quic_exporter() {
@@ -1419,7 +1401,6 @@ pub struct PeerConn {
 
     secure_mode_cfg: SecureModeConfig,
     session_filter: PeerSessionTunnelFilter,
-    link_envelope_filter: LinkEnvelopeTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
     private_admission: PrivateAdmission,
     connection_permit: Option<super::peer_map::PeerConnectionPermit>,
@@ -1515,23 +1496,11 @@ impl PeerConn {
             .get_secure_mode()
             .filter(|config| config.enabled)
             .expect("the current protocol requires automatic secure mode");
-        let link_protected = tunnel_info
-            .as_ref()
-            .is_some_and(|info| matches!(info.tunnel_type.as_str(), "udp" | "ring"));
-        let link_envelope_filter = LinkEnvelopeTunnelFilter::with_telemetry(
-            link_protected,
-            global_ctx.dataplane_telemetry().clone(),
-        );
-        let session_filter = PeerSessionTunnelFilter::new_with_peer_and_link_active(
-            my_peer_id,
-            true,
-            link_envelope_filter.active_flag(),
-        );
+        let session_filter = PeerSessionTunnelFilter::new_with_peer(my_peer_id, true);
 
         let peer_conn_tunnel_filter = StatsRecorderTunnelFilter::new();
         let throughput = peer_conn_tunnel_filter.filter_output();
-        let filter_chain = TunnelFilterChain::new(session_filter.clone(), peer_conn_tunnel_filter)
-            .chain(link_envelope_filter.clone());
+        let filter_chain = TunnelFilterChain::new(session_filter.clone(), peer_conn_tunnel_filter);
         let peer_conn_tunnel = TunnelWithFilter::new(tunnel, filter_chain);
         let mut direct_tunnel = DirectTunnel::new_with_process_memory(
             peer_conn_tunnel,
@@ -1556,7 +1525,6 @@ impl PeerConn {
 
             secure_mode_cfg,
             session_filter,
-            link_envelope_filter,
             noise_handshake_result: None,
             private_admission: PrivateAdmission::None,
             connection_permit: None,
@@ -1862,7 +1830,6 @@ impl PeerConn {
         alternate_fec_wire_len(
             record_len,
             self.session_filter.encryption_context().is_some(),
-            self.link_envelope_filter.is_active(),
         )
         .is_some_and(|wire_len| wire_len <= self.alternate_fec_datagram_budget())
     }
@@ -1932,7 +1899,7 @@ impl PeerConn {
     }
 
     fn keep_packet_during_handshake(packet_type: u8) -> bool {
-        crate::peers::link_envelope::is_noise_handshake_packet_type(packet_type)
+        is_noise_handshake_packet_type(packet_type)
             || packet_type == PacketType::Ping as u8
             || packet_type == PacketType::Pong as u8
     }
@@ -4252,13 +4219,6 @@ impl PeerConn {
         self.session_filter.set_peer_id(noise.peer_id);
         self.session_filter
             .set_data_protection_mode(data_protection_mode);
-        self.link_envelope_filter.install(LinkEnvelopeSession::new(
-            noise.session.root_key(),
-            &noise.handshake_hash,
-            false,
-            self.my_peer_id,
-            noise.peer_id,
-        ));
         {
             self.alternate_fec_enabled = noise.alternate_fec_enabled;
             self.alternate_fec_remote_receive_capabilities =
@@ -4289,13 +4249,6 @@ impl PeerConn {
         self.session_filter.set_peer_id(noise.peer_id);
         self.session_filter
             .set_data_protection_mode(data_protection_mode);
-        self.link_envelope_filter.install(LinkEnvelopeSession::new(
-            noise.session.root_key(),
-            &noise.handshake_hash,
-            true,
-            self.my_peer_id,
-            noise.peer_id,
-        ));
 
         {
             self.alternate_fec_enabled = noise.alternate_fec_enabled;

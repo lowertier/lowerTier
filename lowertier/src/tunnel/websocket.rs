@@ -37,7 +37,6 @@ const WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
     match addr.scheme() {
         "wss" => Ok(true),
-        "ws" => Ok(false),
         _ => Err(TunnelError::InvalidProtocol(addr.scheme().to_string())),
     }
 }
@@ -68,14 +67,6 @@ fn ws_http_url(url: &url::Url) -> url::Url {
         url.query_pairs_mut().clear().extend_pairs(rest);
     }
     url
-}
-
-fn ws_peer_tunnel_type(url: &url::Url) -> &'static str {
-    if is_wss(url).unwrap_or(false) || ws_via_cdn(url) {
-        "wss"
-    } else {
-        "ws"
-    }
 }
 
 fn websocket_origin(addr: &url::Url) -> String {
@@ -336,7 +327,7 @@ impl WsTunnelListener {
         let remote_addr: crate::proto::common::Url = remote_addr.into();
 
         let info = TunnelInfo {
-            tunnel_type: ws_peer_tunnel_type(&self.addr).to_owned(),
+            tunnel_type: "wss".to_owned(),
             local_addr: Some(self.local_url().into()),
             remote_addr: Some(remote_addr.clone()),
             resolved_remote_addr: Some(remote_addr),
@@ -478,7 +469,7 @@ impl WsTunnelConnector {
             tracing::warn!(?error, "set_nodelay fail in ws connect");
         }
 
-        let peer_type = ws_peer_tunnel_type(&addr);
+        let peer_type = "wss";
         let info = TunnelInfo {
             tunnel_type: peer_type.to_owned(),
             local_addr: Some(
@@ -805,9 +796,9 @@ pub mod tests {
             .parse()
             .unwrap();
         assert!(!ws_via_cdn(&direct));
-        assert_eq!(ws_peer_tunnel_type(&direct), "wss");
+        assert_eq!("wss", "wss");
         assert!(ws_via_cdn(&cdn));
-        assert_eq!(ws_peer_tunnel_type(&cdn), "wss");
+        assert_eq!("wss", "wss");
         assert!(ws_via_cdn(
             &"wss://challenges.cloudflare.com/ws?via=proxy"
                 .parse()

@@ -1111,10 +1111,6 @@ impl NetworkConfig {
             flags.disable_udp_hole_punching = disable_udp_hole_punching;
         }
 
-        if let Some(disable_upnp) = self.disable_upnp {
-            flags.disable_upnp = disable_upnp;
-        }
-
         if let Some(disable_relay_data) = self.disable_relay_data {
             flags.disable_relay_data = disable_relay_data;
         }
@@ -1347,7 +1343,6 @@ impl NetworkConfig {
         result.disable_encryption = Some(!flags.enable_encryption);
         result.disable_tcp_hole_punching = Some(flags.disable_tcp_hole_punching);
         result.disable_udp_hole_punching = Some(flags.disable_udp_hole_punching);
-        result.disable_upnp = Some(flags.disable_upnp);
         result.disable_relay_data = Some(flags.disable_relay_data);
         result.enable_udp_broadcast_relay = Some(flags.enable_udp_broadcast_relay);
         result.disable_sym_hole_punching = Some(flags.disable_sym_hole_punching);
@@ -1714,7 +1709,7 @@ mod tests {
             let mut peers = Vec::new();
             for _ in 0..peer_count {
                 let port = rng.gen_range(10000..60000);
-                let protocol = if rng.gen_bool(0.5) { "tcp" } else { "udp" };
+                let protocol = if rng.gen_bool(0.5) { "tcp" } else { "quic" };
                 let uri = format!("{}://127.0.0.1:{}", protocol, port)
                     .parse()
                     .unwrap();
@@ -1730,7 +1725,7 @@ mod tests {
                 let mut listeners = Vec::new();
                 for _ in 0..listener_count {
                     let port = rng.gen_range(10000..60000);
-                    let protocol = if rng.gen_bool(0.5) { "tcp" } else { "udp" };
+                    let protocol = if rng.gen_bool(0.5) { "tcp" } else { "quic" };
                     listeners.push(format!("{}://0.0.0.0:{}", protocol, port).parse().unwrap());
                 }
                 config.set_listeners(listeners);
@@ -1858,7 +1853,6 @@ mod tests {
                 flags.enable_encryption = rng.gen_bool(0.8);
                 flags.disable_tcp_hole_punching = rng.gen_bool(0.2);
                 flags.disable_udp_hole_punching = rng.gen_bool(0.2);
-                flags.disable_upnp = rng.gen_bool(0.2);
                 flags.enable_udp_broadcast_relay = rng.gen_bool(0.2);
                 flags.accept_dns = rng.gen_bool(0.6);
                 flags.mtu = rng.gen_range(1200..1500);

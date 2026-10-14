@@ -542,14 +542,10 @@ impl TcpProxy {
         #[cfg(feature = "smoltcp")]
         if self.global_ctx.get_flags().use_smoltcp
             || self.global_ctx.no_tun()
-            || cfg!(any(
-                target_os = "android",
-                any(
-                    target_os = "ios",
-                    all(target_os = "macos", feature = "macos-ne")
-                ),
-                target_env = "ohos"
-            ))
+            || cfg!(any(any(
+                target_os = "ios",
+                all(target_os = "macos", feature = "macos-ne")
+            )))
         {
             // use smoltcp network stack
 

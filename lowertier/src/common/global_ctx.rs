@@ -261,11 +261,6 @@ pub enum GlobalCtxEvent {
     ListenerAcceptFailed(url::Url, String), // (url, error message)
     ConnectionAccepted(String, String),  // (local url, remote url)
     ConnectionError(String, String, String), // (local url, remote url, error message)
-    ListenerPortMappingEstablished {
-        local_listener: url::Url,
-        mapped_listener: url::Url,
-        backend: String,
-    },
 
     Connecting(url::Url),
     ConnectError(String, String, String), // (dst, ip version, error message)
@@ -1273,7 +1268,7 @@ impl GlobalCtx {
     }
 
     pub fn enable_exit_node(&self) -> bool {
-        self.flags.load().enable_exit_node || cfg!(target_env = "ohos")
+        self.flags.load().enable_exit_node
     }
 
     pub fn proxy_forward_by_system(&self) -> bool {

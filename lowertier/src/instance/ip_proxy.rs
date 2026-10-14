@@ -81,10 +81,8 @@ impl IpProxy {
         if let Err(error) = self.icmp_proxy.get().unwrap().start().await {
             tracing::error!(?error, "start icmp proxy failed");
             if cfg!(not(any(
-                target_os = "android",
                 target_os = "ios",
-                all(target_os = "macos", feature = "macos-ne"),
-                target_env = "ohos"
+                all(target_os = "macos", feature = "macos-ne")
             ))) {
                 return Err(error);
             }

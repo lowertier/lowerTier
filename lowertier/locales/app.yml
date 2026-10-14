@@ -190,9 +190,6 @@ core_clap:
   disable_sym_hole_punching:
     en: "if true, disable udp nat hole punching for symmetric nat (NAT4), which is based on birthday attack and may be blocked by ISP."
     zh-CN: "如果为true，则禁用基于生日攻击的对称NAT (NAT4) UDP 打洞功能，该打洞方式可能会被运营商封锁"
-  disable_upnp:
-    en: "disable runtime UPnP/NAT-PMP port mapping for eligible listeners; automatic port mapping is enabled by default"
-    zh-CN: "禁用符合条件监听器的运行时 UPnP/NAT-PMP 端口映射；自动端口映射默认开启"
   enable_udp_broadcast_relay:
     en: "Windows only: capture local UDP broadcast packets from physical interfaces and forward them to LowTier peers. Helps games to find rooms in local network. Requires administrator privileges."
     zh-CN: "仅 Windows：捕获物理网卡上的本机 UDP 广播包并转发给 LowTier 对等节点，帮助局域网游戏发现房间。需要管理员权限。"

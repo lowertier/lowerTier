@@ -139,12 +139,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Avoid cfg_aliases!: nightly rejects its trailing-semicolon expansion.
     println!("cargo:rustc-check-cfg=cfg(mobile)");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let has_macos_ne = env::var_os("CARGO_FEATURE_MACOS_NE").is_some();
-    if matches!(target_os.as_str(), "android" | "ios")
-        || (target_os == "macos" && has_macos_ne)
-        || target_env == "ohos"
-    {
+    if target_os == "ios" || (target_os == "macos" && has_macos_ne) {
         println!("cargo:rustc-cfg=mobile");
     }
 

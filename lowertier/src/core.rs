@@ -477,15 +477,6 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_DISABLE_UPNP",
-        help = t!("core_clap.disable_upnp").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_upnp: Option<bool>,
-
-    #[arg(
-        long,
         env = "ET_ENABLE_UDP_BROADCAST_RELAY",
         help = t!("core_clap.enable_udp_broadcast_relay").to_string(),
         num_args = 0..=1,
@@ -544,7 +535,7 @@ struct NetworkOptions {
     // SO_MARK (fwmark) is a Linux-family kernel feature. Gate the flag out
     // entirely on other targets so users on Windows/macOS/BSD don't see a
     // `--socket-mark` they can't act on.
-    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
     #[arg(
         long,
         env = "ET_SOCKET_MARK",
@@ -1327,7 +1318,7 @@ impl NetworkOptions {
         }
         f.bind_device = self.bind_device.unwrap_or(f.bind_device);
 
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
         {
             f.socket_mark = self.socket_mark.or(f.socket_mark);
         }
@@ -1392,7 +1383,6 @@ impl NetworkOptions {
         f.disable_sym_hole_punching = self
             .disable_sym_hole_punching
             .unwrap_or(f.disable_sym_hole_punching);
-        f.disable_upnp = self.disable_upnp.unwrap_or(f.disable_upnp);
         f.enable_udp_broadcast_relay = self
             .enable_udp_broadcast_relay
             .unwrap_or(f.enable_udp_broadcast_relay);
