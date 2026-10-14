@@ -145,8 +145,7 @@ start_core() {
         lowertier-core
         --network-name l2-benchmark
         --network-secret l2-benchmark-secret
-        --listeners udp://0.0.0.0:11010
-        --disable-upnp true
+        --listeners quic://0.0.0.0:11010
         --disable-p2p "$disable_p2p"
     )
     if [[ -n "$overlay_ip" ]]; then
@@ -156,7 +155,7 @@ start_core() {
         args+=(--no-tun true)
     fi
     if [[ "$relay_node" == true ]]; then
-        args+=(--relay-network-whitelist l2-benchmark)
+        args+=(--relay-transit-networks l2-benchmark)
     fi
     if [[ "$enable_bridge" == true ]]; then
         args+=(--enable-bridge true)
@@ -184,8 +183,8 @@ capture_route_proof() {
 
     local routes_a="$result_dir/${scenario}-q${queue_count}-r${repeat}.a.routes.json"
     local routes_b="$result_dir/${scenario}-q${queue_count}-r${repeat}.b.routes.json"
-    "${docker_cmd[@]}" exec "$node_a" lowertier-cli -o json route list >"$routes_a"
-    "${docker_cmd[@]}" exec "$node_b" lowertier-cli -o json route list >"$routes_b"
+    "${docker_cmd[@]}" exec "$node_a" lowertier-cli -o json route list --path >"$routes_a"
+    "${docker_cmd[@]}" exec "$node_b" lowertier-cli -o json route list --path >"$routes_b"
     "${docker_cmd[@]}" cp "$node_a:/tmp/lowertier.args" \
         "$result_dir/${scenario}-q${queue_count}-r${repeat}.a.args"
     "${docker_cmd[@]}" cp "$node_b:/tmp/lowertier.args" \
@@ -197,6 +196,7 @@ capture_route_proof() {
     python3 - "$routes_a" "$routes_b" "$proof_file" "$target_ip" "$overlay_a" \
         "$scenario" "$node_relay" <<'PY'
 import json
+import ipaddress
 import pathlib
 import sys
 
@@ -209,21 +209,34 @@ scenario = sys.argv[6]
 relay_hostname = sys.argv[7]
 
 def select(rows, target, direction):
-    matches = [row for row in rows if row.get("ipv4", "").split("/", 1)[0] == target]
+    if rows.get("error") or rows.get("schema_version") != 1:
+        raise SystemExit(f"{direction} route request failed: {rows}")
+    rows = rows["data"].get("routes", [])
+    def ipv4(row):
+        address = row.get("route", {}).get("ipv4_addr", {}).get("address", {}).get("addr")
+        return str(ipaddress.IPv4Address(address)) if address is not None else ""
+    matches = [row for row in rows if ipv4(row) == target]
     if len(matches) != 1:
         raise SystemExit(f"{direction} route proof has {len(matches)} rows for {target}")
     route = matches[0]
-    path_len = int(route.get("path_len", 0))
+    path = route.get("path_peer_ids", [])
+    path_len = len(path) - 1
     if scenario == "relay-compact-l3":
         if path_len != 2:
             raise SystemExit(f"{direction} relay route has path length {path_len}")
-        if route.get("next_hop_hostname") != relay_hostname:
+        relay = [row for row in rows if row.get("route", {}).get("hostname") == relay_hostname]
+        if len(relay) != 1 or path[1] != relay[0]["route"]["peer_id"]:
             raise SystemExit(
-                f"{direction} relay route uses {route.get('next_hop_hostname')!r}"
+                f"{direction} relay route has an unexpected first hop: {path}"
             )
     elif path_len != 1:
         raise SystemExit(f"{direction} direct route has path length {path_len}")
-    return route
+    return {
+        "ipv4": ipv4(route),
+        "path_len": path_len,
+        "path_peer_ids": path,
+        "next_hop_hostname": relay_hostname if scenario == "relay-compact-l3" else "",
+    }
 
 proof = {
     "scenario": scenario,
@@ -361,7 +374,7 @@ write_empty_resource_file() {
 capture_mode_stats() {
     local node=$1
     local local_file=$2
-    "${docker_cmd[@]}" exec "$node" lowertier-cli stats prometheus >"$local_file"
+    "${docker_cmd[@]}" exec "$node" lowertier-cli stats show --prometheus >"$local_file"
 }
 
 write_empty_mode_stats() {
@@ -631,18 +644,18 @@ run_scenario() {
         "${docker_cmd[@]}" network connect --ip "$relay_underlay_b" \
             "$network_b" "$node_relay"
         start_core "$node_relay" "" "" false true true
-        start_core "$node_a" "$overlay_a" "udp://$node_relay:11010" true
-        start_core "$node_b" "$overlay_b" "udp://$node_relay:11010" true
+        start_core "$node_a" "$overlay_a" "quic://$node_relay:11010" true
+        start_core "$node_b" "$overlay_b" "quic://$node_relay:11010" true
     elif [[ "$scenario" == authorized-bridge-compact-l3 ]]; then
         start_container "$node_a" "$network_a" "$underlay_a"
         start_container "$node_b" "$network_a" "$underlay_b"
         start_core "$node_a" "$overlay_a" "" false false false true
-        start_core "$node_b" "$overlay_b" "udp://$node_a:11010" false false false true
+        start_core "$node_b" "$overlay_b" "quic://$node_a:11010" false false false true
     elif [[ "$scenario" != direct-underlay ]]; then
         start_container "$node_a" "$network_a" "$underlay_a"
         start_container "$node_b" "$network_a" "$underlay_b"
         start_core "$node_a" "$overlay_a"
-        start_core "$node_b" "$overlay_b" "udp://$node_a:11010"
+        start_core "$node_b" "$overlay_b" "quic://$node_a:11010"
     else
         start_container "$node_a" "$network_a" "$underlay_a"
         start_container "$node_b" "$network_a" "$underlay_b"

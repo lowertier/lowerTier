@@ -14,7 +14,7 @@ It does not cover a web interface or graphical client.
 - An Ethernet overlay with an IP-only TUN edge on macOS and Windows.
 - Routed TUN mode for lower packet overhead.
 - Unprivileged SOCKS5 and HTTP proxy mode without TUN or TAP.
-- QUIC/HTTP/3 underlay by default (stealth DATAGRAM fabric). UDP and TCP remain available.
+- QUIC/HTTP/3 underlay by default, with H2 and WSS also available.
 - Peer discovery, NAT traversal, subnet routes, exit nodes, ACLs, and port forwarding.
 - ChaCha20-Poly1305 authenticated encryption by default.
 - An optional secure mode with Noise authentication and replay protection.
@@ -44,7 +44,7 @@ TAP, TUN, or local proxy
         |
 LowTier route and Ethernet fabric
         |
-Encrypted QUIC/HTTP/3, UDP, or TCP link
+Encrypted QUIC/HTTP/3, H2, or WSS link
         |
 Remote LowTier peer
 ```
@@ -84,7 +84,7 @@ The default build includes TAP/TUN, QUIC/H2/WSS, unprivileged proxy support, and
 The release profile uses fat LTO, optimization level 3, one code generation unit, symbol stripping, and aborting panics.
 Development and test builds retain panic unwinding for diagnostics.
 
-Use `--features full` only when the deployment requires Magic DNS, Zstandard, or alternate crypto backends; it does not change transport availability.
+Use `--features full` only when the deployment requires Magic DNS; it does not change transport availability.
 
 The build creates these files.
 
@@ -660,8 +660,6 @@ For example, `--network-name` maps to `ET_NETWORK_NAME`.
 
 | Option | Purpose |
 | --- | --- |
-| `--config-server`, `-w` | Read configuration from a UDP, TCP, WS, or WSS configuration server. |
-| `--machine-id` | Set the stable machine identifier used for configuration recovery. |
 | `--config-file`, `-c` | Load one or more TOML files. Use `-` to read one file from standard input. |
 | `--config-dir` | Load every `.toml` file in one directory. |
 | `--network-name` | Set `network_identity.network_name`. |

@@ -6,7 +6,7 @@ loaded latency, and native LowTier CPU per Gbit.
 
 Absolute throughput is often limited by the macOS-to-VM path.
 This limit is more visible when the selected Colima profile uses QEMU.
-The native peer listens on macOS.
+The native peer listens for QUIC connections on macOS.
 The Colima peer connects through `host.docker.internal`.
 This layout does not use Colima UDP port forwarding.
 CPU per Gbit and latency are the primary macOS efficiency measurements.
@@ -40,6 +40,7 @@ Useful controls:
 | `RUNS` | `3` | Throughput repetitions in each direction |
 | `DURATION` | `10` | Seconds per throughput run |
 | `CPU_DURATION` | `15` | Seconds in the CPU and loaded-latency probe |
+| `HOST_QUIC_PORT` | `12010` | Native QUIC listener port |
 | `MTU` | `1360` | Inner TUN MTU used by both benchmark peers |
 | `PROFILE_DURATION` | `0` | Seconds per optional symbol, interface-counter, and process profile |
 | `COLIMA_PROFILE` | `lowertier-l2` | Peer VM profile |

@@ -18,7 +18,7 @@ docker_context=${DOCKER_CONTEXT:-colima-lowertier-l2}
 image=${LOWTIER_TEST_IMAGE:-lowertier-l2-qemu-test:local}
 runtime_env=${LOWTIER_RUNTIME_ENV:-}
 container_name=lowertier-macos-tun-bench
-host_udp_port=${HOST_UDP_PORT:-12010}
+host_quic_port=${HOST_QUIC_PORT:-12010}
 result_dir=${RESULT_DIR:-$(mktemp -d -t lowertier-macos-tun-bench.XXXXXX)}
 client_pid=
 client_core_pid=
@@ -106,9 +106,8 @@ docker --context "$docker_context" run -d \
     --mtu "$mtu" \
     --ipv4 10.91.0.2/24 \
     --no-listener \
-    --peers "udp://host.docker.internal:${host_udp_port}" \
-    --default-protocol udp \
-    --disable-upnp true \
+    --peers "quic://host.docker.internal:${host_quic_port}" \
+    --default-protocol quic \
     --rpc-portal 127.0.0.1:15992 >/dev/null
 
 sleep 1
@@ -126,9 +125,8 @@ fi
         --encryption-algorithm "$encryption_algorithm" \
         --mtu "$mtu" \
         --ipv4 10.91.0.1/24 \
-        --listeners "udp://0.0.0.0:${host_udp_port}" \
-        --default-protocol udp \
-        --disable-upnp true \
+        --listeners "quic://0.0.0.0:${host_quic_port}" \
+        --default-protocol quic \
         --rpc-portal 127.0.0.1:15991
 ) >"$result_dir/client.log" 2>&1 &
 client_pid=$!

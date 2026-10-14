@@ -103,11 +103,10 @@ start_client() {
         --tun=userspace-networking \
         --no-listener \
         --rpc-portal="127.0.0.1:$client_rpc_port" \
-        --peers "udp://127.0.0.1:$underlay_port" \
+        --peers "quic://127.0.0.1:$underlay_port" \
         --socks5-server="127.0.0.1:$proxy_port" \
         ${http_proxy_arg:+"$http_proxy_arg"} \
         --disable-ipv6=true \
-        --disable-upnp=true \
         --disable-p2p=true \
         >"$run_dir/$instance_name.log" 2>&1 &
     client_pid=$!
@@ -129,10 +128,9 @@ RUST_LOG=warn "$core" \
     --hostname userspace-proxy-server \
     --ipv4 10.77.0.2 \
     --tun=userspace-networking \
-    --listeners "udp://127.0.0.1:$underlay_port" \
+    --listeners "quic://127.0.0.1:$underlay_port" \
     --rpc-portal="127.0.0.1:$server_rpc_port" \
     --disable-ipv6=true \
-    --disable-upnp=true \
     --disable-p2p=true \
     >"$run_dir/server.log" 2>&1 &
 server_pid=$!

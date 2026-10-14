@@ -114,6 +114,7 @@ Snapshots can change during collection because packet processing continues.
 
 The underlay policy still applies to all transport sockets.
 
-LowTier ignores the removed `port_mode` and `interface_adapter` fields during migration.
+LowTier rejects the removed `port_mode` and `interface_adapter` fields when it loads TOML configuration.
+Remove these keys to use automatic platform adapter selection.
 
 Protocol version 4 does not use the old L2-TUN send path.

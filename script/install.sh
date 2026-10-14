@@ -241,36 +241,35 @@ INIT() {
 instance_name = "default"
 dhcp = true
 listeners = [
-    "udp://0.0.0.0:11010",
     "quic://0.0.0.0:11012",
     "tcp://0.0.0.0:11010",
-    "ws://0.0.0.0:11011/",
-    "wss://0.0.0.0:11012/",
+    "wss://0.0.0.0:11011/",
 ]
 exit_nodes = []
 peer = []
-rpc_portal = "0.0.0.0:0"
 
 [network_identity]
 network_name = "default"
 network_secret = "default"
 
 [flags]
-default_protocol = "udp"
+default_protocol = "quic"
 dev_name = ""
 enable_encryption = true
 enable_ipv6 = true
 mtu = 1380
-latency_first = false
 enable_exit_node = false
 no_tun = false
 use_smoltcp = false
-foreign_network_whitelist = "*"
 disable_p2p = false
-p2p_only = false
 relay_all_peer_rpc = false
 disable_tcp_hole_punching = false
 disable_udp_hole_punching = false
+
+[relay]
+policy = "hop"
+transit = "allow"
+transit_networks = ["*"]
 
 EOF
 

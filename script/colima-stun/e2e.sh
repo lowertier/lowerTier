@@ -64,13 +64,12 @@ start_node() {
           --network-secret colima-stun-secret \
           --ipv4 "$1/24" \
           --dev-name et0 \
-          --listeners udp://0.0.0.0:11010 \
-          --peers udp://172.30.0.10:11010 \
-          --disable-upnp true \
+          --listeners quic://0.0.0.0:11010 \
+          --peers quic://172.30.0.10:11010 \
           --disable-sym-hole-punching true \
           --need-p2p true \
-          --latency-first true \
-          --stun-servers 172.30.0.10:11010 stun.cloudflare.com:3478 172.30.0.10:11011 \
+          --relay-policy latency \
+          --stun-servers 172.30.0.10:3478 172.30.0.10:3479 \
           --console-log-level debug \
           > /tmp/lowertier.log 2>&1
     ' sh "${overlay_ip}"
@@ -99,7 +98,7 @@ wait_for_hole_punch() {
     local deadline=$((SECONDS + timeout_seconds))
     while (( SECONDS < deadline )); do
         for name in et-stun-node-a et-stun-node-b; do
-            if "${docker_cmd[@]}" exec "${name}" grep -q 'hole punched' /tmp/lowertier.log 2>/dev/null; then
+            if "${docker_cmd[@]}" exec "${name}" grep -Eq 'QUIC hole punch (connected|accepted)' /tmp/lowertier.log 2>/dev/null; then
                 selected_node="${name}"
                 setup_seconds="$(python3 - <<PY
 import time
@@ -125,8 +124,12 @@ create_networks
 "${docker_cmd[@]}" exec -d et-stun-relay sh -c '
     exec lowertier-core --network-name colima-stun --network-secret colima-stun-secret \
       --ipv4 10.230.0.1/24 --dev-name et0 \
-      --listeners udp://0.0.0.0:11010 udp://0.0.0.0:11011 \
+      --listeners quic://0.0.0.0:11010 \
       --disable-udp-hole-punching true > /tmp/lowertier.log 2>&1
+'
+"${docker_cmd[@]}" exec -d et-stun-relay sh -c '
+    exec lowertier-tracker --udp-listen 0.0.0.0:3478,0.0.0.0:3479 \
+      --stun-change-port > /tmp/tracker.log 2>&1
 '
 
 start_router et-stun-nat-a "${private_a_net}" 10.210.0.2 172.30.0.2 10.210.0.0/24 cone
@@ -144,7 +147,7 @@ if ! wait_for_hole_punch 45 "${started_at}"; then
     for name in et-stun-node-a et-stun-node-b; do
         echo "${name} punch diagnostics:" >&2
         "${docker_cmd[@]}" exec "${name}" grep -E \
-            'STUN candidate observed|hole punch got remote|SendPunchPacketConeRequest|got raw packet|got udp hole punch|triggered hole punch|punched socket found|failed to connect with socket' \
+            'QUIC punch|QUIC hole punch|STUN' \
             /tmp/lowertier.log | tail -160 >&2 || true
     done
     "${docker_cmd[@]}" exec et-stun-nat-a conntrack -L -p udp >&2 || true
@@ -152,8 +155,8 @@ if ! wait_for_hole_punch 45 "${started_at}"; then
     exit 1
 fi
 ping_output="$("${docker_cmd[@]}" exec et-stun-node-a ping -n -c 20 -i 0.1 -W 2 10.230.0.3)"
-selected_line="$("${docker_cmd[@]}" exec "${selected_node}" grep 'punched socket found' /tmp/lowertier.log | tail -1)"
-stun_lines="$("${docker_cmd[@]}" exec "${selected_node}" grep 'STUN candidate observed' /tmp/lowertier.log | tail -3)"
+selected_line="$("${docker_cmd[@]}" exec "${selected_node}" grep -E 'QUIC hole punch (connected|accepted)' /tmp/lowertier.log | tail -1)"
+stun_lines="$("${docker_cmd[@]}" exec "${selected_node}" grep -E 'QUIC punch (mapped socket|reserved locally assigned mapped port)' /tmp/lowertier.log | tail -3)"
 
 printf 'direct_setup_seconds=%s\n' "${setup_seconds}"
 printf '%s\n' "${stun_lines}"
@@ -166,4 +169,4 @@ if (( loss_percent > 20 )); then
     exit 1
 fi
 
-echo "Colima QEMU public-STUN, skew, loss, cone-to-cone NAT experiment passed"
+echo "Colima QEMU local STUN and QUIC cone-to-cone NAT experiment passed"
