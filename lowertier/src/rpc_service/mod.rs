@@ -1,5 +1,6 @@
 mod acl_manage;
 mod config;
+pub mod control;
 mod connector_manage;
 mod credential_manage;
 mod json_rpc;

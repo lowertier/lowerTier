@@ -1,3 +1,10 @@
+pub mod control {
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/api.control.v1.rs"));
+        include!(concat!(env!("OUT_DIR"), "/api.control.v1.serde.rs"));
+    }
+}
+
 pub mod config {
     include!(concat!(env!("OUT_DIR"), "/api.config.rs"));
     include!(concat!(env!("OUT_DIR"), "/api.config.serde.rs"));

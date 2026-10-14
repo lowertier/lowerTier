@@ -7,29 +7,13 @@ use crate::{
     instance::instance::InstanceRpcServerHook,
     instance_manager::NetworkInstanceManager,
     proto::{
-        api::{
-            config::ConfigRpcServer,
-            instance::{
-                AclManageRpcServer, ConnectorManageRpcServer, CredentialManageRpcServer,
-                MappedListenerManageRpcServer, PeerManageRpcServer, PortForwardManageRpcServer,
-                StatsRpcServer, TcpProxyRpcServer,
-            },
-            logger::LoggerRpcServer,
-            manage::WebClientServiceServer,
-        },
-        peer_rpc::PeerCenterRpcServer,
+        api::control::v1::ControlPlaneV1RpcServer,
         rpc_impl::{service_registry::ServiceRegistry, standalone::StandAloneServer},
         rpc_types::error::Error,
     },
-    rpc_service::instance_manage::{DefaultHooks, WebClientHooks},
     rpc_service::{
-        acl_manage::AclManageRpcService, config::ConfigRpcService,
-        connector_manage::ConnectorManageRpcService, credential_manage::CredentialManageRpcService,
-        instance_manage::InstanceManageRpcService, logger::LoggerRpcService,
-        mapped_listener_manage::MappedListenerManageRpcService,
-        peer_center::PeerCenterManageRpcService, peer_manage::PeerManageRpcService,
-        port_forward_manage::PortForwardManageRpcService, protected_port,
-        proxy::TcpProxyRpcService, stats::StatsRpcService,
+        control::{ControlPlaneService, ControlToken},
+        protected_port,
     },
     tunnel::{TunnelListener, tcp::TcpTunnelListener},
 };
@@ -53,7 +37,7 @@ impl ApiRpcServer<TcpTunnelListener> {
                     .context("failed to parse rpc portal address")?,
             ),
             instance_manager,
-        );
+        )?;
         protected_port::register_protected_tcp_port(rpc_addr.port());
         server.protected_tcp_port = Some(rpc_addr.port());
 
@@ -66,13 +50,20 @@ impl ApiRpcServer<TcpTunnelListener> {
 }
 
 impl<T: TunnelListener + 'static> ApiRpcServer<T> {
-    pub fn from_tunnel(tunnel: T, instance_manager: Arc<NetworkInstanceManager>) -> Self {
+    pub fn from_tunnel(
+        tunnel: T,
+        instance_manager: Arc<NetworkInstanceManager>,
+    ) -> anyhow::Result<Self> {
+        let token_path = ControlToken::default_path(
+            instance_manager.get_config_dir().map(|path| path.as_path()),
+        )?;
+        let token = ControlToken::load_or_create(&token_path)?;
         let rpc_server = StandAloneServer::new(tunnel);
-        register_api_rpc_service(&instance_manager, rpc_server.registry(), None);
-        Self {
+        register_api_rpc_service(&instance_manager, rpc_server.registry(), token);
+        Ok(Self {
             rpc_server,
             protected_tcp_port: None,
-        }
+        })
     }
 }
 
@@ -100,67 +91,10 @@ impl<T: TunnelListener + 'static> Drop for ApiRpcServer<T> {
 pub fn register_api_rpc_service(
     instance_manager: &Arc<NetworkInstanceManager>,
     registry: &ServiceRegistry,
-    hooks: Option<Arc<dyn WebClientHooks>>,
+    token: ControlToken,
 ) {
     registry.register(
-        PeerManageRpcServer::new(PeerManageRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(
-        ConnectorManageRpcServer::new(ConnectorManageRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(
-        MappedListenerManageRpcServer::new(MappedListenerManageRpcService::new(
-            instance_manager.clone(),
-        )),
-        "",
-    );
-
-    registry.register(
-        TcpProxyRpcServer::new(TcpProxyRpcService::new(instance_manager.clone(), "tcp")),
-        "tcp",
-    );
-
-    registry.register(
-        AclManageRpcServer::new(AclManageRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(
-        PortForwardManageRpcServer::new(PortForwardManageRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(
-        StatsRpcServer::new(StatsRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(LoggerRpcServer::new(LoggerRpcService), "");
-
-    registry.register(
-        ConfigRpcServer::new(ConfigRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(
-        WebClientServiceServer::new(InstanceManageRpcService::new(
-            instance_manager.clone(),
-            hooks.unwrap_or(Arc::new(DefaultHooks)),
-        )),
-        "",
-    );
-
-    registry.register(
-        PeerCenterRpcServer::new(PeerCenterManageRpcService::new(instance_manager.clone())),
-        "",
-    );
-
-    registry.register(
-        CredentialManageRpcServer::new(CredentialManageRpcService::new(instance_manager.clone())),
+        ControlPlaneV1RpcServer::new(ControlPlaneService::new(instance_manager.clone(), token)),
         "",
     );
 }

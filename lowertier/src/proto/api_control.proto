@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package api.control.v1;
+
+message RequestMeta {
+  string instance_id = 1;
+  string control_token = 2;
+  string admin_token = 3;
+  string request_id = 4;
+}
+
+message ApiError {
+  string code = 1;
+  string message = 2;
+  string field_path = 3;
+  bool retryable = 4;
+}
+
+message Page {
+  uint32 limit = 1;
+  string page_token = 2;
+}
+
+message SnapshotMeta {
+  uint64 revision = 1;
+  uint64 topology_generation = 2;
+  int64 sampled_at_unix_ms = 3;
+}
+
+message GetCapabilitiesRequest { RequestMeta meta = 1; }
+
+message GetCapabilitiesResponse {
+  ApiError error = 1;
+  string api_version = 2;
+  repeated string methods = 3;
+  uint32 max_page_size = 4;
+  uint32 max_watch_wait_ms = 5;
+}
+
+service ControlPlaneV1Rpc {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+}
