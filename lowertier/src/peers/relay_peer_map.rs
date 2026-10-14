@@ -2018,9 +2018,7 @@ impl RelayPeerMap {
                 })
         };
         let Some(next_hop) = next_hop else {
-            return Err(Error::RouteError(Some(format!(
-                "next hop not found in route for peer {dst_peer_id:?}"
-            ))));
+            return Err(Error::RouteUnavailable(dst_peer_id));
         };
         if self.peer_map.has_peer(next_hop) {
             self.peer_map.send_msg_directly(msg, next_hop).await
@@ -2040,9 +2038,7 @@ impl RelayPeerMap {
                 .await
                 .map_err(|error| Error::RouteError(Some(error.to_string())))
         } else {
-            Err(Error::RouteError(Some(format!(
-                "next hop not found in direct peer map: {next_hop:?}"
-            ))))
+            Err(Error::RouteUnavailable(next_hop))
         }
     }
 
@@ -2075,15 +2071,31 @@ impl RelayPeerMap {
                 })
         };
         let Some(next_hop) = next_hop else {
-            return Err(Error::RouteError(Some(format!(
-                "next hop not found in route for peer {dst_peer_id:?}"
-            ))));
+            return Err(Error::RouteUnavailable(dst_peer_id));
         };
         if self.peer_map.has_peer(next_hop) {
             self.peer_map.send_msg_batch_directly(batch, next_hop).await
         } else if let Some(foreign_network_client) = &self.foreign_network_client {
-            for packet in batch {
-                foreign_network_client.send_msg(packet, next_hop).await?;
+            let mut packets = batch.into_iter();
+            while let Some(packet) = packets.next() {
+                let transit = packet.transit_data;
+                if let Err(error) = foreign_network_client.send_msg(packet, next_hop).await {
+                    if matches!(
+                        error,
+                        Error::RouteUnavailable(_)
+                            | Error::PeerNoConnectionError(_)
+                            | Error::RouteError(None)
+                            | Error::NotFound
+                    ) {
+                        let transit_packets = u64::from(transit)
+                            + packets.filter(|packet| packet.transit_data).count() as u64;
+                        return Err(Error::RouteBatchUnavailable {
+                            peer_id: next_hop,
+                            transit_packets,
+                        });
+                    }
+                    return Err(error);
+                }
             }
             Ok(())
         } else if let Some(transport) = &self.foreign_relay_transport {
@@ -2109,9 +2121,7 @@ impl RelayPeerMap {
                 .await
                 .map_err(|error| Error::RouteError(Some(error.to_string())))
         } else {
-            Err(Error::RouteError(Some(format!(
-                "next hop not found in direct peer map: {next_hop:?}"
-            ))))
+            Err(Error::RouteUnavailable(next_hop))
         }
     }
 

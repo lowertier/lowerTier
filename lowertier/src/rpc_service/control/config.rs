@@ -260,6 +260,9 @@ fn changed_paths(before: &Value, after: &Value, path: &str, changed: &mut Vec<St
 }
 
 fn classify(path: &str, quic: bool) -> &'static str {
+    if path == "limits.memory_bytes" {
+        return "restart";
+    }
     if path == "hostname"
         || path.starts_with("relay.")
         || path.starts_with("limits.")
@@ -685,7 +688,7 @@ fn select_apply(
         || crate::common::config::transport_protocol_enabled(&desired.get_flags(), "quic");
     let mut published = before;
     for path in changed {
-        match if running {
+        match if running || path == "limits.memory_bytes" {
             classify(&path, quic)
         } else {
             "live"
@@ -737,6 +740,21 @@ impl ControlPlaneService {
             })
             .collect::<Vec<_>>();
         counters.sort_unstable_by(|a, b| (&a.name, &a.labels).cmp(&(&b.name, &b.labels)));
+        let acl = context.get_acl_filter().get_stats();
+        counters.push(crate::proto::api::instance::MetricSnapshot {
+            name: "relay_drops".into(),
+            value: acl
+                .global
+                .get(&crate::common::acl_processor::AclStatKey::ForwardPacketsDropped.as_str())
+                .copied()
+                .unwrap_or(0),
+            labels: [
+                ("error_type".into(), "acl".into()),
+                ("scope".into(), "instance".into()),
+            ]
+            .into_iter()
+            .collect(),
+        });
         let total_bytes = counters
             .iter()
             .filter(|counter| counter.name == "relay_bytes")
@@ -756,21 +774,18 @@ impl ControlPlaneService {
             .map(TomlConfigLoader::new_from_str)
             .transpose()?
             .map_or_else(|| flags.clone(), |config| config.get_flags());
-        let advertised = context.get_feature_flags();
+        let (generation, advertised, paths) =
+            instance.peers()?.get_route().control_routes(&[]).await;
+        let mut snapshot = self.snapshot(&instance).await?;
+        snapshot.topology_generation = generation;
         Ok(GetRelayResponse {
-            snapshot: Some(self.snapshot(&instance).await?),
+            paths,
+            snapshot: Some(snapshot),
             config: Some(flags.relay_config().clone()),
             total_bytes,
             counters,
             desired_permission: desired.relay_config().transit().as_str_name().into(),
-            advertised_permission: if advertised.deny_transit_data {
-                "deny"
-            } else if advertised.avoid_relay_data {
-                "avoid"
-            } else {
-                "allow"
-            }
-            .into(),
+            advertised_permission: advertised,
             drop_reasons: ["deny", "network", "budget", "acl", "unavailable_path"]
                 .into_iter()
                 .map(str::to_owned)
@@ -902,6 +917,17 @@ impl ControlPlaneService {
             .get(&id)
             .cloned()
             .unwrap_or_default();
+        if state
+            .restart_fields
+            .iter()
+            .any(|path| path == "limits.memory_bytes")
+        {
+            return Err(failure(
+                "RESTART_REQUIRED",
+                "Restart the process to apply the staged memory limit.",
+                "limits.memory_bytes",
+            ));
+        }
         if let Some(desired) = &state.desired {
             active.replace_active(&TomlConfigLoader::new_from_str(desired)?);
         }

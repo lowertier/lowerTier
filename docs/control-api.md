@@ -86,6 +86,8 @@ Each transaction prepares ACL rules and TLS identity before persistence and publ
 Failed persistence leaves the previous configuration and revision active.
 
 Relay, limits, hostname, and ACL fields apply live.
+`limits.memory_bytes` requires a process restart because instances share the strictest explicit memory limit.
+Instance stop/start does not activate a staged process memory limit.
 Camouflage HTTP authority, WSS path, and trusted proxy CIDRs affect new connections.
 TLS identity, SNI classification, admission secret, website root, and decoy endpoints require restart when QUIC is enabled.
 This includes QUIC endpoints created by discovery. Existing authenticated connections keep their transport binding.
@@ -100,6 +102,9 @@ Each request shares the existing route work limit. A path error reports unavaila
 Goodput reconstruction retains each destination's positive delivery threshold.
 Route summaries remain O(V). The captured graphs require O(V + E) storage.
 `sample_expiry_ms` reports the remaining lifetime of a peer measurement.
+Relay ACL drops use the instance forwarding-chain counter. These drops have instance scope.
+Unavailable-path drops count transit sends without a usable destination or gateway.
+These drops use one aggregate counter in the owning instance, including foreign transit.
 Discovery HTTP observations describe the HTTP control socket. They do not identify the VPN transport socket.
 An omitted observation expiry means that the observer did not supply a lifetime.
 

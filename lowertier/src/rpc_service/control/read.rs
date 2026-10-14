@@ -302,7 +302,7 @@ impl ControlPlaneService {
         );
         let (mut peers, next_page_token) = page(rows, request.page, &stamp)?;
         let requested = peers.iter().map(|peer| peer.peer_id).collect::<Vec<_>>();
-        let (generation, paths) = instance
+        let (generation, _, paths) = instance
             .peers()?
             .get_route()
             .control_routes(&requested)
@@ -337,7 +337,7 @@ impl ControlPlaneService {
         let (id, instance) = self.resolve(request.meta.as_ref())?;
         let mut snapshot = self.snapshot(&instance).await?;
         let route = instance.peers()?.get_route();
-        let (generation, mut rows) = route.control_routes(&[]).await;
+        let (generation, _, mut rows) = route.control_routes(&[]).await;
         snapshot.topology_generation = generation;
         rows.sort_unstable_by_key(|route| route.route.as_ref().unwrap().peer_id);
         let stamp = stamp(
@@ -354,7 +354,7 @@ impl ControlPlaneService {
                 .iter()
                 .map(|row| row.route.as_ref().unwrap().peer_id)
                 .collect::<Vec<_>>();
-            let (current, paths) = route.control_routes(&requested).await;
+            let (current, _, paths) = route.control_routes(&requested).await;
             if current != generation {
                 return Err(failure(
                     "CONFLICT",
@@ -567,14 +567,16 @@ impl ControlPlaneService {
     ) -> anyhow::Result<GetStatsResponse> {
         let (id, instance) = self.resolve(request.meta.as_ref())?;
         let context = instance.context()?;
-        let (sampled_at, metrics) = {
+        let peer_id = instance.peers()?.my_peer_id();
+        let (_, sampled_at, metrics) = {
             let mut cache = self.stats.lock().unwrap();
             cache.retain(|id, _| self.manager.get_instance_name(id).is_some());
             let current = now_ms();
-            let cached = cache.entry(id).or_insert_with(|| (0, Vec::new()));
-            if current.saturating_sub(cached.0) >= 1000 {
-                cached.0 = current;
-                cached.1 = context
+            let cached = cache.entry(id).or_insert_with(|| (0, 0, Vec::new()));
+            if cached.0 != peer_id || current.saturating_sub(cached.1) >= 1000 {
+                cached.0 = peer_id;
+                cached.1 = current;
+                cached.2 = context
                     .stats_manager()
                     .get_all_metrics()
                     .into_iter()

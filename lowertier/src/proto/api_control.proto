@@ -95,6 +95,7 @@ message RouteSnapshot {
   uint32 first_hop_peer_id = 14;
   uint32 final_gateway_peer_id = 15;
   bytes peer_key = 16;
+  string override_inactive_reason = 17;
 }
 message ListRoutesRequest { RequestMeta meta = 1; Page page = 2; bool include_paths = 3; }
 message ListRoutesResponse {
@@ -267,6 +268,7 @@ message GetRelayResponse {
   string desired_permission = 6;
   string advertised_permission = 7;
   repeated string drop_reasons = 8;
+  repeated RouteSnapshot paths = 9;
 }
 message GetCamouflageRequest { RequestMeta meta = 1; }
 message GetCamouflageResponse {

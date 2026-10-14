@@ -8,6 +8,15 @@ use crate::{
     },
 };
 
+pub(crate) type StatsCache = Arc<
+    std::sync::Mutex<
+        std::collections::BTreeMap<
+            uuid::Uuid,
+            (u32, i64, Vec<crate::proto::api::instance::MetricSnapshot>),
+        >,
+    >,
+>;
+
 pub(crate) mod config;
 mod instance;
 pub(crate) mod logs;
@@ -23,14 +32,7 @@ pub struct ControlPlaneService {
     token: Option<Arc<ControlToken>>,
     epoch: uuid::Uuid,
     externally_locked: bool,
-    stats: Arc<
-        std::sync::Mutex<
-            std::collections::BTreeMap<
-                uuid::Uuid,
-                (i64, Vec<crate::proto::api::instance::MetricSnapshot>),
-            >,
-        >,
-    >,
+    stats: StatsCache,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +44,7 @@ fn failure(code: &str, message: &str, field_path: &str) -> anyhow::Error {
         code: code.to_ascii_lowercase(),
         message: message.into(),
         field_path: field_path.into(),
-        retryable: false,
+        retryable: matches!(code, "UNAVAILABLE" | "DEADLINE_EXCEEDED"),
     })
     .into()
 }
@@ -61,21 +63,21 @@ fn api_error(error: anyhow::Error) -> ApiError {
 impl ControlPlaneService {
     pub fn new(manager: Arc<NetworkInstanceManager>, token: ControlToken) -> Self {
         Self {
+            stats: manager.control_stats.clone(),
             manager,
             token: Some(Arc::new(token)),
             epoch: *std::sync::LazyLock::force(&watch::PROCESS_EPOCH),
             externally_locked: false,
-            stats: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
     pub fn for_owned_instances(manager: Arc<NetworkInstanceManager>) -> Self {
         Self {
+            stats: manager.control_stats.clone(),
             manager,
             token: None,
             epoch: *std::sync::LazyLock::force(&watch::PROCESS_EPOCH),
             externally_locked: false,
-            stats: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 

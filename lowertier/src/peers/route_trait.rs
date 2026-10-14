@@ -1050,9 +1050,14 @@ pub trait Route {
     async fn control_routes(
         &self,
         _path_peers: &[PeerId],
-    ) -> (u64, Vec<crate::proto::api::control::v1::RouteSnapshot>) {
+    ) -> (
+        u64,
+        String,
+        Vec<crate::proto::api::control::v1::RouteSnapshot>,
+    ) {
         (
             self.forwarding_generation(),
+            "unknown".into(),
             self.list_routes()
                 .await
                 .into_iter()

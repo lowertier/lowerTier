@@ -28,6 +28,7 @@ impl Drop for DaemonGuard {
 }
 
 pub struct NetworkInstanceManager {
+    pub(crate) control_stats: crate::rpc_service::control::StatsCache,
     instance_map: Arc<DashMap<uuid::Uuid, NetworkInstance>>,
     instance_stop_tasks: Arc<DashMap<uuid::Uuid, AbortOnDropHandle<()>>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
@@ -48,6 +49,7 @@ impl Default for NetworkInstanceManager {
 impl NetworkInstanceManager {
     pub fn new() -> Self {
         NetworkInstanceManager {
+            control_stats: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             instance_map: Arc::new(DashMap::new()),
             instance_stop_tasks: Arc::new(DashMap::new()),
             stop_check_notifier: Arc::new(tokio::sync::Notify::new()),
@@ -144,6 +146,10 @@ impl NetworkInstanceManager {
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         self.instance_map.retain(|k, _| instance_ids.contains(k));
+        self.control_stats
+            .lock()
+            .unwrap()
+            .retain(|id, _| instance_ids.contains(id));
         self.control_configs
             .lock()
             .unwrap()
@@ -173,6 +179,7 @@ impl NetworkInstanceManager {
     }
 
     pub(crate) fn start_network_instance(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        self.control_stats.lock().unwrap().remove(&id);
         self.instance_map
             .get_mut(&id)
             .ok_or_else(|| anyhow::anyhow!("The instance does not exist."))?
@@ -182,6 +189,7 @@ impl NetworkInstanceManager {
     }
 
     pub(crate) async fn stop_network_instance(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        self.control_stats.lock().unwrap().remove(&id);
         let launcher = self
             .instance_map
             .get_mut(&id)
@@ -199,6 +207,10 @@ impl NetworkInstanceManager {
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         self.instance_map.retain(|k, _| !instance_ids.contains(k));
+        self.control_stats
+            .lock()
+            .unwrap()
+            .retain(|id, _| !instance_ids.contains(id));
         self.control_configs
             .lock()
             .unwrap()

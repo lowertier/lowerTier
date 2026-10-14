@@ -20,6 +20,13 @@ pub enum Error {
     PeerNoConnectionError(PeerId),
     #[error("RouteError: {0:?}")]
     RouteError(Option<String>),
+    #[error("The route to peer {0} is unavailable.")]
+    RouteUnavailable(PeerId),
+    #[error("The route to peer {peer_id} is unavailable for {transit_packets} transit packets.")]
+    RouteBatchUnavailable {
+        peer_id: PeerId,
+        transit_packets: u64,
+    },
     #[error("Not found")]
     NotFound,
     #[error("Invalid Url: {0}")]

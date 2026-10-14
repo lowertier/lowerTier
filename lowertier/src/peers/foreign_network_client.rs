@@ -76,7 +76,7 @@ impl ForeignNetworkClient {
             }
             return ret;
         }
-        Err(Error::RouteError(Some("no next hop".to_string())))
+        Err(Error::RouteUnavailable(peer_id))
     }
 
     pub async fn run(&self) {

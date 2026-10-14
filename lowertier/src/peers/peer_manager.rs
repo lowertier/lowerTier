@@ -4772,6 +4772,7 @@ impl PeerManager {
             return Err(Error::RouteError(None));
         }
         let msg_len = msg.buf_len() as u64;
+        let transit_data = msg.transit_data;
         let latency_first_gateway = {
             peers
                 .get_gateway_peer_id_for_packet(dst_peer_id, policy.clone(), &msg)
@@ -4842,7 +4843,30 @@ impl PeerManager {
             }
         }
 
+        if transit_data {
+            Self::record_unavailable_transit(peers, 1, &send_result);
+        }
         send_result
+    }
+
+    fn record_unavailable_transit(peers: &PeerMap, packets: u64, result: &Result<(), Error>) {
+        let packets = match result {
+            Err(Error::RouteBatchUnavailable {
+                transit_packets, ..
+            }) => *transit_packets,
+            Err(
+                Error::RouteError(None)
+                | Error::RouteUnavailable(_)
+                | Error::PeerNoConnectionError(_)
+                | Error::NotFound,
+            ) => packets,
+            _ => 0,
+        };
+        if packets == 0 {
+            return;
+        }
+        let context = peers.get_global_ctx();
+        context.record_unavailable_transit_drop(packets);
     }
 
     async fn send_msg_internal_batch_authorized(
@@ -4877,6 +4901,7 @@ impl PeerManager {
         let policy = Self::get_next_hop_policy(header);
         let bytes = batch.buffer_byte_len() as u64;
         let packets = batch.len() as u64;
+        let transit_packets = batch.iter().filter(|packet| packet.transit_data).count() as u64;
         let latency_first_gateway = {
             peers
                 .get_gateway_peer_id_for_packet(dst_peer_id, policy.clone(), first)
@@ -4938,6 +4963,7 @@ impl PeerManager {
                     .await;
             }
         }
+        Self::record_unavailable_transit(peers, transit_packets, &send_result);
         send_result
     }
 
@@ -4975,6 +5001,7 @@ impl PeerManager {
         }
         let bytes = batch.buffer_byte_len() as u64;
         let packets = batch.len() as u64;
+        let transit_packets = batch.iter().filter(|packet| packet.transit_data).count() as u64;
         let send_result = if next_hop == dst_peer_id && peers.has_peer(next_hop) {
             peers.send_msg_batch_directly(batch, next_hop).await
         } else {
@@ -4997,6 +5024,7 @@ impl PeerManager {
                     .await;
             }
         }
+        Self::record_unavailable_transit(peers, transit_packets, &send_result);
         send_result
     }
 

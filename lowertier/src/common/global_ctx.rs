@@ -1426,6 +1426,21 @@ impl GlobalCtx {
         }
     }
 
+    pub(crate) fn record_unavailable_transit_drop(&self, packets: u64) {
+        use super::stats_manager::{LabelSet, LabelType, MetricName};
+        if let Some(parent) = self.transit_parent.upgrade() {
+            parent.record_unavailable_transit_drop(packets);
+            return;
+        }
+        // Missing destinations cannot create packet-controlled metric labels.
+        self.stats_manager()
+            .get_counter(
+                MetricName::RelayDrops,
+                LabelSet::new().with_label_type(LabelType::ErrorType("unavailable_path".into())),
+            )
+            .add(packets);
+    }
+
     pub fn get_128_key(&self) -> [u8; 16] {
         let mut key = [0u8; 16];
         let secret = self
