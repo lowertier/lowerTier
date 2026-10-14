@@ -27,5 +27,21 @@ fn bench_known_unicast_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_known_unicast_lookup);
+fn bench_source_learning(c: &mut Criterion) {
+    let frame = ethernet_frame([0xff; 6], [2, 0, 0, 0, 0, 42]);
+    let mut group = c.benchmark_group("l2_fabric_source_learning");
+    for policy in [false, true] {
+        let mut flags = lowertier::common::config::gen_default_flags();
+        flags.l2_max_macs_per_peer = if policy { 256 } else { 0 };
+        flags.l2_mac_move_hold_seconds = if policy { 5 } else { 0 };
+        let fabric = L2Fabric::from_flags(&flags);
+        fabric.learn_source(&frame, 7);
+        group.bench_function(if policy { "policy" } else { "no_policy" }, |bench| {
+            bench.iter(|| fabric.learn_source(black_box(&frame), black_box(7)))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_known_unicast_lookup, bench_source_learning);
 criterion_main!(benches);
