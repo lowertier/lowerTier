@@ -58,19 +58,22 @@ memory_bytes = 268435456
 
 iOS and `macos-ne` builds cap this budget at 16 MiB, including explicit overrides.
 This leaves space below the approximate 50 MiB Network Extension limit for executable pages, runtime state, and uncharged allocations.
-The budget governs retained-memory reservations. It does not measure or cap total process RSS or kernel socket memory.
+The governor bounds QUIC admission. It does not bound peak RSS under simultaneous full-rate load or kernel socket memory.
+Other consumers, including userspace TCP, retain their separate memory reservations.
 
-QUIC reserves 1.25 MiB per connection. Its bounded payload windows total 768 KiB.
-Receive queue metadata and connection state each receive a 256 KiB allowance.
-The DATAGRAM send and receive limits are 128 KiB and 256 KiB.
-The stream send and aggregate receive windows are 128 KiB and 256 KiB.
+QUIC reserves a fixed 1 MiB per connection for admission.
+Idle loopback RSS grew by approximately 260 KiB per endpoint; the charge provides approximately four times that measured allowance.
+The charge does not reserve the worst-case sum of throughput windows.
+The DATAGRAM send and receive limits remain 1 MiB and 2 MiB.
+The stream receive, aggregate receive, and connection send windows remain 2 MiB, 4 MiB, and 2 MiB.
+The incoming bidirectional stream limit remains 100.
 Idle connections allocate buffer storage on demand.
 New QUIC connections leave one quarter of the process budget available for control packets and shared buffer growth.
-The 64 MiB minimum admits up to 38 QUIC connections when no other reservations exist.
-The 1 GiB default ceiling admits up to 614 connections under the same condition.
+The 64 MiB minimum admits up to 48 QUIC connections when no other reservations exist.
+The 1 GiB default ceiling admits up to 768 connections under the same condition.
+The 16 MiB Network Extension ceiling admits up to 12 connections under the same condition.
+Network Extension builds may need smaller windows later; any such change requires separate measurement and platform configuration.
 Full budgets produce a counted warning and a connection refusal.
-Smaller windows can reduce throughput or increase DATAGRAM loss during receive stalls.
-The current changes have no matched WAN throughput measurement.
 Received DATAGRAM payloads use owned copies to prevent small slices from retaining padded packets.
 The receive queue also bounds the count of tiny and empty frames.
 
