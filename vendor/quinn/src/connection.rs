@@ -617,6 +617,23 @@ impl Connection {
         send
     }
 
+    /// Poll FIFO drain and register the single DATAGRAM writer for the next release.
+    pub fn poll_datagrams_drained(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SendDatagramError>> {
+        let mut state = self.0.state.lock("poll_datagrams_drained");
+        if let Some(error) = &state.error {
+            return Poll::Ready(Err(SendDatagramError::ConnectionLost(error.clone())));
+        }
+        if state.inner.datagrams().send_queue_drained() {
+            return Poll::Ready(Ok(()));
+        }
+        *self.0.shared.datagrams_drained.lock().unwrap() = Some(cx.waker().clone());
+        state.wake();
+        Poll::Pending
+    }
+
     /// Compute the maximum size of datagrams that may be passed to [`send_datagram()`].
     ///
     /// Returns `None` if datagrams are unsupported by the peer or disabled locally.
@@ -1152,7 +1169,7 @@ impl Future for SendDatagrams<'_> {
         if queued {
             state.wake();
         }
-        if this.data.is_empty() && state.inner.datagrams().send_queue_drained() {
+        if this.data.is_empty() {
             return Poll::Ready((Ok(()), std::mem::take(this.data)));
         }
         if let Some(deadline) = deadline.filter(|_| !this.data.is_empty()) {
@@ -1310,6 +1327,7 @@ pub(crate) struct Shared {
     datagram_received: Arc<Notify>,
     datagrams_unblocked: Notify,
     fast_datagrams_unblocked: std::sync::Mutex<Option<Waker>>,
+    datagrams_drained: std::sync::Mutex<Option<Waker>>,
     closed: Notify,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
     ref_count: AtomicUsize,
@@ -1564,6 +1582,9 @@ impl State {
                 }
                 DatagramsUnblocked => {
                     shared.datagrams_unblocked.notify_waiters();
+                    if let Some(waker) = shared.datagrams_drained.lock().unwrap().take() {
+                        waker.wake();
+                    }
                     let waker = shared.fast_datagrams_unblocked.lock().unwrap().take();
                     if let Some(waker) = waker {
                         waker.wake();
@@ -1647,6 +1668,9 @@ impl State {
         shared.stream_incoming[Dir::Bi as usize].notify_waiters();
         shared.datagram_received.notify_waiters();
         shared.datagrams_unblocked.notify_waiters();
+        if let Some(waker) = shared.datagrams_drained.lock().unwrap().take() {
+            waker.wake();
+        }
         let waker = shared.fast_datagrams_unblocked.lock().unwrap().take();
         if let Some(waker) = waker {
             waker.wake();

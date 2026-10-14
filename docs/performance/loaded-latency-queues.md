@@ -7,6 +7,14 @@ Packets from one NIC input batch share one enqueue timestamp.
 Dequeue reads the clock once per output batch.
 Persistent delay triggers head drops with the inverse square root control law.
 The existing packet, flow, and retained-memory limits remain hard limits.
+Active NIC deliveries share a three-batch handoff limit of 384 KiB in retained buffer capacity.
+Excess packets remain in the fair flow queues with their original enqueue timestamps.
+All 16 flow slots remain available for small independent deliveries.
+One legal packet can exceed the handoff limit when the active budget is empty.
+The 2 MiB active-memory hard limit still applies.
+At 450 Mbit/s, 384 KiB corresponds to at most 6.99 ms of payload service.
+The previous full active window allowed 23.3 ms for 1,024 packets with 1,280-byte payloads.
+The handoff limit is a byte bound. It does not guarantee a fixed delay at lower rates.
 
 The controller follows [RFC 8289](https://www.rfc-editor.org/rfc/rfc8289).
 The statistics names are `nic_aqm_drops`, `nic_queue_sojourn_us`, and `nic_queue_dequeued`.
@@ -33,6 +41,7 @@ Three 64-datagram batches at the path MTU form the scheduling floor.
 The 1 MiB DATAGRAM memory ceiling still applies.
 Quinn reports this capacity through `datagram_send_buffer_space()`.
 The writer waits for FIFO drain before flush completes.
+Batch admission can fill the rate budget before flush waits for drain.
 Congestion windows and reliable stream windows remain unchanged.
 
 At 450 Mbit/s, 4 ms corresponds to 225,000 bytes.

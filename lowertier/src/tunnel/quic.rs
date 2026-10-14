@@ -2608,7 +2608,22 @@ impl QuicHybridWriter {
                     if staged || self.pending_datagram_send.is_some() {
                         continue;
                     }
-                    return self.poll_reliable_completion(cx);
+                    match self.poll_reliable_completion(cx) {
+                        Poll::Ready(Ok(())) => {}
+                        other => return other,
+                    }
+                    return self
+                        .connection
+                        .conn
+                        .poll_datagrams_drained(cx)
+                        .map(|result| {
+                            result.map_err(|error| {
+                                TunnelError::Anyhow(
+                                    anyhow::Error::new(error)
+                                        .context("drain QUIC DATAGRAM queue failed"),
+                                )
+                            })
+                        });
                 }
             }
         }

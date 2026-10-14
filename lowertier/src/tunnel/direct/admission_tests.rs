@@ -152,6 +152,22 @@ async fn byte_budget_rejection_parks_until_real_release() {
     drop(held);
     assert!(notified.as_mut().now_or_never().is_some());
     assert!(budget.try_acquire(1, 1).is_some());
+    let budget = Arc::new(AdmissionBudget::with_process_and_runs(
+        DIRECT_DATA_PACKET_BUDGET,
+        DIRECT_DATA_BYTE_BUDGET,
+        DIRECT_INFLIGHT_RUN_CAPACITY,
+        None,
+    ));
+    let held = budget.try_acquire(64, DIRECT_QUEUE_FLOOR).unwrap();
+    assert!(budget.try_acquire(1, 1).is_none());
+    drop(held);
+    budget.usage.lock().byte_rate =
+        (DIRECT_QUEUE_FLOOR * 2) as f64 / DIRECT_QUEUE_TARGET.as_secs_f64();
+    let first = budget.try_acquire(64, DIRECT_QUEUE_FLOOR).unwrap();
+    let second = budget.try_acquire(64, DIRECT_QUEUE_FLOOR).unwrap();
+    assert!(budget.try_acquire(1, 1).is_none());
+    drop((first, second));
+    assert!(budget.try_acquire(1, 1).is_some());
 }
 
 #[tokio::test]

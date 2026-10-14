@@ -215,7 +215,10 @@ impl DatagramState {
     }
 
     pub(super) fn next_expiry(&self) -> Option<Instant> {
-        self.outgoing.iter().find_map(|datagram| datagram.deadline)
+        self.outgoing
+            .iter()
+            .filter_map(|datagram| datagram.deadline)
+            .min()
     }
 
     pub(super) fn expire(&mut self, now: Instant) -> bool {
@@ -452,6 +455,20 @@ mod mtu_limit_tests {
         assert!(state.drop_oversized(1200));
         assert!(state.is_send_empty());
         assert_eq!(state.outgoing_total, 0);
+        for deadline in [now + std::time::Duration::from_millis(1), now] {
+            state.outgoing.push_back(OutgoingDatagram {
+                frame: Datagram {
+                    data: Bytes::from_static(b"payload"),
+                },
+                group: None,
+                deadline: Some(deadline),
+            });
+            state.outgoing_total += 7;
+        }
+        assert_eq!(state.next_expiry(), Some(now));
+        assert!(state.expire(now));
+        assert_eq!(state.outgoing_total, 7);
+        assert_eq!(state.expired_packets, 3);
     }
 
     #[test]

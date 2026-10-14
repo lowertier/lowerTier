@@ -14,6 +14,7 @@ const FLOW_LIMIT: usize = 128;
 const PACKET_LIMIT: usize = 2048;
 const QUEUED_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const ACTIVE_BYTE_LIMIT: usize = 2 * 1024 * 1024;
+const ACTIVE_QUEUE_BYTE_LIMIT: usize = 3 * 128 * 1024;
 pub(super) const ACTIVE_FLOW_LIMIT: usize = 16;
 const CODEL_TARGET: Duration = Duration::from_millis(5);
 const CODEL_INTERVAL: Duration = Duration::from_millis(100);
@@ -222,7 +223,8 @@ impl NicIngressQueue {
         if self.active_flows >= ACTIVE_FLOW_LIMIT {
             return None;
         }
-        let available = ACTIVE_BYTE_LIMIT - self.active_bytes;
+        let hard_available = ACTIVE_BYTE_LIMIT - self.active_bytes;
+        let available = ACTIVE_QUEUE_BYTE_LIMIT.saturating_sub(self.active_bytes);
         let now = Instant::now();
         let mut drops = 0;
         let mut marks = 0;
@@ -243,7 +245,13 @@ impl NicIngressQueue {
                     break;
                 };
                 let bytes = packet.packet.retained_buffer_capacity();
-                if retained + bytes > available {
+                // One legal packet can exceed the handoff floor on an empty active budget.
+                let packet_available = if self.active_bytes == 0 && retained == 0 {
+                    available.max(bytes).min(hard_available)
+                } else {
+                    available
+                };
+                if retained + bytes > packet_available {
                     break;
                 }
                 let mut packet = flow.packets.pop_front().expect("front packet exists");
@@ -562,6 +570,27 @@ mod tests {
             queue.complete(hash);
         }
         assert!(queue.flows.is_empty());
+        assert_eq!((queue.bytes, queue.active_bytes, queue.packets), (0, 0, 0));
+        for hash in 0..8 {
+            for _ in 0..MAX_PACKET_BATCH_SIZE {
+                queue.push(hash, packet(0));
+            }
+        }
+        let mut active = Vec::new();
+        while let Some(delivery) = queue.pop() {
+            active.push(delivery);
+            assert!(queue.active_bytes <= ACTIVE_QUEUE_BYTE_LIMIT);
+        }
+        assert!(!queue.is_empty());
+        assert!(active.len() < ACTIVE_FLOW_LIMIT);
+        for (hash, batch) in active {
+            drop(batch);
+            queue.complete(hash);
+        }
+        while let Some((hash, batch)) = queue.pop() {
+            drop(batch);
+            queue.complete(hash);
+        }
         assert_eq!((queue.bytes, queue.active_bytes, queue.packets), (0, 0, 0));
     }
 
