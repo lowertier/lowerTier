@@ -513,9 +513,10 @@ async fn establish(
             remote,
             ctx.get_underlay_policy(),
             Some(ctx.net_ns.clone()),
+            flags,
         )
         .await?),
-        (Protocol::Wss, false) => Ok(WsTunnelListener::accept_punched(stream).await?),
+        (Protocol::Wss, false) => Ok(WsTunnelListener::accept_punched(stream, flags).await?),
     }
 }
 async fn connect_bound(

@@ -27,9 +27,7 @@ pub fn server_identity_paths(flags: &Flags) -> Option<(PathBuf, PathBuf)> {
             PathBuf::from(&flags.camouflage_config().tls_key),
         ));
     }
-    if flags.camouflage_config().server_name.is_empty()
-        || !flags.camouflage_config().udp_decoy().is_empty()
-    {
+    if flags.camouflage_config().server_name.is_empty() || flags.camouflage_config().has_decoy() {
         return None;
     }
     let live = Path::new("/etc/letsencrypt/live").join(&flags.camouflage_config().server_name);
@@ -143,8 +141,7 @@ pub(crate) fn shared_ephemeral_identity() -> (Vec<CertificateDer<'static>>, Priv
 }
 
 pub fn skip_server_verification(flags: &Flags) -> bool {
-    flags.camouflage_config().server_name.is_empty()
-        || !flags.camouflage_config().udp_decoy().is_empty()
+    flags.camouflage_config().server_name.is_empty() || flags.camouflage_config().has_decoy()
 }
 
 /// rustls defaults to AES-256-GCM first. Chrome and Safari offer AES-128-GCM,

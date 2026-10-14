@@ -12,11 +12,7 @@ use anyhow::Context;
 use forwarded_header_value::ForwardedHeaderValue;
 use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
 use pnet::ipnetwork::IpNetwork;
-use std::{
-    net::SocketAddr,
-    sync::{Arc, LazyLock},
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::{TcpListener, TcpSocket, TcpStream},
     time::timeout,
@@ -82,9 +78,11 @@ fn websocket_origin(addr: &url::Url) -> String {
     }
 }
 
-fn wss_server_config() -> Result<rustls::ServerConfig, TunnelError> {
+fn wss_server_config(
+    flags: &crate::common::config::Flags,
+) -> Result<rustls::ServerConfig, TunnelError> {
     let provider = super::stealth_tls::stealth_crypto_provider();
-    let (certs, key) = super::stealth_tls::shared_ephemeral_identity();
+    let (certs, key) = super::stealth_tls::server_identity(flags)?;
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
         .context("configure WSS TLS versions")?
@@ -178,22 +176,11 @@ async fn map_from_ws_message(
     )))
 }
 
-static TRUSTED_PROXIES: LazyLock<Vec<IpNetwork>> = LazyLock::new(|| {
-    [
-        "127.0.0.0/8", // IPV4 Loopback
-        "10.0.0.0/8",  // IPV4 Private Networks
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "::1/128",  // IPV6 Loopback
-        "fc00::/7", // IPV6 Private network
-    ]
-    .into_iter()
-    .map(|s| s.parse().unwrap())
-    .collect()
-});
-
 pub struct WsTunnelListener {
     addr: url::Url,
+    endpoint_path: bool,
+    flags: crate::common::config::Flags,
+    global_ctx: std::sync::Weak<crate::common::global_ctx::GlobalCtx>,
     listener: Option<TcpListener>,
     socket_mark: Option<u32>,
     tls_acceptor: Option<TlsAcceptor>,
@@ -214,6 +201,9 @@ impl std::fmt::Debug for WsTunnelListener {
 impl WsTunnelListener {
     pub fn new(addr: url::Url) -> Self {
         WsTunnelListener {
+            endpoint_path: !addr.path().is_empty() && addr.path() != "/",
+            flags: crate::common::config::gen_default_flags(),
+            global_ctx: std::sync::Weak::new(),
             addr: normalize_ws_url(addr),
             listener: None,
             socket_mark: None,
@@ -226,10 +216,29 @@ impl WsTunnelListener {
         self.socket_mark = socket_mark;
     }
 
-    pub(crate) async fn accept_punched(stream: TcpStream) -> Result<Box<dyn Tunnel>, TunnelError> {
+    pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
+        if !self.endpoint_path {
+            self.addr
+                .set_path(flags.camouflage_config().websocket_path());
+        }
+        self.flags = flags;
+    }
+
+    pub(crate) fn set_global_ctx(&mut self, context: &crate::common::global_ctx::ArcGlobalCtx) {
+        self.global_ctx = Arc::downgrade(context);
+        self.set_flags(context.get_flags());
+    }
+
+    pub(crate) async fn accept_punched(
+        stream: TcpStream,
+        flags: crate::common::config::Flags,
+    ) -> Result<Box<dyn Tunnel>, TunnelError> {
         let addr = super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "wss");
         let mut listener = Self::new(addr);
-        listener.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config()?)));
+        listener.set_flags(flags);
+        listener.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config(
+            &listener.flags,
+        )?)));
         stream.set_nodelay(true)?;
         listener.try_accept(stream).await
     }
@@ -286,21 +295,24 @@ impl WsTunnelListener {
                     Limits::default().max_payload_len(Some(super::tcp_lanes::MAX_PENDING_BYTES)),
                 );
         }
-        let (request, stream) = server.max_headers(128).accept(stream).await?;
-        if ws_via_cdn(&self.addr)
-            && request
-                .headers()
-                .get(http::header::SEC_WEBSOCKET_PROTOCOL)
-                .and_then(|value| value.to_str().ok())
-                != Some(cdn::SUBPROTOCOL)
-        {
-            return Err(TunnelError::InvalidProtocol(
-                "CDN origin requires the inner TLS subprotocol".into(),
-            ));
-        }
-
-        if TRUSTED_PROXIES
+        let (request, stream) = server
+            .max_headers(128)
+            .accept_if(stream, |request| {
+                request.uri().path() == self.addr.path()
+                    && (!ws_via_cdn(&self.addr)
+                        || request
+                            .headers()
+                            .get(http::header::SEC_WEBSOCKET_PROTOCOL)
+                            .and_then(|value| value.to_str().ok())
+                            == Some(cdn::SUBPROTOCOL))
+            })
+            .await?;
+        if self
+            .flags
+            .camouflage_config()
+            .trusted_proxy_cidrs
             .iter()
+            .filter_map(|network| network.parse::<IpNetwork>().ok())
             .any(|net| net.contains(peer_addr.ip()))
             && let Some(forwarded) = request
                 .headers()
@@ -368,7 +380,7 @@ impl TunnelListener for WsTunnelListener {
             .set_port(Some(listener.local_addr()?.port()))
             .unwrap();
         if is_wss(&self.addr)? {
-            self.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config()?)));
+            self.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config(&self.flags)?)));
         }
         self.listener = Some(listener);
 
@@ -390,6 +402,14 @@ impl TunnelListener for WsTunnelListener {
                 listener.accept().await
             };
             let (stream, _) = accepted?;
+            if let Some(context) = self.global_ctx.upgrade() {
+                let flags = context.get_flags();
+                if flags.camouflage_config() != self.flags.camouflage_config() {
+                    self.tls_acceptor =
+                        Some(TlsAcceptor::from(Arc::new(wss_server_config(&flags)?)));
+                    self.set_flags(flags);
+                }
+            }
             stream.set_nodelay(true).unwrap();
             match timeout(Duration::from_secs(3), self.try_accept(stream)).await {
                 Ok(Ok(tunnel)) => {
@@ -420,6 +440,7 @@ impl TunnelListener for WsTunnelListener {
 
 pub struct WsTunnelConnector {
     addr: url::Url,
+    flags: crate::common::config::Flags,
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
 
@@ -432,6 +453,7 @@ impl WsTunnelConnector {
     pub fn new(addr: url::Url) -> Self {
         WsTunnelConnector {
             addr,
+            flags: crate::common::config::gen_default_flags(),
             ip_version: IpVersion::Both,
             resolved_addr: None,
 
@@ -441,15 +463,24 @@ impl WsTunnelConnector {
         }
     }
 
+    pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
+        if self.addr.path().is_empty() || self.addr.path() == "/" {
+            self.addr
+                .set_path(flags.camouflage_config().websocket_path());
+        }
+        self.flags = flags;
+    }
+
     async fn connect_with(
         addr: url::Url,
         socket_addr: SocketAddr,
         tcp_socket: TcpSocket,
         underlay_policy: Arc<UnderlayPolicy>,
+        flags: crate::common::config::Flags,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         super::common::size_tcp_socket_buffers(&socket2::SockRef::from(&tcp_socket));
         let stream = tcp_socket.connect(socket_addr).await?;
-        Self::connect_punched(stream, addr, underlay_policy, None).await
+        Self::connect_punched(stream, addr, underlay_policy, None, flags).await
     }
 
     pub(crate) async fn connect_punched(
@@ -457,6 +488,7 @@ impl WsTunnelConnector {
         addr: url::Url,
         underlay_policy: Arc<UnderlayPolicy>,
         net_ns: Option<crate::common::netns::NetNS>,
+        flags: crate::common::config::Flags,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         let is_wss = is_wss(&addr)?;
         let socket_addr = stream.peer_addr()?;
@@ -484,7 +516,11 @@ impl WsTunnelConnector {
 
         if is_wss {
             let via_cdn = ws_via_cdn(&addr);
-            let name = addr.domain().unwrap_or("localhost");
+            let name = if !via_cdn && !flags.camouflage_config().server_name.is_empty() {
+                flags.camouflage_config().server_name.as_str()
+            } else {
+                addr.domain().unwrap_or("localhost")
+            };
             let stream =
                 super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
             let binding = if via_cdn {
@@ -507,9 +543,9 @@ impl WsTunnelConnector {
                     bytes,
                 })
             };
-            Self::connect_stream(&addr, stream, info, binding).await
+            Self::connect_stream(&addr, stream, info, binding, &flags).await
         } else {
-            Self::connect_stream(&addr, stream, info, None).await
+            Self::connect_stream(&addr, stream, info, None, &flags).await
         }
     }
 
@@ -518,11 +554,29 @@ impl WsTunnelConnector {
         stream: S,
         info: TunnelInfo,
         binding: Option<TransportBinding>,
+        flags: &crate::common::config::Flags,
     ) -> Result<Box<dyn Tunnel>, TunnelError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let (client, response) = browser_ws_client(addr)?.connect_on(stream).await?;
+        let mut request_addr = addr.clone();
+        if request_addr.path().is_empty() || request_addr.path() == "/" {
+            request_addr.set_path(flags.camouflage_config().websocket_path());
+        }
+        if !flags.camouflage_config().http_host.is_empty() {
+            let authority = flags
+                .camouflage_config()
+                .http_host
+                .parse::<http::uri::Authority>()
+                .map_err(|error| TunnelError::InvalidAddr(error.to_string()))?;
+            request_addr
+                .set_host(Some(authority.host()))
+                .map_err(|error| TunnelError::InvalidAddr(error.to_string()))?;
+            request_addr.set_port(authority.port_u16()).map_err(|_| {
+                TunnelError::InvalidAddr("invalid camouflage.http_host port".into())
+            })?;
+        }
+        let (client, response) = browser_ws_client(&request_addr)?.connect_on(stream).await?;
         if ws_via_cdn(addr) {
             if response
                 .headers()
@@ -563,6 +617,7 @@ impl WsTunnelConnector {
             addr,
             socket,
             self.underlay_policy.clone(),
+            self.flags.clone(),
         )
         .await
     }
@@ -587,6 +642,7 @@ impl WsTunnelConnector {
                     addr,
                     socket,
                     self.underlay_policy.clone(),
+                    self.flags.clone(),
                 )),
                 Err(error) => {
                     tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
@@ -652,6 +708,28 @@ impl TunnelConnector for WsTunnelConnector {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_wss_path_rejects_other_paths_before_upgrade() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        timeout(Duration::from_secs(3), async {
+            for (path, accepted) in [("/other", false), ("/vpn", true)] {
+                let (mut client, server) = tokio::io::duplex(4096);
+                let mut listener = WsTunnelListener::new("wss://127.0.0.1:1234".parse().unwrap());
+                let mut flags = crate::common::config::gen_default_flags();
+                flags.camouflage_config_mut().wss_path = "/vpn".into();
+                listener.set_flags(flags);
+                let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+                client.write_all(request.as_bytes()).await.unwrap();
+                let result = listener.accept_stream(server, None, "127.0.0.1:5678".parse().unwrap()).await;
+                assert_eq!(result.is_ok(), accepted);
+                drop(result);
+                let mut response = String::new();
+                client.read_to_string(&mut response).await.unwrap();
+                assert!(response.starts_with(if accepted { "HTTP/1.1 101" } else { "HTTP/1.1 400" }), "{response}");
+            }
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn server_frames_keep_vectored_writes() {
@@ -855,13 +933,37 @@ pub mod tests {
     async fn cdn_inner_tls_binds_peers_and_carries_packets() {
         use crate::tunnel::batch::PacketBatch;
         timeout(Duration::from_secs(5), async {
-            let mut listener =
-                WsTunnelListener::new("ws://127.0.0.1:0/ws?via=cdn".parse().unwrap());
-            listener.listen().await.unwrap();
-            let url = listener.local_url();
-            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
-            let client = WsTunnelConnector::new(url).connect().await.unwrap();
-            let server = server.await.unwrap();
+            async fn pair(
+                origin_cdn: bool,
+            ) -> (
+                Result<Box<dyn Tunnel>, TunnelError>,
+                Result<Box<dyn Tunnel>, TunnelError>,
+            ) {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let client_io = TcpStream::connect(address).await.unwrap();
+                let (server_io, peer) = listener.accept().await.unwrap();
+                let mut origin: url::Url = format!("wss://{address}/ws").parse().unwrap();
+                if origin_cdn {
+                    origin.set_query(Some("via=cdn"));
+                }
+                let ws_listener = WsTunnelListener::new(origin.clone());
+                let mut client_url = origin;
+                client_url.set_query(Some("via=cdn"));
+                let info = TunnelInfo {
+                    tunnel_type: "wss".into(),
+                    ..Default::default()
+                };
+                let flags = crate::common::config::gen_default_flags();
+                // The TCP pair represents the CDN's outer connection.
+                tokio::join!(
+                    ws_listener.accept_stream(server_io, None, peer),
+                    WsTunnelConnector::connect_stream(&client_url, client_io, info, None, &flags)
+                )
+            }
+            let (server, client) = pair(true).await;
+            let server = server.unwrap();
+            let client = client.unwrap();
             assert_eq!(client.transport_binding(), server.transport_binding());
             assert_eq!(
                 client.transport_binding().unwrap().kind,
@@ -882,14 +984,8 @@ pub mod tests {
                     .payload(),
                 &[0x73; 2000]
             );
-            let mut ordinary = WsTunnelListener::new("ws://127.0.0.1:0/ws".parse().unwrap());
-            ordinary.listen().await.unwrap();
-            let mut url = ordinary.local_url();
-            url.set_query(Some("via=cdn"));
-            let ordinary_server = tokio::spawn(async move { ordinary.accept().await });
-            let result = WsTunnelConnector::new(url).connect().await;
-            assert!(result.is_err(), "CDN mode accepted an unbound WebSocket");
-            let _ = ordinary_server.await.unwrap();
+            let (_server, client) = pair(false).await;
+            assert!(client.is_err(), "CDN mode accepted an unbound WebSocket");
         })
         .await
         .unwrap();

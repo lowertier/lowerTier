@@ -110,7 +110,7 @@ pub fn create_listener_by_url(
             let mut l = TcpTunnelListener::new(l.clone());
             l.set_socket_mark(socket_mark);
             l.set_underlay_policy(global_ctx.get_underlay_policy());
-            l.set_flags(global_ctx.get_flags());
+            l.set_global_ctx(&global_ctx);
             l.boxed()
         }
         IpScheme::Quic => {
@@ -119,6 +119,7 @@ pub fn create_listener_by_url(
         }
         IpScheme::Wss => {
             let mut l = tunnel::websocket::WsTunnelListener::new(l.clone());
+            l.set_global_ctx(&global_ctx);
             l.set_socket_mark(socket_mark);
             l.boxed()
         }

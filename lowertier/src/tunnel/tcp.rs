@@ -29,6 +29,7 @@ pub struct TcpTunnelListener {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     lanes: tokio::sync::Mutex<super::tcp_lanes::LaneListener>,
     flags: crate::common::config::Flags,
+    global_ctx: std::sync::Weak<crate::common::global_ctx::GlobalCtx>,
     pending: Mutex<FuturesUnordered<PendingAccept>>,
     pending_by_ip: HashMap<IpAddr, usize>,
 }
@@ -53,12 +54,18 @@ impl TcpTunnelListener {
             tls_acceptor: None,
             lanes: tokio::sync::Mutex::default(),
             flags: crate::common::config::gen_default_flags(),
+            global_ctx: std::sync::Weak::new(),
             pending: Mutex::new(FuturesUnordered::new()),
             pending_by_ip: HashMap::new(),
         }
     }
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
         self.flags = flags;
+    }
+
+    pub(crate) fn set_global_ctx(&mut self, context: &crate::common::global_ctx::ArcGlobalCtx) {
+        self.global_ctx = Arc::downgrade(context);
+        self.set_flags(context.get_flags());
     }
 
     pub fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
@@ -70,6 +77,13 @@ impl TcpTunnelListener {
     }
 
     fn start_accept(&mut self, stream: TcpStream, remote: SocketAddr) -> Result<(), TunnelError> {
+        if let Some(context) = self.global_ctx.upgrade() {
+            let flags = context.get_flags();
+            if flags.camouflage_config() != self.flags.camouflage_config() {
+                self.tls_acceptor = Some(super::http2::tls_acceptor(&flags)?);
+                self.flags = flags;
+            }
+        }
         ensure_remote_allowed(&self.underlay_policy, remote)?;
         let ip = remote.ip();
         if self.pending.get_mut().unwrap().len() >= MAX_PENDING_ACCEPTS

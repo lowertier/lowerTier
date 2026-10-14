@@ -121,7 +121,7 @@ pub(super) async fn accept<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     socket: WebSocketStream<S>,
     info: TunnelInfo,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
-    let mut config = wss_server_config()?;
+    let mut config = wss_server_config(&crate::common::config::gen_default_flags())?;
     config.alpn_protocols = vec![ALPN.to_vec()];
     let stream = TlsAcceptor::from(Arc::new(config))
         .accept(WebSocketIo::new(socket))

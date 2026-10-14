@@ -112,6 +112,15 @@ impl Builder {
         &self,
         stream: S,
     ) -> Result<(http::Request<()>, WebSocketStream<S>), Error> {
+        self.accept_if(stream, |_| true).await
+    }
+
+    /// Checks the request before sending the upgrade response.
+    pub async fn accept_if<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: S,
+        permitted: impl FnOnce(&http::Request<()>) -> bool,
+    ) -> Result<(http::Request<()>, WebSocketStream<S>), Error> {
         let mut framed = FramedRead::new(
             stream,
             client_request::Codec {
@@ -122,6 +131,10 @@ impl Builder {
 
         match reply {
             Some(Ok((request, response))) => {
+                if !permitted(&request) {
+                    framed.get_mut().write_all(BAD_REQUEST).await?;
+                    return Err(Error::Io(io::ErrorKind::PermissionDenied.into()));
+                }
                 framed.get_mut().write_all(&response).await?;
                 Ok((
                     request,

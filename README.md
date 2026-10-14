@@ -253,12 +253,12 @@ enable_encryption = true
 encryption_algorithm = "chacha20-poly1305"
 mtu = 1380
 bind_device = true
-latency_first = true
 l2_fdb_capacity = 16384
 l2_fdb_age_seconds = 300
-l2_flood_bps = 67108864
-quic_datagram_fec_parity = 0
-quic_datagram_alternate_path_parity = false
+l2_flood_bytes_per_second = 67108864
+
+[relay]
+policy = "latency"
 ```
 
 Validate the file before startup.
@@ -494,8 +494,9 @@ group_secret = "<group-secret>"
 
 ### Runtime flags
 
-Put runtime flags under `[flags]`.
-The table includes every supported flag.
+Put retained core settings under `[flags]`.
+Use `[relay]`, `[camouflage]`, and `[limits]` for grouped settings.
+The table uses TOML paths for grouped settings.
 
 | Field | Default | Purpose | CLI option |
 | --- | --- | --- | --- |
@@ -504,47 +505,42 @@ The table includes every supported flag.
 | `enable_encryption` | `true` | Encrypt peer payloads. | `--disable-encryption false` |
 | `enable_ipv6` | `true` | Enable overlay IPv6. | `--disable-ipv6 false` |
 | `mtu` | `1380` | Set the overlay MTU. Encryption gives the kernel interface a 1360-byte effective MTU. | `--mtu` |
-| `latency_first` | `false` | Prefer the measured low-latency route. | `--latency-first` |
-| `speed_first` | `false` | Prefer the route with the highest measured bottleneck delivery rate. | `--speed-first` |
-| `speed_probe_interval_seconds` | `30` | Set the normal interval between direct-link probe cycles. | `--speed-probe-interval-seconds` |
-| `speed_probe_budget_bps` | `0` | Limit average probe traffic across the complete node. Zero disables probes. | `--speed-probe-budget-bps` |
+| `relay.policy` | `hop` | Select hop, latency, or goodput routing. | `--relay-policy` |
+| `relay.probe_interval_seconds` | `30` | Set the normal interval between direct-link probe cycles. | `--relay-probe-interval-seconds` |
+| `relay.probe_budget_bps` | `0` | Limit average probe traffic across the complete node. Zero disables probes. | `--relay-probe-budget-bps` |
 | `enable_exit_node` | `false` | Permit other peers to use this node as an exit node. | `--enable-exit-node` |
-| `relay_network_whitelist` | `*` | Select network names that this node can relay. | `--relay-network-whitelist` |
+| `relay.transit_networks` | `[]` | Permit named foreign networks for transit. | `--relay-transit-networks` |
 | `disable_p2p` | `false` | Disable ordinary automatic direct links. | `--disable-p2p` |
-| `relay_all_peer_rpc` | `false` | Relay peer RPC outside the relay whitelist. | `--relay-all-peer-rpc` |
+| `relay_all_peer_rpc` | `false` | Relay peer RPC outside configured transit networks. | `--relay-all-peer-rpc` |
 | `disable_udp_hole_punching` | `false` | Disable UDP NAT hole punching. | `--disable-udp-hole-punching` |
 | `multi_thread` | `true` | Use the multithread Tokio runtime. | `--multi-thread` |
-| `data_compress_algo` | `1` | Select `1` for none or `2` for Zstandard. | `--compression none|zstd` |
 | `bind_device` | `true` | Bind underlay sockets to selected physical devices. | `--bind-device` |
 | `accept_dns` | `false` | Install and accept Magic DNS settings. | `--accept-dns` |
 | `private_mode` | `false` | Require verified foreign-network membership. | `--private-mode` |
-| `foreign_relay_bps_limit` | unlimited | Limit foreign-network relay bytes per second. | `--foreign-relay-bps-limit` |
+| `relay.transit_bps_limit` | unlimited | Limit all transit in bit/s. | `--relay-transit-bps-limit` |
 | `multi_thread_count` | `2` | Set the multithread runtime worker count. | `--multi-thread-count` |
 | `encryption_algorithm` | `chacha20-poly1305` | Select `chacha20-poly1305`, `aes-gcm`, or `aes-256-gcm`. | `--encryption-algorithm` |
 | `disable_sym_hole_punching` | `false` | Disable symmetric-NAT UDP punching. | `--disable-sym-hole-punching` |
 | `tld_dns_zone` | `et.net.` | Set the Magic DNS suffix. | `--tld-dns-zone` |
-| `p2p_only` | `false` | Send data only through established direct links. | `--p2p-only` |
+| `relay.use_relays` | `true` | Permit local data to use indirect paths. | `--relay-use-relays` |
 | `disable_tcp_hole_punching` | `false` | Disable TCP NAT hole punching. | `--disable-tcp-hole-punching` |
 | `lazy_p2p` | `false` | Create direct links only when traffic needs them. | `--lazy-p2p` |
 | `need_p2p` | `false` | Ask lazy peers to connect before traffic arrives. | `--need-p2p` |
-| `instance_recv_bps_limit` | unlimited | Limit total received bytes per second. | `--instance-recv-bps-limit` |
-| `disable_upnp` | `false` | Disable automatic UPnP and NAT-PMP mapping. | `--disable-upnp` |
-| `disable_relay_data` | `false` | Disable data relay while retaining control functions. | Configuration file only |
+| `limits.receive_bps` | unlimited | Limit all instance input in bit/s. | `--receive-bps` |
+| `relay.transit` | `allow` | Select allow, avoid, or deny for transit. | `--relay-transit` |
 | `enable_udp_broadcast_relay` | `false` | Relay physical-interface UDP broadcasts on Windows. | `--enable-udp-broadcast-relay` |
 | `socket_mark` | unset | Apply Linux `SO_MARK` to underlay sockets. | `--socket-mark` on Linux |
 | `underlay_deny_interfaces` | empty | Deny exact local interface names for underlay traffic. | `--underlay-deny-interfaces` |
 | `underlay_deny_cidrs` | empty | Deny local sources and remote destinations in listed CIDRs. | `--underlay-deny-cidrs` |
-| `quic_initial_receive_window` | `1250000` | Set the QUIC initial per-stream receive window. | `--quic-initial-receive-window` |
-| `quic_receive_window` | `2^62-1` | Set the QUIC connection receive window. | `--quic-receive-window` |
-| `quic_admission_secret` | empty | Set a shared HTTP/3 CONNECT-IP admission secret. | `--quic-admission-secret` |
-| `quic_fallback_root` | empty | Serve this static website for ordinary HTTP/3 requests. | `--quic-fallback-root` |
-| `quic_decoy_upstream` | empty | Forward unmarked QUIC datagrams and splice unmarked TCP to this host. | `--quic-decoy-upstream` |
-| `quic_sni_passthrough` | `false` | Admit QUIC clients whose TLS SNI matches `quic_server_name`. Other UDP still goes to `quic_decoy_upstream`. | `--quic-sni-passthrough` |
+| `quic_initial_receive_window` | `2097152` | Set the QUIC initial per-stream receive window. | `--quic-initial-receive-window` |
+| `quic_receive_window` | `4194304` | Set the QUIC connection receive window. | `--quic-receive-window` |
+| `camouflage.admission_secret` | empty | Set a shared HTTP/3 CONNECT-IP admission secret. | `--admission-secret` |
+| `camouflage.website_root` | empty | Serve this static website for ordinary HTTP/3 requests. | `--website-root` |
+| `camouflage.decoy_upstream` | empty | Forward unmarked QUIC datagrams and splice unmarked TCP to this host. | `--decoy-tcp-upstream / --decoy-udp-upstream` |
+| `camouflage.sni_routing` | `false` | Admit QUIC clients whose TLS SNI matches `camouflage.server_name`. Other UDP still goes to `camouflage.decoy_upstream`. | `--sni-routing` |
 | `l2_fdb_capacity` | `16384` | Limit learned source MAC entries. | `--l2-fdb-capacity` |
 | `l2_fdb_age_seconds` | `300` | Expire idle MAC entries after this interval. | `--l2-fdb-age-seconds` |
-| `l2_flood_bps` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bps` |
-| `quic_datagram_fec_parity` | `0` | Select `0` off, `2` for 16+2, or `3` for 16+3 alternate-path FEC. | `--quic-datagram-fec-parity` |
-| `quic_datagram_alternate_path_parity` | `false` | Send L2 parity through a second distinct QUIC path. | `--quic-datagram-alternate-path-parity` |
+| `l2_flood_bytes_per_second` | `67108864` | Limit replicated Ethernet bytes per second. Zero removes the limit. | `--l2-flood-bytes-per-second` |
 
 QUIC NAT traversal exchanges candidates through authenticated peer RPC.
 It retains the selected UDP socket for the QUIC connection.
@@ -579,18 +575,21 @@ SNI. Nginx stream-passthroughs TCP and UDP to LowTier. Marked LowTier
 clients become a VPN hop. Unmarked probes are spliced to the real
 Cloudflare host and complete TLS with Cloudflare's certificate.
 
-Configure the same `quic_admission_secret` on credential peers. Secret-based
-networks use `network_secret` when `quic_admission_secret` is empty. LowTier
+Configure the same `camouflage.admission_secret` on credential peers. Secret-based
+networks use `network_secret` when `camouflage.admission_secret` is empty. LowTier
 rotates the encrypted admission token every five minutes.
 
 ```toml
 listeners = ["tcp://127.0.0.1:8443", "quic://127.0.0.1:8443"]
 mapped_listeners = ["tcp://0.0.0.0:443", "quic://0.0.0.0:443"]
 
-[flags]
-quic_server_name = "challenges.cloudflare.com"
-quic_decoy_upstream = "challenges.cloudflare.com:443"
-quic_admission_secret = "replace-with-a-random-shared-secret"
+[camouflage]
+server_name = "challenges.cloudflare.com"
+admission_secret = "replace-with-a-random-shared-secret"
+
+[camouflage.decoy_upstream]
+tcp = "challenges.cloudflare.com:443"
+udp = "challenges.cloudflare.com:443"
 ```
 
 ```nginx
@@ -623,24 +622,24 @@ supports IPv4 listeners and IPv4 upstream endpoints. Marked packets enter the
 local QUIC endpoint through the public socket and do not use a loopback UDP
 relay. TCP listeners use the same flags. A client with a valid routing prefix
 reaches local HTTP/2. Every other TCP flow is spliced to
-`quic_decoy_upstream`. TCP does not serve `quic_fallback_root`. The local
+`camouflage.decoy_upstream`. TCP does not serve `camouflage.website_root`. The local
 LowTier path uses Noise authentication and does not require a certificate for
 the upstream name.
 
 To serve your own static site instead of a Cloudflare decoy, set
-`quic_fallback_root` and omit `quic_decoy_upstream`. LowTier then terminates
-TLS for `quic_server_name` and loads
-`/etc/letsencrypt/live/<quic_server_name>/fullchain.pem` and `privkey.pem`
+`camouflage.website_root` and omit `camouflage.decoy_upstream`. LowTier then terminates
+TLS for `camouflage.server_name` and loads
+`/etc/letsencrypt/live/<server_name>/fullchain.pem` and `privkey.pem`
 unless you set explicit certificate paths.
 
 ```toml
-[flags]
-quic_server_name = "vpn.example.com"
-quic_admission_secret = "replace-with-a-random-shared-secret"
-quic_fallback_root = "/var/www/vpn.example.com"
+[camouflage]
+server_name = "challenges.cloudflare.com"
+admission_secret = "replace-with-a-random-shared-secret"
+website_root = "/var/www/lowertier"
 ```
 
-Leave `quic_sni_passthrough` off for this camouflage. Peers and probes
+Leave `camouflage.sni_routing` off for this camouflage. Peers and probes
 share the `challenges.cloudflare.com` SNI, so Nginx cannot split TCP by
 name. HTTP/2 is still Nginx-forwardable: use the dumb stream block above,
 not `ssl_preread`. Marked clients send a tiny TLS record then ClientHello;
@@ -707,7 +706,7 @@ The mode rejects `--socket-mark` and `--dev-name`.
 
 ### Security, relay, transport, and limits
 
-All matching runtime options appear in the `[flags]` table above.
+All matching runtime options appear in the configuration table above.
 The remaining security options configure keys, credentials, and port access.
 
 | Option | Purpose |
@@ -772,67 +771,32 @@ Use the root options to select another RPC portal or instance.
 | `stats show` | Show general counters. |
 | `stats prometheus` | Print counters in Prometheus text format. |
 
-### Speed-first routing
+### Goodput routing
 
-Speed-first routing measures each direct direction independently.
-The route from node A to node B can differ from the route from node B to node A.
-
-Enable measurement before route selection.
-This example limits average probe traffic to 1 Mbit/s across the complete node.
+Goodput routing measures each direct direction independently.
+Set a positive probe budget before selecting the goodput policy.
 
 ```toml
-[flags]
-speed_first = false
-speed_probe_interval_seconds = 30
-speed_probe_budget_bps = 1000000
+[relay]
+policy = "hop"
+probe_interval_seconds = 30
+probe_budget_bps = 1000000
 ```
 
-A positive budget enables measurement and reporting.
-The budget applies to all direct connections on the node.
-The token bucket can hold one complete interval of probe traffic.
+The example permits 1 Mbit/s of average probe traffic across the node.
+Set `policy = "goodput"` after fresh samples appear.
+The selector first minimizes avoided transit nodes.
+It then maximizes the path's minimum valid directed delivery rate.
+Equal bottlenecks use cost, hop count, and first-hop peer ID.
+Destination-specific bottleneck thresholds preserve the cost tie-breaker.
+Expired or missing samples use latency and then hop fallback.
+Every data fallback excludes denied transit nodes.
+Authenticated routing and handshake control use a separate hop table.
+Complete Ethernet control frames still follow data transit restrictions.
 
-Inspect samples and routes before you enable selection.
-
-```bash
-lowertier-cli peer list
-lowertier-cli route list
-lowertier-cli stats prometheus
-```
-
-Set `speed_first = true` after fresh samples appear.
-Speed-first mode requires a positive probe budget.
-Speed-first mode takes priority when `latency_first` is also true.
-
-The route selector uses the widest directed path.
-It maximizes the lowest delivery rate on the path.
-It then prefers lower latency, fewer hops, and the lower next-hop peer identifier.
-
-The speed route builder keeps one label for each node.
-A higher bottleneck replaces a lower bottleneck label.
-Equal bottlenecks use cumulative latency, hop count, and first-hop peer ID.
-This gives one directed widest-path pass with O(E log V) work.
-The secondary latency choice is deterministic, but it is not a global
-constrained-shortest-path guarantee when a later edge lowers two paths to the
-same final bottleneck.
-
-The route fallback order is speed, latency, and hop count.
-The direct-connection fallback order is latency, configured protocol, current live connection, and connection identifier.
-Each active flow keeps one route and one direct connection until expiry or failure.
-
-Critical Ethernet control traffic continues to use latency-first routing.
-Older relays see the compatibility latency flag.
-Nodes without speed samples use the normal fallback order.
-
-The Prometheus output includes these metrics:
-
-- `speed_probe_bytes_tx` and `speed_probe_packets_tx`
-- `speed_probe_bytes_rx` and `speed_probe_packets_rx`
-- `speed_probe_failures`
-- `speed_sample_age_ms`
-- `speed_selected_path_delivery_bps`
-
-Disable `speed_first` to roll back route selection.
-Set `speed_probe_budget_bps = 0` to stop measurement.
+Use `policy = "hop"` to restore hop selection.
+Set `probe_budget_bps = 0` to stop measurement after changing the policy.
+See [control configuration and migration](docs/control-config.md) for units, defaults, and retired options.
 
 ### Runtime change commands
 
@@ -924,7 +888,6 @@ Interface names such as macOS `utun5` can change after restart.
 
 Strict deny policy requires literal peer and STUN addresses.
 The policy disables hostname and HTTP-based discovery paths.
-The policy also disables automatic UPnP and NAT-PMP mapping.
 
 Restart the instance after an underlay policy change.
 
@@ -936,22 +899,12 @@ Inner transports own congestion control. QUIC only provides packet protection.
 [flags]
 quic_initial_receive_window = 8388608
 quic_receive_window = 33554432
-quic_datagram_fec_parity = 0
-quic_datagram_alternate_path_parity = false
 ```
-
-Alternate-path parity `2` uses a 16+2 profile.
-Parity `3` uses the higher-overhead 16+3 profile.
-Parity `0` disables FEC.
 
 Normal Ethernet frames use plain QUIC DATAGRAM records.
 LowTier does not retransmit these records.
 Inner TCP handles lost TCP-bearing Ethernet frames.
 ARP, DHCP, and IPv6 neighbor-discovery frames use the reliable QUIC stream.
-
-Alternate-path parity requires two authenticated QUIC paths with distinct IP surfaces.
-The primary frame stays on its selected path.
-Only bounded parity records use the second path.
 
 ## Security and traffic visibility
 

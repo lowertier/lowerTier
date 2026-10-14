@@ -310,7 +310,11 @@ pub async fn create_connector_by_url(
             connector.boxed()
         }
         IpScheme::Quic => tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed(),
-        IpScheme::Wss => tunnel::websocket::WsTunnelConnector::new(url).boxed(),
+        IpScheme::Wss => {
+            let mut connector = tunnel::websocket::WsTunnelConnector::new(url);
+            connector.set_flags(global_ctx.get_flags());
+            connector.boxed()
+        }
     };
     connector.set_resolved_addr(resolved_addr.addr);
     connector.set_socket_mark(global_ctx.config.get_flags().socket_mark);

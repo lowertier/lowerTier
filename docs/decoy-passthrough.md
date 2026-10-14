@@ -1,9 +1,9 @@
 # Decoy passthrough limits
 
-`quic_decoy_upstream` forwards unmarked TCP and QUIC traffic to one
-operator-configured upstream. It does not resolve destinations supplied by
-visitors. Rate limiting does not make arbitrary visitor-selected upstreams safe:
-that would still be an open proxy, only slower.
+`camouflage.decoy_upstream.tcp` and `.udp` select fixed upstream endpoints.
+TCP forwards unmarked streams. QUIC forwards unmarked datagrams.
+The endpoints can differ. Visitors cannot select a destination.
+See [control configuration](control-config.md) for admission and SNI settings.
 
 ## Shared bandwidth and bursts
 

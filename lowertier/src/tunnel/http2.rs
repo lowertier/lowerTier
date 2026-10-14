@@ -199,8 +199,17 @@ fn http2_authority(url: &url::Url) -> String {
     }
 }
 
-fn connect_ip_request(url: &url::Url, bearer: Option<&str>) -> Result<Request<()>, TunnelError> {
-    let uri = format!("https://{}{CONNECT_IP_PATH}", http2_authority(url));
+fn connect_ip_request(
+    url: &url::Url,
+    bearer: Option<&str>,
+    http_host: &str,
+) -> Result<Request<()>, TunnelError> {
+    let authority = if http_host.is_empty() {
+        http2_authority(url)
+    } else {
+        http_host.to_owned()
+    };
+    let uri = format!("https://{authority}{CONNECT_IP_PATH}");
     let mut builder = Request::builder().method(Method::CONNECT).uri(uri);
     if let Some(bearer) = bearer {
         builder = builder.header("proxy-authorization", format!("Bearer {bearer}"));
@@ -739,7 +748,11 @@ pub async fn connect(
         .await
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 client ready: {error}")))?;
     let bearer = ConnectIpAdmission::from_flags(flags).map(|admission| admission.current_token());
-    let request = connect_ip_request(&url, bearer.as_deref())?;
+    let request = connect_ip_request(
+        &url,
+        bearer.as_deref(),
+        &flags.camouflage_config().http_host,
+    )?;
     let (response, send) = h2
         .send_request(request, false)
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 CONNECT: {error}")))?;

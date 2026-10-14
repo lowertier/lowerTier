@@ -23,8 +23,8 @@ The CDN cannot replace that authenticated peer connection with its own TLS expor
 The inner TLS handshake uses `challenges.cloudflare.com` as its compatibility SNI.
 This SNI does not imply certificate ownership or make the connection unidentifiable.
 
-The origin uses its existing ephemeral TLS certificate.
-Configure origin certificate verification for that deployment explicitly.
+The origin uses the shared camouflage TLS identity.
+Configure `camouflage.tls_cert` and `camouflage.tls_key` when the CDN verifies the origin certificate.
 The normal configuration interface requires a `wss` origin listener.
 Peer authentication requires the inner TLS connection in CDN mode.
 
@@ -32,6 +32,9 @@ Direct WSS keeps its existing outer TLS exporter binding.
 CDN mode requires both endpoints to support the inner TLS subprotocol.
 It does not fall back to unbound authentication when the subprotocol is absent.
 Multiple TCP lanes are not available in CDN mode.
+The origin enforces its configured WSS path before the HTTP upgrade.
+Set `camouflage.wss_path` or use an explicit endpoint URL path.
+Configure `camouflage.trusted_proxy_cidrs` to accept forwarded client addresses. The default trusts no proxy.
 
 WebSocket messages have a 256 KiB payload limit, including fragmented messages.
 Inner TLS writes use chunks of at most 32 KiB.

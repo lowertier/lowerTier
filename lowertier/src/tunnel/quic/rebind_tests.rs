@@ -109,14 +109,18 @@ impl Peers {
         let decoy_upstream = if decoy {
             let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let mut flags = server_ctx.get_flags();
-            flags.quic_decoy_upstream = upstream.local_addr().unwrap().to_string();
-            flags.quic_admission_secret = "test-rebinding-routing-secret".into();
-            flags.quic_server_name = "challenges.cloudflare.com".into();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(upstream.local_addr().unwrap().to_string());
+            flags.camouflage_config_mut().admission_secret = "test-rebinding-routing-secret".into();
+            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".into();
             server_ctx.set_flags(flags);
             let mut flags = client_ctx.get_flags();
-            flags.quic_decoy_upstream = upstream.local_addr().unwrap().to_string();
-            flags.quic_admission_secret = "test-rebinding-routing-secret".into();
-            flags.quic_server_name = "challenges.cloudflare.com".into();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(upstream.local_addr().unwrap().to_string());
+            flags.camouflage_config_mut().admission_secret = "test-rebinding-routing-secret".into();
+            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".into();
             client_ctx.set_flags(flags);
             Some(upstream)
         } else {

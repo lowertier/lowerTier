@@ -3912,6 +3912,17 @@ impl TunnelConnector for QuicTunnelConnector {
                 .server_name
                 .clone()
         };
+        let http_host = self
+            .global_ctx
+            .get_flags()
+            .camouflage_config()
+            .http_host
+            .clone();
+        let authority = if http_host.is_empty() {
+            authority
+        } else {
+            http_host
+        };
         let bearer = connect_ip_bearer(&self.global_ctx);
         let (connect_stream, connect_stream_id) =
             open_connect_ip_request(&connection, &authority, bearer.as_deref()).await?;
