@@ -1,6 +1,7 @@
 pub(crate) mod client;
 mod runtime;
-pub mod server;
+#[cfg(test)]
+pub use lowertier_tracker::server;
 pub(crate) mod socket;
-pub mod wire;
+pub use lowertier_tracker::wire;
 pub(crate) use runtime::start;

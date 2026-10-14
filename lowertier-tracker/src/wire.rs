@@ -10,6 +10,13 @@ pub const MAX_RESPONSE: usize = 16 * 1024;
 pub const IDLE_ANNOUNCE_INTERVAL_SECS: u32 = 30;
 pub type Id = [u8; 20];
 
+pub fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub fn rendezvous_id(key: &[u8], protocol: &str) -> Id {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(b"vpn-rendezvous-v1");

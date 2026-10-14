@@ -1,5 +1,5 @@
 use clap::Parser;
-use lowertier::connector::tracker_discovery::server::TrackerServer;
+use lowertier_tracker::server::TrackerServer;
 use std::net::SocketAddr;
 
 #[derive(Parser)]

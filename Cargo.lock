@@ -3322,6 +3322,7 @@ dependencies = [
  "indoc",
  "io-uring",
  "itertools 0.14.0",
+ "lowertier-tracker",
  "machine-uid",
  "maplit",
  "mimalloc",
@@ -3419,6 +3420,26 @@ dependencies = [
  "zerocopy 0.7.35",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "lowertier-tracker"
+version = "2.6.4"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "cidr",
+ "clap",
+ "hmac",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "percent-encoding",
+ "rand 0.8.5",
+ "sha2",
+ "socket2 0.5.10",
+ "tokio",
 ]
 
 [[package]]

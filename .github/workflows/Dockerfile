@@ -27,6 +27,7 @@ ENV TZ=Asia/Shanghai
 EXPOSE 11010/tcp
 EXPOSE 11010/udp
 EXPOSE 11012/udp
+EXPOSE 16969/udp
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
     CMD ["/usr/local/bin/lowertier-cli", "--rpc-portal", "127.0.0.1:15888", "--output", "json", "node", "info"]

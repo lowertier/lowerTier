@@ -64,7 +64,7 @@ jobs:
             artifact_name="$(basename "$artifact_dir")"
             case "$artifact_name" in
               *-windows-*) ;;
-              *) chmod 0755 "$artifact_dir/lowertier-core" "$artifact_dir/lowertier-cli" ;;
+              *) chmod 0755 "$artifact_dir/lowertier-core" "$artifact_dir/lowertier-cli" "$artifact_dir/lowertier-tracker" ;;
             esac
             archive="$GITHUB_WORKSPACE/zipped-assets/${artifact_name}-${VERSION}.zip"
             (cd "$artifact_dir" && zip -r "$archive" .)
@@ -79,7 +79,7 @@ jobs:
           body: |
             This release contains the lowertier command-line programs.
 
-            Each archive contains `lowertier-core` and `lowertier-cli`.
+            Each archive contains `lowertier-core`, `lowertier-cli`, and `lowertier-tracker`.
             Windows archives also contain required driver files.
             Verify each archive with `SHA256SUMS`.
           draft: false

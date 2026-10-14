@@ -1,7 +1,6 @@
 use super::{
     client::{self, UdpTracker},
-    server::unix_seconds,
-    wire::{self, Announce},
+    wire::{self, Announce, unix_seconds},
 };
 use crate::connector::tcp_hole_punch::TcpBootstrap;
 use crate::{

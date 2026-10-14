@@ -221,7 +221,7 @@ INSTALL() {
   mkdir $INSTALL_PATH/config
   mv $INSTALL_PATH/lowertier-linux-${ARCH}/* $INSTALL_PATH/
   rm -rf $INSTALL_PATH/lowertier-linux-${ARCH}/
-  chmod +x $INSTALL_PATH/lowertier-core $INSTALL_PATH/lowertier-cli
+  chmod +x $INSTALL_PATH/lowertier-core $INSTALL_PATH/lowertier-cli $INSTALL_PATH/lowertier-tracker
   if [ -f $INSTALL_PATH/lowertier-core ] || [ -f $INSTALL_PATH/lowertier-cli ]; then
     echo -e "${GREEN_COLOR} Download successfully! ${RES}"
   else
@@ -337,10 +337,12 @@ EOF
   rm -rf /etc/systemd/system/lowertier.service
   rm -rf /usr/bin/lowertier-core
   rm -rf /usr/bin/lowertier-cli
+  rm -f /usr/bin/lowertier-tracker
 
   # Add link
   ln -s $INSTALL_PATH/lowertier-core /usr/sbin/lowertier-core
   ln -s $INSTALL_PATH/lowertier-cli /usr/sbin/lowertier-cli
+  ln -s $INSTALL_PATH/lowertier-tracker /usr/sbin/lowertier-tracker
 }
 
 SUCCESS() {
@@ -379,6 +381,7 @@ UNINSTALL() {
     rc-service lowertier stop
   fi
   echo -e "${GREEN_COLOR}Delete files ...${RES}"
+  rm -f /usr/bin/lowertier-tracker /usr/sbin/lowertier-tracker
   if [ "$INIT_SYSTEM" = "systemd" ]; then
     rm -rf $INSTALL_PATH /etc/systemd/system/lowertier.service /usr/bin/lowertier-core /usr/bin/lowertier-cli /etc/systemd/system/lowertier@.service /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
     systemctl daemon-reload
@@ -464,11 +467,11 @@ UPDATE() {
   
   echo "Replacing files..."
   # Remove old binaries and docs, but not the config directory
-  rm -f "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
+  rm -f "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/lowertier-tracker" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
   
   # Move new files into the installation directory
   mv "$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}"/* "$INSTALL_PATH/"
-  chmod +x "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli"
+  chmod +x "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/lowertier-tracker"
 
   # Restore configuration to prevent user-defined settings from being overwritten
   if [ -d "$BACKUP_CONFIG_DIR/config" ]; then

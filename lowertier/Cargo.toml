@@ -27,12 +27,6 @@ path = "src/lowertier-cli.rs"
 test = false
 bench = false
 
-[[bin]]
-name = "lowertier-tracker"
-path = "src/lowertier-tracker.rs"
-test = false
-bench = false
-
 [lib]
 name = "lowertier"
 path = "src/lib.rs"
@@ -54,6 +48,7 @@ name = "acl_filter"
 harness = false
 
 [dependencies]
+lowertier-tracker = { path = "../lowertier-tracker" }
 git-version = "0.3.9"
 
 tracing = { version = "0.1", features = ["log"] }
@@ -367,6 +362,7 @@ zip = "4.0.0"
 
 
 [dev-dependencies]
+lowertier-tracker = { path = "../lowertier-tracker", features = ["server", "test-support"] }
 criterion = "0.5.1"
 serial_test = "3.0.0"
 rstest = "0.25.0"

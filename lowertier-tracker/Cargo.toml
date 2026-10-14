@@ -1,0 +1,35 @@
+[package]
+name = "lowertier-tracker"
+version = "2.6.4"
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "Bounded BitTorrent tracker rendezvous service and codecs"
+
+[[bin]]
+name = "lowertier-tracker"
+path = "src/main.rs"
+required-features = ["server"]
+test = false
+bench = false
+
+[features]
+default = []
+server = ["dep:bytes", "dep:cidr", "dep:clap", "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:percent-encoding", "dep:rand", "dep:socket2", "dep:tokio"]
+test-support = ["server"]
+
+[dependencies]
+anyhow = "1"
+hmac = "0.12"
+sha2 = "0.10"
+bytes = { version = "1", optional = true }
+cidr = { version = "0.3", optional = true }
+clap = { version = "4.5.30", features = ["derive"], optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+percent-encoding = { version = "2", optional = true }
+rand = { version = "0.8.5", optional = true }
+socket2 = { version = "0.5.10", features = ["all"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"], optional = true }

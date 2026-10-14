@@ -7,6 +7,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "lowertier/**"
+      - "lowertier-tracker/**"
       - "vendor/**"
       - ".github/actions/prepare-build/**"
       - ".github/workflows/core.yml"
@@ -17,6 +18,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "lowertier/**"
+      - "lowertier-tracker/**"
       - "vendor/**"
       - ".github/actions/prepare-build/**"
       - ".github/workflows/core.yml"
@@ -93,7 +95,7 @@ jobs:
       - name: Build CLI binaries
         run: >-
           cargo build --locked --release --target "$TARGET"
-          --package lowertier --bins
+          --package lowertier --package lowertier-tracker --features lowertier-tracker/server --bins
 
       - name: Collect binaries
         run: |
@@ -104,6 +106,7 @@ jobs:
           fi
           cp "target/$TARGET/release/lowertier-core$suffix" artifacts/
           cp "target/$TARGET/release/lowertier-cli$suffix" artifacts/
+          cp "target/$TARGET/release/lowertier-tracker$suffix" artifacts/
 
           if [[ "$TARGET" == *windows* ]]; then
             arch_dir="x86_64"

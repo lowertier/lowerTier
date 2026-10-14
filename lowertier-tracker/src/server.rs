@@ -1,5 +1,5 @@
 //! A bounded BEP 15 and compact HTTP tracker for public or self-hosted bootstrap.
-use super::wire::{self, Announce, Id, MAX_PEERS};
+use super::wire::{self, Announce, Id, MAX_PEERS, unix_seconds};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
@@ -10,7 +10,7 @@ use std::{
     convert::Infallible,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::{
     net::{TcpListener, UdpSocket},
@@ -50,8 +50,8 @@ impl TrackerServer {
             self.interval
         }
     }
-    #[cfg(test)]
-    pub(crate) fn peer_count(&self) -> usize {
+    #[cfg(feature = "test-support")]
+    pub fn peer_count(&self) -> usize {
         self.store.lock().unwrap().entries
     }
     pub fn new(interval: u32) -> Result<Arc<Self>> {
@@ -333,13 +333,6 @@ impl TrackerServer {
             .body(Full::new(Bytes::from(body)))
             .unwrap()
     }
-}
-
-pub fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn append_compact(bytes: &mut Vec<u8>, address: SocketAddr) {

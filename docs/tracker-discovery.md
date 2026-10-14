@@ -156,7 +156,7 @@ Knowledge of the hash does not authorize VPN access.
 ## Self-hosted tracker
 
 ```sh
-cargo build --release -p lowertier --bin lowertier-tracker
+cargo build --release -p lowertier-tracker --features server --bin lowertier-tracker
 lowertier-tracker --udp-listen 0.0.0.0:6969 --http-listen 127.0.0.1:6970
 ```
 
