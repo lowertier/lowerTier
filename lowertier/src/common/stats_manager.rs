@@ -13,6 +13,8 @@ use tokio_util::task::AbortOnDropHandle;
 pub enum MetricName {
     /// QUIC path changes rejected by authentication, policy, or migration limits.
     QuicMigrationsRejected,
+    RelayBytes,
+    RelayDrops,
     /// RPC calls sent to peers
     PeerRpcClientTx,
     /// RPC calls received from peers
@@ -145,6 +147,8 @@ impl fmt::Display for MetricName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MetricName::QuicMigrationsRejected => write!(f, "quic_migrations_rejected"),
+            MetricName::RelayBytes => write!(f, "relay_bytes"),
+            MetricName::RelayDrops => write!(f, "relay_drops"),
             MetricName::PeerRpcClientTx => write!(f, "peer_rpc_client_tx"),
             MetricName::PeerRpcClientRx => write!(f, "peer_rpc_client_rx"),
             MetricName::PeerRpcServerTx => write!(f, "peer_rpc_server_tx"),

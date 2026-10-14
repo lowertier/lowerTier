@@ -31,6 +31,7 @@ message InstanceConfigPatch {
   reserved "disable_relay_data";
   common.RelayConfig relay = 15;
   common.CamouflageConfig camouflage = 16;
+  common.LimitsConfig limits = 17;
 }
 
 message PortForwardPatch {

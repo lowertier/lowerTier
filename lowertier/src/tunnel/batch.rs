@@ -178,6 +178,10 @@ impl PacketBatch {
         self.packets.iter_mut()
     }
 
+    pub(crate) fn retain_mut(&mut self, permitted: impl FnMut(&mut ZCPacket) -> bool) {
+        self.packets.retain_mut(permitted);
+    }
+
     /// Keep packets in their original order and reuse this batch allocation.
     pub(crate) fn retain_flags(&mut self, keep: &[bool]) {
         assert_eq!(keep.len(), self.packets.len());

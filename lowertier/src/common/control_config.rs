@@ -4,11 +4,12 @@ use base64::{Engine as _, prelude::BASE64_STANDARD};
 
 use crate::common::config::Flags;
 pub use crate::proto::common::{
-    CamouflageConfig, DecoyUpstream, RelayConfig, RelayLinkCost, RelayPolicy, RelayPrefer,
-    TransitPolicy,
+    CamouflageConfig, DecoyUpstream, LimitsConfig, RelayConfig, RelayLinkCost, RelayPolicy,
+    RelayPrefer, TransitPolicy,
 };
 
 pub const LEGACY_KEYS: &[(&str, &str)] = &[
+    ("instance_recv_bps_limit", "limits.receive_bps"),
     ("latency_first", "relay.policy"),
     ("speed_first", "relay.policy"),
     ("p2p_only", "relay.use_relays"),
@@ -29,7 +30,13 @@ pub const LEGACY_KEYS: &[(&str, &str)] = &[
     ("quic_sni_passthrough", "camouflage.sni_routing"),
 ];
 
+// WSS accepts one serialized overlay packet up to this existing receive bound.
+pub(crate) const MAX_TRANSIT_PACKET_BYTES: u64 = crate::tunnel::tcp_lanes::MAX_PENDING_BYTES as u64;
+
 impl Flags {
+    pub fn receive_bps(&self) -> Option<u64> {
+        self.limits.as_ref().and_then(|limits| limits.receive_bps)
+    }
     pub fn relay_config(&self) -> &RelayConfig {
         static DEFAULT: LazyLock<RelayConfig> = LazyLock::new(RelayConfig::default);
         self.relay.as_ref().unwrap_or(&DEFAULT)
@@ -58,6 +65,25 @@ pub fn peer_key(value: &str) -> anyhow::Result<[u8; 32]> {
 }
 
 impl RelayConfig {
+    pub(crate) fn validate_local_key(&self, local_key: Option<&str>) -> anyhow::Result<()> {
+        let Some(local_key) = local_key else {
+            return Ok(());
+        };
+        let local_key = peer_key(local_key)?;
+        for preference in &self.prefer {
+            anyhow::ensure!(
+                peer_key(&preference.peer)? != local_key && peer_key(&preference.via)? != local_key,
+                "relay.prefer cannot reference the local peer key"
+            );
+        }
+        for link in &self.link_cost {
+            anyhow::ensure!(
+                peer_key(&link.peer)? != local_key,
+                "relay.link_cost cannot reference the local peer key"
+            );
+        }
+        Ok(())
+    }
     pub fn can_use_relays(&self) -> bool {
         self.use_relays.unwrap_or(true)
     }
@@ -73,6 +99,10 @@ impl RelayConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.prefer.len() <= 64 && self.link_cost.len() <= 256,
+            "relay.prefer permits 64 entries; relay.link_cost permits 256 entries"
+        );
         RelayPolicy::try_from(self.policy)?;
         TransitPolicy::try_from(self.transit)?;
         anyhow::ensure!(
@@ -90,8 +120,10 @@ impl RelayConfig {
         }
         if let Some(burst) = self.transit_burst_bytes {
             anyhow::ensure!(
-                self.transit_bps_limit.is_some() && burst >= 65535 && burst <= u64::MAX / 8,
-                "relay.transit_burst_bytes requires a limit and space for a maximum frame"
+                self.transit_bps_limit.is_some()
+                    && burst >= MAX_TRANSIT_PACKET_BYTES
+                    && burst <= u64::MAX / 8,
+                "relay.transit_burst_bytes requires a limit and at least {MAX_TRANSIT_PACKET_BYTES} bytes for a maximum frame"
             );
         }
         for (index, prefer) in self.prefer.iter().enumerate() {
@@ -203,11 +235,16 @@ impl CamouflageConfig {
                 .into_iter()
                 .filter(|address| !address.is_empty())
             {
-                url::Url::parse(&format!("tcp://{address}"))?
-                    .port()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("camouflage.decoy_upstream must include a port")
-                    })?;
+                let endpoint = url::Url::parse(&format!("tcp://{address}"))?;
+                anyhow::ensure!(
+                    endpoint.port().is_some()
+                        && endpoint.username().is_empty()
+                        && endpoint.password().is_none()
+                        && endpoint.query().is_none()
+                        && endpoint.fragment().is_none()
+                        && matches!(endpoint.path(), "" | "/"),
+                    "camouflage.decoy_upstream must contain only a host and port"
+                );
             }
         }
         anyhow::ensure!(
@@ -225,8 +262,47 @@ impl CamouflageConfig {
         for cidr in &self.trusted_proxy_cidrs {
             cidr.parse::<cidr::IpCidr>()?;
         }
+        anyhow::ensure!(
+            self.trusted_proxy_cidrs.len() <= 64,
+            "camouflage.trusted_proxy_cidrs permits at most 64 entries"
+        );
         Ok(())
     }
+}
+
+pub(crate) fn validate_camouflage_listeners(
+    flags: &Flags,
+    listeners: &[url::Url],
+) -> anyhow::Result<()> {
+    for listener in listeners {
+        if listener.scheme() == "wss" {
+            crate::tunnel::tcp_lanes::requested(listener)?;
+        }
+        let address = match listener.scheme() {
+            "tcp" => flags.camouflage_config().tcp_decoy(),
+            "quic" => flags.camouflage_config().udp_decoy(),
+            _ => continue,
+        };
+        if address.is_empty() {
+            continue;
+        }
+        let upstream = url::Url::parse(&format!("tcp://{address}"))?;
+        let same_host = upstream.host_str() == listener.host_str()
+            || (listener.host_str().is_some_and(|host| {
+                host.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_unspecified())
+            }) && upstream.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            }));
+        anyhow::ensure!(
+            !(same_host && upstream.port() == listener.port()),
+            "camouflage.decoy_upstream cannot forward to its own listener"
+        );
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for CamouflageConfig {
@@ -251,12 +327,44 @@ impl std::fmt::Debug for CamouflageConfig {
 pub(crate) mod tests {
     pub(crate) fn rejects_legacy_control_keys_with_replacement_names() {
         for (old, replacement) in super::LEGACY_KEYS {
-            let text = format!("[flags]\n{old} = false\n");
-            let error = crate::common::config::TomlConfigLoader::new_from_str(&text).unwrap_err();
-            assert!(
-                format!("{error:#}").contains(replacement),
-                "{old}: {error:#}"
-            );
+            for section in ["[flags]\n", ""] {
+                let text = format!("{section}{old} = false\n");
+                let error =
+                    crate::common::config::TomlConfigLoader::new_from_str(&text).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(replacement),
+                    "{old}: {error:#}"
+                );
+            }
         }
+        use crate::common::config::ConfigLoader;
+        let config = crate::common::config::TomlConfigLoader::new_from_str(
+            r#"
+[relay]
+policy = "latency"
+use_relays = false
+transit = "deny"
+transit_networks = ["foreign-*"]
+transit_bps_limit = 1
+transit_burst_bytes = 262144
+[limits]
+receive_bps = 7
+[camouflage]
+wss_path = "/vpn"
+http_host = "example.test"
+trusted_proxy_cidrs = ["127.0.0.1/32"]
+"#,
+        )
+        .unwrap();
+        let flags = config.get_flags();
+        assert_eq!(flags.relay_config().policy(), super::RelayPolicy::Latency);
+        assert!(!flags.relay_config().can_use_relays());
+        assert_eq!(flags.relay_config().transit(), super::TransitPolicy::Deny);
+        assert_eq!(flags.relay_config().transit_bps_limit, Some(1));
+        assert_eq!(flags.receive_bps(), Some(7));
+        assert_eq!(flags.camouflage_config().websocket_path(), "/vpn");
+        let reloaded =
+            crate::common::config::TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+        assert_eq!(reloaded.get_flags(), flags);
     }
 }

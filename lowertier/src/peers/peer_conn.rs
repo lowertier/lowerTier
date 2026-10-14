@@ -62,7 +62,7 @@ use crate::{
     },
     proto::{
         api::instance::{PeerConnInfo, PeerConnStats},
-        common::{LimiterConfig, SecureModeConfig, TunnelInfo},
+        common::{SecureModeConfig, TunnelInfo},
         peer_rpc::{
             CredentialCertificate, CredentialCertificateStatus, HandshakeRequest,
             PeerConnDataProtectionPb, PeerConnNoiseCommitAckPb, PeerConnNoiseCommitDonePb,
@@ -1268,6 +1268,7 @@ pub struct PeerConn {
     peer_id_hint: Option<PeerId>,
     discovery_peer_hint: Option<Arc<DiscoveryPeerHint>>,
     global_ctx: ArcGlobalCtx,
+    transit_network: std::sync::OnceLock<Arc<str>>,
 
     my_encrypt_algo: String,
     secure_mode_cfg: SecureModeConfig,
@@ -1374,6 +1375,7 @@ impl PeerConn {
         );
 
         let (recv, sink) = (direct_tunnel.get_stream(), direct_tunnel.get_sink());
+        sink.set_transit_context(&global_ctx);
 
         let conn_id = PeerConnId::new_v4();
         let my_encrypt_algo = flags.encryption_algorithm;
@@ -1385,6 +1387,7 @@ impl PeerConn {
             peer_id_hint,
             discovery_peer_hint: None,
             global_ctx,
+            transit_network: std::sync::OnceLock::new(),
 
             secure_mode_cfg,
             session_filter,
@@ -4101,47 +4104,6 @@ impl PeerConn {
             probe_peer_id,
         );
 
-        let is_foreign_network = conn_info_for_instrument.network_name
-            != self.global_ctx.get_network_identity().network_name;
-        let recv_limiter = if is_foreign_network
-            && self
-                .global_ctx
-                .get_flags()
-                .relay_config()
-                .transit_bps_limit
-                .map_or(u64::MAX, |bits| bits / 8)
-                != u64::MAX
-        {
-            let relay_network_bps_limit = self
-                .global_ctx
-                .get_flags()
-                .relay_config()
-                .transit_bps_limit
-                .map_or(u64::MAX, |bits| bits / 8);
-            let limiter_config = LimiterConfig {
-                burst_rate: None,
-                bps: Some(relay_network_bps_limit),
-                fill_duration_ms: None,
-            };
-            Some(self.global_ctx.token_bucket_manager().get_or_create(
-                &format!("{}:recv", conn_info_for_instrument.network_name),
-                limiter_config.into(),
-            ))
-        } else if self.global_ctx.get_flags().instance_recv_bps_limit != u64::MAX {
-            let limiter_config = LimiterConfig {
-                burst_rate: None,
-                bps: Some(self.global_ctx.get_flags().instance_recv_bps_limit),
-                fill_duration_ms: None,
-            };
-            Some(
-                self.global_ctx
-                    .token_bucket_manager()
-                    .get_or_create("instance:recv", limiter_config.into()),
-            )
-        } else {
-            None
-        };
-
         let poll_receiver = speed_probe_receiver.clone();
         let poll_sink = sink.clone();
         let poll_close_notifier = self.close_event_notifier.clone();
@@ -4200,6 +4162,7 @@ impl PeerConn {
         });
 
         let receiver_pacer_for_recv = receiver_pacer.clone();
+        let global_ctx = self.global_ctx.clone();
         self.tasks.spawn(
             async move {
                 tracing::info!("start recving peer conn packet");
@@ -4314,11 +4277,7 @@ impl PeerConn {
                         if delivery_failed || identity_invalid {
                             break;
                         }
-                        if received_bytes != 0
-                            && let Some(limiter) = recv_limiter.as_ref()
-                        {
-                            limiter.consume(received_bytes).await;
-                        }
+                        global_ctx.pace_receive(received_bytes as usize).await;
                         stream_ended |= prefetch_reached_end;
                         next_result = if let Some(first) = receive_queue.pop_front() {
                             Some(first)
@@ -4476,11 +4435,7 @@ impl PeerConn {
                         }
                     }
 
-                    if received_bytes != 0
-                        && let Some(limiter) = recv_limiter.as_ref()
-                    {
-                        limiter.consume(received_bytes).await;
-                    }
+                    global_ctx.pace_receive(received_bytes as usize).await;
                     next_result = if let Some(first) = receive_queue.pop_front() {
                         Some(first)
                     } else if stream_ended {
@@ -4545,10 +4500,36 @@ impl PeerConn {
         );
     }
 
-    pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
+    fn prepare_outbound_transit(&self, msg: &mut ZCPacket) {
+        let Some(header) = msg.peer_manager_header() else {
+            return;
+        };
+        let is_data = if header.packet_type == PacketType::ForeignNetworkPacket as u8 {
+            !header.is_foreign_control()
+                && msg.foreign_network_inner_is_data().is_none_or(|data| data)
+        } else {
+            super::traffic_metrics::is_relay_data_packet_type(header.packet_type)
+        };
+        if !is_data || (!msg.transit_data && header.from_peer_id.get() == self.my_peer_id) {
+            return;
+        }
+        let destination = header.to_peer_id.get();
+        if msg.transit_network.is_none() {
+            msg.transit_network = Some(
+                self.transit_network
+                    .get_or_init(|| Arc::from(self.get_network_identity().network_name))
+                    .clone(),
+            );
+        }
+        msg.transit_destination.get_or_insert(destination);
+        msg.transit_data = true;
+    }
+
+    pub async fn send_msg(&self, mut msg: ZCPacket) -> Result<(), Error> {
         let paced_bytes = paced_packet_bytes(&msg);
         self.pace_outbound_bulk(usize::from(paced_bytes != 0), paced_bytes)
             .await;
+        self.prepare_outbound_transit(&mut msg);
         Ok(self.sink.send(msg).await?)
     }
 
@@ -4746,12 +4727,21 @@ impl PeerConn {
     }
 
     pub async fn send_msg_batch(&self, batch: PacketBatch) -> Result<(), Error> {
-        let batch = match batch.pop_singleton() {
+        let mut batch = match batch.pop_singleton() {
             Ok(packet) => return self.send_msg(packet).await,
             Err(batch) => batch,
         };
         let paced_bytes = paced_batch_bytes(&batch);
         self.pace_outbound_bulk(batch.len(), paced_bytes).await;
+        if batch
+            .iter()
+            .all(|packet| !packet.transit_data && packet.get_src_peer_id() == Some(self.my_peer_id))
+        {
+            return Ok(self.sink.send_batch(batch).await?);
+        }
+        for packet in batch.iter_mut() {
+            self.prepare_outbound_transit(packet);
+        }
         Ok(self.sink.send_batch(batch).await?)
     }
 

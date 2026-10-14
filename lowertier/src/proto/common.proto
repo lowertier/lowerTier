@@ -64,7 +64,8 @@ message FlagsInConfig {
 
   bool lazy_p2p = 37;
   bool need_p2p = 38;
-  uint64 instance_recv_bps_limit = 39;
+  reserved 39;
+  reserved "instance_recv_bps_limit";
   reserved 40, 41;
   reserved "disable_upnp", "disable_relay_data";
   bool enable_udp_broadcast_relay = 42;
@@ -124,6 +125,7 @@ message FlagsInConfig {
   // Runtime snapshots. TOML stores these as top-level sections.
   RelayConfig relay = 76;
   CamouflageConfig camouflage = 77;
+  LimitsConfig limits = 78;
 }
 
 enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }
@@ -145,6 +147,7 @@ message RelayConfig {
 }
 
 message DecoyUpstream { string tcp = 1; string udp = 2; }
+message LimitsConfig { optional uint64 receive_bps = 1; }
 message CamouflageConfig {
   string server_name = 1;
   string tls_cert = 2;

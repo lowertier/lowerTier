@@ -32,7 +32,65 @@ mod admission_tests;
 
 type BoxedPacketBatchSink = Pin<Box<dyn PacketBatchSink>>;
 
+struct TransitSink {
+    inner: BoxedPacketBatchSink,
+    state: std::sync::Weak<DirectSinkState>,
+}
+
+impl futures::Sink<PacketBatch> for TransitSink {
+    type Error = TunnelError;
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_ready(cx)
+    }
+    fn start_send(mut self: Pin<&mut Self>, mut batch: PacketBatch) -> Result<(), Self::Error> {
+        // Check after poll_ready. Queued data cannot retain old permission or credit.
+        if let Some(context) = self.state.upgrade().and_then(|state| {
+            state
+                .transit_context
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+        }) {
+            batch.retain_mut(|packet| {
+                if !packet.transit_data {
+                    return true;
+                }
+                let network = packet.transit_network.clone();
+                context.admit_transit(
+                    packet,
+                    network
+                        .as_deref()
+                        .unwrap_or(&context.get_network_identity().network_name),
+                    packet
+                        .transit_destination
+                        .or_else(|| packet.get_dst_peer_id())
+                        .unwrap_or(0),
+                )
+            });
+        }
+        if batch.is_empty() {
+            return Ok(());
+        }
+        self.inner.as_mut().start_send(batch)
+    }
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_flush(cx)
+    }
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_close(cx)
+    }
+}
+
 struct DirectSinkState {
+    transit_context: OnceLock<std::sync::Weak<crate::common::global_ctx::GlobalCtx>>,
     ownership_budget: Arc<AdmissionBudget>,
     control_budget: Arc<AdmissionBudget>,
     terminal_error: OnceLock<String>,
@@ -89,6 +147,7 @@ impl DirectSinkState {
         let (control_tx, control_rx) = mpsc::channel(2);
         let (data_tx, data_rx) = mpsc::channel(data_run_capacity);
         let state = Arc::new(Self {
+            transit_context: OnceLock::new(),
             ownership_budget: Arc::new(AdmissionBudget::with_process_and_runs(
                 DIRECT_DATA_PACKET_BUDGET,
                 DIRECT_DATA_BYTE_BUDGET,
@@ -107,7 +166,10 @@ impl DirectSinkState {
         });
         tokio::spawn(run_direct_sink_owner(
             Arc::downgrade(&state),
-            sink,
+            Box::pin(TransitSink {
+                inner: sink,
+                state: Arc::downgrade(&state),
+            }),
             control_rx,
             data_rx,
             close_timeout,
@@ -220,6 +282,9 @@ pub struct DirectTunnelSender {
 }
 
 impl DirectTunnelSender {
+    pub(crate) fn set_transit_context(&self, context: &crate::common::global_ctx::ArcGlobalCtx) {
+        let _ = self.state.transit_context.set(Arc::downgrade(context));
+    }
     pub fn send(&self, packet: ZCPacket) -> impl Future<Output = Result<(), TunnelError>> + '_ {
         self.send_batch(PacketBatch::singleton(packet))
     }
@@ -591,14 +656,11 @@ pub(crate) fn is_data_packet(packet: &ZCPacket) -> bool {
         return false;
     }
 
-    let packet_type = if header.packet_type == PacketType::ForeignNetworkPacket as u8 {
-        let Some(inner_packet_type) = packet.foreign_network_inner_packet_type() else {
-            return false;
-        };
-        inner_packet_type
-    } else {
-        header.packet_type
-    };
+    if header.packet_type == PacketType::ForeignNetworkPacket as u8 {
+        return !header.is_foreign_control();
+    }
+
+    let packet_type = header.packet_type;
 
     matches!(
         packet_type,

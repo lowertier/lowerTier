@@ -334,6 +334,9 @@ pub struct GlobalCtx {
     tun_device_name: Mutex<Option<String>>,
 
     flags: ArcSwap<Flags>,
+    transit_budget: std::sync::Mutex<super::transit_budget::TransitBudget>,
+    receive_budget: std::sync::Mutex<super::transit_budget::TransitBudget>,
+    pub(crate) transit_parent: std::sync::Weak<GlobalCtx>,
     underlay_policy: Arc<ArcSwap<UnderlayPolicy>>,
 
     // Runtime/base advertised feature flags before config-owned fields are
@@ -557,9 +560,11 @@ impl GlobalCtx {
         flags: &Flags,
         mut feature_flags: PeerFeatureFlag,
     ) -> PeerFeatureFlag {
-        if (flags.relay_config().transit() == crate::proto::common::TransitPolicy::Deny) {
-            feature_flags.avoid_relay_data = true;
-        }
+        feature_flags.avoid_relay_data =
+            flags.relay_config().transit() == crate::proto::common::TransitPolicy::Avoid;
+        feature_flags.deny_transit_data =
+            flags.relay_config().transit() == crate::proto::common::TransitPolicy::Deny;
+        feature_flags.relay_semantics_v1 = true;
         feature_flags.speed_routing = true;
         feature_flags.relay_origin_proof = true;
         feature_flags
@@ -721,6 +726,16 @@ impl GlobalCtx {
             advertised_ipv6_public_addr_prefix: Mutex::new(None),
             tun_device_name: Mutex::new(None),
 
+            transit_budget: std::sync::Mutex::new(super::transit_budget::TransitBudget::new(
+                flags.relay_config(),
+            )),
+            transit_parent: std::sync::Weak::new(),
+            receive_budget: std::sync::Mutex::new(super::transit_budget::TransitBudget::new(
+                &crate::proto::common::RelayConfig {
+                    transit_bps_limit: flags.receive_bps(),
+                    ..Default::default()
+                },
+            )),
             flags: ArcSwap::new(Arc::new(flags)),
             underlay_policy,
 
@@ -1089,7 +1104,22 @@ impl GlobalCtx {
 
     pub fn set_flags(&self, mut flags: Flags) {
         remove_obsolete_adapter_flags(&mut flags);
-        if let Err(error) = validate_flags(&flags) {
+        let secure_mode = self.config.get_secure_mode();
+        if let Err(error) = validate_flags(&flags)
+            .and_then(|_| {
+                flags.relay_config().validate_local_key(
+                    secure_mode
+                        .as_ref()
+                        .and_then(|mode| mode.local_public_key.as_deref()),
+                )
+            })
+            .and_then(|_| {
+                super::control_config::validate_camouflage_listeners(
+                    &flags,
+                    self.config.get_listeners().as_deref().unwrap_or_default(),
+                )
+            })
+        {
             tracing::error!(?error, "rejected invalid runtime flags");
             return;
         }
@@ -1102,7 +1132,19 @@ impl GlobalCtx {
             self.base_feature_flags.load(),
         ));
         self.underlay_policy.store(Arc::new(policy));
+        self.transit_budget
+            .lock()
+            .unwrap()
+            .update(flags.relay_config());
+        self.receive_budget
+            .lock()
+            .unwrap()
+            .update(&crate::proto::common::RelayConfig {
+                transit_bps_limit: flags.receive_bps(),
+                ..Default::default()
+            });
         self.flags.store(Arc::new(flags));
+        self.issue_event(GlobalCtxEvent::ConfigPatched(Default::default()));
     }
 
     pub fn get_underlay_policy(&self) -> Arc<UnderlayPolicy> {
@@ -1111,6 +1153,65 @@ impl GlobalCtx {
 
     pub fn flags_arc(&self) -> Arc<Flags> {
         self.flags.load_full()
+    }
+
+    pub(crate) fn admit_transit(
+        &self,
+        packet: &mut crate::tunnel::packet_def::ZCPacket,
+        network: &str,
+        destination: PeerId,
+    ) -> bool {
+        use super::stats_manager::{LabelSet, LabelType, MetricName};
+        if let Some(parent) = self.transit_parent.upgrade() {
+            return parent.admit_transit(packet, network, destination);
+        }
+        let flags = self.flags_arc();
+        let relay = flags.relay_config();
+        let reason = if relay.transit() == crate::proto::common::TransitPolicy::Deny {
+            Some("deny")
+        } else if network != self.get_network_identity().network_name
+            && !relay.permits_foreign_network(network)
+        {
+            Some("network")
+        } else if relay.transit_bps_limit.is_some()
+            && !self
+                .transit_budget
+                .lock()
+                .unwrap()
+                .consume(packet.tunnel_payload().len())
+        {
+            Some("budget")
+        } else {
+            None
+        };
+        let labels = LabelSet::new()
+            .with_label_type(LabelType::NetworkName(network.to_owned()))
+            .with_label_type(LabelType::DstPeerId(destination));
+        if let Some(reason) = reason {
+            self.stats_manager()
+                .get_counter(
+                    MetricName::RelayDrops,
+                    labels.with_label_type(LabelType::ErrorType(reason.to_owned())),
+                )
+                .inc();
+            return false;
+        }
+        self.stats_manager()
+            .get_counter(MetricName::RelayBytes, labels)
+            .add(packet.tunnel_payload().len() as u64);
+        true
+    }
+
+    pub(crate) async fn pace_receive(&self, mut bytes: usize) {
+        let parent = self.transit_parent.upgrade();
+        let context = parent.as_deref().unwrap_or(self);
+        while bytes > 0 {
+            let (consumed, delay) = context.receive_budget.lock().unwrap().receive_chunk(bytes);
+            bytes -= consumed;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+        }
     }
 
     pub fn get_128_key(&self) -> [u8; 16] {
@@ -1182,24 +1283,6 @@ impl GlobalCtx {
             flags.as_ref(),
             feature_flags,
         ));
-    }
-
-    /// Set the avoid-relay preference that is independent of disable_relay_data.
-    ///
-    /// disable_relay_data still forces the effective advertised flag to true,
-    /// but this base preference is preserved when that config flag is toggled.
-    pub fn set_avoid_relay_data_preference(&self, avoid_relay_data: bool) -> bool {
-        let mut base_feature_flags = self.base_feature_flags.load();
-        base_feature_flags.avoid_relay_data = avoid_relay_data;
-        self.base_feature_flags.store(base_feature_flags);
-
-        let mut feature_flags = self.feature_flags.load();
-        let previous = feature_flags.avoid_relay_data;
-        feature_flags.avoid_relay_data = avoid_relay_data
-            || (self.flags.load().relay_config().transit()
-                == crate::proto::common::TransitPolicy::Deny);
-        self.feature_flags.store(feature_flags);
-        previous != feature_flags.avoid_relay_data
     }
 
     /// Set the runtime IPv6-provider advertised bit without touching

@@ -26,12 +26,12 @@ use super::{
 pub(super) const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_JOINS: usize = 32;
 const MAX_TRACKED_FLOWS: usize = 256;
-pub(super) const MAX_PENDING_BYTES: usize = MAX_PACKET_BATCH_SIZE * 4096;
+pub(crate) const MAX_PENDING_BYTES: usize = MAX_PACKET_BATCH_SIZE * 4096;
 const RECORD_BYTES: usize = 54;
 const DOMAIN: &[u8] = b"LowTier TCP lanes v1";
 type JoinId = [u8; 16];
 
-pub(super) fn requested(url: &url::Url) -> Result<usize, TunnelError> {
+pub(crate) fn requested(url: &url::Url) -> Result<usize, TunnelError> {
     let mut values = url.query_pairs().filter(|(key, _)| key == "lanes");
     let count = match values.next() {
         None => return Ok(1),

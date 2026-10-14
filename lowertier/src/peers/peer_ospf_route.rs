@@ -88,8 +88,6 @@ use prost_wkt_types::Timestamp;
 
 static UPDATE_PEER_INFO_PERIOD: Duration = Duration::from_secs(3600);
 static REMOVE_DEAD_PEER_INFO_AFTER: Duration = Duration::from_secs(3660);
-// the cost (latency between two peers) is i32, i32::MAX is large enough.
-static AVOID_RELAY_COST: usize = i32::MAX as usize;
 
 // if a peer is unreachable for `REMOVE_UNREACHABLE_PEER_INFO_AFTER` time, we can remove it because
 // 1. all the ospf sessions between two zone are already destroy, new created session will resend the peer info.
@@ -512,6 +510,8 @@ impl RoutePeerInfo {
             bridge_attestation_hmac: Vec::new(),
             bridge_attestation_issued_unix_ms: 0,
             bridge_attestation_expiry_unix_ms: 0,
+            relay_link_cost: Vec::new(),
+            relay_prefer: Vec::new(),
         }
     }
 
@@ -631,6 +631,8 @@ impl RoutePeerInfo {
             },
 
             identity_type: identity_type as i32,
+            relay_link_cost: global_ctx.get_flags().relay_config().link_cost.clone(),
+            relay_prefer: global_ctx.get_flags().relay_config().prefer.clone(),
 
             ..Default::default()
         };
@@ -2528,10 +2530,11 @@ struct TopologyBuildInput {
 }
 
 /// Immutable route input with calculator-specific edge weights.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RouteBuildInput {
     version: Version,
     graph: PeerGraph,
+    control_graph: PeerGraph,
     speed_graph: SpeedGraph,
     speed_preparation: Option<WidestPathPreparation>,
     start_node: NodeIndex,
@@ -2597,6 +2600,116 @@ fn add_authorized_relay_reverse_edges(
 }
 
 impl TopologyBuildInput {
+    #[cfg(test)]
+    pub(crate) fn check_deny_transit_routes() {
+        struct Measurements;
+        impl RouteCostCalculatorInterface for Measurements {
+            fn calculate_cost(&self, src: PeerId, dst: PeerId) -> i32 {
+                if src == 1 && dst == 2 { 50 } else { 1 }
+            }
+            fn calculate_delivery_bps(&self, _: PeerId, _: PeerId) -> Option<u64> {
+                Some(80_000)
+            }
+        }
+        let mut graph = PeerGraph::new();
+        let nodes: Vec<_> = (1..=4).map(|peer| graph.add_node(peer)).collect();
+        for (src, dst) in [(0, 1), (1, 0), (1, 2), (0, 3), (3, 2)] {
+            graph.add_edge(nodes[src], nodes[dst], 1);
+        }
+        let infos = (1..=4)
+            .map(|peer| {
+                (
+                    peer,
+                    RoutePeerInfo {
+                        peer_id: peer,
+                        noise_static_pubkey: vec![peer as u8; 32],
+                        feature_flag: Some(crate::proto::common::PeerFeatureFlag {
+                            relay_semantics_v1: true,
+                            deny_transit_data: peer == 1 || peer == 2,
+                            ..Default::default()
+                        }),
+                        identity_type: PeerIdentityType::Admin as i32,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let mut topology = Self {
+            version: 1,
+            graph,
+            start_node: nodes[0],
+            peer_infos: Arc::new(infos),
+            conn_map: Arc::new(HashMap::new()),
+            suppressed_peer_ids: Arc::new(HashSet::new()),
+            relay_credential_peers: Arc::new(HashSet::new()),
+            local_proxy_cidrs: Vec::new(),
+        };
+        let input = topology.with_measurements(&Measurements, true, true);
+        for policy in [
+            NextHopPolicy::LeastHop,
+            NextHopPolicy::LeastCost,
+            NextHopPolicy::MaxGoodput,
+        ] {
+            let routes = RouteTable::build_next_hop_map_from_input_checked(&input, policy).unwrap();
+            assert_eq!(routes[&3].next_hop_peer_id, 4);
+            assert_eq!(routes[&2].next_hop_peer_id, 2);
+        }
+        Arc::make_mut(&mut topology.peer_infos)
+            .get_mut(&4)
+            .unwrap()
+            .feature_flag
+            .as_mut()
+            .unwrap()
+            .deny_transit_data = true;
+        let input = topology.with_measurements(&Measurements, true, true);
+        for policy in [
+            NextHopPolicy::LeastHop,
+            NextHopPolicy::LeastCost,
+            NextHopPolicy::MaxGoodput,
+        ] {
+            assert!(
+                !RouteTable::build_next_hop_map_from_input_checked(&input, policy)
+                    .unwrap()
+                    .contains_key(&3)
+            );
+        }
+        assert!(
+            RouteTable::build_next_hop_map_from_input_checked(&input, NextHopPolicy::ControlHop)
+                .unwrap()
+                .contains_key(&3)
+        );
+        use base64::{Engine as _, prelude::BASE64_STANDARD};
+        let infos = Arc::make_mut(&mut topology.peer_infos);
+        for info in infos.values_mut() {
+            info.feature_flag.as_mut().unwrap().deny_transit_data = false;
+        }
+        let preference = crate::proto::common::RelayPrefer {
+            peer: BASE64_STANDARD.encode([3_u8; 32]),
+            via: BASE64_STANDARD.encode([2_u8; 32]),
+        };
+        infos.get_mut(&1).unwrap().relay_prefer = vec![preference.clone()];
+        let input = topology.with_measurements(&Measurements, true, true);
+        assert_eq!(
+            RouteTable::build_next_hop_map_from_input_checked(&input, NextHopPolicy::LeastCost)
+                .unwrap()[&3]
+                .next_hop_peer_id,
+            2
+        );
+        let mut opposite = preference;
+        opposite.via = BASE64_STANDARD.encode([1_u8; 32]);
+        Arc::make_mut(&mut topology.peer_infos)
+            .get_mut(&2)
+            .unwrap()
+            .relay_prefer = vec![opposite];
+        let input = topology.with_measurements(&Measurements, true, true);
+        assert_eq!(
+            RouteTable::build_next_hop_map_from_input_checked(&input, NextHopPolicy::LeastCost)
+                .unwrap()[&3]
+                .next_hop_peer_id,
+            4
+        );
+    }
+
     fn capture(my_peer_id: PeerId, synced_info: &SyncedRouteInfo) -> Self {
         let (version, peer_infos, conn_map, suppressed_peer_ids) = {
             let _topology_guard = synced_info.topology_state_lock();
@@ -2736,11 +2849,12 @@ impl TopologyBuildInput {
             let dst = edge.target();
             let src_peer_id = self.graph[src];
             let dst_peer_id = self.graph[dst];
-            let peer_avoid_relay_data = self
-                .peer_infos
-                .get(&src_peer_id)
-                .and_then(|info| info.feature_flag)
-                .is_some_and(|flags| flags.avoid_relay_data);
+            let source_denies_transit = src != self.start_node
+                && self
+                    .peer_infos
+                    .get(&src_peer_id)
+                    .and_then(|info| info.feature_flag)
+                    .is_none_or(|flags| flags.deny_transit_data || !flags.relay_semantics_v1);
             // Least-hop and least-cost rebuilds need an edge weight. A
             // delivery-only rebuild still captures cost for speed latency.
             let raw_cost = if capture_cost || capture_delivery {
@@ -2748,11 +2862,22 @@ impl TopologyBuildInput {
             } else {
                 1
             };
-            let effective_cost = if peer_avoid_relay_data {
-                raw_cost.saturating_add(AVOID_RELAY_COST)
-            } else {
-                raw_cost
-            };
+            let bias = self
+                .peer_infos
+                .get(&src_peer_id)
+                .and_then(|info| {
+                    let dst_key = &self.peer_infos.get(&dst_peer_id)?.noise_static_pubkey;
+                    info.relay_link_cost
+                        .iter()
+                        .take(256)
+                        .find(|link| {
+                            crate::common::control_config::peer_key(&link.peer)
+                                .is_ok_and(|key| key.as_slice() == dst_key)
+                        })
+                        .map(|link| link.bias_ms as usize)
+                })
+                .unwrap_or(0);
+            let effective_cost = raw_cost.saturating_add(bias).min(i32::MAX as usize);
             if capture_cost {
                 *graph
                     .edge_weight_mut(edge_id)
@@ -2766,10 +2891,7 @@ impl TopologyBuildInput {
                     .and_then(|info| PeerIdentityType::try_from(info.identity_type).ok())
                     .is_some_and(|identity| matches!(identity, PeerIdentityType::Admin))
                 || self.relay_credential_peers.contains(&src_peer_id);
-            if capture_delivery
-                && source_can_publish_delivery
-                && (src == self.start_node || !peer_avoid_relay_data)
-            {
+            if capture_delivery && source_can_publish_delivery && !source_denies_transit {
                 let Some(delivery_bps) = cost_calc.calculate_delivery_bps(src_peer_id, dst_peer_id)
                 else {
                     continue;
@@ -2782,18 +2904,60 @@ impl TopologyBuildInput {
                     dst,
                     SpeedEdge {
                         delivery_bps,
-                        latency_ms: raw_cost as u64,
+                        latency_ms: effective_cost as u64,
                     },
                 );
             }
         }
 
+        let control_graph = self.graph.clone();
+        graph.retain_edges(|graph, edge| {
+            let (src, _) = graph.edge_endpoints(edge).expect("topology edge");
+            src == self.start_node
+                || self
+                    .peer_infos
+                    .get(&graph[src])
+                    .and_then(|info| info.feature_flag)
+                    .is_some_and(|flags| flags.relay_semantics_v1 && !flags.deny_transit_data)
+        });
+        let avoid_cost = |src: NodeIndex| {
+            usize::from(
+                src != self.start_node
+                    && self
+                        .peer_infos
+                        .get(&self.graph[src])
+                        .and_then(|info| info.feature_flag)
+                        .is_some_and(|flags| flags.avoid_relay_data),
+            )
+        };
+        let avoid_distances = if graph.node_weight(self.start_node).is_some() {
+            dijkstra(&graph, self.start_node, None, |edge| {
+                avoid_cost(edge.source())
+            })
+        } else {
+            Default::default()
+        };
+        let permitted = |src: NodeIndex, dst: NodeIndex| {
+            avoid_distances
+                .get(&src)
+                .zip(avoid_distances.get(&dst))
+                .is_some_and(|(a, b)| *a + avoid_cost(src) == *b)
+        };
+        graph.retain_edges(|graph, edge| {
+            let (src, dst) = graph.edge_endpoints(edge).expect("data edge");
+            permitted(src, dst)
+        });
+        speed_graph.retain_edges(|graph, edge| {
+            let (src, dst) = graph.edge_endpoints(edge).expect("delivery edge");
+            permitted(src, dst)
+        });
         let speed_preparation =
             capture_delivery.then(|| prepare_widest_path(&speed_graph, self.start_node));
 
         RouteBuildInput {
             version: self.version,
             graph,
+            control_graph,
             speed_graph,
             speed_preparation,
             start_node: self.start_node,
@@ -2803,6 +2967,12 @@ impl TopologyBuildInput {
             local_proxy_cidrs: self.local_proxy_cidrs.clone(),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn deny_transit_removes_data_edges_and_preserves_control_routes() {
+    TopologyBuildInput::check_deny_transit_routes();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3423,13 +3593,7 @@ impl RouteTable {
             );
             return;
         }
-        let normalize_edge_cost = |e: petgraph::graph::EdgeReference<usize>| {
-            if *e.weight() >= AVOID_RELAY_COST {
-                AVOID_RELAY_COST + 1
-            } else {
-                1
-            }
-        };
+        let normalize_edge_cost = |_: petgraph::graph::EdgeReference<usize>| 1;
         // Calculate the permitted shortest-hop distance once.
         let path_len_map = dijkstra(&graph, *start_node, None, normalize_edge_cost);
         let (costs, next_hops) = dijkstra_with_first_hop_filtered(graph, *start_node, |edge| {
@@ -3468,9 +3632,10 @@ impl RouteTable {
     ) {
         for (dst, (next_hop, path_len)) in next_hops.iter() {
             let info = NextHopInfo {
+                preferred: false,
                 next_hop_peer_id: *graph.node_weight(*next_hop).unwrap(),
                 path_delivery_bps: 0,
-                path_latency: (*costs.get(dst).unwrap() % AVOID_RELAY_COST) as i32,
+                path_latency: (*costs.get(dst).unwrap()).min(i32::MAX as usize) as i32,
                 path_len: { *path_len },
                 version,
             };
@@ -3509,6 +3674,7 @@ impl RouteTable {
             widest_path_with_preparation(graph, *start_node, preparation, budget, &mut work_stats)?;
         for (dst, route) in routes {
             let info = NextHopInfo {
+                preferred: false,
                 next_hop_peer_id: route.next_hop_peer_id,
                 path_delivery_bps: route.quality.delivery_bps,
                 path_latency: route.quality.latency_ms.min(i32::MAX as u64) as i32,
@@ -3534,10 +3700,204 @@ impl RouteTable {
         input: &RouteBuildInput,
         policy: NextHopPolicy,
     ) -> Result<HashMap<PeerId, NextHopInfo>, WidestPathWorkError> {
+        let mut routes = Self::build_automatic_next_hops(input, policy.clone())?;
+        if policy == NextHopPolicy::ControlHop {
+            return Ok(routes);
+        }
+        let Some(origin) = input.graph.node_weight(input.start_node) else {
+            return Ok(routes);
+        };
+        let Some(preferences) = input.peer_infos.get(origin).map(|info| &info.relay_prefer) else {
+            return Ok(routes);
+        };
+        let per_preference = if policy == NextHopPolicy::MaxGoodput {
+            widest_path_work_limit(
+                input.speed_graph.node_count(),
+                input.speed_graph.edge_count(),
+            )
+            .unwrap_or(usize::MAX)
+        } else {
+            (input.graph.node_count() + input.graph.edge_count()).saturating_mul(4)
+        };
+        let work = per_preference
+            .saturating_mul(preferences.len())
+            .saturating_mul(input.graph.node_count().max(1));
+        if work > MAX_ROUTE_REBUILD_WORK {
+            return Ok(routes);
+        }
+        for preference in preferences {
+            let resolve = |key: &str| {
+                let key = crate::common::control_config::peer_key(key).ok()?;
+                input
+                    .graph
+                    .node_references()
+                    .find(|(_, id)| {
+                        input
+                            .peer_infos
+                            .get(id)
+                            .is_some_and(|info| info.noise_static_pubkey == key)
+                    })
+                    .map(|(node, id)| (node, *id))
+            };
+            let Some((destination, peer)) = resolve(&preference.peer) else {
+                continue;
+            };
+            let Some((via_node, via)) = resolve(&preference.via) else {
+                continue;
+            };
+            if via_node == input.start_node || destination == input.start_node {
+                continue;
+            }
+            let Some(edge) = input.graph.find_edge(input.start_node, via_node) else {
+                continue;
+            };
+            if via == peer {
+                routes.insert(
+                    peer,
+                    NextHopInfo {
+                        preferred: true,
+                        next_hop_peer_id: via,
+                        path_len: 1,
+                        path_latency: input.graph[edge].min(i32::MAX as usize) as i32,
+                        version: input.version,
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
+            let mut suffix = input.clone();
+            suffix.start_node = via_node;
+            suffix.graph.retain_edges(|graph, edge| {
+                graph
+                    .edge_endpoints(edge)
+                    .is_some_and(|(_, dst)| dst != input.start_node)
+            });
+            suffix.speed_graph.retain_edges(|graph, edge| {
+                graph
+                    .edge_endpoints(edge)
+                    .is_some_and(|(_, dst)| dst != input.start_node)
+            });
+            if policy == NextHopPolicy::MaxGoodput {
+                let Some(first_edge) = input.speed_graph.find_edge(input.start_node, via_node)
+                else {
+                    continue;
+                };
+                let capacity = input.speed_graph[first_edge].delivery_bps;
+                for edge in suffix.speed_graph.edge_weights_mut() {
+                    edge.delivery_bps = edge.delivery_bps.min(capacity);
+                }
+                suffix.speed_preparation = Some(prepare_widest_path(&suffix.speed_graph, via_node));
+            }
+            let Ok(suffix_routes) = Self::build_automatic_next_hops(&suffix, policy.clone()) else {
+                continue;
+            };
+            let Some(mut selected) = suffix_routes.get(&peer).copied() else {
+                continue;
+            };
+            if !Self::preferred_suffix_is_acyclic(input, via_node, destination, policy.clone()) {
+                continue;
+            }
+            if policy == NextHopPolicy::MaxGoodput {
+                let Some(edge) = input.speed_graph.find_edge(input.start_node, via_node) else {
+                    continue;
+                };
+                selected.path_delivery_bps = selected
+                    .path_delivery_bps
+                    .min(input.speed_graph[edge].delivery_bps);
+            }
+            selected.next_hop_peer_id = via;
+            selected.preferred = true;
+            selected.path_len += 1;
+            selected.path_latency = selected
+                .path_latency
+                .saturating_add(input.graph[edge].min(i32::MAX as usize) as i32);
+            routes.insert(peer, selected);
+        }
+        Ok(routes)
+    }
+
+    fn preferred_suffix_is_acyclic(
+        input: &RouteBuildInput,
+        mut current: NodeIndex,
+        destination: NodeIndex,
+        policy: NextHopPolicy,
+    ) -> bool {
+        let mut visited = HashSet::from([input.start_node]);
+        let Some(target) = input.peer_infos.get(&input.graph[destination]) else {
+            return false;
+        };
+        while current != destination {
+            if !visited.insert(current) {
+                return false;
+            }
+            let preferred = input
+                .peer_infos
+                .get(&input.graph[current])
+                .and_then(|info| {
+                    info.relay_prefer.iter().take(64).find(|preference| {
+                        crate::common::control_config::peer_key(&preference.peer)
+                            .is_ok_and(|key| key.as_slice() == target.noise_static_pubkey)
+                    })
+                });
+            let preferred_next = preferred.and_then(|preference| {
+                let key = crate::common::control_config::peer_key(&preference.via).ok()?;
+                input
+                    .graph
+                    .node_references()
+                    .find(|(node, peer)| {
+                        *node != current
+                            && input.graph.find_edge(current, *node).is_some()
+                            && input
+                                .peer_infos
+                                .get(peer)
+                                .is_some_and(|info| info.noise_static_pubkey == key)
+                    })
+                    .map(|(node, _)| node)
+            });
+            let next = if let Some(next) = preferred_next {
+                next
+            } else {
+                let mut suffix = input.clone();
+                suffix.start_node = current;
+                if policy == NextHopPolicy::MaxGoodput {
+                    suffix.speed_preparation =
+                        Some(prepare_widest_path(&suffix.speed_graph, current));
+                }
+                let Ok(routes) = Self::build_automatic_next_hops(&suffix, policy.clone()) else {
+                    return false;
+                };
+                let Some(route) = routes.get(&target.peer_id) else {
+                    return false;
+                };
+                let Some((next, _)) = input
+                    .graph
+                    .node_references()
+                    .find(|(_, peer)| **peer == route.next_hop_peer_id)
+                else {
+                    return false;
+                };
+                next
+            };
+            current = next;
+        }
+        true
+    }
+
+    fn build_automatic_next_hops(
+        input: &RouteBuildInput,
+        policy: NextHopPolicy,
+    ) -> Result<HashMap<PeerId, NextHopInfo>, WidestPathWorkError> {
         let workspace = Self::new();
         workspace.next_hop_map_version.set(input.version);
         if input.start_node != NodeIndex::end() {
             match policy {
+                NextHopPolicy::ControlHop => {
+                    workspace.gen_next_hop_map_with_least_hop(
+                        &input.control_graph,
+                        &input.start_node,
+                        input.version,
+                    );
+                }
                 NextHopPolicy::LeastHop => {
                     if input.graph.node_count() == 0 {
                         return Ok(HashMap::new());
@@ -3910,10 +4270,6 @@ impl RouteTableSnapshot {
         self.get_next_hop(peer_id).is_some()
     }
 
-    fn topology_peer_reachable(&self, peer_id: PeerId) -> bool {
-        self.get_topology_next_hop(peer_id).is_some()
-    }
-
     fn get_udp_nat_type(&self, peer_id: PeerId) -> Option<NatType> {
         self.peer_infos
             .get(&peer_id)
@@ -4276,6 +4632,7 @@ impl Drop for SyncRouteSession {
 #[derive(Debug, Clone)]
 struct ForwardingSnapshot {
     generation: u64,
+    control_hop: Arc<HashMap<PeerId, ForwardingNextHop>>,
     route_table: Arc<RouteTableSnapshot>,
     route_table_with_cost: Arc<RouteTableSnapshot>,
     route_table_with_speed: Arc<RouteTableSnapshot>,
@@ -4397,6 +4754,7 @@ struct PeerRouteServiceImpl {
     route_table: RouteTable,
     route_table_with_cost: RouteTable,
     route_table_with_speed: RouteTable,
+    control_hop: std::sync::Mutex<Arc<HashMap<PeerId, ForwardingNextHop>>>,
     committed_topology: std::sync::Mutex<Option<Arc<TopologyBuildInput>>>,
     forwarding_snapshot: ArcSwap<ForwardingSnapshot>,
     forwarding_snapshot_source: std::sync::RwLock<Option<ForwardingDecisionSnapshotSource>>,
@@ -4506,9 +4864,11 @@ impl PeerRouteServiceImpl {
             route_table: RouteTable::new(),
             route_table_with_cost: RouteTable::new(),
             route_table_with_speed: RouteTable::new(),
+            control_hop: std::sync::Mutex::new(Arc::new(HashMap::new())),
             committed_topology: std::sync::Mutex::new(None),
             forwarding_snapshot: ArcSwap::new(Arc::new(ForwardingSnapshot {
                 generation: 0,
+                control_hop: Arc::new(HashMap::new()),
                 route_table: Arc::new(RouteTable::new().into_snapshot()),
                 route_table_with_cost: Arc::new(RouteTable::new().into_snapshot()),
                 route_table_with_speed: Arc::new(RouteTable::new().into_snapshot()),
@@ -4588,6 +4948,7 @@ impl PeerRouteServiceImpl {
         policy: NextHopPolicy,
     ) -> Option<NextHopInfo> {
         match policy {
+            NextHopPolicy::ControlHop => snapshot.control_hop.get(&dst_peer_id).copied(),
             NextHopPolicy::MaxGoodput => snapshot
                 .route_table_with_speed
                 .get_next_hop(dst_peer_id)
@@ -5205,6 +5566,11 @@ impl PeerRouteServiceImpl {
                     return None;
                 }
             };
+            let control_next_hops = RouteTable::build_next_hop_map_from_input_checked(
+                &build_input,
+                NextHopPolicy::ControlHop,
+            )
+            .expect("hop routes have no widest-path work");
             let cost_next_hops = match RouteTable::build_next_hop_map_from_input_checked(
                 &build_input,
                 NextHopPolicy::LeastCost,
@@ -5236,7 +5602,9 @@ impl PeerRouteServiceImpl {
                 .least_hop_rebuilds
                 .fetch_add(1, Ordering::Relaxed);
             let shared_maps =
-                RouteTable::build_shared_maps(self.my_peer_id, &build_input, &baseline_next_hops);
+                RouteTable::build_shared_maps(self.my_peer_id, &build_input, &control_next_hops);
+            *self.control_hop.lock().unwrap() = Arc::new(control_next_hops);
+
             self.route_table
                 .replace_policy(baseline_next_hops, shared_maps.clone());
 
@@ -5805,6 +6173,7 @@ impl PeerRouteServiceImpl {
                     })
             });
 
+        let control_hop = self.control_hop.lock().unwrap().clone();
         let decision_snapshot = ForwardingDecisionSnapshot::from_parts_with_service_routes(
             generation,
             forwarding_peers.clone(),
@@ -5818,10 +6187,12 @@ impl PeerRouteServiceImpl {
             route_table.cidr_peer_id_map.clone(),
             route_table.cidr_v6_peer_id_map.clone(),
             route_table.service_routes.clone(),
-        );
+        )
+        .with_control_hop(control_hop.clone());
 
         let next_snapshot = Arc::new(ForwardingSnapshot {
             generation,
+            control_hop,
             route_table,
             route_table_with_cost,
             route_table_with_speed,
@@ -5968,6 +6339,9 @@ impl PeerRouteServiceImpl {
     }
 
     fn handle_global_ctx_event(&self, event: &GlobalCtxEvent) {
+        if matches!(event, GlobalCtxEvent::ConfigPatched(_)) {
+            self.rebuild_domains(RouteRebuildDomains::topology());
+        }
         if matches!(
             event,
             GlobalCtxEvent::PeerAdded(_)
@@ -6156,7 +6530,7 @@ impl PeerRouteServiceImpl {
             }
 
             // do not send unreachable peer info to dst peer.
-            if !route_snapshot.route_table.topology_peer_reachable(*peer_id) {
+            if !route_snapshot.control_hop.contains_key(&*peer_id) {
                 unreachable_peers_for_peer_info.insert(*peer_id, peer_info.version);
                 continue;
             }
@@ -6174,7 +6548,7 @@ impl PeerRouteServiceImpl {
                 return false;
             };
 
-            if route_snapshot.route_table.topology_peer_reachable(*peer_id) {
+            if route_snapshot.control_hop.contains_key(&*peer_id) {
                 route_infos.push(peer_info.clone());
             }
 
@@ -6225,7 +6599,7 @@ impl PeerRouteServiceImpl {
                 continue;
             }
 
-            if !route_snapshot.route_table.topology_peer_reachable(*peer_id) {
+            if !route_snapshot.control_hop.contains_key(&*peer_id) {
                 unreachable_peers_for_conn_info.insert(*peer_id, conn_info.version.get());
                 continue;
             }
@@ -6243,7 +6617,7 @@ impl PeerRouteServiceImpl {
                 return false;
             };
 
-            if route_snapshot.route_table.topology_peer_reachable(*peer_id) {
+            if route_snapshot.control_hop.contains_key(&*peer_id) {
                 add_to_conn_peer_list(*peer_id, conn_info);
             }
 
@@ -6381,8 +6755,7 @@ impl PeerRouteServiceImpl {
             .verify_and_update_credential_trusts_with_active_peers_protecting(
                 network_identity.network_secret.as_deref(),
                 |peer_id| {
-                    peer_id == self.my_peer_id
-                        || route_snapshot.route_table.topology_peer_reachable(peer_id)
+                    peer_id == self.my_peer_id || route_snapshot.control_hop.contains_key(&peer_id)
                 },
                 Some(self.my_peer_id),
             );
@@ -6592,7 +6965,7 @@ impl PeerRouteServiceImpl {
             if let Ok(d) = now.duration_since(last_update)
                 && (d > REMOVE_DEAD_PEER_INFO_AFTER
                     || (d > REMOVE_UNREACHABLE_PEER_INFO_AFTER
-                        && !route_snapshot.route_table.topology_peer_reachable(*peer_id)))
+                        && !route_snapshot.control_hop.contains_key(&*peer_id)))
             {
                 to_remove.push(*peer_id);
             }

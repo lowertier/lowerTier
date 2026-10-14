@@ -637,10 +637,10 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_INSTANCE_RECV_BPS_LIMIT",
-        help = t!("core_clap.instance_recv_bps_limit").to_string(),
+        env = "LOWTIER_RECEIVE_BPS",
+        help = "Instance receive limit in bit/s"
     )]
-    instance_recv_bps_limit: Option<u64>,
+    receive_bps: Option<u64>,
 
     #[arg(
         long,
@@ -1319,9 +1319,11 @@ impl NetworkOptions {
         }
         f.accept_dns = self.accept_dns.unwrap_or(f.accept_dns);
         f.private_mode = self.private_mode.unwrap_or(f.private_mode);
-        f.instance_recv_bps_limit = self
-            .instance_recv_bps_limit
-            .unwrap_or(f.instance_recv_bps_limit);
+        if let Some(receive_bps) = self.receive_bps {
+            f.limits = Some(crate::common::control_config::LimitsConfig {
+                receive_bps: Some(receive_bps),
+            });
+        }
         f.multi_thread_count = self.multi_thread_count.unwrap_or(f.multi_thread_count);
         f.disable_sym_hole_punching = self
             .disable_sym_hole_punching

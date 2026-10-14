@@ -283,6 +283,7 @@ pub struct ForwardingDecisionSnapshot {
     suppressed_peer_ids: Arc<HashSet<PeerId>>,
     public_ipv6_gateway_peer_id: Option<PeerId>,
     least_hop: Arc<HashMap<PeerId, ForwardingNextHop>>,
+    control_hop: Arc<HashMap<PeerId, ForwardingNextHop>>,
     least_cost: Arc<HashMap<PeerId, ForwardingNextHop>>,
     max_goodput: Arc<HashMap<PeerId, ForwardingNextHop>>,
     ipv4_peer_ids: Arc<HashMap<Ipv4Addr, PeerId>>,
@@ -294,6 +295,7 @@ pub struct ForwardingDecisionSnapshot {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForwardingNextHop {
+    pub preferred: bool,
     pub next_hop_peer_id: PeerId,
     pub path_delivery_bps: u64,
     pub path_latency: i32,
@@ -374,6 +376,7 @@ impl ForwardingDecisionSnapshot {
             capabilities,
             suppressed_peer_ids,
             public_ipv6_gateway_peer_id,
+            control_hop: least_hop.clone(),
             least_hop,
             least_cost,
             max_goodput,
@@ -387,6 +390,14 @@ impl ForwardingDecisionSnapshot {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn with_control_hop(
+        mut self: Arc<Self>,
+        control_hop: Arc<HashMap<PeerId, ForwardingNextHop>>,
+    ) -> Arc<Self> {
+        Arc::make_mut(&mut self).control_hop = control_hop;
+        self
     }
 
     pub fn capabilities(&self) -> &ForwardingPeerTable {
@@ -411,6 +422,7 @@ impl ForwardingDecisionSnapshot {
             return None;
         }
         match policy {
+            NextHopPolicy::ControlHop => self.control_hop.get(&peer_id).copied(),
             NextHopPolicy::MaxGoodput => self
                 .max_goodput
                 .get(&peer_id)
@@ -889,6 +901,7 @@ impl ForwardingDecisionSnapshotSource {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum NextHopPolicy {
+    ControlHop,
     #[default]
     LeastHop,
     LeastCost,

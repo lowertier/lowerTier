@@ -1425,6 +1425,7 @@ pub struct PeerManager {
     local_bgp_routes_lock: SyncMutex<()>,
     local_bgp_route_generation: AtomicU64,
     topology_service_route_generation: AtomicU64,
+    static_service_route_generation: AtomicU64,
 
     exit_nodes: ArcSwap<Vec<IpAddr>>,
 
@@ -2057,6 +2058,7 @@ impl PeerManager {
             local_bgp_routes_lock: SyncMutex::new(()),
             local_bgp_route_generation: AtomicU64::new(0),
             topology_service_route_generation: AtomicU64::new(0),
+            static_service_route_generation: AtomicU64::new(0),
 
             exit_nodes: ArcSwap::from_pointee(exit_nodes),
 
@@ -2560,23 +2562,12 @@ impl PeerManager {
         peer_map: &PeerMap,
         relay_peer_map: &Arc<RelayPeerMap>,
         foreign_network_mgr: &ForeignNetworkManager,
-        disable_relay_data: bool,
     ) -> Result<(), ZCPacket> {
         let Some(pm_header) = packet.peer_manager_header() else {
             return Ok(());
         };
         let from_peer_id = pm_header.from_peer_id.get();
         let to_peer_id = pm_header.to_peer_id.get();
-
-        if disable_relay_data && Self::is_relay_data_zc_packet(&packet) {
-            tracing::debug!(
-                ?from_peer_id,
-                ?to_peer_id,
-                inner_packet_type = ?packet.foreign_network_inner_packet_type(),
-                "drop foreign network relay data while relay data is disabled"
-            );
-            return Ok(());
-        }
 
         let Some(foreign_hdr) = packet.foreign_network_hdr() else {
             tracing::warn!(
@@ -2612,6 +2603,7 @@ impl PeerManager {
         if packet.authenticated_peer_id().is_none()
             && Some(from_peer_id) == foreign_network_my_peer_id
         {
+            packet.transit_data = Self::is_relay_data_zc_packet(&packet);
             let Some(to_peer_id) = peer_map
                 .get_origin_my_peer_id(&foreign_network_name, to_peer_id)
                 .await
@@ -2631,11 +2623,9 @@ impl PeerManager {
             let header = packet.mut_peer_manager_header().unwrap();
             header.from_peer_id.set(my_peer_id);
             header.to_peer_id.set(to_peer_id);
+            let policy = Self::get_next_hop_policy(header);
 
-            if let Err(error) = relay_peer_map
-                .send_msg(packet, to_peer_id, NextHopPolicy::LeastHop)
-                .await
-            {
+            if let Err(error) = relay_peer_map.send_msg(packet, to_peer_id, policy).await {
                 tracing::debug!(?error, ?to_peer_id, "secure foreign packet send failed");
             }
             Ok(())
@@ -2707,6 +2697,7 @@ impl PeerManager {
                 return Ok(());
             }
 
+            inner_packet.transit_data = Self::is_relay_data_packet(inner_packet_type);
             add_counter(
                 MetricName::TrafficBytesForeignForwardRx,
                 MetricName::TrafficPacketsForeignForwardRx,
@@ -2747,6 +2738,9 @@ impl PeerManager {
         };
 
         if hdr.packet_type == PacketType::ForeignNetworkPacket as u8 {
+            if hdr.is_foreign_control() {
+                return false;
+            }
             if hdr.is_encrypted() {
                 return true;
             }
@@ -2854,8 +2848,6 @@ impl PeerManager {
         self.tasks.lock().await.spawn(async move {
             tracing::trace!("start_peer_recv");
             while let Ok(mut batch) = recv_packet_batch_from_chan(&mut recv).await {
-                let disable_relay_data = (global_ctx.flags_arc().relay_config().transit()
-                    == crate::proto::common::TransitPolicy::Deny);
                 let mut local_batch = if let Some((from_peer_id, packet_type)) =
                     decoded_local_nic_batch_source(&batch, my_peer_id)
                 {
@@ -2970,7 +2962,6 @@ impl PeerManager {
                                     &peers,
                                     &relay_peer_map,
                                     &foreign_mgr,
-                                    disable_relay_data,
                                 )
                                 .await
                                 else {
@@ -3067,15 +3058,7 @@ impl PeerManager {
                             continue;
                         }
                         if to_peer_id != my_peer_id {
-                            if disable_relay_data && is_relay_data_packet {
-                                tracing::debug!(
-                                    ?from_peer_id,
-                                    ?to_peer_id,
-                                    packet_type,
-                                    "drop forwarded relay data while relay data is disabled"
-                                );
-                                continue;
-                            }
+                            ret.transit_data = is_relay_data_packet && from_peer_id != my_peer_id;
 
                             let Some(header) = ret.mut_peer_manager_header() else {
                                 tracing::warn!(?ret, "invalid forwarded packet, skip");
@@ -3098,14 +3081,6 @@ impl PeerManager {
                                     "credential node dropping forwarded handshake packet"
                                 );
                                 continue;
-                            }
-
-                            if header.forward_counter > 2 && header.is_latency_first() {
-                                tracing::trace!(
-                                    ?header,
-                                    "set_latency_first false because too many hop"
-                                );
-                                header.set_speed_first(false).set_latency_first(false);
                             }
 
                             header.forward_counter += 1;
@@ -3924,8 +3899,15 @@ impl PeerManager {
         }
     }
 
-    fn get_next_hop_policy(header: &crate::tunnel::packet_def::PeerManagerHeader) -> NextHopPolicy {
-        if header.is_speed_first() {
+    pub(crate) fn get_next_hop_policy(
+        header: &crate::tunnel::packet_def::PeerManagerHeader,
+    ) -> NextHopPolicy {
+        if !Self::is_relay_data_packet(header.packet_type)
+            && !is_foreign_network_packet_type(header.packet_type)
+            || header.is_foreign_control()
+        {
+            NextHopPolicy::ControlHop
+        } else if header.is_speed_first() {
             NextHopPolicy::MaxGoodput
         } else if header.is_latency_first() {
             NextHopPolicy::LeastCost
@@ -3939,6 +3921,20 @@ impl PeerManager {
             return Err(Error::RouteError(None));
         }
         Ok(())
+    }
+
+    fn local_snapshot_next_hop(
+        &self,
+        snapshot: &ForwardingDecisionSnapshotHandle,
+        destination: PeerId,
+        policy: NextHopPolicy,
+    ) -> Option<PeerId> {
+        if self.global_ctx.p2p_only() {
+            return self.peers.has_peer(destination).then_some(destination);
+        }
+        snapshot
+            .next_hop(destination, policy)
+            .map(|hop| hop.next_hop_peer_id)
     }
 
     pub async fn send_msg_for_proxy(
@@ -4106,12 +4102,11 @@ impl PeerManager {
                 let next_hop = (overridden_dst == self.my_peer_id)
                     .then_some(overridden_dst)
                     .or_else(|| {
-                        forwarding_snapshot
-                            .next_hop(
-                                overridden_dst,
-                                Self::get_next_hop_policy(packet.peer_manager_header().unwrap()),
-                            )
-                            .map(|next_hop| next_hop.next_hop_peer_id)
+                        self.local_snapshot_next_hop(
+                            forwarding_snapshot,
+                            overridden_dst,
+                            Self::get_next_hop_policy(packet.peer_manager_header().unwrap()),
+                        )
                     });
                 if next_hop.is_none() {
                     errors.push(Error::RouteError(Some(
@@ -4207,12 +4202,11 @@ impl PeerManager {
                     .to_peer_id
                     .set(peer_id);
                 let next_hop = (peer_id == self.my_peer_id).then_some(peer_id).or_else(|| {
-                    forwarding_snapshot
-                        .next_hop(
-                            peer_id,
-                            Self::get_next_hop_policy(per_peer_msg.peer_manager_header().unwrap()),
-                        )
-                        .map(|next_hop| next_hop.next_hop_peer_id)
+                    self.local_snapshot_next_hop(
+                        forwarding_snapshot,
+                        peer_id,
+                        Self::get_next_hop_policy(per_peer_msg.peer_manager_header().unwrap()),
+                    )
                 });
                 if next_hop.is_none() {
                     errors.push(Error::RouteError(Some(
@@ -4757,7 +4751,6 @@ impl PeerManager {
         authorization: Option<FullEthernetAuthorizationToken>,
     ) -> Result<(), Error> {
         let policy = Self::get_next_hop_policy(msg.peer_manager_header().unwrap());
-        let is_latency_first = msg.peer_manager_header().unwrap().is_latency_first();
         let packet_type = msg.peer_manager_header().unwrap().packet_type;
         if packet_type == PacketType::Ethernet as u8
             && !Self::full_ethernet_destination_is_authorized(peers, dst_peer_id).await
@@ -4775,13 +4768,11 @@ impl PeerManager {
             return Err(Error::RouteError(None));
         }
         let msg_len = msg.buf_len() as u64;
-        let latency_first_gateway = if is_latency_first {
+        let latency_first_gateway = {
             peers
                 .get_gateway_peer_id_for_packet(dst_peer_id, policy.clone(), &msg)
                 .await
                 .filter(|gateway| *gateway != dst_peer_id)
-        } else {
-            None
         };
         let send_result = if let Some(gateway) = latency_first_gateway
             && (peers.has_peer(gateway) || foreign_network_client.has_next_hop(gateway))
@@ -4863,7 +4854,6 @@ impl PeerManager {
             return Ok(());
         };
         let header = first.peer_manager_header().unwrap();
-        let is_latency_first = header.is_latency_first();
         let packet_type = header.packet_type;
         if packet_type == PacketType::Ethernet as u8
             && !Self::full_ethernet_destination_is_authorized(peers, dst_peer_id).await
@@ -4883,13 +4873,11 @@ impl PeerManager {
         let policy = Self::get_next_hop_policy(header);
         let bytes = batch.buffer_byte_len() as u64;
         let packets = batch.len() as u64;
-        let latency_first_gateway = if is_latency_first {
+        let latency_first_gateway = {
             peers
                 .get_gateway_peer_id_for_packet(dst_peer_id, policy.clone(), first)
                 .await
                 .filter(|gateway| *gateway != dst_peer_id)
-        } else {
-            None
         };
 
         let send_result = if let Some(gateway) = latency_first_gateway
@@ -5347,9 +5335,7 @@ impl PeerManager {
             let next_hop = if peer_id == self.my_peer_id {
                 Some(peer_id)
             } else {
-                snapshot
-                    .next_hop(peer_id, Self::get_next_hop_policy(header))
-                    .map(|next_hop| next_hop.next_hop_peer_id)
+                self.local_snapshot_next_hop(snapshot, peer_id, Self::get_next_hop_policy(header))
             };
             let Some(next_hop) = next_hop else {
                 return Err(Error::RouteError(Some(
@@ -5482,6 +5468,34 @@ impl PeerManager {
         {
             self.service_routes
                 .replace_source(RouteSource::Overlay, topology_routes.routes().to_vec());
+        }
+        if self
+            .static_service_route_generation
+            .swap(snapshot.generation(), Ordering::AcqRel)
+            != snapshot.generation()
+        {
+            let flags = self.global_ctx.flags_arc();
+            let policy = match flags.relay_config().policy() {
+                crate::proto::common::RelayPolicy::Hop => NextHopPolicy::LeastHop,
+                crate::proto::common::RelayPolicy::Latency => NextHopPolicy::LeastCost,
+                crate::proto::common::RelayPolicy::Goodput => NextHopPolicy::MaxGoodput,
+            };
+            let static_routes = topology_routes
+                .routes()
+                .iter()
+                .filter(|route| {
+                    snapshot
+                        .next_hop(route.gateway, policy.clone())
+                        .is_some_and(|hop| hop.preferred)
+                })
+                .cloned()
+                .map(|mut route| {
+                    route.preference = 10;
+                    route
+                })
+                .collect();
+            self.service_routes
+                .replace_source(RouteSource::Static, static_routes);
         }
     }
 

@@ -288,6 +288,31 @@ impl InstanceConfigPatcher {
         let patch_for_event = patch.clone();
         let global_ctx = weak_upgrade(&self.global_ctx)?;
         let parsed_ipv6_public_addr_prefix = Self::validate_public_ipv6_patch(&global_ctx, &patch)?;
+        let mut candidate_flags = global_ctx.get_flags();
+        if let Some(relay) = &patch.relay {
+            candidate_flags.relay = Some(relay.clone());
+        }
+        if let Some(camouflage) = &patch.camouflage {
+            candidate_flags.camouflage = Some(camouflage.clone());
+        }
+        if let Some(limits) = &patch.limits {
+            candidate_flags.limits = Some(limits.clone());
+        }
+        crate::common::config::validate_flags(&candidate_flags)?;
+        let secure_mode = global_ctx.config.get_secure_mode();
+        candidate_flags.relay_config().validate_local_key(
+            secure_mode
+                .as_ref()
+                .and_then(|mode| mode.local_public_key.as_deref()),
+        )?;
+        crate::common::control_config::validate_camouflage_listeners(
+            &candidate_flags,
+            global_ctx
+                .config
+                .get_listeners()
+                .as_deref()
+                .unwrap_or_default(),
+        )?;
 
         self.patch_port_forwards(patch.port_forwards).await?;
         self.patch_acl(patch.acl).await?;
@@ -312,16 +337,8 @@ impl InstanceConfigPatcher {
             global_ctx.set_ipv6(Some(ipv6.into()));
             global_ctx.config.set_ipv6(Some(ipv6.into()));
         }
-        if patch.relay.is_some() || patch.camouflage.is_some() {
-            let mut flags = global_ctx.get_flags();
-            if let Some(relay) = patch.relay {
-                flags.relay = Some(relay);
-            }
-            if let Some(camouflage) = patch.camouflage {
-                flags.camouflage = Some(camouflage);
-            }
-            crate::common::config::validate_flags(&flags)?;
-            global_ctx.set_flags(flags);
+        if patch.relay.is_some() || patch.camouflage.is_some() || patch.limits.is_some() {
+            global_ctx.set_flags(candidate_flags);
         }
         if let Some(enabled) = patch.ipv6_public_addr_provider {
             global_ctx.config.set_ipv6_public_addr_provider(enabled);

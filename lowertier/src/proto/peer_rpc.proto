@@ -134,6 +134,8 @@ message RoutePeerInfo {
   bytes bridge_attestation_hmac = 27;
   uint64 bridge_attestation_issued_unix_ms = 28;
   uint64 bridge_attestation_expiry_unix_ms = 29;
+  repeated common.RelayLinkCost relay_link_cost = 30;
+  repeated common.RelayPrefer relay_prefer = 31;
 }
 
 message PeerIdVersion {

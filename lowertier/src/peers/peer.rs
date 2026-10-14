@@ -283,7 +283,7 @@ impl Peer {
                     )
                 })
                 .map(|entry| entry.value().clone()),
-            NextHopPolicy::LeastHop => self
+            NextHopPolicy::LeastHop | NextHopPolicy::ControlHop => self
                 .conns
                 .iter()
                 .filter(|entry| !entry.value().is_closed())
@@ -312,6 +312,7 @@ impl Peer {
             return Some(conn);
         }
         let policy_flow = match policy {
+            NextHopPolicy::ControlHop => flow_hash ^ (1_u64 << 61),
             NextHopPolicy::LeastHop => flow_hash,
             NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
             NextHopPolicy::MaxGoodput => flow_hash ^ (1_u64 << 62),

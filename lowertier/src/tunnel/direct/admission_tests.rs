@@ -2,6 +2,63 @@ use super::*;
 use futures::{FutureExt, SinkExt};
 
 #[tokio::test]
+async fn queued_transit_observes_denial_before_framing() {
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+    struct GateSink {
+        ready: Arc<AtomicBool>,
+        sent: Arc<AtomicUsize>,
+    }
+    impl futures::Sink<PacketBatch> for GateSink {
+        type Error = TunnelError;
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.ready.load(Ordering::Acquire) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
+            self.sent.fetch_add(batch.len(), Ordering::Relaxed);
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    let context = crate::common::global_ctx::tests::get_mock_global_ctx();
+    let drain = futures::sink::drain::<PacketBatch>().sink_map_err(|never| match never {});
+    let state = DirectSinkState::new(Box::pin(drain), None, None);
+    state.transit_context.set(Arc::downgrade(&context)).unwrap();
+    let ready = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicUsize::new(0));
+    let mut sink: BoxedPacketBatchSink = Box::pin(TransitSink {
+        inner: Box::pin(GateSink {
+            ready: ready.clone(),
+            sent: sent.clone(),
+        }),
+        state: Arc::downgrade(&state),
+    });
+    let mut packet = ZCPacket::new_with_payload(&[0; 100]);
+    packet.fill_peer_manager_hdr(2, 3, PacketType::Data as u8);
+    packet.transit_data = true;
+    let send = start_direct_batch(&mut sink, PacketBatch::singleton(packet), None);
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    let mut flags = context.get_flags();
+    flags.relay_config_mut().transit = crate::proto::common::TransitPolicy::Deny as i32;
+    context.set_flags(flags);
+    ready.store(true, Ordering::Release);
+    assert!(send.await.is_ok());
+    assert_eq!(sent.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn byte_budget_rejection_parks_until_real_release() {
     let budget = Arc::new(AdmissionBudget::with_process(4, 8, None));
     let held = budget.try_acquire(1, 8).unwrap();

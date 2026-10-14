@@ -1527,6 +1527,7 @@ impl PeerMap {
         flow_hash: u64,
     ) -> Option<PeerId> {
         let policy_flow = match policy {
+            NextHopPolicy::ControlHop => flow_hash ^ (1_u64 << 61),
             NextHopPolicy::LeastHop => flow_hash,
             NextHopPolicy::LeastCost => flow_hash ^ (1_u64 << 63),
             NextHopPolicy::MaxGoodput => flow_hash ^ (1_u64 << 62),
@@ -1557,7 +1558,7 @@ impl PeerMap {
             return Some((dst_peer_id, snapshot.generation()));
         }
 
-        if self.has_peer(dst_peer_id) && matches!(policy, NextHopPolicy::LeastHop) {
+        if self.has_peer(dst_peer_id) && matches!(policy, NextHopPolicy::ControlHop) {
             return Some((dst_peer_id, snapshot.generation()));
         }
 
@@ -1572,6 +1573,13 @@ impl PeerMap {
         policy: NextHopPolicy,
         packet: &ZCPacket,
     ) -> Option<PeerId> {
+        if policy != NextHopPolicy::ControlHop
+            && packet.get_src_peer_id() == Some(self.my_peer_id)
+            && !packet.transit_data
+            && self.global_ctx.p2p_only()
+        {
+            return self.has_peer(dst_peer_id).then_some(dst_peer_id);
+        }
         self.get_gateway_peer_id_for_flow(dst_peer_id, policy, classify_packet_flow(packet).hash)
             .await
     }

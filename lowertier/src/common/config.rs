@@ -63,7 +63,6 @@ pub fn gen_default_flags() -> Flags {
         tld_dns_zone: DEFAULT_ET_DNS_ZONE.to_string(),
 
         need_p2p: false,
-        instance_recv_bps_limit: u64::MAX,
         enable_udp_broadcast_relay: false,
         socket_mark: None,
         underlay_deny_interfaces: Vec::new(),
@@ -82,6 +81,7 @@ pub fn gen_default_flags() -> Flags {
         l2_allowed_ether_types: Vec::new(),
         relay: None,
         camouflage: None,
+        limits: None,
     }
 }
 
@@ -103,6 +103,10 @@ pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyho
 }
 
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        flags.receive_bps() != Some(0),
+        "limits.receive_bps must be positive"
+    );
     for (index, protocol) in flags.enabled_protocols.iter().enumerate() {
         anyhow::ensure!(
             matches!(protocol.as_str(), "quic" | "tcp" | "wss"),
@@ -283,7 +287,7 @@ fn reflected_flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, s
     current_message
         .descriptor()
         .fields()
-        .filter(|field| !matches!(field.name(), "relay" | "camouflage"))
+        .filter(|field| !matches!(field.name(), "relay" | "camouflage" | "limits"))
         .filter_map(|field| {
             let key = field.name();
             let value_changed = default_map.get(key) != current_map.get(key);
@@ -870,6 +874,7 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
 struct Config {
     relay: Option<RelayConfig>,
     camouflage: Option<CamouflageConfig>,
+    limits: Option<crate::common::control_config::LimitsConfig>,
     discovery: Option<TrackerDiscoveryConfig>,
     netns: Option<String>,
     hostname: Option<String>,
@@ -914,6 +919,12 @@ struct Config {
 
     credential_file: Option<PathBuf>,
     source: Option<ConfigSourceConfig>,
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "std::collections::HashMap::is_empty"
+    )]
+    unknown_keys: std::collections::HashMap<String, toml::Value>,
 }
 
 fn format_toml_parse_error(source_name: &str, config_str: &str, error: &toml::de::Error) -> String {
@@ -987,10 +998,17 @@ impl TomlConfigLoader {
             anyhow::Error::new(err).context(message)
         })?;
 
-        let raw = toml::from_str::<toml::Value>(config_str)?;
         for (old, new) in LEGACY_KEYS {
-            anyhow::ensure!(raw.get(old).is_none(), "removed option '{old}': use {new}");
+            anyhow::ensure!(
+                !config.unknown_keys.contains_key(*old),
+                "removed option '{old}': use {new}"
+            );
         }
+        anyhow::ensure!(
+            config.unknown_keys.is_empty(),
+            "unknown configuration keys: {:?}",
+            config.unknown_keys.keys()
+        );
         Self::normalize_config_source(&mut config);
 
         Self::new_from_config(config).map_err(|err| {
@@ -1004,8 +1022,13 @@ impl TomlConfigLoader {
             .map_err(|error| anyhow::anyhow!("failed to parse flags: {error}"))?;
         flags.relay = config.relay.clone();
         flags.camouflage = config.camouflage.clone();
+        flags.limits = config.limits.clone();
         remove_obsolete_adapter_flags(&mut flags);
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
+        crate::common::control_config::validate_camouflage_listeners(
+            &flags,
+            config.listeners.as_deref().unwrap_or_default(),
+        )?;
         // Reject contradictory listeners and bootstrap peers before runtime startup.
         for listener in config
             .listeners
@@ -1024,6 +1047,17 @@ impl TomlConfigLoader {
             .map(process_secure_mode_cfg)
             .transpose()
             .context("failed to configure secure mode")?;
+        config
+            .flags_struct
+            .as_ref()
+            .unwrap()
+            .relay_config()
+            .validate_local_key(
+                config
+                    .secure_mode
+                    .as_ref()
+                    .and_then(|mode| mode.local_public_key.as_deref()),
+            )?;
         let has_network_identity = config.network_identity.is_some();
 
         if config
@@ -1126,7 +1160,7 @@ impl TomlConfigLoader {
                 )));
             }
         }
-        for section in ["relay", "camouflage"] {
+        for section in ["relay", "camouflage", "limits"] {
             if flags_hashmap.contains_key(section) {
                 return Err(<serde_json::Error as serde::de::Error>::custom(format!(
                     "use the top-level [{section}] section"
@@ -1551,6 +1585,7 @@ impl ConfigLoader for TomlConfigLoader {
         config.flags = Some(flags_diff_from_default(&flags));
         config.relay = flags.relay.clone();
         config.camouflage = flags.camouflage.clone();
+        config.limits = flags.limits.clone();
         if config.network_identity.as_ref().is_some_and(|identity| {
             identity.network_secret.is_none()
                 && identity.credential_root_fingerprint().is_none()
@@ -1887,6 +1922,7 @@ pub mod tests {
         quic_decoy_requires_and_accepts_complete_routing_configuration();
         rejects_an_unknown_encryption_algorithm();
         relay_probes_require_a_valid_budget_and_interval();
+        crate::common::transit_budget::check_budget_units();
         crate::common::control_config::tests::rejects_legacy_control_keys_with_replacement_names();
         automatic_adapter_uses_the_platform_capability();
         obsolete_adapter_fields_are_removed_during_config_load();

@@ -143,6 +143,10 @@ const FLOW_SHARD_MASK: u8 = 0x3f;
 const CRITICAL_L2_CONTROL: u8 = 0x40;
 
 impl PeerManagerHeader {
+    // Foreign wrappers use NO_PROXY as an authenticated control classification.
+    pub(crate) fn is_foreign_control(&self) -> bool {
+        self.packet_type == PacketType::ForeignNetworkPacket as u8 && self.is_no_proxy()
+    }
     fn initialize(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8, len: u32) {
         self.from_peer_id.set(from_peer_id);
         self.to_peer_id.set(to_peer_id);
@@ -721,6 +725,10 @@ pub(crate) struct ParsedPacketMetadata {
 
 #[derive(Debug)]
 pub struct ZCPacket {
+    // Preserve transit classification when local encapsulation changes the source.
+    pub(crate) transit_data: bool,
+    pub(crate) transit_network: Option<std::sync::Arc<str>>,
+    pub(crate) transit_destination: Option<PeerId>,
     inner: BytesMut,
     packet_type: ZCPacketType,
     lossy_hint: Option<bool>,
@@ -747,6 +755,9 @@ impl Clone for ZCPacket {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            transit_data: self.transit_data,
+            transit_network: self.transit_network.clone(),
+            transit_destination: self.transit_destination,
             packet_type: self.packet_type,
             lossy_hint: self.lossy_hint,
             authenticated_peer_id: self.authenticated_peer_id,
@@ -819,6 +830,9 @@ impl ZCPacket {
     pub fn new_nic_packet() -> Self {
         Self {
             inner: BytesMut::new(),
+            transit_data: false,
+            transit_network: None,
+            transit_destination: None,
             packet_type: ZCPacketType::NIC,
             lossy_hint: None,
             authenticated_peer_id: None,
@@ -846,6 +860,9 @@ impl ZCPacket {
 
     pub fn new_from_buf(buf: BytesMut, packet_type: ZCPacketType) -> Self {
         Self {
+            transit_data: false,
+            transit_network: None,
+            transit_destination: None,
             inner: buf,
             packet_type,
             lossy_hint: None,
@@ -885,6 +902,9 @@ impl ZCPacket {
     ) -> Self {
         let reusable_allocation_start = Some(buf.as_ptr() as usize);
         Self {
+            transit_data: false,
+            transit_network: None,
+            transit_destination: None,
             inner: buf,
             packet_type,
             lossy_hint: None,
@@ -951,6 +971,9 @@ impl ZCPacket {
             foreign_network_hdr.get_header_len() + foreign_zc_packet.tunnel_payload().len();
 
         let mut ret = Self::new_nic_packet();
+        ret.transit_data = foreign_zc_packet.transit_data;
+        ret.transit_network = Some(std::sync::Arc::from(network_name));
+        ret.transit_destination = Some(dst_peer_id);
         let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
         ret.inner.resize(payload_off + total_payload_len, 0);
 
@@ -972,6 +995,14 @@ impl ZCPacket {
             PacketType::ForeignNetworkPacket as u8,
             total_payload_len as u32,
         );
+        if let Some(inner) = foreign_zc_packet.peer_manager_header() {
+            hdr.set_latency_first(inner.is_latency_first())
+                .set_speed_first(inner.is_speed_first());
+            hdr.set_no_proxy(
+                inner.is_foreign_control()
+                    || !crate::peers::traffic_metrics::is_relay_data_packet_type(inner.packet_type),
+            );
+        }
 
         ret
     }
@@ -1318,8 +1349,14 @@ impl ZCPacket {
     pub fn fill_peer_manager_hdr(&mut self, from_peer_id: u32, to_peer_id: u32, packet_type: u8) {
         self.flow_hash = None;
         let payload_len = self.payload_len();
+        let foreign_flags = (packet_type == PacketType::ForeignNetworkPacket as u8)
+            .then(|| self.peer_manager_header().map(|hdr| hdr.flags))
+            .flatten();
         let hdr = self.mut_peer_manager_header().unwrap();
         hdr.initialize(from_peer_id, to_peer_id, packet_type, payload_len as u32);
+        if let Some(flags) = foreign_flags {
+            hdr.flags = flags;
+        }
     }
 
     /// Initialize the peer header without invalidating the payload-derived flow hash.
@@ -1721,6 +1758,19 @@ impl ZCPacket {
     }
 
     pub fn foreign_network_inner_packet_type(&self) -> Option<u8> {
+        self.foreign_network_inner_header()
+            .map(|hdr| hdr.packet_type)
+    }
+
+    pub(crate) fn foreign_network_inner_is_data(&self) -> Option<bool> {
+        let hdr = self.foreign_network_inner_header()?;
+        Some(
+            !hdr.is_foreign_control()
+                && crate::peers::traffic_metrics::is_relay_data_packet_type(hdr.packet_type),
+        )
+    }
+
+    fn foreign_network_inner_header(&self) -> Option<&PeerManagerHeader> {
         if self.peer_manager_header()?.packet_type != PacketType::ForeignNetworkPacket as u8 {
             return None;
         }
@@ -1728,10 +1778,16 @@ impl ZCPacket {
         let payload = self.payload();
         let hdr = self.foreign_network_hdr()?;
         let inner_packet = payload.get(hdr.get_header_len()..)?;
-        PeerManagerHeader::ref_from_prefix(inner_packet).map(|hdr| hdr.packet_type)
+        PeerManagerHeader::ref_from_prefix(inner_packet)
     }
 
     pub fn foreign_network_packet(mut self) -> Option<Self> {
+        // A control declaration cannot carry data through a denied transit node.
+        if self.peer_manager_header()?.is_foreign_control()
+            && self.foreign_network_inner_is_data().is_none_or(|data| data)
+        {
+            return None;
+        }
         let hdr = self.foreign_network_hdr()?;
         let foreign_hdr_len = hdr.get_header_len();
         if foreign_hdr_len < std::mem::size_of::<ForeignNetworkPacketHeader>()
@@ -2073,6 +2129,31 @@ mod tests {
             assert!(packet.foreign_network_hdr().is_none());
             assert!(packet.foreign_network_inner_packet_type().is_none());
             assert!(packet.foreign_network_packet().is_none());
+        }
+        let mut data = foreign_packet_for_parser_test();
+        data.mut_peer_manager_header().unwrap().set_no_proxy(true);
+        assert!(data.foreign_network_packet().is_none());
+        for kind in [
+            PacketType::RpcReq,
+            PacketType::RelayHandshake,
+            PacketType::Data,
+        ] {
+            let mut inner = ZCPacket::new_with_payload(b"inner");
+            inner.fill_peer_manager_hdr(1, 2, kind as u8);
+            inner
+                .mut_peer_manager_header()
+                .unwrap()
+                .set_speed_first(true)
+                .set_latency_first(true);
+            let mut outer = ZCPacket::new_for_foreign_network("network", 2, &inner);
+            outer.fill_peer_manager_hdr(3, 4, PacketType::ForeignNetworkPacket as u8);
+            let header = outer.peer_manager_header().unwrap();
+            assert_eq!(
+                header.is_foreign_control(),
+                !crate::peers::traffic_metrics::is_relay_data_packet_type(kind as u8)
+            );
+            assert!(header.is_speed_first() && header.is_latency_first());
+            assert!(outer.foreign_network_packet().is_some());
         }
     }
 

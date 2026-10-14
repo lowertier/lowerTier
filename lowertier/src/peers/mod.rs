@@ -21,7 +21,7 @@ pub mod route_trait;
 pub mod rpc_service;
 pub mod service_route;
 pub(crate) mod speed_probe;
-mod traffic_metrics;
+pub(crate) mod traffic_metrics;
 
 use std::sync::{Arc, OnceLock};
 

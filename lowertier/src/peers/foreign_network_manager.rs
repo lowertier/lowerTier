@@ -33,7 +33,6 @@ use crate::{
         global_ctx::{ArcGlobalCtx, GlobalCtx, GlobalCtxEvent, NetworkIdentity, TrustedKeySource},
         join_joinset_background, shrink_dashmap,
         stats_manager::{LabelSet, LabelType, MetricName, StatsManager},
-        token_bucket::TokenBucket,
     },
     peer_center::instance::{PeerCenterInstance, PeerMapWithPeerRpcManager},
     peers::route_trait::{
@@ -45,7 +44,6 @@ use crate::{
             ForeignNetworkEntryPb, ListForeignNetworkResponse, PeerInfo, TrustedKeyInfoPb,
             TrustedKeySourcePb,
         },
-        common::LimiterConfig,
         peer_rpc::{DirectConnectorRpcServer, PeerIdentityType, SecureAuthLevel},
     },
     tunnel::packet_def::{PacketType, ZCPacket},
@@ -84,25 +82,20 @@ pub trait GlobalForeignNetworkAccessor: Send + Sync + 'static {
 struct ForeignNetworkEntry {
     my_peer_id: PeerId,
 
-    // Node-global runtime flags, such as disable_relay_data, live on the parent
-    // context. The foreign context is scoped to the foreign network's OSPF view.
+    // Transit configuration and budgets use the parent instance.
+    // The foreign context owns this network's route view.
     parent_global_ctx: ArcGlobalCtx,
     global_ctx: ArcGlobalCtx,
     network: NetworkIdentity,
     peer_map: Arc<PeerMap>,
     relay_peer_map: Arc<RelayPeerMap>,
     _peer_session_store: Arc<PeerSessionStore>,
-    // Static per-network permission from the whitelist check. disable_relay_data
-    // is the node-wide runtime override layered on top of this value.
-    relay_data: bool,
     pm_packet_sender: Mutex<Option<PacketRecvChan>>,
 
     peer_rpc: Arc<PeerRpcManager>,
     rpc_sender: Sender<ZCPacket>,
 
     packet_recv: Mutex<Option<PacketRecvChanReceiver>>,
-
-    bps_limiter: Option<Arc<TokenBucket>>,
 
     peer_center: Arc<PeerCenterInstance>,
 
@@ -212,23 +205,6 @@ impl ForeignNetworkEntry {
             &network.network_name,
         );
 
-        let relay_bps_limit = global_ctx
-            .config
-            .get_flags()
-            .relay_config()
-            .transit_bps_limit
-            .map_or(u64::MAX, |bits| bits / 8);
-        let bps_limiter = (relay_bps_limit != u64::MAX).then(|| {
-            let limiter_config = LimiterConfig {
-                burst_rate: None,
-                bps: Some(relay_bps_limit),
-                fill_duration_ms: None,
-            };
-            global_ctx
-                .token_bucket_manager()
-                .get_or_create(&network.network_name, limiter_config.into())
-        });
-
         let peer_center = Arc::new(PeerCenterInstance::new(Arc::new(
             PeerMapWithPeerRpcManager {
                 peer_map: peer_map.clone(),
@@ -245,15 +221,12 @@ impl ForeignNetworkEntry {
             peer_map,
             relay_peer_map,
             _peer_session_store: peer_session_store,
-            relay_data,
             pm_packet_sender: Mutex::new(Some(pm_packet_sender)),
 
             peer_rpc,
             rpc_sender: rpc_transport_sender,
 
             packet_recv: Mutex::new(Some(packet_recv)),
-
-            bps_limiter,
 
             stats_mgr,
             traffic_metrics,
@@ -267,31 +240,27 @@ impl ForeignNetworkEntry {
         }
     }
 
-    fn desired_avoid_relay_data_feature_flag(
-        parent_global_ctx: &ArcGlobalCtx,
-        relay_data: bool,
-    ) -> bool {
-        !relay_data || parent_global_ctx.get_feature_flags().avoid_relay_data
-    }
-
     fn sync_parent_relay_data_feature_flag(
         parent_global_ctx: &ArcGlobalCtx,
         global_ctx: &ArcGlobalCtx,
-        relay_data: bool,
     ) -> bool {
-        let avoid_relay_data =
-            Self::desired_avoid_relay_data_feature_flag(parent_global_ctx, relay_data);
-        if global_ctx.get_feature_flags().avoid_relay_data == avoid_relay_data {
+        let mut flags = global_ctx.get_flags();
+        let mut relay = parent_global_ctx.get_flags().relay_config().clone();
+        if !relay.permits_foreign_network(&global_ctx.get_network_identity().network_name) {
+            relay.transit = crate::proto::common::TransitPolicy::Deny as i32;
+        }
+        if flags.relay.as_ref() == Some(&relay) {
             return false;
         }
-
-        global_ctx.set_avoid_relay_data_preference(avoid_relay_data)
+        flags.relay = Some(relay);
+        global_ctx.set_flags(flags);
+        true
     }
 
     fn build_foreign_global_ctx(
         network: &NetworkIdentity,
         global_ctx: ArcGlobalCtx,
-        relay_data: bool,
+        _relay_data: bool,
     ) -> ArcGlobalCtx {
         let config = TomlConfigLoader::default();
         config.set_network_identity(network.clone());
@@ -311,15 +280,16 @@ impl ForeignNetworkEntry {
 
         config.set_mapped_listeners(Some(global_ctx.config.get_mapped_listeners()));
 
-        let foreign_global_ctx = Arc::new(GlobalCtx::new(config));
+        let mut foreign_global_ctx = GlobalCtx::new(config);
+        foreign_global_ctx.transit_parent = Arc::downgrade(&global_ctx);
+        let foreign_global_ctx = Arc::new(foreign_global_ctx);
         foreign_global_ctx
             .replace_stun_info_collector(Box::new(global_ctx.get_stun_info_collector().clone()));
 
         let mut feature_flag = global_ctx.get_feature_flags();
         feature_flag.is_public_server = true;
-        feature_flag.avoid_relay_data =
-            Self::desired_avoid_relay_data_feature_flag(&global_ctx, relay_data);
         foreign_global_ctx.set_base_advertised_feature_flags(feature_flag);
+        Self::sync_parent_relay_data_feature_flag(&global_ctx, &foreign_global_ctx);
 
         for u in global_ctx.get_running_listeners().into_iter() {
             foreign_global_ctx.add_running_listener(u);
@@ -560,11 +530,8 @@ impl ForeignNetworkEntry {
         let peer_map = self.peer_map.clone();
         let relay_peer_map = self.relay_peer_map.clone();
         let traffic_metrics = self.traffic_metrics.clone();
-        let parent_global_ctx = self.parent_global_ctx.clone();
-        let relay_data = self.relay_data;
         let pm_sender = self.pm_packet_sender.lock().await.take().unwrap();
         let network_name = self.network.network_name.clone();
-        let bps_limiter = self.bps_limiter.clone();
 
         let label_set =
             LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone()));
@@ -591,7 +558,7 @@ impl ForeignNetworkEntry {
         self.tasks.lock().await.spawn(async move {
             while let Ok(mut zc_packet) = recv_packet_from_chan(&mut recv).await {
                 let buf_len = zc_packet.buf_len();
-                let Some(hdr) = zc_packet.peer_manager_header() else {
+                let Some(hdr) = zc_packet.peer_manager_header().cloned() else {
                     tracing::warn!("invalid packet, skip");
                     continue;
                 };
@@ -663,24 +630,7 @@ impl ForeignNetworkEntry {
                     );
                 } else {
                     if is_relay_data_packet_type(packet_type) {
-                        let disable_relay_data =
-                            (parent_global_ctx.flags_arc().relay_config().transit()
-                                == crate::proto::common::TransitPolicy::Deny);
-                        if !relay_data || disable_relay_data {
-                            tracing::debug!(
-                                ?from_peer_id,
-                                ?to_peer_id,
-                                packet_type,
-                                disable_relay_data,
-                                "drop foreign network relay data"
-                            );
-                            continue;
-                        }
-                        if let Some(bps_limiter) = bps_limiter.as_ref()
-                            && !bps_limiter.try_consume(len.into())
-                        {
-                            continue;
-                        }
+                        zc_packet.transit_data = true;
                     }
 
                     match traffic_kind(packet_type) {
@@ -694,8 +644,11 @@ impl ForeignNetworkEntry {
                         }
                     }
 
+                    let policy = super::peer_manager::PeerManager::get_next_hop_policy(
+                        zc_packet.peer_manager_header().unwrap(),
+                    );
                     let gateway_peer_id = peer_map
-                        .get_gateway_peer_id(to_peer_id, NextHopPolicy::LeastHop)
+                        .get_gateway_peer_id(to_peer_id, policy.clone())
                         .await;
                     let is_relay_handshake = RelayPeerMap::is_handshake_packet_type(packet_type);
 
@@ -705,9 +658,8 @@ impl ForeignNetworkEntry {
                                 && hdr.from_peer_id.get() == my_node_id
                                 && !is_relay_handshake
                             {
-                                if let Err(e) = relay_peer_map
-                                    .send_msg(zc_packet, to_peer_id, NextHopPolicy::LeastHop)
-                                    .await
+                                if let Err(e) =
+                                    relay_peer_map.send_msg(zc_packet, to_peer_id, policy).await
                                 {
                                     tracing::error!(
                                         ?e,
@@ -794,14 +746,12 @@ impl ForeignNetworkEntry {
     async fn run_parent_feature_flag_sync_routine(&self) {
         let parent_global_ctx = self.parent_global_ctx.clone();
         let global_ctx = self.global_ctx.clone();
-        let relay_data = self.relay_data;
         self.tasks.lock().await.spawn(async move {
             let mut parent_events = parent_global_ctx.subscribe();
             loop {
                 ForeignNetworkEntry::sync_parent_relay_data_feature_flag(
                     &parent_global_ctx,
                     &global_ctx,
-                    relay_data,
                 );
 
                 if parent_events.recv().await.is_err() {
@@ -1314,9 +1264,12 @@ impl ForeignNetworkManager {
                 .map(|hdr| hdr.packet_type)
                 .unwrap_or(0);
             let msg_len = msg.buf_len() as u64;
+            let policy = super::peer_manager::PeerManager::get_next_hop_policy(
+                msg.peer_manager_header().unwrap(),
+            );
             let send_result = entry
                 .relay_peer_map
-                .send_msg(msg, dst_peer_id, NextHopPolicy::LeastHop)
+                .send_msg(msg, dst_peer_id, policy)
                 .await;
             if send_result.is_ok() {
                 entry

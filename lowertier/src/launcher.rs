@@ -956,6 +956,7 @@ impl NetworkConfig {
         );
         flags.relay = self.relay.clone();
         flags.camouflage = self.camouflage.clone();
+        flags.limits = self.limits.clone();
 
         if let Some(dev_name) = self.dev_name.clone() {
             flags.dev_name = dev_name;
@@ -1085,10 +1086,6 @@ impl NetworkConfig {
 
         if let Some(mtu) = self.mtu {
             flags.mtu = mtu as u32;
-        }
-
-        if let Some(instance_recv_bps_limit) = self.instance_recv_bps_limit {
-            flags.instance_recv_bps_limit = instance_recv_bps_limit;
         }
 
         if let Some(enable_private_mode) = self.enable_private_mode {
@@ -1225,6 +1222,7 @@ impl NetworkConfig {
         let default_flags = default_config.get_flags();
         result.relay = flags.relay.clone();
         result.camouflage = flags.camouflage.clone();
+        result.limits = flags.limits.clone();
         result.dev_name = Some(flags.dev_name.clone());
         result.use_smoltcp = Some(flags.use_smoltcp);
         result.disable_ipv6 = Some(!flags.enable_ipv6);
@@ -1271,8 +1269,7 @@ impl NetworkConfig {
         result.encryption_algorithm = (flags.encryption_algorithm
             != default_flags.encryption_algorithm)
             .then_some(flags.encryption_algorithm.clone());
-        result.instance_recv_bps_limit =
-            (flags.instance_recv_bps_limit != u64::MAX).then_some(flags.instance_recv_bps_limit);
+
         result.enable_private_mode = Some(flags.private_mode);
 
         result.acl = config.get_acl();

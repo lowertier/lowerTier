@@ -140,6 +140,7 @@ message NetworkConfig {
   optional uint64 l2_flood_bytes_per_second = 101;
   common.RelayConfig relay = 102;
   common.CamouflageConfig camouflage = 103;
+  common.LimitsConfig limits = 104;
 }
 
 message NetworkPeerConfig {

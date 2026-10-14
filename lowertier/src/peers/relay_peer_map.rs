@@ -1237,7 +1237,7 @@ impl RelayPeerMap {
         handshake_id: [u8; RELAY_HANDSHAKE_ID_SIZE],
         packet_type: PacketType,
         dst_peer_id: PeerId,
-        policy: NextHopPolicy,
+        _policy: NextHopPolicy,
     ) -> Result<(), Error> {
         let mut payload = Vec::with_capacity(RELAY_HANDSHAKE_ID_SIZE + noise_payload.len());
         payload.extend_from_slice(&handshake_id);
@@ -1245,7 +1245,8 @@ impl RelayPeerMap {
         let mut pkt = ZCPacket::new_with_payload(&payload);
         pkt.fill_peer_manager_hdr(self.my_peer_id, dst_peer_id, packet_type as u8);
         let pkt_len = pkt.buf_len() as u64;
-        self.send_via_next_hop(pkt, dst_peer_id, policy).await?;
+        self.send_via_next_hop(pkt, dst_peer_id, NextHopPolicy::ControlHop)
+            .await?;
         self.control_metrics.record_tx(pkt_len);
         Ok(())
     }
@@ -1273,7 +1274,7 @@ impl RelayPeerMap {
         let mut packet = ZCPacket::new_with_payload(&packet_payload);
         packet.fill_peer_manager_hdr(self.my_peer_id, dst_peer_id, packet_type as u8);
         let packet_len = packet.buf_len() as u64;
-        self.send_via_next_hop(packet, dst_peer_id, NextHopPolicy::LeastHop)
+        self.send_via_next_hop(packet, dst_peer_id, NextHopPolicy::ControlHop)
             .await?;
         self.control_metrics.record_tx(packet_len);
         Ok(())
@@ -1347,7 +1348,7 @@ impl RelayPeerMap {
             .encrypt_payload(self.my_peer_id, dst_peer_id, &mut packet)
             .map_err(|error| Error::RouteError(Some(error.to_string())))?;
         let packet_len = packet.buf_len() as u64;
-        self.send_via_next_hop(packet, dst_peer_id, NextHopPolicy::LeastHop)
+        self.send_via_next_hop(packet, dst_peer_id, NextHopPolicy::ControlHop)
             .await?;
         self.control_metrics.record_tx(packet_len);
         Ok(())
@@ -1387,7 +1388,7 @@ impl RelayPeerMap {
             .encrypt_payload(self.my_peer_id, dst_peer_id, &mut packet)
             .map_err(|error| Error::RouteError(Some(error.to_string())))?;
         let packet_len = packet.buf_len() as u64;
-        self.send_via_next_hop(packet, dst_peer_id, NextHopPolicy::LeastHop)
+        self.send_via_next_hop(packet, dst_peer_id, NextHopPolicy::ControlHop)
             .await?;
         self.control_metrics.record_tx(packet_len);
         Ok(())
@@ -1999,28 +2000,11 @@ impl RelayPeerMap {
         policy: NextHopPolicy,
         selected_next_hop: Option<PeerId>,
     ) -> Result<(), Error> {
-        if let Some(transport) = &self.foreign_relay_transport
-            && !self.peer_map.has_peer(dst_peer_id)
-        {
-            let mut foreign_packet =
-                ZCPacket::new_for_foreign_network(&transport.network_name, dst_peer_id, &msg);
-            foreign_packet.fill_peer_manager_hdr(
-                self.my_peer_id,
-                dst_peer_id,
-                PacketType::ForeignNetworkPacket as u8,
-            );
-            return transport
-                .packet_sender
-                .send(foreign_packet)
-                .await
-                .map_err(|error| Error::RouteError(Some(error.to_string())));
-        }
-
         let next_hop = if let Some(next_hop) = selected_next_hop {
             Some(next_hop)
         } else {
             self.peer_map
-                .get_gateway_peer_id_for_packet(dst_peer_id, policy, &msg)
+                .get_gateway_peer_id_for_packet(dst_peer_id, policy.clone(), &msg)
                 .await
                 .or_else(|| {
                     (self.peer_map.has_peer(dst_peer_id)
@@ -2028,7 +2012,8 @@ impl RelayPeerMap {
                             .foreign_network_client
                             .as_ref()
                             .is_some_and(|client| client.has_next_hop(dst_peer_id))
-                        || self.foreign_relay_transport.is_some())
+                        || (policy == NextHopPolicy::ControlHop
+                            && self.foreign_relay_transport.is_some()))
                     .then_some(dst_peer_id)
                 })
         };
@@ -2068,32 +2053,6 @@ impl RelayPeerMap {
         policy: NextHopPolicy,
         selected_next_hop: Option<PeerId>,
     ) -> Result<(), Error> {
-        if let Some(transport) = &self.foreign_relay_transport
-            && !self.peer_map.has_peer(dst_peer_id)
-        {
-            let mut foreign_batch = PacketBatch::new();
-            for packet in batch {
-                let mut foreign_packet = ZCPacket::new_for_foreign_network(
-                    &transport.network_name,
-                    dst_peer_id,
-                    &packet,
-                );
-                foreign_packet.fill_peer_manager_hdr(
-                    self.my_peer_id,
-                    dst_peer_id,
-                    PacketType::ForeignNetworkPacket as u8,
-                );
-                foreign_batch
-                    .try_push(foreign_packet)
-                    .expect("the foreign batch cannot exceed its source batch");
-            }
-            return transport
-                .packet_sender
-                .send_batch(foreign_batch)
-                .await
-                .map_err(|error| Error::RouteError(Some(error.to_string())));
-        }
-
         let Some(first) = batch.first() else {
             return Ok(());
         };
@@ -2102,7 +2061,7 @@ impl RelayPeerMap {
             Some(next_hop)
         } else {
             self.peer_map
-                .get_gateway_peer_id_for_flow(dst_peer_id, policy, flow_hash)
+                .get_gateway_peer_id_for_flow(dst_peer_id, policy.clone(), flow_hash)
                 .await
                 .or_else(|| {
                     (self.peer_map.has_peer(dst_peer_id)
@@ -2110,7 +2069,8 @@ impl RelayPeerMap {
                             .foreign_network_client
                             .as_ref()
                             .is_some_and(|client| client.has_next_hop(dst_peer_id))
-                        || self.foreign_relay_transport.is_some())
+                        || (policy == NextHopPolicy::ControlHop
+                            && self.foreign_relay_transport.is_some()))
                     .then_some(dst_peer_id)
                 })
         };
@@ -2652,7 +2612,7 @@ impl RelayPeerMap {
             state.retry_scheduled.store(false, Ordering::Release);
             if state.phase() == RelaySendPhase::AwaitingSession {
                 let _ = relay_map
-                    .ensure_session(dst_peer_id, NextHopPolicy::LeastHop)
+                    .ensure_session(dst_peer_id, NextHopPolicy::ControlHop)
                     .await;
             } else if state.phase() == RelaySendPhase::Draining {
                 if let Err(error) = relay_map
@@ -3334,7 +3294,7 @@ impl RelayPeerMap {
             PacketType::RelayHandshakeResetAck as u8,
         );
         let packet_len = ack.buf_len() as u64;
-        self.send_via_next_hop(ack, remote_peer_id, NextHopPolicy::LeastHop)
+        self.send_via_next_hop(ack, remote_peer_id, NextHopPolicy::ControlHop)
             .await?;
         self.control_metrics.record_tx(packet_len);
         Ok(())
@@ -4009,7 +3969,7 @@ impl RelayPeerMap {
                     handshake_id,
                     PacketType::RelayHandshakeAck,
                     remote_peer_id,
-                    NextHopPolicy::LeastHop,
+                    NextHopPolicy::ControlHop,
                 )
                 .await;
         }
@@ -4034,7 +3994,7 @@ impl RelayPeerMap {
                     handshake_id,
                     PacketType::RelayHandshakeAck,
                     remote_peer_id,
-                    NextHopPolicy::LeastHop,
+                    NextHopPolicy::ControlHop,
                 )
                 .await;
         }
@@ -4151,7 +4111,7 @@ impl RelayPeerMap {
                         handshake_id,
                         PacketType::RelayHandshakeAck,
                         remote_peer_id,
-                        NextHopPolicy::LeastHop,
+                        NextHopPolicy::ControlHop,
                     )
                     .await
                 {
@@ -4349,7 +4309,7 @@ impl RelayPeerMap {
                 handshake_id,
                 PacketType::RelayHandshakeAck,
                 remote_peer_id,
-                NextHopPolicy::LeastHop,
+                NextHopPolicy::ControlHop,
             )
             .await
         {
@@ -4556,7 +4516,7 @@ impl RelayPeerMap {
                 // explicit handshake path may reserve session state.
                 return Ok(false);
             }
-            self.ensure_session(from_peer_id, NextHopPolicy::LeastHop)
+            self.ensure_session(from_peer_id, NextHopPolicy::ControlHop)
                 .await?;
             return Ok(false);
         };
