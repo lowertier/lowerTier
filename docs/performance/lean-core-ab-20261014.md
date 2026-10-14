@@ -196,13 +196,75 @@ All ping summaries recorded complete delivery. The same sampling limits apply as
 Source review then found a missing maximum-level hint in the control log filter.
 Commit `0386ae55` restores global DEBUG/TRACE rejection at default INFO settings.
 The focused log-level test, host check, Linux check, and format check pass.
-Its performance remains unmeasured at this report stage.
+The owner approved one final confirmation for that binary. The final results follow below.
 
 The first attempted campaign used mismatched TAP MTUs, 1340 baseline and 1320 candidate.
 Validation rejected those results. They remain under `invalid-mtu/`.
 Recovery set configured MTU 1360 for both binaries and checked actual MTUs before each load.
 No bisection or workload profile ran. WAN, WSS, and four-stream trials were excluded by the owner scope.
 Raw repair artifacts are in `benchmark-results/lean-perf-20261014/`.
+
+### Final confirmation
+
+The final comparison tests `0386ae55` against baseline `10e33193`.
+H2 meets the 3% throughput gate. QUIC misses the gate in both directions.
+No further measurements ran after this campaign.
+The same clean topology, one-stream matrix, timings, authentication, and MTUs were used.
+Each cell contains two interleaved repetitions. All 16 transfers passed the validation checks.
+
+| Transport | Direction | Baseline Gbit/s [range] | Fixed Gbit/s [range] | Delta | Baseline CPU s/Gbit [range] | Fixed CPU s/Gbit [range] |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| QUIC | forward | 6.636 [6.549–6.723] | 6.417 [6.415–6.418] | -3.3% | 0.320 [0.316–0.324] | 0.332 [0.332–0.333] |
+| QUIC | reverse | 6.679 [6.557–6.801] | 6.425 [6.396–6.454] | -3.8% | 0.321 [0.318–0.324] | 0.333 [0.333–0.333] |
+| H2 | forward | 8.363 [8.325–8.401] | 8.253 [8.233–8.272] | -1.3% | 0.265 [0.265–0.266] | 0.270 [0.269–0.270] |
+| H2 | reverse | 8.424 [8.405–8.444] | 8.200 [8.144–8.257] | -2.7% | 0.264 [0.263–0.265] | 0.271 [0.271–0.272] |
+
+RSS ranges cover endpoint A / B, in MiB. RTT gives median loaded p50 / p95, in milliseconds.
+Retransmission and loss cells list repetition one, then repetition two.
+QUIC loss uses sampled measured-window counters. H2 outer retransmissions include warmup and both endpoint sockets.
+
+| Transport | Direction | Binary | RSS A / B | RTT p50 / p95 | Inner retransmissions | Outer retransmissions or QUIC loss |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| QUIC | forward | baseline | 24.3–25.7 / 26.6–28.1 | 0.412 / 0.786 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | forward | fixed | 24.3–25.0 / 27.0–27.5 | 0.437 / 0.822 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | reverse | baseline | 24.6–26.1 / 27.3–29.1 | 0.421 / 0.849 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | reverse | fixed | 24.8–25.5 / 27.5–27.9 | 0.421 / 0.808 | 0, 0 | 0.0000%, 0.0000% |
+| H2 | forward | baseline | 22.9–25.2 / 25.6–27.0 | 0.856 / 1.727 | 0, 0 | 902, 1221 |
+| H2 | forward | fixed | 22.3–25.9 / 26.1–28.0 | 0.969 / 1.897 | 1063, 537 | 1025, 1284 |
+| H2 | reverse | baseline | 23.6–25.3 / 26.2–29.2 | 0.862 / 1.782 | 316, 0 | 652, 953 |
+| H2 | reverse | fixed | 23.7–25.6 / 27.3–29.8 | 0.923 / 2.102 | 381, 364 | 1515, 1056 |
+
+Every ping summary recorded complete delivery. Receiver/sender byte accounting ratios ranged from 0.999916 to 1.000096.
+Those ratios reflect end-of-transfer accounting. They do not measure packet loss.
+Each endpoint supplied 79 or 80 CPU samples per measured window.
+The sampling and shared-VM limits from the original report still apply. Two repetitions give limited statistical evidence.
+
+The final binary SHA256 is `7a24e08ecfcdd668e81403e20a36b93e49d0b674ff9036fc106222252d99c6ba`.
+The baseline binary hash matches the original report.
+Manifest, invocation records, raw logs, validated trials, and summary are in `benchmark-results/lean-perf-20261014/final-confirmation/`.
+Benchmark containers and the benchmark network have stopped. Colima remains available.
+WAN, WSS, and four-stream performance remain unmeasured for the repaired binary.
+
+### Remaining source suspects
+
+The remaining QUIC CPU difference is about 0.012 CPU second per delivered Gbit.
+At 1300 delivered payload bytes, that is about 0.12 microsecond per delivered data packet across both processes.
+The H2 difference is about 0.004 through 0.007 CPU second per Gbit.
+These measurements support investigation of small remaining packet costs. They do not identify a specific function.
+The following ranking uses source evidence. No profile share or individual measured cost is available.
+
+| Priority | Source | Remaining work and theoretical cost |
+| --- | --- | --- |
+| 1 | `vendor/quinn-proto/src/packet.rs:35`, `connection/datagrams.rs:123` | Every UDP packet now converts BytesMut to Vec, Bytes, and BytesMut to recover allocation capacity. The bytes conversion calls `ptr::copy`; equal-pointer execution cost is uncertain. Shared tails copy. DATAGRAM admission also tracks retained bytes and checks another queue bound. Cost scales with packet count. Extra branches, pointer conversion, metadata, or allocation can matter at a residual 0.12 microsecond per delivered packet. |
+| 2 | `lowertier/src/peers/peer_manager.rs:872`, `peers/direct_nic.rs:566` | Compact TAP admission still parses each IP packet, classifies multicast/broadcast, applies type/VLAN policy, builds keep flags, and walks retained slots. Baseline skipped this admission without L2 policy. Cost remains O(N), even after address caching and removal of redundant moves. |
+| 3 | `lowertier/src/peers/l2_fabric.rs:318`, `peers/peer_manager.rs:5153` | Default source learning still parses Ethernet policy metadata for each packet and reads the ownership generation. Cache membership scans up to U source tuples per packet. Parsing costs O(N). Membership costs O(N U). Mutable FDB work is O(U) while the generation stays unchanged. Small batches reduce the benefit. |
+| 4 | `lowertier/src/tunnel/stats.rs:117`, `stats.rs:130` | TX and RX counters use adjacent atomic fields. Accounting uses two or three atomic additions per batch. Concurrent writers can share cache lines. Cost scales with N/B and contention. Preserve the counter race fix. No padding or counter tuning was attempted. |
+| 5 | `lowertier/src/common/global_ctx.rs:1408`, `tunnel/direct.rs:48`, `peers/peer_conn.rs:4503` | Unlimited receive pacing still reads live flags. Local egress still scans transit flags and performs packet preparation. Transit/authentication fields add stores and metadata traffic. The live relay restriction also retains a packet-time ArcSwap read. These costs preserve runtime policy and authentication contracts. |
+
+Camouflage access and TLS exporter checks remain setup costs, so they do not explain this residual packet cost.
+The migration watcher remains periodic. This clean topology supplies no evidence of repeated rebinding.
+The supplied benchmark does not configure a UDP decoy, so the decoy GRO fix does not explain its remaining gap.
+Further work must preserve memory bounds, flood policy, FDB ownership, runtime limits, and authentication.
 
 ### Packet path review
 
@@ -288,5 +350,5 @@ The original WSS sample difference is consistent with the trace-filter hypothesi
 Only one corrected WSS sample existed for each completed cell.
 Transport batch sizes and other bottlenecks can change the cost of shared work per delivered byte.
 The first valid confirmation measures the first three commits. It still shows the regression.
-It does not measure `0386ae55`. Final confirmation requires owner authorization because the one-campaign limit is already used.
+The final approved confirmation measures `0386ae55`. H2 meets the gate, while QUIC remains 3.3% through 3.8% below baseline.
 No measured percentage can be assigned to an individual function from the current evidence.
