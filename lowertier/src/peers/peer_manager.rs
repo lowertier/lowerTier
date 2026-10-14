@@ -1,4 +1,3 @@
-use anyhow::Context;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
@@ -785,15 +784,6 @@ fn prepare_packet_batch(mut batch: PacketBatch) -> Result<PreparedPacketBatch, E
         first_is_hybrid_ip_ethernet,
         uniform_direct_priority,
     })
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-// TODO(l2fix): remove this allowance after integration.
-pub(crate) fn benchmark_prepare_packet_batch(batch: PacketBatch) -> PacketBatch {
-    prepare_packet_batch(batch)
-        .expect("uncompressed benchmark packet preparation is infallible")
-        .batch
 }
 
 const DIRECT_NIC_QUEUE_BATCH_CAPACITY: usize = 3;
@@ -1775,28 +1765,6 @@ impl PeerManager {
         }
     }
 
-    /// Check current origin authority before using a forwarding snapshot.
-    ///
-    /// A route snapshot can outlive a capability revocation. The current
-    /// immutable authority snapshot must therefore approve the same key.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn current_full_ethernet_destination_is_authorized(
-        peers: &PeerMap,
-        destination_peer_id: PeerId,
-        my_peer_id: PeerId,
-        global_ctx: &ArcGlobalCtx,
-    ) -> bool {
-        let origin_snapshot = peers.origin_auth_snapshot();
-        Self::current_full_ethernet_destination_is_authorized_from_snapshot(
-            &origin_snapshot,
-            destination_peer_id,
-            my_peer_id,
-            global_ctx,
-        )
-    }
-
     fn current_full_ethernet_destination_is_authorized_from_snapshot(
         origin_snapshot: &crate::peers::peer_map::OriginAuthSnapshot,
         destination_peer_id: PeerId,
@@ -1825,29 +1793,6 @@ impl PeerManager {
             && grant.source == OriginAuthSource::RouteAttestation
             && identity.noise_static_pubkey == grant.noise_static_pubkey
             && grant.is_live(quanta::Instant::now())
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn snapshot_and_current_full_ethernet_destination_is_authorized(
-        peers: &PeerMap,
-        snapshot: &ForwardingDecisionSnapshotHandle,
-        destination_peer_id: PeerId,
-        my_peer_id: PeerId,
-        global_ctx: &ArcGlobalCtx,
-    ) -> bool {
-        Self::snapshot_allows_full_ethernet_destination(
-            snapshot,
-            destination_peer_id,
-            my_peer_id,
-            global_ctx,
-        ) && Self::current_full_ethernet_destination_is_authorized(
-            peers,
-            destination_peer_id,
-            my_peer_id,
-            global_ctx,
-        )
     }
 
     fn snapshot_and_current_full_ethernet_destination_is_authorized_from_snapshot(
@@ -1893,12 +1838,6 @@ impl PeerManager {
     // Keep lazy-p2p demand alive across the 5s task rescan interval and a full on-demand
     // connect attempt, without retaining extra per-task state in the hot path.
     const RECENT_HAVE_TRAFFIC_TTL: Duration = Duration::from_secs(30);
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn should_mark_recent_traffic_for_fanout(total_dst_peers: usize) -> bool {
-        total_dst_peers <= 1
-    }
 
     fn gc_recent_traffic_entries<F>(
         recent_have_traffic: &DashMap<PeerId, Instant>,
@@ -2195,14 +2134,6 @@ impl PeerManager {
         self.p2p_demand_notify.clone()
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn gc_recent_traffic(&self) {
-        Self::gc_recent_traffic_entries(&self.recent_have_traffic, Instant::now(), |peer_id| {
-            self.has_directly_connected_conn(peer_id)
-        });
-    }
-
     async fn close_untrusted_credential_peers(peer_map: &Arc<PeerMap>, global_ctx: &ArcGlobalCtx) {
         let network_name = global_ctx.get_network_name();
         for peer_id in peer_map.list_peers() {
@@ -2328,9 +2259,7 @@ impl PeerManager {
         }
         self.add_new_peer_conn(peer).await
     }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
+    #[cfg(test)]
     pub(crate) async fn add_discovered_tunnel(
         &self,
         tunnel: Box<dyn Tunnel>,
@@ -3976,33 +3905,6 @@ impl PeerManager {
         self.get_route().get_foreign_network_summary().await
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn run_nic_packet_process_pipeline(&self, data: &mut ZCPacket) -> bool {
-        if data
-            .peer_manager_header()
-            .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
-        {
-            // L3 proxy filters do not inspect transparent Ethernet frames.
-            return true;
-        }
-
-        for pipeline in self.nic_packet_process_pipeline.read().await.iter().rev() {
-            let _ = pipeline.try_process_packet_from_nic(data).await;
-        }
-        data.refresh_peer_manager_hdr_len();
-
-        // Check the final packet after all transformations. This prevents a later
-        // destination rewrite from bypassing the outbound ACL.
-        self.global_ctx.get_acl_filter().process_packet_with_acl(
-            data,
-            false,
-            None,
-            |_| false,
-            &self.get_route(),
-        )
-    }
-
     async fn run_nic_packet_process_pipeline_batch(&self, mut batch: PacketBatch) -> PacketBatch {
         let pipelines = self.nic_packet_process_pipeline.read().await;
         for pipeline in pipelines.iter().rev() {
@@ -4033,18 +3935,6 @@ impl PeerManager {
         if header.is_speed_first() {
             NextHopPolicy::MaxGoodput
         } else if header.is_latency_first() {
-            NextHopPolicy::LeastCost
-        } else {
-            NextHopPolicy::LeastHop
-        }
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn get_local_data_policy(&self) -> NextHopPolicy {
-        if self.global_ctx.speed_first() {
-            NextHopPolicy::MaxGoodput
-        } else if self.global_ctx.latency_first() {
             NextHopPolicy::LeastCost
         } else {
             NextHopPolicy::LeastHop
@@ -4156,87 +4046,6 @@ impl PeerManager {
     #[cfg(test)]
     pub async fn send_msg_by_ethernet_batch(&self, batch: PacketBatch) -> Result<(), Error> {
         self.send_fabric_batch(FabricBatch::new(FabricPayloadKind::Ethernet, batch))
-            .await
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn send_ethernet_to_selected_peers_with_descriptor(
-        &self,
-        mut msg: ZCPacket,
-        destination_peers: &[PeerId],
-        is_exit_node: bool,
-        descriptor: &PeerMapDataPlaneDescriptor,
-        packet_prepared: bool,
-        fanout_budget_reserved: bool,
-    ) -> Result<(), Error> {
-        if destination_peers.is_empty() {
-            return Ok(());
-        }
-        let current_descriptor = self.peers.dataplane_descriptor();
-        if !self.full_ethernet_descriptor_is_current(
-            descriptor,
-            &current_descriptor,
-            destination_peers,
-        ) {
-            return Err(Error::RouteError(Some(
-                "complete Ethernet authority changed before preparation".to_string(),
-            )));
-        }
-        if !packet_prepared {
-            msg.fill_peer_manager_hdr(self.my_peer_id, 0, PacketType::Ethernet as u8);
-            msg.mut_peer_manager_header()
-                .unwrap()
-                .set_exit_node(is_exit_node);
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(msg.buf_len() as u64);
-            Self::prepare_packet(&mut msg);
-            self.self_tx_counters
-                .compress_tx_bytes_after
-                .add(msg.buf_len() as u64);
-        }
-        let current_descriptor = self.peers.dataplane_descriptor();
-        if !self.full_ethernet_descriptor_is_current(
-            descriptor,
-            &current_descriptor,
-            destination_peers,
-        ) {
-            return Err(Error::RouteError(Some(
-                "complete Ethernet authority changed before dispatch".to_string(),
-            )));
-        }
-        if !fanout_budget_reserved && destination_peers.len() > 1 {
-            self.reserve_fanout(msg.buf_len(), destination_peers.len())?;
-        }
-        let mut inputs = EthernetBatchInputs::with_capacity(destination_peers.len());
-        let mut final_packet = Some(msg);
-        for (index, peer_id) in destination_peers.iter().copied().enumerate() {
-            let packet = if index + 1 == destination_peers.len() {
-                final_packet.take().unwrap()
-            } else {
-                final_packet.as_ref().unwrap().clone()
-            };
-            inputs.push(EthernetBatchInput {
-                packet,
-                destination_peer_id: Some(peer_id),
-                is_exit_node,
-                suppress_local_delivery: false,
-            });
-        }
-        self.send_preclassified_ethernet_batch_with_descriptor(inputs, descriptor)
-            .await
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn send_preclassified_ethernet_batch<I>(&self, inputs: I) -> Result<(), Error>
-    where
-        I: IntoIterator<Item = EthernetBatchInput>,
-    {
-        let descriptor = self.peers.dataplane_descriptor();
-        self.send_preclassified_ethernet_batch_with_descriptor(inputs, &descriptor)
             .await
     }
 
@@ -5147,85 +4956,6 @@ impl PeerManager {
         send_result
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn send_msg_internal_with_next_hop(
-        peers: &Arc<PeerMap>,
-        foreign_network_client: &Arc<ForeignNetworkClient>,
-        relay_peer_map: &Arc<RelayPeerMap>,
-        direct_tx_metrics: Option<&Arc<TrafficMetricRecorder>>,
-        msg: ZCPacket,
-        dst_peer_id: PeerId,
-        next_hop: PeerId,
-    ) -> Result<(), Error> {
-        Self::send_msg_internal_with_next_hop_authorized(
-            peers,
-            foreign_network_client,
-            relay_peer_map,
-            direct_tx_metrics,
-            msg,
-            dst_peer_id,
-            next_hop,
-            None,
-        )
-        .await
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn send_msg_internal_with_next_hop_authorized(
-        peers: &Arc<PeerMap>,
-        _foreign_network_client: &Arc<ForeignNetworkClient>,
-        relay_peer_map: &Arc<RelayPeerMap>,
-        direct_tx_metrics: Option<&Arc<TrafficMetricRecorder>>,
-        msg: ZCPacket,
-        dst_peer_id: PeerId,
-        next_hop: PeerId,
-        authorization: Option<FullEthernetAuthorizationToken>,
-    ) -> Result<(), Error> {
-        let header = msg
-            .peer_manager_header()
-            .ok_or_else(|| Error::RouteError(Some("packet without header".to_string())))?;
-        let policy = Self::get_next_hop_policy(header);
-        let packet_type = header.packet_type;
-        if packet_type == PacketType::Ethernet as u8
-            && !Self::full_ethernet_destination_is_authorized(peers, dst_peer_id).await
-        {
-            tracing::warn!(
-                dst_peer_id,
-                "block complete Ethernet to an unauthorized bridge"
-            );
-            return Err(Error::RouteError(Some(
-                "complete Ethernet destination is not an authorized bridge".to_string(),
-            )));
-        }
-        if !Self::credential_ethernet_peer_is_allowed(peers, packet_type, dst_peer_id).await {
-            return Err(Error::RouteError(None));
-        }
-        let msg_len = msg.buf_len() as u64;
-        let send_result = if next_hop == dst_peer_id && peers.has_peer(next_hop) {
-            peers.send_msg_directly(msg, next_hop).await
-        } else {
-            relay_peer_map
-                .send_msg_with_next_hop_authorized(
-                    msg,
-                    dst_peer_id,
-                    policy,
-                    Some(next_hop),
-                    authorization,
-                )
-                .await
-        };
-        if send_result.is_ok()
-            && let Some(metrics) = direct_tx_metrics
-        {
-            if !metrics.try_record_tx_batch(dst_peer_id, packet_type, msg_len, 1) {
-                metrics.record_tx(dst_peer_id, packet_type, msg_len).await;
-            }
-        }
-        send_result
-    }
-
     async fn send_msg_internal_batch_with_next_hop_authorized(
         peers: &Arc<PeerMap>,
         _foreign_network_client: &Arc<ForeignNetworkClient>,
@@ -5350,43 +5080,6 @@ impl PeerManager {
                         .bridge_authorization_deadline
                         .is_none_or(|deadline| deadline > Instant::now())
             })
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn combine_hybrid_delivery_results(
-        compact: Result<(), Error>,
-        full: Result<(), Error>,
-    ) -> Result<(), Error> {
-        match (compact, full) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(compact), Err(full)) => Err(anyhow::anyhow!(
-                "compact and full Ethernet delivery failed: compact={compact}; full={full}"
-            )
-            .into()),
-        }
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn rebuild_ethernet_from_accepted_ip(
-        ip_packet: &ZCPacket,
-        ethernet_header: &[u8],
-    ) -> Result<ZCPacket, Error> {
-        if ethernet_header.len() < crate::instance::l2_tun::ETHERNET_HEADER_LEN {
-            return Err(Error::InvalidEthernetFrame(
-                "Ethernet header is shorter than 14 bytes".to_string(),
-            ));
-        }
-        let mut frame = Vec::with_capacity(ethernet_header.len() + ip_packet.payload_len());
-        frame.extend_from_slice(ethernet_header);
-        frame.extend_from_slice(ip_packet.payload());
-        let mut packet = ZCPacket::new_with_payload(&frame);
-        if let Some(flow_hash) = ip_packet.flow_hash() {
-            packet.set_flow_hash(flow_hash);
-        }
-        Ok(packet)
     }
 
     /// Rebuild a complete Ethernet frame in the owned packet buffer.
@@ -5539,37 +5232,6 @@ impl PeerManager {
             is_broadcast,
             bridge_fallback,
         }
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn filter_authorized_full_ethernet_peers(
-        &self,
-        full_peers: Vec<PeerId>,
-        descriptor: &PeerMapDataPlaneDescriptor,
-    ) -> (Vec<PeerId>, bool) {
-        let Some(snapshot) = descriptor.forwarding_snapshot.as_ref() else {
-            return (Vec::new(), !full_peers.is_empty());
-        };
-        let origin_auth_snapshot = descriptor.origin_auth_snapshot.as_ref();
-        let mut unauthorized = false;
-        let authorized = full_peers
-            .into_iter()
-            .filter(|peer_id| {
-                let allowed = Self::snapshot_and_current_full_ethernet_destination_is_authorized_from_snapshot(
-                    origin_auth_snapshot,
-                    snapshot,
-                    *peer_id,
-                    self.my_peer_id,
-                    &self.global_ctx,
-                );
-                if !allowed {
-                    unauthorized = true;
-                }
-                allowed
-            })
-            .collect();
-        (authorized, unauthorized)
     }
 
     pub(crate) fn full_ethernet_descriptor_is_current_for_destination(
@@ -5936,35 +5598,6 @@ impl PeerManager {
         }
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn capture_hybrid_forwarding_state(
-        &self,
-        ip_addr: IpAddr,
-    ) -> Result<
-        (
-            Vec<PeerId>,
-            bool,
-            ForwardingDecisionSnapshotHandle,
-            Arc<Vec<IpAddr>>,
-        ),
-        Error,
-    > {
-        let snapshot = self
-            .peers
-            .forwarding_decision_snapshot()
-            .await
-            .ok_or_else(|| {
-                Error::RouteError(Some(
-                    "forwarding decision snapshot is unavailable".to_string(),
-                ))
-            })?;
-        let configured_exit_nodes = self.exit_nodes.load_full();
-        let (peers, is_exit_node) =
-            self.hybrid_destination_from_snapshot(&snapshot, ip_addr, &configured_exit_nodes);
-        Ok((peers, is_exit_node, snapshot, configured_exit_nodes))
-    }
-
     pub async fn get_msg_dst_peer_ipv4(&self, ipv4_addr: &Ipv4Addr) -> (Vec<PeerId>, bool) {
         let mut is_exit_node = false;
         let mut dst_peers = vec![];
@@ -6076,19 +5709,6 @@ impl PeerManager {
             .is_some_and(|features| features.hybrid_l3)
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn route_subscribes_to_multicast(route: &ForwardingPeerInfo, address: IpAddr) -> bool {
-        route.feature_flag.as_ref().is_some_and(|features| {
-            features.hybrid_l3
-                && features.multicast_membership
-                && route.multicast_groups.iter().any(|group| match address {
-                    IpAddr::V4(address) => group.as_slice() == address.octets(),
-                    IpAddr::V6(address) => group.as_slice() == address.octets(),
-                })
-        })
-    }
-
     pub async fn send_fabric_batch(&self, batch: FabricBatch) -> Result<(), Error> {
         if batch.is_empty() {
             return Ok(());
@@ -6107,57 +5727,6 @@ impl PeerManager {
 
     pub async fn send_fabric_packet(&self, packet: FabricPacket) -> Result<(), Error> {
         self.send_fabric_batch(FabricBatch::singleton(packet)).await
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn send_compact_ip_to_peers_with_snapshot(
-        &self,
-        mut msg: ZCPacket,
-        ip_addr: IpAddr,
-        not_send_to_self: bool,
-        dst_peers: Vec<PeerId>,
-        is_exit_node: bool,
-        forwarding_snapshot: Option<&ForwardingDecisionSnapshotHandle>,
-        pipeline_already_run: bool,
-        packet_prepared: bool,
-        fanout_budget_reserved: bool,
-    ) -> Result<(), Error> {
-        if dst_peers.is_empty() {
-            return Ok(());
-        }
-        if !pipeline_already_run {
-            msg.fill_peer_manager_hdr_preserving_flow_hash(
-                self.my_peer_id,
-                0,
-                PacketType::Data as u8,
-            );
-            if !self.run_nic_packet_process_pipeline(&mut msg).await {
-                return Ok(());
-            }
-        }
-        apply_local_route_policy(
-            &mut msg,
-            self.global_ctx.speed_first(),
-            self.global_ctx.latency_first(),
-        );
-        let overridden_peer = msg.peer_manager_header().unwrap().to_peer_id.get();
-        let dst_peers = if overridden_peer == 0 {
-            dst_peers
-        } else {
-            vec![overridden_peer]
-        };
-        self.finish_send_ip_with_snapshot(
-            msg,
-            ip_addr,
-            not_send_to_self,
-            dst_peers,
-            is_exit_node,
-            forwarding_snapshot,
-            packet_prepared,
-            fanout_budget_reserved,
-        )
-        .await
     }
 
     pub async fn send_msg_by_hybrid_ethernet_batch(&self, batch: PacketBatch) -> Result<(), Error> {
@@ -6708,133 +6277,6 @@ impl PeerManager {
         }
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn finish_send_ip_with_snapshot(
-        &self,
-        mut msg: ZCPacket,
-        ip_addr: IpAddr,
-        not_send_to_self: bool,
-        dst_peers: Vec<PeerId>,
-        is_exit_node: bool,
-        forwarding_snapshot: Option<&ForwardingDecisionSnapshotHandle>,
-        packet_prepared: bool,
-        fanout_budget_reserved: bool,
-    ) -> Result<(), Error> {
-        if !packet_prepared {
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(msg.buf_len() as u64);
-
-            Self::prepare_packet(&mut msg);
-
-            self.self_tx_counters
-                .compress_tx_bytes_after
-                .add(msg.buf_len() as u64);
-        }
-
-        if !fanout_budget_reserved && dst_peers.len() > 1 {
-            self.reserve_fanout(msg.buf_len(), dst_peers.len())?;
-        }
-
-        msg.mut_peer_manager_header()
-            .unwrap()
-            .set_exit_node(is_exit_node);
-
-        let mut errs: Vec<Error> = vec![];
-        let mut msg = Some(msg);
-        let total_dst_peers = dst_peers.len();
-        let should_mark_recent_traffic =
-            Self::should_mark_recent_traffic_for_fanout(total_dst_peers);
-        for (i, peer_id) in dst_peers.iter().enumerate() {
-            if should_mark_recent_traffic {
-                self.mark_recent_traffic(*peer_id);
-            }
-            if let Err(e) = self.check_p2p_only_before_send(*peer_id) {
-                errs.push(e);
-                continue;
-            }
-
-            let mut msg = if i == total_dst_peers - 1 {
-                msg.take().unwrap()
-            } else {
-                msg.clone().unwrap()
-            };
-
-            let hdr = msg.mut_peer_manager_header().unwrap();
-            hdr.to_peer_id.set(*peer_id);
-
-            {
-                if not_send_to_self
-                    && *peer_id == self.my_peer_id
-                    && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
-                {
-                    // Keep the loop-prevention flags for proxy-induced self-delivery where
-                    // the destination is not this node's own LowTier-managed IP.
-                    hdr.set_not_send_to_tun(true);
-                    hdr.set_no_proxy(true);
-                }
-            }
-
-            self.self_tx_counters
-                .self_tx_bytes
-                .add(msg.buf_len() as u64);
-            self.self_tx_counters.self_tx_packets.inc();
-
-            let result = if let Some(snapshot) = forwarding_snapshot {
-                let Some(next_hop) =
-                    (*peer_id == self.my_peer_id)
-                        .then_some(*peer_id)
-                        .or_else(|| {
-                            snapshot
-                                .next_hop(
-                                    *peer_id,
-                                    Self::get_next_hop_policy(msg.peer_manager_header().unwrap()),
-                                )
-                                .map(|next_hop| next_hop.next_hop_peer_id)
-                        })
-                else {
-                    errs.push(Error::RouteError(Some(
-                        "snapshot next hop is unavailable".to_string(),
-                    )));
-                    continue;
-                };
-                Self::send_msg_internal_with_next_hop(
-                    &self.peers,
-                    &self.foreign_network_client,
-                    &self.relay_peer_map,
-                    Some(&self.traffic_metrics),
-                    msg,
-                    *peer_id,
-                    next_hop,
-                )
-                .await
-            } else {
-                Self::send_msg_internal(
-                    &self.peers,
-                    &self.foreign_network_client,
-                    &self.relay_peer_map,
-                    Some(&self.traffic_metrics),
-                    msg,
-                    *peer_id,
-                )
-                .await
-            };
-            if let Err(e) = result {
-                errs.push(e);
-            }
-        }
-
-        tracing::trace!(?dst_peers, "do send_msg in peer manager done");
-
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            tracing::error!(?errs, "send_msg has error");
-            Err(anyhow::anyhow!("send_msg has error: {:?}", errs).into())
-        }
-    }
-
     async fn run_clean_peer_without_conn_routine(&self) {
         let peer_map = self.peers.clone();
         self.tasks.lock().await.spawn(async move {
@@ -7269,79 +6711,34 @@ impl PeerManager {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine;
     use futures::{SinkExt as _, StreamExt as _};
     use std::{
-        collections::{BTreeSet, HashMap, HashSet},
         fmt::Debug,
-        future::Future as _,
-        net::{IpAddr, Ipv4Addr},
         pin::Pin,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
+        sync::Arc,
         task::{Context, Poll},
         time::Duration,
     };
 
-    use cidr::{Ipv4Cidr, Ipv6Cidr};
-    use prefix_trie::PrefixMap;
-    use quanta::Instant;
-
     use crate::{
-        common::{
-            PeerId,
-            config::{ConfigLoader, Flags},
-            global_ctx::{
-                NetworkIdentity,
-                tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
-            },
-            stats_manager::{LabelSet, LabelType, MetricName},
-        },
-        connector::{create_connector_by_url, direct::PeerManagerForDirectConnector},
-        instance::listeners::create_listener_by_url,
+        common::{PeerId, config::Flags, global_ctx::tests::get_mock_global_ctx},
         peers::{
-            NicPacketFilter, PacketRecvChanReceiver, PeerPacketFilter, create_packet_recv_chan,
-            fabric::{FabricBatch, FabricPacket, FabricPayloadKind},
-            peer_conn::tests::set_secure_mode_cfg,
+            PacketRecvChanReceiver, create_packet_recv_chan,
             peer_manager::RouteAlgoType,
-            peer_map::PeerMap,
-            route_trait::{
-                BridgeRoutePeerEvidence, ForwardingDecisionSnapshot, ForwardingPeerInfo,
-                ForwardingPeerTable, MockRoute, NextHopPolicy, Route, RouteCostCalculatorInterface,
-                RouteInterfaceBox,
-            },
+            route_trait::{ForwardingPeerInfo, ForwardingPeerTable},
             service_route::{ServiceRoute, ServiceRouteAction},
-            tests::{
-                connect_peer_manager, create_mock_peer_manager, create_mock_peer_manager_secure,
-                create_mock_peer_manager_with_mock_stun, wait_route_appear,
-                wait_route_appear_with_cost,
-            },
+            tests::{connect_peer_manager, wait_route_appear},
         },
-        proto::{
-            acl::{Acl, AclV1, Action, Chain, ChainType},
-            common::{CompressionAlgoPb, NatType, SecureModeConfig},
-            peer_rpc::{PeerIdentityType, SecureAuthLevel},
-        },
+        proto::peer_rpc::{PeerIdentityType, SecureAuthLevel},
         tunnel::{
-            PacketBatchSink, Tunnel, TunnelConnector, TunnelListener,
             batch::PacketBatch,
-            common::tests::wait_for_condition,
-            filter::{TunnelWithFilter, tests::DropSendTunnelFilter},
             packet_def::{PacketType, ZCPacket},
-            ring::create_ring_tunnel_pair,
         },
     };
 
     use super::{
-        DIRECT_NIC_BATCH_CREDIT_BYTES, DIRECT_NIC_QUEUE_CREDIT_BYTES, DirectNicBatchWriter,
-        DirectNicDelivery, DirectNicEndpoint, DirectNicQueueState, EthernetBatchInput,
-        OriginAuthCapability, PeerManager, UserRoutePlan, apply_local_route_policy,
-        check_tunnel_info_underlay, decoded_local_nic_batch_source, direct_batch_group_key,
-        direct_selected_conn_allowed, is_foreign_network_packet_type, ordered_probe_indexes,
-        packet_batch_contains_peer_rpc, packet_supports_speed_first, plan_direct_nic_delivery,
-        prepare_direct_nic_batch, prepare_packet_batch, run_direct_nic_writer,
+        DIRECT_NIC_QUEUE_CREDIT_BYTES, DirectNicDelivery, DirectNicEndpoint, DirectNicQueueState,
+        PeerManager, plan_direct_nic_delivery, run_direct_nic_writer,
     };
 
     #[test]
@@ -7352,254 +6749,6 @@ mod tests {
         super::suppress_local_tun_delivery(header);
         assert!(header.is_not_send_to_tun());
         assert!(header.is_no_proxy());
-    }
-
-    // TODO(l2fix): remove this allowance after test integration.
-    #[allow(dead_code)]
-    struct CountingNicFilter(Arc<AtomicUsize>);
-
-    #[derive(Clone)]
-    // TODO(l2fix): remove this allowance after test integration.
-    #[allow(dead_code)]
-    struct ControlledRoute {
-        peer_id: PeerId,
-        block_open: bool,
-        publish_authority: bool,
-        opened: Arc<tokio::sync::Notify>,
-        release_open: Arc<tokio::sync::Notify>,
-        started: Arc<AtomicBool>,
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn controlled_route_snapshot(peer_id: PeerId) -> Arc<ForwardingDecisionSnapshot> {
-        ForwardingDecisionSnapshot::from_parts(
-            1,
-            Arc::new(ForwardingPeerTable::new(vec![ForwardingPeerInfo {
-                peer_id,
-                ..Default::default()
-            }])),
-            Arc::new(HashSet::new()),
-            None,
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(PrefixMap::new()),
-            Arc::new(PrefixMap::new()),
-        )
-    }
-
-    #[async_trait::async_trait]
-    impl Route for ControlledRoute {
-        async fn open(&self, interface: RouteInterfaceBox) -> Result<u8, ()> {
-            self.started.store(true, Ordering::Release);
-            if let Some(source) = interface.forwarding_decision_snapshot_source() {
-                let snapshot = controlled_route_snapshot(self.peer_id);
-                if self.publish_authority {
-                    let _ = interface.publish_origin_auth_batch(
-                        source.source_token(),
-                        snapshot.generation(),
-                        &[],
-                    );
-                }
-                let _ = source.publish(snapshot);
-            }
-            self.opened.notify_one();
-            if self.block_open {
-                self.release_open.notified().await;
-            }
-            Ok(1)
-        }
-
-        async fn close(&self) {}
-
-        async fn get_next_hop(&self, _peer_id: PeerId) -> Option<PeerId> {
-            None
-        }
-
-        async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route> {
-            vec![crate::proto::api::instance::Route {
-                peer_id: self.peer_id,
-                ..Default::default()
-            }]
-        }
-
-        async fn list_proxy_cidrs(&self) -> BTreeSet<Ipv4Cidr> {
-            BTreeSet::new()
-        }
-
-        async fn list_proxy_cidrs_v6(&self) -> BTreeSet<Ipv6Cidr> {
-            BTreeSet::new()
-        }
-
-        async fn get_peer_info(
-            &self,
-            _peer_id: PeerId,
-        ) -> Option<crate::proto::peer_rpc::RoutePeerInfo> {
-            None
-        }
-
-        async fn get_peer_info_last_update_time(&self) -> Instant {
-            Instant::now()
-        }
-
-        fn get_peer_groups(&self, _peer_id: PeerId) -> Arc<Vec<String>> {
-            Arc::new(Vec::new())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl NicPacketFilter for CountingNicFilter {
-        async fn try_process_packet_from_nic(&self, _data: &mut ZCPacket) -> bool {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-    }
-
-    // TODO(l2fix): remove this allowance after test integration.
-    #[allow(dead_code)]
-    struct ClearingNicFilter;
-
-    #[async_trait::async_trait]
-    impl NicPacketFilter for ClearingNicFilter {
-        async fn try_process_packet_from_nic(&self, data: &mut ZCPacket) -> bool {
-            let _ = data.mut_payload();
-            true
-        }
-    }
-
-    struct DelayedDataSink {
-        inner: Pin<Box<dyn PacketBatchSink>>,
-        delay: Duration,
-        pending_delay: Option<Pin<Box<tokio::time::Sleep>>>,
-    }
-
-    impl Unpin for DelayedDataSink {}
-
-    impl futures::Sink<PacketBatch> for DelayedDataSink {
-        type Error = crate::tunnel::TunnelError;
-
-        fn poll_ready(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            self.as_mut().get_mut().inner.as_mut().poll_ready(cx)
-        }
-
-        fn start_send(mut self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
-            let this = self.as_mut().get_mut();
-            let delay_data = batch.iter().any(|packet| {
-                packet.peer_manager_header().is_some_and(|header| {
-                    header.packet_type == PacketType::Data as u8
-                        || header.packet_type == PacketType::Ethernet as u8
-                })
-            });
-            this.inner.as_mut().start_send(batch)?;
-            if delay_data {
-                this.pending_delay = Some(Box::pin(tokio::time::sleep(this.delay)));
-            }
-            Ok(())
-        }
-
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            let this = self.as_mut().get_mut();
-            if let Some(delay) = this.pending_delay.as_mut() {
-                if delay.as_mut().poll(cx).is_pending() {
-                    return Poll::Pending;
-                }
-                this.pending_delay = None;
-            }
-            this.inner.as_mut().poll_flush(cx)
-        }
-
-        fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            self.get_mut().inner.as_mut().poll_close(cx)
-        }
-    }
-
-    struct DelayedDataTunnel<T> {
-        inner: T,
-        delay: Duration,
-    }
-
-    impl<T> DelayedDataTunnel<T> {
-        #[allow(dead_code)]
-        // TODO(l2fix): remove this allowance after integration.
-        fn new(inner: T, delay: Duration) -> Self {
-            Self { inner, delay }
-        }
-    }
-
-    impl<T> Tunnel for DelayedDataTunnel<T>
-    where
-        T: Tunnel + Send + 'static,
-    {
-        fn split(&self) -> crate::tunnel::SplitTunnel {
-            let (stream, sink) = self.inner.split();
-            (
-                stream,
-                Box::pin(DelayedDataSink {
-                    inner: sink,
-                    delay: self.delay,
-                    pending_delay: None,
-                }),
-            )
-        }
-
-        fn info(&self) -> Option<crate::proto::common::TunnelInfo> {
-            self.inner.info()
-        }
-
-        fn is_transport_authenticated(&self) -> bool {
-            self.inner.is_transport_authenticated()
-        }
-    }
-
-    // TODO(l2fix): remove this allowance after test integration.
-    #[allow(dead_code)]
-    struct RewriteIpv4Destination(Ipv4Addr);
-
-    #[async_trait::async_trait]
-    impl NicPacketFilter for RewriteIpv4Destination {
-        async fn try_process_packet_from_nic(&self, data: &mut ZCPacket) -> bool {
-            let payload = data.mut_payload();
-            if payload.len() < 20 || payload[0] >> 4 != 4 {
-                return false;
-            }
-            payload[16..20].copy_from_slice(&self.0.octets());
-            true
-        }
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn deny_outbound_acl() -> Acl {
-        Acl {
-            acl_v1: Some(AclV1 {
-                chains: vec![Chain {
-                    name: "deny_outbound".to_string(),
-                    chain_type: ChainType::Outbound as i32,
-                    enabled: true,
-                    default_action: Action::Drop as i32,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }),
-        }
-    }
-
-    // TODO(l2fix): remove this allowance after test integration.
-    #[allow(dead_code)]
-    struct GatedDirectNicSink {
-        sent: futures::channel::mpsc::UnboundedSender<PacketBatch>,
-        released: Arc<AtomicBool>,
-        flush_waker: Arc<futures::task::AtomicWaker>,
-        fail_flush: bool,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -7647,49 +6796,6 @@ mod tests {
         }
     }
 
-    impl futures::Sink<PacketBatch> for GatedDirectNicSink {
-        type Error = crate::tunnel::TunnelError;
-
-        fn poll_ready(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn start_send(self: Pin<&mut Self>, batch: PacketBatch) -> Result<(), Self::Error> {
-            self.get_mut()
-                .sent
-                .unbounded_send(batch)
-                .map_err(|_| crate::tunnel::TunnelError::Shutdown)
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            let this = self.get_mut();
-            if this.fail_flush {
-                return Poll::Ready(Err(crate::tunnel::TunnelError::InternalError(
-                    "forced direct NIC flush failure".into(),
-                )));
-            }
-            if this.released.load(Ordering::Acquire) {
-                return Poll::Ready(Ok(()));
-            }
-            this.flush_waker.register(cx.waker());
-            if this.released.load(Ordering::Acquire) {
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Pending
-            }
-        }
-
-        fn poll_close(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            self.as_mut().poll_flush(cx)
-        }
-    }
-
     fn direct_nic_writer_batch(marker: u8, packet_count: usize) -> DirectNicDelivery {
         let mut batch = PacketBatch::new();
         for sequence in 0..packet_count {
@@ -7698,18 +6804,6 @@ mod tests {
                 .unwrap();
         }
         plan_direct_nic_delivery(batch).unwrap()
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn direct_nic_control_delivery(marker: u8) -> DirectNicDelivery {
-        let mut packet = ZCPacket::new_with_payload(&[marker, 0]);
-        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
-        packet
-            .mut_peer_manager_header()
-            .unwrap()
-            .set_critical_l2_control(true);
-        plan_direct_nic_delivery(PacketBatch::singleton(packet)).unwrap()
     }
 
     #[tokio::test]
@@ -7747,30 +6841,6 @@ mod tests {
         );
         assert_eq!(events_rx.next().await, Some(DirectNicWriterEvent::Flush));
         assert_eq!(events_rx.next().await, None);
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn direct_nic_ingress_batch(
-        destination_peer_id: PeerId,
-        marker: u8,
-        packet_count: usize,
-    ) -> PacketBatch {
-        let mut batch = PacketBatch::new();
-        for sequence in 0..packet_count {
-            let mut packet = ZCPacket::new_with_payload(&[marker, sequence as u8]);
-            packet.fill_peer_manager_hdr(42, destination_peer_id, PacketType::Data as u8);
-            assert!(packet.set_authenticated_peer_id(42));
-            assert!(packet.set_authenticated_peer_identity_type(PeerIdentityType::Admin));
-            assert!(
-                packet.set_authenticated_peer_secure_auth_level(
-                    SecureAuthLevel::NetworkSecretConfirmed
-                )
-            );
-            assert!(packet.set_authenticated_session_id(uuid::Uuid::new_v4()));
-            batch.try_push(packet).unwrap();
-        }
-        batch
     }
 
     async fn create_tap_peer_manager(
@@ -7814,78 +6884,6 @@ mod tests {
         peer_manager.run().await.unwrap();
         (peer_manager, packet_recv)
     }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn create_routed_peer_manager_with_ipv4(ipv4: std::net::Ipv4Addr) -> Arc<PeerManager> {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
-        let mut features = global_ctx.get_feature_flags();
-        features.ethernet_input = false;
-        features.hybrid_l3 = true;
-        features.bridge_input = false;
-        features.multicast_membership = true;
-        global_ctx.set_base_advertised_feature_flags(features);
-
-        let (packet_send, _packet_recv) = create_packet_recv_chan();
-        let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
-            global_ctx,
-            packet_send,
-        ));
-        peer_manager.run().await.unwrap();
-        peer_manager
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn create_hybrid_peer_manager_with_ipv4(
-        ipv4: std::net::Ipv4Addr,
-    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
-        create_hybrid_peer_manager_with_ipv4_and_bridge(ipv4, false).await
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn create_hybrid_peer_manager_with_ipv4_and_bridge(
-        ipv4: std::net::Ipv4Addr,
-        enable_bridge: bool,
-    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
-        create_hybrid_peer_manager_with_ipv4_and_bridge_and_flood(ipv4, enable_bridge, 0).await
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn create_hybrid_peer_manager_with_ipv4_and_bridge_and_flood(
-        ipv4: std::net::Ipv4Addr,
-        enable_bridge: bool,
-        l2_flood_bytes_per_second: u64,
-    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
-        let global_ctx = get_mock_global_ctx();
-        global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
-        let mut flags = global_ctx.get_flags();
-        flags.enable_bridge = enable_bridge;
-        flags.l2_flood_bytes_per_second = l2_flood_bytes_per_second;
-        global_ctx.set_flags(flags);
-        let mut features = global_ctx.get_feature_flags();
-        features.ethernet_input = true;
-        features.hybrid_l3 = true;
-        features.bridge_input = enable_bridge;
-        features.multicast_membership = true;
-        global_ctx.set_base_advertised_feature_flags(features);
-
-        let (packet_send, packet_recv) = create_packet_recv_chan();
-        let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
-            global_ctx,
-            packet_send,
-        ));
-        peer_manager.run().await.unwrap();
-        (peer_manager, packet_recv)
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
     fn routed_ipv4_packet(
         source: std::net::Ipv4Addr,
         destination: std::net::Ipv4Addr,
@@ -8087,219 +7085,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l2_bridged_ip_preserves_hosts_before_and_after_learning() {
-        let (a, mut nic_a) =
-            create_tap_peer_manager_with_ipv4(0, Some("10.42.0.1".parse().unwrap())).await;
-        let (b, mut nic_b) =
-            create_tap_peer_manager_with_ipv4(0, Some("10.42.0.2".parse().unwrap())).await;
-        connect_peer_manager(a.clone(), b.clone()).await;
-        wait_route_appear(a.clone(), b.clone()).await.unwrap();
-        let mac_a = [2, 1, 1, 1, 1, 1];
-        let mac_b = [2, 1, 1, 1, 1, 2];
-        for ipv6 in [false, true] {
-            for learned in [false, true] {
-                for (sender, receiver, nic, source, destination) in [
-                    (&a, &b, &mut nic_b, mac_a, mac_b),
-                    (&b, &a, &mut nic_a, mac_b, mac_a),
-                ] {
-                    sender.l2_fabric.clear();
-                    if learned {
-                        sender.l2_fabric.learn_source(
-                            &ethernet_frame([0xff; 6], destination),
-                            receiver.my_peer_id(),
-                        );
-                    }
-                    let mut frame = ethernet_frame(destination, source);
-                    let (source_host, destination_host) =
-                        if source == mac_a { (11, 12) } else { (12, 11) };
-                    let ip = if ipv6 {
-                        let mut bytes = vec![0; 64];
-                        bytes[0] = 0x60;
-                        bytes[4..6].copy_from_slice(&24_u16.to_be_bytes());
-                        bytes[6] = 17;
-                        bytes[7] = 64;
-                        bytes[8..24].copy_from_slice(
-                            &std::net::Ipv6Addr::new(0xfd42, 0, 0, 0, 0, 0, 0, source_host)
-                                .octets(),
-                        );
-                        bytes[24..40].copy_from_slice(
-                            &std::net::Ipv6Addr::new(0xfd42, 0, 0, 0, 0, 0, 0, destination_host)
-                                .octets(),
-                        );
-                        bytes
-                    } else {
-                        routed_ipv4_packet(
-                            std::net::Ipv4Addr::new(10, 42, 0, source_host as u8),
-                            std::net::Ipv4Addr::new(10, 42, 0, destination_host as u8),
-                            1,
-                        )
-                        .payload()
-                        .to_vec()
-                    };
-                    frame.truncate(14);
-                    frame[12..14]
-                        .copy_from_slice(&(if ipv6 { 0x86dd_u16 } else { 0x0800 }).to_be_bytes());
-                    frame.extend_from_slice(&ip);
-                    sender
-                        .send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(
-                            ZCPacket::new_with_payload(&frame),
-                        ))
-                        .await
-                        .unwrap();
-                    let received = tokio::time::timeout(Duration::from_secs(5), nic.recv())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    assert_eq!(received.payload(), frame, "ipv6={ipv6}, learned={learned}");
-                }
-            }
-        }
-        let (exit, mut nic_exit) =
-            create_tap_peer_manager_with_ipv4(0, Some("10.42.0.3".parse().unwrap())).await;
-        connect_peer_manager(a.clone(), exit.clone()).await;
-        wait_route_appear(a.clone(), exit.clone()).await.unwrap();
-        a.exit_nodes
-            .store(Arc::new(vec!["10.42.0.3".parse().unwrap()]));
-        a.l2_fabric
-            .learn_source(&ethernet_frame([0xff; 6], mac_b), b.my_peer_id());
-        let mut frame = ethernet_frame(mac_b, mac_a);
-        frame.truncate(14);
-        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
-        frame.extend_from_slice(
-            routed_ipv4_packet(
-                "192.0.2.11".parse().unwrap(),
-                "192.0.2.12".parse().unwrap(),
-                2,
-            )
-            .payload(),
-        );
-        a.send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(ZCPacket::new_with_payload(
-            &frame,
-        )))
-        .await
-        .unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(received.payload(), frame);
-        assert!(!received.peer_manager_header().unwrap().is_exit_node());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), nic_exit.recv())
-                .await
-                .is_err()
-        );
-        a.service_routes.replace_source(
-            crate::peers::service_route::RouteSource::Bgp,
-            vec![ServiceRoute {
-                prefix: "192.0.2.0/24".parse().unwrap(),
-                gateway: 0,
-                preference: 100,
-                metric: 0,
-                path_id: 1,
-                action: ServiceRouteAction::Blackhole,
-            }],
-        );
-        a.send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(ZCPacket::new_with_payload(
-            &frame,
-        )))
-        .await
-        .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn l2_stale_known_destination_floods_to_live_bridges() {
-        let (a, _nic_a) = create_tap_peer_manager(0).await;
-        let (b, mut nic_b) = create_tap_peer_manager(0).await;
-        connect_peer_manager(a.clone(), b.clone()).await;
-        wait_route_appear(a.clone(), b.clone()).await.unwrap();
-        let mac = [2, 1, 1, 1, 1, 2];
-        a.l2_fabric.learn_source(
-            &ethernet_frame([0xff; 6], mac),
-            b.my_peer_id().wrapping_add(1),
-        );
-        let frame = ethernet_frame(mac, [2, 1, 1, 1, 1, 1]);
-        a.send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
-            .await
-            .unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(received.payload(), frame);
-    }
-
-    #[tokio::test]
-    async fn l2_route_publication_removes_invalid_fdb_owners() {
-        use crate::peers::l2_fabric::EthernetDestination;
-        let (a, _nic_a) = create_tap_peer_manager(0).await;
-        let (b, _nic_b) = create_tap_peer_manager(0).await;
-        connect_peer_manager(a.clone(), b.clone()).await;
-        wait_route_appear(a.clone(), b.clone()).await.unwrap();
-        let local_mac = [2, 1, 1, 1, 1, 1];
-        let remote_mac = [2, 1, 1, 1, 1, 2];
-        let learned = ethernet_frame([0xff; 6], remote_mac);
-        a.l2_fabric.learn_source(&learned, b.my_peer_id());
-        a.l2_fabric
-            .learn_source(&ethernet_frame([0xff; 6], local_mac), a.my_peer_id());
-        assert!(a.peers.revoke_bridge_route_evidence(b.my_peer_id(), None));
-        assert_eq!(
-            a.l2_fabric
-                .destination(&ethernet_frame(remote_mac, local_mac)),
-            Ok(EthernetDestination::Flood)
-        );
-        // A source replacement withdraws routes without removing a direct connection.
-        a.l2_fabric.learn_source(&learned, b.my_peer_id());
-        a.peers
-            .install_forwarding_snapshot_source()
-            .unwrap()
-            .revoke();
-        assert_eq!(
-            a.l2_fabric
-                .destination(&ethernet_frame(remote_mac, local_mac)),
-            Ok(EthernetDestination::Flood)
-        );
-        assert_eq!(
-            a.l2_fabric
-                .destination(&ethernet_frame(local_mac, remote_mac)),
-            Ok(EthernetDestination::Known(a.my_peer_id()))
-        );
-    }
-
-    #[tokio::test]
-    async fn l2_ingress_budget_filters_floods_in_a_batch() {
-        let (a, _nic_a) = create_tap_peer_manager(0).await;
-        let (b, mut nic_b) = create_tap_peer_manager(100).await;
-        connect_peer_manager(a.clone(), b.clone()).await;
-        wait_route_appear(a.clone(), b.clone()).await.unwrap();
-        let frame = ethernet_frame([0xff; 6], [2, 1, 1, 1, 1, 1]);
-        let mut batch = PacketBatch::new();
-        batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
-        batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
-        a.send_msg_by_ethernet_batch(batch).await.unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
-                .await
-                .unwrap()
-                .unwrap()
-                .payload(),
-            frame
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
-                .await
-                .is_err()
-        );
-        assert_eq!(b.l2_counters().ingress_flood_drops, 1);
-    }
-
-    #[tokio::test]
-    async fn l2_known_unicast_delivers_frame_and_learns_source() {
+    async fn l2_known_unicast_preserves_lan_headers_and_route_rules() {
         let (peer_mgr_a, _nic_a) = create_tap_peer_manager(0).await;
         let (peer_mgr_b, mut nic_b) = create_tap_peer_manager(0).await;
         connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
@@ -8336,6 +7122,140 @@ mod tests {
                 peer_mgr_a.my_peer_id()
             ))
         );
+        {
+            let (a, mut nic_a) =
+                create_tap_peer_manager_with_ipv4(0, Some("10.42.0.1".parse().unwrap())).await;
+            let (b, mut nic_b) =
+                create_tap_peer_manager_with_ipv4(0, Some("10.42.0.2".parse().unwrap())).await;
+            connect_peer_manager(a.clone(), b.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            let mac_a = [2, 1, 1, 1, 1, 1];
+            let mac_b = [2, 1, 1, 1, 1, 2];
+            for ipv6 in [false, true] {
+                for learned in [false, true] {
+                    for (sender, receiver, nic, source, destination) in [
+                        (&a, &b, &mut nic_b, mac_a, mac_b),
+                        (&b, &a, &mut nic_a, mac_b, mac_a),
+                    ] {
+                        sender.l2_fabric.clear();
+                        if learned {
+                            sender.l2_fabric.learn_source(
+                                &ethernet_frame([0xff; 6], destination),
+                                receiver.my_peer_id(),
+                            );
+                        }
+                        let mut frame = ethernet_frame(destination, source);
+                        let (source_host, destination_host) =
+                            if source == mac_a { (11, 12) } else { (12, 11) };
+                        let ip = if ipv6 {
+                            let mut bytes = vec![0; 64];
+                            bytes[0] = 0x60;
+                            bytes[4..6].copy_from_slice(&24_u16.to_be_bytes());
+                            bytes[6] = 17;
+                            bytes[7] = 64;
+                            bytes[8..24].copy_from_slice(
+                                &std::net::Ipv6Addr::new(0xfd42, 0, 0, 0, 0, 0, 0, source_host)
+                                    .octets(),
+                            );
+                            bytes[24..40].copy_from_slice(
+                                &std::net::Ipv6Addr::new(
+                                    0xfd42,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    destination_host,
+                                )
+                                .octets(),
+                            );
+                            bytes
+                        } else {
+                            routed_ipv4_packet(
+                                std::net::Ipv4Addr::new(10, 42, 0, source_host as u8),
+                                std::net::Ipv4Addr::new(10, 42, 0, destination_host as u8),
+                                1,
+                            )
+                            .payload()
+                            .to_vec()
+                        };
+                        frame.truncate(14);
+                        frame[12..14].copy_from_slice(
+                            &(if ipv6 { 0x86dd_u16 } else { 0x0800 }).to_be_bytes(),
+                        );
+                        frame.extend_from_slice(&ip);
+                        sender
+                            .send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(
+                                ZCPacket::new_with_payload(&frame),
+                            ))
+                            .await
+                            .unwrap();
+                        let received = tokio::time::timeout(Duration::from_secs(5), nic.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(received.payload(), frame, "ipv6={ipv6}, learned={learned}");
+                    }
+                }
+            }
+            let (exit, mut nic_exit) =
+                create_tap_peer_manager_with_ipv4(0, Some("10.42.0.3".parse().unwrap())).await;
+            connect_peer_manager(a.clone(), exit.clone()).await;
+            wait_route_appear(a.clone(), exit.clone()).await.unwrap();
+            a.exit_nodes
+                .store(Arc::new(vec!["10.42.0.3".parse().unwrap()]));
+            a.l2_fabric
+                .learn_source(&ethernet_frame([0xff; 6], mac_b), b.my_peer_id());
+            let mut frame = ethernet_frame(mac_b, mac_a);
+            frame.truncate(14);
+            frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+            frame.extend_from_slice(
+                routed_ipv4_packet(
+                    "192.0.2.11".parse().unwrap(),
+                    "192.0.2.12".parse().unwrap(),
+                    2,
+                )
+                .payload(),
+            );
+            a.send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(
+                ZCPacket::new_with_payload(&frame),
+            ))
+            .await
+            .unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received.payload(), frame);
+            assert!(!received.peer_manager_header().unwrap().is_exit_node());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), nic_exit.recv())
+                    .await
+                    .is_err()
+            );
+            a.service_routes.replace_source(
+                crate::peers::service_route::RouteSource::Bgp,
+                vec![ServiceRoute {
+                    prefix: "192.0.2.0/24".parse().unwrap(),
+                    gateway: 0,
+                    preference: 100,
+                    metric: 0,
+                    path_id: 1,
+                    action: ServiceRouteAction::Blackhole,
+                }],
+            );
+            a.send_msg_by_hybrid_ethernet_batch(PacketBatch::singleton(
+                ZCPacket::new_with_payload(&frame),
+            ))
+            .await
+            .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]
@@ -8392,7 +7312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l2_unknown_unicast_fans_out_to_ethernet_capable_peers() {
+    async fn l2_unknown_or_stale_unicast_floods_to_live_bridges() {
         let (peer_mgr_a, _nic_a) = create_tap_peer_manager(0).await;
         let (peer_mgr_b, mut nic_b) = create_tap_peer_manager(0).await;
         let (peer_mgr_c, mut nic_c) = create_tap_peer_manager(0).await;
@@ -8422,10 +7342,66 @@ mod tests {
                 PacketType::Ethernet as u8
             );
         }
+        {
+            let (a, _nic_a) = create_tap_peer_manager(0).await;
+            let (b, mut nic_b) = create_tap_peer_manager(0).await;
+            connect_peer_manager(a.clone(), b.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            let mac = [2, 1, 1, 1, 1, 2];
+            a.l2_fabric.learn_source(
+                &ethernet_frame([0xff; 6], mac),
+                b.my_peer_id().wrapping_add(1),
+            );
+            let frame = ethernet_frame(mac, [2, 1, 1, 1, 1, 1]);
+            a.send_msg_by_ethernet(ZCPacket::new_with_payload(&frame))
+                .await
+                .unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received.payload(), frame);
+        }
+
+        {
+            use crate::peers::l2_fabric::EthernetDestination;
+            let (a, _nic_a) = create_tap_peer_manager(0).await;
+            let (b, _nic_b) = create_tap_peer_manager(0).await;
+            connect_peer_manager(a.clone(), b.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            let local_mac = [2, 1, 1, 1, 1, 1];
+            let remote_mac = [2, 1, 1, 1, 1, 2];
+            let learned = ethernet_frame([0xff; 6], remote_mac);
+            a.l2_fabric.learn_source(&learned, b.my_peer_id());
+            a.l2_fabric
+                .learn_source(&ethernet_frame([0xff; 6], local_mac), a.my_peer_id());
+            assert!(a.peers.revoke_bridge_route_evidence(b.my_peer_id(), None));
+            assert_eq!(
+                a.l2_fabric
+                    .destination(&ethernet_frame(remote_mac, local_mac)),
+                Ok(EthernetDestination::Flood)
+            );
+            // A source replacement withdraws routes without removing a direct connection.
+            a.l2_fabric.learn_source(&learned, b.my_peer_id());
+            a.peers
+                .install_forwarding_snapshot_source()
+                .unwrap()
+                .revoke();
+            assert_eq!(
+                a.l2_fabric
+                    .destination(&ethernet_frame(remote_mac, local_mac)),
+                Ok(EthernetDestination::Flood)
+            );
+            assert_eq!(
+                a.l2_fabric
+                    .destination(&ethernet_frame(local_mac, remote_mac)),
+                Ok(EthernetDestination::Known(a.my_peer_id()))
+            );
+        }
     }
 
     #[tokio::test]
-    async fn l2_flood_budget_returns_a_typed_error_without_delivery() {
+    async fn l2_flood_budgets_limit_output_and_ingress() {
         let (peer_mgr_a, _nic_a) = create_tap_peer_manager(1).await;
         let (peer_mgr_b, mut nic_b) = create_tap_peer_manager(0).await;
         connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
@@ -8445,6 +7421,31 @@ mod tests {
                 .await
                 .is_err()
         );
+        {
+            let (a, _nic_a) = create_tap_peer_manager(0).await;
+            let (b, mut nic_b) = create_tap_peer_manager(100).await;
+            connect_peer_manager(a.clone(), b.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            let frame = ethernet_frame([0xff; 6], [2, 1, 1, 1, 1, 1]);
+            let mut batch = PacketBatch::new();
+            batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
+            batch.try_push(ZCPacket::new_with_payload(&frame)).unwrap();
+            a.send_msg_by_ethernet_batch(batch).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), nic_b.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .payload(),
+                frame
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), nic_b.recv())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(b.l2_counters().ingress_flood_drops, 1);
+        }
     }
 
     #[tokio::test]
@@ -8545,57 +7546,6 @@ mod tests {
         );
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn create_lazy_peer_manager() -> Arc<PeerManager> {
-        let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let mut flags = peer_mgr.get_global_ctx().get_flags();
-        flags.lazy_p2p = true;
-        peer_mgr.get_global_ctx().set_flags(flags);
-        peer_mgr
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn metric_value(peer_mgr: &PeerManager, metric: MetricName, labels: &LabelSet) -> u64 {
-        peer_mgr
-            .get_global_ctx()
-            .stats_manager()
-            .get_metric(metric, labels)
-            .map(|metric| metric.value)
-            .unwrap_or(0)
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn network_labels(peer_mgr: &PeerManager) -> LabelSet {
-        LabelSet::new().with_label_type(LabelType::NetworkName(
-            peer_mgr.get_global_ctx().get_network_name(),
-        ))
-    }
-
-    // TODO(l2fix): remove this allowance after test integration.
-    #[allow(dead_code)]
-    struct TestCostCalculator {
-        costs: HashMap<(PeerId, PeerId), i32>,
-    }
-
-    impl RouteCostCalculatorInterface for TestCostCalculator {
-        fn calculate_cost(&self, src: PeerId, dst: PeerId) -> i32 {
-            *self.costs.get(&(src, dst)).unwrap_or(&1)
-        }
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn route_with_ipv4(peer_id: u32, ipv4_addr: Option<std::net::Ipv4Addr>) -> ForwardingPeerInfo {
-        ForwardingPeerInfo {
-            peer_id,
-            has_ipv4: ipv4_addr.is_some(),
-            ..Default::default()
-        }
-    }
-
     fn ethernet_route(
         peer_id: PeerId,
         ethernet_input: bool,
@@ -8617,26 +7567,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn forwarding_snapshot_with_routes(
-        routes: Vec<ForwardingPeerInfo>,
-    ) -> Arc<ForwardingDecisionSnapshot> {
-        ForwardingDecisionSnapshot::from_parts(
-            1,
-            Arc::new(ForwardingPeerTable::new(routes)),
-            Arc::new(HashSet::new()),
-            None,
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            Arc::new(PrefixMap::new()),
-            Arc::new(PrefixMap::new()),
-        )
-    }
-
     #[test]
     fn ethernet_peer_selection_requires_capability_and_deduplicates() {
         let routes = ForwardingPeerTable::new(vec![
@@ -8648,26 +7578,5 @@ mod tests {
         ]);
 
         assert_eq!(PeerManager::select_ethernet_peers(&routes, 3), vec![1, 4]);
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    async fn connect_peer_manager_with<C: TunnelConnector + Debug + 'static, L: TunnelListener>(
-        client_mgr: Arc<PeerManager>,
-        server_mgr: &Arc<PeerManager>,
-        mut client: C,
-        server: &mut L,
-    ) {
-        server.listen().await.unwrap();
-
-        tokio::spawn(async move {
-            client.set_bind_addrs(vec![]);
-            client_mgr.try_direct_connect(client).await.unwrap();
-        });
-
-        server_mgr
-            .add_tunnel_as_server(server.accept().await.unwrap(), false)
-            .await
-            .unwrap();
     }
 }

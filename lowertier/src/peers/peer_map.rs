@@ -110,9 +110,6 @@ pub(crate) enum OriginAuthSource {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum OriginAuthCapability {
-    // TODO(l2fix): remove this allowance after origin-auth integration.
-    #[allow(dead_code)]
-    GenericRelayOrigin,
     FullEthernetBridge,
 }
 
@@ -395,22 +392,6 @@ impl PeerMap {
             })
     }
 
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn publish_dataplane_descriptor(
-        &self,
-        forwarding_snapshot: Option<ForwardingDecisionSnapshotHandle>,
-        origin_auth_snapshot: Arc<OriginAuthSnapshot>,
-    ) {
-        let descriptor = self.load_dataplane_descriptor();
-        let source_token = descriptor.source_token;
-        self.publish_dataplane_descriptor_with_source(
-            forwarding_snapshot,
-            origin_auth_snapshot,
-            source_token,
-        );
-    }
-
     fn publish_dataplane_descriptor_with_source(
         &self,
         forwarding_snapshot: Option<ForwardingDecisionSnapshotHandle>,
@@ -603,32 +584,6 @@ impl PeerMap {
             )));
         }
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    pub(crate) fn start_origin_auth_listener(self: &Arc<Self>) {
-        let mut events = self.global_ctx.subscribe();
-        let weak_peer_map = Arc::downgrade(self);
-        tokio::spawn(async move {
-            loop {
-                let event = match events.recv().await {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                };
-                let peer_id = match event {
-                    GlobalCtxEvent::PeerConnAdded(info) | GlobalCtxEvent::PeerConnRemoved(info) => {
-                        info.peer_id
-                    }
-                    _ => continue,
-                };
-                let Some(peer_map) = weak_peer_map.upgrade() else {
-                    break;
-                };
-                peer_map.publish_direct_origin_auth_evidence(peer_id);
-            }
-        });
     }
 
     fn publish_origin_auth_source(
@@ -1322,56 +1277,7 @@ impl PeerMap {
         );
         true
     }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    fn publish_origin_auth_grant(&self, grant: Option<OriginAuthGrant>) -> Option<OriginAuthGrant> {
-        let _publish_guard = self.origin_auth_publish_lock.lock();
-        if !self.auth_generation_available() {
-            return None;
-        }
-        let previous = self.origin_auth_snapshot();
-        let Some(grant) = grant else {
-            return None;
-        };
-        let grant_key = (grant.peer_id, grant.capability);
-        let current = self.origin_auth_grants.get(&grant_key).map(|entry| *entry);
-        if current.is_some_and(|entry| entry.same_attestation(&grant)) {
-            let mut updated = current.expect("the current grant was checked");
-            if updated.expires_at == grant.expires_at {
-                return Some(updated);
-            }
-            updated.expires_at = grant.expires_at;
-            self.origin_auth_grants.insert(grant_key, updated);
-            let entries = previous.entries.clone();
-            let mut grants = previous.grants.clone();
-            grants.insert(grant_key, updated);
-            self.publish_auth_snapshot(Arc::new(OriginAuthSnapshot {
-                auth_generation: previous.auth_generation,
-                entries,
-                grants,
-            }));
-            return Some(updated);
-        }
-        let mut grant = grant;
-        let Some(generation) = self.next_auth_generation() else {
-            return None;
-        };
-        grant.revision = generation;
-        self.origin_auth_grants.insert(grant_key, grant);
-        let entries = previous.entries.clone();
-        let mut grants = previous.grants.clone();
-        grants.insert(grant_key, grant);
-        self.publish_auth_snapshot(Arc::new(OriginAuthSnapshot {
-            auth_generation: generation,
-            entries,
-            grants,
-        }));
-        Some(grant)
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
+    #[cfg(test)]
     fn revoke_origin_auth_grant(
         &self,
         peer_id: PeerId,
@@ -1429,32 +1335,7 @@ impl PeerMap {
             None,
         );
     }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    pub(crate) fn publish_bridge_route_evidence(&self, evidence: BridgeRoutePeerEvidence) -> bool {
-        if !evidence.validate_for(evidence.peer_id, QuantaInstant::now()) {
-            return false;
-        }
-        let Some(noise_static_pubkey) = <[u8; 32]>::try_from(evidence.noise_static_pubkey).ok()
-        else {
-            return false;
-        };
-        self.publish_origin_auth_grant(Some(OriginAuthGrant {
-            peer_id: evidence.peer_id,
-            capability: OriginAuthCapability::FullEthernetBridge,
-            noise_static_pubkey,
-            source: OriginAuthSource::RouteAttestation,
-            source_token: None,
-            source_generation: evidence.generation,
-            revision: 0,
-            expires_at: evidence.deadline,
-        }))
-        .is_some()
-    }
-
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
+    #[cfg(test)]
     pub(crate) fn revoke_bridge_route_evidence(
         &self,
         peer_id: PeerId,
@@ -1471,41 +1352,6 @@ impl PeerMap {
         self.load_dataplane_descriptor()
             .origin_auth_snapshot
             .clone()
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    // TODO(l2fix): remove this allowance after integration.
-    pub(crate) fn install_test_origin_auth_evidence(
-        &self,
-        peer_id: PeerId,
-        noise_static_pubkey: [u8; 32],
-        source_generation: u64,
-    ) {
-        let epoch = source_generation.max(1);
-        self.peer_instance_epochs.insert(peer_id, epoch);
-        self.publish_origin_auth_source(
-            peer_id,
-            OriginAuthSource::Direct,
-            Some((
-                PeerIdentityType::Admin,
-                noise_static_pubkey,
-                SecureAuthLevel::PeerVerified,
-            )),
-            Some(epoch),
-            source_generation,
-            None,
-        );
-        self.publish_origin_auth_grant(Some(OriginAuthGrant {
-            peer_id,
-            capability: OriginAuthCapability::FullEthernetBridge,
-            noise_static_pubkey,
-            source: OriginAuthSource::RouteAttestation,
-            source_token: None,
-            source_generation,
-            revision: 0,
-            expires_at: None,
-        }));
     }
 
     fn maintain_alive_client_urls(&self, peer_conn: &PeerConn) -> Option<()> {

@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn learns_unicast_source_and_resolves_destination() {
+    fn learns_unicast_sources_and_rejects_invalid_sources() {
         let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
         let now = Instant::now();
         let source = [0x02, 0, 0, 0, 0, 1];
@@ -798,6 +798,16 @@ mod tests {
             Ok(EthernetDestination::Known(7))
         );
         assert_eq!(fabric.len(), 1);
+        {
+            let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
+            let now = Instant::now();
+
+            for source in [[0; 6], [0xff; 6], [0x01, 0, 0, 0, 0, 1]] {
+                fabric.learn_source_at(&frame([0xff; 6], source), 7, now);
+            }
+
+            assert_eq!(fabric.len(), 0);
+        }
     }
 
     #[test]
@@ -858,18 +868,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_unicast_source_addresses() {
-        let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
-        let now = Instant::now();
-
-        for source in [[0; 6], [0xff; 6], [0x01, 0, 0, 0, 0, 1]] {
-            fabric.learn_source_at(&frame([0xff; 6], source), 7, now);
-        }
-
-        assert_eq!(fabric.len(), 0);
-    }
-
-    #[test]
     fn floods_unknown_broadcast_and_multicast_destinations() {
         let fabric = L2Fabric::new(16, Duration::from_secs(300), 1024);
         let now = Instant::now();
@@ -903,25 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_entry_is_removed_during_lookup() {
-        let fabric = L2Fabric::new(16, Duration::from_secs(10), 1024);
-        let now = Instant::now();
-        let source = [0x02, 0, 0, 0, 0, 1];
-
-        fabric.learn_source_at(&frame([0xff; 6], source), 7, now);
-
-        assert_eq!(
-            fabric.destination_at(
-                &frame(source, [0x02, 0, 0, 0, 0, 2]),
-                now + Duration::from_secs(11)
-            ),
-            Ok(EthernetDestination::Flood)
-        );
-        assert_eq!(fabric.len(), 0);
-    }
-
-    #[test]
-    fn capacity_rejects_a_new_mac_without_replacing_fresh_entry() {
+    fn capacity_and_expiry_release_forwarding_entries() {
         let fabric = L2Fabric::new(1, Duration::from_secs(300), 1024);
         let now = Instant::now();
         let first = [0x02, 0, 0, 0, 0, 1];
@@ -947,6 +927,22 @@ mod tests {
             fabric.destination_at(&frame(second, first), later),
             Ok(EthernetDestination::Known(8))
         );
+        {
+            let fabric = L2Fabric::new(16, Duration::from_secs(10), 1024);
+            let now = Instant::now();
+            let source = [0x02, 0, 0, 0, 0, 1];
+
+            fabric.learn_source_at(&frame([0xff; 6], source), 7, now);
+
+            assert_eq!(
+                fabric.destination_at(
+                    &frame(source, [0x02, 0, 0, 0, 0, 2]),
+                    now + Duration::from_secs(11)
+                ),
+                Ok(EthernetDestination::Flood)
+            );
+            assert_eq!(fabric.len(), 0);
+        }
     }
 
     #[test]
@@ -986,10 +982,44 @@ mod tests {
         let mac_c = [2, 0, 0, 0, 0, 3];
         assert!(fabric.admit_source_at(&frame([0xff; 6], mac_c), 7, now + Duration::from_secs(33)));
         assert_eq!(fabric.len(), 1);
+        {
+            let mut flags = crate::common::config::gen_default_flags();
+            flags.l2_max_macs_per_peer = 8;
+            flags.l2_fdb_capacity = 8;
+            let fabric = L2Fabric::from_flags(&flags);
+            std::thread::scope(|scope| {
+                for n in 1..=32 {
+                    let fabric = &fabric;
+                    scope.spawn(move || {
+                        fabric.learn_source(&frame([0xff; 6], [2, 0, 0, 0, 0, n]), 7)
+                    });
+                }
+            });
+            assert_eq!(fabric.len(), 8);
+            assert_eq!(
+                fabric
+                    .per_peer_counts
+                    .get(&7)
+                    .unwrap()
+                    .load(std::sync::atomic::Ordering::Acquire),
+                8
+            );
+            fabric.forget_peer(7);
+            assert_eq!(
+                fabric
+                    .per_peer_counts
+                    .get(&7)
+                    .unwrap()
+                    .load(std::sync::atomic::Ordering::Acquire),
+                0
+            );
+            fabric.learn_source(&frame([0xff; 6], [2, 0, 0, 0, 0, 33]), 8);
+            assert_eq!(fabric.len(), 1);
+        }
     }
 
     #[test]
-    fn flood_budget_refills_without_a_second_boundary_burst() {
+    fn flood_budgets_refill_and_isolate_ingress_peers() {
         let fabric = L2Fabric::new(16, Duration::from_secs(300), 100);
         let now = Instant::now();
         assert!(fabric.allow_flood_at(100, now + Duration::from_millis(999)));
@@ -998,75 +1028,38 @@ mod tests {
         assert!(fabric.allow_flood_at(50, now + Duration::from_millis(1499)));
         assert!(!fabric.allow_flood_at(1, now + Duration::from_millis(1498)));
         assert!(fabric.allow_flood_at(100, now + Duration::from_millis(2499)));
-    }
+        {
+            let fabric = L2Fabric::new(16, Duration::from_secs(300), 0);
 
-    #[test]
-    fn zero_flood_budget_is_unlimited() {
-        let fabric = L2Fabric::new(16, Duration::from_secs(300), 0);
+            assert!(fabric.allow_flood_at(usize::MAX, Instant::now()));
+            assert!(fabric.allow_flood_at(usize::MAX, Instant::now()));
+        }
 
-        assert!(fabric.allow_flood_at(usize::MAX, Instant::now()));
-        assert!(fabric.allow_flood_at(usize::MAX, Instant::now()));
-    }
-
-    #[test]
-    fn ingress_buckets_isolate_peers_and_count_local_reflection() {
-        let mut flags = crate::common::config::gen_default_flags();
-        flags.l2_flood_bytes_per_second = 100;
-        let fabric = L2Fabric::from_flags(&flags);
-        let now = Instant::now();
-        let frame_a = frame([0xff; 6], [2, 0, 0, 0, 0, 1]);
-        assert!(fabric.admit_ingress_at(&frame_a, 7, 1, now));
-        assert!(!fabric.admit_ingress_at(&frame_a, 7, 1, now));
-        assert!(fabric.admit_ingress_at(&frame([0xff; 6], [2, 0, 0, 0, 0, 2]), 8, 1, now));
-        let local_frame = frame([0xff; 6], [2, 0, 0, 0, 0, 3]);
-        fabric.learn_source_at(&local_frame, 1, now);
-        assert!(!fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(4)));
-        assert!(fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(6)));
-        assert_eq!(fabric.counters().ingress_flood_drops, 1);
-        assert_eq!(fabric.counters().loop_drops, 1);
-        let mut batch = super::L2IngressBatch::default();
-        let moving = frame([0xff; 6], [2, 0, 0, 0, 0, 4]);
-        assert!(fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
-        fabric.forget_peer(9);
-        assert!(fabric.admit_source_at(&moving, 1, now));
-        assert!(!fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
-        assert_eq!(fabric.counters().loop_drops, 2);
-        assert!(!fabric.allow_flood_output_bytes(101, 1));
-        assert_eq!(fabric.snapshot().counters.flood_drops, 1);
-    }
-
-    #[test]
-    fn concurrent_learning_keeps_peer_limits_and_releases_reservations() {
-        let mut flags = crate::common::config::gen_default_flags();
-        flags.l2_max_macs_per_peer = 8;
-        flags.l2_fdb_capacity = 8;
-        let fabric = L2Fabric::from_flags(&flags);
-        std::thread::scope(|scope| {
-            for n in 1..=32 {
-                let fabric = &fabric;
-                scope.spawn(move || fabric.learn_source(&frame([0xff; 6], [2, 0, 0, 0, 0, n]), 7));
-            }
-        });
-        assert_eq!(fabric.len(), 8);
-        assert_eq!(
-            fabric
-                .per_peer_counts
-                .get(&7)
-                .unwrap()
-                .load(std::sync::atomic::Ordering::Acquire),
-            8
-        );
-        fabric.forget_peer(7);
-        assert_eq!(
-            fabric
-                .per_peer_counts
-                .get(&7)
-                .unwrap()
-                .load(std::sync::atomic::Ordering::Acquire),
-            0
-        );
-        fabric.learn_source(&frame([0xff; 6], [2, 0, 0, 0, 0, 33]), 8);
-        assert_eq!(fabric.len(), 1);
+        {
+            let mut flags = crate::common::config::gen_default_flags();
+            flags.l2_flood_bytes_per_second = 100;
+            let fabric = L2Fabric::from_flags(&flags);
+            let now = Instant::now();
+            let frame_a = frame([0xff; 6], [2, 0, 0, 0, 0, 1]);
+            assert!(fabric.admit_ingress_at(&frame_a, 7, 1, now));
+            assert!(!fabric.admit_ingress_at(&frame_a, 7, 1, now));
+            assert!(fabric.admit_ingress_at(&frame([0xff; 6], [2, 0, 0, 0, 0, 2]), 8, 1, now));
+            let local_frame = frame([0xff; 6], [2, 0, 0, 0, 0, 3]);
+            fabric.learn_source_at(&local_frame, 1, now);
+            assert!(!fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(4)));
+            assert!(fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(6)));
+            assert_eq!(fabric.counters().ingress_flood_drops, 1);
+            assert_eq!(fabric.counters().loop_drops, 1);
+            let mut batch = super::L2IngressBatch::default();
+            let moving = frame([0xff; 6], [2, 0, 0, 0, 0, 4]);
+            assert!(fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
+            fabric.forget_peer(9);
+            assert!(fabric.admit_source_at(&moving, 1, now));
+            assert!(!fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
+            assert_eq!(fabric.counters().loop_drops, 2);
+            assert!(!fabric.allow_flood_output_bytes(101, 1));
+            assert_eq!(fabric.snapshot().counters.flood_drops, 1);
+        }
     }
 
     #[test]

@@ -2209,40 +2209,38 @@ mod tests {
     }
 
     #[test]
-    fn bridge_mtu_preserves_lan_payload_and_vlan_tags() {
-        use crate::common::config::InterfaceAdapter;
-        let mut flags = crate::common::config::gen_default_flags();
-        assert_eq!(
-            super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
-            1360
-        );
-        flags.enable_bridge = true;
-        for encrypted in [false, true] {
-            flags.enable_encryption = encrypted;
-            assert_eq!(
-                super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
-                1516
-            );
-        }
-        flags.mtu = 9000;
-        flags.enable_encryption = true;
-        assert_eq!(
-            super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
-            9000
-        );
-        assert_eq!(
-            super::effective_nic_mtu(&flags, InterfaceAdapter::Tun).unwrap(),
-            8980
-        );
-    }
-
-    #[test]
-    fn automatic_adapter_uses_native_ethernet_when_the_platform_supports_it() {
+    fn automatic_adapter_and_bridge_mtu_preserve_lan_frames() {
         let adapter = VirtualNic::interface_adapter();
         let native_ethernet = cfg!(any(target_os = "linux", target_os = "freebsd"));
 
         assert_eq!(adapter.uses_native_ethernet(), native_ethernet);
         assert_eq!(VirtualNic::needs_tap_edge_adapter(adapter), native_ethernet);
+        {
+            use crate::common::config::InterfaceAdapter;
+            let mut flags = crate::common::config::gen_default_flags();
+            assert_eq!(
+                super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+                1360
+            );
+            flags.enable_bridge = true;
+            for encrypted in [false, true] {
+                flags.enable_encryption = encrypted;
+                assert_eq!(
+                    super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+                    1516
+                );
+            }
+            flags.mtu = 9000;
+            flags.enable_encryption = true;
+            assert_eq!(
+                super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+                9000
+            );
+            assert_eq!(
+                super::effective_nic_mtu(&flags, InterfaceAdapter::Tun).unwrap(),
+                8980
+            );
+        }
     }
 
     #[test]
