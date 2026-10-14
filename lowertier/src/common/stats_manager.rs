@@ -107,15 +107,6 @@ pub enum MetricName {
     /// UDP broadcast relay packets that failed to forward
     UdpBroadcastRelayPacketsForwardFailed,
 
-    /// Compression bytes before compression
-    CompressionBytesRxBefore,
-    /// Compression bytes after compression
-    CompressionBytesRxAfter,
-    /// Compression bytes before compression
-    CompressionBytesTxBefore,
-    /// Compression bytes after compression
-    CompressionBytesTxAfter,
-
     /// Speed probe bytes sent
     SpeedProbeBytesTx,
     /// Speed probe packets sent
@@ -236,11 +227,6 @@ impl fmt::Display for MetricName {
             MetricName::UdpBroadcastRelayPacketsForwardFailed => {
                 write!(f, "udp_broadcast_relay_packets_forward_failed")
             }
-
-            MetricName::CompressionBytesRxBefore => write!(f, "compression_bytes_rx_before"),
-            MetricName::CompressionBytesRxAfter => write!(f, "compression_bytes_rx_after"),
-            MetricName::CompressionBytesTxBefore => write!(f, "compression_bytes_tx_before"),
-            MetricName::CompressionBytesTxAfter => write!(f, "compression_bytes_tx_after"),
 
             MetricName::SpeedProbeBytesTx => write!(f, "speed_probe_bytes_tx"),
             MetricName::SpeedProbePacketsTx => write!(f, "speed_probe_packets_tx"),

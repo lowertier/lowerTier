@@ -352,8 +352,6 @@ impl Clone for RouteAlgoInst {
 struct SelfTxCounters {
     self_tx_packets: CounterHandle,
     self_tx_bytes: CounterHandle,
-    compress_tx_bytes_before: CounterHandle,
-    compress_tx_bytes_after: CounterHandle,
     compact_l3_packets: CounterHandle,
     compact_l3_bytes: CounterHandle,
     full_ethernet_packets: CounterHandle,
@@ -743,8 +741,7 @@ fn packet_batch_contains_peer_rpc(batch: &PacketBatch) -> bool {
 
 struct PreparedPacketBatch {
     batch: PacketBatch,
-    bytes_before: u64,
-    bytes_after: u64,
+    byte_count: u64,
     contains_ethernet: bool,
     first_packet_type: u8,
     first_is_hybrid_ip_ethernet: bool,
@@ -752,14 +749,14 @@ struct PreparedPacketBatch {
 }
 
 fn prepare_packet_batch(mut batch: PacketBatch) -> Result<PreparedPacketBatch, Error> {
-    let mut bytes_before = 0_u64;
+    let mut byte_count = 0_u64;
     let mut contains_ethernet = false;
     let mut first_packet_type = 0;
     let mut first_is_hybrid_ip_ethernet = false;
     let mut first_is_data = None;
     let mut uniform_direct_priority = true;
     for packet in batch.iter_mut() {
-        bytes_before = bytes_before.saturating_add(packet.buf_len() as u64);
+        byte_count = byte_count.saturating_add(packet.buf_len() as u64);
         stamp_critical_l2_control(packet);
         stamp_packet_flow(packet);
         let header = packet
@@ -777,8 +774,7 @@ fn prepare_packet_batch(mut batch: PacketBatch) -> Result<PreparedPacketBatch, E
 
     Ok(PreparedPacketBatch {
         batch,
-        bytes_before,
-        bytes_after: bytes_before,
+        byte_count,
         contains_ethernet,
         first_packet_type,
         first_is_hybrid_ip_ethernet,
@@ -1228,8 +1224,6 @@ pub(crate) struct DirectNicIngress {
     nic: Arc<DirectNicBatchWriter>,
     self_rx_bytes: CounterHandle,
     self_rx_packets: CounterHandle,
-    compress_rx_bytes_before: CounterHandle,
-    compress_rx_bytes_after: CounterHandle,
 }
 
 impl DirectNicIngress {
@@ -1359,8 +1353,6 @@ impl DirectNicIngress {
         };
         self.self_rx_bytes.add(delivery.byte_count);
         self.self_rx_packets.add(delivery.packet_count);
-        self.compress_rx_bytes_before.add(delivery.byte_count);
-        self.compress_rx_bytes_after.add(delivery.byte_count);
         if !self.traffic_metrics.try_record_rx_batch(
             from_peer_id,
             packet_type,
@@ -1964,14 +1956,6 @@ impl PeerManager {
             ),
             self_tx_bytes: stats_manager.get_counter(
                 MetricName::TrafficBytesSelfTx,
-                LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
-            ),
-            compress_tx_bytes_before: stats_manager.get_counter(
-                MetricName::CompressionBytesTxBefore,
-                LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
-            ),
-            compress_tx_bytes_after: stats_manager.get_counter(
-                MetricName::CompressionBytesTxAfter,
                 LabelSet::new().with_label_type(LabelType::NetworkName(network_name.clone())),
             ),
             compact_l3_packets: stats_manager.get_counter(
@@ -2841,12 +2825,6 @@ impl PeerManager {
             label_set.clone(),
         );
 
-        let compress_tx_bytes_before = self.self_tx_counters.compress_tx_bytes_before.clone();
-        let compress_tx_bytes_after = self.self_tx_counters.compress_tx_bytes_after.clone();
-        let compress_rx_bytes_before =
-            stats_mgr.get_counter(MetricName::CompressionBytesRxBefore, label_set.clone());
-        let compress_rx_bytes_after =
-            stats_mgr.get_counter(MetricName::CompressionBytesRxAfter, label_set.clone());
         let traffic_metrics = self.traffic_metrics.clone();
 
         self.tasks.lock().await.spawn(async move {
@@ -2889,8 +2867,6 @@ impl PeerManager {
                     let packets = batch.len() as u64;
                     self_rx_bytes.add(bytes);
                     self_rx_packets.add(packets);
-                    compress_rx_bytes_before.add(bytes);
-                    compress_rx_bytes_after.add(bytes);
                     traffic_metrics
                         .record_rx_batch(from_peer_id, packet_type, bytes, packets)
                         .await;
@@ -2905,8 +2881,6 @@ impl PeerManager {
                     let mut local_batch = PacketBatch::new();
                     let mut local_rx_bytes = 0_u64;
                     let mut local_rx_packets = 0_u64;
-                    let mut compression_rx_before = 0_u64;
-                    let mut compression_rx_after = 0_u64;
                     let mut rx_metric_batches: SmallVec<[(PeerId, u8, u64, u64); 4]> =
                         SmallVec::new();
                     for (batch_index, mut ret) in batch.into_iter().enumerate() {
@@ -3090,8 +3064,6 @@ impl PeerManager {
                             header.forward_counter += 1;
 
                             if from_peer_id == my_peer_id {
-                                compress_tx_bytes_before.add(buf_len as u64);
-
                                 if packet_type == PacketType::Data as u8
                                     || packet_type == PacketType::Ethernet as u8
                                     || packet_type == PacketType::OverlayStream as u8
@@ -3099,7 +3071,6 @@ impl PeerManager {
                                     Self::prepare_packet(&mut ret);
                                 }
 
-                                compress_tx_bytes_after.add(ret.buf_len() as u64);
                                 self_tx_bytes.add(ret.buf_len() as u64);
                                 self_tx_packets.inc();
                             } else {
@@ -3212,7 +3183,6 @@ impl PeerManager {
 
                             local_rx_bytes += buf_len as u64;
                             local_rx_packets += 1;
-                            compression_rx_before += buf_len as u64;
                             if let Some((_, _, bytes, packets)) =
                                 rx_metric_batches.iter_mut().find(|(peer_id, kind, _, _)| {
                                     *peer_id == from_peer_id && *kind == packet_type
@@ -3246,8 +3216,6 @@ impl PeerManager {
                                 }
                             }
 
-                            compression_rx_after += ret.buf_len() as u64;
-
                             local_batch
                                 .try_push(ret)
                                 .expect("the local batch cannot exceed the received batch");
@@ -3256,8 +3224,6 @@ impl PeerManager {
 
                     self_rx_bytes.add(local_rx_bytes);
                     self_rx_packets.add(local_rx_packets);
-                    compress_rx_bytes_before.add(compression_rx_before);
-                    compress_rx_bytes_after.add(compression_rx_after);
                     for (peer_id, packet_type, bytes, packets) in rx_metric_batches {
                         traffic_metrics
                             .record_rx_batch(peer_id, packet_type, bytes, packets)
@@ -3949,15 +3915,7 @@ impl PeerManager {
         self.mark_recent_traffic(dst_peer_id);
         self.check_p2p_only_before_send(dst_peer_id)?;
 
-        self.self_tx_counters
-            .compress_tx_bytes_before
-            .add(msg.buf_len() as u64);
-
         Self::prepare_packet(&mut msg);
-
-        self.self_tx_counters
-            .compress_tx_bytes_after
-            .add(msg.buf_len() as u64);
 
         apply_local_route_policy(
             &mut msg,
@@ -3994,13 +3952,7 @@ impl PeerManager {
     ) -> Result<(), Error> {
         self.mark_recent_traffic(dst_peer_id);
         self.check_p2p_only_before_send(dst_peer_id)?;
-        self.self_tx_counters
-            .compress_tx_bytes_before
-            .add(msg.buf_len() as u64);
         Self::prepare_packet(&mut msg);
-        self.self_tx_counters
-            .compress_tx_bytes_after
-            .add(msg.buf_len() as u64);
         apply_local_route_policy(
             &mut msg,
             self.global_ctx.speed_first(),
@@ -4352,13 +4304,7 @@ impl PeerManager {
                     continue;
                 }
             }
-            self.self_tx_counters
-                .compress_tx_bytes_before
-                .add(prepared.bytes_before);
-            self.self_tx_counters
-                .compress_tx_bytes_after
-                .add(prepared.bytes_after);
-            let prepared_bytes = prepared.bytes_after;
+            let prepared_bytes = prepared.byte_count;
             let first_packet_type = prepared.first_packet_type;
             let first_is_hybrid_ip_ethernet = prepared.first_is_hybrid_ip_ethernet;
             let uniform_direct_priority = prepared.uniform_direct_priority;
@@ -6600,10 +6546,6 @@ impl PeerManager {
                 self_rx_bytes: stats.get_counter(MetricName::TrafficBytesSelfRx, label_set.clone()),
                 self_rx_packets: stats
                     .get_counter(MetricName::TrafficPacketsSelfRx, label_set.clone()),
-                compress_rx_bytes_before: stats
-                    .get_counter(MetricName::CompressionBytesRxBefore, label_set.clone()),
-                compress_rx_bytes_after: stats
-                    .get_counter(MetricName::CompressionBytesRxAfter, label_set),
             }));
         self.direct_nic_writer
             .install(sink, self.global_ctx.clone())
