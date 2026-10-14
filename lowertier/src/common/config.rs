@@ -444,6 +444,8 @@ impl ValueEnum for EncryptionAlgorithm {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TrackerDiscoveryConfig {
     pub trackers: Vec<url::Url>,
+    #[serde(default)]
+    pub private_trackers: Vec<url::Url>,
     pub bind: Option<std::net::SocketAddr>,
     pub advertise: Option<std::net::SocketAddr>,
 }

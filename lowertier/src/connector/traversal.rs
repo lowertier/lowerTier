@@ -51,10 +51,16 @@ pub(super) fn public_candidates(candidates: &[SocketAddr]) -> Vec<SocketAddr> {
     candidates
         .iter()
         .copied()
-        .filter(|address| {
-            let IpAddr::V4(ip) = address.ip() else {
-                return false;
-            };
+        .filter(|address| address.is_ipv4() && public_candidate(*address))
+        .collect()
+}
+
+pub(super) fn public_candidate(address: SocketAddr) -> bool {
+    if address.port() == 0 {
+        return false;
+    }
+    match address.ip() {
+        IpAddr::V4(ip) => {
             let octets = ip.octets();
             !ip.is_private()
                 && !ip.is_loopback()
@@ -64,8 +70,18 @@ pub(super) fn public_candidates(candidates: &[SocketAddr]) -> Vec<SocketAddr> {
                 && octets[0] != 0
                 && octets[0] < 240
                 && !(octets[0] == 100 && (64..128).contains(&octets[1]))
-        })
-        .collect()
+        }
+        IpAddr::V6(ip) => {
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return public_candidate(SocketAddr::new(ip.into(), address.port()));
+            }
+            !ip.is_unspecified()
+                && !ip.is_loopback()
+                && !ip.is_unique_local()
+                && !ip.is_unicast_link_local()
+                && !ip.is_multicast()
+        }
+    }
 }
 
 pub(super) fn expanded_candidates(

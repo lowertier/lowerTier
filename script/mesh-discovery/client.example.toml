@@ -18,6 +18,12 @@ trackers = [
   "http://[::1]:16969/announce",
 ]
 # Omit bind to discover through every permitted interface.
+private_trackers = [
+  "udp://127.0.0.1:16969/announce",
+  "udp://[::1]:16969/announce",
+  "http://127.0.0.1:16969/announce",
+  "http://[::1]:16969/announce",
+]
 # Use explicit endpoints when a fixed local port is required.
 # bind = "127.0.0.1:17001"
 # advertise = "127.0.0.1:17001"

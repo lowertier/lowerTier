@@ -32,6 +32,45 @@ static QUIC_DISCOVERY_HANDSHAKES: tokio::sync::Semaphore = tokio::sync::Semaphor
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAPPING_EVENT_INTERVAL: Duration = Duration::from_secs(5);
 
+// All discovery paths share these limits. Configured seed connectors remain independent.
+static DISCOVERY_BUDGET: std::sync::LazyLock<std::sync::Mutex<DiscoveryBudget>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(DiscoveryBudget {
+            second: std::time::Instant::now(),
+            bytes: 0,
+            attempts: 0,
+        })
+    });
+
+struct DiscoveryBudget {
+    second: std::time::Instant,
+    bytes: usize,
+    attempts: usize,
+}
+
+fn admit_discovery(bytes: usize, attempt: bool) -> bool {
+    let mut budget = DISCOVERY_BUDGET.lock().unwrap();
+    if budget.second.elapsed() >= Duration::from_secs(1) {
+        budget.second = std::time::Instant::now();
+        budget.bytes = 0;
+        budget.attempts = 0;
+    }
+    if budget.bytes + bytes > 64 * 1024 || (attempt && budget.attempts >= 32) {
+        return false;
+    }
+    budget.bytes += bytes;
+    budget.attempts += usize::from(attempt);
+    true
+}
+
+fn valid_mapping(ctx: &ArcGlobalCtx, bound: SocketAddr, mapped: SocketAddr) -> bool {
+    mapped.is_ipv4() == bound.is_ipv4()
+        && mapped.port() != 0
+        && !mapped.ip().is_unspecified()
+        && !mapped.ip().is_multicast()
+        && ensure_remote_allowed(&ctx.get_underlay_policy(), mapped).is_ok()
+}
+
 #[derive(Clone, Copy)]
 struct Candidate {
     address: SocketAddr,
@@ -68,7 +107,7 @@ struct CandidateState {
     active_generation: Option<u64>,
     upgrade: Option<oneshot::Sender<u32>>,
     probe: Option<([u8; 16], Instant)>,
-    responded: Option<Instant>,
+    responded: Option<([u8; 16], Instant)>,
     connection: Option<DiscoveryConnection>,
     hint: Arc<DiscoveryPeerHint>,
 }
@@ -388,6 +427,13 @@ pub(crate) fn start(
             "invalid tracker URL"
         );
     }
+    ensure!(
+        config
+            .private_trackers
+            .iter()
+            .all(|url| config.trackers.contains(url)),
+        "private trackers must also appear in discovery trackers"
+    );
     if let Some(local) = config.bind {
         ensure!(
             local.is_ipv4() || ctx.get_flags().enable_ipv6,
@@ -573,6 +619,7 @@ async fn run_path(
     let hash = wire::rendezvous_id(&key, &protocol);
     // CONNECT requests start while STUN is still in flight.
     for url in config.trackers.clone() {
+        let private = config.private_trackers.contains(&url);
         let connected = connected.clone();
         let (ctx, udp, packets, mapped, candidates) = (
             ctx.clone(),
@@ -593,6 +640,7 @@ async fn run_path(
                 peer_session,
                 connected,
                 bound,
+                private,
             )
             .await
         });
@@ -666,7 +714,8 @@ async fn run_path(
                             .await
                     };
                     let mapped = match mapping {
-                        Ok(mapped) => Some(mapped),
+                        Ok(mapped) if valid_mapping(&ctx, udp.local_addr()?, mapped) => Some(mapped),
+                        Ok(_) => None,
                         Err(error) => {
                             tracing::debug!(%error, "tracker discovery STUN failed; mapping withdrawn");
                             None
@@ -760,6 +809,7 @@ async fn tracker_loop(
     peer: wire::Id,
     mut connected: watch::Receiver<bool>,
     bound: SocketAddr,
+    private: bool,
 ) -> Result<()> {
     let local = udp.local_addr()?;
     let tracker_name = url.host_str().unwrap().to_owned();
@@ -824,11 +874,12 @@ async fn tracker_loop(
                     && peer != address
                     && peer != local
                     && ensure_remote_allowed(&ctx.get_underlay_policy(), peer).is_ok()
+                    && (private || crate::connector::traversal::public_candidate(peer))
                 {
                     let _ = candidates.try_send(Candidate {
                         address: peer,
                         expires: Instant::now()
-                            + Duration::from_secs(u64::from(peers.interval) * 2 + 60),
+                            + Duration::from_secs((u64::from(peers.interval) * 2 + 60).min(3600)),
                     });
                 }
             }
@@ -915,6 +966,7 @@ mod tests {
                         peer.clone(),
                         TrackerDiscoveryConfig {
                             trackers: vec![url.clone()],
+                            private_trackers: vec![url.clone()],
                             bind: Some("127.0.0.1:0".parse().unwrap()),
                             advertise: None,
                         },
@@ -1626,6 +1678,7 @@ mod tests {
                             drop(reserve);
                             let config = TrackerDiscoveryConfig {
                                 trackers: vec![blackhole_url.clone(), tracker_url.clone()],
+                                private_trackers: vec![tracker_url.clone()],
                                 bind: Some(address),
                                 advertise: address.is_ipv4().then_some(address),
                             };
@@ -1717,7 +1770,7 @@ async fn candidate_loop(
                 entries.retain(|_, state| state.expires.is_some() || state.connection.is_some()
                     || state.active_generation.is_some() || state.probe.is_some()
                     || state.attempted.is_some_and(|time| time.elapsed() < Duration::from_secs(30))
-                    || state.responded.is_some_and(|time| time.elapsed() < Duration::from_secs(1))
+                    || state.responded.is_some_and(|(_, time)| time.elapsed() < Duration::from_secs(60))
                     || Arc::strong_count(&state.hint) > 1);
                 if attempts.len() < 8 && punch_tasks.len() < 16 {
                     candidate = entries.iter()
@@ -1742,12 +1795,15 @@ async fn candidate_loop(
                     if reply {
                         if !state.probe.is_some_and(|(sent, time)| sent == nonce && time.elapsed() < Duration::from_secs(15)) { continue; }
                     } else {
-                        if state.responded.is_some_and(|time| time.elapsed() < Duration::from_secs(1)) { continue; }
-                        state.responded = Some(Instant::now());
+                        if state.responded.is_some_and(|(old, time)| time.elapsed() < Duration::from_secs(1)
+                            || (old == nonce && time.elapsed() < Duration::from_secs(60))) { continue; }
+                        state.responded = Some((nonce, Instant::now()));
                     }
                 }
                 if !reply {
-                    let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), true), packet.addr).await;
+                    if admit_discovery(wire::PUNCH_BYTES, false) {
+                        let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), true), packet.addr).await;
+                    }
                 }
                 // Retain the authenticated identity for session recovery on every interface.
                 connections.hint(packet.addr).observe(peer);
@@ -1796,6 +1852,9 @@ async fn candidate_loop(
                     let start = Instant::now();
                     for millis in [0, 50, 150, 350, 750] {
                         tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+                        if !admit_discovery(wire::PUNCH_BYTES, false) {
+                            continue;
+                        }
                         let _ = udp
                             .send_to(
                                 &wire::punch(&key, my_id, nonce, unix_seconds(), false),
@@ -1834,6 +1893,10 @@ async fn candidate_loop(
                 continue;
             }
             if attempts.len() >= 8 {
+                continue;
+            }
+            if !admit_discovery(0, true) {
+                state.retry_at = Instant::now() + Duration::from_secs(1);
                 continue;
             }
             let upgrade = if endpoint.is_some() && expected.is_none() {

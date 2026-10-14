@@ -33,6 +33,7 @@ struct Store {
     rate_second: u64,
     rates: HashMap<IpAddr, u32>,
     requests: u32,
+    response_bytes: usize,
 }
 
 pub struct TrackerServer {
@@ -69,14 +70,15 @@ impl TrackerServer {
                 rate_second: 0,
                 rates: HashMap::new(),
                 requests: 0,
+                response_bytes: 0,
             }),
         }))
     }
 
-    fn cookie(&self, source: IpAddr, bucket: u64) -> u64 {
+    fn cookie(&self, source: SocketAddr, bucket: u64) -> u64 {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret).unwrap();
         mac.update(b"lowertier-tracker-cookie-v1");
-        match source {
+        match source.ip() {
             IpAddr::V4(ip) => {
                 mac.update(&[4]);
                 mac.update(&ip.octets());
@@ -86,15 +88,24 @@ impl TrackerServer {
                 mac.update(&ip.octets());
             }
         }
+        mac.update(&source.port().to_be_bytes());
         mac.update(&bucket.to_be_bytes());
         u64::from_be_bytes(mac.finalize().into_bytes()[..8].try_into().unwrap())
     }
 
     fn admit(&self, source: IpAddr, now: u64) -> bool {
+        // A rotating IPv6 interface identifier must not bypass source limits.
+        let source = match source {
+            IpAddr::V6(ip) => {
+                IpAddr::V6(std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 64)))
+            }
+            ip => ip,
+        };
         let mut store = self.store.lock().unwrap();
         if store.rate_second != now {
             store.rate_second = now;
             store.requests = 0;
+            store.response_bytes = 0;
             store.rates.clear();
         }
         if store.requests >= 2048 {
@@ -109,6 +120,15 @@ impl TrackerServer {
         }
         *count += 1;
         store.requests += 1;
+        true
+    }
+
+    fn admit_response(&self, bytes: usize) -> bool {
+        let mut store = self.store.lock().unwrap();
+        if store.response_bytes + bytes > 128 * 1024 {
+            return false;
+        }
+        store.response_bytes += bytes;
         true
     }
 
@@ -216,13 +236,12 @@ impl TrackerServer {
         if action == 0 && connection == wire::CONNECT_MAGIC {
             let mut reply = 0u32.to_be_bytes().to_vec();
             reply.extend_from_slice(transaction);
-            reply.extend_from_slice(&self.cookie(source.ip(), now / 60).to_be_bytes());
-            return Some(reply);
+            reply.extend_from_slice(&self.cookie(source, now / 60).to_be_bytes());
+            return self.admit_response(reply.len()).then_some(reply);
         }
         if action != 1
             || packet.len() < 98
-            || !(0..=2)
-                .any(|age| self.cookie(source.ip(), (now / 60).saturating_sub(age)) == connection)
+            || !(0..=2).any(|age| self.cookie(source, (now / 60).saturating_sub(age)) == connection)
         {
             return None;
         }
@@ -243,7 +262,7 @@ impl TrackerServer {
         for peer in peers {
             append_compact(&mut reply, peer);
         }
-        Some(reply)
+        self.admit_response(reply.len()).then_some(reply)
     }
 
     pub async fn serve_udp(self: Arc<Self>, socket: UdpSocket) -> Result<()> {

@@ -4,6 +4,9 @@
 It accepts standard BEP 15 UDP requests and compact HTTP announcements.
 HTTP can run behind an HTTPS reverse proxy.
 Public tracker clients remain compatible.
+Client configurations identify private services with `discovery.private_trackers`, using URLs also present in `discovery.trackers`.
+Public tracker candidates exclude loopback, private, link-local, and shared IPv4 addresses by default.
+Private tracker candidates and authenticated peer candidates retain the configured underlay policy.
 The service does not implement torrent storage, scraping, indexing, or VPN relaying.
 
 ## Explicit ports
@@ -83,6 +86,9 @@ A healthy connection to a different peer does not suppress repair of a lost peer
 Expired candidate observations stop producing retries.
 The existing process and peer connection limits still apply.
 Discovery candidates do not allocate unlimited VPN connections.
+All discovery paths share limits of 32 connection attempts and 64 KiB of punch payload per second.
+These limits cover bootstrap probes and candidate attempts, including fresh-port fallback.
+QUIC packet traffic retains the existing transport admission and memory limits.
 
 QUIC retains its authenticated peer probes and mapped UDP socket.
 H2 and WSS bind TCP listeners before collecting mappings.
