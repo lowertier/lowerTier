@@ -466,3 +466,134 @@ The existing tests now also check non-bridge filter behavior, shared allocation 
 No new test marker was added.
 WAN, WSS, four-stream, full bridge performance, and a broad Caddy matrix remain unmeasured for this candidate.
 The benchmark containers and network have stopped. No resident LowTier node was changed.
+
+## WSS repeated
+
+This campaign compares baseline `10e33193` with snapshot `f3c62ece`.
+Each cell has three interleaved repetitions, in baseline/candidate order.
+Explicit `/ws` listener and peer URLs prevent the earlier connector mismatch.
+The clean Colima profile uses the topology, build profile, authentication, and MTUs described above.
+Each trial excludes ten warmup seconds and measures twenty seconds.
+The matrix has 24 transfers: both directions, one/four streams, two binaries, and three repetitions.
+
+Throughput and CPU cells give median [minimum–maximum]. CPU sums both LowTier daemons.
+
+| Direction | Streams | Baseline Gbit/s | Candidate Gbit/s | Delta | Baseline CPU s/Gbit | Candidate CPU s/Gbit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| forward | 1 | 7.931 [7.473–7.948] | 7.640 [7.498–7.762] | -3.7% | 0.281 [0.278–0.300] | 0.292 [0.287–0.292] |
+| forward | 4 | 8.132 [7.868–8.347] | 7.935 [7.838–8.085] | -2.4% | 0.282 [0.272–0.293] | 0.288 [0.282–0.295] |
+| reverse | 1 | 7.406 [7.179–7.533] | 7.400 [7.392–7.460] | -0.1% | 0.303 [0.297–0.313] | 0.301 [0.299–0.301] |
+| reverse | 4 | 7.750 [7.507–7.920] | 7.653 [7.443–7.681] | -1.2% | 0.302 [0.295–0.308] | 0.302 [0.301–0.312] |
+
+RSS covers endpoint A / B in MiB. Loaded RTT gives median [range] for p50 / p95 in milliseconds.
+Retransmission lists retain all three repetitions. Outer counts include warmup and both endpoint sockets.
+
+| Direction | Streams | Binary | RSS A / B | Loaded RTT p50 / p95 | Inner retransmissions | Outer retransmissions |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| forward | 1 | baseline | 21.2–24.7 / 22.5–22.8 | 1.240 [1.055–1.310] / 2.485 [2.417–2.903] | 1565, 2347, 1937 | 965, 539, 876 |
+| forward | 1 | main | 22.2–25.6 / 22.8–22.9 | 1.210 [1.130–1.300] / 2.840 [2.554–2.882] | 556, 1887, 872 | 711, 695, 919 |
+| forward | 4 | baseline | 25.7–28.9 / 24.9–25.9 | 2.470 [2.420–2.640] / 4.552 [4.446–5.022] | 103400, 271513, 171177 | 1112, 1197, 1484 |
+| forward | 4 | main | 24.0–30.5 / 24.7–25.6 | 2.520 [2.470–2.990] / 4.986 [4.778–5.546] | 200382, 136350, 201615 | 2011, 1086, 1719 |
+| reverse | 1 | baseline | 26.4–26.8 / 24.7–28.2 | 1.210 [0.994–1.280] / 2.451 [2.388–2.587] | 914, 749, 1468 | 595, 954, 571 |
+| reverse | 1 | main | 26.0–29.0 / 24.9–28.5 | 1.180 [1.065–1.330] / 2.480 [2.446–2.554] | 2204, 2634, 2650 | 735, 522, 742 |
+| reverse | 4 | baseline | 26.4–26.8 / 25.4–31.9 | 2.400 [2.210–2.680] / 4.865 [4.822–5.428] | 182483, 203645, 203340 | 956, 642, 491 |
+| reverse | 4 | main | 26.0–29.1 / 25.9–33.6 | 2.720 [2.600–2.955] / 5.264 [5.061–5.694] | 204257, 148933, 141545 | 668, 656, 1180 |
+
+Ping delivery was 3594/3594 across the observation windows.
+The existing measured-window CPU, RTT, byte-accounting, and RSS limits apply.
+Host release compilation ran during this campaign. This background load limits comparisons near the measurement spread.
+These measurements do not establish the full default-on performance gate.
+
+Colima baseline SHA256: `c8c708fb47cce00d9ca5cb9e8405ed96d22d9f6d3722bee21c48bb5aad2092e0`.
+Colima candidate SHA256: `bf19b3b658bca9caf3d0b9f25fb938cb960cd1c6875d7b2d016a634e2a5e3f6b`.
+
+## Real internet A/B
+
+The Mac Studio and s6916 used isolated temporary instances over the public address `193.32.149.82`.
+Management used SSH through the established Tailscale address. Benchmark peer traffic did not use the Tailscale overlay.
+The Mac used native TUN. Linux used native TAP with compact IP. Actual interface MTUs were 1280.
+The Mac has 16 logical CPUs. s6916 has two logical CPUs and runs Debian 11 with Linux 5.10.0-35-cloud-amd64.
+Both release builds used Rust 1.95.0, no default features, and feature `tun`.
+The Mac target was aarch64-apple-darwin. The Linux target was x86_64-unknown-linux-musl, built with cargo-zigbuild.
+Iperf versions were 3.21 locally and 3.9 remotely.
+Each trial requested one inner TCP stream for 12 sender seconds, without excluded warmup.
+Each protocol ran two interleaved baseline/candidate repetitions in upload and download directions.
+Upload means Mac to s6916. Download means s6916 to Mac.
+The temporary network used separate secrets, work directories, overlay addresses, listener port 19924, and RPC port 19923.
+Private admission, secure mode, ChaCha20-Poly1305, and TLS exporter authentication remained enabled.
+
+| Transport | Direction | Baseline Mbit/s | Candidate Mbit/s | Delta | Baseline Mac / Linux CPU s/Gbit | Candidate Mac / Linux CPU s/Gbit |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| QUIC | upload | 447.4 [443.1–451.8] | 438.6 [437.1–440.1] | -2.0% | 0.720 [0.714–0.726] / 3.133 [3.113–3.154] | 0.832 [0.778–0.885] / 3.158 [3.141–3.175] |
+| QUIC | download | 416.0 [406.8–425.3] | 419.5 [409.4–429.6] | +0.8% | 1.231 [1.220–1.242] / 2.647 [2.588–2.707] | 1.224 [1.217–1.230] / 2.542 [2.366–2.717] |
+| H2 | upload | 393.8 [336.1–451.6] | 449.7 [448.9–450.5] | +14.2% | 0.773 [0.331–1.214] / 2.869 [2.792–2.945] | 0.336 [0.324–0.348] / 2.791 [2.773–2.809] |
+| H2 | download | 415.7 [385.2–446.2] | 445.6 [443.4–447.9] | +7.2% | 1.330 [1.133–1.527] / 1.331 [1.291–1.370] | 1.218 [1.190–1.247] / 1.376 [1.358–1.393] |
+| WSS | upload | 340.2 [249.7–430.7] | 452.4 [451.7–453.2] | +33.0% | 0.569 [0.376–0.761] / 2.904 [2.900–2.908] | 0.568 [0.370–0.766] / 2.893 [2.846–2.940] |
+| WSS | download | 433.6 [416.4–450.7] | 432.7 [417.7–447.6] | -0.2% | 0.982 [0.909–1.054] / 1.331 [1.248–1.414] | 0.950 [0.875–1.025] / 1.410 [1.294–1.525] |
+
+RSS gives observed Mac / Linux ranges in MiB. Loaded RTT gives median [range] for each trial p50.
+Each trial sent 12 ping probes at 0.5-second intervals during the transfer.
+
+| Transport | Direction | Binary | RSS Mac / Linux | Loaded RTT p50, ms | Loaded RTT p95, ms | Inner TCP retransmissions |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| QUIC | upload | baseline | 25.0–28.7 / 19.8–30.3 | 14.53 [14.31–14.76] | 24.55 [23.98–25.13] | 1649, 798 |
+| QUIC | upload | main | 25.4–31.8 / 19.5–30.4 | 18.76 [16.16–21.35] | 31.75 [31.16–32.34] | 1099, 942 |
+| QUIC | download | baseline | 28.6–29.1 / 30.0–31.4 | 12.24 [12.01–12.47] | 14.56 [13.28–15.83] | 28989, 102 |
+| QUIC | download | main | 29.8–32.5 / 29.8–31.9 | 13.00 [12.62–13.37] | 18.19 [15.38–21.01] | 4070, 18573 |
+| H2 | upload | baseline | 24.3–30.1 / 17.8–35.7 | 35.15 [31.38–38.92] | 42.38 [35.95–48.80] | 146, 83 |
+| H2 | upload | main | 24.6–31.3 / 18.0–37.4 | 29.63 [28.95–30.30] | 35.81 [33.71–37.90] | 156, 113 |
+| H2 | download | baseline | 29.2–31.0 / 30.7–38.6 | 28.97 [26.23–31.70] | 44.48 [37.95–51.02] | 3, 11 |
+| H2 | download | main | 31.4–32.4 / 32.8–44.2 | 27.71 [26.15–29.26] | 48.69 [34.78–62.60] | 0, 0 |
+| WSS | upload | baseline | 24.2–30.5 / 17.8–51.4 | 58.56 [47.42–69.70] | 76.80 [75.12–78.47] | 37, 2 |
+| WSS | upload | main | 24.5–30.5 / 16.7–58.5 | 69.04 [67.53–70.56] | 75.05 [74.78–75.32] | 78, 0 |
+| WSS | download | baseline | 28.9–31.3 / 40.4–51.6 | 27.21 [24.91–29.51] | 54.07 [51.85–56.30] | 0, 0 |
+| WSS | download | main | 29.9–31.8 / 46.6–58.7 | 25.84 [22.27–29.40] | 57.93 [41.78–74.09] | 0, 0 |
+
+All 288 of 288 ping probes returned.
+All transfers had positive receiver delivery, the requested sender duration, and stable authenticated connection IDs.
+Baseline WSS upload repetition two sent for 12.140 seconds but recorded 22.219 receiver seconds.
+Its final server interval spans 10.217 seconds and contains 12.157 MB. The raw record does not establish the delay cause.
+That result remains in the table at 249.7 Mbit/s. The WSS upload delta therefore includes unequal receiver observation durations.
+The result cannot establish a matched 12-second WSS upload speed improvement. No slow trial was discarded or replaced.
+CPU includes daemon user and system time. Nominal sampling was 250 ms on both hosts.
+CPU cost divides sampled CPU seconds by receiver-delivered Gbit. The observation windows include transfer setup and teardown.
+CPU excludes iperf, monitoring, and kernel networking work outside daemon accounting.
+RSS includes shared pages and excludes kernel socket memory. Observed ranges do not establish peak memory.
+Inner TCP retransmissions do not measure outer QUIC loss or outer H2/WSS TCP retransmissions.
+Remote socket and network snapshots remain in the raw records. Outer loss was not measured symmetrically.
+Receiver/sender byte ratios remain end-of-transfer accounting ratios, not packet-loss measurements.
+Two short repetitions cannot separate transport effects from changing internet conditions and host load.
+Four-stream QUIC trials did not run. Caddy routing and unauthorized-probe tests were outside this measurement brief.
+
+The temporary processes, binaries, configurations, and baseline worktree were removed.
+Resident process IDs and binary hashes remained unchanged. Resident authenticated peers and ping delivery passed after cleanup.
+No resident configuration, keys, ACLs, routes, or binary was replaced.
+
+The first host build failed because Rust 1.95.0 was incomplete. Toolchain recovery restored the requested version.
+The first cross build passed an incompatible Zig target. Removing the explicit compiler setting restored cargo-zigbuild.
+The `s6916` SSH alias failed host-key verification. The established verified Tailscale IP identity succeeded.
+
+The first candidate startup check assumed the old CLI JSON shape. The updated parser reads the main CLI data envelope.
+The two completed baseline QUIC trials were retained. Cleanup and resident identity checks passed before the campaign resumed.
+A root-owned output directory prevented one failure-log move. Ownership recovery preserved the traceback and campaign log.
+The failed local startup log was overwritten. The audit retains the corresponding remote log and CLI response.
+
+That ownership change also changed the control-token owner. Candidate startup correctly rejected the token.
+Cleanup removed the token. The resumed campaign retained six completed trials and preserved token ownership.
+
+Artifacts: `benchmark-results/lean-core-real-20261014/`.
+Audit: `benchmark-results/.work/lean-core-20261014-bench2.jsonl`.
+Raw JSON, complete logs, resource samples, path records, invocation records, and build manifests remain available.
+
+Observed average sampling intervals were 317.6–374.3 ms on the Mac and 250.6–251.0 ms on Linux.
+Receiver/sender byte-accounting ratios ranged from 0.970303–1.000142.
+Both daemons used two worker threads and one authenticated transport connection.
+The Mac public route used en0 with underlay MTU 1500. The server public interface used eth0 with MTU 1500.
+The harness retained operating-system TCP congestion defaults for both binaries. Linux used BBR; the Mac algorithm was not recorded.
+
+| Binary | SHA256 |
+| --- | --- |
+| baseline-mac | `19433e6980a8a3c77fbfd4d89c1f3ca05179ec2453e414ecd632baf422fbcafe` |
+| main-mac | `6dd8d74fdf5e47b876e52c24073541226edbf18d623038fbde3ea801abe6109a` |
+| baseline-remote-linux | `4a28137cffcda19cc23c709b521e5435f485bc69c141aa10e2bbf2484c51a963` |
+| main-remote-linux | `ff1ac4ede2d2ee29290be39dbb39e8e6d3e857ff2090356ea71750facd9a2a6c` |
