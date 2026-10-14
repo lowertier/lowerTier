@@ -1,7 +1,4 @@
-use std::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU32, Ordering::Relaxed},
-};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 pub struct WindowLatency {
     latency_us_window: Vec<AtomicU32>,
@@ -61,39 +58,23 @@ impl WindowLatency {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Throughput {
-    tx_bytes: UnsafeCell<u64>,
-    rx_bytes: UnsafeCell<u64>,
-    tx_packets: UnsafeCell<u64>,
-    rx_packets: UnsafeCell<u64>,
-    tx_data_packets: UnsafeCell<u64>,
+    tx_bytes: AtomicU64,
+    rx_bytes: AtomicU64,
+    tx_packets: AtomicU64,
+    rx_packets: AtomicU64,
+    tx_data_packets: AtomicU64,
 }
 
 impl Clone for Throughput {
     fn clone(&self) -> Self {
         Self {
-            tx_bytes: UnsafeCell::new(unsafe { *self.tx_bytes.get() }),
-            rx_bytes: UnsafeCell::new(unsafe { *self.rx_bytes.get() }),
-            tx_packets: UnsafeCell::new(unsafe { *self.tx_packets.get() }),
-            rx_packets: UnsafeCell::new(unsafe { *self.rx_packets.get() }),
-            tx_data_packets: UnsafeCell::new(unsafe { *self.tx_data_packets.get() }),
-        }
-    }
-}
-
-// add sync::Send and sync::Sync traits to Throughput
-unsafe impl Send for Throughput {}
-unsafe impl Sync for Throughput {}
-
-impl Default for Throughput {
-    fn default() -> Self {
-        Self {
-            tx_bytes: UnsafeCell::new(0),
-            rx_bytes: UnsafeCell::new(0),
-            tx_packets: UnsafeCell::new(0),
-            rx_packets: UnsafeCell::new(0),
-            tx_data_packets: UnsafeCell::new(0),
+            tx_bytes: AtomicU64::new(self.tx_bytes()),
+            rx_bytes: AtomicU64::new(self.rx_bytes()),
+            tx_packets: AtomicU64::new(self.tx_packets()),
+            rx_packets: AtomicU64::new(self.rx_packets()),
+            tx_data_packets: AtomicU64::new(self.tx_data_packets()),
         }
     }
 }
@@ -104,23 +85,23 @@ impl Throughput {
     }
 
     pub fn tx_bytes(&self) -> u64 {
-        unsafe { *self.tx_bytes.get() }
+        self.tx_bytes.load(Relaxed)
     }
 
     pub fn rx_bytes(&self) -> u64 {
-        unsafe { *self.rx_bytes.get() }
+        self.rx_bytes.load(Relaxed)
     }
 
     pub fn tx_packets(&self) -> u64 {
-        unsafe { *self.tx_packets.get() }
+        self.tx_packets.load(Relaxed)
     }
 
     pub fn rx_packets(&self) -> u64 {
-        unsafe { *self.rx_packets.get() }
+        self.rx_packets.load(Relaxed)
     }
 
     pub fn tx_data_packets(&self) -> u64 {
-        unsafe { *self.tx_data_packets.get() }
+        self.tx_data_packets.load(Relaxed)
     }
 
     pub fn record_tx_bytes(&self, bytes: u64) {
@@ -128,16 +109,12 @@ impl Throughput {
     }
 
     pub fn record_tx_batch(&self, bytes: u64, packets: u64) {
-        unsafe {
-            *self.tx_bytes.get() += bytes;
-            *self.tx_packets.get() += packets;
-        }
+        self.tx_bytes.fetch_add(bytes, Relaxed);
+        self.tx_packets.fetch_add(packets, Relaxed);
     }
 
     pub fn record_tx_data_packets(&self, packets: u64) {
-        unsafe {
-            *self.tx_data_packets.get() += packets;
-        }
+        self.tx_data_packets.fetch_add(packets, Relaxed);
     }
 
     pub fn record_rx_bytes(&self, bytes: u64) {
@@ -145,9 +122,7 @@ impl Throughput {
     }
 
     pub fn record_rx_batch(&self, bytes: u64, packets: u64) {
-        unsafe {
-            *self.rx_bytes.get() += bytes;
-            *self.rx_packets.get() += packets;
-        }
+        self.rx_bytes.fetch_add(bytes, Relaxed);
+        self.rx_packets.fetch_add(packets, Relaxed);
     }
 }
