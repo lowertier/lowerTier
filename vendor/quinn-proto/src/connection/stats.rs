@@ -134,6 +134,8 @@ impl std::fmt::Debug for FrameStats {
 #[derive(Debug, Default, Copy, Clone)]
 #[non_exhaustive]
 pub struct PathStats {
+    /// Remote path changes and local socket changes rejected on this connection.
+    pub migration_rejections: u64,
     /// Current best estimate of this connection's latency (round-trip-time)
     pub rtt: Duration,
     /// Current congestion window of the connection

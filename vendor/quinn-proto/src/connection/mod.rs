@@ -151,6 +151,8 @@ pub struct Connection {
     allow_mtud: bool,
     prev_path: Option<(ConnectionId, PathData)>,
     path_policy: Option<Arc<dyn PathPolicy>>,
+    local_path_validation: bool,
+    received_on_current_socket: bool,
     state: State,
     side: ConnectionSide,
     /// Whether or not 0-RTT was enabled during the handshake. Does not imply acceptance.
@@ -291,6 +293,8 @@ impl Connection {
             local_ip,
             prev_path: None,
             path_policy: None,
+            local_path_validation: false,
+            received_on_current_socket: true,
             state,
             side: connection_side,
             zero_rtt_enabled: false,
@@ -880,7 +884,7 @@ impl Connection {
                         size: buf.len(),
                         ecn: None,
                         segment_size: None,
-                        src_ip: self.local_ip,
+                        src_ip: self.source_ip_for(remote),
                     });
                 }
             }
@@ -1017,7 +1021,7 @@ impl Connection {
                 1 => None,
                 _ => Some(segment_size),
             },
-            src_ip: self.local_ip,
+            src_ip: self.source_ip_for(self.path.remote),
         })
     }
 
@@ -1075,7 +1079,7 @@ impl Connection {
             size: buf.len(),
             ecn: None,
             segment_size: None,
-            src_ip: self.local_ip,
+            src_ip: self.source_ip_for(destination),
         })
     }
 
@@ -1102,6 +1106,14 @@ impl Connection {
     /// (including application `Event`s, `EndpointEvent`s and outgoing datagrams) that should be
     /// extracted through the relevant methods.
     pub fn handle_event(&mut self, event: ConnectionEvent) {
+        self.handle_event_on_local_path(event, true);
+    }
+
+    /// Process an event with the receive socket identified by the async endpoint.
+    ///
+    /// A local validation response must arrive on the replacement socket.
+    pub fn handle_event_on_local_path(&mut self, event: ConnectionEvent, current_socket: bool) {
+        self.received_on_current_socket = current_socket;
         use ConnectionEventInner::*;
         match event.0 {
             Datagram(DatagramConnectionEvent {
@@ -1112,6 +1124,7 @@ impl Connection {
                 remaining,
             }) => {
                 if remote != self.path.remote && !self.remote_path_allowed(remote) {
+                    self.record_migration_rejection();
                     trace!("discarding packet from unrecognized peer {}", remote);
                     return;
                 }
@@ -1120,18 +1133,24 @@ impl Connection {
 
                 self.stats.udp_rx.datagrams += 1;
                 self.stats.udp_rx.bytes += first_decode.len() as u64;
-                let data_len = first_decode.len();
+                let data_len = first_decode.len() + remaining.as_ref().map_or(0, BytesMut::len);
 
                 self.handle_decode(now, remote, ecn, first_decode);
-                // The current `path` might have changed inside `handle_decode`,
-                // since the packet could have triggered a migration. Make sure
-                // the data received is accounted for the most recent path by accessing
-                // `path` after `handle_decode`.
-                self.path.total_recvd = self.path.total_recvd.saturating_add(data_len as u64);
-
                 if let Some(data) = remaining {
                     self.stats.udp_rx.bytes += data.len() as u64;
                     self.handle_coalesced(now, remote, ecn, data);
+                }
+                // Credit only the source path. Old-path traffic cannot fund a new path.
+                let received_path = if remote == self.path.remote {
+                    Some(&mut self.path)
+                } else {
+                    self.prev_path
+                        .as_mut()
+                        .filter(|(_, path)| path.remote == remote)
+                        .map(|(_, path)| path)
+                };
+                if let Some(path) = received_path {
+                    path.total_recvd = path.total_recvd.saturating_add(data_len as u64);
                 }
 
                 self.config.qlog_sink.emit_recovery_metrics(
@@ -1205,11 +1224,10 @@ impl Connection {
                 }
                 Timer::PathValidation => {
                     debug!("path validation failed");
-                    if let Some((_, prev)) = self.prev_path.take() {
-                        self.path = prev;
+                    if self.path_policy.is_some() {
+                        self.record_migration_rejection();
                     }
-                    self.path.challenge = None;
-                    self.path.challenge_pending = false;
+                    self.fail_path_validation();
                 }
                 Timer::Pacing => {
                     trace!("pacing timer expired");
@@ -1611,13 +1629,33 @@ impl Connection {
         if self.is_handshaking() || self.side.is_client() {
             return false;
         }
+        if self.path_policy.is_some()
+            && self.path.challenge.is_some()
+            && self
+                .prev_path
+                .as_ref()
+                .is_none_or(|(_, path)| path.remote != remote)
+        {
+            return false;
+        }
         match &self.path_policy {
             Some(policy) => {
                 (self.side.remote_may_migrate() || remote.ip() == self.path.remote.ip())
                     && policy.allow(self.path.remote, remote)
             }
-            None => self.side.remote_may_migrate(),
+            None => self.side.remote_may_migrate() && !self.config.migration_requires_policy,
         }
+    }
+
+    /// Count a path change rejected by the application before socket rebinding.
+    pub fn record_migration_rejection(&mut self) {
+        self.stats.path.migration_rejections =
+            self.stats.path.migration_rejections.saturating_add(1);
+    }
+
+    fn source_ip_for(&self, remote: SocketAddr) -> Option<IpAddr> {
+        self.local_ip
+            .filter(|ip| ip.to_canonical().is_ipv4() == remote.ip().to_canonical().is_ipv4())
     }
 
     /// The local IP address which was used when the peer established
@@ -2274,6 +2312,7 @@ impl Connection {
 
         self.process_decrypted_packet(now, remote, Some(packet_number), packet.into())?;
         if let Some(data) = remaining {
+            self.path.total_recvd = self.path.total_recvd.saturating_add(data.len() as u64);
             self.handle_coalesced(now, remote, ecn, data);
         }
 
@@ -2465,7 +2504,6 @@ impl Connection {
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) {
-        self.path.total_recvd = self.path.total_recvd.saturating_add(data.len() as u64);
         let mut remaining = Some(data);
         while let Some(data) = remaining {
             match PartialDecode::new(
@@ -2983,6 +3021,45 @@ impl Connection {
         let payload = packet.payload.freeze();
         let mut is_probing_packet = true;
         let mut path_denied = false;
+        if remote != self.path.remote && self.path_policy.is_some() {
+            // Admit the path before queuing responses. A validated path cannot fund an unknown path.
+            let mut probing = true;
+            for frame in frame::Iter::new(payload.clone())? {
+                if !matches!(
+                    frame?,
+                    Frame::Padding
+                        | Frame::PathChallenge(_)
+                        | Frame::PathResponse(_)
+                        | Frame::NewConnectionId(_)
+                ) {
+                    probing = false;
+                    break;
+                }
+            }
+            if !probing
+                && self.path.challenge.is_none()
+                && number == self.spaces[SpaceId::Data].rx_packet
+                && self
+                    .path_policy
+                    .as_ref()
+                    .unwrap()
+                    .begin_validation(self.path.remote, remote)
+            {
+                self.migrate(now, remote);
+                self.update_rem_cid();
+                self.spin = false;
+            } else {
+                // Keep processing acknowledged frames, but suppress unadmitted path responses.
+                path_denied = true;
+                if self
+                    .prev_path
+                    .as_ref()
+                    .is_none_or(|(_, path)| path.remote != remote)
+                {
+                    self.record_migration_rejection();
+                }
+            }
+        }
         let mut close = None;
         let payload_len = payload.len();
         let mut ack_eliciting = false;
@@ -3051,6 +3128,15 @@ impl Connection {
                     close = Some(reason);
                 }
                 Frame::PathChallenge(token) => {
+                    if self.path_policy.is_some()
+                        && remote != self.path.remote
+                        && self
+                            .prev_path
+                            .as_ref()
+                            .is_none_or(|(_, path)| path.remote != remote)
+                    {
+                        continue;
+                    }
                     self.path_responses.push(number, token, remote);
                     if remote == self.path.remote {
                         // PATH_CHALLENGE on active path, possible off-path packet forwarding
@@ -3062,7 +3148,10 @@ impl Connection {
                     }
                 }
                 Frame::PathResponse(token) => {
-                    if self.path.challenge == Some(token) && remote == self.path.remote {
+                    if self.path.challenge == Some(token)
+                        && remote == self.path.remote
+                        && (!self.local_path_validation || self.received_on_current_socket)
+                    {
                         // A policy can change while validation is in progress.
                         if self.path_policy.as_ref().is_some_and(|policy| {
                             let previous = self
@@ -3072,11 +3161,8 @@ impl Connection {
                             !policy.allow(previous, remote)
                         }) {
                             self.timers.stop(Timer::PathValidation);
-                            if let Some((_, previous)) = self.prev_path.take() {
-                                self.path = previous;
-                            }
-                            self.path.challenge = None;
-                            self.path.challenge_pending = false;
+                            self.record_migration_rejection();
+                            self.fail_path_validation();
                             // The packet is already acknowledged. Process its remaining frames.
                             path_denied = true;
                             continue;
@@ -3084,6 +3170,7 @@ impl Connection {
                         trace!("new path validated");
                         self.timers.stop(Timer::PathValidation);
                         self.path.challenge = None;
+                        self.path.challenge_pending = false;
                         self.path.validated = true;
                         if let Some((_, ref mut prev_path)) = self.prev_path {
                             prev_path.challenge = None;
@@ -3091,6 +3178,12 @@ impl Connection {
                         }
                         if let Some(policy) = &self.path_policy {
                             policy.validated(remote);
+                        }
+                        if mem::take(&mut self.local_path_validation) {
+                            self.events.push_back(Event::LocalPathValidationFinished {
+                                token,
+                                validated: true,
+                            });
                         }
                     } else {
                         debug!(token, "ignoring invalid PATH_RESPONSE");
@@ -3370,9 +3463,63 @@ impl Connection {
     }
 
     /// Handle a change in the local address, i.e. an active migration
-    pub fn local_address_changed(&mut self) {
+    pub fn local_address_changed(&mut self, now: Instant) -> bool {
+        if self.config.migration_requires_policy
+            && (self.is_handshaking()
+                || self.side.is_server()
+                || self
+                    .path_policy
+                    .as_ref()
+                    .is_none_or(|policy| !policy.begin_local_validation(self.path.remote)))
+        {
+            self.record_migration_rejection();
+            if self.path.challenge.is_none() {
+                if let Some(policy) = &self.path_policy {
+                    policy.validation_failed(self.path.remote);
+                }
+            }
+            return false;
+        }
+        if self.path_policy.is_some() {
+            if self.path.challenge.is_some() {
+                self.record_migration_rejection();
+                return false;
+            }
+            self.path.challenge = Some(self.rng.random());
+            self.path.challenge_pending = true;
+            self.local_path_validation = true;
+            self.path_changed(now);
+            self.timers
+                .set(Timer::PathValidation, now + 3 * self.pto(SpaceId::Data));
+        }
         self.update_rem_cid();
         self.ping();
+        true
+    }
+
+    /// Identify the local path validation started by the last socket change.
+    pub fn local_path_validation_token(&self) -> Option<u64> {
+        self.local_path_validation
+            .then_some(self.path.challenge)
+            .flatten()
+    }
+
+    fn fail_path_validation(&mut self) {
+        if let Some(policy) = &self.path_policy {
+            policy.validation_failed(self.path.remote);
+        }
+        if mem::take(&mut self.local_path_validation) {
+            if let Some(token) = self.path.challenge {
+                self.events.push_back(Event::LocalPathValidationFinished {
+                    token,
+                    validated: false,
+                });
+            }
+        } else if let Some((_, previous)) = self.prev_path.take() {
+            self.path = previous;
+        }
+        self.path.challenge = None;
+        self.path.challenge_pending = false;
     }
 
     /// Switch to a previously unused remote connection ID, if possible
@@ -3920,6 +4067,43 @@ impl Connection {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_path_frame(
+        &mut self,
+        now: Instant,
+        ty: frame::FrameType,
+        token: u64,
+    ) -> BytesMut {
+        assert!(matches!(
+            ty,
+            frame::FrameType::PATH_CHALLENGE | frame::FrameType::PATH_RESPONSE
+        ));
+        let mut buffer = Vec::with_capacity(128);
+        let builder = PacketBuilder::new(
+            now,
+            SpaceId::Data,
+            self.rem_cids.active(),
+            &mut buffer,
+            128,
+            0,
+            false,
+            self,
+        )
+        .unwrap();
+        buffer.write(ty);
+        buffer.write(token);
+        builder.finish_and_track(
+            now,
+            self,
+            Some(SentFrames {
+                non_retransmits: true,
+                ..SentFrames::default()
+            }),
+            &mut buffer,
+        );
+        Bytes::from(buffer).into()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_local_cid_seq(&self) -> (u64, u64) {
         self.local_cid_state.active_seq()
     }
@@ -4266,8 +4450,21 @@ pub trait PathPolicy: Send + Sync {
     /// Decide whether an address can start path validation.
     fn allow(&self, current: SocketAddr, candidate: SocketAddr) -> bool;
 
+    /// Admit one validation after packet authentication and before selecting the new path.
+    fn begin_validation(&self, current: SocketAddr, candidate: SocketAddr) -> bool {
+        self.allow(current, candidate)
+    }
+
+    /// Check application admission for a local socket change.
+    fn begin_local_validation(&self, remote: SocketAddr) -> bool {
+        self.allow(remote, remote)
+    }
+
     /// Report an address after a matching PATH_RESPONSE validates the path.
     fn validated(&self, remote: SocketAddr);
+
+    /// Release application validation state after a timeout or policy revocation.
+    fn validation_failed(&self, _remote: SocketAddr) {}
 }
 
 /// Events of interest to the application
@@ -4290,6 +4487,13 @@ pub enum Event {
     DatagramReceived,
     /// One or more application datagrams have been sent after blocking
     DatagramsUnblocked,
+    /// A local socket change completed path validation or requires socket rollback.
+    LocalPathValidationFinished {
+        /// The challenge identifies the socket change.
+        token: u64,
+        /// Whether the peer validated the new local path.
+        validated: bool,
+    },
 }
 
 fn get_max_ack_delay(params: &TransportParameters) -> Duration {

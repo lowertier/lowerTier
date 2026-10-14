@@ -1322,6 +1322,28 @@ fn rebinding_policy_revocation_preserves_coalesced_stream_data() {
     pair.client
         .addr
         .set_port(CLIENT_PORTS.lock().unwrap().next().unwrap());
+    let now = pair.time;
+    let probe =
+        pair.client_conn_mut(client)
+            .test_path_frame(now, frame::FrameType::PATH_CHALLENGE, 7);
+    assert!(probe.len() < 1200);
+    let before_response = pair.server_conn_mut(server).stats().frame_tx.path_response;
+    let before_received = pair.server_conn_mut(server).total_recvd();
+    pair.server.inbound.push_back((now, None, probe));
+    pair.drive_server();
+    assert_eq!(pair.server_conn_mut(server).remote_address(), old_remote);
+    assert_eq!(pair.server_conn_mut(server).total_recvd(), before_received);
+    assert_eq!(
+        pair.server_conn_mut(server).stats().frame_tx.path_response,
+        before_response
+    );
+    assert!(
+        pair.server_conn_mut(server)
+            .stats()
+            .path
+            .migration_rejections
+            > 0
+    );
     pair.client_conn_mut(client).ping();
     pair.drive_client();
     pair.drive_server();
@@ -1330,6 +1352,18 @@ fn rebinding_policy_revocation_preserves_coalesced_stream_data() {
         pair.client.addr
     );
     assert!(!policy.notified.load(Ordering::Acquire));
+
+    // A packet on the previous source cannot increase the candidate path's receive credit.
+    let new_remote = pair.client.addr;
+    pair.client.addr = old_remote;
+    let probe =
+        pair.client_conn_mut(client)
+            .test_path_frame(now, frame::FrameType::PATH_CHALLENGE, 9);
+    let before_received = pair.server_conn_mut(server).total_recvd();
+    pair.server.inbound.push_back((now, None, probe));
+    pair.drive_server();
+    assert_eq!(pair.server_conn_mut(server).total_recvd(), before_received);
+    pair.client.addr = new_remote;
 
     // Quinn puts PATH_RESPONSE before STREAM in the same packet.
     policy.allowed.store(false, Ordering::Release);
@@ -1349,6 +1383,38 @@ fn rebinding_policy_revocation_preserves_coalesced_stream_data() {
         payload
     );
     chunks.finalize();
+
+    // A protected response on the old socket cannot validate a local socket change.
+    policy.allowed.store(true, Ordering::Release);
+    pair.client_conn_mut(client).set_path_policy(policy.clone());
+    assert!(pair.client_conn_mut(client).local_address_changed(now));
+    let token = pair
+        .client_conn_mut(client)
+        .local_path_validation_token()
+        .unwrap();
+    for current_socket in [false, true] {
+        let response = pair.server_conn_mut(server).test_path_frame(
+            now,
+            frame::FrameType::PATH_RESPONSE,
+            token,
+        );
+        let Some(DatagramEvent::ConnectionEvent(handle, event)) =
+            pair.client
+                .handle(now, pair.server.addr, None, None, response, &mut Vec::new())
+        else {
+            panic!("protected response must reach the connection");
+        };
+        assert_eq!(handle, client);
+        pair.client_conn_mut(client)
+            .handle_event_on_local_path(event, current_socket);
+        assert_eq!(
+            pair.client_conn_mut(client)
+                .local_path_validation_token()
+                .is_none(),
+            current_socket
+        );
+        assert_eq!(policy.notified.load(Ordering::Acquire), current_socket);
+    }
 }
 
 fn test_flow_control(config: TransportConfig, window_size: usize) {

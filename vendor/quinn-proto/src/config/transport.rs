@@ -35,6 +35,7 @@ pub enum DatagramReceiveDropPolicy {
 /// performance at lower bandwidths and latencies. The default configuration is tuned for a 100Mbps
 /// link with a 100ms round trip time.
 pub struct TransportConfig {
+    pub(crate) migration_requires_policy: bool,
     pub(crate) max_concurrent_bidi_streams: VarInt,
     pub(crate) max_concurrent_uni_streams: VarInt,
     pub(crate) max_idle_timeout: Option<VarInt>,
@@ -71,6 +72,14 @@ pub struct TransportConfig {
 }
 
 impl TransportConfig {
+    /// Require an application path policy for remote migration and local socket rebinding.
+    ///
+    /// Disabled by default. A connection without a policy keeps its existing path when enabled.
+    pub fn migration_requires_policy(&mut self, value: bool) -> &mut Self {
+        self.migration_requires_policy = value;
+        self
+    }
+
     /// Maximum number of incoming bidirectional streams that may be open concurrently
     ///
     /// Must be nonzero for the peer to open any bidirectional streams.
@@ -389,6 +398,7 @@ impl Default for TransportConfig {
 
         Self {
             max_concurrent_bidi_streams: 100u32.into(),
+            migration_requires_policy: false,
             max_concurrent_uni_streams: 100u32.into(),
             // 30 second default recommended by RFC 9308 § 3.2
             max_idle_timeout: Some(VarInt(30_000)),
@@ -429,6 +439,7 @@ impl Default for TransportConfig {
 impl fmt::Debug for TransportConfig {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
+            migration_requires_policy,
             max_concurrent_bidi_streams,
             max_concurrent_uni_streams,
             max_idle_timeout,
@@ -464,6 +475,7 @@ impl fmt::Debug for TransportConfig {
             .field("max_concurrent_uni_streams", max_concurrent_uni_streams)
             .field("max_idle_timeout", max_idle_timeout)
             .field("stream_receive_window", stream_receive_window)
+            .field("migration_requires_policy", migration_requires_policy)
             .field("receive_window", receive_window)
             .field("send_window", send_window)
             .field("send_fairness", send_fairness)

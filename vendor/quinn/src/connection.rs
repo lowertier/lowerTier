@@ -655,6 +655,15 @@ impl Connection {
             .set_path_policy(policy);
     }
 
+    /// Count a path change rejected before the endpoint socket is changed.
+    pub fn record_migration_rejection(&self) {
+        self.0
+            .state
+            .lock("record_migration_rejection")
+            .inner
+            .record_migration_rejection();
+    }
+
     /// The local IP address which was used when the peer established
     /// the connection
     ///
@@ -1158,6 +1167,7 @@ impl ConnectionRef {
                 error: None,
                 io_poller: socket.clone().create_io_poller(),
                 socket,
+                previous_socket: None,
                 runtime,
                 send_buffer: Vec::new(),
                 buffered_transmit: None,
@@ -1241,6 +1251,7 @@ pub(crate) struct State {
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     socket: Arc<dyn AsyncUdpSocket>,
+    previous_socket: Option<(u64, Arc<dyn AsyncUdpSocket>)>,
     io_poller: Pin<Box<dyn UdpPoller>>,
     runtime: Arc<dyn Runtime>,
     send_buffer: Vec<u8>,
@@ -1381,16 +1392,24 @@ impl State {
         for _ in 0..MAX_CONNECTION_EVENT_BATCHES_PER_POLL {
             match self.conn_events.poll_recv(cx) {
                 Poll::Ready(Some(ConnectionEvent::Rebind(socket))) => {
-                    self.socket = socket;
-                    self.io_poller = self.socket.clone().create_io_poller();
-                    self.inner.local_address_changed();
+                    self.forward_app_events(shared);
+                    if self.inner.local_address_changed(self.runtime.now()) {
+                        let previous = std::mem::replace(&mut self.socket, socket);
+                        self.previous_socket = self
+                            .inner
+                            .local_path_validation_token()
+                            .map(|token| (token, previous));
+                        self.io_poller = self.socket.clone().create_io_poller();
+                    }
                 }
                 Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
                     self.inner.handle_event(event);
                 }
-                Poll::Ready(Some(ConnectionEvent::ProtoBatch(events))) => {
+                Poll::Ready(Some(ConnectionEvent::ProtoBatch { events, socket_id })) => {
+                    let current_socket =
+                        Arc::as_ptr(&self.socket) as *const () as usize == socket_id;
                     for event in events {
-                        self.inner.handle_event(event);
+                        self.inner.handle_event_on_local_path(event, current_socket);
                     }
                 }
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
@@ -1436,6 +1455,21 @@ impl State {
                 }
                 ConnectionLost { reason } => {
                     self.terminate(reason, shared);
+                }
+                LocalPathValidationFinished { token, validated } => {
+                    if self
+                        .previous_socket
+                        .as_ref()
+                        .is_some_and(|(pending, _)| *pending == token)
+                    {
+                        let (_, previous) = self.previous_socket.take().unwrap();
+                        if !validated {
+                            self.socket = previous;
+                            self.io_poller = self.socket.clone().create_io_poller();
+                            self.inner.ping();
+                            self.wake();
+                        }
+                    }
                 }
                 Stream(StreamEvent::Writable { id }) => wake_stream(id, &mut self.blocked_writers),
                 Stream(StreamEvent::Opened { dir: Dir::Uni }) => {

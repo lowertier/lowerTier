@@ -99,7 +99,10 @@ enum ConnectionEvent {
         reason: bytes::Bytes,
     },
     Proto(proto::ConnectionEvent),
-    ProtoBatch(Vec<proto::ConnectionEvent>),
+    ProtoBatch {
+        events: Vec<proto::ConnectionEvent>,
+        socket_id: usize,
+    },
     Rebind(Arc<dyn AsyncUdpSocket>),
 }
 

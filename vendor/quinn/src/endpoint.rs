@@ -9,8 +9,8 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
 };
@@ -18,8 +18,9 @@ use std::{
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
 use crate::runtime::default_runtime;
 use crate::{
+    Instant,
     runtime::{AsyncUdpSocket, Runtime},
-    udp_transmit, Instant,
+    udp_transmit,
 };
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
@@ -30,13 +31,13 @@ use proto::{
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{futures::Notified, mpsc, Notify};
+use tokio::sync::{Notify, futures::Notified, mpsc};
 use tracing::{Instrument, Span};
-use udp::{RecvMeta, BATCH_SIZE};
+use udp::{BATCH_SIZE, RecvMeta};
 
 use crate::{
-    connection::Connecting, incoming::Incoming, ConnectionEvent, EndpointConfig, VarInt,
-    IO_LOOP_BOUND,
+    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, VarInt, connection::Connecting,
+    incoming::Incoming,
 };
 
 /// A QUIC endpoint.
@@ -252,7 +253,11 @@ impl Endpoint {
     pub fn rebind_abstract(&self, socket: Arc<dyn AsyncUdpSocket>) -> io::Result<()> {
         let addr = socket.local_addr()?;
         let mut inner = self.inner.state.lock().unwrap();
-        inner.prev_socket = Some(mem::replace(&mut inner.socket, socket));
+        inner
+            .prev_sockets
+            .retain(|socket| Arc::strong_count(socket) > 1);
+        let previous = mem::replace(&mut inner.socket, socket);
+        inner.prev_sockets.push(previous);
         inner.ipv6 = addr.is_ipv6();
 
         // Update connection socket references
@@ -288,6 +293,11 @@ impl Endpoint {
     /// Get the number of connections that are currently open
     pub fn open_connections(&self) -> usize {
         self.inner.state.lock().unwrap().inner.open_connections()
+    }
+
+    /// Whether this endpoint accepts incoming connections.
+    pub fn has_server_config(&self) -> bool {
+        self.inner.state.lock().unwrap().inner.has_server_config()
     }
 
     /// Close all of this endpoint's connections immediately and cease accepting new connections.
@@ -471,9 +481,8 @@ impl EndpointInner {
 #[derive(Debug)]
 pub(crate) struct State {
     socket: Arc<dyn AsyncUdpSocket>,
-    /// During an active migration, abandoned_socket receives traffic
-    /// until the first packet arrives on the new socket.
-    prev_socket: Option<Arc<dyn AsyncUdpSocket>>,
+    /// Connections retain receive sockets until local validation succeeds or rollback completes.
+    prev_sockets: Vec<Arc<dyn AsyncUdpSocket>>,
     inner: proto::Endpoint,
     recv_state: RecvState,
     driver: Option<Waker>,
@@ -495,23 +504,18 @@ pub(crate) struct Shared {
 impl State {
     fn drive_recv(&mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
         let mut receive_work = 0;
-        if let Some(socket) = &self.prev_socket {
-            // We don't care about the `PollProgress` from old sockets.
-            let poll_res =
-                self.recv_state
-                    .poll_socket(cx, &mut self.inner, &**socket, now, &mut receive_work);
-            if poll_res.is_err() {
-                self.prev_socket = None;
-            }
-        };
+        self.prev_sockets.retain(|socket| {
+            self.recv_state
+                .poll_socket(cx, &mut self.inner, &**socket, now, &mut receive_work)
+                .is_ok()
+        });
         let poll_res =
             self.recv_state
                 .poll_socket(cx, &mut self.inner, &*self.socket, now, &mut receive_work);
         let poll_res = poll_res?;
         if poll_res.received_connection_packet {
-            // Traffic has arrived on self.socket, therefore there is no need for the abandoned
-            // one anymore. TODO: Account for multiple outgoing connections.
-            self.prev_socket = None;
+            self.prev_sockets
+                .retain(|socket| Arc::strong_count(socket) > 1);
         }
         Ok(poll_res.keep_going)
     }
@@ -692,7 +696,7 @@ impl EndpointRef {
             },
             state: Mutex::new(State {
                 socket,
-                prev_socket: None,
+                prev_sockets: Vec::new(),
                 inner,
                 ipv6,
                 events,
@@ -879,7 +883,9 @@ impl RecvState {
                     for (handle, events) in connection_events {
                         // Ignore events for a connection that closed during this receive call.
                         if let Some(sender) = self.connections.senders.get_mut(&handle) {
-                            let _ = sender.send(ConnectionEvent::ProtoBatch(events));
+                            let socket_id =
+                                socket as *const dyn AsyncUdpSocket as *const () as usize;
+                            let _ = sender.send(ConnectionEvent::ProtoBatch { events, socket_id });
                         }
                     }
                     if msgs == slots && slots < BATCH_SIZE {
@@ -949,7 +955,7 @@ struct PollProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_datagram_count, receive_cycle_complete, ReceiveBuffer};
+    use super::{ReceiveBuffer, logical_datagram_count, receive_cycle_complete};
     use crate::IO_LOOP_BOUND;
     use udp::BATCH_SIZE;
 
