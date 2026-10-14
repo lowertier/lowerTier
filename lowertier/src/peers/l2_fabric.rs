@@ -25,19 +25,10 @@ pub enum L2FrameError {
     TooShort,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct FdbEntry {
     peer_id: PeerId,
     last_seen: Instant,
-    owner_count: Option<Arc<AtomicUsize>>,
-}
-
-impl Drop for FdbEntry {
-    fn drop(&mut self) {
-        if let Some(count) = &self.owner_count {
-            count.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -354,6 +345,7 @@ impl L2Fabric {
             if now.saturating_duration_since(entry.last_seen) <= self.age {
                 return true;
             }
+            self.release_peer_entry(entry.peer_id);
             self.entry_count.fetch_sub(1, Ordering::AcqRel);
             false
         });
@@ -448,7 +440,9 @@ impl L2Fabric {
             self.policy_drops.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        let learned = batch.sources.sources.contains(&(vlan, source, peer_id));
+        // Ownership can change during a batch when another task withdraws a peer.
+        let learned =
+            !self.has_policy() && batch.sources.sources.contains(&(vlan, source, peer_id));
         let is_flood =
             batch.destinations.resolve_at(self, frame, now).unwrap() == EthernetDestination::Flood;
         if !learned
@@ -519,6 +513,7 @@ impl L2Fabric {
                 if bridge(entry.peer_id) {
                     return true;
                 }
+                self.release_peer_entry(entry.peer_id);
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
                 false
             });
@@ -538,7 +533,13 @@ impl L2Fabric {
         for key in keys {
             if self
                 .fdb
-                .remove_if(&key, |_, entry| entry.peer_id == peer_id)
+                .remove_if(&key, |_, entry| {
+                    if entry.peer_id != peer_id {
+                        return false;
+                    }
+                    self.release_peer_entry(entry.peer_id);
+                    true
+                })
                 .is_some()
             {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
@@ -555,7 +556,14 @@ impl L2Fabric {
             .map(|entry| *entry.key())
             .collect::<Vec<_>>();
         for key in keys {
-            if self.fdb.remove(&key).is_some() {
+            if self
+                .fdb
+                .remove_if(&key, |_, entry| {
+                    self.release_peer_entry(entry.peer_id);
+                    true
+                })
+                .is_some()
+            {
                 self.entry_count.fetch_sub(1, Ordering::AcqRel);
             }
         }
@@ -607,13 +615,13 @@ impl L2Fabric {
                     if now.saturating_duration_since(previous.last_seen) < self.policy.move_hold {
                         return false;
                     }
-                    let Ok(owner_count) = self.try_reserve_peer(peer_id) else {
+                    let Ok(_reservation) = self.try_reserve_peer(peer_id) else {
                         return false;
                     };
+                    self.release_peer_entry(previous.peer_id);
                     *occupied.get_mut() = FdbEntry {
                         peer_id,
                         last_seen: now,
-                        owner_count,
                     };
                 } else {
                     occupied.get_mut().last_seen = now;
@@ -627,7 +635,6 @@ impl L2Fabric {
                     vacant.insert(FdbEntry {
                         peer_id,
                         last_seen: now,
-                        owner_count,
                     });
                 } else {
                     if let Some(count) = owner_count {
@@ -641,6 +648,17 @@ impl L2Fabric {
             }
         }
         true
+    }
+
+    fn release_peer_entry(&self, peer_id: PeerId) {
+        if self.policy.max_macs_per_peer != 0 {
+            let count = self
+                .per_peer_counts
+                .get(&peer_id)
+                .expect("a limited FDB owner has a counter");
+            let previous = count.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous != 0);
+        }
     }
 
     fn try_reserve_peer(&self, peer_id: PeerId) -> Result<Option<Arc<AtomicUsize>>, ()> {
@@ -694,7 +712,11 @@ impl L2Fabric {
         if self
             .fdb
             .remove_if(&key, |_, entry| {
-                now.saturating_duration_since(entry.last_seen) > self.age
+                if now.saturating_duration_since(entry.last_seen) <= self.age {
+                    return false;
+                }
+                self.release_peer_entry(entry.peer_id);
+                true
             })
             .is_some()
         {
@@ -1002,6 +1024,13 @@ mod tests {
         assert!(fabric.admit_ingress_at(&local_frame, 7, 1, now + Duration::from_secs(6)));
         assert_eq!(fabric.counters().ingress_flood_drops, 1);
         assert_eq!(fabric.counters().loop_drops, 1);
+        let mut batch = super::L2IngressBatch::default();
+        let moving = frame([0xff; 6], [2, 0, 0, 0, 0, 4]);
+        assert!(fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
+        fabric.forget_peer(9);
+        assert!(fabric.admit_source_at(&moving, 1, now));
+        assert!(!fabric.admit_ingress_batch_at(&moving, 9, 1, now, &mut batch));
+        assert_eq!(fabric.counters().loop_drops, 2);
         assert!(!fabric.allow_flood_output_bytes(101, 1));
         assert_eq!(fabric.snapshot().counters.flood_drops, 1);
     }

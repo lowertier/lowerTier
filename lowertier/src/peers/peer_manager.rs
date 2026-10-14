@@ -8110,6 +8110,8 @@ mod tests {
                         );
                     }
                     let mut frame = ethernet_frame(destination, source);
+                    let (source_host, destination_host) =
+                        if source == mac_a { (11, 12) } else { (12, 11) };
                     let ip = if ipv6 {
                         let mut bytes = vec![0; 64];
                         bytes[0] = 0x60;
@@ -8117,16 +8119,18 @@ mod tests {
                         bytes[6] = 17;
                         bytes[7] = 64;
                         bytes[8..24].copy_from_slice(
-                            &"fd42::11".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                            &std::net::Ipv6Addr::new(0xfd42, 0, 0, 0, 0, 0, 0, source_host)
+                                .octets(),
                         );
                         bytes[24..40].copy_from_slice(
-                            &"fd42::12".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+                            &std::net::Ipv6Addr::new(0xfd42, 0, 0, 0, 0, 0, 0, destination_host)
+                                .octets(),
                         );
                         bytes
                     } else {
                         routed_ipv4_packet(
-                            "10.42.0.11".parse().unwrap(),
-                            "10.42.0.12".parse().unwrap(),
+                            std::net::Ipv4Addr::new(10, 42, 0, source_host as u8),
+                            std::net::Ipv4Addr::new(10, 42, 0, destination_host as u8),
                             1,
                         )
                         .payload()
