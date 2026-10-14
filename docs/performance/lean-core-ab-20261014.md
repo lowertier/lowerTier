@@ -155,3 +155,138 @@ The resident authenticated Mac peer returned both verification pings. The real s
 Raw artifacts: `benchmark-results/lean-core-ab-20261014/`.
 Audit: `benchmark-results/.work/lean-core-ab-20261014.jsonl`.
 Reproduction scripts, invocation environments, binary hashes, complete logs, failed trials, and omitted-cell records remain in those artifacts.
+
+## Regression and fix
+
+The source review compares baseline `10e33193` with main `502c81c4`.
+The performance branch includes the new direct-sink drain, WSS connector, and patcher-order fixes.
+The owner replaced bisection and profiling with code review and one confirming campaign.
+
+The first valid campaign tested `66f45369`, before the log filter fix.
+Each cell contains two interleaved repetitions with one stream.
+Repetition one used baseline then candidate. Repetition two reversed that order.
+Both directions used the same clean topology, TLS exporter binding, MTUs, build profile, and timing described above.
+All 16 transfers passed binary hash, duration, one-connection, MTU, and CPU-sample checks.
+
+| Transport | Direction | Baseline Gbit/s [range] | Candidate Gbit/s [range] | Delta | Baseline CPU s/Gbit [range] | Candidate CPU s/Gbit [range] |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| QUIC | forward | 6.641 [6.441–6.840] | 4.767 [4.645–4.889] | -28.2% | 0.320 [0.310–0.331] | 0.434 [0.424–0.445] |
+| QUIC | reverse | 6.665 [6.598–6.731] | 4.775 [4.752–4.799] | -28.3% | 0.321 [0.317–0.324] | 0.437 [0.434–0.441] |
+| H2 | forward | 8.382 [8.327–8.437] | 6.616 [6.529–6.702] | -21.1% | 0.264 [0.264–0.264] | 0.335 [0.331–0.338] |
+| H2 | reverse | 8.455 [8.435–8.475] | 6.607 [6.586–6.628] | -21.9% | 0.263 [0.261–0.264] | 0.335 [0.334–0.336] |
+
+These measurements do not pass the performance gate.
+
+RSS ranges cover endpoint A / B, in MiB. RTT gives median loaded p50 / p95, in milliseconds.
+Retransmission cells show the two individual trials. QUIC outer loss was zero in every sampled window.
+H2 outer retransmission counts include warmup and both endpoint sockets.
+
+| Transport | Direction | Binary | RSS A / B | RTT p50 / p95 | Inner retransmissions | Outer H2 retransmissions |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| QUIC | forward | baseline | 25.2–25.4 / 27.5–28.1 | 0.408 / 0.836 | 0, 0 | not applicable |
+| QUIC | forward | candidate | 22.7–25.5 / 26.8–27.4 | 0.393 / 0.842 | 0, 0 | not applicable |
+| QUIC | reverse | baseline | 25.2–26.1 / 28.3–29.2 | 0.402 / 0.924 | 0, 0 | not applicable |
+| QUIC | reverse | candidate | 25.1–26.0 / 27.5–27.8 | 0.394 / 0.780 | 0, 0 | not applicable |
+| H2 | forward | baseline | 23.1–25.6 / 26.5–27.1 | 0.921 / 1.881 | 81, 271 | 1582, 1193 |
+| H2 | forward | candidate | 22.2–24.3 / 25.0–26.3 | 0.904 / 1.896 | 28, 0 | 245, 188 |
+| H2 | reverse | baseline | 24.0–25.6 / 27.1–29.1 | 0.875 / 1.830 | 254, 179 | 1397, 1122 |
+| H2 | reverse | candidate | 22.8–24.5 / 25.9–28.1 | 0.868 / 1.694 | 0, 12 | 403, 335 |
+
+All ping summaries recorded complete delivery. The same sampling limits apply as in the original report.
+Source review then found a missing maximum-level hint in the control log filter.
+Commit `0386ae55` restores global DEBUG/TRACE rejection at default INFO settings.
+The focused log-level test, host check, Linux check, and format check pass.
+Its performance remains unmeasured at this report stage.
+
+The first attempted campaign used mismatched TAP MTUs, 1340 baseline and 1320 candidate.
+Validation rejected those results. They remain under `invalid-mtu/`.
+Recovery set configured MTU 1360 for both binaries and checked actual MTUs before each load.
+No bisection or workload profile ran. WAN, WSS, and four-stream trials were excluded by the owner scope.
+Raw repair artifacts are in `benchmark-results/lean-perf-20261014/`.
+
+### Packet path review
+
+The comparison uses baseline `10e33193` and main `502c81c4`.
+The fixes are `226b495d`, `00b28f16`, `66f45369`, and `0386ae55`.
+The owner replaced profiling and bisection with source analysis and one confirming campaign.
+
+### Work model
+
+Let N be the packet count, L the delivered TCP payload bytes per packet, and B the packet count per batch.
+Let S be the segment count per GRO buffer, and U the distinct source tuples per batch.
+Let K be the disabled trace events and spans reached per packet, including transport polls.
+At L = 1300 bytes, one delivered Gbit contains about 96154 data packets.
+An added 0.1 microsecond per packet costs about 0.0096 CPU second per Gbit.
+A batch operation has about 1/B of that cost when batches contain B packets.
+These estimates exclude ACK packets, retransmissions, and kernel work outside daemon CPU accounting.
+
+The following latency ranges are assumptions for cost estimates.
+They are not measured instruction costs on this VM.
+An uncontended atomic or lock can cost tens through hundreds of nanoseconds.
+Contention can increase that cost to microseconds.
+An allocation, copy, and release can cost 0.1 through 1 microsecond for a small packet.
+A time read can cost tens through hundreds of nanoseconds.
+Assume a dynamic trace check costs 0.05 through 0.5 microsecond.
+Its total cost is K times that cost per packet. K depends on transport framing and batching.
+For K = 5, the estimate is 0.024 through 0.240 CPU second per delivered Gbit.
+
+#### Send and receive paths
+
+The send path is TAP read, NIC ingress workers, peer-manager fabric admission and routing,
+peer connection preparation, session filtering, direct sink, and the transport writer.
+QUIC submits DATAGRAM frames. H2 writes CONNECT-IP capsules in DATA frames.
+WSS uses its WebSocket writer after the same peer and session stages.
+
+The receive path is transport decoding, peer-connection session filtering, receive pacing,
+peer-manager or direct-NIC admission, ACL processing, a NIC write batch, and TAP write.
+The transport library trace calls execute inside these transport stages.
+
+### Source inventory
+
+| Path and function | Work added after baseline | Cost model | Fix or retained contract |
+| --- | --- | --- | --- |
+| TAP read and NIC ingress workers | No added per-packet production work in these modules. | Existing bounded reads and worker batching remain. | Keep the existing queues and batch limits. |
+| TAP MTU selection | Main changes native TAP MTU calculation. Bridge mode can require DATAGRAM fragments on a 1500-byte underlay. | Up to two outer packets and allocations per large Ethernet frame. | Confirmation disables bridge mode and matches actual TAP MTU 1340. |
+| `send_msg_by_hybrid_ethernet_batch` source admission | Source learning now runs by default. MAC quota changed from 0 to 256. Move hold changed from 0 to 5 seconds. | N mutable FDB lookups, hashes, shard locks, and timestamp stores. | Cache admitted sources within a batch. Recheck the ownership generation for each packet. Typical repeated sources need one lookup after insertion, or two during insertion. |
+| `send_msg_by_hybrid_ethernet_batch` destination lookup | FDB resolution moved before the compact unicast path. Known owners also require route and origin checks. Invalid owners trigger a bounded FDB sweep. | A distinct destination needs a hash lookup. Known destinations can incur checks for each packet. | Skip FDB work for known overlay IP destinations and local virtual IP addresses. Keep FDB priority for real bridged destinations. |
+| `sync_topology_service_routes` | Main adds another AcqRel generation swap and static-route publication. | Two shared atomic writes per packet, plus route rebuilding after a generation change. | Synchronize once per TAP batch. Use read checks before unchanged generation swaps. |
+| `local_snapshot_next_hop` | Main adds a current relay-use check before snapshot lookup. | One borrowed ArcSwap load per routed packet. | Keep the live relay restriction. No configuration clone occurs here. |
+| `PeerConn::prepare_outbound_transit` | New source/type classification and transit metadata preparation. | N header checks. Actual transit also clones an Arc for network metadata. | Return for local packets before type classification. Remove the separate full-batch source scan. |
+| `TransitSink::start_send` | New sink layer upgrades two weak references and filters every batch. Actual transit also cloned network metadata and eagerly cloned the default identity. | O(N) filtering plus weak-reference atomics per batch. Transit identity and labels can allocate. | Local batches return directly after the transit flag scan. Transit packets borrow their network name. Resolve the default name only when required. |
+| `GlobalCtx::admit_transit` | Permission, network, budget, and labeled metrics at actual transit egress. | A limited packet can require a mutex, time read, counter lookup, label allocation, and atomic accounting. | Preserve permission and budget checks after sink readiness. Local data bypasses this function. Remaining transit costs are explicit. |
+| Session filter authentication clearing | Main clears receiving-connection authentication metadata before sending. | Fixed field stores per packet. | Keep the authentication boundary. |
+| `ZCPacket` ownership | Main adds transit fields. NIC headroom grows from 8 to 18 bytes. | About 32 additional metadata bytes per packet move. Ten additional reserved bytes per NIC packet. | Keep transit classification and CONNECT-IP headroom. |
+| Session filter and TLS exporter | The exporter mode still skips inner session AEAD for immediate direct QUIC, H2, and WSS hops. | Existing per-batch session loads and packet classification. | No new exporter derivation or binding check runs per packet. |
+| QUIC DATAGRAM admission | Quinn copies every incoming DATAGRAM while holding connection ownership. The earlier application copy was removed. | An allocation and full payload copy occur on the serial receive driver. | Charge normalized backing allocation capacity. Keep ordinary packet storage. Copy only when the backing allocation exceeds the receive window. |
+| QUIC packet ownership normalization | The fix recovers Vec allocation capacity before packet splitting. | No second allocation for independent offset-zero input. Shared coalesced tails copy. The bytes implementation calls `ptr::copy`, even for equal pointers. | Exact capacity supports a strict retained-memory bound. Self-copy execution cost remains uncertain from source alone. |
+| `QuicDecoySocket::route_received` | Main routes every GRO segment separately. Cached segments read time, hash the tuple, lock a shard, and update an atomic timestamp. | N route lookups instead of about N/S. | Route an established tuple once per GRO buffer. Keep segment inspection for an unknown tuple that can mix Initial and short-header packets. |
+| Quinn socket and path processing | Main tags receive batches with socket identity. It tracks current-socket delivery and credits the actual source path. | Pointer comparison per event batch. Boolean stores and address checks per received UDP packet. | Preserve migration validation and anti-amplification accounting. Same-path traffic skips migration policy calls. |
+| QUIC migration watcher | Main scans client paths every two seconds and listens for route changes. Rebinding can reset path state. | Episodic socket probes and route checks. This is not per-packet work. | Unchanged source and route generation avoid rebinding. No speculative watcher change was made. |
+| QUIC I/O statistics | Main checks the migration-rejection count when recording I/O statistics. | One atomic read and branch per statistics call. | Keep the counter. Packet labels are not formatted on the unchanged path. |
+| QUIC keepalive | Main adds a three-second keepalive and ten-second idle timeout. | O(connections/time), rather than O(data packets). | Keep liveness and dead-path retirement. |
+| H2 CONNECT-IP reader and writer | The packet reader, decoder, DATA credit release, coalescing size, flow-control windows, and flush code match baseline. | No new per-packet cost was found in `http2.rs`. | Keep those implementations. |
+| H2 and QUIC camouflage settings | Methods return borrowed settings. SNI, host, admission token, certificate, and decoy changes occur at setup or accept. | Connection setup cost. No packet-time configuration clone was found in H2. | No camouflage rewrite was needed. |
+| `DirectNicIngress` compact admission | Main applies compact-IP policy and flood admission on each received TAP packet. | N IP parses, address loads, flag decisions, and retained packet moves. The IPv4 AtomicCell uses a fallback sequence lock. Reads usually use its optimistic path. | Preserve flood and type policy. Read the IPv4 broadcast address once per batch. The shared retention fix removes moves before the first rejected packet. |
+| `PacketBatch::retain_flags` | New compact admission calls this helper even when every packet is kept. The helper reads and writes each packet slot. | About 2 times packet-metadata size times N of memory traffic. | Move only when read and write slots differ. |
+| `GlobalCtx::pace_receive` | A shared receive-budget mutex replaces an absent optional limiter on unlimited receive batches. | About N/B mutex acquisitions and weak-reference operations. | Read the current effective limit first. Unlimited reception skips the mutex. |
+| Throughput counters at current main | Unsafe counters become atomic. | Two or three atomic additions per existing batch accounting call. Possible TX/RX cache-line sharing remains. | Keep the race fix. No fixture-specific padding or instruction tuning was added. |
+| Direct NIC writer and tunnel owner | Their queues and write ownership already exist in baseline. Main separates the NIC module and fixes sink shutdown draining. | No additional queue hop, GSO/GRO disablement, or ordinary flush change was found. | Keep the new shutdown drain logic. |
+| `ControlLogFilter` in `rpc_service/control/logs.rs` | Commit `de798b9f` adds control log capture. Commit `40908f8e` adds its level filter with no maximum-level hint. It returns dynamic callsite interest. Default INFO therefore loses global DEBUG/TRACE rejection. Existing QUIC and H2 trace events and spans enter the subscriber on packet processing and transport polls. | K dynamic subscriber calls per packet. Enabled checks include layer traversal, context access, and filter state. Transport field formatting remains disabled when all filters reject. | Publish the current maximum level. Rebuild the global cache after level changes. Serialize control updates and file-filter reloads. Keep dynamic callsite interest to avoid a first-registration race. |
+| Crypto, compression, FEC, and stage sampling | Removal deletes inactive filters and compression/FEC work. Secure datagrams already used Ring. Stage sampling already existed. | No added enabled cipher was found. | Keep the removals. |
+
+### Predicted change
+
+The fixes remove common FDB writes, unchanged route-generation writes, unused budget locking, and redundant packet moves.
+The log filter fix restores rejection before subscriber access at default INFO settings.
+It removes work at existing QUIC and H2 trace calls. WSS has fewer such transport calls.
+QUIC also removes the mandatory received-payload allocation and copy from connection processing.
+The memory bound uses actual retained allocation capacity, rather than payload length alone.
+Default MAC quotas, move holds, bridge checks, transit denial, and rate limits remain enforced.
+No new queue or resource limit was added.
+
+The original WSS sample difference is consistent with the trace-filter hypothesis.
+Only one corrected WSS sample existed for each completed cell.
+Transport batch sizes and other bottlenecks can change the cost of shared work per delivered byte.
+The first valid confirmation measures the first three commits. It still shows the regression.
+It does not measure `0386ae55`. Final confirmation requires owner authorization because the one-campaign limit is already used.
+No measured percentage can be assigned to an individual function from the current evidence.
