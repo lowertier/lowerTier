@@ -1,3 +1,4 @@
+pub(crate) mod direct_nic;
 mod graph_algo;
 
 pub mod l2_fabric;
@@ -106,7 +107,7 @@ type BoxNicPacketFilter = Box<dyn NicPacketFilter + Send + Sync>;
 pub struct PacketRecvChan {
     sender: tokio::sync::mpsc::Sender<QueuedPacketBatch>,
     queue_credits: Arc<Semaphore>,
-    direct_nic: Arc<OnceLock<Arc<peer_manager::DirectNicIngress>>>,
+    direct_nic: Arc<OnceLock<Arc<direct_nic::DirectNicIngress>>>,
 }
 
 const PACKET_QUEUE_BATCH_CAPACITY: usize = 32;
@@ -204,7 +205,7 @@ impl PacketRecvChan {
             })
     }
 
-    pub(crate) fn install_direct_nic(&self, ingress: Arc<peer_manager::DirectNicIngress>) {
+    fn install_direct_nic(&self, ingress: Arc<direct_nic::DirectNicIngress>) {
         let _ = self.direct_nic.set(ingress);
     }
 

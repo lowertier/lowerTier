@@ -4133,7 +4133,7 @@ impl PeerConn {
                                 occupancy_packets: snapshot
                                     .occupancy_packets
                                     .min(u64::from(u32::MAX)) as u32,
-                                capacity_packets: super::peer_manager::DIRECT_NIC_QUEUE_PACKET_CAPACITY
+                                capacity_packets: super::direct_nic::DIRECT_NIC_QUEUE_PACKET_CAPACITY
                                     .min(u32::MAX as usize) as u32,
                                 stall_ns: snapshot.stall_ns,
                             };

@@ -23,9 +23,10 @@ use crate::{
     instance::proxy_cidrs_monitor::ProxyCidrsMonitor,
     peers::{
         PacketRecvChanReceiver,
+        direct_nic::DirectNicEndpoint,
         fabric::{FabricBatch, FabricPayloadKind},
         flow::classify_nic_packet_flow,
-        peer_manager::{DirectNicEndpoint, PeerManager},
+        peer_manager::PeerManager,
     },
     tunnel::{
         PacketBatchSink, PacketBatchStream, StreamItem, Tunnel, TunnelError,
