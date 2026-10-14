@@ -30,12 +30,7 @@ use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
 use crate::peers::fabric::{FabricBatch, FabricPayloadKind};
 use crate::peers::peer_manager::PeerManager;
 use crate::peers::{NicPacketFilter, PeerPacketFilter};
-use crate::proto::api::instance::{
-    ListTcpProxyEntryRequest, ListTcpProxyEntryResponse, TcpProxyEntry, TcpProxyEntryState,
-    TcpProxyRpc,
-};
-use crate::proto::rpc_types;
-use crate::proto::rpc_types::controller::BaseController;
+use crate::proto::api::instance::{TcpProxyEntry, TcpProxyEntryState};
 #[cfg(feature = "smoltcp")]
 use crate::tunnel::batch::PacketBatch;
 use crate::tunnel::packet_def::{PacketType, PeerManagerHeader, ZCPacket};
@@ -981,36 +976,5 @@ impl TcpProxy {
             entries.push(entry.value().as_ref().parse_as_pb());
         }
         entries
-    }
-}
-
-#[derive(Clone)]
-pub struct TcpProxyRpcService {
-    tcp_proxy: Weak<std::sync::OnceLock<Arc<TcpProxy>>>,
-}
-
-#[async_trait::async_trait]
-impl TcpProxyRpc for TcpProxyRpcService {
-    type Controller = BaseController;
-    async fn list_tcp_proxy_entry(
-        &self,
-        _: BaseController,
-        _request: ListTcpProxyEntryRequest, // Accept request of type HelloRequest
-    ) -> std::result::Result<ListTcpProxyEntryResponse, rpc_types::error::Error> {
-        let mut reply = ListTcpProxyEntryResponse::default();
-        if let Some(slot) = self.tcp_proxy.upgrade() {
-            if let Some(tcp_proxy) = slot.get() {
-                reply.entries = tcp_proxy.list_proxy_entries();
-            }
-        }
-        Ok(reply)
-    }
-}
-
-impl TcpProxyRpcService {
-    pub fn new(tcp_proxy: Arc<std::sync::OnceLock<Arc<TcpProxy>>>) -> Self {
-        Self {
-            tcp_proxy: Arc::downgrade(&tcp_proxy),
-        }
     }
 }

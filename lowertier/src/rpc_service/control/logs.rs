@@ -20,6 +20,7 @@ struct LogRing {
     entries: VecDeque<LogEntry>,
     sequence: u64,
     truncated: u64,
+    memory: Option<crate::common::global_ctx::ProcessMemoryPermit>,
 }
 
 static RING: LazyLock<Mutex<LogRing>> = LazyLock::new(|| Mutex::new(LogRing::default()));
@@ -59,7 +60,8 @@ impl Visit for LogMessage {
 pub(crate) struct ControlLogLayer;
 
 pub(super) fn generation() -> u64 {
-    RING.lock().unwrap().sequence
+    let ring = RING.lock().unwrap();
+    ring.sequence.saturating_add(ring.truncated)
 }
 
 impl<S: Subscriber> Layer<S> for ControlLogLayer {
@@ -68,6 +70,15 @@ impl<S: Subscriber> Layer<S> for ControlLogLayer {
         event.record(&mut message);
         let metadata = event.metadata();
         let mut ring = RING.lock().unwrap();
+        if ring.memory.is_none() {
+            // Charge the ring capacity and the bounded UTF-8 string allocations.
+            ring.memory = crate::common::global_ctx::global_process_memory_governor()
+                .try_reserve_owned(3 * 1024 * 1024);
+        }
+        if ring.memory.is_none() {
+            ring.truncated = ring.truncated.saturating_add(1);
+            return;
+        }
         ring.sequence = ring.sequence.saturating_add(1);
         let sequence = ring.sequence;
         if ring.entries.len() == LOG_CAPACITY {
@@ -89,7 +100,21 @@ pub(super) fn read(request: Option<Page>) -> anyhow::Result<ReadLogsResponse> {
     let after = if request.page_token.is_empty() {
         0
     } else {
-        request.page_token.parse::<u64>().map_err(|_| {
+        let (epoch, sequence) = request.page_token.rsplit_once(':').ok_or_else(|| {
+            super::failure(
+                "INVALID_ARGUMENT",
+                "The log cursor is invalid.",
+                "page.page_token",
+            )
+        })?;
+        if epoch != super::watch::PROCESS_EPOCH.to_string() {
+            return Err(super::failure(
+                "CONFLICT",
+                "The log cursor belongs to an earlier process.",
+                "page.page_token",
+            ));
+        }
+        sequence.parse::<u64>().map_err(|_| {
             super::failure(
                 "INVALID_ARGUMENT",
                 "The log cursor is invalid.",
@@ -117,10 +142,11 @@ pub(super) fn read(request: Option<Page>) -> anyhow::Result<ReadLogsResponse> {
         .take(limit)
         .cloned()
         .collect::<Vec<_>>();
-    let next_page_token = logs
-        .last()
-        .map_or(after, |entry| entry.sequence)
-        .to_string();
+    let next_page_token = format!(
+        "{}:{}",
+        *super::watch::PROCESS_EPOCH,
+        logs.last().map_or(after, |entry| entry.sequence)
+    );
     Ok(ReadLogsResponse {
         logs,
         next_page_token,

@@ -1,17 +1,9 @@
 syntax = "proto3";
-
 import "common.proto";
 import "peer_rpc.proto";
 import "api_instance.proto";
-import "acl.proto";
 
 package api.manage;
-
-enum NetworkingMethod {
-  PublicServer = 0;
-  Manual = 1;
-  Standalone = 2;
-}
 
 enum ConfigSource {
   ConfigSourceUnspecified = 0;
@@ -20,96 +12,19 @@ enum ConfigSource {
   reserved "ConfigSourceWeb";
 }
 
+// The GUI configuration schema is retired.
 message NetworkConfig {
-  optional string instance_id = 1;
-
-  optional bool dhcp = 2;
-  optional string virtual_ipv4 = 3;
-  optional int32 network_length = 4;
-  optional string hostname = 5;
-  optional string network_name = 6;
-  optional string network_secret = 7;
-  optional NetworkingMethod networking_method = 8;
-
-  optional string public_server_url = 9;
-  repeated string peer_urls = 10;
-
-  repeated string proxy_cidrs = 11;
-
   reserved 12, 13, 14, 15;
-
-  optional bool advanced_settings = 16;
-
-  repeated string listener_urls = 17;
-  // optional int32 rpc_port = 18;
-  optional bool latency_first = 19;
-
-  optional string dev_name = 20;
-
-  optional bool use_smoltcp = 21;
-  optional bool disable_ipv6 = 47;
   reserved 22, 23;
-  optional bool disable_p2p = 24;
-  optional bool bind_device = 25;
-  optional bool no_tun = 26;
-
-  optional bool enable_exit_node = 27;
-  optional bool relay_all_peer_rpc = 28;
-  optional bool multi_thread = 29;
-  optional bool enable_relay_network_whitelist = 30;
-  repeated string relay_network_whitelist = 31;
-  optional bool enable_manual_routes = 32;
-  repeated string routes = 33;
-  repeated string exit_nodes = 34;
-  optional bool proxy_forward_by_system = 35;
-  optional bool disable_encryption = 36;
-  optional bool enable_socks5 = 37;
-  optional int32 socks5_port = 38;
-  optional bool disable_udp_hole_punching = 39;
-  optional int32 mtu = 40;
-  repeated string mapped_listeners = 41;
-
-  optional bool enable_magic_dns = 42;
-  optional bool enable_private_mode = 43;
-
-  // repeated string rpc_portal_whitelists = 44;
-
   reserved 45, 46, 50;
-  repeated PortForwardConfig port_forwards = 48;
-
-  optional bool disable_sym_hole_punching = 49;
-
-  optional bool p2p_only = 51;
   reserved 52;
   reserved "data_compress_algo";
-  optional string encryption_algorithm = 53;
-  optional bool disable_tcp_hole_punching = 54;
-
-  common.SecureModeConfig secure_mode = 55;
-  optional acl.Acl acl = 56;
-  optional string credential_file = 57;
-  optional bool lazy_p2p = 58;
-  optional bool need_p2p = 59;
-  optional uint64 instance_recv_bps_limit = 60;
   reserved 61;
   reserved "disable_upnp";
-  optional bool ipv6_public_addr_provider = 62;
-  optional bool ipv6_public_addr_auto = 63;
-  optional string ipv6_public_addr_prefix = 64;
-  optional bool disable_relay_data = 65;
-  optional bool enable_udp_broadcast_relay = 66;
-  optional uint32 socket_mark = 67;
-  repeated NetworkPeerConfig peers = 68;
-  repeated string underlay_deny_interfaces = 69;
-  repeated string underlay_deny_cidrs = 70;
   reserved 71, 72, 73;
   reserved "quic_congestion", "quic_brutal_send_bps", "quic_brutal_loss_compensation";
-  optional uint64 quic_initial_receive_window = 74;
-  optional uint64 quic_receive_window = 75;
   reserved 76;
   reserved "port_mode";
-  optional uint32 l2_fdb_capacity = 77;
-  optional uint64 l2_fdb_age_seconds = 78;
   reserved 79;
   reserved "l2_flood_bps";
   reserved 80;
@@ -117,43 +32,10 @@ message NetworkConfig {
   reserved 81;
   reserved 82;
   reserved "quic_datagram_alternate_path_parity";
-  optional string socks5_server = 83;
-  optional string outbound_http_proxy_listen = 84;
-  optional bool speed_first = 85;
-  optional uint64 speed_probe_interval_seconds = 86;
-  optional uint64 speed_probe_budget_bps = 87;
-  // Authorize complete Ethernet input in automatic mode.
-  optional bool enable_bridge = 88;
   reserved 89;
   reserved "interface_adapter";
-  optional string quic_tls_cert = 90;
-  optional string quic_tls_key = 91;
-  optional string quic_server_name = 92;
-  optional string quic_admission_secret = 93;
-  optional string quic_fallback_root = 94;
-  optional string quic_decoy_upstream = 95;
-  optional bool quic_sni_passthrough = 96;
-  optional uint32 l2_max_macs_per_peer = 97;
-  optional uint64 l2_mac_move_hold_seconds = 98;
-  repeated uint32 l2_allowed_vlans = 99;
-  repeated uint32 l2_allowed_ether_types = 100;
-  optional uint64 l2_flood_bytes_per_second = 101;
-  common.RelayConfig relay = 102;
-  common.CamouflageConfig camouflage = 103;
-  common.LimitsConfig limits = 104;
-}
-
-message NetworkPeerConfig {
-  string uri = 1;
-  optional string peer_public_key = 2;
-}
-
-message PortForwardConfig {
-  string bind_ip = 1;
-  uint32 bind_port = 2;
-  string dst_ip = 3;
-  uint32 dst_port = 4;
-  string proto = 5;
+  reserved 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 19, 20, 21, 47, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 48, 49, 51, 53, 54, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 69, 70, 74, 75, 77, 78, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101;
+  reserved "instance_id", "dhcp", "virtual_ipv4", "network_length", "hostname", "network_name", "network_secret", "networking_method", "public_server_url", "peer_urls", "proxy_cidrs", "advanced_settings", "listener_urls", "latency_first", "dev_name", "use_smoltcp", "disable_ipv6", "disable_p2p", "bind_device", "no_tun", "enable_exit_node", "relay_all_peer_rpc", "multi_thread", "enable_relay_network_whitelist", "relay_network_whitelist", "enable_manual_routes", "routes", "exit_nodes", "proxy_forward_by_system", "disable_encryption", "enable_socks5", "socks5_port", "disable_udp_hole_punching", "mtu", "mapped_listeners", "enable_magic_dns", "enable_private_mode", "port_forwards", "disable_sym_hole_punching", "p2p_only", "encryption_algorithm", "disable_tcp_hole_punching", "secure_mode", "acl", "credential_file", "lazy_p2p", "need_p2p", "instance_recv_bps_limit", "ipv6_public_addr_provider", "ipv6_public_addr_auto", "ipv6_public_addr_prefix", "disable_relay_data", "enable_udp_broadcast_relay", "socket_mark", "peers", "underlay_deny_interfaces", "underlay_deny_cidrs", "quic_initial_receive_window", "quic_receive_window", "l2_fdb_capacity", "l2_fdb_age_seconds", "socks5_server", "outbound_http_proxy_listen", "speed_first", "speed_probe_interval_seconds", "speed_probe_budget_bps", "enable_bridge", "quic_tls_cert", "quic_tls_key", "quic_server_name", "quic_admission_secret", "quic_fallback_root", "quic_decoy_upstream", "quic_sni_passthrough", "l2_max_macs_per_peer", "l2_mac_move_hold_seconds", "l2_allowed_vlans", "l2_allowed_ether_types", "l2_flood_bytes_per_second";
 }
 
 message MyNodeInfo {
@@ -177,78 +59,4 @@ message NetworkInstanceRunningInfo {
   bool running = 7;
   optional string error_msg = 8;
   peer_rpc.RouteForeignNetworkSummary foreign_network_summary = 9;
-}
-
-message NetworkInstanceRunningInfoMap {
-  map<string, NetworkInstanceRunningInfo> map = 1;
-}
-
-message NetworkMeta {
-  common.UUID inst_id = 1;
-  string network_name = 2;
-  uint32 config_permission = 3;
-  string instance_name = 4;
-  ConfigSource source = 5;
-}
-
-message ValidateConfigRequest { NetworkConfig config = 1; }
-
-message ValidateConfigResponse { string toml_config = 1; }
-
-message RunNetworkInstanceRequest {
-  common.UUID inst_id = 1;
-  NetworkConfig config = 2;
-  bool overwrite = 3;
-  ConfigSource source = 4;
-}
-
-message RunNetworkInstanceResponse { common.UUID inst_id = 1; }
-
-message RetainNetworkInstanceRequest { repeated common.UUID inst_ids = 1; }
-
-message RetainNetworkInstanceResponse {
-  repeated common.UUID remain_inst_ids = 1;
-}
-
-message CollectNetworkInfoRequest { repeated common.UUID inst_ids = 1; }
-
-message CollectNetworkInfoResponse { NetworkInstanceRunningInfoMap info = 1; }
-
-message ListNetworkInstanceRequest {}
-
-message ListNetworkInstanceResponse { repeated common.UUID inst_ids = 1; }
-
-message DeleteNetworkInstanceRequest { repeated common.UUID inst_ids = 1; }
-
-message DeleteNetworkInstanceResponse {
-  repeated common.UUID remain_inst_ids = 1;
-}
-
-message GetNetworkInstanceConfigRequest { common.UUID inst_id = 1; }
-
-message GetNetworkInstanceConfigResponse {
-  NetworkConfig config = 1;
-  ConfigSource source = 2;
-}
-
-message ListNetworkInstanceMetaRequest { repeated common.UUID inst_ids = 1; }
-
-message ListNetworkInstanceMetaResponse { repeated NetworkMeta metas = 1; }
-
-service WebClientService {
-  rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse) {}
-  rpc RunNetworkInstance(RunNetworkInstanceRequest)
-      returns (RunNetworkInstanceResponse) {}
-  rpc RetainNetworkInstance(RetainNetworkInstanceRequest)
-      returns (RetainNetworkInstanceResponse) {}
-  rpc CollectNetworkInfo(CollectNetworkInfoRequest)
-      returns (CollectNetworkInfoResponse) {}
-  rpc ListNetworkInstance(ListNetworkInstanceRequest)
-      returns (ListNetworkInstanceResponse) {}
-  rpc DeleteNetworkInstance(DeleteNetworkInstanceRequest)
-      returns (DeleteNetworkInstanceResponse) {}
-  rpc GetNetworkInstanceConfig(GetNetworkInstanceConfigRequest)
-      returns (GetNetworkInstanceConfigResponse) {}
-  rpc ListNetworkInstanceMeta(ListNetworkInstanceMetaRequest)
-      returns (ListNetworkInstanceMetaResponse) {}
 }

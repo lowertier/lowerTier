@@ -2,8 +2,6 @@ syntax = "proto3";
 
 import "common.proto";
 import "acl.proto";
-import "api_instance.proto";
-import "api_manage.proto";
 
 package api.config;
 
@@ -69,24 +67,4 @@ message RoutePatch {
 message ExitNodePatch {
   ConfigPatchAction action = 1;
   common.IpAddr node = 2;
-}
-
-message PatchConfigRequest {
-  InstanceConfigPatch patch = 1;
-  api.instance.InstanceIdentifier instance = 2;
-}
-
-message PatchConfigResponse {}
-
-message GetConfigRequest {
-  api.instance.InstanceIdentifier instance = 1;
-}
-
-message GetConfigResponse {
-  api.manage.NetworkConfig config = 1;
-}
-
-service ConfigRpc {
-  rpc PatchConfig(PatchConfigRequest) returns (PatchConfigResponse);
-  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
 }

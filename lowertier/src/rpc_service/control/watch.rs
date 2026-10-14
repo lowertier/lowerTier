@@ -44,7 +44,7 @@ impl ControlPlaneService {
         let instance = self
             .manager
             .get_instance_service(&id)
-            .map(|instance| instance.control_instance());
+            .map(|instance| (*instance).clone());
         let mut event = 0;
         let mut topology = 0;
         let mut l2 = vec![0; 5];
@@ -73,7 +73,15 @@ impl ControlPlaneService {
                     let mut rows = self
                         .manager
                         .iter()
-                        .map(|entry| (*entry.key(), entry.is_lowertier_running()))
+                        .map(|entry| {
+                            (
+                                *entry.key(),
+                                entry.is_lowertier_running(),
+                                entry.get_inst_name(),
+                                entry.get_network_name(),
+                                entry.get_latest_error_msg(),
+                            )
+                        })
                         .collect::<Vec<_>>();
                     rows.sort_unstable();
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -97,7 +105,6 @@ impl ControlPlaneService {
         _: BaseController,
         mut request: WatchChangesRequest,
     ) -> anyhow::Result<WatchChangesResponse> {
-        let id = self.select_instance(request.meta.as_ref())?;
         if request.resources.is_empty() {
             request.resources = RESOURCES.iter().map(|name| (*name).into()).collect();
         }
@@ -115,6 +122,15 @@ impl ControlPlaneService {
         }
         request.resources.sort_unstable();
         request.resources.dedup();
+        let id = if request
+            .resources
+            .iter()
+            .all(|name| matches!(name.as_str(), "logs" | "instances"))
+        {
+            uuid::Uuid::nil()
+        } else {
+            self.select_instance(request.meta.as_ref())?
+        };
         if request.cursor.len() > 8192 {
             return Err(failure(
                 "INVALID_ARGUMENT",

@@ -3,7 +3,6 @@ use std::hash::{Hash, Hasher};
 
 use crate::{
     common::config::ConfigLoader,
-    peers::rpc_service::PeerManagerRpcService,
     proto::{
         api::{control::v1::*, instance as legacy},
         rpc_types::controller::{BaseController, Controller},
@@ -110,7 +109,7 @@ impl ControlPlaneService {
                 "meta.instance_id",
             )
         })?;
-        Ok((id, instance.control_instance()))
+        Ok((id, (*instance).clone()))
     }
 
     pub(super) fn select_instance(&self, meta: Option<&RequestMeta>) -> anyhow::Result<uuid::Uuid> {
@@ -215,9 +214,24 @@ impl ControlPlaneService {
             .into_iter()
             .map(|route| (route.peer_id, route))
             .collect::<BTreeMap<_, _>>();
-        let mut rows = PeerManagerRpcService::list_peers(&peers)
+        let mut peer_infos = ControlInstance::list_peers(&peers)
             .await
             .into_iter()
+            .map(|peer| (peer.peer_id, peer))
+            .collect::<BTreeMap<_, _>>();
+        for &peer_id in routes.keys() {
+            if peer_id != peers.my_peer_id() {
+                peer_infos
+                    .entry(peer_id)
+                    .or_insert_with(|| legacy::PeerInfo {
+                        peer_id,
+                        ..Default::default()
+                    });
+            }
+        }
+        let identities = peers.get_peer_map().origin_auth_snapshot();
+        let mut rows = peer_infos
+            .into_values()
             .map(|peer| {
                 let selected = peer
                     .conns
@@ -232,6 +246,11 @@ impl ControlPlaneService {
                 PeerSnapshot {
                     peer_key: selected
                         .map(|conn| conn.noise_remote_static_pubkey.clone())
+                        .or_else(|| {
+                            identities
+                                .lookup(peer.peer_id)
+                                .map(|identity| identity.noise_static_pubkey.to_vec())
+                        })
                         .unwrap_or_default(),
                     peer_id: peer.peer_id,
                     rtt_us: selected
@@ -243,7 +262,11 @@ impl ControlPlaneService {
                     sample_age_ms: selected.and_then(|conn| conn.speed_sample_age_ms),
                     udp_nat: nat.map_or(0, |nat| nat.udp_nat_type),
                     tcp_nat: nat.map_or(0, |nat| nat.tcp_nat_type),
-                    metric_scope: "direct_connection".into(),
+                    metric_scope: if selected.is_some() {
+                        "direct_connection".into()
+                    } else {
+                        "unavailable".into()
+                    },
                     conns: peer.conns,
                     route,
                     ..Default::default()
@@ -454,26 +477,38 @@ impl ControlPlaneService {
         _: BaseController,
         request: GetStatsRequest,
     ) -> anyhow::Result<GetStatsResponse> {
-        let (_, instance) = self.resolve(request.meta.as_ref())?;
-        let metrics = instance
-            .context()?
-            .stats_manager()
-            .get_all_metrics()
-            .into_iter()
-            .map(|metric| legacy::MetricSnapshot {
-                name: metric.name_str(),
-                value: metric.value,
-                labels: metric
-                    .labels
-                    .labels()
-                    .iter()
-                    .map(|label| (label.key.clone(), label.value.clone()))
-                    .collect(),
-            })
-            .collect();
+        let (id, instance) = self.resolve(request.meta.as_ref())?;
+        let context = instance.context()?;
+        let (sampled_at, metrics) = {
+            let mut cache = self.stats.lock().unwrap();
+            cache.retain(|id, _| self.manager.get_instance_name(id).is_some());
+            let current = now_ms();
+            let cached = cache.entry(id).or_insert_with(|| (0, Vec::new()));
+            if current.saturating_sub(cached.0) >= 1000 {
+                cached.0 = current;
+                cached.1 = context
+                    .stats_manager()
+                    .get_all_metrics()
+                    .into_iter()
+                    .map(|metric| legacy::MetricSnapshot {
+                        name: metric.name_str(),
+                        value: metric.value,
+                        labels: metric
+                            .labels
+                            .labels()
+                            .iter()
+                            .map(|label| (label.key.clone(), label.value.clone()))
+                            .collect(),
+                    })
+                    .collect();
+            }
+            cached.clone()
+        };
+        let mut snapshot = self.snapshot(&instance).await?;
+        snapshot.sampled_at_unix_ms = sampled_at;
         Ok(GetStatsResponse {
             metrics,
-            snapshot: Some(self.snapshot(&instance).await?),
+            snapshot: Some(snapshot),
             ..Default::default()
         })
     }
@@ -591,7 +626,11 @@ impl ControlPlaneService {
             .get_tunnel_info()
             .and_then(|info| info.remote_addr.as_ref())
             .and_then(|address| url::Url::parse(&address.url).ok())
-            .and_then(|address| address.host_str()?.parse::<std::net::IpAddr>().ok())
+            .and_then(|address| match address.host()? {
+                url::Host::Ipv4(address) => Some(std::net::IpAddr::V4(address)),
+                url::Host::Ipv6(address) => Some(std::net::IpAddr::V6(address)),
+                url::Host::Domain(address) => address.parse::<std::net::IpAddr>().ok(),
+            })
             .is_some_and(|address| address.is_loopback());
         let expected = context
             .get_network_identity()
@@ -601,7 +640,7 @@ impl ControlPlaneService {
             crate::common::verify_slices_are_equal(meta.admin_token.as_bytes(), expected.as_bytes())
                 .is_ok()
         });
-        if !remote_is_loopback || expected.is_empty() || !valid {
+        if (!remote_is_loopback && self.token.is_some()) || expected.is_empty() || !valid {
             return Err(failure(
                 "PERMISSION_DENIED",
                 "Credential administration requires a loopback channel and a valid administrator token.",

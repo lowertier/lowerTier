@@ -18,7 +18,6 @@ use crate::{
         peer_map::PeerMap,
         peer_rpc::PeerRpcManager,
         route_trait::{RouteCostCalculator, RouteCostCalculatorInterface},
-        rpc_service::PeerManagerRpcService,
     },
     proto::{
         api::instance::Route,
@@ -642,7 +641,9 @@ impl PeerCenterInstance {
 #[async_trait::async_trait]
 impl PeerCenterPeerManagerTrait for PeerManager {
     async fn list_peers(&self) -> PeerInfoForGlobalMap {
-        PeerManagerRpcService::list_peers(self).await.into()
+        crate::rpc_service::control::ControlInstance::list_peers(self)
+            .await
+            .into()
     }
 
     fn my_peer_id(&self) -> PeerId {

@@ -1212,10 +1212,12 @@ impl GlobalCtx {
             .lock()
             .unwrap()
             .insert(local, listeners);
+        self.control_generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn remove_discovery_listeners(&self, local: SocketAddr) {
         self.discovery_listeners.lock().unwrap().remove(&local);
+        self.control_generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn get_discovery_listeners(&self) -> Vec<url::Url> {

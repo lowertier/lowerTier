@@ -1625,7 +1625,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
             control.set_no_delete(true);
         }
 
-        log::info!(path = %config_file.display(), permission = %control.permission, "Starting LowTier from a config file");
+        log::info!(path = %config_file.display(), permission = ?control.permission, "Starting LowTier from a config file");
         manager.run_network_instance(cfg, true, control)?;
     }
 

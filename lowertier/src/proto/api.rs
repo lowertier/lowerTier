@@ -266,11 +266,6 @@ pub mod instance {
     }
 }
 
-pub mod logger {
-    include!(concat!(env!("OUT_DIR"), "/api.logger.rs"));
-    include!(concat!(env!("OUT_DIR"), "/api.logger.serde.rs"));
-}
-
 pub mod manage {
     include!(concat!(env!("OUT_DIR"), "/api.manage.rs"));
     include!(concat!(env!("OUT_DIR"), "/api.manage.serde.rs"));

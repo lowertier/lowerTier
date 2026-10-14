@@ -13,7 +13,7 @@ use crate::{
     },
     launcher::{NetworkInstance, NetworkInstanceRunningInfo},
     proto::{self},
-    rpc_service::InstanceRpcService,
+    rpc_service::control::ControlInstance,
 };
 
 pub(crate) struct DaemonGuard {
@@ -138,6 +138,45 @@ impl NetworkInstanceManager {
             .retain(|k, _| instance_ids.contains(k));
         self.instance_error_messages.shrink_to_fit();
         Ok(self.list_network_instance_ids())
+    }
+
+    pub(crate) fn create_network_instance(
+        &self,
+        cfg: TomlConfigLoader,
+        control: ConfigFileControl,
+    ) -> anyhow::Result<uuid::Uuid> {
+        let id = cfg.get_id();
+        match self.instance_map.entry(id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(NetworkInstance::new(cfg, control));
+                Ok(id)
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                anyhow::bail!("The instance already exists.")
+            }
+        }
+    }
+
+    pub(crate) fn start_network_instance(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        self.instance_map
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("The instance does not exist."))?
+            .start()?;
+        self.instance_error_messages.remove(&id);
+        self.start_instance_task(id)
+    }
+
+    pub(crate) async fn stop_network_instance(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        let launcher = self
+            .instance_map
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("The instance does not exist."))?
+            .take_launcher();
+        if let Some(launcher) = launcher {
+            launcher.stop().await?;
+        }
+        self.instance_stop_tasks.remove(&id);
+        Ok(())
     }
 
     pub fn delete_network_instance(
@@ -293,10 +332,7 @@ impl NetworkInstanceManager {
             .map(|instance| instance.value().get_network_config_source())
     }
 
-    pub fn get_instance_service(
-        &self,
-        instance_id: &uuid::Uuid,
-    ) -> Option<Arc<dyn InstanceRpcService>> {
+    pub fn get_instance_service(&self, instance_id: &uuid::Uuid) -> Option<Arc<ControlInstance>> {
         self.instance_map
             .get(instance_id)
             .and_then(|instance| instance.value().get_api_service())

@@ -18,7 +18,6 @@ pub(crate) mod receiver_pacing;
 pub mod relay_peer_map;
 pub(crate) mod replay_window;
 pub mod route_trait;
-pub mod rpc_service;
 pub mod service_route;
 pub(crate) mod speed_probe;
 pub(crate) mod traffic_metrics;

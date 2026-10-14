@@ -50,7 +50,7 @@ impl ApiRpcServer<TcpTunnelListener> {
 }
 
 impl<T: TunnelListener + 'static> ApiRpcServer<T> {
-    pub fn from_tunnel(
+    fn from_tunnel(
         tunnel: T,
         instance_manager: Arc<NetworkInstanceManager>,
     ) -> anyhow::Result<Self> {

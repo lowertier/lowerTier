@@ -101,8 +101,6 @@ mod protocol_memory_tests {
         global_ctx::GlobalCtx,
     };
     use crate::peers::{create_packet_recv_chan, peer_manager::RouteAlgoType};
-    use crate::proto::api::instance::{ListTcpProxyEntryRequest, TcpProxyRpc};
-    use crate::proto::rpc_types::controller::BaseController;
     fn fixture(no_tun: bool) -> (Arc<PeerManager>, IpProxy) {
         let config = TomlConfigLoader::default();
         let mut flags = config.get_flags();
@@ -118,15 +116,12 @@ mod protocol_memory_tests {
     async fn inactive_proxy_and_status_query_allocate_no_protocol_state() {
         let (_peer, proxy) = fixture(false);
         proxy.start().await.unwrap();
-        let rpc = crate::gateway::tcp_proxy::TcpProxyRpcService::new(proxy.tcp_proxy());
-        let response = rpc
-            .list_tcp_proxy_entry(
-                BaseController::default(),
-                ListTcpProxyEntryRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert!(response.entries.is_empty());
+        let entries = proxy
+            .tcp_proxy()
+            .get()
+            .map(|proxy| proxy.list_proxy_entries())
+            .unwrap_or_default();
+        assert!(entries.is_empty());
         assert!(proxy.tcp_proxy.get().is_none());
         assert!(proxy.icmp_proxy.get().is_none());
         assert!(proxy.udp_proxy.get().is_none());

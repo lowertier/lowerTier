@@ -13,15 +13,8 @@ use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 use crate::{
     common::{PeerId, dns::socket_addrs, join_joinset_background},
     peers::peer_conn::PeerConnId,
-    proto::{
-        api::instance::{
-            Connector, ConnectorManageRpc, ConnectorStatus, ListConnectorRequest,
-            ListConnectorResponse,
-        },
-        rpc_types::{self, controller::BaseController},
-    },
+    proto::api::instance::{Connector, ConnectorStatus},
     tunnel::{IpVersion, TunnelConnector},
-    utils::weak_upgrade,
 };
 
 use crate::{
@@ -433,25 +426,6 @@ impl ManualConnectorManager {
         }
 
         reconn_ret
-    }
-}
-
-#[derive(Clone)]
-pub struct ConnectorManagerRpcService(pub Weak<ManualConnectorManager>);
-
-#[async_trait::async_trait]
-impl ConnectorManageRpc for ConnectorManagerRpcService {
-    type Controller = BaseController;
-
-    async fn list_connector(
-        &self,
-        _: BaseController,
-        _request: ListConnectorRequest,
-    ) -> Result<ListConnectorResponse, rpc_types::error::Error> {
-        let mut ret = ListConnectorResponse::default();
-        let connectors = weak_upgrade(&self.0)?.list_connectors().await;
-        ret.connectors = connectors;
-        Ok(ret)
     }
 }
 

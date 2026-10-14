@@ -23,36 +23,21 @@ use crate::common::config::ConfigLoader;
 use crate::common::error::Error;
 use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx, GlobalCtxEvent};
 use crate::connector::direct::DirectConnectorManager;
-use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
+use crate::connector::manual::ManualConnectorManager;
 use crate::connector::quic_hole_punch::QuicHolePunchConnector;
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
 
 use crate::gateway::overlay_stream::OverlayStreamEndpoint;
-use crate::gateway::tcp_proxy::TcpProxyRpcService;
-use crate::peer_center::instance::{PeerCenterInstance, PeerCenterInstanceService};
+use crate::peer_center::instance::PeerCenterInstance;
 use crate::peers::peer_conn::PeerConnId;
 use crate::peers::peer_manager::{PeerManager, RouteAlgoType};
 #[cfg(feature = "tun")]
 use crate::peers::recv_packet_from_chan;
-use crate::peers::rpc_service::PeerManagerRpcService;
 use crate::peers::{PacketRecvChanReceiver, create_packet_recv_chan};
-use crate::proto::api::config::{
-    ConfigPatchAction, ConfigRpc, GetConfigRequest, GetConfigResponse, PatchConfigRequest,
-    PatchConfigResponse, PortForwardPatch,
-};
-use crate::proto::api::instance::{
-    GetPrometheusStatsRequest, GetPrometheusStatsResponse, GetStatsRequest, GetStatsResponse,
-    ListMappedListenerRequest, ListMappedListenerResponse, ListPortForwardRequest,
-    ListPortForwardResponse, MappedListener, MappedListenerManageRpc, MetricSnapshot,
-    PortForwardManageRpc, StatsRpc,
-};
-use crate::proto::api::manage::NetworkConfig;
-use crate::proto::common::{PortForwardConfigPb, TunnelInfo};
-use crate::proto::peer_rpc::PeerCenterRpc;
+use crate::proto::api::config::{ConfigPatchAction, PortForwardPatch};
+use crate::proto::common::TunnelInfo;
 use crate::proto::rpc_impl::standalone::RpcServerHook;
-use crate::proto::rpc_types;
-use crate::proto::rpc_types::controller::BaseController;
-use crate::rpc_service::InstanceRpcService;
+use crate::rpc_service::control::ControlInstance;
 use crate::utils::weak_upgrade;
 
 #[cfg(feature = "magic-dns")]
@@ -198,16 +183,17 @@ impl RpcServerHook for InstanceRpcServerHook {
         let url = url::Url::parse(url_str)
             .map_err(|e| anyhow::anyhow!("Failed to parse remote URL '{}': {}", url_str, e))?;
 
-        let host = url
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("No host found in remote URL '{}'", url_str))?;
-
-        let ip_addr: IpAddr = host
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Failed to parse IP address '{}': {}", host, e))?;
+        let ip_addr = match url.host() {
+            Some(url::Host::Ipv4(address)) => IpAddr::V4(address),
+            Some(url::Host::Ipv6(address)) => IpAddr::V6(address),
+            Some(url::Host::Domain(address)) => address
+                .parse::<IpAddr>()
+                .map_err(|_| anyhow::anyhow!("The RPC client address must be an IP address."))?,
+            _ => anyhow::bail!("The RPC client address must be an IP address."),
+        };
 
         for cidr in &self.rpc_portal_whitelist {
-            if cidr.contains(&ip_addr) {
+            if ip_addr.is_loopback() && cidr.contains(&ip_addr) {
                 return Ok(Some(tunnel_info));
             }
         }
@@ -1137,125 +1123,6 @@ impl Instance {
         self.peer_manager.my_peer_id()
     }
 
-    fn get_mapped_listener_manager_rpc_service(
-        &self,
-    ) -> impl MappedListenerManageRpc<Controller = BaseController> + Clone + use<> {
-        #[derive(Clone)]
-        pub struct MappedListenerManagerRpcService(Weak<GlobalCtx>);
-
-        #[async_trait::async_trait]
-        impl MappedListenerManageRpc for MappedListenerManagerRpcService {
-            type Controller = BaseController;
-
-            async fn list_mapped_listener(
-                &self,
-                _: BaseController,
-                _request: ListMappedListenerRequest,
-            ) -> Result<ListMappedListenerResponse, rpc_types::error::Error> {
-                let mut ret = ListMappedListenerResponse::default();
-                let urls = weak_upgrade(&self.0)?.config.get_mapped_listeners();
-                let mapped_listeners: Vec<MappedListener> = urls
-                    .into_iter()
-                    .map(|u| MappedListener {
-                        url: Some(u.into()),
-                    })
-                    .collect();
-                ret.mappedlisteners = mapped_listeners;
-                Ok(ret)
-            }
-        }
-
-        MappedListenerManagerRpcService(Arc::downgrade(&self.global_ctx))
-    }
-
-    fn get_port_forward_manager_rpc_service(
-        &self,
-    ) -> impl PortForwardManageRpc<Controller = BaseController> + Clone + use<> {
-        #[derive(Clone)]
-        pub struct PortForwardManagerRpcService {
-            global_ctx: Weak<GlobalCtx>,
-            #[cfg(feature = "socks5")]
-            _socks5_server: Weak<Socks5Server>,
-        }
-
-        #[async_trait::async_trait]
-        impl PortForwardManageRpc for PortForwardManagerRpcService {
-            type Controller = BaseController;
-
-            async fn list_port_forward(
-                &self,
-                _: BaseController,
-                _request: ListPortForwardRequest,
-            ) -> Result<ListPortForwardResponse, rpc_types::error::Error> {
-                let forwards = weak_upgrade(&self.global_ctx)?.config.get_port_forwards();
-                let cfgs: Vec<PortForwardConfigPb> = forwards.into_iter().map(Into::into).collect();
-                Ok(ListPortForwardResponse { cfgs })
-            }
-        }
-
-        PortForwardManagerRpcService {
-            global_ctx: Arc::downgrade(&self.global_ctx),
-            #[cfg(feature = "socks5")]
-            _socks5_server: Arc::downgrade(&self.socks5_server),
-        }
-    }
-
-    fn get_stats_rpc_service(&self) -> impl StatsRpc<Controller = BaseController> + Clone + use<> {
-        #[derive(Clone)]
-        pub struct StatsRpcService {
-            global_ctx: Weak<GlobalCtx>,
-        }
-
-        #[async_trait::async_trait]
-        impl StatsRpc for StatsRpcService {
-            type Controller = BaseController;
-
-            async fn get_stats(
-                &self,
-                _: BaseController,
-                _request: GetStatsRequest,
-            ) -> Result<GetStatsResponse, rpc_types::error::Error> {
-                let snapshots = weak_upgrade(&self.global_ctx)?
-                    .stats_manager()
-                    .get_all_metrics();
-
-                let metrics = snapshots
-                    .into_iter()
-                    .map(|snapshot| {
-                        let mut labels = std::collections::BTreeMap::new();
-                        for label in snapshot.labels.labels() {
-                            labels.insert(label.key.clone(), label.value.clone());
-                        }
-
-                        MetricSnapshot {
-                            name: snapshot.name_str(),
-                            value: snapshot.value,
-                            labels,
-                        }
-                    })
-                    .collect();
-
-                Ok(GetStatsResponse { metrics })
-            }
-
-            async fn get_prometheus_stats(
-                &self,
-                _: BaseController,
-                _request: GetPrometheusStatsRequest,
-            ) -> Result<GetPrometheusStatsResponse, rpc_types::error::Error> {
-                let global_ctx = weak_upgrade(&self.global_ctx)?;
-                let mut prometheus_text = global_ctx.stats_manager().export_prometheus();
-                prometheus_text.push_str(&global_ctx.dataplane_telemetry().export_prometheus());
-
-                Ok(GetPrometheusStatsResponse { prometheus_text })
-            }
-        }
-
-        StatsRpcService {
-            global_ctx: Arc::downgrade(&self.global_ctx),
-        }
-    }
-
     pub fn get_config_patcher(&self) -> InstanceConfigPatcher {
         InstanceConfigPatcher {
             global_ctx: Arc::downgrade(&self.global_ctx),
@@ -1267,173 +1134,11 @@ impl Instance {
         }
     }
 
-    fn get_config_service(&self) -> impl ConfigRpc<Controller = BaseController> + Clone + use<> {
-        #[derive(Clone)]
-        pub struct ConfigRpcService {
-            patcher: InstanceConfigPatcher,
-            global_ctx: Weak<GlobalCtx>,
-        }
-
-        #[async_trait::async_trait]
-        impl ConfigRpc for ConfigRpcService {
-            type Controller = BaseController;
-
-            async fn patch_config(
-                &self,
-                _: Self::Controller,
-                request: PatchConfigRequest,
-            ) -> crate::proto::rpc_types::error::Result<PatchConfigResponse> {
-                let Some(patch) = request.patch else {
-                    return Ok(PatchConfigResponse::default());
-                };
-
-                self.patcher.apply_patch(patch).await?;
-                Ok(PatchConfigResponse::default())
-            }
-
-            async fn get_config(
-                &self,
-                _: Self::Controller,
-                _request: GetConfigRequest,
-            ) -> crate::proto::rpc_types::error::Result<GetConfigResponse> {
-                let global_ctx = weak_upgrade(&self.global_ctx)?;
-                let config = NetworkConfig::new_from_config(&global_ctx.config)?;
-                Ok(GetConfigResponse {
-                    config: Some(config),
-                })
-            }
-        }
-
-        ConfigRpcService {
-            patcher: self.get_config_patcher(),
+    pub fn control_instance(&self) -> ControlInstance {
+        ControlInstance {
+            peer_manager: Arc::downgrade(&self.peer_manager),
             global_ctx: Arc::downgrade(&self.global_ctx),
-        }
-    }
-
-    pub fn get_api_rpc_service(&self) -> impl InstanceRpcService + use<> {
-        use crate::proto::api::instance::*;
-
-        #[derive(Clone)]
-        struct ApiRpcServiceImpl<A, B, C, E, F, G, H> {
-            control_instance: crate::rpc_service::control::ControlInstance,
-            peer_mgr_rpc_service: A,
-            connector_mgr_rpc_service: B,
-            mapped_listener_mgr_rpc_service: C,
-            tcp_proxy_rpc_services: dashmap::DashMap<
-                String,
-                Arc<dyn TcpProxyRpc<Controller = BaseController> + Send + Sync>,
-            >,
-            acl_manage_rpc_service: E,
-            port_forward_manage_rpc_service: F,
-            stats_rpc_service: G,
-            config_rpc_service: H,
-            peer_center_rpc_service: Arc<PeerCenterInstanceService>,
-            credential_manage_rpc_service: PeerManagerRpcService,
-        }
-
-        #[async_trait::async_trait]
-        impl<
-            A: PeerManageRpc<Controller = BaseController> + Send + Sync,
-            B: ConnectorManageRpc<Controller = BaseController> + Send + Sync,
-            C: MappedListenerManageRpc<Controller = BaseController> + Send + Sync,
-            E: AclManageRpc<Controller = BaseController> + Send + Sync,
-            F: PortForwardManageRpc<Controller = BaseController> + Send + Sync,
-            G: StatsRpc<Controller = BaseController> + Send + Sync,
-            H: ConfigRpc<Controller = BaseController> + Send + Sync,
-        > InstanceRpcService for ApiRpcServiceImpl<A, B, C, E, F, G, H>
-        {
-            fn control_instance(&self) -> crate::rpc_service::control::ControlInstance {
-                self.control_instance.clone()
-            }
-            fn get_peer_manage_service(&self) -> &dyn PeerManageRpc<Controller = BaseController> {
-                &self.peer_mgr_rpc_service
-            }
-
-            fn get_connector_manage_service(
-                &self,
-            ) -> &dyn ConnectorManageRpc<Controller = BaseController> {
-                &self.connector_mgr_rpc_service
-            }
-
-            fn get_mapped_listener_manage_service(
-                &self,
-            ) -> &dyn MappedListenerManageRpc<Controller = BaseController> {
-                &self.mapped_listener_mgr_rpc_service
-            }
-
-            fn get_proxy_service(
-                &self,
-                client_type: &str,
-            ) -> Option<Arc<dyn TcpProxyRpc<Controller = BaseController> + Send + Sync>>
-            {
-                self.tcp_proxy_rpc_services
-                    .get(client_type)
-                    .map(|e| e.clone())
-            }
-
-            fn get_acl_manage_service(&self) -> &dyn AclManageRpc<Controller = BaseController> {
-                &self.acl_manage_rpc_service
-            }
-
-            fn get_port_forward_manage_service(
-                &self,
-            ) -> &dyn PortForwardManageRpc<Controller = BaseController> {
-                &self.port_forward_manage_rpc_service
-            }
-
-            fn get_stats_service(&self) -> &dyn StatsRpc<Controller = BaseController> {
-                &self.stats_rpc_service
-            }
-
-            fn get_config_service(&self) -> &dyn ConfigRpc<Controller = BaseController> {
-                &self.config_rpc_service
-            }
-
-            fn get_peer_center_service(
-                &self,
-            ) -> Arc<dyn PeerCenterRpc<Controller = BaseController> + Send + Sync> {
-                self.peer_center_rpc_service.clone()
-            }
-
-            fn get_credential_manage_service(
-                &self,
-            ) -> &dyn CredentialManageRpc<Controller = BaseController> {
-                &self.credential_manage_rpc_service
-            }
-        }
-
-        ApiRpcServiceImpl {
-            control_instance: crate::rpc_service::control::ControlInstance {
-                peer_manager: Arc::downgrade(&self.peer_manager),
-                global_ctx: Arc::downgrade(&self.global_ctx),
-                patcher: self.get_config_patcher(),
-            },
-            peer_mgr_rpc_service: PeerManagerRpcService::new(self.peer_manager.clone()),
-            connector_mgr_rpc_service: ConnectorManagerRpcService(Arc::downgrade(
-                &self.conn_manager,
-            )),
-            mapped_listener_mgr_rpc_service: self.get_mapped_listener_manager_rpc_service(),
-            tcp_proxy_rpc_services: {
-                let tcp_proxy_rpc_services: dashmap::DashMap<
-                    String,
-                    Arc<dyn TcpProxyRpc<Controller = BaseController> + Send + Sync>,
-                > = dashmap::DashMap::new();
-
-                if let Some(ip_proxy) = self.ip_proxy.as_ref() {
-                    tcp_proxy_rpc_services.insert(
-                        "tcp".to_string(),
-                        Arc::new(TcpProxyRpcService::new(ip_proxy.tcp_proxy())),
-                    );
-                }
-
-                tcp_proxy_rpc_services
-            },
-            acl_manage_rpc_service: PeerManagerRpcService::new(self.peer_manager.clone()),
-            port_forward_manage_rpc_service: self.get_port_forward_manager_rpc_service(),
-            stats_rpc_service: self.get_stats_rpc_service(),
-            config_rpc_service: self.get_config_service(),
-            peer_center_rpc_service: Arc::new(self.peer_center.get_rpc_service()),
-            credential_manage_rpc_service: PeerManagerRpcService::new(self.peer_manager.clone()),
+            patcher: self.get_config_patcher(),
         }
     }
 
