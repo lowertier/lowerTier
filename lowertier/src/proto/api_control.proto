@@ -39,6 +39,7 @@ message GetCapabilitiesResponse {
   repeated string methods = 3;
   uint32 max_page_size = 4;
   uint32 max_watch_wait_ms = 5;
+  repeated string apply_classes = 6;
 }
 
 message ListInstancesRequest { RequestMeta meta = 1; }
@@ -67,6 +68,7 @@ message PeerSnapshot {
   optional uint64 sample_age_ms = 10;
   string metric_scope = 11;
   api.instance.Route route = 12;
+  optional uint64 sample_expiry_ms = 13;
 }
 message ListPeersRequest { RequestMeta meta = 1; Page page = 2; }
 message ListPeersResponse {
@@ -88,6 +90,11 @@ message RouteSnapshot {
   string override_status = 9;
   api.instance.Route route = 10;
   string path_error = 11;
+  string control_policy = 12;
+  string fallback_reason = 13;
+  uint32 first_hop_peer_id = 14;
+  uint32 final_gateway_peer_id = 15;
+  bytes peer_key = 16;
 }
 message ListRoutesRequest { RequestMeta meta = 1; Page page = 2; bool include_paths = 3; }
 message ListRoutesResponse {
@@ -147,6 +154,7 @@ message ListenerSnapshot {
   string auth_state = 5;
   string binding_kind = 6;
   uint64 config_revision = 7;
+  string configured_path = 8;
 }
 message ListListenersRequest { RequestMeta meta = 1; }
 message ListListenersResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated ListenerSnapshot listeners = 3; }
@@ -186,6 +194,106 @@ message RevokeCredentialResponse { ApiError error = 1; bool revoked = 2; }
 message ListPortForwardsRequest { RequestMeta meta = 1; }
 message ListPortForwardsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated common.PortForwardConfigPb port_forwards = 3; }
 
+message ControlConfig { optional string token_file = 1; }
+message IdentityConfig { optional string network_name = 1; optional string network_secret = 2; }
+message PeerConfig { string uri = 1; optional string peer_public_key = 2; }
+message ProxyNetworkConfig { string cidr = 1; optional string mapped_cidr = 2; repeated string allow = 3; }
+message ForwardConfig { string bind_addr = 1; string dst_addr = 2; string proto = 3; }
+message DiscoveryConfig { repeated string trackers = 1; repeated string private_trackers = 2; optional string bind = 3; optional string advertise = 4; }
+message NodeConfig {
+  common.RelayConfig relay = 1;
+  common.CamouflageConfig camouflage = 2;
+  common.LimitsConfig limits = 3;
+  DiscoveryConfig discovery = 4;
+  optional string netns = 5;
+  optional string hostname = 6;
+  optional string instance_name = 7;
+  optional string instance_id = 8;
+  optional string ipv4 = 9;
+  optional string ipv6 = 10;
+  optional bool ipv6_public_addr_provider = 11;
+  optional bool ipv6_public_addr_auto = 12;
+  optional string ipv6_public_addr_prefix = 13;
+  optional bool dhcp = 14;
+  IdentityConfig network_identity = 15;
+  repeated string listeners = 16;
+  repeated string mapped_listeners = 17;
+  repeated string exit_nodes = 18;
+  repeated PeerConfig peer = 19;
+  repeated ProxyNetworkConfig proxy_network = 20;
+  repeated string routes = 21;
+  optional string socks5_proxy = 22;
+  optional string outbound_http_proxy = 23;
+  repeated ForwardConfig port_forward = 24;
+  common.SecureModeConfig secure_mode = 25;
+  common.FlagsInConfig flags = 26;
+  acl.Acl acl = 27;
+  repeated string tcp_whitelist = 28;
+  repeated string udp_whitelist = 29;
+  repeated string stun_servers = 30;
+  repeated string tcp_stun_servers = 31;
+  repeated string stun_servers_v6 = 32;
+  optional string credential_file = 33;
+  ControlConfig control = 34;
+}
+message ConfigPatch {
+  uint64 expected_revision = 1;
+  repeated string field_mask = 2;
+  NodeConfig values = 3;
+  repeated string clear_paths = 4;
+  bool persist = 5;
+  bool stage = 6;
+}
+message ApplyResult {
+  uint64 revision = 1;
+  repeated string live_fields = 2;
+  repeated string new_connection_fields = 3;
+  repeated string restart_fields = 4;
+  repeated ApiError errors = 5;
+}
+message GetConfigRequest { RequestMeta meta = 1; }
+message GetConfigResponse { ApiError error = 1; SnapshotMeta snapshot = 2; NodeConfig desired = 3; NodeConfig active = 4; repeated string restart_fields = 5; }
+message ValidateConfigRequest { RequestMeta meta = 1; ConfigPatch patch = 2; }
+message ValidateConfigResponse { ApiError error = 1; ApplyResult result = 2; }
+message PatchConfigRequest { RequestMeta meta = 1; ConfigPatch patch = 2; }
+message PatchConfigResponse { ApiError error = 1; ApplyResult result = 2; }
+message GetRelayRequest { RequestMeta meta = 1; }
+message GetRelayResponse {
+  ApiError error = 1;
+  SnapshotMeta snapshot = 2;
+  common.RelayConfig config = 3;
+  uint64 total_bytes = 4;
+  repeated api.instance.MetricSnapshot counters = 5;
+  string desired_permission = 6;
+  string advertised_permission = 7;
+  repeated string drop_reasons = 8;
+}
+message GetCamouflageRequest { RequestMeta meta = 1; }
+message GetCamouflageResponse {
+  ApiError error = 1;
+  SnapshotMeta snapshot = 2;
+  common.CamouflageConfig config = 3;
+  string certificate_source = 4;
+  string quic_h2_verification = 5;
+  string direct_wss_verification = 6;
+  string cdn_outer_verification = 7;
+  string cdn_inner_verification = 8;
+}
+message CreateInstanceRequest { RequestMeta meta = 1; NodeConfig config = 2; }
+message CreateInstanceResponse { ApiError error = 1; string instance_id = 2; ApplyResult result = 3; }
+message StartInstanceRequest { RequestMeta meta = 1; }
+message StartInstanceResponse { ApiError error = 1; ApplyResult result = 2; }
+message StopInstanceRequest { RequestMeta meta = 1; }
+message StopInstanceResponse { ApiError error = 1; }
+message DeleteInstanceRequest { RequestMeta meta = 1; }
+message DeleteInstanceResponse { ApiError error = 1; }
+message SetAclRequest { RequestMeta meta = 1; uint64 expected_revision = 2; acl.Acl acl = 3; repeated string tcp_whitelist = 4; repeated string udp_whitelist = 5; bool persist = 6; }
+message SetAclResponse { ApiError error = 1; ApplyResult result = 2; }
+message PutPortForwardRequest { RequestMeta meta = 1; uint64 expected_revision = 2; ForwardConfig port_forward = 3; bool persist = 4; bool stage = 5; }
+message PutPortForwardResponse { ApiError error = 1; ApplyResult result = 2; }
+message DeletePortForwardRequest { RequestMeta meta = 1; uint64 expected_revision = 2; string bind_addr = 3; string proto = 4; bool persist = 5; bool stage = 6; }
+message DeletePortForwardResponse { ApiError error = 1; ApplyResult result = 2; }
+
 message WatchChangesRequest {
   RequestMeta meta = 1;
   repeated string resources = 2;
@@ -215,4 +323,16 @@ service ControlPlaneV1Rpc {
   rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
   rpc ListPortForwards(ListPortForwardsRequest) returns (ListPortForwardsResponse);
   rpc WatchChanges(WatchChangesRequest) returns (WatchChangesResponse);
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse);
+  rpc PatchConfig(PatchConfigRequest) returns (PatchConfigResponse);
+  rpc GetRelay(GetRelayRequest) returns (GetRelayResponse);
+  rpc GetCamouflage(GetCamouflageRequest) returns (GetCamouflageResponse);
+  rpc CreateInstance(CreateInstanceRequest) returns (CreateInstanceResponse);
+  rpc StartInstance(StartInstanceRequest) returns (StartInstanceResponse);
+  rpc StopInstance(StopInstanceRequest) returns (StopInstanceResponse);
+  rpc DeleteInstance(DeleteInstanceRequest) returns (DeleteInstanceResponse);
+  rpc SetAcl(SetAclRequest) returns (SetAclResponse);
+  rpc PutPortForward(PutPortForwardRequest) returns (PutPortForwardResponse);
+  rpc DeletePortForward(DeletePortForwardRequest) returns (DeletePortForwardResponse);
 }

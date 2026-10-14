@@ -74,6 +74,41 @@ Camouflage changes affect new connections. Existing authenticated connections ke
 After FFI uses this service through pbjson, delete `NetworkConfig` conversions and `json_rpc`.
 Web client code is already removed. Do not add a replacement GUI-specific configuration model.
 
+The implemented protobuf schema uses repeated strings for `field_mask`.
+Paths use TOML names, such as `relay.use_relays`, `camouflage.http_host`, and `port_forward`.
+Mask paths cannot overlap clear paths or other mask paths. Arrays replace completely.
+Revision values start at one. Successful changes increment the revision once.
+`GetConfig` returns separate `desired` and `active` projections and pending `restart_fields`.
+`ValidateConfig` uses the same active baseline and apply classes as `PatchConfig`.
+Secrets are absent or use `[REDACTED]`. Untouched secrets remain in the stored configuration.
+ACL group arrays preserve redacted secrets for existing group names.
+Each transaction prepares ACL rules and TLS identity before persistence and publication.
+Failed persistence leaves the previous configuration and revision active.
+
+Relay, limits, hostname, and ACL fields apply live.
+Camouflage HTTP authority, WSS path, and trusted proxy CIDRs affect new connections.
+TLS identity, SNI classification, admission secret, website root, and decoy endpoints require restart when QUIC is enabled.
+This includes QUIC endpoints created by discovery. Existing authenticated connections keep their transport binding.
+Other core settings and port forwards currently require restart while the instance runs.
+Use `stage=true` to store those desired changes. Stop and start the instance to activate staged fields.
+Stopped instances apply configuration fields immediately. Startup rejects patches until the instance service becomes ready.
+Instances created through the API use memory configuration and permit deletion after stop.
+Persistence requires an instance configuration file with write permission.
+
+`ListRoutes` reconstructs only the requested page from a captured immutable graph.
+Each request shares the existing route work limit. A path error reports unavailable or exhausted reconstruction.
+Goodput reconstruction retains each destination's positive delivery threshold.
+Route summaries remain O(V). The captured graphs require O(V + E) storage.
+`sample_expiry_ms` reports the remaining lifetime of a peer measurement.
+Discovery HTTP observations describe the HTTP control socket. They do not identify the VPN transport socket.
+An omitted observation expiry means that the observer did not supply a lifetime.
+
+The FFI JSON bridge accepts the exact service name and PascalCase method names.
+Its manager supplies trusted ownership. The request selects only instances owned by that manager.
+The bridge uses generated pbjson requests and responses, including shared lowercase `ApiError` codes.
+API failures return an error envelope. Invalid C pointers still return the C ABI failure code.
+The FFI manager lock covers lifecycle changes and data-plane handle cleanup.
+
 ## Statistics, logs, watch, and administration
 
 Methods: `GetStats`, `GetPrometheus`, `WatchChanges`, `ReadLogs`, `GetLogConfig`, `SetLogConfig`,

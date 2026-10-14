@@ -32,6 +32,18 @@ pub(super) const METHODS: &[&str] = &[
     "RevokeCredential",
     "ListPortForwards",
     "WatchChanges",
+    "GetConfig",
+    "ValidateConfig",
+    "PatchConfig",
+    "GetRelay",
+    "GetCamouflage",
+    "CreateInstance",
+    "StartInstance",
+    "StopInstance",
+    "DeleteInstance",
+    "SetAcl",
+    "PutPortForward",
+    "DeletePortForward",
 ];
 
 pub(super) fn now_ms() -> i64 {
@@ -149,9 +161,12 @@ impl ControlPlaneService {
         }
     }
 
-    async fn snapshot(&self, instance: &ControlInstance) -> anyhow::Result<SnapshotMeta> {
+    pub(super) async fn snapshot(
+        &self,
+        instance: &ControlInstance,
+    ) -> anyhow::Result<SnapshotMeta> {
         Ok(SnapshotMeta {
-            revision: 1,
+            revision: self.manager.config_revision(instance.context()?.get_id()),
             topology_generation: instance
                 .peers()?
                 .get_peer_map()
@@ -260,6 +275,11 @@ impl ControlPlaneService {
                     loss_ppm: selected.and_then(|conn| conn.tx_loss_ppm),
                     delivery_bps: selected.and_then(|conn| conn.tx_delivery_bps),
                     sample_age_ms: selected.and_then(|conn| conn.speed_sample_age_ms),
+                    sample_expiry_ms: selected.and_then(|conn| {
+                        conn.speed_sample_ttl_ms
+                            .zip(conn.speed_sample_age_ms)
+                            .map(|(ttl, age)| ttl.saturating_sub(age))
+                    }),
                     udp_nat: nat.map_or(0, |nat| nat.udp_nat_type),
                     tcp_nat: nat.map_or(0, |nat| nat.tcp_nat_type),
                     metric_scope: if selected.is_some() {
@@ -280,7 +300,27 @@ impl ControlPlaneService {
             snapshot.topology_generation,
             rows.iter().map(|peer| peer.peer_id).collect::<Vec<_>>(),
         );
-        let (peers, next_page_token) = page(rows, request.page, &stamp)?;
+        let (mut peers, next_page_token) = page(rows, request.page, &stamp)?;
+        let requested = peers.iter().map(|peer| peer.peer_id).collect::<Vec<_>>();
+        let (generation, paths) = instance
+            .peers()?
+            .get_route()
+            .control_routes(&requested)
+            .await;
+        if generation != snapshot.topology_generation {
+            return Err(failure(
+                "CONFLICT",
+                "The peer topology changed. Retry the request.",
+                "page.page_token",
+            ));
+        }
+        let mut paths = paths
+            .into_iter()
+            .map(|row| (row.route.as_ref().unwrap().peer_id, row.path_peer_ids))
+            .collect::<BTreeMap<_, _>>();
+        for peer in &mut peers {
+            peer.path_peer_ids = paths.remove(&peer.peer_id).unwrap_or_default();
+        }
         Ok(ListPeersResponse {
             peers,
             next_page_token,
@@ -295,46 +335,10 @@ impl ControlPlaneService {
         request: ListRoutesRequest,
     ) -> anyhow::Result<ListRoutesResponse> {
         let (id, instance) = self.resolve(request.meta.as_ref())?;
-        let snapshot = self.snapshot(&instance).await?;
-        let flags = instance.context()?.get_flags();
-        let policy = if flags.speed_first {
-            "goodput"
-        } else if flags.latency_first {
-            "latency"
-        } else {
-            "hop"
-        };
-        let mut rows = instance
-            .peers()?
-            .list_routes()
-            .await
-            .into_iter()
-            .map(|route| RouteSnapshot {
-                destination: route.peer_id.to_string(),
-                policy: policy.into(),
-                effective_policy: if flags.speed_first
-                    && route.path_delivery_bps_speed_first.is_none()
-                {
-                    "latency".into()
-                } else {
-                    policy.into()
-                },
-                source: "topology".into(),
-                cost_ms: u64::try_from(route.path_latency).ok(),
-                delivery_bps: if flags.speed_first {
-                    route.path_delivery_bps_speed_first
-                } else {
-                    None
-                },
-                path_error: if request.include_paths {
-                    "The route graph snapshot is not available.".into()
-                } else {
-                    String::new()
-                },
-                route: Some(route),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
+        let mut snapshot = self.snapshot(&instance).await?;
+        let route = instance.peers()?.get_route();
+        let (generation, mut rows) = route.control_routes(&[]).await;
+        snapshot.topology_generation = generation;
         rows.sort_unstable_by_key(|route| route.route.as_ref().unwrap().peer_id);
         let stamp = stamp(
             "routes",
@@ -344,7 +348,28 @@ impl ControlPlaneService {
                 .map(|route| route.destination.as_str())
                 .collect::<Vec<_>>(),
         );
-        let (routes, next_page_token) = page(rows, request.page, &stamp)?;
+        let (mut routes, next_page_token) = page(rows, request.page, &stamp)?;
+        if request.include_paths {
+            let requested = routes
+                .iter()
+                .map(|row| row.route.as_ref().unwrap().peer_id)
+                .collect::<Vec<_>>();
+            let (current, paths) = route.control_routes(&requested).await;
+            if current != generation {
+                return Err(failure(
+                    "CONFLICT",
+                    "The route graph changed. Retry the request.",
+                    "page.page_token",
+                ));
+            }
+            let mut paths = paths
+                .into_iter()
+                .map(|row| (row.route.as_ref().unwrap().peer_id, row))
+                .collect::<BTreeMap<_, _>>();
+            for row in &mut routes {
+                *row = paths.remove(&row.route.as_ref().unwrap().peer_id).unwrap();
+            }
+        }
         Ok(ListRoutesResponse {
             routes,
             next_page_token,
@@ -522,6 +547,9 @@ impl ControlPlaneService {
                     auth_state: "noise_exporter".into(),
                     binding_kind: "transport".into(),
                     config_revision: snapshot.revision,
+                    configured_path: parsed
+                        .as_ref()
+                        .map_or_else(String::new, |uri| uri.path().into()),
                 }
             })
             .collect();
@@ -627,22 +655,22 @@ impl ControlPlaneService {
                 "level",
             ));
         }
-        let sender = crate::rpc_service::logger::LOGGER_LEVEL_SENDER
-            .get()
-            .ok_or_else(|| failure("UNAVAILABLE", "The log reloader is not available.", "level"))?;
-        sender
-            .lock()
-            .map_err(|_| failure("UNAVAILABLE", "The log reloader is not available.", "level"))?
-            .send(request.level.clone())?;
-        if let Some(level) = crate::rpc_service::logger::CURRENT_LOG_LEVEL.get() {
-            *level.lock().map_err(|_| {
-                failure(
-                    "UNAVAILABLE",
-                    "The log configuration is not available.",
-                    "level",
-                )
-            })? = request.level;
+        if let Some(sender) = crate::rpc_service::logger::LOGGER_LEVEL_SENDER.get() {
+            sender
+                .lock()
+                .map_err(|_| failure("UNAVAILABLE", "The log reloader is not available.", "level"))?
+                .send(request.level.clone())?;
         }
+        logs::set_level(request.level.parse()?);
+        let level = crate::rpc_service::logger::CURRENT_LOG_LEVEL
+            .get_or_init(|| std::sync::Mutex::new("info".into()));
+        *level.lock().map_err(|_| {
+            failure(
+                "UNAVAILABLE",
+                "The log configuration is not available.",
+                "level",
+            )
+        })? = request.level;
         Ok(SetLogConfigResponse::default())
     }
 
@@ -653,8 +681,18 @@ impl ControlPlaneService {
     ) -> anyhow::Result<GetAclResponse> {
         let (_, instance) = self.resolve(request.meta.as_ref())?;
         let context = instance.context()?;
+        let mut acl = context.config.get_acl();
+        if let Some(group) = acl
+            .as_mut()
+            .and_then(|acl| acl.acl_v1.as_mut())
+            .and_then(|acl| acl.group.as_mut())
+        {
+            for declaration in &mut group.declares {
+                declaration.group_secret = "[REDACTED]".into();
+            }
+        }
         Ok(GetAclResponse {
-            acl: context.config.get_acl(),
+            acl,
             tcp_whitelist: context.config.get_tcp_whitelist(),
             udp_whitelist: context.config.get_udp_whitelist(),
             snapshot: Some(self.snapshot(&instance).await?),

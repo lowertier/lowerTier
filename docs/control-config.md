@@ -18,6 +18,9 @@ probe_budget_bps = 0
 # server_name = "challenges.cloudflare.com"
 wss_path = "/ws"
 trusted_proxy_cidrs = []
+
+[control]
+token_file = "/path/to/control.token"
 ```
 
 `policy` accepts `hop`, `latency`, and `goodput`. Goodput requires a positive probe budget.
@@ -104,7 +107,8 @@ CDN inner TLS retains the end-to-end exporter binding. Missing subprotocol negot
 TCP and WSS listeners read camouflage changes for new connections.
 Existing connections keep their authenticated transport binding.
 QUIC listeners cache certificates and decoy settings until listener recreation.
-The future control API must prepare replacement listeners before it reports these settings as active.
+The control API stages cached QUIC settings as restart fields while QUIC is enabled.
+Stop and start the instance to recreate those endpoints.
 
 Endpoint URLs retain `via=cdn`, `lanes=1,2,4`, and WSS paths.
 An explicit WSS URL path overrides `camouflage.wss_path`. The listener rejects a different request path.

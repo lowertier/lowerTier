@@ -101,7 +101,21 @@ pub fn init(
 ) -> Result<Option<NewFilterSender>, anyhow::Error> {
     let mut layers = Vec::new();
 
-    layers.push(crate::rpc_service::control::logs::ControlLogLayer.boxed());
+    let control_level = config
+        .get_console_logger_config()
+        .level
+        .as_deref()
+        .unwrap_or("info")
+        .parse::<LevelFilter>()?;
+    crate::rpc_service::control::logs::set_level(control_level);
+    let _ = CURRENT_LOG_LEVEL.set(std::sync::Mutex::new(
+        control_level.to_string().to_ascii_lowercase(),
+    ));
+    layers.push(
+        crate::rpc_service::control::logs::ControlLogLayer
+            .with_filter(crate::rpc_service::control::logs::ControlLogFilter)
+            .boxed(),
+    );
 
     let console_layers = console_layers(
         config

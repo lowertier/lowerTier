@@ -24,6 +24,46 @@ struct LogRing {
 }
 
 static RING: LazyLock<Mutex<LogRing>> = LazyLock::new(|| Mutex::new(LogRing::default()));
+static LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
+
+pub(crate) fn set_level(level: tracing::level_filters::LevelFilter) {
+    use tracing::level_filters::LevelFilter;
+    let value = match level {
+        LevelFilter::OFF => 0,
+        LevelFilter::ERROR => 1,
+        LevelFilter::WARN => 2,
+        LevelFilter::INFO => 3,
+        LevelFilter::DEBUG => 4,
+        _ => 5,
+    };
+    LEVEL.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) struct ControlLogFilter;
+
+impl<S> tracing_subscriber::layer::Filter<S> for ControlLogFilter {
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        _: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        let value = match *metadata.level() {
+            tracing::Level::ERROR => 1,
+            tracing::Level::WARN => 2,
+            tracing::Level::INFO => 3,
+            tracing::Level::DEBUG => 4,
+            tracing::Level::TRACE => 5,
+        };
+        value <= LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn callsite_enabled(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+}
 
 #[derive(Default)]
 struct LogMessage(String);

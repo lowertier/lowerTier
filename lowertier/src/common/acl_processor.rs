@@ -1321,10 +1321,16 @@ impl AclRuleBuilder {
     }
 
     pub fn build(global_ctx: &ArcGlobalCtx) -> anyhow::Result<Option<Acl>> {
+        Self::build_config(global_ctx.config.as_ref())
+    }
+
+    pub(crate) fn build_config(
+        config: &dyn crate::common::config::ConfigLoader,
+    ) -> anyhow::Result<Option<Acl>> {
         let builder = AclRuleBuilder {
-            acl: global_ctx.config.get_acl(),
-            tcp_whitelist: global_ctx.config.get_tcp_whitelist(),
-            udp_whitelist: global_ctx.config.get_udp_whitelist(),
+            acl: config.get_acl(),
+            tcp_whitelist: config.get_tcp_whitelist(),
+            udp_whitelist: config.get_udp_whitelist(),
             whitelist_priority: None,
         };
         builder.do_build()

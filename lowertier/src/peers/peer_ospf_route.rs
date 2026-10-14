@@ -2544,6 +2544,110 @@ struct RouteBuildInput {
     local_proxy_cidrs: Vec<IpCidr>,
 }
 
+impl RouteBuildInput {
+    fn control_path(
+        &self,
+        hop_graph: Option<&PeerGraph>,
+        destination: PeerId,
+        first: PeerId,
+        policy: &str,
+        threshold: u64,
+        budget: &mut usize,
+    ) -> Result<Vec<PeerId>, &'static str> {
+        let graph = if policy == "hop" {
+            hop_graph.unwrap_or(&self.graph)
+        } else {
+            &self.graph
+        };
+        *budget = budget
+            .checked_sub(graph.node_count().saturating_mul(4))
+            .ok_or("The route work budget is exhausted.")?;
+        let find = |peer| {
+            graph
+                .node_references()
+                .find(|(_, id)| **id == peer)
+                .map(|(node, _)| node)
+        };
+        let start = find(first).ok_or("The first hop is absent from the captured graph.")?;
+        let destination =
+            find(destination).ok_or("The destination is absent from the captured graph.")?;
+        if first == graph[self.start_node] {
+            return Err("The selected first hop is invalid.");
+        }
+        let mut labels = vec![None; graph.node_count()];
+        let mut predecessors = vec![None; graph.node_count()];
+        let mut pending = BTreeSet::new();
+        labels[start.index()] = Some((0u64, 0u64));
+        pending.insert((0u64, 0u64, graph[start], start.index()));
+        while let Some((primary, secondary, _, index)) = pending.pop_first() {
+            *budget = budget
+                .checked_sub(1)
+                .ok_or("The route work budget is exhausted.")?;
+            if labels[index] != Some((primary, secondary)) {
+                continue;
+            }
+            if index == destination.index() {
+                break;
+            }
+            let node = NodeIndex::new(index);
+            let mut relax = |next: NodeIndex, cost: u64| -> Result<(), &'static str> {
+                *budget = budget
+                    .checked_sub(1)
+                    .ok_or("The route work budget is exhausted.")?;
+                if cost == u64::MAX {
+                    return Ok(());
+                }
+                if next == self.start_node {
+                    return Ok(());
+                }
+                let quality = if policy == "hop" {
+                    (primary.saturating_add(1), secondary.saturating_add(cost))
+                } else {
+                    (primary.saturating_add(cost), secondary.saturating_add(1))
+                };
+                if labels[next.index()].is_none_or(|previous| quality < previous) {
+                    labels[next.index()] = Some(quality);
+                    predecessors[next.index()] = Some(node);
+                    pending.insert((quality.0, quality.1, graph[next], next.index()));
+                }
+                Ok(())
+            };
+            if policy == "goodput" {
+                for edge in self.speed_graph.edges(node) {
+                    relax(
+                        edge.target(),
+                        if edge.weight().delivery_bps >= threshold {
+                            edge.weight().latency_ms
+                        } else {
+                            u64::MAX
+                        },
+                    )?;
+                }
+            } else {
+                for edge in graph.edges(node) {
+                    relax(edge.target(), *edge.weight() as u64)?;
+                }
+            }
+        }
+        if labels[destination.index()].is_none() {
+            return Err("The selected path is unavailable in the captured graph.");
+        }
+        let mut path = vec![graph[destination]];
+        let mut current = destination;
+        while current != start {
+            *budget = budget
+                .checked_sub(1)
+                .ok_or("The route work budget is exhausted.")?;
+            current =
+                predecessors[current.index()].ok_or("The captured predecessor is unavailable.")?;
+            path.push(graph[current]);
+        }
+        path.push(graph[self.start_node]);
+        path.reverse();
+        Ok(path)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RouteConnBuildInfo {
     connected_peers: BTreeSet<PeerId>,
@@ -4631,6 +4735,10 @@ impl Drop for SyncRouteSession {
 /// Immutable forwarding state published as one unit.
 #[derive(Debug, Clone)]
 struct ForwardingSnapshot {
+    hop_graph: Option<Arc<PeerGraph>>,
+    relay_policy: String,
+    route_input: Option<Arc<RouteBuildInput>>,
+    route_input_memory: Option<Arc<crate::common::global_ctx::ProcessMemoryPermit>>,
     generation: u64,
     control_hop: Arc<HashMap<PeerId, ForwardingNextHop>>,
     route_table: Arc<RouteTableSnapshot>,
@@ -4867,6 +4975,10 @@ impl PeerRouteServiceImpl {
             control_hop: std::sync::Mutex::new(Arc::new(HashMap::new())),
             committed_topology: std::sync::Mutex::new(None),
             forwarding_snapshot: ArcSwap::new(Arc::new(ForwardingSnapshot {
+                hop_graph: None,
+                relay_policy: "hop".into(),
+                route_input: None,
+                route_input_memory: None,
                 generation: 0,
                 control_hop: Arc::new(HashMap::new()),
                 route_table: Arc::new(RouteTable::new().into_snapshot()),
@@ -6080,6 +6192,7 @@ impl PeerRouteServiceImpl {
     fn publish_forwarding_snapshot_for_domains(
         &self,
         domains: RouteRebuildDomains,
+        route_input: Option<&RouteBuildInput>,
     ) -> Result<(), super::route_trait::RouteOriginAuthPublishError> {
         if !domains.needs_publication() {
             return Ok(());
@@ -6190,7 +6303,92 @@ impl PeerRouteServiceImpl {
         )
         .with_control_hop(control_hop.clone());
 
+        let has_route_input = route_input.is_some();
+        let route_input_memory = if let Some(input) = route_input {
+            // Charge cloned graph capacity and request-retained predecessor preparation.
+            let previous_input = previous.route_input.as_ref();
+            let nodes = input
+                .control_graph
+                .capacity()
+                .0
+                .max(input.graph.capacity().0)
+                .max(input.speed_graph.capacity().0);
+            let edges = input
+                .control_graph
+                .capacity()
+                .1
+                .saturating_add(
+                    input
+                        .graph
+                        .capacity()
+                        .1
+                        .max(previous_input.map_or(0, |input| input.graph.capacity().1)),
+                )
+                .saturating_add(
+                    input
+                        .speed_graph
+                        .capacity()
+                        .1
+                        .max(previous_input.map_or(0, |input| input.speed_graph.capacity().1)),
+                );
+            let hop_edges = if domains.topology {
+                input.graph.capacity().1
+            } else {
+                previous
+                    .hop_graph
+                    .as_ref()
+                    .map_or(0, |graph| graph.capacity().1)
+            };
+            let bytes = nodes
+                .saturating_mul(320)
+                .saturating_add(edges.saturating_add(hop_edges).saturating_mul(64));
+            self.global_ctx
+                .process_memory_governor()
+                .try_reserve_owned(bytes)
+                .map(Arc::new)
+        } else if !domains.topology {
+            previous.route_input_memory.clone()
+        } else {
+            None
+        };
+        let route_input = route_input
+            .filter(|_| route_input_memory.is_some())
+            .map(|input| {
+                let mut input = input.clone();
+                if let Some(previous) = &previous.route_input {
+                    if !domains.topology && !domains.cost {
+                        input.graph = previous.graph.clone();
+                    }
+                    if !domains.topology && !domains.delivery {
+                        input.speed_graph = previous.speed_graph.clone();
+                    }
+                }
+                Arc::new(input)
+            })
+            .or_else(|| {
+                (!domains.topology && !has_route_input)
+                    .then(|| previous.route_input.clone())
+                    .flatten()
+            });
         let next_snapshot = Arc::new(ForwardingSnapshot {
+            hop_graph: if route_input_memory.is_none() {
+                None
+            } else if domains.topology {
+                route_input
+                    .as_ref()
+                    .map(|input| Arc::new(input.graph.clone()))
+            } else {
+                previous.hop_graph.clone()
+            },
+            route_input_memory,
+            relay_policy: self
+                .global_ctx
+                .get_flags()
+                .relay_config()
+                .policy()
+                .as_str_name()
+                .into(),
+            route_input,
             generation,
             control_hop,
             route_table,
@@ -6404,51 +6602,53 @@ impl PeerRouteServiceImpl {
             self.update_peer_info_last_update();
         }
 
-        let (mut effective_domains, mut build_input) =
-            match self.update_route_tables_for_domains(domains) {
-                Some(result) => {
+        let (mut effective_domains, mut build_input) = match self
+            .update_route_tables_for_domains(domains)
+        {
+            Some(result) => {
+                self.route_rebuild_failures.swap(0, Ordering::AcqRel);
+                result
+            }
+            None => {
+                let failures = self.route_rebuild_failures.swap(0, Ordering::AcqRel);
+                if failures & RouteRebuildDomains::topology().bits() != 0 {
+                    self.publish_conservative_forwarding_snapshot();
+                    return;
+                }
+                let topology_is_current = self
+                    .committed_topology
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|topology| {
+                        topology.version == self.synced_route_info.version.get()
+                    });
+                if topology_is_current {
+                    if domains.foreign {
+                        self.update_foreign_network_owner_map();
+                        self.rebuild_work
+                            .owner_map_rebuilds
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Err(error) = self.publish_forwarding_snapshot_for_domains(domains, None)
+                    {
+                        tracing::warn!(?error, "forwarding snapshot publication rejected");
+                    } else if domains.foreign {
+                        self.global_ctx
+                            .issue_event(GlobalCtxEvent::PeerRoutesUpdated);
+                    }
+                    return;
+                }
+                let Some(result) =
+                    self.update_route_tables_for_domains(RouteRebuildDomains::topology())
+                else {
                     self.route_rebuild_failures.swap(0, Ordering::AcqRel);
-                    result
-                }
-                None => {
-                    let failures = self.route_rebuild_failures.swap(0, Ordering::AcqRel);
-                    if failures & RouteRebuildDomains::topology().bits() != 0 {
-                        self.publish_conservative_forwarding_snapshot();
-                        return;
-                    }
-                    let topology_is_current = self
-                        .committed_topology
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .is_some_and(|topology| {
-                            topology.version == self.synced_route_info.version.get()
-                        });
-                    if topology_is_current {
-                        if domains.foreign {
-                            self.update_foreign_network_owner_map();
-                            self.rebuild_work
-                                .owner_map_rebuilds
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        if let Err(error) = self.publish_forwarding_snapshot_for_domains(domains) {
-                            tracing::warn!(?error, "forwarding snapshot publication rejected");
-                        } else if domains.foreign {
-                            self.global_ctx
-                                .issue_event(GlobalCtxEvent::PeerRoutesUpdated);
-                        }
-                        return;
-                    }
-                    let Some(result) =
-                        self.update_route_tables_for_domains(RouteRebuildDomains::topology())
-                    else {
-                        self.route_rebuild_failures.swap(0, Ordering::AcqRel);
-                        self.publish_conservative_forwarding_snapshot();
-                        return;
-                    };
-                    result
-                }
-            };
+                    self.publish_conservative_forwarding_snapshot();
+                    return;
+                };
+                result
+            }
+        };
 
         // Sync handlers can update topology while this thread computes owner
         // maps. Do not publish policy and metadata from different topologies.
@@ -6476,7 +6676,9 @@ impl PeerRouteServiceImpl {
             self.mark_interface_peers_dirty();
             return;
         }
-        if let Err(error) = self.publish_forwarding_snapshot_for_domains(effective_domains) {
+        if let Err(error) =
+            self.publish_forwarding_snapshot_for_domains(effective_domains, Some(&build_input))
+        {
             tracing::warn!(?error, "forwarding snapshot publication rejected");
         } else if effective_domains.topology || effective_domains.foreign {
             self.global_ctx
@@ -6495,7 +6697,7 @@ impl PeerRouteServiceImpl {
         self.verified_bridge_attestations.clear();
         *self.bridge_attestation_next_deadline.lock().unwrap() = None;
         if let Err(error) =
-            self.publish_forwarding_snapshot_for_domains(RouteRebuildDomains::topology())
+            self.publish_forwarding_snapshot_for_domains(RouteRebuildDomains::topology(), None)
         {
             tracing::warn!(
                 ?error,
@@ -8469,6 +8671,60 @@ impl Drop for PeerRoute {
     }
 }
 
+impl PeerRoute {
+    fn snapshot_routes(
+        &self,
+        snapshot: &ForwardingSnapshot,
+    ) -> Vec<crate::proto::api::instance::Route> {
+        let route_table = &snapshot.route_table;
+        let route_table_with_cost = &snapshot.route_table_with_cost;
+        let route_table_with_speed = &snapshot.route_table_with_speed;
+        let mut routes = Vec::new();
+        for (peer_id, item) in route_table.peer_infos.iter() {
+            if *peer_id == self.my_peer_id {
+                continue;
+            }
+            let Some(next_hop_peer) = route_table.get_next_hop(*peer_id) else {
+                continue;
+            };
+            let next_hop_peer_latency_first = route_table_with_cost.get_next_hop(*peer_id);
+            let next_hop_peer_speed = route_table_with_speed.get_next_hop(*peer_id);
+            let selected_speed_route = next_hop_peer_speed
+                .or(next_hop_peer_latency_first)
+                .or(Some(next_hop_peer));
+            let mut route: crate::proto::api::instance::Route = item.clone().into();
+            route.next_hop_peer_id = next_hop_peer.next_hop_peer_id;
+            route.cost = next_hop_peer.path_len as i32;
+            route.path_latency = next_hop_peer.path_latency;
+
+            route.next_hop_peer_id_latency_first =
+                next_hop_peer_latency_first.map(|x| x.next_hop_peer_id);
+            route.cost_latency_first = next_hop_peer_latency_first.map(|x| x.path_len as i32);
+            route.path_latency_latency_first = next_hop_peer_latency_first.map(|x| x.path_latency);
+
+            route.next_hop_peer_id_speed_first = selected_speed_route.map(|x| x.next_hop_peer_id);
+            route.path_delivery_bps_speed_first = next_hop_peer_speed.map(|x| x.path_delivery_bps);
+            route.path_latency_speed_first = selected_speed_route.map(|x| x.path_latency);
+            route.path_len_speed_first = selected_speed_route.map(|x| x.path_len as i32);
+
+            route.feature_flag = item.feature_flag;
+
+            // Replace wire role metadata with one locally authenticated snapshot.
+            // A missing attestation is not eligible for peer-center authority.
+            if let Some(authenticated) = self.service_impl.authenticated_peers.get(peer_id) {
+                route.peer_identity_type = authenticated.identity_type as i32;
+                route.secure_auth_level = authenticated.secure_auth_level as i32;
+            } else {
+                route.peer_identity_type = PeerIdentityType::SharedNode as i32;
+                route.secure_auth_level = SecureAuthLevel::EncryptedUnauthenticated as i32;
+            }
+
+            routes.push(route);
+        }
+        routes
+    }
+}
+
 #[async_trait::async_trait]
 impl Route for PeerRoute {
     async fn open(&self, interface: RouteInterfaceBox) -> Result<u8, ()> {
@@ -8564,53 +8820,93 @@ impl Route for PeerRoute {
     }
 
     async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route> {
+        self.snapshot_routes(&self.service_impl.forwarding_snapshot())
+    }
+
+    async fn control_routes(
+        &self,
+        path_peers: &[PeerId],
+    ) -> (u64, Vec<crate::proto::api::control::v1::RouteSnapshot>) {
+        use crate::proto::api::control::v1::RouteSnapshot;
         let snapshot = self.service_impl.forwarding_snapshot();
-        let route_table = &snapshot.route_table;
-        let route_table_with_cost = &snapshot.route_table_with_cost;
-        let route_table_with_speed = &snapshot.route_table_with_speed;
-        let mut routes = Vec::new();
-        for (peer_id, item) in route_table.peer_infos.iter() {
-            if *peer_id == self.my_peer_id {
-                continue;
-            }
-            let Some(next_hop_peer) = route_table.get_next_hop(*peer_id) else {
-                continue;
-            };
-            let next_hop_peer_latency_first = route_table_with_cost.get_next_hop(*peer_id);
-            let next_hop_peer_speed = route_table_with_speed.get_next_hop(*peer_id);
-            let selected_speed_route = next_hop_peer_speed
-                .or(next_hop_peer_latency_first)
-                .or(Some(next_hop_peer));
-            let mut route: crate::proto::api::instance::Route = item.clone().into();
-            route.next_hop_peer_id = next_hop_peer.next_hop_peer_id;
-            route.cost = next_hop_peer.path_len as i32;
-            route.path_latency = next_hop_peer.path_latency;
-
-            route.next_hop_peer_id_latency_first =
-                next_hop_peer_latency_first.map(|x| x.next_hop_peer_id);
-            route.cost_latency_first = next_hop_peer_latency_first.map(|x| x.path_len as i32);
-            route.path_latency_latency_first = next_hop_peer_latency_first.map(|x| x.path_latency);
-
-            route.next_hop_peer_id_speed_first = selected_speed_route.map(|x| x.next_hop_peer_id);
-            route.path_delivery_bps_speed_first = next_hop_peer_speed.map(|x| x.path_delivery_bps);
-            route.path_latency_speed_first = selected_speed_route.map(|x| x.path_latency);
-            route.path_len_speed_first = selected_speed_route.map(|x| x.path_len as i32);
-
-            route.feature_flag = item.feature_flag;
-
-            // Replace wire role metadata with one locally authenticated snapshot.
-            // A missing attestation is not eligible for peer-center authority.
-            if let Some(authenticated) = self.service_impl.authenticated_peers.get(peer_id) {
-                route.peer_identity_type = authenticated.identity_type as i32;
-                route.secure_auth_level = authenticated.secure_auth_level as i32;
-            } else {
-                route.peer_identity_type = PeerIdentityType::SharedNode as i32;
-                route.secure_auth_level = SecureAuthLevel::EncryptedUnauthenticated as i32;
-            }
-
-            routes.push(route);
-        }
-        routes
+        let policy = snapshot.relay_policy.clone();
+        let mut budget = MAX_ROUTE_REBUILD_WORK;
+        let mut routes = self.snapshot_routes(&snapshot);
+        routes.sort_unstable_by_key(|route| route.peer_id);
+        let rows = routes
+            .into_iter()
+            .map(|route| {
+                let effective = if policy == "goodput"
+                    && route
+                        .path_delivery_bps_speed_first
+                        .is_none_or(|rate| rate == 0)
+                {
+                    "latency"
+                } else {
+                    &policy
+                };
+                let table = match effective {
+                    "goodput" => &snapshot.route_table_with_speed,
+                    "latency" => &snapshot.route_table_with_cost,
+                    _ => &snapshot.route_table,
+                };
+                let selected = table
+                    .get_next_hop(route.peer_id)
+                    .or_else(|| snapshot.route_table.get_next_hop(route.peer_id));
+                let mut row = RouteSnapshot {
+                    destination: route.peer_id.to_string(),
+                    policy: policy.clone(),
+                    effective_policy: effective.into(),
+                    source: "topology".into(),
+                    cost_ms: selected.and_then(|hop| u64::try_from(hop.path_latency).ok()),
+                    control_policy: "hop".into(),
+                    first_hop_peer_id: selected.map_or(0, |hop| hop.next_hop_peer_id),
+                    final_gateway_peer_id: route.peer_id,
+                    peer_key: snapshot
+                        .route_table
+                        .peer_infos
+                        .get(&route.peer_id)
+                        .map_or_else(Vec::new, |info| info.noise_static_pubkey.clone()),
+                    fallback_reason: if policy == "goodput" && effective != "goodput" {
+                        "No current delivery measurement is available.".into()
+                    } else {
+                        String::new()
+                    },
+                    delivery_bps: (effective == "goodput")
+                        .then_some(selected.map_or(0, |hop| hop.path_delivery_bps)),
+                    override_status: if selected.is_some_and(|hop| hop.preferred) {
+                        "active"
+                    } else {
+                        "automatic"
+                    }
+                    .into(),
+                    ..Default::default()
+                };
+                if path_peers.contains(&route.peer_id) {
+                    match snapshot
+                        .route_input
+                        .as_ref()
+                        .ok_or("The captured route graph is unavailable.")
+                        .and_then(|input| {
+                            let hop = selected.ok_or("The selected next hop is unavailable.")?;
+                            input.control_path(
+                                snapshot.hop_graph.as_deref(),
+                                route.peer_id,
+                                hop.next_hop_peer_id,
+                                effective,
+                                hop.path_delivery_bps,
+                                &mut budget,
+                            )
+                        }) {
+                        Ok(path) => row.path_peer_ids = path,
+                        Err(error) => row.path_error = error.into(),
+                    }
+                }
+                row.route = Some(route);
+                row
+            })
+            .collect();
+        (snapshot.generation, rows)
     }
 
     async fn list_forwarding_peers(&self) -> super::route_trait::ForwardingPeerSnapshot {

@@ -1047,6 +1047,25 @@ pub trait Route {
 
     async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route>;
 
+    async fn control_routes(
+        &self,
+        _path_peers: &[PeerId],
+    ) -> (u64, Vec<crate::proto::api::control::v1::RouteSnapshot>) {
+        (
+            self.forwarding_generation(),
+            self.list_routes()
+                .await
+                .into_iter()
+                .map(|route| crate::proto::api::control::v1::RouteSnapshot {
+                    destination: route.peer_id.to_string(),
+                    route: Some(route),
+                    path_error: "The route graph is unavailable.".into(),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    }
+
     async fn list_forwarding_peers(&self) -> ForwardingPeerSnapshot {
         Arc::new(ForwardingPeerTable::new(
             self.list_routes()

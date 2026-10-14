@@ -129,7 +129,7 @@ impl ControlToken {
 }
 
 #[cfg(windows)]
-fn create_windows_token(path: &Path) -> anyhow::Result<bool> {
+pub(super) fn create_windows_token(path: &Path) -> anyhow::Result<bool> {
     let script = r#"
 $ErrorActionPreference = 'Stop'
 $path = $env:LOWTIER_TOKEN_ACL_PATH
@@ -158,7 +158,7 @@ try {
 }
 
 #[cfg(windows)]
-fn secure_windows_token(path: &Path) -> anyhow::Result<()> {
+pub(super) fn secure_windows_token(path: &Path) -> anyhow::Result<()> {
     let script = r#"
 $ErrorActionPreference = 'Stop'
 $path = $env:LOWTIER_TOKEN_ACL_PATH

@@ -4,6 +4,7 @@ use anyhow::Context;
 use cidr::IpCidr;
 
 use crate::{
+    common::config::ConfigLoader,
     instance::instance::InstanceRpcServerHook,
     instance_manager::NetworkInstanceManager,
     proto::{
@@ -54,9 +55,22 @@ impl<T: TunnelListener + 'static> ApiRpcServer<T> {
         tunnel: T,
         instance_manager: Arc<NetworkInstanceManager>,
     ) -> anyhow::Result<Self> {
-        let token_path = ControlToken::default_path(
-            instance_manager.get_config_dir().map(|path| path.as_path()),
-        )?;
+        let mut configured = instance_manager
+            .iter()
+            .filter_map(|instance| instance.get_config().get_control_token_file())
+            .collect::<Vec<_>>();
+        configured.sort();
+        configured.dedup();
+        anyhow::ensure!(
+            configured.len() <= 1,
+            "The process requires one control token file."
+        );
+        let token_path = match configured.pop() {
+            Some(path) => path,
+            None => ControlToken::default_path(
+                instance_manager.get_config_dir().map(|path| path.as_path()),
+            )?,
+        };
         let token = ControlToken::load_or_create(&token_path)?;
         let rpc_server = StandAloneServer::new(tunnel);
         register_api_rpc_service(&instance_manager, rpc_server.registry(), token);

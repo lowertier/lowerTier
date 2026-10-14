@@ -35,6 +35,8 @@ pub struct NetworkInstanceManager {
     config_dir: Option<PathBuf>,
     guard_counter: Arc<()>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) control_configs:
+        std::sync::Mutex<BTreeMap<uuid::Uuid, crate::rpc_service::control::config::ConfigState>>,
 }
 
 impl Default for NetworkInstanceManager {
@@ -53,6 +55,7 @@ impl NetworkInstanceManager {
             config_dir: None,
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            control_configs: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -63,6 +66,14 @@ impl NetworkInstanceManager {
 
     pub fn remote_mutation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
         self.remote_mutation_lock.clone()
+    }
+
+    pub(crate) fn config_revision(&self, id: uuid::Uuid) -> u64 {
+        self.control_configs
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map_or(1, |state| state.revision)
     }
 
     fn start_instance_task(&self, instance_id: uuid::Uuid) -> Result<(), anyhow::Error> {
@@ -133,6 +144,10 @@ impl NetworkInstanceManager {
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         self.instance_map.retain(|k, _| instance_ids.contains(k));
+        self.control_configs
+            .lock()
+            .unwrap()
+            .retain(|id, _| instance_ids.contains(id));
         self.instance_map.shrink_to_fit();
         self.instance_error_messages
             .retain(|k, _| instance_ids.contains(k));
@@ -184,6 +199,10 @@ impl NetworkInstanceManager {
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         self.instance_map.retain(|k, _| !instance_ids.contains(k));
+        self.control_configs
+            .lock()
+            .unwrap()
+            .retain(|id, _| !instance_ids.contains(id));
         self.instance_map.shrink_to_fit();
         self.instance_error_messages
             .retain(|k, _| !instance_ids.contains(k));

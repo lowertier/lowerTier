@@ -377,6 +377,9 @@ pub struct TrackerDiscoveryConfig {
 
 #[auto_impl::auto_impl(Box, &)]
 pub trait ConfigLoader: Send + Sync {
+    fn get_control_token_file(&self) -> Option<PathBuf> {
+        None
+    }
     fn get_tracker_discovery(&self) -> Option<TrackerDiscoveryConfig> {
         None
     }
@@ -878,6 +881,7 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
+    control: Option<ControlConfig>,
     relay: Option<RelayConfig>,
     camouflage: Option<CamouflageConfig>,
     limits: Option<crate::common::control_config::LimitsConfig>,
@@ -967,6 +971,12 @@ pub struct TomlConfigLoader {
     config: Arc<Mutex<Config>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ControlConfig {
+    token_file: Option<PathBuf>,
+}
+
 impl Default for TomlConfigLoader {
     fn default() -> Self {
         TomlConfigLoader::new_from_str("").unwrap()
@@ -974,6 +984,10 @@ impl Default for TomlConfigLoader {
 }
 
 impl TomlConfigLoader {
+    pub(crate) fn replace_active(&self, candidate: &Self) {
+        let config = candidate.config.lock().unwrap().clone();
+        *self.config.lock().unwrap() = config;
+    }
     fn normalize_config_source(config: &mut Config) {
         if matches!(
             config.source.as_ref().map(|source| source.source),
@@ -1183,6 +1197,14 @@ impl TomlConfigLoader {
 }
 
 impl ConfigLoader for TomlConfigLoader {
+    fn get_control_token_file(&self) -> Option<PathBuf> {
+        self.config
+            .lock()
+            .unwrap()
+            .control
+            .as_ref()
+            .and_then(|control| control.token_file.clone())
+    }
     fn get_inst_name(&self) -> String {
         self.config
             .lock()

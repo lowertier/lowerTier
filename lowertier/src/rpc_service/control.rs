@@ -8,6 +8,7 @@ use crate::{
     },
 };
 
+pub(crate) mod config;
 mod instance;
 pub(crate) mod logs;
 mod read;
@@ -21,6 +22,7 @@ pub struct ControlPlaneService {
     manager: Arc<NetworkInstanceManager>,
     token: Option<Arc<ControlToken>>,
     epoch: uuid::Uuid,
+    externally_locked: bool,
     stats: Arc<
         std::sync::Mutex<
             std::collections::BTreeMap<
@@ -37,7 +39,7 @@ struct Failure(ApiError);
 
 fn failure(code: &str, message: &str, field_path: &str) -> anyhow::Error {
     Failure(ApiError {
-        code: code.into(),
+        code: code.to_ascii_lowercase(),
         message: message.into(),
         field_path: field_path.into(),
         retryable: false,
@@ -49,7 +51,7 @@ fn api_error(error: anyhow::Error) -> ApiError {
     match error.downcast::<Failure>() {
         Ok(failure) => failure.0,
         Err(_) => ApiError {
-            code: "INTERNAL".into(),
+            code: "internal".into(),
             message: "The control operation failed.".into(),
             ..Default::default()
         },
@@ -62,6 +64,7 @@ impl ControlPlaneService {
             manager,
             token: Some(Arc::new(token)),
             epoch: *std::sync::LazyLock::force(&watch::PROCESS_EPOCH),
+            externally_locked: false,
             stats: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
@@ -71,6 +74,7 @@ impl ControlPlaneService {
             manager,
             token: None,
             epoch: *std::sync::LazyLock::force(&watch::PROCESS_EPOCH),
+            externally_locked: false,
             stats: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
@@ -84,11 +88,19 @@ impl ControlPlaneService {
             return Ok(());
         }
         Err(ApiError {
-            code: "UNAUTHENTICATED".into(),
+            code: "permission_denied".into(),
             message: "A valid control token is required.".into(),
             field_path: "meta.control_token".into(),
             retryable: false,
         })
+    }
+
+    async fn mutation_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        if self.externally_locked {
+            None
+        } else {
+            Some(self.manager.remote_mutation_lock().lock_owned().await)
+        }
     }
 }
 
@@ -99,15 +111,30 @@ pub async fn call_owned_json(
     domain_name: Option<&str>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
+    Ok(
+        call_owned_json_locked(manager, service_name, method_name, domain_name, payload)
+            .await?
+            .0,
+    )
+}
+
+/// Keep the manager lock until the owned adapter completes lifecycle cleanup.
+pub async fn call_owned_json_locked(
+    manager: &Arc<NetworkInstanceManager>,
+    service_name: &str,
+    method_name: &str,
+    domain_name: Option<&str>,
+    payload: serde_json::Value,
+) -> Result<(serde_json::Value, Option<tokio::sync::OwnedMutexGuard<()>>)> {
     let error = if service_name != "api.control.v1.ControlPlaneV1Rpc" {
         Some(failure(
-            "UNSUPPORTED_SERVICE",
+            "INVALID_ARGUMENT",
             "The control service name is invalid.",
             "service_name",
         ))
     } else if !read::METHODS.contains(&method_name) {
         Some(failure(
-            "UNSUPPORTED_METHOD",
+            "INVALID_ARGUMENT",
             "The control method name is invalid.",
             "method_name",
         ))
@@ -121,19 +148,27 @@ pub async fn call_owned_json(
         None
     };
     if let Some(error) = error {
-        return Ok(serde_json::json!({"error": api_error(error)}));
+        return Ok((serde_json::json!({"error": api_error(error)}), None));
     }
-    match ControlPlaneService::for_owned_instances(manager.clone())
+    let guard = if method_name == "WatchChanges" {
+        None
+    } else {
+        Some(manager.remote_mutation_lock().lock_owned().await)
+    };
+    let mut service = ControlPlaneService::for_owned_instances(manager.clone());
+    service.externally_locked = guard.is_some();
+    let response = match service
         .json_call_method(BaseController::default(), method_name, payload)
         .await
     {
-        Ok(response) => Ok(response),
-        Err(_) => Ok(serde_json::json!({"error": ApiError {
-            code: "INVALID_ARGUMENT".into(),
+        Ok(response) => response,
+        Err(_) => serde_json::json!({"error": ApiError {
+            code: "invalid_argument".into(),
             message: "The control request is invalid.".into(),
             ..Default::default()
-        }})),
-    }
+        }}),
+    };
+    Ok((response, guard))
 }
 
 macro_rules! control_service {
@@ -161,6 +196,7 @@ macro_rules! control_service {
                     methods: read::METHODS.iter().map(|method| (*method).into()).collect(),
                     max_page_size: 256,
                     max_watch_wait_ms: 20_000,
+                    apply_classes: vec!["live".into(), "new_connection".into(), "restart".into()],
                     ..Default::default()
                 })
             }
@@ -188,6 +224,18 @@ control_service! {
     revoke_credential, RevokeCredentialRequest, RevokeCredentialResponse, revoke_credential_inner;
     list_port_forwards, ListPortForwardsRequest, ListPortForwardsResponse, list_port_forwards_inner;
     watch_changes, WatchChangesRequest, WatchChangesResponse, watch_changes_inner;
+    get_config, GetConfigRequest, GetConfigResponse, get_config_inner;
+    validate_config, ValidateConfigRequest, ValidateConfigResponse, validate_config_inner;
+    patch_config, PatchConfigRequest, PatchConfigResponse, patch_config_inner;
+    get_relay, GetRelayRequest, GetRelayResponse, get_relay_inner;
+    get_camouflage, GetCamouflageRequest, GetCamouflageResponse, get_camouflage_inner;
+    create_instance, CreateInstanceRequest, CreateInstanceResponse, create_instance_inner;
+    start_instance, StartInstanceRequest, StartInstanceResponse, start_instance_inner;
+    stop_instance, StopInstanceRequest, StopInstanceResponse, stop_instance_inner;
+    delete_instance, DeleteInstanceRequest, DeleteInstanceResponse, delete_instance_inner;
+    set_acl, SetAclRequest, SetAclResponse, set_acl_inner;
+    put_port_forward, PutPortForwardRequest, PutPortForwardResponse, put_port_forward_inner;
+    delete_port_forward, DeletePortForwardRequest, DeletePortForwardResponse, delete_port_forward_inner;
 }
 
 #[cfg(test)]
@@ -223,6 +271,8 @@ tcp_stun_servers = []
 [network_identity]
 network_name = "rpc-test"
 network_secret = "rpc-test-secret"
+[acl.acl_v1.group]
+declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
 [flags]
 no_tun = true
 multi_thread = false
@@ -281,7 +331,7 @@ disable_tcp_hole_punching = true
             .get_capabilities(BaseController::default(), GetCapabilitiesRequest::default())
             .await
             .unwrap();
-        assert_eq!(response.error.unwrap().code, "UNAUTHENTICATED");
+        assert_eq!(response.error.unwrap().code, "permission_denied");
         let meta = Some(RequestMeta {
             instance_id: ids[0].to_string(),
             control_token,
@@ -310,7 +360,7 @@ disable_tcp_hole_punching = true
                 ListRoutesRequest {
                     meta: meta.clone(),
                     page: None,
-                    include_paths: false,
+                    include_paths: true,
                 },
             )
             .await
@@ -322,6 +372,217 @@ disable_tcp_hole_punching = true
                 .as_ref()
                 .is_some_and(|route| route.peer_id == b.my_peer_id())
         }));
+        let selected = routes
+            .routes
+            .iter()
+            .find(|route| route.route.as_ref().unwrap().peer_id == b.my_peer_id())
+            .unwrap();
+        assert_eq!(selected.path_peer_ids, vec![a.my_peer_id(), b.my_peer_id()]);
+        let config = service
+            .get_config(
+                BaseController::default(),
+                GetConfigRequest { meta: meta.clone() },
+            )
+            .await
+            .unwrap();
+        assert!(config.error.is_none(), "{:?}", config.error);
+        assert_eq!(config.snapshot.unwrap().revision, 1);
+        let active = config.active.unwrap();
+        assert!(active.network_identity.unwrap().network_secret.is_none());
+        assert_eq!(
+            active.acl.unwrap().acl_v1.unwrap().group.unwrap().declares[0].group_secret,
+            "[REDACTED]"
+        );
+        let patch = ConfigPatch {
+            expected_revision: 1,
+            field_mask: vec!["relay.use_relays".into()],
+            values: Some(NodeConfig {
+                relay: Some(crate::proto::common::RelayConfig {
+                    use_relays: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let applied = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(patch.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        assert_eq!(applied.result.unwrap().revision, 2);
+        let stale = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(patch),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.error.unwrap().code, "conflict");
+        let patch = ConfigPatch {
+            expected_revision: 2,
+            field_mask: vec!["hostname".into()],
+            values: Some(NodeConfig {
+                hostname: Some("unpublished".into()),
+                ..Default::default()
+            }),
+            persist: true,
+            ..Default::default()
+        };
+        let failed = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(patch),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(failed.error.is_some());
+        let patch = ConfigPatch {
+            expected_revision: 2,
+            field_mask: vec!["listeners".into()],
+            values: Some(NodeConfig {
+                listeners: vec!["quic://127.0.0.1:0".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rejected = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(patch.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.error.unwrap().code, "restart_required");
+        let staged = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(ConfigPatch {
+                        stage: true,
+                        ..patch
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(staged.error.is_none(), "{:?}", staged.error);
+        assert_eq!(staged.result.unwrap().restart_fields, vec!["listeners"]);
+        let config = service
+            .get_config(
+                BaseController::default(),
+                GetConfigRequest { meta: meta.clone() },
+            )
+            .await
+            .unwrap();
+        assert!(config.error.is_none(), "{:?}", config.error);
+        assert_eq!(config.snapshot.unwrap().revision, 3);
+        assert!(config.active.as_ref().unwrap().listeners.is_empty());
+        assert_eq!(config.active.unwrap().hostname.as_deref(), None);
+        assert_eq!(config.desired.unwrap().listeners.len(), 1);
+        let validation = service
+            .validate_config(
+                BaseController::default(),
+                ValidateConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(ConfigPatch {
+                        expected_revision: 3,
+                        field_mask: vec!["hostname".into()],
+                        values: Some(NodeConfig {
+                            hostname: Some("rpc-host".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(validation.error.is_none(), "{:?}", validation.error);
+        assert_eq!(validation.result.unwrap().restart_fields, vec!["listeners"]);
+        let camouflage = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(ConfigPatch {
+                        expected_revision: 3,
+                        field_mask: vec!["camouflage.http_host".into()],
+                        values: Some(NodeConfig {
+                            camouflage: Some(crate::proto::common::CamouflageConfig {
+                                http_host: "example.test".into(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        stage: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(camouflage.error.is_none(), "{:?}", camouflage.error);
+        assert_eq!(
+            camouflage.result.unwrap().new_connection_fields,
+            vec!["camouflage.http_host"]
+        );
+        let camouflage = service
+            .get_camouflage(
+                BaseController::default(),
+                GetCamouflageRequest { meta: meta.clone() },
+            )
+            .await
+            .unwrap();
+        assert!(camouflage.error.is_none(), "{:?}", camouflage.error);
+        assert_eq!(camouflage.config.unwrap().http_host, "example.test");
+        let invalid = service
+            .validate_config(
+                BaseController::default(),
+                ValidateConfigRequest {
+                    meta: meta.clone(),
+                    patch: Some(ConfigPatch {
+                        expected_revision: 4,
+                        field_mask: vec![
+                            "camouflage.tls_cert".into(),
+                            "camouflage.tls_key".into(),
+                            "camouflage.server_name".into(),
+                            "camouflage.website_root".into(),
+                        ],
+                        values: Some(NodeConfig {
+                            camouflage: Some(crate::proto::common::CamouflageConfig {
+                                tls_cert: dir.path().join("missing.crt").display().to_string(),
+                                tls_key: dir.path().join("missing.key").display().to_string(),
+                                server_name: "example.test".into(),
+                                website_root: dir.path().display().to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        stage: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.error.unwrap().code, "invalid_argument");
         use crate::proto::{common::TunnelInfo, rpc_impl::standalone::RpcServerHook};
         let hook = InstanceRpcServerHook::new(None);
         let ipv6_channel = TunnelInfo {
@@ -348,7 +609,7 @@ disable_tcp_hole_punching = true
             )
             .await
             .unwrap();
-        assert_eq!(rejected.error.unwrap().code, "PERMISSION_DENIED");
+        assert_eq!(rejected.error.unwrap().code, "permission_denied");
         admin_meta.admin_token = "rpc-test-secret".into();
         let accepted = admin_service
             .list_credentials(
@@ -361,6 +622,78 @@ disable_tcp_hole_punching = true
             .await
             .unwrap();
         assert!(accepted.error.is_none(), "{:?}", accepted.error);
+        let stored = TomlConfigLoader::default();
+        let stored_id = stored.get_id();
+        let stored_path = dir.path().join("stored.toml");
+        manager
+            .create_network_instance(
+                stored,
+                ConfigFileControl::new(Some(stored_path.clone()), 0u8.into()),
+            )
+            .unwrap();
+        let stored_meta = Some(RequestMeta {
+            instance_id: stored_id.to_string(),
+            ..Default::default()
+        });
+        let owned = ControlPlaneService::for_owned_instances(manager.clone());
+        let patch = ConfigPatch {
+            expected_revision: 1,
+            field_mask: vec!["hostname".into()],
+            values: Some(NodeConfig {
+                hostname: Some("persisted-host".into()),
+                ..Default::default()
+            }),
+            persist: true,
+            ..Default::default()
+        };
+        let persisted = owned
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: stored_meta.clone(),
+                    patch: Some(patch.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(persisted.error.is_none(), "{:?}", persisted.error);
+        assert_eq!(
+            TomlConfigLoader::new(&stored_path).unwrap().get_hostname(),
+            "persisted-host"
+        );
+        std::fs::remove_file(&stored_path).unwrap();
+        std::fs::create_dir(&stored_path).unwrap();
+        std::fs::write(stored_path.join("entry"), "occupied").unwrap();
+        let failed = owned
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: stored_meta.clone(),
+                    patch: Some(ConfigPatch {
+                        expected_revision: 2,
+                        values: Some(NodeConfig {
+                            hostname: Some("failed-host".into()),
+                            ..Default::default()
+                        }),
+                        ..patch
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.error.unwrap().code, "unavailable");
+        let unchanged = owned
+            .get_config(
+                BaseController::default(),
+                GetConfigRequest { meta: stored_meta },
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.snapshot.unwrap().revision, 2);
+        assert_eq!(
+            unchanged.active.unwrap().hostname.as_deref(),
+            Some("persisted-host")
+        );
         for id in ids {
             manager.stop_network_instance(id).await.unwrap();
         }

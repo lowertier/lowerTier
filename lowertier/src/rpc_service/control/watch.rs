@@ -35,6 +35,7 @@ const RESOURCES: &[&str] = &[
 struct Cursor {
     epoch: uuid::Uuid,
     instance_id: uuid::Uuid,
+    incarnation: u32,
     sampled_at: i64,
     generations: BTreeMap<String, Vec<u64>>,
 }
@@ -49,9 +50,11 @@ impl ControlPlaneService {
         let mut topology = 0;
         let mut l2 = vec![0; 5];
         let mut discovery = 0;
+        let mut incarnation = 0;
         if let Some(instance) = instance {
             event = instance.context()?.control_generation();
             let peers = instance.peers()?;
+            incarnation = peers.my_peer_id();
             topology = peers.get_peer_map().forwarding_generation().await;
             let counters = peers.l2_counters();
             l2 = vec![
@@ -84,6 +87,7 @@ impl ControlPlaneService {
             let generation = match resource.as_str() {
                 "stats" => vec![sampled_at.max(0) as u64 / 1000],
                 "logs" => vec![logs::generation()],
+                "config" => vec![self.manager.config_revision(id)],
                 "l2" => l2.clone(),
                 "discovery" => vec![event, discovery],
                 "peers" | "routes" | "relay" => vec![event, topology],
@@ -113,6 +117,7 @@ impl ControlPlaneService {
         Ok(Cursor {
             epoch: self.epoch,
             instance_id: id,
+            incarnation,
             sampled_at,
             generations,
         })
@@ -172,6 +177,10 @@ impl ControlPlaneService {
             + Duration::from_millis(u64::from(request.max_wait_ms.min(20_000)));
         loop {
             let current = self.generations(id, &request.resources).await?;
+            let reset = reset
+                || previous
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.incarnation != current.incarnation);
             let changed = current
                 .generations
                 .iter()
