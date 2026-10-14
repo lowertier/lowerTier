@@ -48,13 +48,13 @@ These values describe equivalent serialization time, not measured RTT or complet
 | Darwin maximum write overshoot | No separate bound | 64 KiB | Unknown / 1.17 ms |
 | h2 stream send buffer | 400 KiB | 128 KiB | 7.28 / 2.33 ms |
 | H2 coalescing, normal | 16 KiB | 16 KiB | 0.29 / 0.29 ms |
-| H2 coalescing, Linux large-buffer setting | 64 KiB | 16 KiB | 1.17 / 0.29 ms |
+| H2 coalescing, Linux large-buffer setting | 64 KiB | 64 KiB | 1.17 / 1.17 ms |
 | WSS flush threshold, one lane | 8 KiB | 8 KiB | 0.15 / 0.15 ms |
 | WSS flush threshold, multiple lanes | 64 KiB | 64 KiB | 1.17 / 1.17 ms |
 
 The H2 stream and coalescing subtotal falls from 7.57 ms to 2.62 ms normally.
-With Linux large buffers, this subtotal falls from 8.45 ms to 2.62 ms.
-Adding the nominal socket threshold gives approximately 4.95 ms.
+With Linux large buffers, this subtotal falls from 8.45 ms to 3.50 ms.
+Adding the nominal socket threshold gives approximately 4.95 ms normally, or 5.83 ms with Linux large buffers.
 On Darwin, one maximum write increases this subtotal to approximately 6.12 ms.
 HTTP/2 encoding, TLS output, packet adapters, and upstream admission add further bounded storage.
 These subtotals are not total transport latency guarantees.
@@ -69,6 +69,8 @@ At 1280 payload bytes per packet, one 64-packet batch represents 1.46 ms at 450 
 Retained allocation capacity and payload bytes measure different quantities.
 
 H2 flush sends an incomplete coalescing buffer immediately.
+Linux large buffers retain the milestone's 64 KiB coalescing threshold to preserve bulk batching.
+That threshold represents 1.17 ms at 450 Mbit/s, or 0.075 ms at 7 Gbit/s.
 WSS explicit flush drains messages below its threshold.
 The lane writer polls sibling flushes when another lane blocks.
 No new fill timer delays sparse traffic.

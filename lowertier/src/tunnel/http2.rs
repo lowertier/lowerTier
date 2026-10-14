@@ -409,7 +409,13 @@ struct H2Writer {
 
 impl H2Writer {
     fn new(send: SendStream<Bytes>) -> Self {
-        let coalesce_bytes = HTTP2_COALESCE_BYTES;
+        let coalesce_bytes = if cfg!(target_os = "linux")
+            && std::env::var_os("LOWTIER_ENABLE_TCP_LARGE_BUFFERS").is_some()
+        {
+            64 * 1024
+        } else {
+            HTTP2_COALESCE_BYTES
+        };
         Self {
             send,
             pending: BytesMut::with_capacity(coalesce_bytes),
