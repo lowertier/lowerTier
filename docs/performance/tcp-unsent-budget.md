@@ -2,15 +2,17 @@
 
 Updated: 2026-10-15. H2 and WSS use a rate-based budget for each socket, including TCP lanes and punched connections.
 The matched confirmation is recorded in [the performance report](lean-core-ab-20261014.md).
-All clean throughput guards pass. Public upload and latency targets remain unmet.
+The report separates the original confirmation from the Darwin buffer follow-up.
 
 ## Socket admission
 
 The unsent threshold is `clamp(rate_bytes_per_second × 0.004, floor, 4 MiB)`.
 The floor is 128 KiB on Linux and 256 KiB on Darwin.
 Every socket receives its floor before TLS starts.
-The write adapter refreshes the estimate at most once per 100 ms, during existing write activity.
-No background task, packet queue, or periodic timer is added.
+Linux refreshes the estimate at most once per 100 ms during write activity.
+Darwin polls one 50 ms timer per socket during write activity, including blocked writes.
+Only an expired timer triggers kernel queries and option updates on Darwin.
+No background task or packet queue is added.
 The shared budget adds one atomic value per socket.
 
 Linux reads `TCP_INFO.tcpi_delivery_rate` in bytes per second.
@@ -28,18 +30,23 @@ The first sample retains the floor.
 [XNU TCP](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/tcp.h) defines the counters.
 
 Darwin checks the unsent threshold in socket readiness, while `send()` can still accept data beyond that threshold.
-The adapter therefore retains the zero-timeout `poll()` check before each send.
-It clears Tokio's cached readiness when the threshold blocks writing.
+The adapter sets `SO_SNDBUF` to the reported congestion window plus the unsent allowance.
+The 256 KiB floor and 4 MiB ceiling apply to the allowance, independently of the congestion window.
+This replaces the zero-timeout `poll()` check before each send.
+Native Tokio scalar and vectored writes stop when the kernel send buffer fills.
+`TCP_NOTSENT_LOWAT` remains configured for readiness notifications.
 Scalar and vectored writes retain their full input lengths.
 The previous separate 64 KiB write cap is removed.
-One caller write can overshoot the threshold. Rustls retains its own output bound.
+Darwin uses the congestion window as a flight estimate. The estimated allowance is not a strict unsent-byte guarantee.
+Rustls retains its own output bound.
 [XNU documentation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man4/tcp.4) describes readiness notifications for this option.
 
 Option failures retain the connection and the last successful budget.
 Other operating systems retain normal socket writes and the 128 KiB H2 scheduling floor.
-Socket send and receive buffers, H2 receive-credit windows, and authentication remain unchanged.
+Linux socket buffers, receive buffers, H2 receive-credit windows, and authentication remain unchanged.
 An 11 ms path at 450 Mbit/s still requires approximately 619 kB in flight.
-The unsent budget does not remove capacity for transmitted bytes.
+Darwin reserves the reported congestion window separately from the unsent allowance.
+Setting `SO_SNDBUF` disables Darwin send-buffer autotuning; the 50 ms updates replace that growth mechanism.
 
 ## H2 admission and ownership
 
@@ -81,7 +88,7 @@ The 4 MiB ceiling limits each stage when a recent rate estimate exceeds current 
 
 ## Verification scope
 
-The socket regression checks option readback, unchanged flight buffers, rate-counter decoding, and Darwin blocked-write recovery.
+The socket regression checks option readback, rate-counter decoding, Darwin buffer bounds, timer refresh, and blocked-write recovery.
 The H2 regression checks changed limits, partial DATA consumption, discarded DATA, and registered wake delivery.
 Existing H2 and WSS tests check framing, authentication, and transport binding.
 The matched campaign compares public upload/download and clean Colima throughput.

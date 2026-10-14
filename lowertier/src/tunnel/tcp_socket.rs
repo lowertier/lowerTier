@@ -18,6 +18,7 @@ pub(super) const TCP_NOTSENT_BYTES: u32 = if cfg!(target_vendor = "apple") {
     128 * 1024
 };
 pub(super) const TCP_MAX_UNSENT_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(not(target_vendor = "apple"))]
 const RATE_INTERVAL: Duration = Duration::from_millis(100);
 
 fn queue_budget(bytes_per_second: u64) -> usize {
@@ -63,23 +64,41 @@ pub(super) fn prepare(stream: TcpStream) -> TcpUnderlay {
     };
     #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
     let limited = false;
-    TcpUnderlay {
+    let underlay = TcpUnderlay {
         stream,
         limited,
         budget: Arc::new(AtomicUsize::new(TCP_NOTSENT_BYTES as usize)),
+        #[cfg(not(target_vendor = "apple"))]
         next_update: Instant::now(),
         #[cfg(target_vendor = "apple")]
         last_sent: None,
+        #[cfg(target_vendor = "apple")]
+        update: Box::pin(tokio::time::sleep(Duration::from_millis(50))),
+        #[cfg(target_vendor = "apple")]
+        send_buffer: 0,
+    };
+    #[cfg(target_vendor = "apple")]
+    {
+        let mut underlay = underlay;
+        underlay.refresh_budget();
+        underlay
     }
+    #[cfg(not(target_vendor = "apple"))]
+    underlay
 }
 
 pub(super) struct TcpUnderlay {
     stream: TcpStream,
     limited: bool,
     budget: Arc<AtomicUsize>,
+    #[cfg(not(target_vendor = "apple"))]
     next_update: Instant,
     #[cfg(target_vendor = "apple")]
     last_sent: Option<(Instant, u64)>,
+    #[cfg(target_vendor = "apple")]
+    update: Pin<Box<tokio::time::Sleep>>,
+    #[cfg(target_vendor = "apple")]
+    send_buffer: usize,
 }
 
 impl TcpUnderlay {
@@ -87,6 +106,7 @@ impl TcpUnderlay {
         self.budget.clone()
     }
 
+    #[cfg(not(target_vendor = "apple"))]
     fn refresh_budget(&mut self) {
         if !self.limited {
             return;
@@ -96,7 +116,7 @@ impl TcpUnderlay {
             return;
         }
         self.next_update = now + RATE_INTERVAL;
-        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        #[cfg(target_os = "linux")]
         if let Ok(rate) = self.send_rate(now) {
             let bytes = queue_budget(rate);
             if bytes != self.budget.load(Ordering::Relaxed) {
@@ -106,6 +126,43 @@ impl TcpUnderlay {
                     self.budget.store(bytes, Ordering::Relaxed);
                 }
             }
+        }
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn refresh_budget(&mut self) {
+        if !self.limited {
+            return;
+        }
+        let result = self
+            .send_capacity(Instant::now())
+            .and_then(|(rate, flight)| {
+                let bytes = queue_budget(rate);
+                // The unsent ceiling excludes flight, which still needs its congestion window.
+                let capacity = flight.saturating_add(bytes);
+                if capacity != self.send_buffer {
+                    socket2::SockRef::from(&self.stream).set_send_buffer_size(capacity)?;
+                    self.send_buffer = capacity;
+                }
+                if bytes != self.budget.load(Ordering::Relaxed) {
+                    set_notsent_lowat(&self.stream, bytes as u32)?;
+                    self.budget.store(bytes, Ordering::Relaxed);
+                }
+                Ok(())
+            });
+        if let Err(error) = result {
+            tracing::warn!(?error, "TCP send budget update failed for tunnel socket");
+        }
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn poll_budget(&mut self, cx: &mut Context<'_>) {
+        use std::future::Future;
+        if self.update.as_mut().poll(cx).is_ready() {
+            self.refresh_budget();
+            self.update
+                .as_mut()
+                .reset(tokio::time::Instant::now() + Duration::from_millis(50));
         }
     }
 
@@ -140,12 +197,20 @@ impl TcpUnderlay {
     }
 
     #[cfg(target_vendor = "apple")]
-    fn send_rate(&mut self, now: Instant) -> io::Result<u64> {
+    fn send_capacity(&mut self, now: Instant) -> io::Result<(u64, usize)> {
         // Darwin packs the TFO bitfields into one u32. libc's counter offsets do not match that ABI.
         #[repr(C)]
         #[derive(Default)]
         struct ConnectionInfo {
-            prefix: [u32; 14],
+            prefix: [u32; 6],
+            cwnd: u32,
+            send_window: u32,
+            socket_bytes: u32,
+            receive_window: u32,
+            rtt: u32,
+            smoothed_rtt: u32,
+            rtt_variance: u32,
+            tfo: u32,
             tx_packets: u64,
             tx_bytes: u64,
             tx_retransmit_bytes: u64,
@@ -154,10 +219,11 @@ impl TcpUnderlay {
         socket_info(&self.stream, nix::libc::TCP_CONNECTION_INFO, &mut info)?;
         let sent = info.tx_bytes.saturating_sub(info.tx_retransmit_bytes);
         let previous = self.last_sent.replace((now, sent));
-        Ok(previous.map_or(0, |(then, bytes)| {
+        let rate = previous.map_or(0, |(then, bytes)| {
             (sent.saturating_sub(bytes) as f64 / now.duration_since(then).as_secs_f64().max(0.001))
                 as u64
-        }))
+        });
+        Ok((rate, info.cwnd as usize))
     }
 }
 
@@ -201,10 +267,10 @@ impl AsyncWrite for TcpUnderlay {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        self.refresh_budget();
         #[cfg(target_vendor = "apple")]
-        return self.poll_send(cx, |socket| socket.send(buf));
+        self.poll_budget(cx);
         #[cfg(not(target_vendor = "apple"))]
+        self.refresh_budget();
         Pin::new(&mut self.stream).poll_write(cx, buf)
     }
 
@@ -216,10 +282,10 @@ impl AsyncWrite for TcpUnderlay {
         if bufs.iter().all(|buf| buf.is_empty()) {
             return Poll::Ready(Ok(0));
         }
-        self.refresh_budget();
         #[cfg(target_vendor = "apple")]
-        return self.poll_send(cx, |socket| socket.send_vectored(bufs));
+        self.poll_budget(cx);
         #[cfg(not(target_vendor = "apple"))]
+        self.refresh_budget();
         Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
     }
 
@@ -233,58 +299,6 @@ impl AsyncWrite for TcpUnderlay {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_shutdown(cx)
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-mod darwin {
-    use super::TcpUnderlay;
-    use std::{
-        io,
-        os::fd::AsRawFd,
-        task::{Context, Poll, ready},
-    };
-    use tokio::io::Interest;
-
-    impl TcpUnderlay {
-        pub(super) fn write_ready(&self) -> io::Result<()> {
-            if !self.limited {
-                return Ok(());
-            }
-            let mut descriptor = nix::libc::pollfd {
-                fd: self.stream.as_raw_fd(),
-                events: nix::libc::POLLOUT,
-                revents: 0,
-            };
-            // poll() uses Darwin's unsent-byte check and never waits here.
-            let result = unsafe { nix::libc::poll(&mut descriptor, 1, 0) };
-            if result < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if descriptor.revents == 0 {
-                return Err(io::ErrorKind::WouldBlock.into());
-            }
-            Ok(())
-        }
-
-        pub(super) fn poll_send(
-            &self,
-            cx: &mut Context<'_>,
-            send: impl Fn(&socket2::Socket) -> io::Result<usize>,
-        ) -> Poll<io::Result<usize>> {
-            loop {
-                ready!(self.stream.poll_write_ready(cx))?;
-                let result = self.stream.try_io(Interest::WRITABLE, || {
-                    self.write_ready()?;
-                    send(&socket2::SockRef::from(&self.stream))
-                });
-                match result {
-                    // Clear Tokio's cached readiness when the unsent limit is hit.
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-                    result => return Poll::Ready(result),
-                }
-            }
-        }
     }
 }
 
@@ -346,39 +360,58 @@ mod tests {
             sent.unwrap();
             read.unwrap();
             assert_eq!(received, [0x5a; 16 * 1024]);
+            #[cfg(target_os = "linux")]
             assert!(client.send_rate(Instant::now()).unwrap() > 0);
+            #[cfg(target_vendor = "apple")]
+            assert!(client.send_capacity(Instant::now()).unwrap().0 > 0);
 
             #[cfg(target_vendor = "apple")]
             {
                 use std::{io, pin::Pin, task::Context};
                 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-                socket2::SockRef::from(&client.stream)
-                    .set_send_buffer_size(1024 * 1024)
+                let capacity = socket2::SockRef::from(&client.stream)
+                    .send_buffer_size()
                     .unwrap();
+                assert_eq!(capacity, client.send_buffer);
+                assert!(capacity >= TCP_NOTSENT_BYTES as usize);
                 client.stream.writable().await.unwrap();
                 let mut sent = 0;
                 let block = [0x5a; 64 * 1024];
-                while client.write_ready().is_ok() {
+                loop {
                     assert!(
                         sent < 8 * 1024 * 1024,
-                        "unsent limit did not stop readiness"
+                        "socket capacity did not stop writing"
                     );
-                    sent += socket2::SockRef::from(&client.stream).send(&block).unwrap();
+                    match client.stream.try_write(&block) {
+                        Ok(bytes) => sent += bytes,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) => panic!("socket write failed: {error}"),
+                    }
                 }
-                assert_eq!(
-                    client.write_ready().unwrap_err().kind(),
-                    io::ErrorKind::WouldBlock
-                );
-                // send() still accepts bytes, although Darwin reports no write readiness.
-                sent += socket2::SockRef::from(&client.stream)
-                    .send(&[0x5a])
-                    .unwrap();
                 let mut cx = Context::from_waker(futures::task::noop_waker_ref());
                 assert!(
                     Pin::new(&mut client)
                         .poll_write(&mut cx, b"wake")
                         .is_pending()
+                );
+                let refreshed = client.last_sent.unwrap().0;
+                let mut first_update = None;
+                let timer = tokio::time::timeout(
+                    Duration::from_millis(120),
+                    std::future::poll_fn(|cx| {
+                        let result = Pin::new(&mut client).poll_write(cx, b"wake");
+                        let updated = client.last_sent.unwrap().0;
+                        if updated > refreshed {
+                            first_update.get_or_insert(updated);
+                        }
+                        result
+                    }),
+                )
+                .await;
+                assert!(timer.is_err(), "the receiver must keep the write blocked");
+                assert!(
+                    first_update.unwrap().duration_since(refreshed) < Duration::from_millis(100)
                 );
                 let (written, received) = tokio::join!(
                     async {
