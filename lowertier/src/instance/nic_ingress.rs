@@ -549,6 +549,9 @@ mod tests {
 
     #[test]
     fn active_memory_and_parallelism_remain_bounded() {
+        oversized_receive_slab_is_compacted_before_active_admission();
+        unserviceable_payload_is_rejected_without_poisoning_flow();
+        exhausted_flow_slots_are_reported_and_reclaimed();
         let mut queue = NicIngressQueue::default();
         let mut active = Vec::new();
         for hash in 0..FLOW_LIMIT as u64 {
@@ -594,7 +597,6 @@ mod tests {
         assert_eq!((queue.bytes, queue.active_bytes, queue.packets), (0, 0, 0));
     }
 
-    #[test]
     fn oversized_receive_slab_is_compacted_before_active_admission() {
         let mut queue = NicIngressQueue::default();
         let mut short = ZCPacket::new_for_tun(ACTIVE_BYTE_LIMIT + 65536, 0);
@@ -611,7 +613,6 @@ mod tests {
         assert!(queue.flows.is_empty());
     }
 
-    #[test]
     fn unserviceable_payload_is_rejected_without_poisoning_flow() {
         let mut queue = NicIngressQueue::default();
         queue.push(9, ZCPacket::new_with_payload_len(ACTIVE_BYTE_LIMIT + 1));
@@ -623,7 +624,6 @@ mod tests {
         assert_eq!(batch.iter().next().unwrap().payload()[0], 3);
     }
 
-    #[test]
     fn exhausted_flow_slots_are_reported_and_reclaimed() {
         let mut queue = NicIngressQueue::default();
         for hash in 0..FLOW_LIMIT as u64 {
