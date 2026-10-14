@@ -46,10 +46,12 @@ async fn caddy_multiplexes_tcp_transports() {
             let web_reservation = TcpListener::bind("127.0.0.1:0").unwrap();
             let web = web_reservation.local_addr().unwrap();
             let mut flags = gen_default_flags();
-            flags.quic_server_name = HOST.to_owned();
-            flags.quic_decoy_upstream = web.to_string();
-            flags.quic_admission_secret = "caddy-routing-test-secret".to_owned();
-            flags.quic_sni_passthrough = true;
+            flags.camouflage_config_mut().server_name = HOST.to_owned();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(web.to_string());
+            flags.camouflage_config_mut().admission_secret = "caddy-routing-test-secret".to_owned();
+            flags.camouflage_config_mut().sni_routing = true;
             let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(12);
             let mut servers = tokio::task::JoinSet::new();
             let mut upstreams = [Vec::new(), Vec::new()];

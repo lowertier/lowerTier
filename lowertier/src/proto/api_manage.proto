@@ -138,6 +138,8 @@ message NetworkConfig {
   repeated uint32 l2_allowed_vlans = 99;
   repeated uint32 l2_allowed_ether_types = 100;
   optional uint64 l2_flood_bytes_per_second = 101;
+  common.RelayConfig relay = 102;
+  common.CamouflageConfig camouflage = 103;
 }
 
 message NetworkPeerConfig {

@@ -21,16 +21,18 @@ use rustls::{
 use crate::{common::config::Flags, tunnel::TunnelError};
 
 pub fn server_identity_paths(flags: &Flags) -> Option<(PathBuf, PathBuf)> {
-    if !flags.quic_tls_cert.is_empty() {
+    if !flags.camouflage_config().tls_cert.is_empty() {
         return Some((
-            PathBuf::from(&flags.quic_tls_cert),
-            PathBuf::from(&flags.quic_tls_key),
+            PathBuf::from(&flags.camouflage_config().tls_cert),
+            PathBuf::from(&flags.camouflage_config().tls_key),
         ));
     }
-    if flags.quic_server_name.is_empty() || !flags.quic_decoy_upstream.is_empty() {
+    if flags.camouflage_config().server_name.is_empty()
+        || !flags.camouflage_config().udp_decoy().is_empty()
+    {
         return None;
     }
-    let live = Path::new("/etc/letsencrypt/live").join(&flags.quic_server_name);
+    let live = Path::new("/etc/letsencrypt/live").join(&flags.camouflage_config().server_name);
     Some((live.join("fullchain.pem"), live.join("privkey.pem")))
 }
 
@@ -97,7 +99,7 @@ pub fn server_identity(
             format!(
                 "open stealth TLS certificate {}; configure explicit paths or install the certificate for {}",
                 cert_path.display(),
-                flags.quic_server_name
+                flags.camouflage_config().server_name
             )
         })?;
         let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
@@ -141,7 +143,8 @@ pub(crate) fn shared_ephemeral_identity() -> (Vec<CertificateDer<'static>>, Priv
 }
 
 pub fn skip_server_verification(flags: &Flags) -> bool {
-    flags.quic_server_name.is_empty() || !flags.quic_decoy_upstream.is_empty()
+    flags.camouflage_config().server_name.is_empty()
+        || !flags.camouflage_config().udp_decoy().is_empty()
 }
 
 /// rustls defaults to AES-256-GCM first. Chrome and Safari offer AES-128-GCM,
@@ -246,8 +249,8 @@ pub fn client_server_name(
     flags: &Flags,
     url: &url::Url,
 ) -> Result<ServerName<'static>, TunnelError> {
-    let name = if !flags.quic_server_name.is_empty() {
-        flags.quic_server_name.clone()
+    let name = if !flags.camouflage_config().server_name.is_empty() {
+        flags.camouflage_config().server_name.clone()
     } else {
         url.domain()
             .map(str::to_string)
@@ -318,16 +321,16 @@ pub(crate) struct ConnectIpAdmission {
 impl ConnectIpAdmission {
     pub(crate) fn from_global_ctx(global_ctx: &ArcGlobalCtx) -> Option<Self> {
         let flags = global_ctx.config.get_flags();
-        let key = if flags.quic_admission_secret.is_empty() {
+        let key = if flags.camouflage_config().admission_secret.is_empty() {
             global_ctx.get_network_identity().network_secret?
         } else {
-            flags.quic_admission_secret
+            flags.camouflage_config().admission_secret.clone()
         };
         Self::from_secret(key)
     }
 
     pub(crate) fn from_flags(flags: &crate::common::config::Flags) -> Option<Self> {
-        Self::from_secret(flags.quic_admission_secret.clone())
+        Self::from_secret(flags.camouflage_config().admission_secret.clone())
     }
 
     fn from_secret(key: String) -> Option<Self> {
@@ -390,7 +393,7 @@ mod tests {
     #[test]
     fn certificate_paths_follow_server_name_without_manual_paths() {
         let mut flags = gen_default_flags();
-        flags.quic_server_name = "challenges.cloudflare.com".to_owned();
+        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
 
         let paths = server_identity_paths(&flags).unwrap();
 
@@ -407,9 +410,9 @@ mod tests {
     #[test]
     fn explicit_certificate_paths_take_priority() {
         let mut flags = gen_default_flags();
-        flags.quic_server_name = "challenges.cloudflare.com".to_owned();
-        flags.quic_tls_cert = "/run/cert.pem".to_owned();
-        flags.quic_tls_key = "/run/key.pem".to_owned();
+        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+        flags.camouflage_config_mut().tls_cert = "/run/cert.pem".to_owned();
+        flags.camouflage_config_mut().tls_key = "/run/key.pem".to_owned();
 
         assert_eq!(
             server_identity_paths(&flags),
@@ -423,8 +426,10 @@ mod tests {
     #[test]
     fn decoy_pass_through_does_not_load_a_local_certificate() {
         let mut flags = gen_default_flags();
-        flags.quic_server_name = "challenges.cloudflare.com".to_owned();
-        flags.quic_decoy_upstream = "challenges.cloudflare.com:443".to_owned();
+        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+        flags
+            .camouflage_config_mut()
+            .set_decoy_upstream("challenges.cloudflare.com:443".to_owned());
         assert!(server_identity_paths(&flags).is_none());
         assert!(skip_server_verification(&flags));
     }

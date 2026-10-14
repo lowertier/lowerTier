@@ -4104,9 +4104,20 @@ impl PeerConn {
         let is_foreign_network = conn_info_for_instrument.network_name
             != self.global_ctx.get_network_identity().network_name;
         let recv_limiter = if is_foreign_network
-            && self.global_ctx.get_flags().foreign_relay_bps_limit != u64::MAX
+            && self
+                .global_ctx
+                .get_flags()
+                .relay_config()
+                .transit_bps_limit
+                .map_or(u64::MAX, |bits| bits / 8)
+                != u64::MAX
         {
-            let relay_network_bps_limit = self.global_ctx.get_flags().foreign_relay_bps_limit;
+            let relay_network_bps_limit = self
+                .global_ctx
+                .get_flags()
+                .relay_config()
+                .transit_bps_limit
+                .map_or(u64::MAX, |bits| bits / 8);
             let limiter_config = LimiterConfig {
                 burst_rate: None,
                 bps: Some(relay_network_bps_limit),

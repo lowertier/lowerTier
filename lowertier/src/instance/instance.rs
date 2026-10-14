@@ -312,9 +312,15 @@ impl InstanceConfigPatcher {
             global_ctx.set_ipv6(Some(ipv6.into()));
             global_ctx.config.set_ipv6(Some(ipv6.into()));
         }
-        if let Some(disable_relay_data) = patch.disable_relay_data {
+        if patch.relay.is_some() || patch.camouflage.is_some() {
             let mut flags = global_ctx.get_flags();
-            flags.disable_relay_data = disable_relay_data;
+            if let Some(relay) = patch.relay {
+                flags.relay = Some(relay);
+            }
+            if let Some(camouflage) = patch.camouflage {
+                flags.camouflage = Some(camouflage);
+            }
+            crate::common::config::validate_flags(&flags)?;
             global_ctx.set_flags(flags);
         }
         if let Some(enabled) = patch.ipv6_public_addr_provider {

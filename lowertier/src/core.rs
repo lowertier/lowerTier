@@ -343,35 +343,50 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_LATENCY_FIRST",
-        help = t!("core_clap.latency_first").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
+        value_enum,
+        help = "Relay route policy: hop, latency, or goodput"
     )]
-    latency_first: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_SPEED_FIRST",
-        help = t!("core_clap.speed_first").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    speed_first: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_SPEED_PROBE_INTERVAL_SECONDS",
-        help = t!("core_clap.speed_probe_interval_seconds").to_string()
-    )]
-    speed_probe_interval_seconds: Option<u64>,
-
-    #[arg(
-        long,
-        env = "ET_SPEED_PROBE_BUDGET_BPS",
-        help = t!("core_clap.speed_probe_budget_bps").to_string()
-    )]
-    speed_probe_budget_bps: Option<u64>,
+    relay_policy: Option<crate::proto::common::RelayPolicy>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    relay_use_relays: Option<bool>,
+    #[arg(long, value_enum, help = "Local data transit permission")]
+    relay_transit: Option<crate::proto::common::TransitPolicy>,
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    relay_transit_networks: Option<Vec<String>>,
+    #[arg(long, help = "All transit traffic limit in bits per second")]
+    relay_transit_bps_limit: Option<u64>,
+    #[arg(long)]
+    relay_transit_burst_bytes: Option<u64>,
+    #[arg(long)]
+    relay_probe_interval_seconds: Option<u64>,
+    #[arg(long, help = "Probe traffic budget in bits per second")]
+    relay_probe_budget_bps: Option<u64>,
+    #[arg(long, value_parser = parse_relay_prefer)]
+    relay_prefer: Vec<crate::proto::common::RelayPrefer>,
+    #[arg(long, value_parser = parse_relay_link_cost)]
+    relay_link_cost: Vec<crate::proto::common::RelayLinkCost>,
+    #[arg(long, env = "LOWTIER_SERVER_NAME")]
+    server_name: Option<String>,
+    #[arg(long, env = "LOWTIER_TLS_CERT")]
+    tls_cert: Option<String>,
+    #[arg(long, env = "LOWTIER_TLS_KEY")]
+    tls_key: Option<String>,
+    #[arg(long, env = "LOWTIER_ADMISSION_SECRET", hide_env_values = true)]
+    admission_secret: Option<String>,
+    #[arg(long, env = "LOWTIER_WEBSITE_ROOT")]
+    website_root: Option<String>,
+    #[arg(long)]
+    decoy_tcp_upstream: Option<String>,
+    #[arg(long)]
+    decoy_udp_upstream: Option<String>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    sni_routing: Option<bool>,
+    #[arg(long)]
+    wss_path: Option<String>,
+    #[arg(long)]
+    http_host: Option<String>,
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    trusted_proxy_cidrs: Option<Vec<String>>,
 
     #[arg(
         long,
@@ -399,27 +414,6 @@ struct NetworkOptions {
         num_args = 0..
     )]
     manual_routes: Option<Vec<String>>,
-
-    // if not in relay_network_whitelist:
-    // for foreign virtual network, will refuse the incoming connection
-    // for local virtual network, will refuse to relay tun packets
-    #[arg(
-        long,
-        env = "ET_RELAY_NETWORK_WHITELIST",
-        value_delimiter = ',',
-        help = t!("core_clap.relay_network_whitelist").to_string(),
-        num_args = 0..
-    )]
-    relay_network_whitelist: Option<Vec<String>>,
-
-    #[arg(
-        long,
-        env = "ET_P2P_ONLY",
-        help = t!("core_clap.p2p_only").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    p2p_only: Option<bool>,
 
     #[arg(
         long,
@@ -600,68 +594,17 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_QUIC_INITIAL_RECEIVE_WINDOW",
+        env = "LOWTIER_QUIC_INITIAL_RECEIVE_WINDOW",
         help = t!("core_clap.quic_initial_receive_window").to_string()
     )]
     quic_initial_receive_window: Option<u64>,
 
     #[arg(
         long,
-        env = "ET_QUIC_RECEIVE_WINDOW",
+        env = "LOWTIER_QUIC_RECEIVE_WINDOW",
         help = t!("core_clap.quic_receive_window").to_string()
     )]
     quic_receive_window: Option<u64>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_TLS_CERT",
-        help = "Optional QUIC TLS certificate chain in PEM format"
-    )]
-    quic_tls_cert: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_TLS_KEY",
-        help = "Optional QUIC TLS private key in PEM format"
-    )]
-    quic_tls_key: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_SERVER_NAME",
-        help = "DNS name for QUIC SNI, validation, and automatic Let's Encrypt path discovery"
-    )]
-    quic_server_name: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_ADMISSION_SECRET",
-        help = "Shared secret for encrypted HTTP/3 CONNECT-IP admission"
-    )]
-    quic_admission_secret: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_FALLBACK_ROOT",
-        help = "Static website root for ordinary HTTP/3 requests"
-    )]
-    quic_fallback_root: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_DECOY_UPSTREAM",
-        help = "UDP endpoint for QUIC connections without a valid routing marker"
-    )]
-    quic_decoy_upstream: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_QUIC_SNI_PASSTHROUGH",
-        help = "Admit QUIC clients whose TLS SNI matches quic_server_name when other UDP is forwarded to quic_decoy_upstream",
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    quic_sni_passthrough: Option<bool>,
 
     #[arg(
         long,
@@ -691,13 +634,6 @@ struct NetworkOptions {
         help = t!("core_clap.private_mode").to_string(),
     )]
     private_mode: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_FOREIGN_RELAY_BPS_LIMIT",
-        help = t!("core_clap.foreign_relay_bps_limit").to_string(),
-    )]
-    foreign_relay_bps_limit: Option<u64>,
 
     #[arg(
         long,
@@ -891,6 +827,25 @@ impl Cli {
 
         Ok(parsed)
     }
+}
+
+fn parse_relay_prefer(value: &str) -> Result<crate::proto::common::RelayPrefer, String> {
+    let (peer, via) = value.split_once(',').ok_or("expected PEER_KEY,VIA_KEY")?;
+    crate::common::control_config::peer_key(peer).map_err(|error| error.to_string())?;
+    crate::common::control_config::peer_key(via).map_err(|error| error.to_string())?;
+    Ok(crate::proto::common::RelayPrefer {
+        peer: peer.to_owned(),
+        via: via.to_owned(),
+    })
+}
+
+fn parse_relay_link_cost(value: &str) -> Result<crate::proto::common::RelayLinkCost, String> {
+    let (peer, bias) = value.split_once(',').ok_or("expected PEER_KEY,BIAS_MS")?;
+    crate::common::control_config::peer_key(peer).map_err(|error| error.to_string())?;
+    Ok(crate::proto::common::RelayLinkCost {
+        peer: peer.to_owned(),
+        bias_ms: bias.parse::<u32>().map_err(|error| error.to_string())?,
+    })
 }
 
 impl NetworkOptions {
@@ -1231,14 +1186,36 @@ impl NetworkOptions {
         if let Some(v) = self.disable_ipv6 {
             f.enable_ipv6 = !v;
         }
-        f.latency_first = self.latency_first.unwrap_or(f.latency_first);
-        f.speed_first = self.speed_first.unwrap_or(f.speed_first);
-        f.speed_probe_interval_seconds = self
-            .speed_probe_interval_seconds
-            .unwrap_or(f.speed_probe_interval_seconds);
-        f.speed_probe_budget_bps = self
-            .speed_probe_budget_bps
-            .unwrap_or(f.speed_probe_budget_bps);
+        if let Some(policy) = self.relay_policy {
+            f.relay_config_mut().policy = policy as i32;
+        }
+        if let Some(use_relays) = self.relay_use_relays {
+            f.relay_config_mut().use_relays = Some(use_relays);
+        }
+        if let Some(transit) = self.relay_transit {
+            f.relay_config_mut().transit = transit as i32;
+        }
+        if let Some(networks) = &self.relay_transit_networks {
+            f.relay_config_mut().transit_networks = networks.clone();
+        }
+        if let Some(limit) = self.relay_transit_bps_limit {
+            f.relay_config_mut().transit_bps_limit = Some(limit);
+        }
+        if let Some(burst) = self.relay_transit_burst_bytes {
+            f.relay_config_mut().transit_burst_bytes = Some(burst);
+        }
+        if let Some(interval) = self.relay_probe_interval_seconds {
+            f.relay_config_mut().probe_interval_seconds = Some(interval);
+        }
+        if let Some(budget) = self.relay_probe_budget_bps {
+            f.relay_config_mut().probe_budget_bps = budget;
+        }
+        if !self.relay_prefer.is_empty() {
+            f.relay_config_mut().prefer = self.relay_prefer.clone();
+        }
+        if !self.relay_link_cost.is_empty() {
+            f.relay_config_mut().link_cost = self.relay_link_cost.clone();
+        }
         if let Some(tun) = self.tun.as_deref()
             && tun != "userspace-networking"
             && self.dev_name.as_deref().is_some_and(|name| name != tun)
@@ -1258,11 +1235,7 @@ impl NetworkOptions {
         }
         f.enable_exit_node = self.enable_exit_node.unwrap_or(f.enable_exit_node);
         f.no_tun |= cfg!(not(feature = "tun"));
-        if let Some(wl) = self.relay_network_whitelist.as_ref() {
-            f.relay_network_whitelist = wl.join(" ");
-        }
         f.disable_p2p = self.disable_p2p.unwrap_or(f.disable_p2p);
-        f.p2p_only = self.p2p_only.unwrap_or(f.p2p_only);
         f.lazy_p2p = self.lazy_p2p.unwrap_or(f.lazy_p2p);
         f.disable_tcp_hole_punching = self
             .disable_tcp_hole_punching
@@ -1305,30 +1278,47 @@ impl NetworkOptions {
             .quic_initial_receive_window
             .unwrap_or(f.quic_initial_receive_window);
         f.quic_receive_window = self.quic_receive_window.unwrap_or(f.quic_receive_window);
-        if let Some(cert) = &self.quic_tls_cert {
-            f.quic_tls_cert = cert.clone();
+        if let Some(value) = &self.tls_cert {
+            f.camouflage_config_mut().tls_cert = value.clone();
         }
-        if let Some(key) = &self.quic_tls_key {
-            f.quic_tls_key = key.clone();
+        if let Some(value) = &self.tls_key {
+            f.camouflage_config_mut().tls_key = value.clone();
         }
-        if let Some(server_name) = &self.quic_server_name {
-            f.quic_server_name = server_name.clone();
+        if let Some(value) = &self.server_name {
+            f.camouflage_config_mut().server_name = value.clone();
         }
-        if let Some(secret) = &self.quic_admission_secret {
-            f.quic_admission_secret = secret.clone();
+        if let Some(value) = &self.admission_secret {
+            f.camouflage_config_mut().admission_secret = value.clone();
         }
-        if let Some(root) = &self.quic_fallback_root {
-            f.quic_fallback_root = root.clone();
+        if let Some(value) = &self.website_root {
+            f.camouflage_config_mut().website_root = value.clone();
         }
-        if let Some(upstream) = &self.quic_decoy_upstream {
-            f.quic_decoy_upstream = upstream.clone();
+        if let Some(value) = &self.wss_path {
+            f.camouflage_config_mut().wss_path = value.clone();
         }
-        f.quic_sni_passthrough = self.quic_sni_passthrough.unwrap_or(f.quic_sni_passthrough);
+        if let Some(value) = &self.http_host {
+            f.camouflage_config_mut().http_host = value.clone();
+        }
+        if let Some(value) = self.sni_routing {
+            f.camouflage_config_mut().sni_routing = value;
+        }
+        if let Some(cidrs) = &self.trusted_proxy_cidrs {
+            f.camouflage_config_mut().trusted_proxy_cidrs = cidrs.clone();
+        }
+        if self.decoy_tcp_upstream.is_some() || self.decoy_udp_upstream.is_some() {
+            let upstream = f
+                .camouflage_config_mut()
+                .decoy_upstream
+                .get_or_insert_with(Default::default);
+            if let Some(value) = &self.decoy_tcp_upstream {
+                upstream.tcp = value.clone();
+            }
+            if let Some(value) = &self.decoy_udp_upstream {
+                upstream.udp = value.clone();
+            }
+        }
         f.accept_dns = self.accept_dns.unwrap_or(f.accept_dns);
         f.private_mode = self.private_mode.unwrap_or(f.private_mode);
-        f.foreign_relay_bps_limit = self
-            .foreign_relay_bps_limit
-            .unwrap_or(f.foreign_relay_bps_limit);
         f.instance_recv_bps_limit = self
             .instance_recv_bps_limit
             .unwrap_or(f.instance_recv_bps_limit);
@@ -1481,6 +1471,27 @@ fn win_service_event_loop(
 }
 
 fn parse_cli() -> Cli {
+    for (old, replacement) in crate::common::control_config::LEGACY_KEYS {
+        let argument = format!("--{}", old.replace('_', "-"));
+        let environment = format!("ET_{}", old.to_uppercase());
+        if std::env::args().any(|value| value.split('=').next() == Some(argument.as_str()))
+            || std::env::var_os(&environment).is_some()
+        {
+            eprintln!("legacy option {argument}/{environment}; use {replacement}");
+            std::process::exit(2);
+        }
+    }
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str()
+            && name.starts_with("ET_QUIC_")
+        {
+            eprintln!(
+                "legacy environment variable {name}; use LOWTIER_{}",
+                name.trim_start_matches("ET_")
+            );
+            std::process::exit(2);
+        }
+    }
     let mut cli = Cli::parse();
     // for --stun-servers="", we want vec![], but clap will give vec![""], hack for that
     if let Some(stun_servers) = &mut cli.network_options.stun_servers {

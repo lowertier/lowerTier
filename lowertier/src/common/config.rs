@@ -30,11 +30,10 @@ use crate::{
     tunnel::{IpScheme, generate_digest_from_str},
 };
 
+use super::control_config::{CamouflageConfig, LEGACY_KEYS, RelayConfig};
 use super::env_parser;
 
 pub type Flags = crate::proto::common::FlagsInConfig;
-
-const MAX_SPEED_PROBE_INTERVAL_SECONDS: u64 = 300;
 
 pub fn gen_default_flags() -> Flags {
     #[allow(deprecated)]
@@ -45,14 +44,11 @@ pub fn gen_default_flags() -> Flags {
         enable_encryption: true,
         enable_ipv6: true,
         mtu: 1380,
-        latency_first: false,
         enable_exit_node: false,
         proxy_forward_by_system: false,
         no_tun: false,
         use_smoltcp: false,
-        relay_network_whitelist: "*".to_string(),
         disable_p2p: false,
-        p2p_only: false,
         lazy_p2p: false,
         relay_all_peer_rpc: false,
         disable_tcp_hole_punching: false,
@@ -61,7 +57,6 @@ pub fn gen_default_flags() -> Flags {
         bind_device: true,
         accept_dns: false,
         private_mode: false,
-        foreign_relay_bps_limit: u64::MAX,
         multi_thread_count: 2,
         encryption_algorithm: EncryptionAlgorithm::default().to_string(),
         disable_sym_hole_punching: false,
@@ -69,16 +64,12 @@ pub fn gen_default_flags() -> Flags {
 
         need_p2p: false,
         instance_recv_bps_limit: u64::MAX,
-        disable_relay_data: false,
         enable_udp_broadcast_relay: false,
         socket_mark: None,
         underlay_deny_interfaces: Vec::new(),
         underlay_deny_cidrs: Vec::new(),
         quic_initial_receive_window: 2 * 1024 * 1024,
         quic_receive_window: 4 * 1024 * 1024,
-        speed_first: false,
-        speed_probe_interval_seconds: 30,
-        speed_probe_budget_bps: 0,
         port_mode: String::new(),
         interface_adapter: String::new(),
         l2_fdb_capacity: 16_384,
@@ -89,13 +80,8 @@ pub fn gen_default_flags() -> Flags {
         l2_mac_move_hold_seconds: 5,
         l2_allowed_vlans: Vec::new(),
         l2_allowed_ether_types: Vec::new(),
-        quic_tls_cert: String::new(),
-        quic_tls_key: String::new(),
-        quic_server_name: String::new(),
-        quic_admission_secret: String::new(),
-        quic_fallback_root: String::new(),
-        quic_decoy_upstream: String::new(),
-        quic_sni_passthrough: false,
+        relay: None,
+        camouflage: None,
     }
 }
 
@@ -138,49 +124,8 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
                 flags.encryption_algorithm
             )
         })?;
-    if flags.quic_tls_cert.is_empty() != flags.quic_tls_key.is_empty() {
-        anyhow::bail!("quic_tls_cert and quic_tls_key must be configured together");
-    }
-    if !flags.quic_tls_cert.is_empty() && flags.quic_server_name.is_empty() {
-        anyhow::bail!("quic_server_name is required with a QUIC TLS certificate");
-    }
-    if flags.quic_sni_passthrough && flags.quic_decoy_upstream.is_empty() {
-        anyhow::bail!("quic_sni_passthrough requires quic_decoy_upstream");
-    }
-    if !flags.quic_server_name.is_empty()
-        && flags.quic_fallback_root.is_empty()
-        && flags.quic_decoy_upstream.is_empty()
-    {
-        anyhow::bail!("quic_fallback_root is required with quic_server_name");
-    }
-    if !flags.quic_server_name.is_empty()
-        && (flags.quic_server_name.parse::<IpAddr>().is_ok()
-            || flags.quic_server_name.contains('/')
-            || flags.quic_server_name.contains(':'))
-    {
-        anyhow::bail!("quic_server_name must be a DNS name");
-    }
-    if !flags.quic_admission_secret.is_empty() && flags.quic_admission_secret.len() < 16 {
-        anyhow::bail!("quic_admission_secret must contain at least 16 bytes");
-    }
-    if !flags.quic_decoy_upstream.is_empty() {
-        if flags.quic_server_name.is_empty() {
-            anyhow::bail!("quic_server_name is required with quic_decoy_upstream");
-        }
-        if flags.quic_admission_secret.len() < 16 {
-            anyhow::bail!("quic_admission_secret is required with quic_decoy_upstream");
-        }
-        if flags.quic_decoy_upstream.parse::<SocketAddr>().is_err()
-            && !flags.quic_decoy_upstream.contains(':')
-        {
-            anyhow::bail!("quic_decoy_upstream must include a UDP port");
-        }
-    }
-    if !flags.quic_fallback_root.is_empty()
-        && !std::path::Path::new(&flags.quic_fallback_root).is_dir()
-    {
-        anyhow::bail!("quic_fallback_root must be an existing directory");
-    }
+    flags.relay_config().validate()?;
+    flags.camouflage_config().validate()?;
     if !(1..=1_048_576).contains(&flags.l2_fdb_capacity) {
         anyhow::bail!("l2_fdb_capacity must be between 1 and 1048576");
     }
@@ -230,20 +175,6 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
             "quic_receive_window must be at least quic_initial_receive_window and no more than {MAX_QUIC_VARINT}"
         );
     }
-    if flags.speed_first && flags.speed_probe_budget_bps == 0 {
-        anyhow::bail!("speed_first requires a positive speed_probe_budget_bps");
-    }
-    if flags.speed_probe_budget_bps > 0 {
-        if flags.speed_probe_interval_seconds == 0 {
-            anyhow::bail!("speed probes require a positive speed_probe_interval_seconds");
-        }
-        if flags.speed_probe_interval_seconds > MAX_SPEED_PROBE_INTERVAL_SECONDS {
-            anyhow::bail!(
-                "speed_probe_interval_seconds must be at most {MAX_SPEED_PROBE_INTERVAL_SECONDS} when speed probes are enabled"
-            );
-        }
-    }
-
     Ok(())
 }
 
@@ -352,6 +283,7 @@ fn reflected_flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, s
     current_message
         .descriptor()
         .fields()
+        .filter(|field| !matches!(field.name(), "relay" | "camouflage"))
         .filter_map(|field| {
             let key = field.name();
             let value_changed = default_map.get(key) != current_map.get(key);
@@ -936,6 +868,8 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
+    relay: Option<RelayConfig>,
+    camouflage: Option<CamouflageConfig>,
     discovery: Option<TrackerDiscoveryConfig>,
     netns: Option<String>,
     hostname: Option<String>,
@@ -1053,6 +987,10 @@ impl TomlConfigLoader {
             anyhow::Error::new(err).context(message)
         })?;
 
+        let raw = toml::from_str::<toml::Value>(config_str)?;
+        for (old, new) in LEGACY_KEYS {
+            anyhow::ensure!(raw.get(old).is_none(), "removed option '{old}': use {new}");
+        }
         Self::normalize_config_source(&mut config);
 
         Self::new_from_config(config).map_err(|err| {
@@ -1063,7 +1001,9 @@ impl TomlConfigLoader {
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
         let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
-            .context("failed to parse flags")?;
+            .map_err(|error| anyhow::anyhow!("failed to parse flags: {error}"))?;
+        flags.relay = config.relay.clone();
+        flags.camouflage = config.camouflage.clone();
         remove_obsolete_adapter_flags(&mut flags);
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         // Reject contradictory listeners and bootstrap peers before runtime startup.
@@ -1178,6 +1118,20 @@ impl TomlConfigLoader {
             return Err(<serde_json::Error as serde::de::Error>::custom(
                 "removed option 'l2_flood_bps': use l2_flood_bytes_per_second",
             ));
+        }
+        for (old, new) in LEGACY_KEYS {
+            if flags_hashmap.contains_key(*old) {
+                return Err(<serde_json::Error as serde::de::Error>::custom(format!(
+                    "removed option '{old}': use {new}"
+                )));
+            }
+        }
+        for section in ["relay", "camouflage"] {
+            if flags_hashmap.contains_key(section) {
+                return Err(<serde_json::Error as serde::de::Error>::custom(format!(
+                    "use the top-level [{section}] section"
+                )));
+            }
         }
         let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
             Ok(serde_json::Value::Object(map)) => map,
@@ -1593,7 +1547,10 @@ impl ConfigLoader for TomlConfigLoader {
     fn dump(&self) -> String {
         let mut config = self.config.lock().unwrap().clone();
         Self::normalize_config_source(&mut config);
-        config.flags = Some(flags_diff_from_default(&self.get_flags()));
+        let flags = self.get_flags();
+        config.flags = Some(flags_diff_from_default(&flags));
+        config.relay = flags.relay.clone();
+        config.camouflage = flags.camouflage.clone();
         if config.network_identity.as_ref().is_some_and(|identity| {
             identity.network_secret.is_none()
                 && identity.credential_root_fingerprint().is_none()
@@ -1927,12 +1884,10 @@ pub mod tests {
     #[test]
     fn configuration_cases_flags() {
         socket_mark_config_file_roundtrip_none_some_and_zero();
-        underlay_and_quic_flags_have_safe_defaults();
-        speed_first_requires_a_positive_probe_budget();
         quic_decoy_requires_and_accepts_complete_routing_configuration();
         rejects_an_unknown_encryption_algorithm();
-        speed_probes_require_a_positive_interval();
-        speed_probe_interval_has_a_protocol_bound();
+        relay_probes_require_a_valid_budget_and_interval();
+        crate::common::control_config::tests::rejects_legacy_control_keys_with_replacement_names();
         automatic_adapter_uses_the_platform_capability();
         obsolete_adapter_fields_are_removed_during_config_load();
         obsolete_adapter_fields_are_removed_from_runtime_updates();
@@ -1993,60 +1948,24 @@ socket_mark = 66
         assert_eq!(cfg.get_flags().socket_mark, None);
     }
 
-    #[allow(deprecated)]
-    fn underlay_and_quic_flags_have_safe_defaults() {
-        let flags = gen_default_flags();
-
-        assert_eq!(flags.default_protocol, "quic");
-        assert!(flags.interface_adapter.is_empty());
-        assert!(flags.port_mode.is_empty());
-        assert!(!flags.enable_bridge);
-        assert_eq!(flags.l2_fdb_capacity, 16_384);
-        assert_eq!(flags.l2_fdb_age_seconds, 300);
-        assert_eq!(flags.l2_flood_bytes_per_second, 64 * 1024 * 1024);
-        assert_eq!(flags.l2_max_macs_per_peer, 256);
-        assert_eq!(flags.l2_mac_move_hold_seconds, 5);
-        assert!(flags.underlay_deny_interfaces.is_empty());
-        assert!(flags.underlay_deny_cidrs.is_empty());
-        assert_eq!(flags.quic_initial_receive_window, 2 * 1024 * 1024);
-        assert_eq!(flags.quic_receive_window, 4 * 1024 * 1024);
-        assert!(flags.quic_tls_cert.is_empty());
-        assert!(flags.quic_tls_key.is_empty());
-        assert!(flags.quic_server_name.is_empty());
-        assert!(flags.quic_admission_secret.is_empty());
-        assert!(flags.quic_fallback_root.is_empty());
-        assert!(flags.quic_decoy_upstream.is_empty());
-        assert!(!flags.quic_sni_passthrough);
-        assert!(!flags.speed_first);
-        assert_eq!(flags.speed_probe_interval_seconds, 30);
-        assert_eq!(flags.speed_probe_budget_bps, 0);
-    }
-
-    fn speed_first_requires_a_positive_probe_budget() {
-        let mut flags = gen_default_flags();
-        flags.speed_first = true;
-
-        let error = validate_flags(&flags).unwrap_err();
-
-        assert!(error.to_string().contains("speed_probe_budget_bps"));
-    }
-
     fn quic_decoy_requires_and_accepts_complete_routing_configuration() {
         let mut flags = gen_default_flags();
-        flags.quic_server_name = "challenges.cloudflare.com".to_owned();
-        flags.quic_decoy_upstream = "challenges.cloudflare.com:443".to_owned();
+        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+        flags
+            .camouflage_config_mut()
+            .set_decoy_upstream("challenges.cloudflare.com:443".to_owned());
 
         let error = validate_flags(&flags).unwrap_err();
-        assert!(error.to_string().contains("quic_admission_secret"));
+        assert!(error.to_string().contains("camouflage.admission_secret"));
 
-        flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+        flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
         validate_flags(&flags).unwrap();
 
-        flags.quic_sni_passthrough = true;
+        flags.camouflage_config_mut().sni_routing = true;
         validate_flags(&flags).unwrap();
-        flags.quic_decoy_upstream.clear();
+        flags.camouflage_config_mut().decoy_upstream = None;
         let error = validate_flags(&flags).unwrap_err();
-        assert!(error.to_string().contains("quic_sni_passthrough"));
+        assert!(error.to_string().contains("camouflage.sni_routing"));
     }
 
     fn rejects_an_unknown_encryption_algorithm() {
@@ -2062,29 +1981,21 @@ socket_mark = 66
         );
     }
 
-    fn speed_probes_require_a_positive_interval() {
+    fn relay_probes_require_a_valid_budget_and_interval() {
         let mut flags = gen_default_flags();
-        flags.speed_probe_budget_bps = 1;
-        flags.speed_probe_interval_seconds = 0;
-
+        flags.relay_config_mut().policy = crate::proto::common::RelayPolicy::Goodput as i32;
         let error = validate_flags(&flags).unwrap_err();
+        assert!(error.to_string().contains("relay.probe_budget_bps"));
 
-        assert!(error.to_string().contains("speed_probe_interval_seconds"));
-    }
-
-    fn speed_probe_interval_has_a_protocol_bound() {
-        let mut flags = gen_default_flags();
-        flags.speed_probe_budget_bps = 1;
-        flags.speed_probe_interval_seconds = 300;
+        flags.relay_config_mut().probe_budget_bps = 1;
+        flags.relay_config_mut().probe_interval_seconds = Some(0);
+        let error = validate_flags(&flags).unwrap_err();
+        assert!(error.to_string().contains("relay.probe_interval_seconds"));
+        flags.relay_config_mut().probe_interval_seconds = Some(300);
         validate_flags(&flags).unwrap();
-
-        flags.speed_probe_interval_seconds = 301;
+        flags.relay_config_mut().probe_interval_seconds = Some(301);
         let error = validate_flags(&flags).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("at most 300 when speed probes are enabled")
-        );
+        assert!(error.to_string().contains("relay.probe_interval_seconds"));
     }
 
     fn automatic_adapter_uses_the_platform_capability() {
@@ -2205,7 +2116,10 @@ quic_receive_window = 33554432
         flags.multi_thread = false;
         flags.bind_device = false;
         flags.enable_ipv6 = false;
-        flags.relay_network_whitelist = "".to_string();
+        flags.relay_config_mut().transit_networks = ("".to_string())
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
         flags.mtu = 0;
         flags.socket_mark = Some(0);
         cfg.set_flags(flags);
@@ -2218,7 +2132,7 @@ quic_receive_window = 33554432
         assert!(dumped.contains("multi_thread = false"));
         assert!(dumped.contains("bind_device = false"));
         assert!(dumped.contains("enable_ipv6 = false"));
-        assert!(dumped.contains("relay_network_whitelist = \"\""));
+        assert!(dumped.contains("[relay]"));
         assert!(dumped.contains("mtu = 0"));
         assert!(dumped.contains("socket_mark = 0"));
 
@@ -2230,7 +2144,7 @@ quic_receive_window = 33554432
         assert!(!reloaded_flags.multi_thread);
         assert!(!reloaded_flags.bind_device);
         assert!(!reloaded_flags.enable_ipv6);
-        assert_eq!(reloaded_flags.relay_network_whitelist, "");
+        assert!(reloaded_flags.relay_config().transit_networks.is_empty());
         assert_eq!(reloaded_flags.mtu, 0);
         assert_eq!(reloaded_flags.socket_mark, Some(0));
     }

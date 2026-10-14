@@ -10,11 +10,13 @@ message FlagsInConfig {
   bool enable_encryption = 3;
   bool enable_ipv6 = 4;
   uint32 mtu = 5;
-  bool latency_first = 6;
+  reserved 6;
+  reserved "latency_first";
   bool enable_exit_node = 7;
   bool no_tun = 8;
   bool use_smoltcp = 9;
-  string relay_network_whitelist = 10;
+  reserved 10;
+  reserved "relay_network_whitelist";
   bool disable_p2p = 11;
   bool relay_all_peer_rpc = 12;
   bool disable_udp_hole_punching = 13;
@@ -38,8 +40,8 @@ message FlagsInConfig {
   // quic listen port
   reserved 33;
 
-  // a global relay limit, only work for foreign network
-  uint64 foreign_relay_bps_limit = 26;
+  reserved 26;
+  reserved "foreign_relay_bps_limit";
 
   uint32 multi_thread_count = 27;
 
@@ -55,16 +57,16 @@ message FlagsInConfig {
    // tld dns zone for magic dns
   string tld_dns_zone = 31;
 
-  bool p2p_only = 32;
+  reserved 32;
+  reserved "p2p_only";
 
   bool disable_tcp_hole_punching = 34;
 
   bool lazy_p2p = 37;
   bool need_p2p = 38;
   uint64 instance_recv_bps_limit = 39;
-  reserved 40;
-  reserved "disable_upnp";
-  bool disable_relay_data = 41;
+  reserved 40, 41;
+  reserved "disable_upnp", "disable_relay_data";
   bool enable_udp_broadcast_relay = 42;
 
   // Linux-only: SO_MARK (fwmark) value applied to every outbound underlay
@@ -99,31 +101,15 @@ message FlagsInConfig {
   reserved 57;
   reserved "quic_datagram_alternate_path_parity";
 
-  // Prefer the freshest route with the highest measured delivery rate.
-  bool speed_first = 58;
-  // Seconds between directional probe cycles.
-  uint64 speed_probe_interval_seconds = 59;
-  // Maximum node-wide probe traffic in bits per second.
-  uint64 speed_probe_budget_bps = 60;
+  reserved 58, 59, 60;
+  reserved "speed_first", "speed_probe_interval_seconds", "speed_probe_budget_bps";
   // Permit complete Ethernet frames from this authenticated admin node.
   bool enable_bridge = 61;
   // Removed adapter selector. Readers ignore this compatibility field.
   string interface_adapter = 62 [deprecated = true];
-  // HTTP/3 server certificate chain and private key in PEM format.
-  string quic_tls_cert = 63;
-  string quic_tls_key = 64;
-  // DNS name used for QUIC SNI and certificate validation.
-  string quic_server_name = 65;
-  // Shared secret used only for encrypted HTTP/3 CONNECT-IP admission.
-  string quic_admission_secret = 66;
-  // Static website root served to ordinary and unauthorized HTTP/3 requests.
-  string quic_fallback_root = 67;
-  // Forward QUIC connections without a valid routing marker to this UDP endpoint.
-  string quic_decoy_upstream = 68;
-  // Admit QUIC Initials whose TLS SNI matches quic_server_name, so a stream UDP
-  // passthrough can split the VPN from other HTTP/3 sites. Off keeps CID-only
-  // decoy routing when the VPN and the decoy share a name.
-  bool quic_sni_passthrough = 69;
+  reserved 63 to 69;
+  reserved "quic_tls_cert", "quic_tls_key", "quic_server_name", "quic_admission_secret";
+  reserved "quic_fallback_root", "quic_decoy_upstream", "quic_sni_passthrough";
   // Startup-only transport allowlist; empty preserves all transports.
   // Include every listener and bootstrap scheme: quic, tcp (HTTP/2), wss.
   repeated string enabled_protocols = 70;
@@ -135,6 +121,41 @@ message FlagsInConfig {
   // Empty permits all. Values identify the final EtherType after VLAN tags.
   repeated uint32 l2_allowed_ether_types = 74;
   uint64 l2_flood_bytes_per_second = 75;
+  // Runtime snapshots. TOML stores these as top-level sections.
+  RelayConfig relay = 76;
+  CamouflageConfig camouflage = 77;
+}
+
+enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }
+enum TransitPolicy { allow = 0; avoid = 1; deny = 2; }
+
+message RelayPrefer { string peer = 1; string via = 2; }
+message RelayLinkCost { string peer = 1; uint32 bias_ms = 2; }
+message RelayConfig {
+  RelayPolicy policy = 1;
+  optional bool use_relays = 2;
+  TransitPolicy transit = 3;
+  repeated string transit_networks = 4;
+  optional uint64 transit_bps_limit = 5;
+  optional uint64 transit_burst_bytes = 6;
+  optional uint64 probe_interval_seconds = 7;
+  uint64 probe_budget_bps = 8;
+  repeated RelayPrefer prefer = 9;
+  repeated RelayLinkCost link_cost = 10;
+}
+
+message DecoyUpstream { string tcp = 1; string udp = 2; }
+message CamouflageConfig {
+  string server_name = 1;
+  string tls_cert = 2;
+  string tls_key = 3;
+  string admission_secret = 4;
+  string website_root = 5;
+  DecoyUpstream decoy_upstream = 6;
+  bool sni_routing = 7;
+  string wss_path = 8;
+  string http_host = 9;
+  repeated string trusted_proxy_cidrs = 10;
 }
 
 message RpcDescriptor {
@@ -290,6 +311,8 @@ message PeerFeatureFlag {
   bool bridge_input = 15;
   bool multicast_membership = 16;
   bool relay_origin_proof = 17;
+  bool deny_transit_data = 18;
+  bool relay_semantics_v1 = 19;
 }
 
 enum SocketType {

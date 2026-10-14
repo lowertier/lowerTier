@@ -10,6 +10,7 @@ use tracing::Instrument;
 pub mod acl_processor;
 pub mod config;
 pub mod constants;
+pub mod control_config;
 pub mod dataplane_telemetry;
 pub mod dns;
 pub mod env_parser;

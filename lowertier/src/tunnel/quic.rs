@@ -791,7 +791,7 @@ mod tls {
         #[test]
         fn certificate_paths_follow_server_name_without_manual_paths() {
             let mut flags = gen_default_flags();
-            flags.quic_server_name = "challenges.cloudflare.com".to_owned();
+            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
 
             let paths = server_identity_paths(&flags).unwrap();
 
@@ -808,9 +808,9 @@ mod tls {
         #[test]
         fn explicit_certificate_paths_take_priority() {
             let mut flags = gen_default_flags();
-            flags.quic_server_name = "challenges.cloudflare.com".to_owned();
-            flags.quic_tls_cert = "/run/cert.pem".to_owned();
-            flags.quic_tls_key = "/run/key.pem".to_owned();
+            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+            flags.camouflage_config_mut().tls_cert = "/run/cert.pem".to_owned();
+            flags.camouflage_config_mut().tls_key = "/run/key.pem".to_owned();
 
             assert_eq!(
                 server_identity_paths(&flags),
@@ -959,8 +959,14 @@ pub fn server_config(flags: &Flags) -> Result<ServerConfig, TunnelError> {
 pub fn client_config(flags: &Flags) -> Result<ClientConfig, TunnelError> {
     let mut config = ClientConfig::new(Arc::new(tls::client_crypto(flags)?));
     config.transport_config(transport_config(flags)?);
-    if !flags.quic_decoy_upstream.is_empty() {
-        let secret: Arc<[u8]> = Arc::from(flags.quic_admission_secret.clone().into_bytes());
+    if !flags.camouflage_config().udp_decoy().is_empty() {
+        let secret: Arc<[u8]> = Arc::from(
+            flags
+                .camouflage_config()
+                .admission_secret
+                .clone()
+                .into_bytes(),
+        );
         config.initial_dst_cid_provider(Arc::new(move || {
             quic_routing_cid(&secret, SystemTime::now())
         }));
@@ -1559,10 +1565,10 @@ impl QuicEndpointManager {
 
         loop {
             let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy, addr)?;
-            let server_name = if security.flags.quic_server_name.is_empty() {
+            let server_name = if security.flags.camouflage_config().server_name.is_empty() {
                 addr.ip().to_string()
             } else {
-                security.flags.quic_server_name.clone()
+                security.flags.camouflage_config().server_name.clone()
             };
             let connecting =
                 match endpoint.connect_with(client_config(security.flags)?, addr, &server_name) {
@@ -1605,10 +1611,10 @@ impl QuicEndpointManager {
 
         loop {
             let endpoint = self.client_endpoint(ip_version, socket_mark, addr)?;
-            let server_name = if security.flags.quic_server_name.is_empty() {
+            let server_name = if security.flags.camouflage_config().server_name.is_empty() {
                 addr.ip().to_string()
             } else {
-                security.flags.quic_server_name.clone()
+                security.flags.camouflage_config().server_name.clone()
             };
             let connecting =
                 match endpoint.connect_with(client_config(security.flags)?, addr, &server_name) {
@@ -3402,7 +3408,13 @@ impl QuicTunnelListener {
         let remote_addr = initial_remote;
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), remote_addr)?;
         let admission = ConnectIpAdmission::from_global_ctx(&global_ctx);
-        let fallback_root = match global_ctx.config.get_flags().quic_fallback_root {
+        let fallback_root = match global_ctx
+            .config
+            .get_flags()
+            .camouflage_config()
+            .website_root
+            .clone()
+        {
             root if root.is_empty() => None,
             root => Some(PathBuf::from(root)),
         };
@@ -3583,13 +3595,16 @@ impl TunnelListener for QuicTunnelListener {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
         let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
         let flags = self.global_ctx.config.get_flags();
-        let endpoint = if flags.quic_decoy_upstream.is_empty() {
+        let endpoint = if flags.camouflage_config().udp_decoy().is_empty() {
             QuicEndpointManager::server(&self.global_ctx, &endpoint_manager, addr)?
         } else {
-            let upstream = tokio::net::lookup_host(&flags.quic_decoy_upstream)
+            let upstream = tokio::net::lookup_host(&flags.camouflage_config().udp_decoy())
                 .await
                 .with_context(|| {
-                    format!("resolve QUIC decoy upstream {}", flags.quic_decoy_upstream)
+                    format!(
+                        "resolve QUIC decoy upstream {}",
+                        flags.camouflage_config().udp_decoy()
+                    )
                 })?
                 .find(SocketAddr::is_ipv4)
                 .ok_or_else(|| {
@@ -3600,10 +3615,17 @@ impl TunnelListener for QuicTunnelListener {
                 &endpoint_manager,
                 addr,
                 upstream,
-                Arc::from(flags.quic_admission_secret.into_bytes()),
+                Arc::from(
+                    flags
+                        .camouflage_config()
+                        .admission_secret
+                        .clone()
+                        .into_bytes(),
+                ),
                 flags
-                    .quic_sni_passthrough
-                    .then(|| Arc::from(flags.quic_server_name.as_str())),
+                    .camouflage_config()
+                    .sni_routing
+                    .then(|| Arc::from(flags.camouflage_config().server_name.as_str())),
             )?
         };
         self.addr
@@ -3846,10 +3868,10 @@ impl TunnelConnector for QuicTunnelConnector {
                     )?,
                 };
                 let flags = self.global_ctx.get_flags();
-                let name = if flags.quic_server_name.is_empty() {
+                let name = if flags.camouflage_config().server_name.is_empty() {
                     addr.ip().to_string()
                 } else {
-                    flags.quic_server_name.clone()
+                    flags.camouflage_config().server_name.clone()
                 };
                 let connection = endpoint
                     .connect_with(client_config(&flags)?, addr, &name)
@@ -3874,7 +3896,8 @@ impl TunnelConnector for QuicTunnelConnector {
             .global_ctx
             .config
             .get_flags()
-            .quic_server_name
+            .camouflage_config()
+            .server_name
             .is_empty()
         {
             self.addr
@@ -3882,7 +3905,12 @@ impl TunnelConnector for QuicTunnelConnector {
                 .map(str::to_owned)
                 .unwrap_or_else(|| addr.ip().to_string())
         } else {
-            self.global_ctx.config.get_flags().quic_server_name
+            self.global_ctx
+                .config
+                .get_flags()
+                .camouflage_config()
+                .server_name
+                .clone()
         };
         let bearer = connect_ip_bearer(&self.global_ctx);
         let (connect_stream, connect_stream_id) =
@@ -4413,9 +4441,12 @@ mod tests {
             });
             let global_ctx = global_ctx();
             let mut listener_flags = global_ctx.get_flags();
-            listener_flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
-            listener_flags.quic_decoy_upstream = upstream_addr.to_string();
-            listener_flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            listener_flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+            listener_flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(upstream_addr.to_string());
+            listener_flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
             global_ctx.set_flags(listener_flags);
             let mut listener =
                 QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
@@ -4464,9 +4495,12 @@ mod tests {
                 .expect("challenges.cloudflare.com has IPv4");
             let global_ctx = global_ctx();
             let mut listener_flags = global_ctx.get_flags();
-            listener_flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
-            listener_flags.quic_decoy_upstream = upstream.to_string();
-            listener_flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            listener_flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+            listener_flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(upstream.to_string());
+            listener_flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
             global_ctx.set_flags(listener_flags);
             let mut listener =
                 QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
@@ -4474,7 +4508,7 @@ mod tests {
             let backend = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
             let proxy = start_udp_passthrough(backend).await;
             let mut flags = gen_default_flags();
-            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
+            flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
             let mut probe = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             probe.set_default_client_config(client_config(&flags).unwrap());
             let connection = tokio::time::timeout(
@@ -4521,9 +4555,12 @@ mod tests {
             let decoy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let global_ctx = global_ctx();
             let mut flags = global_ctx.get_flags();
-            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
-            flags.quic_decoy_upstream = decoy.local_addr().unwrap().to_string();
-            flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(decoy.local_addr().unwrap().to_string());
+            flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
             global_ctx.set_flags(flags);
 
             let mut listener =
@@ -4571,10 +4608,13 @@ mod tests {
             let decoy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let global_ctx = global_ctx();
             let mut flags = global_ctx.get_flags();
-            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
-            flags.quic_decoy_upstream = decoy.local_addr().unwrap().to_string();
-            flags.quic_admission_secret = "routing-test-secret-material".to_owned();
-            flags.quic_sni_passthrough = true;
+            flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(decoy.local_addr().unwrap().to_string());
+            flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
+            flags.camouflage_config_mut().sni_routing = true;
             global_ctx.set_flags(flags);
 
             let mut listener =
@@ -4612,10 +4652,13 @@ mod tests {
             });
             let global_ctx = global_ctx();
             let mut listener_flags = global_ctx.get_flags();
-            listener_flags.quic_server_name = "lowertier.invalid".to_owned();
-            listener_flags.quic_decoy_upstream = upstream_addr.to_string();
-            listener_flags.quic_admission_secret = "routing-test-secret-material".to_owned();
-            listener_flags.quic_sni_passthrough = true;
+            listener_flags.camouflage_config_mut().server_name = "lowertier.invalid".to_owned();
+            listener_flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(upstream_addr.to_string());
+            listener_flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
+            listener_flags.camouflage_config_mut().sni_routing = true;
             global_ctx.set_flags(listener_flags);
             let mut listener =
                 QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx);
@@ -4715,9 +4758,12 @@ mod tests {
         let decoy = if camouflage {
             let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let mut flags = global_ctx.get_flags();
-            flags.quic_server_name = CAMOUFLAGE_HOST.to_owned();
-            flags.quic_decoy_upstream = socket.local_addr().unwrap().to_string();
-            flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+            flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(socket.local_addr().unwrap().to_string());
+            flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
             global_ctx.set_flags(flags);
             Some(socket)
         } else {

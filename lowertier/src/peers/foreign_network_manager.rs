@@ -212,7 +212,12 @@ impl ForeignNetworkEntry {
             &network.network_name,
         );
 
-        let relay_bps_limit = global_ctx.config.get_flags().foreign_relay_bps_limit;
+        let relay_bps_limit = global_ctx
+            .config
+            .get_flags()
+            .relay_config()
+            .transit_bps_limit
+            .map_or(u64::MAX, |bits| bits / 8);
         let bps_limiter = (relay_bps_limit != u64::MAX).then(|| {
             let limiter_config = LimiterConfig {
                 burst_rate: None,
@@ -658,7 +663,9 @@ impl ForeignNetworkEntry {
                     );
                 } else {
                     if is_relay_data_packet_type(packet_type) {
-                        let disable_relay_data = parent_global_ctx.flags_arc().disable_relay_data;
+                        let disable_relay_data =
+                            (parent_global_ctx.flags_arc().relay_config().transit()
+                                == crate::proto::common::TransitPolicy::Deny);
                         if !relay_data || disable_relay_data {
                             tracing::debug!(
                                 ?from_peer_id,

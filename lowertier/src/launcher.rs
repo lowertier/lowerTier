@@ -943,18 +943,19 @@ impl NetworkConfig {
         }
 
         let mut flags = gen_default_flags();
-        if let Some(latency_first) = self.latency_first {
-            flags.latency_first = latency_first;
+        let legacy = serde_json::to_value(self)?;
+        for (old, replacement) in crate::common::control_config::LEGACY_KEYS {
+            anyhow::ensure!(
+                legacy.get(*old).is_none(),
+                "legacy configuration key {old}; use {replacement}"
+            );
         }
-        if let Some(speed_first) = self.speed_first {
-            flags.speed_first = speed_first;
-        }
-        if let Some(speed_probe_interval_seconds) = self.speed_probe_interval_seconds {
-            flags.speed_probe_interval_seconds = speed_probe_interval_seconds;
-        }
-        if let Some(speed_probe_budget_bps) = self.speed_probe_budget_bps {
-            flags.speed_probe_budget_bps = speed_probe_budget_bps;
-        }
+        anyhow::ensure!(
+            self.enable_relay_network_whitelist.is_none(),
+            "legacy enable_relay_network_whitelist; use relay.transit_networks"
+        );
+        flags.relay = self.relay.clone();
+        flags.camouflage = self.camouflage.clone();
 
         if let Some(dev_name) = self.dev_name.clone() {
             flags.dev_name = dev_name;
@@ -988,10 +989,6 @@ impl NetworkConfig {
 
         if let Some(disable_p2p) = self.disable_p2p {
             flags.disable_p2p = disable_p2p;
-        }
-
-        if let Some(p2p_only) = self.p2p_only {
-            flags.p2p_only = p2p_only;
         }
 
         if let Some(lazy_p2p) = self.lazy_p2p {
@@ -1038,27 +1035,6 @@ impl NetworkConfig {
         if let Some(quic_receive_window) = self.quic_receive_window {
             flags.quic_receive_window = quic_receive_window;
         }
-        if let Some(cert) = &self.quic_tls_cert {
-            flags.quic_tls_cert = cert.clone();
-        }
-        if let Some(key) = &self.quic_tls_key {
-            flags.quic_tls_key = key.clone();
-        }
-        if let Some(server_name) = &self.quic_server_name {
-            flags.quic_server_name = server_name.clone();
-        }
-        if let Some(secret) = &self.quic_admission_secret {
-            flags.quic_admission_secret = secret.clone();
-        }
-        if let Some(root) = &self.quic_fallback_root {
-            flags.quic_fallback_root = root.clone();
-        }
-        if let Some(upstream) = &self.quic_decoy_upstream {
-            flags.quic_decoy_upstream = upstream.clone();
-        }
-        if let Some(quic_sni_passthrough) = self.quic_sni_passthrough {
-            flags.quic_sni_passthrough = quic_sni_passthrough;
-        }
         if let Some(no_tun) = self.no_tun {
             flags.no_tun = no_tun;
         }
@@ -1087,24 +1063,12 @@ impl NetworkConfig {
             flags.enable_encryption = !disable_encryption;
         }
 
-        if self.enable_relay_network_whitelist.unwrap_or_default() {
-            if !self.relay_network_whitelist.is_empty() {
-                flags.relay_network_whitelist = self.relay_network_whitelist.join(" ");
-            } else {
-                flags.relay_network_whitelist = "".to_string();
-            }
-        }
-
         if let Some(disable_tcp_hole_punching) = self.disable_tcp_hole_punching {
             flags.disable_tcp_hole_punching = disable_tcp_hole_punching;
         }
 
         if let Some(disable_udp_hole_punching) = self.disable_udp_hole_punching {
             flags.disable_udp_hole_punching = disable_udp_hole_punching;
-        }
-
-        if let Some(disable_relay_data) = self.disable_relay_data {
-            flags.disable_relay_data = disable_relay_data;
         }
 
         if let Some(enable_udp_broadcast_relay) = self.enable_udp_broadcast_relay {
@@ -1259,19 +1223,12 @@ impl NetworkConfig {
             .map(|path| path.to_string_lossy().into_owned());
         let flags = config.get_flags();
         let default_flags = default_config.get_flags();
-        result.latency_first = Some(flags.latency_first);
-        result.speed_first = Some(flags.speed_first);
-        result.speed_probe_interval_seconds = (flags.speed_probe_interval_seconds
-            != default_flags.speed_probe_interval_seconds)
-            .then_some(flags.speed_probe_interval_seconds);
-        result.speed_probe_budget_bps = (flags.speed_probe_budget_bps
-            != default_flags.speed_probe_budget_bps)
-            .then_some(flags.speed_probe_budget_bps);
+        result.relay = flags.relay.clone();
+        result.camouflage = flags.camouflage.clone();
         result.dev_name = Some(flags.dev_name.clone());
         result.use_smoltcp = Some(flags.use_smoltcp);
         result.disable_ipv6 = Some(!flags.enable_ipv6);
         result.disable_p2p = Some(flags.disable_p2p);
-        result.p2p_only = Some(flags.p2p_only);
         result.lazy_p2p = Some(flags.lazy_p2p);
         result.bind_device = Some(flags.bind_device);
         result.socket_mark = flags.socket_mark;
@@ -1298,21 +1255,6 @@ impl NetworkConfig {
         result.quic_receive_window = (flags.quic_receive_window
             != default_flags.quic_receive_window)
             .then_some(flags.quic_receive_window);
-        result.quic_tls_cert =
-            (!flags.quic_tls_cert.is_empty()).then_some(flags.quic_tls_cert.clone());
-        result.quic_tls_key =
-            (!flags.quic_tls_key.is_empty()).then_some(flags.quic_tls_key.clone());
-        result.quic_server_name =
-            (!flags.quic_server_name.is_empty()).then_some(flags.quic_server_name.clone());
-        result.quic_admission_secret = (!flags.quic_admission_secret.is_empty())
-            .then_some(flags.quic_admission_secret.clone());
-        result.quic_fallback_root =
-            (!flags.quic_fallback_root.is_empty()).then_some(flags.quic_fallback_root.clone());
-        result.quic_decoy_upstream =
-            (!flags.quic_decoy_upstream.is_empty()).then_some(flags.quic_decoy_upstream.clone());
-        result.quic_sni_passthrough = (flags.quic_sni_passthrough
-            != default_flags.quic_sni_passthrough)
-            .then_some(flags.quic_sni_passthrough);
         result.no_tun = Some(flags.no_tun);
         result.enable_exit_node = Some(flags.enable_exit_node);
         result.relay_all_peer_rpc = Some(flags.relay_all_peer_rpc);
@@ -1322,7 +1264,6 @@ impl NetworkConfig {
         result.disable_encryption = Some(!flags.enable_encryption);
         result.disable_tcp_hole_punching = Some(flags.disable_tcp_hole_punching);
         result.disable_udp_hole_punching = Some(flags.disable_udp_hole_punching);
-        result.disable_relay_data = Some(flags.disable_relay_data);
         result.enable_udp_broadcast_relay = Some(flags.enable_udp_broadcast_relay);
         result.disable_sym_hole_punching = Some(flags.disable_sym_hole_punching);
         result.enable_magic_dns = Some(flags.accept_dns);
@@ -1335,21 +1276,6 @@ impl NetworkConfig {
         result.enable_private_mode = Some(flags.private_mode);
 
         result.acl = config.get_acl();
-
-        if flags.relay_network_whitelist == "*" {
-            result.enable_relay_network_whitelist = Some(false);
-        } else {
-            result.enable_relay_network_whitelist = Some(true);
-            if flags.relay_network_whitelist.is_empty() {
-                result.relay_network_whitelist = vec![];
-            } else {
-                result.relay_network_whitelist = flags
-                    .relay_network_whitelist
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        }
 
         Ok(result)
     }
@@ -1453,27 +1379,17 @@ mod tests {
     fn network_config_round_trips_speed_first_settings() -> anyhow::Result<()> {
         let config = gen_default_config();
         let mut flags = config.get_flags();
-        flags.speed_first = true;
-        flags.speed_probe_interval_seconds = 15;
-        flags.speed_probe_budget_bps = 8_000_000;
+        flags.relay_config_mut().policy = crate::proto::common::RelayPolicy::Goodput as i32;
+        flags.relay_config_mut().probe_interval_seconds = Some(15);
+        flags.relay_config_mut().probe_budget_bps = 8_000_000;
         config.set_flags(flags.clone());
 
         let network_config = super::NetworkConfig::new_from_config(&config)?;
-        assert_eq!(network_config.speed_first, Some(true));
-        assert_eq!(network_config.speed_probe_interval_seconds, Some(15));
-        assert_eq!(network_config.speed_probe_budget_bps, Some(8_000_000));
+        assert_eq!(network_config.relay, flags.relay);
 
         let regenerated = network_config.gen_config()?;
         let regenerated_flags = regenerated.get_flags();
-        assert_eq!(regenerated_flags.speed_first, flags.speed_first);
-        assert_eq!(
-            regenerated_flags.speed_probe_interval_seconds,
-            flags.speed_probe_interval_seconds
-        );
-        assert_eq!(
-            regenerated_flags.speed_probe_budget_bps,
-            flags.speed_probe_budget_bps
-        );
+        assert_eq!(regenerated_flags.relay, flags.relay);
         Ok(())
     }
 
@@ -1807,12 +1723,16 @@ mod tests {
 
             if rng.gen_bool(0.9) {
                 let mut flags = crate::common::config::gen_default_flags();
-                flags.latency_first = rng.gen_bool(0.5);
+                flags.relay_config_mut().policy = if rng.gen_bool(0.5) {
+                    crate::proto::common::RelayPolicy::Latency as i32
+                } else {
+                    crate::proto::common::RelayPolicy::Hop as i32
+                };
                 flags.dev_name = format!("etun{}", rng.gen_range(0..10));
                 flags.use_smoltcp = rng.gen_bool(0.3);
                 flags.enable_ipv6 = rng.gen_bool(0.8);
                 flags.disable_p2p = rng.gen_bool(0.2);
-                flags.p2p_only = rng.gen_bool(0.2);
+                flags.relay_config_mut().use_relays = Some(!rng.gen_bool(0.2));
                 flags.lazy_p2p = rng.gen_bool(0.3);
                 flags.bind_device = rng.gen_bool(0.3);
                 flags.no_tun = rng.gen_bool(0.1);
@@ -1830,7 +1750,7 @@ mod tests {
                 flags.private_mode = rng.gen_bool(0.3);
 
                 if rng.gen_bool(0.4) {
-                    flags.relay_network_whitelist = (0..rng.gen_range(1..3))
+                    flags.relay_config_mut().transit_networks = (0..rng.gen_range(1..3))
                         .map(|_| {
                             format!(
                                 "{}.{}.0.0/16",
@@ -1838,8 +1758,7 @@ mod tests {
                                 rng.gen_range(0..255)
                             )
                         })
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                        .collect::<Vec<_>>();
                 }
 
                 config.set_flags(flags);

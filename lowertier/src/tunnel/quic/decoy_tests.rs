@@ -12,9 +12,12 @@ async fn listener(upstream: SocketAddr) -> QuicTunnelListener {
         "decoy-limits-test-network-secret".to_owned(),
     )));
     let mut flags = context.get_flags();
-    flags.quic_server_name = HOST.to_owned();
-    flags.quic_decoy_upstream = upstream.to_string();
-    flags.quic_admission_secret = "decoy-limits-test-admission-secret".to_owned();
+    flags.camouflage_config_mut().server_name = HOST.to_owned();
+    flags
+        .camouflage_config_mut()
+        .set_decoy_upstream(upstream.to_string());
+    flags.camouflage_config_mut().admission_secret =
+        "decoy-limits-test-admission-secret".to_owned();
     context.set_flags(flags);
     let mut listener = QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), context);
     listener.listen().await.unwrap();
@@ -217,9 +220,9 @@ async fn http3_decoy_large_certificate_and_body_are_lossless_and_rate_limited() 
             std::fs::write(&cert_path, cert.serialize_pem().unwrap()).unwrap();
             std::fs::write(&key_path, cert.serialize_private_key_pem()).unwrap();
             let mut flags = gen_default_flags();
-            flags.quic_server_name = HOST.to_owned();
-            flags.quic_tls_cert = cert_path.to_str().unwrap().to_owned();
-            flags.quic_tls_key = key_path.to_str().unwrap().to_owned();
+            flags.camouflage_config_mut().server_name = HOST.to_owned();
+            flags.camouflage_config_mut().tls_cert = cert_path.to_str().unwrap().to_owned();
+            flags.camouflage_config_mut().tls_key = key_path.to_str().unwrap().to_owned();
             let upstream = Endpoint::server(server_config(&flags).unwrap(), "127.0.0.1:0".parse().unwrap()).unwrap();
             let listener = listener(upstream.local_addr().unwrap()).await;
             let public = listener.endpoint.as_ref().unwrap().local_addr().unwrap();

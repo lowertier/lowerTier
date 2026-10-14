@@ -159,9 +159,11 @@ async fn demo() -> Result<()> {
     }));
 
     let mut flags = gen_default_flags();
-    flags.quic_server_name = HOST.to_owned();
-    flags.quic_decoy_upstream = origin_addr.to_string();
-    flags.quic_admission_secret = uuid::Uuid::new_v4().to_string();
+    flags.camouflage_config_mut().server_name = HOST.to_owned();
+    flags
+        .camouflage_config_mut()
+        .set_decoy_upstream(origin_addr.to_string());
+    flags.camouflage_config_mut().admission_secret = uuid::Uuid::new_v4().to_string();
     let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse()?);
     listener.set_flags(flags);
     listener.listen().await?;

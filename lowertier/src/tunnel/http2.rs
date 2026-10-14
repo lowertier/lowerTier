@@ -79,7 +79,7 @@ pub fn tls_acceptor(flags: &Flags) -> Result<TlsAcceptor, TunnelError> {
 }
 
 fn decoy_upstream(flags: &Flags) -> Option<std::net::SocketAddr> {
-    let upstream = flags.quic_decoy_upstream.as_str();
+    let upstream = flags.camouflage_config().tcp_decoy();
     if upstream.is_empty() {
         return None;
     }
@@ -91,15 +91,21 @@ fn decoy_upstream(flags: &Flags) -> Option<std::net::SocketAddr> {
 }
 
 fn routing_secret(flags: &Flags) -> Option<Vec<u8>> {
-    if flags.quic_admission_secret.len() >= 16 {
-        Some(flags.quic_admission_secret.as_bytes().to_vec())
+    if flags.camouflage_config().admission_secret.len() >= 16 {
+        Some(
+            flags
+                .camouflage_config()
+                .admission_secret
+                .as_bytes()
+                .to_vec(),
+        )
     } else {
         None
     }
 }
 
 fn tcp_routing_prefix(flags: &Flags) -> bool {
-    decoy_upstream(flags).is_some() && !flags.quic_sni_passthrough
+    decoy_upstream(flags).is_some() && !flags.camouflage_config().sni_routing
 }
 
 fn tcp_routing_record(cid: &[u8; QUIC_ROUTING_CID_BYTES]) -> [u8; TCP_ROUTING_RECORD_LEN] {
@@ -847,10 +853,12 @@ mod tests {
     #[test]
     fn routing_prefix_is_off_behind_sni_passthrough() {
         let mut flags = gen_default_flags();
-        flags.quic_decoy_upstream = "127.0.0.1:443".to_owned();
-        flags.quic_admission_secret = "routing-test-secret-material".to_owned();
+        flags
+            .camouflage_config_mut()
+            .set_decoy_upstream("127.0.0.1:443".to_owned());
+        flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
         assert!(tcp_routing_prefix(&flags));
-        flags.quic_sni_passthrough = true;
+        flags.camouflage_config_mut().sni_routing = true;
         assert!(!tcp_routing_prefix(&flags));
     }
 

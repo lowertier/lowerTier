@@ -180,7 +180,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .file_descriptor_set_path(&descriptor)
         .service_generator(Box::new(ServiceGenerator::default()))
         .btree_map(["."])
-        .skip_debug([".common.Ipv4Addr", ".common.Ipv6Addr", ".common.UUID"]);
+        .enum_attribute(".common.RelayPolicy", "#[derive(clap::ValueEnum)]")
+        .enum_attribute(".common.TransitPolicy", "#[derive(clap::ValueEnum)]")
+        .skip_debug([
+            ".common.Ipv4Addr",
+            ".common.Ipv6Addr",
+            ".common.UUID",
+            ".common.CamouflageConfig",
+        ]);
 
     config.compile_protos(&proto_files, &["src/proto/"])?;
 

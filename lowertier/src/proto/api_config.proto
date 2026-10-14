@@ -27,7 +27,10 @@ message InstanceConfigPatch {
   optional bool ipv6_public_addr_provider = 11;
   optional bool ipv6_public_addr_auto = 12;
   optional string ipv6_public_addr_prefix = 13;
-  optional bool disable_relay_data = 14;
+  reserved 14;
+  reserved "disable_relay_data";
+  common.RelayConfig relay = 15;
+  common.CamouflageConfig camouflage = 16;
 }
 
 message PortForwardPatch {

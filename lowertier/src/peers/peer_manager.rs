@@ -1880,14 +1880,6 @@ impl PeerManager {
         ));
         let peer_session_store = Arc::new(PeerSessionStore::new());
 
-        if global_ctx
-            .check_network_in_whitelist(&global_ctx.get_network_name())
-            .is_err()
-        {
-            // if local network is not in whitelist, avoid relay data when exist any other route path
-            global_ctx.set_avoid_relay_data_preference(true);
-        }
-
         // TODO: remove these because we have impl pipeline processor.
         let (peer_rpc_tspt_sender, peer_rpc_tspt_recv) = create_rpc_ingress_channel();
         let rpc_tspt = Arc::new(RpcTransport {
@@ -2862,7 +2854,8 @@ impl PeerManager {
         self.tasks.lock().await.spawn(async move {
             tracing::trace!("start_peer_recv");
             while let Ok(mut batch) = recv_packet_batch_from_chan(&mut recv).await {
-                let disable_relay_data = global_ctx.flags_arc().disable_relay_data;
+                let disable_relay_data = (global_ctx.flags_arc().relay_config().transit()
+                    == crate::proto::common::TransitPolicy::Deny);
                 let mut local_batch = if let Some((from_peer_id, packet_type)) =
                     decoded_local_nic_batch_source(&batch, my_peer_id)
                 {
@@ -6397,21 +6390,23 @@ impl PeerManager {
             let mut rotation = 0_usize;
             loop {
                 let flags = global_ctx.flags_arc();
-                if flags.speed_probe_budget_bps == 0 || flags.speed_probe_interval_seconds == 0 {
+                if flags.relay_config().probe_budget_bps == 0
+                    || flags.relay_config().probe_interval() == 0
+                {
                     active_config = None;
                     budget = None;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
 
-                let interval = Duration::from_secs(flags.speed_probe_interval_seconds);
+                let interval = Duration::from_secs(flags.relay_config().probe_interval());
                 let config = (
-                    flags.speed_probe_budget_bps,
-                    flags.speed_probe_interval_seconds,
+                    flags.relay_config().probe_budget_bps,
+                    flags.relay_config().probe_interval(),
                 );
                 if active_config != Some(config) {
                     match ProbeBudget::new(
-                        flags.speed_probe_budget_bps,
+                        flags.relay_config().probe_budget_bps,
                         interval,
                         std::time::Instant::now(),
                     ) {

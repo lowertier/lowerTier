@@ -557,7 +557,7 @@ impl GlobalCtx {
         flags: &Flags,
         mut feature_flags: PeerFeatureFlag,
     ) -> PeerFeatureFlag {
-        if flags.disable_relay_data {
+        if (flags.relay_config().transit() == crate::proto::common::TransitPolicy::Deny) {
             feature_flags.avoid_relay_data = true;
         }
         feature_flags.speed_routing = true;
@@ -888,15 +888,16 @@ impl GlobalCtx {
 
     pub fn check_network_in_whitelist(&self, network_name: &str) -> Result<(), anyhow::Error> {
         if self
-            .get_flags()
-            .relay_network_whitelist
-            .split(" ")
-            .map(wildmatch::WildMatch::new)
-            .any(|wl| wl.matches(network_name))
+            .flags
+            .load()
+            .relay_config()
+            .permits_foreign_network(network_name)
         {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("network {} not in whitelist", network_name))
+            Err(anyhow::anyhow!(
+                "network {network_name} is not in relay.transit_networks"
+            ))
         }
     }
 
@@ -1194,7 +1195,9 @@ impl GlobalCtx {
 
         let mut feature_flags = self.feature_flags.load();
         let previous = feature_flags.avoid_relay_data;
-        feature_flags.avoid_relay_data = avoid_relay_data || self.flags.load().disable_relay_data;
+        feature_flags.avoid_relay_data = avoid_relay_data
+            || (self.flags.load().relay_config().transit()
+                == crate::proto::common::TransitPolicy::Deny);
         self.feature_flags.store(feature_flags);
         previous != feature_flags.avoid_relay_data
     }
@@ -1309,22 +1312,19 @@ impl GlobalCtx {
     }
 
     pub fn p2p_only(&self) -> bool {
-        self.flags.load().p2p_only
+        !self.flags.load().relay_config().can_use_relays()
     }
 
     pub fn latency_first(&self) -> bool {
-        // NOTICE: p2p only is conflict with latency first
-        let flags = self.flags.load();
-        flags.latency_first && !flags.p2p_only
+        self.flags.load().relay_config().policy() == crate::proto::common::RelayPolicy::Latency
     }
 
     pub fn speed_first(&self) -> bool {
-        let flags = self.flags.load();
-        flags.speed_first && !flags.p2p_only
+        self.flags.load().relay_config().policy() == crate::proto::common::RelayPolicy::Goodput
     }
 
     pub fn speed_probes_enabled(&self) -> bool {
-        self.flags.load().speed_probe_budget_bps > 0
+        self.flags.load().relay_config().probe_budget_bps > 0
     }
 
     fn is_port_in_running_listeners(&self, port: u16, is_udp: bool) -> bool {
