@@ -457,6 +457,10 @@ pub struct GlobalCtx {
 
     running_listeners: Mutex<Vec<url::Url>>,
     discovery_listeners: Mutex<HashMap<SocketAddr, Vec<url::Url>>>,
+    discovery_sources: Mutex<
+        HashMap<SocketAddr, std::sync::Weak<crate::connector::tracker_discovery::PathConnections>>,
+    >,
+    discovery_observations: Mutex<Vec<crate::connector::tracker_discovery::DiscoveryObservation>>,
     advertised_ipv6_public_addr_prefix: Mutex<Option<cidr::Ipv6Cidr>>,
     tun_device_name: Mutex<Option<String>>,
 
@@ -852,6 +856,8 @@ impl GlobalCtx {
 
             running_listeners: Mutex::new(Vec::new()),
             discovery_listeners: Mutex::new(HashMap::new()),
+            discovery_sources: Mutex::new(HashMap::new()),
+            discovery_observations: Mutex::new(Vec::new()),
             advertised_ipv6_public_addr_prefix: Mutex::new(None),
             tun_device_name: Mutex::new(None),
 
@@ -1217,7 +1223,76 @@ impl GlobalCtx {
 
     pub(crate) fn remove_discovery_listeners(&self, local: SocketAddr) {
         self.discovery_listeners.lock().unwrap().remove(&local);
+        self.discovery_sources.lock().unwrap().remove(&local);
+        self.discovery_observations
+            .lock()
+            .unwrap()
+            .retain(|observation| observation.socket != local);
         self.control_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn register_discovery_source(
+        &self,
+        local: SocketAddr,
+        source: std::sync::Weak<crate::connector::tracker_discovery::PathConnections>,
+    ) {
+        self.discovery_sources.lock().unwrap().insert(local, source);
+    }
+
+    pub(crate) fn mark_control_change(&self) {
+        self.control_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn discovery_sources(
+        &self,
+    ) -> Vec<(
+        SocketAddr,
+        Arc<crate::connector::tracker_discovery::PathConnections>,
+    )> {
+        let mut sources = self.discovery_sources.lock().unwrap();
+        sources.retain(|_, source| source.strong_count() != 0);
+        sources
+            .iter()
+            .filter_map(|(&local, source)| source.upgrade().map(|source| (local, source)))
+            .collect()
+    }
+
+    pub(crate) fn record_discovery_observation(
+        &self,
+        observation: crate::connector::tracker_discovery::DiscoveryObservation,
+    ) {
+        let mut observations = self.discovery_observations.lock().unwrap();
+        observations.retain(|entry| {
+            entry
+                .lifetime
+                .is_none_or(|lifetime| entry.sampled_at.elapsed() < lifetime)
+        });
+        let previous = observations.iter_mut().find(|entry| {
+            entry.protocol == observation.protocol
+                && entry.observer == observation.observer
+                && (entry.socket == observation.socket
+                    || (entry.protocol == "http" && entry.socket.ip() == observation.socket.ip()))
+        });
+        if let Some(previous) = previous {
+            *previous = observation;
+        } else if observations.len() < 256 {
+            observations.push(observation);
+        } else {
+            return;
+        }
+        self.control_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn discovery_observations(
+        &self,
+    ) -> Vec<crate::connector::tracker_discovery::DiscoveryObservation> {
+        let mut observations = self.discovery_observations.lock().unwrap();
+        observations.retain(|entry| {
+            entry
+                .lifetime
+                .is_none_or(|lifetime| entry.sampled_at.elapsed() < lifetime)
+        });
+        observations.clone()
     }
 
     pub(crate) fn get_discovery_listeners(&self) -> Vec<url::Url> {

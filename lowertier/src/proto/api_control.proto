@@ -124,7 +124,7 @@ message Observation {
   string observer = 3;
   string endpoint = 4;
   uint64 age_ms = 5;
-  int64 expires_at_unix_ms = 6;
+  optional int64 expires_at_unix_ms = 6;
   bool provisional = 7;
 }
 message TrackerSnapshot { string uri = 1; string last_error = 2; optional uint32 candidate_count = 3; }

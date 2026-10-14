@@ -48,6 +48,7 @@ impl ControlPlaneService {
         let mut event = 0;
         let mut topology = 0;
         let mut l2 = vec![0; 5];
+        let mut discovery = 0;
         if let Some(instance) = instance {
             event = instance.context()?.control_generation();
             let peers = instance.peers()?;
@@ -60,6 +61,22 @@ impl ControlPlaneService {
                 counters.loop_drops,
                 counters.policy_drops,
             ];
+            let mut sources = instance
+                .context()?
+                .discovery_sources()
+                .into_iter()
+                .map(|(socket, source)| {
+                    (
+                        socket,
+                        source.candidate_count(),
+                        source.has_live_connections(&peers),
+                    )
+                })
+                .collect::<Vec<_>>();
+            sources.sort_unstable();
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            sources.hash(&mut hash);
+            discovery = hash.finish();
         }
         let sampled_at = now_ms();
         let mut generations = BTreeMap::new();
@@ -68,6 +85,7 @@ impl ControlPlaneService {
                 "stats" => vec![sampled_at.max(0) as u64 / 1000],
                 "logs" => vec![logs::generation()],
                 "l2" => l2.clone(),
+                "discovery" => vec![event, discovery],
                 "peers" | "routes" | "relay" => vec![event, topology],
                 "instances" => {
                     let mut rows = self

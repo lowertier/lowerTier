@@ -408,27 +408,87 @@ impl ControlPlaneService {
     ) -> anyhow::Result<GetDiscoveryResponse> {
         let (_, instance) = self.resolve(request.meta.as_ref())?;
         let context = instance.context()?;
+        let peers = instance.peers()?;
+        let mut trackers = BTreeMap::<String, TrackerSnapshot>::new();
+        let mut candidate_count = 0u32;
+        let mut active_paths = Vec::new();
+        for (socket, source) in context.discovery_sources() {
+            let (statuses, count, active) = source.control_snapshot(&peers);
+            candidate_count = candidate_count.saturating_add(count as u32);
+            if active {
+                active_paths.push(format!("{}://{socket}", source.protocol()));
+            }
+            for status in statuses {
+                match trackers.entry(status.uri.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(TrackerSnapshot {
+                            uri: status.uri,
+                            last_error: status.last_error,
+                            candidate_count: status.candidate_count,
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let entry = entry.get_mut();
+                        entry.candidate_count = entry
+                            .candidate_count
+                            .zip(status.candidate_count)
+                            .map(|(left, right)| left.saturating_add(right));
+                        if !status.last_error.is_empty() {
+                            entry.last_error = status.last_error;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(config) = context.config.get_tracker_discovery() {
+            for uri in config.trackers {
+                let uri = crate::connector::tracker_discovery::observer_uri(&uri);
+                trackers
+                    .entry(uri.clone())
+                    .or_insert_with(|| TrackerSnapshot {
+                        uri,
+                        ..Default::default()
+                    });
+            }
+        }
+        let sampled_at = now_ms();
+        let observations = context
+            .discovery_observations()
+            .into_iter()
+            .map(|observation| {
+                let age_ms = observation
+                    .sampled_at
+                    .elapsed()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                Observation {
+                    protocol: observation.protocol,
+                    socket: observation.socket.to_string(),
+                    observer: observation.observer,
+                    endpoint: observation.endpoint.to_string(),
+                    age_ms: age_ms as u64,
+                    expires_at_unix_ms: observation.lifetime.map(|lifetime| {
+                        sampled_at
+                            .saturating_sub(age_ms)
+                            .saturating_add(lifetime.as_millis().min(i64::MAX as u128) as i64)
+                    }),
+                    provisional: observation.provisional,
+                }
+            })
+            .collect();
+        active_paths.sort_unstable();
+        let last_error = trackers
+            .values()
+            .find(|tracker| !tracker.last_error.is_empty())
+            .map(|tracker| tracker.last_error.clone())
+            .unwrap_or_default();
         Ok(GetDiscoveryResponse {
             snapshot: Some(self.snapshot(&instance).await?),
-            trackers: context
-                .config
-                .get_tracker_discovery()
-                .map(|config| {
-                    config
-                        .trackers
-                        .into_iter()
-                        .map(|uri| TrackerSnapshot {
-                            uri: uri.to_string(),
-                            ..Default::default()
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            active_paths: context
-                .get_discovery_listeners()
-                .into_iter()
-                .map(|uri| uri.to_string())
-                .collect(),
+            trackers: trackers.into_values().collect(),
+            observations,
+            candidate_count: Some(candidate_count),
+            active_paths,
+            last_error,
             ..Default::default()
         })
     }

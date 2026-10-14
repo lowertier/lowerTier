@@ -39,13 +39,13 @@ impl UdpTracker {
         self
     }
 
-    pub async fn observed_endpoint(&self) -> Option<SocketAddr> {
+    pub async fn observed_sample(&self) -> Option<(SocketAddr, Instant)> {
         self.connection
             .lock()
             .await
             .as_ref()
             .filter(|(_, received, _)| received.elapsed() < Duration::from_secs(60))
-            .and_then(|(_, _, observed)| *observed)
+            .and_then(|(_, received, observed)| observed.map(|address| (address, *received)))
     }
 
     async fn exchange(&self, request: &[u8], action: u32, transaction: u32) -> Result<Vec<u8>> {
@@ -202,6 +202,7 @@ pub(super) async fn http_announce_rotating(
         .maybe_socket_mark(ctx.get_flags().socket_mark)
         .call()?;
     let stream = socket.connect(remote).await?;
+    let observation_socket = stream.local_addr()?;
     let mut target = url.clone();
     let query = match url.query() {
         Some(existing) => format!("{existing}&{}", announce.http_query()),
@@ -232,7 +233,26 @@ pub(super) async fn http_announce_rotating(
     } else {
         http_get(stream, &authority, path).await?
     };
-    wire::http_response(&response)
+    let peers = wire::http_response(&response)?;
+    if let Some(endpoint) = peers.observed.filter(|endpoint| {
+        endpoint.is_ipv4() == observation_socket.is_ipv4()
+            && endpoint.port() != 0
+            && !endpoint.ip().is_unspecified()
+            && !endpoint.ip().is_multicast()
+            && ensure_remote_allowed(&ctx.get_underlay_policy(), *endpoint).is_ok()
+    }) {
+        // The HTTP observation describes the tracker connection, not the VPN transport socket.
+        ctx.record_discovery_observation(super::DiscoveryObservation {
+            protocol: "http".into(),
+            socket: observation_socket,
+            observer: super::observer_uri(url),
+            endpoint,
+            sampled_at: std::time::Instant::now(),
+            lifetime: None,
+            provisional: true,
+        });
+    }
+    Ok(peers)
 }
 
 async fn http_get<S>(stream: S, host: &str, path: &str) -> Result<Vec<u8>>

@@ -97,11 +97,20 @@ struct PathOwnership {
 }
 
 #[derive(Default)]
-struct PathConnections {
+pub(crate) struct PathConnections {
+    protocol: String,
     candidates: std::sync::Mutex<HashMap<SocketAddr, CandidateState>>,
     ownership: std::sync::Mutex<PathOwnership>,
     admission: tokio::sync::Mutex<()>,
     changed: tokio::sync::Notify,
+    trackers: std::sync::Mutex<Vec<TrackerStatus>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TrackerStatus {
+    pub uri: String,
+    pub last_error: String,
+    pub candidate_count: Option<u32>,
 }
 
 struct CandidateState {
@@ -198,6 +207,51 @@ impl Drop for PathLifetime {
 }
 
 impl PathConnections {
+    pub(crate) fn protocol(&self) -> &str {
+        &self.protocol
+    }
+
+    pub(crate) fn candidate_count(&self) -> usize {
+        self.candidates
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|state| state.expires.is_none_or(|expiry| expiry > Instant::now()))
+            .count()
+    }
+
+    pub(crate) fn has_live_connections(&self, peers: &PeerManager) -> bool {
+        self.ownership
+            .lock()
+            .unwrap()
+            .connections
+            .iter()
+            .any(|connection| connection_alive(peers, *connection))
+    }
+    pub(crate) fn control_snapshot(
+        &self,
+        peers: &PeerManager,
+    ) -> (Vec<TrackerStatus>, usize, bool) {
+        let candidates = self.candidate_count();
+        let active = self.has_live_connections(peers);
+        (self.trackers.lock().unwrap().clone(), candidates, active)
+    }
+
+    fn record_tracker(&self, uri: &url::Url, last_error: String, candidate_count: Option<u32>) {
+        let uri = super::observer_uri(uri);
+        let mut trackers = self.trackers.lock().unwrap();
+        let status = TrackerStatus {
+            uri: uri.clone(),
+            last_error,
+            candidate_count,
+        };
+        if let Some(previous) = trackers.iter_mut().find(|previous| previous.uri == uri) {
+            *previous = status;
+        } else if trackers.len() < 256 {
+            trackers.push(status);
+        }
+    }
+
     fn entry(
         candidates: &mut HashMap<SocketAddr, CandidateState>,
         address: SocketAddr,
@@ -707,10 +761,25 @@ async fn run_path(
     let (candidate_tx, candidate_rx) = mpsc::channel(64);
     let hash = wire::rendezvous_id(&key, &protocol);
     let observe_udp = protocol == "quic" && config.advertise.is_none();
+    let connections = Arc::new(PathConnections {
+        protocol: protocol.clone(),
+        ..Default::default()
+    });
+    ctx.register_discovery_source(bound, Arc::downgrade(&connections));
+    ctx.record_discovery_observation(super::DiscoveryObservation {
+        protocol: protocol.clone(),
+        socket: bound,
+        observer: "configured".into(),
+        endpoint: config.advertise.unwrap_or(bound),
+        sampled_at: std::time::Instant::now(),
+        lifetime: None,
+        provisional: true,
+    });
     // CONNECT requests start while STUN is still in flight.
     for url in config.trackers.clone() {
         let private = config.private_trackers.contains(&url);
         let connected = connected.clone();
+        let connections = connections.clone();
         let (ctx, udp, packets, mapped, candidates) = (
             ctx.clone(),
             udp.clone(),
@@ -732,11 +801,11 @@ async fn run_path(
                 bound,
                 private,
                 observe_udp,
+                connections,
             )
             .await
         });
     }
-    let connections = Arc::new(PathConnections::default());
     let tcp = if protocol != "quic" {
         let tcp = bootstrap_tcp.unwrap();
         mapped_tx.send_replace(Some(tcp.mapped().await?));
@@ -902,6 +971,7 @@ async fn tracker_loop(
     bound: SocketAddr,
     private: bool,
     observe_udp: bool,
+    connections: Arc<PathConnections>,
 ) -> Result<()> {
     let local = udp.local_addr()?;
     let tracker_name = url.host_str().unwrap().to_owned();
@@ -945,7 +1015,7 @@ async fn tracker_loop(
                 if let Some(tracker) = cached_tracker.as_ref() {
                     // Refresh the observer before choosing the port for this announce.
                     tracker.connect().await?;
-                    tracker.observed_endpoint().await
+                    tracker.observed_sample().await
                 } else {
                     None
                 }
@@ -954,8 +1024,22 @@ async fn tracker_loop(
             };
             // This observation applies only to this observer and the shared UDP transport socket.
             let address = observed
+                .map(|(endpoint, _)| endpoint)
                 .filter(|address| valid_mapping(&ctx, bound, *address))
                 .unwrap_or_else(|| (*mapped.borrow_and_update()).unwrap_or(bound));
+            if let Some((endpoint, received)) =
+                observed.filter(|(address, _)| valid_mapping(&ctx, bound, *address))
+            {
+                ctx.record_discovery_observation(super::DiscoveryObservation {
+                    protocol: "udp".into(),
+                    socket: local,
+                    observer: super::observer_uri(&url),
+                    endpoint,
+                    sampled_at: received.into_std(),
+                    lifetime: Some(Duration::from_secs(60)),
+                    provisional: false,
+                });
+            }
             let announce = Announce {
                 hash,
                 peer,
@@ -983,6 +1067,8 @@ async fn tracker_loop(
                 .await??
             };
             next_event = Instant::now() + MAPPING_EVENT_INTERVAL;
+            connections.record_tracker(&url, String::new(), Some(peers.addresses.len() as u32));
+            ctx.mark_control_change();
             tracing::info!(tracker = %tracker_name, protocol = %ctx.get_flags().default_protocol, count = peers.addresses.len(), interval = peers.interval, ?address, "tracker discovery announce succeeded");
             for peer in peers.addresses {
                 if peer.is_ipv4() == local.is_ipv4()
@@ -1021,6 +1107,8 @@ async fn tracker_loop(
                 Duration::from_secs(u64::from(interval))
             }
             Err(error) => {
+                connections.record_tracker(&url, "The tracker request failed.".into(), None);
+                ctx.mark_control_change();
                 cached_tracker = None;
                 // A failed DNS address must not monopolize subsequent tracker attempts.
                 address_index = address_index.wrapping_add(1);
@@ -1095,6 +1183,30 @@ mod tests {
                     || !b.has_live_peer_connection(a.my_peer_id())
                 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                for peer in [&a, &b] {
+                    let context = peer.get_global_ctx();
+                    let sources = context.discovery_sources();
+                    assert!(!sources.is_empty());
+                    assert!(sources.iter().any(|(_, source)| {
+                        source.control_snapshot(peer).0.iter().any(|status| {
+                            status.candidate_count.is_some() && status.last_error.is_empty()
+                        })
+                    }));
+                    assert!(
+                        context
+                            .discovery_observations()
+                            .iter()
+                            .any(|observation| observation.observer == "configured"
+                                && observation.provisional)
+                    );
+                    if protocol == "quic" {
+                        assert!(context.discovery_observations().iter().any(|observation| {
+                            observation.protocol == "udp"
+                                && !observation.provisional
+                                && observation.socket.ip().is_loopback()
+                        }));
+                    }
                 }
             })
             .await
