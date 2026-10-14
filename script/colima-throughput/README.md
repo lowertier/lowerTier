@@ -128,6 +128,8 @@ Important controls:
 | `UNDERLAY_PROTOCOL` | `udp` | LowTier underlay, `udp`, `tcp`, `quic`, `ws`, or `wss` |
 | `LOWTIER_CORE_ARGS` | empty | Extra arguments passed to both LowTier nodes |
 | `LOWTIER_CORE_BINARY` | empty | Linux binary mounted into both runtime containers |
+| `LOWTIER_CONFIG_DIR` | empty | Directory with one TOML file per container name; replaces generated startup arguments |
+| `IPERF_EXEC_WRAPPER` | empty | Executable prepended to each iperf command; receives `IPERF_OBSERVER_OUTPUT` |
 | `TCP_CONGESTION_CONTROL` | empty | Inner TCP congestion control. Use `bbr` for matched results. |
 | `NETEM_DELAY` | empty | Mean egress delay; empty disables netem |
 | `NETEM_JITTER` | `0ms` | Random delay range around the mean |

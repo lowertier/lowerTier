@@ -31,11 +31,17 @@ rsync -a --relative \
     .cargo/config.toml \
     lowertier \
     vendor \
-    assets \
     LICENSE \
     README.md \
     README_CN.md \
     "$stage/"
+
+# Cargo resolves every workspace member, including members not selected for this build.
+for member in assets lowertier-tracker lowertier-contrib/lowertier-ffi; do
+    if [[ -d "$member" ]]; then
+        rsync -a --relative "$member" "$stage/"
+    fi
+done
 
 docker_cmd=(docker --context "$docker_context")
 "${docker_cmd[@]}" info >/dev/null
@@ -72,6 +78,8 @@ build_features=${LOWTIER_BUILD_FEATURES:-tun}
         cp -a /work/. /cache/source.next/
         rm -rf /cache/source
         mv /cache/source.next /cache/source
+        # Older source timestamps must not reuse path dependencies from another revision.
+        find /cache/source -type f -exec touch {} +
         cd /cache/source
         RUSTUP_TOOLCHAIN=1.95.0 /usr/local/cargo/bin/cargo --offline build --locked --release \
             -p lowertier --bin lowertier-core \

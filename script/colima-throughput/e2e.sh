@@ -34,6 +34,8 @@ case "$tcp_lanes" in
 esac
 core_args=${LOWTIER_CORE_ARGS:-}
 core_binary=${LOWTIER_CORE_BINARY:-}
+config_dir=${LOWTIER_CONFIG_DIR:-}
+iperf_wrapper=${IPERF_EXEC_WRAPPER:-}
 underlay_mtu=${UNDERLAY_MTU:-1500}
 caddy_binary=${CADDY_BIN:-}
 cpu_processes=lowertier-core
@@ -310,7 +312,7 @@ run_iperf() {
     start_iperf_server "$port"
     for attempt in $(seq 0 "$iperf_busy_retries"); do
         exit_code=0
-        "${docker_cmd[@]}" exec "$node_a" \
+        IPERF_OBSERVER_OUTPUT="$output" ${iperf_wrapper:+"$iperf_wrapper"} "${docker_cmd[@]}" exec "$node_a" \
             timeout "$iperf_timeout_seconds" iperf3 "${iperf_args[@]}" >"$output" || exit_code=$?
         if [[ "$exit_code" == 0 ]] \
             && jq -e '(.error == null) and (.end.sum_received.bytes > 0) and (.end.sum_received.seconds > 0)' "$output" >/dev/null 2>&1 \
@@ -529,10 +531,18 @@ EOF
     "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
         'exec caddy run --adapter caddyfile --config /tmp/Caddyfile >/tmp/caddy.log 2>&1'
 fi
+if [[ -n "$config_dir" ]]; then
+    for node in "${containers[@]}"; do
+        "${docker_cmd[@]}" cp "$config_dir/$node.toml" "$node:/tmp/benchmark.toml"
+        "${docker_cmd[@]}" exec -d "$node" sh -lc \
+            "exec env $runtime_env lowertier-core -c /tmp/benchmark.toml $core_args >/tmp/lowertier.log 2>&1"
+    done
+else
 "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
     "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.1/24 --listeners '${underlay_protocol}://0.0.0.0:$listener_port$lane_query' --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
 "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
     "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.2/24 --listeners '${underlay_protocol}://0.0.0.0:11010$lane_query' --peers '${underlay_protocol}://$peer_host:11010$lane_query' --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
+fi
 wait_for_ping "$subnet.2"
 "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \
     >"$result_dir/latency/${profile}-unloaded.txt"
