@@ -80,11 +80,11 @@ The fallback retains transport authentication, Noise authentication, and same-ne
 While that fallback remains pending, a valid PUNCH message can switch the attempt to the original mapped socket.
 The attempt retains its handshake permit and deadline.
 
-H2 and WSS announce their TCP STUN port. A separate UDP socket queries UDP trackers.
+H2 and WSS announce their TCP STUN port when available, or the bound TCP port provisionally.
+A separate UDP socket queries UDP trackers. Its observed UDP port never replaces a TCP port.
 Their first bootstrap TCP attempt reuses the reserved source port.
-If that transport or VPN handshake fails, one retry uses a fresh source port on the same permitted local address.
-Both attempts share the existing 15-second bootstrap deadline and retain all authentication checks.
-The mapped attempt can use at most half that deadline, which preserves time for the fresh-port retry.
+A conventional fresh-port connection starts after 750 milliseconds on the same permitted local address.
+The complete attempt has a 45-second deadline and retains all authentication checks.
 The advertised listener and retained STUN connections survive this retry.
 After bootstrap, authenticated rendezvous RPCs coordinate simultaneous TCP opens between known peers.
 Pending punch connections remain alive until the existing 20-second traversal deadline.
@@ -165,6 +165,8 @@ lowertier-tracker --udp-listen 0.0.0.0:6969 --http-listen 127.0.0.1:6970
 ```
 
 The service implements BEP 15 CONNECT and ANNOUNCE, plus compact HTTP announcements at `/announce`.
+It also supports bounded UDP Binding and optional TCP Binding in the same process.
+See [rendezvous options](rendezvous.md) for private echoes, passkeys, and the optional alternate Binding port.
 It keeps bounded, expiring state in memory. Restarting the service clears that state.
 It has no torrent data transfer, DHT, scrape API, or VPN credentials.
 

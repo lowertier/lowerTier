@@ -107,7 +107,8 @@ struct CandidateState {
     active_generation: Option<u64>,
     upgrade: Option<oneshot::Sender<u32>>,
     probe: Option<([u8; 16], Instant)>,
-    responded: Option<([u8; 16], Instant)>,
+    responded: Option<Instant>,
+    nonces: [Option<([u8; 16], Instant)>; 4],
     connection: Option<DiscoveryConnection>,
     hint: Arc<DiscoveryPeerHint>,
 }
@@ -122,6 +123,7 @@ impl CandidateState {
             upgrade: None,
             probe: None,
             responded: None,
+            nonces: [None; 4],
             connection: None,
             hint: Arc::default(),
         }
@@ -140,6 +142,28 @@ impl CandidateState {
         self.hint
             .recent_peer_id(Duration::from_secs(30))
             .is_some_and(|peer| peers.has_live_peer_connection(peer))
+    }
+
+    fn accept_request(&mut self, nonce: [u8; 16], expires: Instant) -> bool {
+        let now = Instant::now();
+        for seen in &mut self.nonces {
+            if seen.is_some_and(|(_, deadline)| deadline <= now) {
+                *seen = None;
+            }
+        }
+        if self.nonces.iter().flatten().any(|(seen, _)| *seen == nonce)
+            || self
+                .responded
+                .is_some_and(|time| time.elapsed() < Duration::from_secs(1))
+        {
+            return false;
+        }
+        let Some(slot) = self.nonces.iter_mut().find(|slot| slot.is_none()) else {
+            return false;
+        };
+        *slot = Some((nonce, expires));
+        self.responded = Some(now);
+        true
     }
 }
 
@@ -181,6 +205,14 @@ impl PathConnections {
                     state.active_generation.is_none()
                         && state.connection.is_none()
                         && Arc::strong_count(&state.hint) == 1
+                        && state
+                            .attempted
+                            .is_none_or(|time| time.elapsed() >= Duration::from_secs(30))
+                        && state
+                            .nonces
+                            .iter()
+                            .flatten()
+                            .all(|(_, expires)| *expires <= Instant::now())
                         && state
                             .probe
                             .is_none_or(|(_, sent)| sent.elapsed() >= Duration::from_secs(15))
@@ -420,6 +452,7 @@ pub(crate) fn start(
     for url in &config.trackers {
         ensure!(
             matches!(url.scheme(), "udp" | "http" | "https")
+                && url[url::Position::BeforePath..url::Position::AfterQuery].len() <= 1024
                 && url.host_str().is_some()
                 && url.port_or_known_default().is_some()
                 && url.username().is_empty()
@@ -617,6 +650,7 @@ async fn run_path(
     let (mapped_tx, mapped_rx) = watch::channel(Some(config.advertise.unwrap_or(bound)));
     let (candidate_tx, candidate_rx) = mpsc::channel(64);
     let hash = wire::rendezvous_id(&key, &protocol);
+    let observe_udp = protocol == "quic" && config.advertise.is_none();
     // CONNECT requests start while STUN is still in flight.
     for url in config.trackers.clone() {
         let private = config.private_trackers.contains(&url);
@@ -641,6 +675,7 @@ async fn run_path(
                 connected,
                 bound,
                 private,
+                observe_udp,
             )
             .await
         });
@@ -810,6 +845,7 @@ async fn tracker_loop(
     mut connected: watch::Receiver<bool>,
     bound: SocketAddr,
     private: bool,
+    observe_udp: bool,
 ) -> Result<()> {
     let local = udp.local_addr()?;
     let tracker_name = url.host_str().unwrap().to_owned();
@@ -844,11 +880,26 @@ async fn tracker_loop(
                 allowed.dedup();
                 ensure!(!allowed.is_empty(), "no allowed UDP tracker address");
                 let remote = allowed[address_index % allowed.len()];
-                let tracker = UdpTracker::new(remote, udp.clone(), packets.clone());
+                let tracker =
+                    UdpTracker::new(remote, udp.clone(), packets.clone()).with_url(&url, private);
                 tracker.connect().await?;
                 cached_tracker = Some(tracker);
             }
-            let address = (*mapped.borrow_and_update()).unwrap_or(bound);
+            let observed = if observe_udp {
+                if let Some(tracker) = cached_tracker.as_ref() {
+                    // Refresh the observer before choosing the port for this announce.
+                    tracker.connect().await?;
+                    tracker.observed_endpoint().await
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            // This observation applies only to this observer and the shared UDP transport socket.
+            let address = observed
+                .filter(|address| valid_mapping(&ctx, bound, *address))
+                .unwrap_or_else(|| (*mapped.borrow_and_update()).unwrap_or(bound));
             let announce = Announce {
                 hash,
                 peer,
@@ -861,9 +912,17 @@ async fn tracker_loop(
             let peers = if let Some(tracker) = cached_tracker.as_ref() {
                 tracker.announce(&announce).await?
             } else {
+                let mut target = url.clone();
+                if private {
+                    let query = match target.query() {
+                        Some(query) => format!("{query}&lt_observe=1"),
+                        None => "lt_observe=1".to_owned(),
+                    };
+                    target.set_query(Some(&query));
+                }
                 tokio::time::timeout(
                     Duration::from_secs(15),
-                    client::http_announce_rotating(&url, &announce, local, &ctx, address_index),
+                    client::http_announce_rotating(&target, &announce, local, &ctx, address_index),
                 )
                 .await??
             };
@@ -938,53 +997,55 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_stun_does_not_block_quic_tracker_bootstrap() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let tracker = TrackerServer::new(1).unwrap();
-            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let url: url::Url = format!("udp://{}/announce", udp.local_addr().unwrap())
-                .parse()
-                .unwrap();
-            let _tracker = AbortOnDropHandle::new(tokio::spawn(tracker.clone().serve_udp(udp)));
-            let blackhole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let a = create_mock_peer_manager_secure("no-stun".into(), "secret".into()).await;
-            let b = create_mock_peer_manager_secure("no-stun".into(), "secret".into()).await;
-            let mut paths = Vec::new();
-            for peer in [&a, &b] {
-                let ctx = peer.get_global_ctx();
-                let mut flags = ctx.get_flags();
-                flags.default_protocol = "quic".into();
-                ctx.set_flags(flags);
-                ctx.replace_stun_info_collector(Box::new(
-                    crate::common::stun::StunInfoCollector::new(
-                        vec![blackhole.local_addr().unwrap().to_string()],
-                        Vec::new(),
-                        Vec::new(),
-                    ),
-                ));
-                paths.push(
-                    start(
-                        peer.clone(),
-                        TrackerDiscoveryConfig {
-                            trackers: vec![url.clone()],
-                            private_trackers: vec![url.clone()],
-                            bind: Some("127.0.0.1:0".parse().unwrap()),
-                            advertise: None,
-                        },
-                    )
-                    .unwrap(),
-                );
-                while tracker.peer_count() < paths.len() {
-                    tokio::task::yield_now().await;
+        for protocol in ["quic", "tcp", "wss"] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let tracker = TrackerServer::new(1).unwrap();
+                let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let url: url::Url = format!("udp://{}/announce", udp.local_addr().unwrap())
+                    .parse()
+                    .unwrap();
+                let _tracker = AbortOnDropHandle::new(tokio::spawn(tracker.clone().serve_udp(udp)));
+                let blackhole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let a = create_mock_peer_manager_secure("no-stun".into(), "secret".into()).await;
+                let b = create_mock_peer_manager_secure("no-stun".into(), "secret".into()).await;
+                let mut paths = Vec::new();
+                for peer in [&a, &b] {
+                    let ctx = peer.get_global_ctx();
+                    let mut flags = ctx.get_flags();
+                    flags.default_protocol = protocol.into();
+                    ctx.set_flags(flags);
+                    ctx.replace_stun_info_collector(Box::new(
+                        crate::common::stun::StunInfoCollector::new(
+                            vec![blackhole.local_addr().unwrap().to_string()],
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ));
+                    paths.push(
+                        start(
+                            peer.clone(),
+                            TrackerDiscoveryConfig {
+                                trackers: vec![url.clone()],
+                                private_trackers: vec![url.clone()],
+                                bind: Some("127.0.0.1:0".parse().unwrap()),
+                                advertise: None,
+                            },
+                        )
+                        .unwrap(),
+                    );
+                    while tracker.peer_count() < paths.len() {
+                        tokio::task::yield_now().await;
+                    }
                 }
-            }
-            while !a.has_live_peer_connection(b.my_peer_id())
-                || !b.has_live_peer_connection(a.my_peer_id())
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("STUN delayed tracker bootstrap");
+                while !a.has_live_peer_connection(b.my_peer_id())
+                    || !b.has_live_peer_connection(a.my_peer_id())
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("STUN delayed tracker bootstrap");
+        }
     }
 
     #[tokio::test]
@@ -1048,6 +1109,13 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_candidates_keep_one_authenticated_probe_challenge() {
+        let mut state = CandidateState::new();
+        let expiry = Instant::now() + Duration::from_secs(120);
+        assert!(state.accept_request([1; 16], expiry));
+        state.responded = Some(Instant::now() - Duration::from_secs(2));
+        assert!(state.accept_request([2; 16], expiry));
+        state.responded = Some(Instant::now() - Duration::from_secs(2));
+        assert!(!state.accept_request([1; 16], expiry));
         let peers =
             create_mock_peer_manager_secure("probe-test".into(), "probe-secret".into()).await;
         let ctx = peers.get_global_ctx();
@@ -1770,7 +1838,7 @@ async fn candidate_loop(
                 entries.retain(|_, state| state.expires.is_some() || state.connection.is_some()
                     || state.active_generation.is_some() || state.probe.is_some()
                     || state.attempted.is_some_and(|time| time.elapsed() < Duration::from_secs(30))
-                    || state.responded.is_some_and(|(_, time)| time.elapsed() < Duration::from_secs(60))
+                    || state.nonces.iter().flatten().any(|(_, expires)| *expires > Instant::now())
                     || Arc::strong_count(&state.hint) > 1);
                 if attempts.len() < 8 && punch_tasks.len() < 16 {
                     candidate = entries.iter()
@@ -1795,9 +1863,9 @@ async fn candidate_loop(
                     if reply {
                         if !state.probe.is_some_and(|(sent, time)| sent == nonce && time.elapsed() < Duration::from_secs(15)) { continue; }
                     } else {
-                        if state.responded.is_some_and(|(old, time)| time.elapsed() < Duration::from_secs(1)
-                            || (old == nonce && time.elapsed() < Duration::from_secs(60))) { continue; }
-                        state.responded = Some((nonce, Instant::now()));
+                        let sent = u64::from_be_bytes(packet.data[25..33].try_into().unwrap());
+                        let lifetime = sent.saturating_add(60).saturating_sub(unix_seconds()).saturating_add(1);
+                        if !state.accept_request(nonce, Instant::now() + Duration::from_secs(lifetime)) { continue; }
                     }
                 }
                 if !reply {

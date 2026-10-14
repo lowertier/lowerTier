@@ -9,6 +9,26 @@ Public tracker candidates exclude loopback, private, link-local, and shared IPv4
 Private tracker candidates and authenticated peer candidates retain the configured underlay policy.
 The service does not implement torrent storage, scraping, indexing, or VPN relaying.
 
+The standalone crate builds with `cargo build -p lowertier-tracker --features server --release`.
+The tracker UDP socket also answers bounded STUN Binding requests for IPv4 and IPv6.
+Use `--stun-tcp-listen 0.0.0.0:16780` to enable retained TCP Binding sessions for H2 and WSS mappings.
+Use `--stun-change-port` with two UDP ports on each listen address to enable CHANGE-PORT.
+CHANGE-IP and TURN remain unsupported. The Python Binding service remains available during deployment migration.
+
+Use `--passkey-file /path/to/passkey` to restrict HTTP and UDP announcements.
+Clients supply `?passkey=...` in each private tracker URL. UDP uses bounded BEP 41 URLData options.
+Passkeys remain visible on plaintext HTTP and UDP paths. Keep passkeys out of shared configuration and request logs.
+HTTP and TCP Binding connections share a limit of 64 across all listeners.
+Tracker and Binding responses share a 128 KiB payload limit per second.
+
+Private clients request a padded, versioned UDP CONNECT echo with the `LTO1` marker.
+The response keeps the standard 16-byte CONNECT prefix and leaves compact ANNOUNCE replies unchanged.
+Clients use the observed UDP endpoint only for that tracker and the shared QUIC socket, for at most 60 seconds.
+An explicit `advertise` overrides observations. A UDP observation cannot establish a TCP mapping.
+Private HTTP requests use `lt_observe=1`; replies can include the bencoded `lt_observed` endpoint.
+HTTP clients use a separate source port, so that port is not a VPN listener mapping.
+Trusted proxies supply only the client IP; their replies omit observed endpoints when the original port is unavailable.
+
 ## Explicit ports
 
 Set each listening port and each URL port explicitly in deployment configuration.

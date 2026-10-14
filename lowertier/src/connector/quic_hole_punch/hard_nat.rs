@@ -166,6 +166,7 @@ async fn run_with_ports(
                     let mut completed = None;
                     if let Ok((length, source)) = received {
                         let eligible = candidates.iter().any(|candidate| candidate.ip() == source.ip())
+                            && source.port() != 0
                             && selected.is_none_or(|winner| winner == (index, source));
                         if eligible && buffer[..length] == request {
                             let _ = sockets[index].send_to(&binding_response(transaction, source), source).await;

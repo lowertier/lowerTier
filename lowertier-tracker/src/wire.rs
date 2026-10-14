@@ -9,6 +9,60 @@ pub const MAX_PEERS: usize = 16;
 pub const MAX_RESPONSE: usize = 16 * 1024;
 pub const IDLE_ANNOUNCE_INTERVAL_SECS: u32 = 30;
 pub type Id = [u8; 20];
+pub const ECHO_MAGIC: &[u8; 4] = b"LTO1";
+
+pub fn observed_connect(packet: &[u8]) -> Result<Option<SocketAddr>> {
+    if packet.get(16..20) != Some(ECHO_MAGIC) {
+        return Ok(None);
+    }
+    ensure!(packet.len() >= 23, "short observed endpoint");
+    let ip = match packet[20] {
+        4 if packet.len() == 27 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(&packet[23..])?)),
+        6 if packet.len() == 39 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[23..])?)),
+        _ => bail!("invalid observed endpoint"),
+    };
+    Ok(Some(SocketAddr::new(
+        ip,
+        u16::from_be_bytes(packet[21..23].try_into()?),
+    )))
+}
+
+// BEP 41 URLData options start after the standard 98-byte announce request.
+pub fn append_url_data(packet: &mut Vec<u8>, target: &str) -> Result<()> {
+    ensure!(target.len() <= 1024, "tracker URL data too large");
+    for chunk in target.as_bytes().chunks(255) {
+        packet.extend_from_slice(&[2, chunk.len() as u8]);
+        packet.extend_from_slice(chunk);
+    }
+    Ok(())
+}
+
+pub fn url_data(packet: &[u8]) -> Result<String> {
+    ensure!(packet.len() >= 98, "short tracker announce");
+    let mut data = Vec::new();
+    let mut offset = 98;
+    while offset < packet.len() {
+        let kind = packet[offset];
+        offset += 1;
+        if kind == 0 {
+            break;
+        }
+        if kind == 1 {
+            continue;
+        }
+        let length = usize::from(*packet.get(offset).context("short tracker option")?);
+        offset += 1;
+        let value = packet
+            .get(offset..offset + length)
+            .context("truncated tracker option")?;
+        if kind == 2 {
+            ensure!(data.len() + length <= 1024, "tracker URL data too large");
+            data.extend_from_slice(value);
+        }
+        offset += length;
+    }
+    Ok(String::from_utf8(data)?)
+}
 
 pub fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -114,6 +168,7 @@ impl Announce {
 pub struct Peers {
     pub interval: u32,
     pub addresses: Vec<SocketAddr>,
+    pub observed: Option<SocketAddr>,
 }
 
 pub fn compact(bytes: &[u8], ipv6: bool) -> Result<Vec<SocketAddr>> {
@@ -152,6 +207,7 @@ pub fn announce_response(packet: &[u8], transaction: u32, ipv6: bool) -> Result<
     Ok(Peers {
         interval,
         addresses: compact(&packet[20..], ipv6)?,
+        observed: None,
     })
 }
 
@@ -278,6 +334,7 @@ pub fn http_response(bytes: &[u8]) -> Result<Peers> {
     let mut interval = None;
     let mut minimum = 0;
     let mut addresses = Vec::new();
+    let mut observed = None;
     while parser.peek()? != b'e' {
         match parser.string()? {
             b"failure reason" => bail!(
@@ -292,6 +349,7 @@ pub fn http_response(bytes: &[u8]) -> Result<Peers> {
             }
             b"peers" => addresses.extend(parser.peers()?),
             b"peers6" => addresses.extend(compact(parser.string()?, true)?),
+            b"lt_observed" => observed = Some(std::str::from_utf8(parser.string()?)?.parse()?),
             _ => parser.skip(0)?,
         }
     }
@@ -306,6 +364,7 @@ pub fn http_response(bytes: &[u8]) -> Result<Peers> {
     Ok(Peers {
         interval: interval.max(minimum),
         addresses,
+        observed,
     })
 }
 
@@ -374,6 +433,41 @@ mod tests {
         assert!(announce_response(&reply, 43, false).is_err());
         assert!(announce_response(&reply[..25], 42, false).is_err());
         assert!(announce_response(&reply, 42, true).is_err());
+        let mut packet = packet.to_vec();
+        let target = format!("/announce?passkey={}", "a".repeat(300));
+        append_url_data(&mut packet, &target).unwrap();
+        assert_eq!(url_data(&packet).unwrap(), target);
+        packet.pop();
+        assert!(url_data(&packet).is_err());
+
+        let request = crate::binding::request(&[7; 12]);
+        for source in ["192.0.2.1:3456", "[2001:db8::1]:3456"] {
+            let source: SocketAddr = source.parse().unwrap();
+            let (reply, changed) = crate::binding::response(&request, source, false).unwrap();
+            assert!(!changed);
+            assert_eq!(&reply[..2], &[1, 1]);
+            assert_eq!(reply.len(), if source.is_ipv4() { 32 } else { 44 });
+            assert_eq!(
+                u16::from_be_bytes(reply[26..28].try_into().unwrap()) ^ 0x2112,
+                source.port()
+            );
+            if let IpAddr::V6(ip) = source.ip() {
+                let decoded: Vec<_> = reply[28..]
+                    .iter()
+                    .zip(&request[4..])
+                    .map(|(octet, mask)| octet ^ mask)
+                    .collect();
+                assert_eq!(decoded, ip.octets());
+            }
+        }
+        let source = "192.0.2.1:3456".parse().unwrap();
+        let mut change = request.to_vec();
+        change[3] = 8;
+        change.extend_from_slice(&[0, 3, 0, 4, 0, 0, 0, 2]);
+        assert!(crate::binding::response(&change, source, false).is_none());
+        assert!(crate::binding::response(&change, source, true).unwrap().1);
+        change[27] = 6;
+        assert!(crate::binding::response(&change, source, true).is_none());
     }
 
     #[test]

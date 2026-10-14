@@ -12,7 +12,9 @@ pub struct UdpTracker {
     remote: SocketAddr,
     socket: Arc<UdpSocket>,
     packets: broadcast::Sender<StunPacket>,
-    connection: Mutex<Option<(u64, Instant)>>,
+    connection: Mutex<Option<(u64, Instant, Option<SocketAddr>)>>,
+    private: bool,
+    url_data: String,
 }
 
 impl UdpTracker {
@@ -26,7 +28,24 @@ impl UdpTracker {
             socket,
             packets,
             connection: Mutex::new(None),
+            private: false,
+            url_data: String::new(),
         }
+    }
+
+    pub fn with_url(mut self, url: &url::Url, private: bool) -> Self {
+        self.private = private;
+        self.url_data = url[url::Position::BeforePath..url::Position::AfterQuery].to_owned();
+        self
+    }
+
+    pub async fn observed_endpoint(&self) -> Option<SocketAddr> {
+        self.connection
+            .lock()
+            .await
+            .as_ref()
+            .filter(|(_, received, _)| received.elapsed() < Duration::from_secs(60))
+            .and_then(|(_, _, observed)| *observed)
     }
 
     async fn exchange(&self, request: &[u8], action: u32, transaction: u32) -> Result<Vec<u8>> {
@@ -62,17 +81,25 @@ impl UdpTracker {
 
     pub async fn connect(&self) -> Result<u64> {
         let mut cached = self.connection.lock().await;
-        if let Some((connection, received)) = *cached {
+        if let Some((connection, received, _)) = *cached {
             if received.elapsed() < Duration::from_secs(60) {
                 return Ok(connection);
             }
         }
         let transaction = rand::random();
-        let reply = self
-            .exchange(&wire::connect_request(transaction), 0, transaction)
-            .await?;
+        let mut request = wire::connect_request(transaction).to_vec();
+        if self.private {
+            request.extend_from_slice(wire::ECHO_MAGIC);
+            request.resize(48, 0);
+        }
+        let reply = self.exchange(&request, 0, transaction).await?;
         let connection = wire::connect_response(&reply, transaction)?;
-        *cached = Some((connection, Instant::now()));
+        let observed = if self.private {
+            wire::observed_connect(&reply)?
+        } else {
+            None
+        };
+        *cached = Some((connection, Instant::now(), observed));
         Ok(connection)
     }
 
@@ -85,13 +112,15 @@ impl UdpTracker {
             .lock()
             .await
             .as_ref()
-            .map(|(_, time)| time.elapsed())
+            .map(|(_, time, _)| time.elapsed())
             .unwrap_or_default();
         let remaining = Duration::from_secs(60).saturating_sub(age);
         // This exchange must end before the connection cookie expires.
+        let mut packet = announce.udp(connection, transaction).to_vec();
+        wire::append_url_data(&mut packet, &self.url_data)?;
         let response = tokio::time::timeout(
             Duration::from_secs(45).min(remaining),
-            self.exchange(&announce.udp(connection, transaction), 1, transaction),
+            self.exchange(&packet, 1, transaction),
         )
         .await
         .context("tracker announce cookie expired")??;

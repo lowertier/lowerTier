@@ -3,7 +3,7 @@ name = "lowertier-tracker"
 version = "2.6.4"
 edition.workspace = true
 rust-version.workspace = true
-license = "Apache-2.0"
+license-file = "../lowertier/LICENSE"
 description = "Bounded BitTorrent tracker rendezvous service and codecs"
 
 [[bin]]
@@ -32,4 +32,4 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 percent-encoding = { version = "2", optional = true }
 rand = { version = "0.8.5", optional = true }
 socket2 = { version = "0.5.10", features = ["all"], optional = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal", "io-util"], optional = true }

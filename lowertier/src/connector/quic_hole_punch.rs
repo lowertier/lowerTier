@@ -50,7 +50,6 @@ mod hard_nat;
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const MAGIC: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
 
 struct Session {
     transaction: [u8; 12],
@@ -177,31 +176,13 @@ async fn mapped_socket_from(
 
 // The transaction ID is a random rendezvous secret sent through the encrypted RPC.
 fn binding_request(transaction: &[u8; 12]) -> [u8; 20] {
-    let mut packet = [0; 20];
-    packet[1] = 1;
-    packet[4..8].copy_from_slice(&MAGIC);
-    packet[8..20].copy_from_slice(transaction);
-    packet
+    lowertier_tracker::binding::request(transaction)
 }
 
-fn binding_response(transaction: &[u8; 12], source: SocketAddr) -> [u8; 32] {
-    let mut packet = [0; 32];
-    packet[..20].copy_from_slice(&binding_request(transaction));
-    packet[0] = 1;
-    packet[3] = 12;
-    packet[21] = 0x20; // XOR-MAPPED-ADDRESS, IPv4.
-    packet[23] = 8;
-    packet[25] = 1;
-    packet[26..28].copy_from_slice(&(source.port() ^ 0x2112).to_be_bytes());
-    if let std::net::IpAddr::V4(ip) = source.ip() {
-        for (out, (octet, mask)) in packet[28..]
-            .iter_mut()
-            .zip(ip.octets().into_iter().zip(MAGIC))
-        {
-            *out = octet ^ mask;
-        }
-    }
-    packet
+fn binding_response(transaction: &[u8; 12], source: SocketAddr) -> Vec<u8> {
+    lowertier_tracker::binding::response(&binding_request(transaction), source, false)
+        .expect("authenticated probe uses a valid Binding request")
+        .0
 }
 
 async fn punch(
@@ -238,7 +219,7 @@ async fn punch(
                             | std::io::ErrorKind::HostUnreachable) => continue,
                         Err(error) => return Err(error.into()),
                     };
-                    if !source.is_ipv4() || ensure_remote_allowed(&ctx.get_underlay_policy(), source).is_err() {
+                    if !source.is_ipv4() || source.port() == 0 || ensure_remote_allowed(&ctx.get_underlay_policy(), source).is_err() {
                         continue;
                     }
                     if buffer[..length] == request {

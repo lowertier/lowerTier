@@ -221,6 +221,21 @@ mod tests {
 
     #[test]
     fn hard_search_uses_only_public_ipv4_candidates() {
+        for address in [
+            "127.0.0.1:1",
+            "10.0.0.1:1",
+            "169.254.1.1:1",
+            "100.64.0.1:1",
+            "[::1]:1",
+            "[fc00::1]:1",
+            "[fe80::1]:1",
+            "[::ffff:127.0.0.1]:1",
+        ] {
+            assert!(!public_candidate(address.parse().unwrap()));
+        }
+        assert!(public_candidate(
+            "[2001:4860:4860::8888]:1".parse().unwrap()
+        ));
         let candidates: Vec<SocketAddr> = [
             "127.0.0.1:1",
             "192.168.0.1:1",
