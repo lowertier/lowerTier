@@ -947,3 +947,201 @@ Caddy routing, unauthorized probes, multi-stream traffic, and symmetric public l
 
 Raw records and scripts: `benchmark-results/lean-core-tune-20261015/` in the tune worktree.
 Command audit: `/Users/boyu/code/lowertier/benchmark-results/.work/lean-core-20261014-tune.jsonl`.
+
+## Darwin send buffers and QUIC FIFO feedback
+
+The 2026-10-15 confirmation does not pass all requested performance gates.
+All three clean throughput guards pass. Public QUIC and H2 upload throughput gates fail.
+Every public direction misses at least one historical B latency gate.
+A is `f3c62ece`. C is `8ba2ddc9`.
+B denotes the historical `1b2452cd` latency measurements in the preceding section.
+The campaign ran once. No slow trial was replaced.
+
+C replaces Darwin per-write readiness checks with native writes and 50 ms kernel buffer updates.
+Darwin reserves the reported congestion window plus a rate × 4 ms unsent allowance.
+C retains the QUIC peak-rate cap and adds persistent FIFO delay feedback to per-flow NIC CoDel.
+A 5 ms target and 100 ms interval pause new admission until the FIFO drains below target.
+NIC CoDel handles ECN marking and head drops. Admitted DATAGRAMs remain queued for transmission.
+The source models are in [local queue delay](loaded-latency-queues.md) and [TCP admission](tcp-unsent-budget.md).
+
+### Public path
+
+The isolated Mac Studio to s6916 method matches bench3.
+Each protocol used one stream, 12 sender seconds, and two interleaved A/C repetitions in each direction.
+Overlay MTU was 1280. Underlay MTU was 1500. Each daemon used two worker threads.
+Management used Tailscale SSH. Overlay traffic used the public peer address and separate temporary credentials.
+No Rust compilation ran during measurement.
+Cells give median [minimum–maximum] across both repetitions.
+
+| Transport | Direction | A Mbit/s | C Mbit/s | Change | Throughput gate |
+| --- | --- | ---: | ---: | ---: | --- |
+| QUIC | upload | 434.0 [433.5–434.6] | 418.9 [411.6–426.2] | -3.49% | fail |
+| QUIC | download | 434.7 [430.4–439.0] | 425.7 [419.1–432.3] | -2.08% | pass |
+| H2 | upload | 450.5 [449.7–451.4] | 422.5 [393.3–451.7] | -6.22% | fail |
+| H2 | download | 439.4 [426.2–452.6] | 446.4 [445.7–447.0] | +1.59% | pass |
+| WSS | upload | 453.3 [453.2–453.3] | 444.3 [442.1–446.4] | -1.98% | pass |
+| WSS | download | 452.9 [446.0–459.9] | 453.2 [453.1–453.2] | +0.05% | pass |
+
+| Transport | Direction | A p50 / p95 ms | Historical B p50 / p95 ms | C p50 / p95 ms | C latency gate |
+| --- | --- | ---: | ---: | ---: | --- |
+| QUIC | upload | 17.05 [15.42–18.69] / 65.41 [34.91–95.91] | 12.10 [11.55–12.66] / 15.54 [11.81–19.27] | 16.30 [13.40–19.20] / 44.86 [18.00–71.71] | fail |
+| QUIC | download | 13.36 [13.09–13.62] / 18.21 [15.86–20.56] | 13.02 [12.98–13.07] / 15.50 [15.39–15.61] | 14.41 [14.34–14.48] / 21.15 [20.59–21.71] | fail |
+| H2 | upload | 31.19 [28.58–33.81] / 35.70 [33.85–37.54] | 16.07 [12.14–19.99] / 20.15 [12.41–27.89] | 25.60 [22.88–28.32] / 33.80 [31.90–35.71] | fail |
+| H2 | download | 26.85 [26.19–27.51] / 65.75 [56.84–74.67] | 23.64 [23.48–23.79] / 40.68 [33.44–47.92] | 25.44 [25.25–25.63] / 37.80 [32.01–43.59] | fail |
+| WSS | upload | 69.92 [69.65–70.20] / 73.24 [71.71–74.77] | 40.66 [40.16–41.15] / 59.49 [51.39–67.60] | 28.95 [28.38–29.52] / 63.42 [60.52–66.31] | fail |
+| WSS | download | 31.35 [20.02–42.68] / 66.00 [51.26–80.73] | 22.56 [17.24–27.88] / 45.78 [41.72–49.85] | 27.77 [22.60–32.93] / 45.28 [40.95–49.61] | fail |
+
+The latency gate compares C with historical B medians.
+B did not run in this campaign. Public path variation limits that comparison.
+B QUIC records retain the measurement contamination limits documented in the preceding section.
+Twelve ping probes at 0.5-second intervals cover approximately the first half of each transfer.
+Two repetitions and twelve probes limit p95 confidence.
+
+| Transport | Direction | Binary | CPU Mac / Linux s/Gbit | RSS Mac / Linux MiB | Inner retransmissions |
+| --- | --- | --- | ---: | ---: | ---: |
+| QUIC | upload | A | 0.845 [0.795–0.896] / 3.173 [3.152–3.193] | 25.2–31.0 / 19.5–31.2 | 1550, 673 |
+| QUIC | upload | C | 0.885 [0.816–0.953] / 3.267 [3.229–3.305] | 25.2–30.9 / 21.5–33.1 | 310, 286 |
+| QUIC | download | A | 1.192 [1.164–1.219] / 2.512 [2.431–2.593] | 29.5–32.0 / 30.0–32.2 | 5371, 25053 |
+| QUIC | download | C | 1.239 [1.231–1.247] / 2.927 [2.903–2.951] | 30.4–31.8 / 31.6–34.8 | 23768, 25809 |
+| H2 | upload | A | 0.565 [0.335–0.796] / 2.772 [2.772–2.772] | 24.2–30.4 / 17.6–36.8 | 80, 237 |
+| H2 | upload | C | 0.428 [0.388–0.469] / 2.922 [2.865–2.978] | 24.4–31.5 / 20.7–42.9 | 30, 699 |
+| H2 | download | A | 1.124 [0.965–1.282] / 1.378 [1.373–1.384] | 30.1–33.1 / 35.9–44.7 | 0, 4 |
+| H2 | download | C | 1.264 [1.256–1.272] / 1.312 [1.303–1.322] | 31.0–32.4 / 42.8–47.1 | 0, 0 |
+| WSS | upload | A | 0.720 [0.600–0.839] / 2.874 [2.870–2.878] | 24.1–30.0 / 19.0–56.1 | 37, 1 |
+| WSS | upload | C | 0.403 [0.397–0.409] / 2.934 [2.920–2.948] | 24.3–30.3 / 19.4–47.5 | 434, 583 |
+| WSS | download | A | 0.770 [0.709–0.831] / 1.196 [1.166–1.226] | 29.5–31.2 / 45.6–56.2 | 0, 0 |
+| WSS | download | C | 0.849 [0.721–0.977] / 1.292 [1.193–1.391] | 30.1–31.4 / 41.7–47.2 | 840, 0 |
+
+| Transport | Direction | C host | NIC drops | ECN marks | Mean NIC residence us | Expired QUIC packets |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| QUIC | upload | Mac | 0, 0 | 2, 3 | 2999.27, 1688.07 | 0, 0 |
+| QUIC | upload | Linux | 0, 0 | 0, 0 | 14.15, 5.71 | 0, 0 |
+| QUIC | download | Mac | 0, 0 | 0, 0 | 32.61, 1.81 | 0, 0 |
+| QUIC | download | Linux | 0, 0 | 1, 8 | 2277.68, 3473.23 | 0, 0 |
+| H2 | upload | Mac | 25, 689 | 1, 4 | 459.13, 1520.43 | not applicable |
+| H2 | upload | Linux | 0, 0 | 0, 0 | 1.61, 1.74 | not applicable |
+| H2 | download | Mac | 0, 0 | 0, 0 | 2.74, 3.14 | not applicable |
+| H2 | download | Linux | 0, 0 | 5, 9 | 6919.86, 7044.48 | not applicable |
+| WSS | upload | Mac | 343, 558 | 1, 1 | 776.50, 1480.82 | not applicable |
+| WSS | upload | Linux | 0, 0 | 0, 0 | 4.84, 2.63 | not applicable |
+| WSS | download | Mac | 0, 0 | 0, 0 | 1.87, 0.51 | not applicable |
+| WSS | download | Linux | 840, 0 | 33, 13 | 8751.63, 3117.52 | not applicable |
+
+### Clean Colima guard
+
+The clean guard used forward traffic, one stream, and two interleaved A/C repetitions for each protocol.
+Each transfer excluded ten warmup seconds and measured twenty seconds.
+Overlay MTU was 1340. Docker bridge MTU was 1500. Inner TCP used BBR.
+No compilation ran during this guard.
+
+| Transport | A Gbit/s | C Gbit/s | Change | 3% guard | A / C CPU s/Gbit |
+| --- | ---: | ---: | ---: | --- | ---: |
+| QUIC | 6.428 [6.400–6.457] | 6.431 [6.387–6.474] | +0.03% | pass | 0.331 [0.330–0.332] / 0.332 [0.331–0.333] |
+| H2 | 8.513 [8.465–8.562] | 8.341 [8.291–8.390] | -2.03% | pass | 0.262 [0.261–0.264] / 0.266 [0.265–0.268] |
+| WSS | 7.821 [7.793–7.850] | 7.857 [7.796–7.917] | +0.45% | pass | 0.285 [0.284–0.286] / 0.286 [0.283–0.288] |
+
+| Transport | Binary | RSS endpoint A / B MiB | Inner retransmissions | Outer retransmissions or QUIC loss |
+| --- | --- | ---: | ---: | ---: |
+| QUIC | A | 25.0–26.4 / 26.7–27.6 | 0, 0 | 0.0000%, 0.0000% |
+| QUIC | C | 25.7–27.4 / 26.7–28.1 | 2, 2 | 0.0000%, 0.0000% |
+| H2 | A | 22.5–26.1 / 24.7–26.9 | 246, 361 | 941, 1127 |
+| H2 | C | 23.9–25.4 / 24.5–26.3 | 25, 58 | 1351, 986 |
+| WSS | A | 21.8–25.4 / 22.9–23.1 | 4248, 3825 | 589, 1201 |
+| WSS | C | 23.0–26.0 / 22.8–23.1 | 717, 1023 | 936, 882 |
+
+Public ping delivery was 288/288. Colima ping delivery was 1772/1772.
+Public trials retained authenticated connection IDs and positive receiver delivery.
+Clean trials passed topology, connection-count, sampling, and delivery checks.
+Clean authentication uses private secure configuration and connection logs; explicit peer authentication snapshots were not saved.
+Public CPU uses daemon user and system CPU seconds divided by receiver-delivered Gbit.
+Public CPU sampling spans were 98.42%–105.18% of receiver duration.
+Clean CPU uses sampled CPU seconds per second, divided by receiver Gbit/s.
+CPU excludes iperf, monitoring, and kernel networking work outside daemon accounting.
+RSS includes shared pages and excludes kernel socket memory. Samples do not establish peak memory.
+Inner retransmissions, outer losses, and unsent expiry measure different events.
+H2/WSS outer retransmissions include both sockets and warmup.
+QUIC outer loss uses path-counter differences within the measured window.
+Public H2/WSS outer loss was not measured symmetrically. Raw remote socket and network snapshots remain available.
+Candidate public QUIC loss uses sampled path counters on both hosts.
+
+
+### QUIC FIFO diagnostics
+
+These counter differences use the last one-second log sample at or before each measurement boundary.
+Public boundaries use the iperf wall clock. Colima uses the recorded measurement window.
+Cross-host clock offset was not measured. Public FIFO windows therefore have additional timing uncertainty.
+Head maxima and paused counts describe log samples. They do not establish continuous maxima or pause duration.
+Residence means use all DATAGRAMs dequeued between those samples, including fragmented application packets.
+
+| Path | Direction | Rep | Host | Mean FIFO us | Persistent episodes | Paused samples | Sampled head max ms | Outer QUIC loss |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| public | download | 1 | Mac | 51.19 | 0 | 0/13 | 5.10 | 0.0000% |
+| public | download | 1 | Linux | 888.58 | 0 | 0/13 | 43.31 | 4.2855% |
+| public | upload | 1 | Mac | 1394.68 | 1 | 0/13 | 25.04 | 0.0603% |
+| public | upload | 1 | Linux | 11.38 | 0 | 0/13 | 0.00 | 0.0000% |
+| public | download | 2 | Mac | 6.92 | 0 | 0/13 | 0.00 | 0.0000% |
+| public | download | 2 | Linux | 927.06 | 0 | 0/13 | 17.46 | 4.7532% |
+| public | upload | 2 | Mac | 986.04 | 1 | 0/13 | 49.75 | 0.0580% |
+| public | upload | 2 | Linux | 17.16 | 0 | 0/13 | 0.00 | 0.0000% |
+| Colima | forward | 1 | lean-latency-a | 139.84 | 0 | 0/21 | 26.11 | 0.0000% |
+| Colima | forward | 1 | lean-latency-b | 0.51 | 0 | 0/21 | 0.00 | 0.0000% |
+| Colima | forward | 2 | lean-latency-a | 154.32 | 0 | 0/21 | 34.45 | 0.0000% |
+| Colima | forward | 2 | lean-latency-b | 0.63 | 0 | 0/21 | 0.00 | 0.0000% |
+
+### Interpretation
+
+The gate tables retain every trial. No repeated measurements replaced slow results.
+The two-repetition public comparison does not establish a stable ranking across changing network conditions.
+Historical B did not run in this campaign. Its recorded contamination limits remain applicable.
+Public QUIC upload loses 3.49% against A. H2 upload loses 6.22%, with candidate rates from 393.3 to 451.7 Mbit/s.
+Mac upload CPU medians fall from 0.565 to 0.428 s/Gbit for H2 and from 0.720 to 0.403 s/Gbit for WSS.
+The H2 A CPU range is wide, from 0.335 to 0.796 s/Gbit. This limits causal interpretation of the CPU median.
+Candidate H2 upload retains 25 and 689 NIC drops. WSS upload retains 343 and 558.
+Mac mean NIC residence is 0.459–1.520 ms for H2 upload and 0.777–1.481 ms for WSS upload.
+These counters show remaining local congestion. They do not establish its precise cause.
+Darwin removes the extra readiness syscall for each write. Kernel queries occur at approximately 20 Hz per active socket.
+The buffer model separates congestion-window flight capacity from the rate-based unsent allowance.
+At 450 Mbit/s, the Darwin allowance floor represents 4.66 ms. At 8 Gbit/s, the allowance represents 4 ms.
+Reported congestion window can exceed actual flight. The allowance does not establish a strict unsent-delay bound.
+QUIC preserves the recent peak-rate byte cap and the 1 MiB hard ceiling.
+The 5 ms FIFO target is a persistent-congestion threshold. It is not a maximum packet age.
+A per-flow observed generation retains the congestion signal across blocked direct-send credits and FIFO drain.
+Each candidate QUIC upload records one persistent FIFO episode and two or three NIC ECN marks, with no NIC drops.
+Upload mean FIFO residence is 0.986–1.395 ms. Candidate QUIC expiry counters remain zero.
+Counters do not distinguish ECN marks caused by FIFO feedback from marks caused by local NIC residence.
+One-second snapshots record no paused samples. They cannot resolve shorter admission pauses.
+Public Linux QUIC download records approximately 4.29% and 4.75% outer loss in the sampled windows.
+The FIFO measurements do not establish FIFO residence as the sole cause of remaining loaded RTT.
+The campaign changes two transport paths together. It cannot isolate every CPU or queue effect.
+
+### Build and cleanup evidence
+
+A artifacts were retained from bench3 and match its recorded hashes.
+All C release builds used Rust 1.95.0, fat LTO, one codegen unit, feature `tun`, and no default features.
+Mac used aarch64-apple-darwin. Public Linux used x86_64-unknown-linux-musl with cargo-zigbuild.
+Colima used aarch64-unknown-linux-gnu in the existing builder image.
+
+| Binary | SHA256 |
+| --- | --- |
+| baseline-mac | `46ce5db2e8a6402d98c1bacaf805a4574f5bc5449ae7a244e71cd22cccf199c0` |
+| baseline-mac-cli | `862aa208a53441fca9b35227f5e9b1a27c9f553e647eee3e77b033e00e1209b0` |
+| baseline-remote-linux | `5cccb3956e3ccc078f2d88fbb1789adac0ff2bcb2b4bf02a6fa48d917cf0cabf` |
+| baseline-remote-linux-cli | `4325cc7d6251a51f89c74064d4b6dab6be78382bcd5c5d6d4f7806de9409eb46` |
+| baseline-linux | `bf19b3b658bca9caf3d0b9f25fb938cb960cd1c6875d7b2d016a634e2a5e3f6b` |
+| main-mac | `680e99ac047048ffa87e2ebd9e8a51bc8f53ae6282a0b0a4b4bc87131ba259a6` |
+| main-mac-cli | `3023d56f8577231035ffbf7f1f476d5822016964135519fd8a10eed95eea147d` |
+| main-remote-linux | `ca71bca7b833cdcdd0e165620613329f6c0f17305e7661bca4bafbd8aec31212` |
+| main-remote-linux-cli | `a0c6649c16f7d4f05436c7cad972f883cc07c92d24b9c3e3570134ebc64033e8` |
+| main-linux | `ace4eba34ecde83a388a1b76c0e7315331be66f2d436c9283177dd37daa0406d` |
+
+macOS and aarch64 Linux all-target checks passed. Focused transport tests and locked Cargo metadata passed.
+Formatting checks covered only changed Rust files.
+Temporary peer processes, binaries, credentials, interfaces, and routes were removed.
+Colima benchmark containers and their network were removed.
+Resident PIDs and binary hashes matched before and after. Resident authentication and ping delivery passed after cleanup.
+Mac resident hashes cover the installed file. Linux resident hashes cover running `/proc/PID/exe` executables.
+No resident configuration, keys, ACLs, routes, or binary changed.
+Caddy routing, unauthorized probes, multi-stream traffic, and symmetric public loss measurements were outside the brief.
+
+Raw records and scripts: `benchmark-results/lean-core-tune-2-20261015/` in the tune worktree.
+Command audit: `/Users/boyu/code/lowertier/benchmark-results/.work/lean-core-20261014-tune-2.jsonl`.
