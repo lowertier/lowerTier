@@ -25,23 +25,6 @@ use super::{add_ns_to_bridge, create_netns, del_netns, drop_insts, ping_test};
 
 use rstest::rstest;
 
-fn generate_secure_mode_config() -> SecureModeConfig {
-    use base64::{Engine, prelude::BASE64_STANDARD};
-    use rand::rngs::OsRng;
-    use x25519_dalek::{PublicKey, StaticSecret};
-
-    let private = StaticSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&private);
-    SecureModeConfig {
-        enabled: true,
-        local_private_key: Some(BASE64_STANDARD.encode(private.as_bytes())),
-        local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
-        credential_bundle: None,
-        credential_root_fingerprint: Vec::new(),
-        credential_certificate: Vec::new(),
-    }
-}
-
 const PUBLIC_SERVER_NETWORK_NAME: &str = "__public_server__";
 const PUBLIC_SERVER_SHARED_SECRET: &str = "public-server-shared-secret";
 const NEED_P2P_ADMIN_NETWORK_NAME: &str = "need_p2p_credential_test_network";
