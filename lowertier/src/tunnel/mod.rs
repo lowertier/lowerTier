@@ -35,6 +35,7 @@ pub mod ring;
 pub mod stats;
 pub mod tcp;
 pub(crate) mod tcp_lanes;
+mod tcp_socket;
 
 pub mod quic;
 

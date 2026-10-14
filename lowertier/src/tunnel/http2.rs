@@ -409,13 +409,7 @@ struct H2Writer {
 
 impl H2Writer {
     fn new(send: SendStream<Bytes>) -> Self {
-        let coalesce_bytes = if cfg!(target_os = "linux")
-            && std::env::var_os("LOWTIER_ENABLE_TCP_LARGE_BUFFERS").is_some()
-        {
-            64 * 1024
-        } else {
-            HTTP2_COALESCE_BYTES
-        };
+        let coalesce_bytes = HTTP2_COALESCE_BYTES;
         Self {
             send,
             pending: BytesMut::with_capacity(coalesce_bytes),
@@ -602,7 +596,7 @@ async fn accept_inner(
             return Ok(None);
         }
     }
-    let tls = acceptor.accept(stream).await?;
+    let tls = acceptor.accept(super::tcp_socket::prepare(stream)).await?;
     let binding = derive_http2_binding(|output| {
         tls.get_ref()
             .1
@@ -620,6 +614,7 @@ async fn accept_inner(
         .enable_connect_protocol()
         .initial_window_size(stream_window)
         .initial_connection_window_size(conn_window)
+        .max_send_buffer_size(super::tcp_socket::TCP_NOTSENT_BYTES as usize)
         .max_frame_size(HTTP2_MAX_FRAME);
     let mut conn = server
         .handshake(tls)
@@ -702,7 +697,7 @@ pub async fn connect(
     }
     let server_name = stealth_tls::client_server_name(flags, &url)?;
     let tls = super::browser_tls::connect(
-        stream,
+        super::tcp_socket::prepare(stream),
         &server_name.to_str(),
         &[HTTP2_ALPN, HTTP11_ALPN],
         !stealth_tls::skip_server_verification(flags),
@@ -734,6 +729,7 @@ pub async fn connect(
     client
         .initial_window_size(stream_window)
         .initial_connection_window_size(conn_window)
+        .max_send_buffer_size(super::tcp_socket::TCP_NOTSENT_BYTES as usize)
         .max_frame_size(HTTP2_MAX_FRAME);
     let (h2, conn) = client
         .handshake(tls)

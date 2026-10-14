@@ -10,7 +10,10 @@ Both endpoints applied egress netem on the underlay veth: 40 ms delay per direct
 
 All LowTier variants used the same release binary, built with Rust 1.95, fat LTO and features `tun,quic,websocket`. SHA256: `28c9b67edcf790e16e6ab3e6df5fb04426a69ce57722245518a02f9cb1597a84`. The independent source candidate was reconstructed from base `c866fb8090e7ff83397915de827c663bd478d38a` plus the scoped changes, retaining the original tests. Throughput workloads and compilation were kept separate.
 
-The common TCP receive/send autotuning ceilings were 64 MiB. LowTier used the existing opt-in `LOWTIER_ENABLE_TCP_LARGE_BUFFERS=1`, giving 64 MiB reported outer TCP accounting limits per socket direction. H2 used ordinary TLS with `--quic-sni-passthrough true`. No `TCP_NOTSENT_LOWAT` experiment remains enabled. The number of inner TCP flows was unchanged when the outer lane count changed.
+The common TCP receive/send autotuning ceilings were 64 MiB. LowTier used the existing opt-in `LOWTIER_ENABLE_TCP_LARGE_BUFFERS=1`, giving 64 MiB reported outer TCP accounting limits per socket direction. H2 used ordinary TLS with `--quic-sni-passthrough true`. The measured baseline had no per-socket `TCP_NOTSENT_LOWAT` limit. The number of inner TCP flows was unchanged when the outer lane count changed.
+
+The 2026-10-14 candidate introduces a [separate unsent data budget](tcp-unsent-budget.md).
+That candidate requires a new matched comparison; the measurements below apply to the earlier binary.
 
 ## Receiver goodput
 

@@ -250,6 +250,7 @@ impl WsTunnelListener {
 
     async fn try_accept(&self, stream: TcpStream) -> Result<Box<dyn Tunnel>, TunnelError> {
         let peer_addr = stream.peer_addr()?;
+        let stream = super::tcp_socket::prepare(stream);
         if is_wss(&self.addr)? {
             let acceptor = self.tls_acceptor.as_ref().ok_or_else(|| {
                 TunnelError::InternalError("WSS listener has no TLS acceptor".to_string())
@@ -516,6 +517,7 @@ impl WsTunnelConnector {
             ),
         };
 
+        let stream = super::tcp_socket::prepare(stream);
         if is_wss {
             let via_cdn = ws_via_cdn(&addr);
             let name = if !via_cdn && !flags.camouflage_config().server_name.is_empty() {
