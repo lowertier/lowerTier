@@ -16,6 +16,10 @@ The `disable_upnp` option is removed. Android and OHOS paths are removed.
 Ring tunnels used by tests now use session AEAD after authentication.
 The production TLS exporter bindings remain unchanged.
 
+Magic DNS retains active listeners, packet handling, and Windows and macOS system configuration.
+The unused Linux DNS configurator stub and orphan test helpers are removed.
+Linux system DNS configuration remains unavailable, as before.
+
 ## Cryptography and compression
 
 Ring provides ChaCha20-Poly1305, AES-128-GCM, and AES-256-GCM.

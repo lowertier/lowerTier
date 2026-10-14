@@ -66,6 +66,7 @@ fn resolve_machine_id_state_file(state_dir: Option<&Path>) -> anyhow::Result<Pat
     Ok(state_dir.join("machine_id"))
 }
 
+#[cfg(not(any(target_os = "ios", all(target_os = "macos", feature = "macos-ne"))))]
 fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
     value.filter(|value| !value.is_empty())
 }

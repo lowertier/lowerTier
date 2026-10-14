@@ -61,7 +61,6 @@ static NIC_PIPELINE_NAME: &str = "magic_dns_server";
 pub(super) struct MagicDnsServerInstanceData {
     dns_server: Server,
     tun_dev: Option<String>,
-    tun_ip: Ipv4Addr,
     fake_ip: Ipv4Addr,
     my_peer_id: PeerId,
 
@@ -483,7 +482,7 @@ impl RpcServerHook for MagicDnsServerInstanceData {
 }
 
 pub struct MagicDnsServerInstance {
-    rpc_server: StandAloneServer<TcpTunnelListener>,
+    _rpc_server: StandAloneServer<TcpTunnelListener>,
     pub(super) data: Arc<MagicDnsServerInstanceData>,
     peer_mgr: Arc<PeerManager>,
     tun_inet: Ipv4Inet,
@@ -544,7 +543,6 @@ impl MagicDnsServerInstance {
         let data = Arc::new(MagicDnsServerInstanceData {
             dns_server,
             tun_dev: tun_dev.clone(),
-            tun_ip: tun_inet.address(),
             fake_ip,
             my_peer_id: peer_mgr.my_peer_id(),
             route_infos: DashMap::new(),
@@ -573,7 +571,7 @@ impl MagicDnsServerInstance {
             .context("Failed to configure system")??;
 
         Ok(Self {
-            rpc_server,
+            _rpc_server: rpc_server,
             data,
             peer_mgr,
             tun_inet,

@@ -258,7 +258,6 @@ hickory-resolver = "0.25.2"
 hickory-proto = "0.25.2"
 
 # for magic dns
-hickory-client = { version = "0.25.2", optional = true }
 hickory-server = { version = "0.25.2", features = [
     "resolver",
 ], optional = true }
@@ -282,11 +281,6 @@ netlink-sys = "0.8.7"
 netlink-packet-route = "0.21.0"
 netlink-packet-core = { version = "0.7.0" }
 netlink-packet-utils = "0.5.2"
-# for magic dns
-resolv-conf = "0.7.3"
-version-compare = "0.2.0"
-dbus = { version = "0.9.7", features = ["vendored"] }
-which = "7.0.3"
 
 [target.'cfg(all(windows, any(target_arch = "x86_64", target_arch = "x86")))'.dependencies]
 windivert = { path = "../vendor/windivert-rust/windivert", features = [
@@ -384,6 +378,6 @@ jemalloc-prof = [
     "jemalloc-sys/stats",
 ]
 tracing = ["tokio/tracing", "dep:console-subscriber"]
-magic-dns = ["dep:hickory-client", "dep:hickory-server"]
+magic-dns = ["dep:hickory-server"]
 # For Network Extension on macOS
 macos-ne = []

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use hickory_proto::op::Edns;
 use hickory_proto::rr;
 use hickory_proto::rr::LowerName;
 use hickory_resolver::config::ResolverOpts;
@@ -10,14 +9,12 @@ use hickory_server::authority::{AuthorityObject, Catalog, ZoneType};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::store::forwarder::ForwardConfig;
 use hickory_server::store::{forwarder::ForwardAuthority, in_memory::InMemoryAuthority};
-use std::io;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tokio::task::JoinSet;
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::common::dns::get_default_resolver_config;
 
@@ -27,9 +24,6 @@ pub struct Server {
     server: ServerFuture<CatalogRequestHandler>,
     catalog: Arc<RwLock<Catalog>>,
     general_config: GeneralConfig,
-    udp_local_addr: Option<SocketAddr>,
-    tcp_local_addr: Option<SocketAddr>,
-    tasks: JoinSet<()>,
 }
 
 struct CatalogRequestHandler {
@@ -123,18 +117,7 @@ impl Server {
             server,
             catalog,
             general_config: config.general().clone(),
-            udp_local_addr: None,
-            tcp_local_addr: None,
-            tasks: JoinSet::new(),
         })
-    }
-
-    pub fn udp_local_addr(&self) -> Option<SocketAddr> {
-        self.udp_local_addr
-    }
-
-    pub fn tcp_local_addr(&self) -> Option<SocketAddr> {
-        self.tcp_local_addr
     }
 
     pub async fn register_udp_socket(&mut self, address: String) -> Result<SocketAddr> {
@@ -185,21 +168,14 @@ impl Server {
             let tcp_listener = TcpListener::bind(address.clone())
                 .await
                 .with_context(|| format!("DNS Server failed to bind TCP address {}", address))?;
-            self.tcp_local_addr = Some(tcp_listener.local_addr()?);
             self.server
                 .register_listener(tcp_listener, Duration::from_secs(5));
         }
 
         if let Some(address) = self.general_config.listen_udp() {
-            let local_addr = self.register_udp_socket(address.clone()).await?;
-            self.udp_local_addr = Some(local_addr);
+            self.register_udp_socket(address.clone()).await?;
         };
 
-        Ok(())
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.server.shutdown_gracefully().await?;
         Ok(())
     }
 
@@ -207,45 +183,7 @@ impl Server {
         self.catalog.write().await.upsert(name, vec![authority]);
     }
 
-    pub async fn remove(&self, name: &LowerName) -> Option<Vec<Arc<dyn AuthorityObject>>> {
-        self.catalog.write().await.remove(name)
-    }
-
-    pub async fn update<R: ResponseHandler>(
-        &self,
-        update: &Request,
-        response_edns: Option<Edns>,
-        response_handle: R,
-    ) -> io::Result<ResponseInfo> {
-        self.catalog
-            .write()
-            .await
-            .update(update, response_edns, response_handle)
-            .await
-    }
-
-    pub async fn contains(&self, name: &LowerName) -> bool {
-        self.catalog.read().await.contains(name)
-    }
-
-    pub async fn lookup<R: ResponseHandler>(
-        &self,
-        request: &Request,
-        response_edns: Option<Edns>,
-        response_handle: R,
-    ) -> ResponseInfo {
-        self.catalog
-            .read()
-            .await
-            .lookup(request, response_edns, response_handle)
-            .await
-    }
-
     pub async fn read_catalog(&self) -> RwLockReadGuard<'_, Catalog> {
         self.catalog.read().await
-    }
-
-    pub async fn write_catalog(&self) -> RwLockWriteGuard<'_, Catalog> {
-        self.catalog.write().await
     }
 }

@@ -88,10 +88,8 @@ pub trait IfConfiguerTrait: Send + Sync {
 }
 
 #[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "windows"
+    all(target_os = "macos", not(feature = "macos-ne")),
+    target_os = "freebsd"
 ))]
 fn cidr_to_subnet_mask(prefix_length: u8) -> Ipv4Addr {
     if prefix_length > 32 {
@@ -110,10 +108,8 @@ fn cidr_to_subnet_mask(prefix_length: u8) -> Ipv4Addr {
 }
 
 #[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "windows"
+    all(target_os = "macos", not(feature = "macos-ne")),
+    target_os = "freebsd"
 ))]
 async fn run_shell_cmd(cmd: &str) -> Result<(), Error> {
     let cmd_out: std::process::Output;

@@ -93,6 +93,11 @@ fn fallback_source_allowed(
 }
 
 struct InterfaceFilter {
+    // Mobile interface filtering accepts all interfaces without inspecting their data.
+    #[cfg_attr(
+        any(target_os = "ios", all(target_os = "macos", feature = "macos-ne")),
+        allow(dead_code)
+    )]
     iface: NetworkInterface,
 }
 
