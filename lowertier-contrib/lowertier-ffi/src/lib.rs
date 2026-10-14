@@ -192,15 +192,12 @@ pub unsafe extern "C" fn set_tun_fd(inst_name: *const c_char, fd: c_int) -> c_in
 
 /// Call an exposed LowTier RPC method using protobuf JSON.
 ///
-/// This generic bridge intentionally excludes instance lifecycle management
-/// RPCs. Use the dedicated FFI APIs for starting, retaining, deleting, and
-/// collecting instances. `payload_json` must contain the protobuf JSON request,
-/// including any `instance` selector required by the target RPC.
-///
-/// `domain_name` may be null or empty. It is only used by
-/// `api.instance.TcpProxyRpcService`; null or empty defaults to `tcp`, and the
-/// only accepted explicit values are `tcp`, `kcp_src`, `kcp_dst`, `quic_src`,
-/// and `quic_dst`.
+/// Use `api.control.v1.ControlPlaneV1Rpc` and a PascalCase method name.
+/// The request uses pbjson field names, such as `meta.instance_id`.
+/// Instance requests can access only instances owned by this FFI manager.
+/// Credential methods also require `meta.admin_token`.
+/// `domain_name` must be null or empty.
+/// API failures return the shared `error` envelope with an `ApiError` value.
 ///
 /// On success, writes a newly allocated JSON response string to
 /// `out_response_json`. The caller must release it with `free_string`.

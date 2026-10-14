@@ -112,9 +112,9 @@ fn list_instance_rejects_null_output_pointer() {
 }
 
 #[test]
-fn call_json_rpc_returns_logger_response() {
-    let service = CString::new("api.logger.LoggerRpcService").unwrap();
-    let method = CString::new("get_logger_config").unwrap();
+fn call_json_rpc_returns_control_response() {
+    let service = CString::new("api.control.v1.ControlPlaneV1Rpc").unwrap();
+    let method = CString::new("GetCapabilities").unwrap();
     let payload = CString::new("{}").unwrap();
     let mut response_ptr: *const c_char = std::ptr::null();
 
@@ -136,11 +136,18 @@ fn call_json_rpc_returns_logger_response() {
         .into_owned();
     free_string(response_ptr);
     let response: Value = serde_json::from_str(&response).unwrap();
-    assert!(response.get("level").is_some());
+    assert_eq!(response["api_version"], "1");
+    assert!(
+        response["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "PatchConfig")
+    );
 }
 
 #[test]
-fn call_json_rpc_rejects_instance_management_service() {
+fn call_json_rpc_rejects_retired_service() {
     let service = CString::new("api.manage.WebClientService").unwrap();
     let method = CString::new("list_network_instance").unwrap();
     let payload = CString::new("{}").unwrap();
@@ -156,16 +163,18 @@ fn call_json_rpc_rejects_instance_management_service() {
                 &mut response_ptr,
             )
         },
-        -1
+        0
     );
-    assert!(response_ptr.is_null());
-    assert!(take_last_error().unwrap().contains("not exposed"));
+    let response: Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(response_ptr) }.to_str().unwrap()).unwrap();
+    free_string(response_ptr);
+    assert_eq!(response["error"]["code"], "invalid_argument");
 }
 
 #[test]
 fn call_json_rpc_rejects_malformed_payload_json() {
-    let service = CString::new("api.logger.LoggerRpcService").unwrap();
-    let method = CString::new("get_logger_config").unwrap();
+    let service = CString::new("api.control.v1.ControlPlaneV1Rpc").unwrap();
+    let method = CString::new("GetCapabilities").unwrap();
     let payload = CString::new("{").unwrap();
     let mut response_ptr: *const c_char = std::ptr::null();
 
@@ -179,20 +188,18 @@ fn call_json_rpc_rejects_malformed_payload_json() {
                 &mut response_ptr,
             )
         },
-        -1
+        0
     );
-    assert!(response_ptr.is_null());
-    assert!(
-        take_last_error()
-            .unwrap()
-            .contains("failed to parse payload_json")
-    );
+    let response: Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(response_ptr) }.to_str().unwrap()).unwrap();
+    free_string(response_ptr);
+    assert_eq!(response["error"]["code"], "invalid_argument");
 }
 
 #[test]
 fn call_json_rpc_rejects_null_output_pointer() {
-    let service = CString::new("api.logger.LoggerRpcService").unwrap();
-    let method = CString::new("get_logger_config").unwrap();
+    let service = CString::new("api.control.v1.ControlPlaneV1Rpc").unwrap();
+    let method = CString::new("GetCapabilities").unwrap();
     let payload = CString::new("{}").unwrap();
 
     assert_eq!(

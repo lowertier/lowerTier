@@ -89,11 +89,12 @@ process with `no_tun = true` and `bind_device = false`, then run TCP and UDP
 ping/pong over the async data-plane API.
 
 The synchronous wrapper also exposes `CallJSONRPC(service, method, domain,
-payload)` for non-lifecycle LowTier RPCs. For example,
-`CallJSONRPC("api.logger.LoggerRpcService", "get_logger_config", "", "{}")`
-returns the logger config as protobuf JSON. Instance lifecycle management RPCs
-are intentionally filtered; use the dedicated FFI APIs for starting and
-stopping instances.
+payload)` for the versioned control service. For example,
+`CallJSONRPC("api.control.v1.ControlPlaneV1Rpc", "GetCapabilities", "", "{}")`
+returns the capabilities as pbjson JSON. Use exact PascalCase method names.
+Instance resources use `meta.instance_id`. Credential methods also require `meta.admin_token`.
+The adapter can access only instances owned by its manager.
+API failures return a shared `error` envelope. The dedicated lifecycle functions remain available.
 
 To run only the async tests:
 

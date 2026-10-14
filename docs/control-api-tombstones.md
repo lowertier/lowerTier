@@ -18,5 +18,5 @@ Peer RPC service identities and methods remain unchanged.
 | api.logger | LoggerRpc |
 | api.manage | WebClientService |
 
-The retired `NetworkConfig` message reserves its field numbers and names.
+The unused `NetworkConfig` message and its GUI conversions are deleted.
 Internal snapshot messages remain available for core data structures.

@@ -51,27 +51,65 @@ pub(crate) unsafe fn call_json_rpc(
             return -1;
         }
     };
-    let payload = match serde_json::from_str::<serde_json::Value>(&payload_json) {
-        Ok(value) => value,
-        Err(err) => {
-            set_error_msg(&format!("failed to parse payload_json: {}", err));
-            return -1;
+    let before = INSTANCE_MANAGER.list_network_instance_ids();
+    let (response, _remote_guard) = match serde_json::from_str::<serde_json::Value>(&payload_json) {
+        Ok(payload) => {
+            match ASYNC_RUNTIME.block_on(lowertier::rpc_service::control::call_owned_json_locked(
+                &INSTANCE_MANAGER,
+                &service_name,
+                &method_name,
+                domain_name.as_deref(),
+                payload,
+            )) {
+                Ok(value) => value,
+                Err(err) => {
+                    set_error_msg(&format!("RPC Error: {}", err));
+                    return -1;
+                }
+            }
         }
+        Err(_) => (
+            serde_json::json!({"error": lowertier::proto::api::control::v1::ApiError {
+                code: "invalid_argument".into(), message: "The control request JSON is invalid.".into(), field_path: "payload_json".into(), retryable: false,
+            }}),
+            None,
+        ),
     };
-
-    let response = match ASYNC_RUNTIME.block_on(lowertier::rpc_service::call_json_rpc(
-        &INSTANCE_MANAGER,
-        &service_name,
-        &method_name,
-        domain_name.as_deref(),
-        payload,
-    )) {
-        Ok(value) => value,
-        Err(err) => {
-            set_error_msg(&format!("RPC Error: {}", err));
-            return -1;
+    if matches!(
+        method_name.as_str(),
+        "CreateInstance" | "StartInstance" | "StopInstance" | "DeleteInstance"
+    ) && response.get("error").is_none()
+    {
+        let _guard = crate::state::INSTANCE_MUTATION_LOCK.lock().unwrap();
+        let after = INSTANCE_MANAGER.list_network_instance_ids();
+        let mut removed = before
+            .into_iter()
+            .filter(|id| !after.contains(id))
+            .collect::<Vec<_>>();
+        if method_name == "StopInstance" {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) {
+                if let Ok(request) = serde_json::from_value::<
+                    lowertier::proto::api::control::v1::StopInstanceRequest,
+                >(payload)
+                {
+                    let selected = request
+                        .meta
+                        .and_then(|meta| meta.instance_id.parse().ok())
+                        .or_else(|| (after.len() == 1).then(|| after[0]));
+                    if let Some(id) = selected {
+                        removed.push(id);
+                    }
+                }
+            }
         }
-    };
+        crate::data_plane::remove_data_plane_handles_by_instance_ids(&removed);
+        crate::state::INSTANCE_NAME_ID_MAP.clear();
+        for id in after {
+            if let Some(name) = INSTANCE_MANAGER.get_instance_name(&id) {
+                crate::state::INSTANCE_NAME_ID_MAP.insert(name, id);
+            }
+        }
+    }
     let response_json = match serde_json::to_string(&response) {
         Ok(value) => value,
         Err(err) => {
