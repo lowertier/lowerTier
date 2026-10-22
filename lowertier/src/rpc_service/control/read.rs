@@ -245,6 +245,8 @@ impl ControlPlaneService {
             }
         }
         let identities = peers.get_peer_map().origin_auth_snapshot();
+        let sessions = peers.get_peer_session_store();
+        let network_name = instance.context()?.get_network_name();
         let mut rows = peer_infos
             .into_values()
             .map(|peer| {
@@ -287,6 +289,19 @@ impl ControlPlaneService {
                     } else {
                         "unavailable".into()
                     },
+                    direct_link_auth: peer
+                        .conns
+                        .iter()
+                        .filter(|conn| !conn.is_closed)
+                        .map(|conn| conn.secure_auth_level)
+                        .max(),
+                    end_to_end_session_ready: sessions
+                        .peek(&crate::peers::peer_session::SessionKey::new(
+                            network_name.clone(),
+                            peer.peer_id,
+                        ))
+                        .map(|session| session.peer_static_pubkey().is_some()),
+                    routing_authority_auth: route.as_ref().map(|route| route.secure_auth_level),
                     conns: peer.conns,
                     route,
                     ..Default::default()

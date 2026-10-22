@@ -34,6 +34,7 @@ See [tracker discovery](docs/tracker-discovery.md) for client configuration, pee
 `lowertier-cli` prints tables by default.
 Use `--output json` for scripts.
 The repository does not provide a separate TUI binary.
+See [mesh health](docs/mesh-health.md) for the peer authentication scopes and UDP forwarding counters.
 
 The packet path has four main parts.
 

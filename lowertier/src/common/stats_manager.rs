@@ -20,6 +20,10 @@ pub enum MetricName {
     QuicMigrationsRejected,
     RelayBytes,
     RelayDrops,
+    /// UDP replies that waited for bounded forwarding capacity.
+    UdpProxyReplyQueueWaits,
+    /// UDP replies discarded because the forwarding receiver was closed.
+    UdpProxyReplyDrops,
     /// RPC calls sent to peers
     PeerRpcClientTx,
     /// RPC calls received from peers
@@ -150,6 +154,8 @@ impl fmt::Display for MetricName {
             MetricName::QuicMigrationsRejected => write!(f, "quic_migrations_rejected"),
             MetricName::RelayBytes => write!(f, "relay_bytes"),
             MetricName::RelayDrops => write!(f, "relay_drops"),
+            MetricName::UdpProxyReplyQueueWaits => write!(f, "udp_proxy_reply_queue_waits"),
+            MetricName::UdpProxyReplyDrops => write!(f, "udp_proxy_reply_drops"),
             MetricName::PeerRpcClientTx => write!(f, "peer_rpc_client_tx"),
             MetricName::PeerRpcClientRx => write!(f, "peer_rpc_client_rx"),
             MetricName::PeerRpcServerTx => write!(f, "peer_rpc_server_tx"),

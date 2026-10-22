@@ -32,7 +32,12 @@ use tracing::Level;
 use super::{CidrSet, ip_reassembler::IpReassembler};
 use crate::tunnel::common::bind;
 use crate::{
-    common::{PeerId, error::Error, global_ctx::ArcGlobalCtx},
+    common::{
+        PeerId,
+        error::Error,
+        global_ctx::ArcGlobalCtx,
+        stats_manager::{LabelSet, MetricName, StatsManager},
+    },
     gateway::ip_reassembler::{ComposeIpv4PacketArgs, compose_ipv4_packet},
     peers::{PeerPacketFilter, peer_manager::PeerManager},
     tunnel::{
@@ -108,12 +113,38 @@ impl UdpNatEntry {
         payload_len: usize,
         payload_mtu: usize,
         ip_id: u16,
+        stats: &StatsManager,
     ) -> Result<(), Error> {
         let SocketAddr::V4(nat_src_v4) = self.src_socket else {
             return Err(Error::Unknown);
         };
 
         assert_eq!(0, payload_mtu % 8);
+
+        // Reserve every fragment before emitting any of this datagram. Waiting
+        // preserves the bounded queue without acknowledging a discarded reply.
+        let fragments = (payload_len + 8).div_ceil(payload_mtu);
+        let reservation = match packet_sender.try_reserve_many(fragments) {
+            Ok(permits) => Ok(permits),
+            Err(TrySendError::Full(())) => {
+                stats
+                    .get_counter(MetricName::UdpProxyReplyQueueWaits, LabelSet::default())
+                    .inc();
+                packet_sender.reserve_many(fragments).await
+            }
+            Err(TrySendError::Closed(())) => {
+                stats
+                    .get_counter(MetricName::UdpProxyReplyDrops, LabelSet::default())
+                    .inc();
+                return Err(Error::Unknown);
+            }
+        };
+        let mut permits = reservation.map_err(|_| {
+            stats
+                .get_counter(MetricName::UdpProxyReplyDrops, LabelSet::default())
+                .inc();
+            Error::Unknown
+        })?;
 
         // udp payload is in buf[20 + 8..]
         let mut udp_packet = MutableUdpPacket::new(&mut buf[20..28 + payload_len]).unwrap();
@@ -141,13 +172,11 @@ impl UdpNatEntry {
                 p.fill_peer_manager_hdr(self.my_peer_id, self.src_peer_id, PacketType::Data as u8);
                 p.mut_peer_manager_header().unwrap().set_no_proxy(true);
 
-                match packet_sender.try_send(p) {
-                    Err(TrySendError::Closed(e)) => {
-                        tracing::error!("send icmp packet to peer failed: {:?}, may exiting..", e);
-                        Err(Error::Unknown)
-                    }
-                    _ => Ok(()),
-                }
+                permits
+                    .next()
+                    .expect("one queue permit per IPv4 fragment")
+                    .send(p);
+                Ok(())
             },
         )?;
 
@@ -160,6 +189,7 @@ impl UdpNatEntry {
         virtual_ipv4: Ipv4Addr,
         real_ipv4: Ipv4Addr,
         mapped_ipv4: Ipv4Addr,
+        stats: Arc<StatsManager>,
     ) {
         let (s, mut r) = channel(128);
 
@@ -204,7 +234,9 @@ impl UdpNatEntry {
                 tracing::trace!(?len, ?src_socket, "udp nat packet response received");
 
                 let ret_buf = cur_buf.split();
-                s.send((ret_buf, len, src_socket)).await.unwrap();
+                if s.send((ret_buf, len, src_socket)).await.is_err() {
+                    break;
+                }
             }
         }));
 
@@ -244,6 +276,7 @@ impl UdpNatEntry {
                     len,
                     1280,
                     ip_id,
+                    &stats,
                 )
                 .await
                 else {
@@ -394,6 +427,7 @@ impl UdpProxy {
                     self.global_ctx.get_ipv4().map(|x| x.address())?,
                     real_dst_ip,
                     ipv4.get_destination(),
+                    self.global_ctx.stats_manager().clone(),
                 )));
         }
 
@@ -548,7 +582,7 @@ impl UdpProxy {
                 };
                 let ret = pm.send_msg_for_proxy(msg, to_peer_id).await;
                 if ret.is_err() {
-                    tracing::error!("send icmp packet to peer failed: {:?}", ret);
+                    tracing::error!("send UDP reply to peer failed: {:?}", ret);
                 }
             }
         });
@@ -561,5 +595,96 @@ impl Drop for UdpProxy {
         for v in self.nat_table.iter() {
             v.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reply_waits_for_all_fragment_capacity_and_counts_closed_queue() {
+        let stats = Arc::new(StatsManager::new());
+        let (sender, mut receiver) = channel(2);
+        sender
+            .send(ZCPacket::new_with_payload(b"occupied"))
+            .await
+            .unwrap();
+        let entry =
+            Arc::new(UdpNatEntry::new(7, 9, "127.0.0.1:40000".parse().unwrap(), true).unwrap());
+        let payload = vec![0x5a; 2000];
+        let task_sender = sender.clone();
+        let task_stats = stats.clone();
+        let task_entry = entry.clone();
+        let task = tokio::spawn(async move {
+            let mut buf = vec![0; 2028];
+            buf[28..].fill(0x5a);
+            task_entry
+                .compose_ipv4_packet(
+                    &task_sender,
+                    &mut buf,
+                    &"127.0.0.2:45262".parse().unwrap(),
+                    2000,
+                    1280,
+                    17,
+                    &task_stats,
+                )
+                .await
+        });
+        let waits = stats.get_counter(MetricName::UdpProxyReplyQueueWaits, LabelSet::default());
+        timeout(Duration::from_secs(2), async {
+            while waits.get() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!task.is_finished());
+        assert_eq!(receiver.recv().await.unwrap().payload(), b"occupied");
+        timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let reassembler = IpReassembler::new(Duration::from_secs(1));
+        let mut assembled = None;
+        for _ in 0..2 {
+            let packet = receiver.recv().await.unwrap();
+            assert!(packet.peer_manager_header().unwrap().is_no_proxy());
+            let ip = Ipv4Packet::new(packet.payload()).unwrap();
+            assert_eq!(ip.get_identification(), 17);
+            assembled = reassembler.add_fragment(ip.get_source(), ip.get_destination(), &ip);
+        }
+        let assembled = assembled.unwrap();
+        let udp = udp::UdpPacket::new(&assembled).unwrap();
+        assert_eq!(udp.payload(), payload);
+        assert_eq!(
+            udp.get_checksum(),
+            udp::ipv4_checksum(&udp, &Ipv4Addr::new(127, 0, 0, 2), &Ipv4Addr::LOCALHOST)
+        );
+
+        drop(receiver);
+        let mut buf = vec![0; 29];
+        assert!(
+            entry
+                .compose_ipv4_packet(
+                    &sender,
+                    &mut buf,
+                    &"127.0.0.2:45262".parse().unwrap(),
+                    1,
+                    1280,
+                    18,
+                    &stats
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            stats
+                .get_counter(MetricName::UdpProxyReplyDrops, LabelSet::default())
+                .get(),
+            1
+        );
     }
 }

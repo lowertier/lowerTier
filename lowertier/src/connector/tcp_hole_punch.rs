@@ -1095,6 +1095,8 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        // Construction publishes the bound address; STUN refresh is explicit.
+        bootstrap.refresh_mapping(None).await.unwrap();
         assert_eq!(bootstrap.mapped().await.unwrap(), mapped);
         let accepting = bootstrap.clone();
         let accepted = tokio::spawn(async move { accepting.accept_stream().await });

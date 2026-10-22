@@ -351,12 +351,56 @@ disable_tcp_hole_punching = true
             .await
             .unwrap();
         assert!(peers.error.is_none(), "{:?}", peers.error);
-        assert!(
-            peers
+        let peer = peers
+            .peers
+            .iter()
+            .find(|peer| peer.peer_id == b.my_peer_id())
+            .unwrap();
+        assert!(peer.direct_link_auth.is_some());
+        assert_eq!(peer.end_to_end_session_ready, Some(true));
+        let routing_auth = peer.route.as_ref().unwrap().secure_auth_level;
+        assert_eq!(peer.routing_authority_auth, Some(routing_auth));
+
+        // A data-plane session must not elevate the independent routing proof.
+        // Invalidating that session must immediately withdraw its ready status.
+        use crate::peers::peer_session::{PeerSession, SessionKey};
+        let session = Arc::new(PeerSession::new(
+            b.my_peer_id(),
+            PeerSession::new_root_key(),
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some(peer.peer_key.clone().try_into().unwrap()),
+        ));
+        a.get_peer_session_store().insert_session(
+            SessionKey::new(a.get_global_ctx().get_network_name(), b.my_peer_id()),
+            session.clone(),
+        );
+        for ready in [Some(true), None] {
+            if ready.is_none() {
+                session.invalidate();
+            }
+            let response = service
+                .list_peers(
+                    BaseController::default(),
+                    ListPeersRequest {
+                        meta: meta.clone(),
+                        page: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(response.error.is_none(), "{:?}", response.error);
+            let peer = response
                 .peers
                 .iter()
-                .any(|peer| peer.peer_id == b.my_peer_id())
-        );
+                .find(|peer| peer.peer_id == b.my_peer_id())
+                .unwrap();
+            assert_eq!(peer.end_to_end_session_ready, ready);
+            assert_eq!(peer.routing_authority_auth, Some(routing_auth));
+            assert!(peer.direct_link_auth.is_some());
+        }
         let routes = service
             .list_routes(
                 BaseController::default(),

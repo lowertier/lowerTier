@@ -209,9 +209,9 @@ pub struct ComposeIpv4PacketArgs<'a> {
 }
 
 // ip payload should be in buf[20..]
-pub fn compose_ipv4_packet<F>(args: ComposeIpv4PacketArgs, cb: F) -> Result<(), Error>
+pub fn compose_ipv4_packet<F>(args: ComposeIpv4PacketArgs, mut cb: F) -> Result<(), Error>
 where
-    F: Fn(&[u8]) -> Result<(), Error>,
+    F: FnMut(&[u8]) -> Result<(), Error>,
 {
     let total_pieces = args.payload_len.div_ceil(args.payload_mtu);
     let mut buf_offset = 0;

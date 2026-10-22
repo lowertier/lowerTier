@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 import "api_instance.proto";
+import "peer_rpc.proto";
 import "common.proto";
 import "acl.proto";
 
@@ -70,6 +71,13 @@ message PeerSnapshot {
   string metric_scope = 11;
   api.instance.Route route = 12;
   optional uint64 sample_expiry_ms = 13;
+  // Authentication from an active direct transport connection, if present.
+  optional peer_rpc.SecureAuthLevel direct_link_auth = 14;
+  // A committed, valid data-plane session with a bound Noise static peer key.
+  // Absent means no end-to-end session is currently established.
+  optional bool end_to_end_session_ready = 15;
+  // Local routing attestation, distinct from transport/session authentication.
+  optional peer_rpc.SecureAuthLevel routing_authority_auth = 16;
 }
 message ListPeersRequest { RequestMeta meta = 1; Page page = 2; }
 message ListPeersResponse {

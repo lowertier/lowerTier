@@ -237,6 +237,23 @@ fn table_output(response: &Response, data: &Value) -> String {
                         field(peer, "delivery_bps"),
                         field(peer, "sample_age_ms"),
                         field(peer, "metric_scope"),
+                        if peer.get("direct_link_auth").is_some_and(|v| !v.is_null()) {
+                            field(peer, "direct_link_auth")
+                        } else {
+                            "not direct".into()
+                        },
+                        match peer
+                            .get("end_to_end_session_ready")
+                            .and_then(Value::as_bool)
+                        {
+                            Some(true) => "key-bound".into(),
+                            Some(false) => "unverified".into(),
+                            None => "not established".into(),
+                        },
+                        match peer.get("routing_authority_auth").and_then(Value::as_str) {
+                            Some("EncryptedUnauthenticated") => "not locally attested".into(),
+                            _ => field(peer, "routing_authority_auth"),
+                        },
                     ]
                 })
                 .collect();
@@ -251,6 +268,9 @@ fn table_output(response: &Response, data: &Value) -> String {
                         "Delivery (bit/s)",
                         "Sample age (ms)",
                         "Scope",
+                        "Direct auth",
+                        "End-to-end session",
+                        "Routing trust",
                     ],
                     entries,
                 )
@@ -526,5 +546,23 @@ mod tests {
             json!({"destination":"2001:db8::/64","path_peer_ids":[1,2,3,4],"first_hop_peer_id":2});
         assert_eq!(path(&route), "1 -> 2 -> 3 -> 4");
         assert_eq!(via(&route), "via 2");
+
+        let response = Response::Peers(crate::cli::client::PeerView {
+            snapshot: None,
+            peers: vec![crate::proto::api::control::v1::PeerSnapshot {
+                routing_authority_auth: Some(
+                    crate::proto::peer_rpc::SecureAuthLevel::EncryptedUnauthenticated as i32,
+                ),
+                ..Default::default()
+            }],
+            route_summaries: Vec::new(),
+            active_policy: "hop".into(),
+            next_page_token: String::new(),
+        });
+        let data = serde_json::to_value(&response).unwrap();
+        let rendered = table_output(&response, &data);
+        assert!(rendered.contains("not direct"));
+        assert!(rendered.contains("not established"));
+        assert!(rendered.contains("not locally attested"));
     }
 }
