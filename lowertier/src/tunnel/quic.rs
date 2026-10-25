@@ -3128,6 +3128,14 @@ impl AsyncUdpSocket for QuicDecoySocket {
         self.inner.try_send(transmit)
     }
 
+    fn try_send_partial(&self, transmit: &quinn::udp::Transmit<'_>) -> std::io::Result<usize> {
+        self.inner.try_send_partial(transmit)
+    }
+
+    fn max_batch_segments(&self) -> usize {
+        self.inner.max_batch_segments()
+    }
+
     fn poll_recv(
         &self,
         cx: &mut TaskContext<'_>,

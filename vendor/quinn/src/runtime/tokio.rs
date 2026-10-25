@@ -3,16 +3,19 @@ use std::{
     io,
     pin::Pin,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
     time::Instant,
 };
 
 use tokio::{
     io::Interest,
-    time::{sleep_until, Sleep},
+    time::{Sleep, sleep_until},
 };
 
 use super::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPollHelper};
+
+#[cfg(target_os = "macos")]
+mod darwin_send;
 
 /// A Quinn runtime for Tokio
 #[derive(Debug)]
@@ -87,6 +90,44 @@ impl AsyncUdpSocket for UdpSocket {
         })
     }
 
+    fn try_send_partial(&self, transmit: &udp::Transmit) -> io::Result<usize> {
+        #[cfg(target_os = "macos")]
+        if self.connected && transmit.segment_size.is_some() {
+            use std::os::fd::AsRawFd;
+            let result = self.io.try_io(Interest::WRITABLE, || {
+                darwin_send::send(self.io.as_raw_fd(), transmit)
+            });
+            match result {
+                Err(ref error) if matches!(error.raw_os_error(), Some(22 | 40 | 45)) => {}
+                result => return result,
+            }
+        }
+        if let Some(segment) = transmit.segment_size {
+            if self.max_transmit_segments() == 1
+                && segment != 0
+                && segment < transmit.contents.len()
+            {
+                let first = udp::Transmit {
+                    contents: &transmit.contents[..segment],
+                    segment_size: None,
+                    ..*transmit
+                };
+                self.try_send(&first)?;
+                return Ok(segment);
+            }
+        }
+        self.try_send(transmit)?;
+        Ok(transmit.contents.len())
+    }
+
+    fn max_batch_segments(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        if self.connected {
+            return darwin_send::BATCH_SIZE;
+        }
+        1
+    }
+
     fn poll_recv(
         &self,
         cx: &mut Context,
@@ -150,6 +191,44 @@ fn connected_send_result(result: io::Result<usize>, expected: usize) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn connected_batch_delivers_separate_datagrams_and_short_tail() {
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        socket.connect(destination).unwrap();
+        let socket = UdpSocket::from_std(socket).unwrap();
+        let payload: Vec<u8> = (0..16).flat_map(|i| [i; 1200]).chain([99; 37]).collect();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut remaining = payload.as_slice();
+            while !remaining.is_empty() {
+                socket.io.writable().await.unwrap();
+                let transmit = udp::Transmit {
+                    destination,
+                    ecn: None,
+                    contents: remaining,
+                    segment_size: Some(1200),
+                    src_ip: None,
+                };
+                match socket.try_send_partial(&transmit) {
+                    Ok(sent) => remaining = &remaining[sent..],
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(e) => panic!("batch send: {e}"),
+                }
+            }
+            for expected in payload.chunks(1200) {
+                let mut received = [0; 1500];
+                let (len, source) = receiver.recv_from(&mut received).await.unwrap();
+                assert_eq!(&received[..len], expected);
+                assert_eq!(source, socket.local_addr().unwrap());
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

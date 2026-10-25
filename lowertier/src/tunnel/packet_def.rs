@@ -488,7 +488,7 @@ impl std::fmt::Debug for ReusableBufferPool {
 }
 
 impl ReusableBufferPool {
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn new(buffer_len: usize, buffer_count: usize) -> Self {
         assert!(buffer_len > 0);
         assert!(buffer_count > 0);
@@ -507,12 +507,12 @@ impl ReusableBufferPool {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn try_take(&self) -> Option<BytesMut> {
         self.inner.buffers.pop()
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn take_or_allocate(&self) -> BytesMut {
         // Receive APIs expose slices before writing. Recycling can restore the full slab length.
         self.try_take()
@@ -830,7 +830,7 @@ impl ZCPacket {
         packet
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn new_from_reusable_buf(
         buf: BytesMut,
         packet_type: ZCPacketType,

@@ -58,6 +58,34 @@ pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
     /// to register the calling task to be woken when a send should be attempted again.
     fn try_send(&self, transmit: &Transmit) -> io::Result<()>;
 
+    /// Submit a prefix of a segmented transmit. The returned byte count must
+    /// end at a datagram boundary (or consume the complete transmit). A caller
+    /// retains the unsent suffix and retries it before generating more packets.
+    fn try_send_partial(&self, transmit: &Transmit) -> io::Result<usize> {
+        if let Some(segment) = transmit.segment_size {
+            // A buffered transmit may outlive a rebind to a socket without GSO.
+            if self.max_transmit_segments() == 1
+                && segment != 0
+                && segment < transmit.contents.len()
+            {
+                let first = Transmit {
+                    contents: &transmit.contents[..segment],
+                    segment_size: None,
+                    ..*transmit
+                };
+                self.try_send(&first)?;
+                return Ok(segment);
+            }
+        }
+        self.try_send(transmit)?;
+        Ok(transmit.contents.len())
+    }
+
+    /// Segments supported by `try_send_partial`, independently of hardware GSO.
+    fn max_batch_segments(&self) -> usize {
+        1
+    }
+
     /// Receive UDP datagrams, or register to be woken if receiving may succeed in the future
     fn poll_recv(
         &self,

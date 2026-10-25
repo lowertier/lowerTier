@@ -15,7 +15,7 @@ use tokio::io::{AsyncWrite, unix::AsyncFd};
 
 use crate::tunnel::{
     StreamItem,
-    packet_def::{TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
+    packet_def::{ReusableBufferPool, TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
 };
 
 const UTUN_HEADER_LEN: usize = 4;
@@ -74,11 +74,12 @@ struct ReceiveSlot {
 }
 
 impl ReceiveSlot {
-    fn new(payload_prefix_len: usize, mtu: usize) -> Self {
+    fn new(payload_prefix_len: usize, mtu: usize, pool: &ReusableBufferPool) -> Self {
         let payload_offset = ZCPacketType::NIC.get_packet_offsets().payload_offset;
         let initialized_len = payload_offset + payload_prefix_len;
-        let mut packet = BytesMut::with_capacity(initialized_len + mtu + TAIL_RESERVED_SIZE);
-        packet.resize(initialized_len, 0);
+        let mut packet = pool.take_or_allocate();
+        packet.truncate(initialized_len);
+        packet.fill(0);
         Self {
             utun_header: [0; UTUN_HEADER_LEN],
             packet,
@@ -91,7 +92,7 @@ impl ReceiveSlot {
         self.packet.spare_capacity_mut().as_mut_ptr().cast()
     }
 
-    fn finish(mut self, received_len: usize) -> io::Result<ZCPacket> {
+    fn finish(mut self, received_len: usize, pool: &ReusableBufferPool) -> io::Result<ZCPacket> {
         if received_len <= UTUN_HEADER_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -107,7 +108,11 @@ impl ReceiveSlot {
         }
         // recvmsg_x initialized exactly payload_len bytes at payload_ptr().
         unsafe { self.packet.set_len(self.payload_offset + payload_len) };
-        Ok(ZCPacket::new_from_buf(self.packet, ZCPacketType::NIC))
+        Ok(ZCPacket::new_from_reusable_buf(
+            self.packet,
+            ZCPacketType::NIC,
+            pool.clone(),
+        ))
     }
 }
 
@@ -154,6 +159,7 @@ pub(super) struct DarwinTunStream {
     pending: VecDeque<ZCPacket>,
     payload_prefix_len: usize,
     mtu: usize,
+    pool: ReusableBufferPool,
 }
 
 impl DarwinTunStream {
@@ -164,13 +170,23 @@ impl DarwinTunStream {
             pending: VecDeque::with_capacity(MAX_TUN_BATCH),
             payload_prefix_len,
             mtu,
+            pool: ReusableBufferPool::new(
+                ZCPacketType::NIC.get_packet_offsets().payload_offset
+                    + payload_prefix_len
+                    + mtu
+                    + TAIL_RESERVED_SIZE,
+                MAX_TUN_BATCH * 2,
+            ),
         }
     }
 
     fn refill_slots(&mut self) {
         while self.slots.len() < MAX_TUN_BATCH {
-            self.slots
-                .push(ReceiveSlot::new(self.payload_prefix_len, self.mtu));
+            self.slots.push(ReceiveSlot::new(
+                self.payload_prefix_len,
+                self.mtu,
+                &self.pool,
+            ));
         }
     }
 
@@ -225,7 +241,7 @@ impl DarwinTunStream {
         let slots = &mut self.slots;
         let pending = &mut self.pending;
         for (slot, message) in slots.drain(..received).zip(messages) {
-            pending.push_back(slot.finish(message.msg_datalen)?);
+            pending.push_back(slot.finish(message.msg_datalen, &self.pool)?);
         }
         Ok(received)
     }
@@ -374,4 +390,31 @@ pub(super) fn split_device(
         DarwinTunStream::new(device.clone(), payload_prefix_len, mtu),
         DarwinTunAsyncWrite::new(device),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receive_storage_is_recycled_only_after_last_transport_owner() {
+        let prefix = ZCPacketType::NIC.get_packet_offsets().payload_offset;
+        let pool = ReusableBufferPool::new(prefix + 1340 + TAIL_RESERVED_SIZE, 1);
+        let mut slot = ReceiveSlot::new(0, 1340, &pool);
+        let allocation = slot.packet.as_ptr();
+        // Emulate a fully initialized kernel receive into the spare capacity.
+        unsafe { ptr::write_bytes(slot.payload_ptr(), 0xa5, 1340) };
+        let packet = slot.finish(UTUN_HEADER_LEN + 1340, &pool).unwrap();
+        assert_eq!(packet.payload(), &[0xa5; 1340]);
+        let bytes = packet.into_bytes();
+        let alias = bytes.clone();
+        drop(bytes);
+        assert_eq!(pool.available(), 0);
+        drop(alias);
+        assert_eq!(pool.available(), 1);
+        let slot = ReceiveSlot::new(0, 1340, &pool);
+        assert_eq!(slot.packet.as_ptr(), allocation);
+        assert!(slot.packet.iter().all(|byte| *byte == 0));
+        assert!(slot.finish(UTUN_HEADER_LEN + 1341, &pool).is_err());
+    }
 }

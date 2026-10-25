@@ -101,10 +101,32 @@ enum ConnectionEvent {
     },
     Proto(proto::ConnectionEvent),
     ProtoBatch {
-        events: Vec<proto::ConnectionEvent>,
+        events: ConnectionEvents,
         socket_id: usize,
     },
     Rebind(Arc<dyn AsyncUdpSocket>),
+}
+
+/// Most receive calls deliver one packet for a connection. Keep that event
+/// inline and allocate a vector only when there is an actual batch.
+#[derive(Debug)]
+enum ConnectionEvents {
+    One(proto::ConnectionEvent),
+    Many(Vec<proto::ConnectionEvent>),
+}
+
+impl ConnectionEvents {
+    fn push(&mut self, event: proto::ConnectionEvent) {
+        match self {
+            Self::Many(events) => events.push(event),
+            Self::One(_) => {
+                let Self::One(first) = std::mem::replace(self, Self::Many(Vec::new())) else {
+                    unreachable!();
+                };
+                *self = Self::Many(vec![first, event]);
+            }
+        }
+    }
 }
 
 fn udp_transmit<'a>(t: &proto::Transmit, buffer: &'a [u8]) -> udp::Transmit<'a> {

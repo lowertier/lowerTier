@@ -19,6 +19,20 @@ The import changes package names and metadata where the LowTier build requires t
 The repository formatter also formats the imported Rust source.
 Each dependency keeps its included license files and package license metadata.
 
+## QUIC buffer reuse and Darwin sends
+
+The receive endpoint reuses its event-grouping map and carries singleton events
+inline. GRO scratch storage halves after 30 seconds of sustained low utilization,
+never below one full GRO message; full batches grow it immediately again. This
+does not change flow-control windows or socket-buffer limits.
+
+Connected Darwin sockets submit up to 16 already paced segments with `sendmsg_x`.
+Each segment remains a separate UDP datagram. Partial submissions retain their
+unsent suffix in the connection's existing transmit buffer; unsupported batch
+operations fall back to individual datagrams. Packet generation still uses
+Quinn's congestion, pacing, MTU, and amplification checks. The receive `ios`
+counter counts protocol packet handling, not actual receive syscalls.
+
 ## QUIC migration policy
 
 `quinn-proto::Connection::set_path_policy` installs a per-connection `PathPolicy`.

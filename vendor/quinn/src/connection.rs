@@ -1174,9 +1174,9 @@ impl Future for SendDatagrams<'_> {
                     }
                 }
             }
-            if this.packet_group.is_none() && state.inner.datagrams().send_buffer_space() == 0 {
-                break;
-            }
+            // Attempt the next packet even when the queue is exactly full.
+            // send_with_deadline marks send_blocked before we register the
+            // waiter; otherwise draining this queue produces no wakeup.
         }
 
         if queued {
@@ -1371,16 +1371,45 @@ pub(crate) struct State {
     buffered_transmit: Option<proto::Transmit>,
 }
 
+fn retain_unsent(
+    transmit: &mut proto::Transmit,
+    buffer: &mut Vec<u8>,
+    sent: usize,
+) -> io::Result<bool> {
+    if sent == transmit.size {
+        return Ok(false);
+    }
+    if sent == 0
+        || sent > transmit.size
+        || !transmit
+            .segment_size
+            .is_some_and(|segment| segment != 0 && sent % segment == 0)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "UDP send split a datagram",
+        ));
+    }
+    buffer.copy_within(sent..transmit.size, 0);
+    transmit.size -= sent;
+    buffer.truncate(transmit.size);
+    Ok(true)
+}
+
 impl State {
     fn drive_transmit(&mut self, cx: &mut Context) -> io::Result<bool> {
         let now = self.runtime.now();
         let mut transmits = 0;
 
-        let max_datagrams = transmit_segment_capacity(self.socket.max_transmit_segments());
+        let max_datagrams = transmit_segment_capacity(
+            self.socket
+                .max_transmit_segments()
+                .max(self.socket.max_batch_segments()),
+        );
 
         loop {
             // Retry the last transmit, or get a new one.
-            let t = match self.buffered_transmit.take() {
+            let mut t = match self.buffered_transmit.take() {
                 Some(t) => t,
                 None => {
                     self.send_buffer.clear();
@@ -1410,9 +1439,10 @@ impl State {
             let len = t.size;
             let retry = match self
                 .socket
-                .try_send(&udp_transmit(&t, &self.send_buffer[..len]))
+                .try_send_partial(&udp_transmit(&t, &self.send_buffer[..len]))
             {
-                Ok(()) => false,
+                Ok(sent) => retain_unsent(&mut t, &mut self.send_buffer, sent)?,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => true,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => true,
                 Err(e) => return Err(e),
             };
@@ -1445,10 +1475,14 @@ impl State {
     fn drive_transmit_eager(&mut self) -> io::Result<usize> {
         let now = self.runtime.now();
         let mut transmitted = 0usize;
-        let max_datagrams = transmit_segment_capacity(self.socket.max_transmit_segments());
+        let max_datagrams = transmit_segment_capacity(
+            self.socket
+                .max_transmit_segments()
+                .max(self.socket.max_batch_segments()),
+        );
 
         loop {
-            let t = match self.buffered_transmit.take() {
+            let mut t = match self.buffered_transmit.take() {
                 Some(t) => t,
                 None => {
                     self.send_buffer.clear();
@@ -1469,15 +1503,27 @@ impl State {
             };
             match self
                 .socket
-                .try_send(&udp_transmit(&t, &self.send_buffer[..len]))
+                .try_send_partial(&udp_transmit(&t, &self.send_buffer[..len]))
             {
-                Ok(()) => {
-                    transmitted = transmitted.saturating_add(segments);
+                Ok(sent) => {
+                    let partial = retain_unsent(&mut t, &mut self.send_buffer, sent)?;
+                    transmitted = transmitted.saturating_add(if partial {
+                        sent / t.segment_size.expect("partial segmented transmit")
+                    } else {
+                        segments
+                    });
+                    if partial {
+                        self.buffered_transmit = Some(t);
+                    }
                     if transmitted >= MAX_EAGER_TRANSMIT_DATAGRAMS {
                         break;
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.buffered_transmit = Some(t);
+                    break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
                     self.buffered_transmit = Some(t);
                     break;
                 }
@@ -1520,8 +1566,15 @@ impl State {
                 Poll::Ready(Some(ConnectionEvent::ProtoBatch { events, socket_id })) => {
                     let current_socket =
                         Arc::as_ptr(&self.socket) as *const () as usize == socket_id;
-                    for event in events {
-                        self.inner.handle_event_on_local_path(event, current_socket);
+                    match events {
+                        crate::ConnectionEvents::One(event) => {
+                            self.inner.handle_event_on_local_path(event, current_socket);
+                        }
+                        crate::ConnectionEvents::Many(events) => {
+                            for event in events {
+                                self.inner.handle_event_on_local_path(event, current_socket);
+                            }
+                        }
                     }
                 }
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
@@ -1812,5 +1865,26 @@ mod transmit_segment_tests {
     #[test]
     fn keeps_non_segmenting_sockets_usable() {
         assert_eq!(transmit_segment_capacity(0), 1);
+    }
+
+    #[test]
+    fn partial_transmit_preserves_exact_unsent_datagrams() {
+        let mut transmit = proto::Transmit {
+            destination: "127.0.0.1:1234".parse().unwrap(),
+            ecn: None,
+            size: 10,
+            segment_size: Some(4),
+            src_ip: None,
+        };
+        let mut bytes = (0..10).collect::<Vec<u8>>();
+        assert!(super::retain_unsent(&mut transmit, &mut bytes, 3).is_err());
+        assert!(super::retain_unsent(&mut transmit, &mut bytes, 0).is_err());
+        assert_eq!(bytes, (0..10).collect::<Vec<u8>>());
+        assert!(super::retain_unsent(&mut transmit, &mut bytes, 4).unwrap());
+        assert_eq!(bytes, [4, 5, 6, 7, 8, 9]);
+        assert_eq!(transmit.size, 6);
+        assert!(super::retain_unsent(&mut transmit, &mut bytes, 4).unwrap());
+        assert_eq!(bytes, [8, 9]);
+        assert!(!super::retain_unsent(&mut transmit, &mut bytes, 2).unwrap());
     }
 }

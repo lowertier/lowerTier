@@ -746,6 +746,7 @@ struct ReceiveBuffer {
     storage: Vec<u8>,
     stride: usize,
     initial_slots: usize,
+    low_usage_since: Option<Instant>,
 }
 
 impl ReceiveBuffer {
@@ -761,6 +762,7 @@ impl ReceiveBuffer {
             storage: vec![0; stride * initial_slots],
             stride,
             initial_slots,
+            low_usage_since: None,
         }
     }
 
@@ -769,15 +771,32 @@ impl ReceiveBuffer {
     }
 
     fn grow(&mut self) {
+        self.low_usage_since = None;
         let slots = self.slots().saturating_mul(2).min(BATCH_SIZE);
         self.storage.resize(self.stride * slots, 0);
     }
 
     fn reset(&mut self) {
+        self.low_usage_since = None;
         let length = self.stride * self.initial_slots;
         if self.storage.len() > length {
             self.storage.truncate(length);
             self.storage.shrink_to_fit();
+        }
+    }
+
+    fn observe_usage(&mut self, messages: usize, now: Instant) {
+        let slots = self.slots();
+        if slots <= self.initial_slots || messages > slots / 4 {
+            self.low_usage_since = None;
+            return;
+        }
+        let since = self.low_usage_since.get_or_insert(now);
+        if now.saturating_duration_since(*since) >= std::time::Duration::from_secs(30) {
+            self.storage
+                .truncate(self.stride * (slots / 2).max(self.initial_slots));
+            self.storage.shrink_to_fit();
+            self.low_usage_since = Some(now);
         }
     }
 }
@@ -787,6 +806,7 @@ struct RecvState {
     incoming: VecDeque<proto::Incoming>,
     connections: ConnectionSet,
     recv_buf: ReceiveBuffer,
+    connection_events: FxHashMap<ConnectionHandle, crate::ConnectionEvents>,
 }
 
 impl RecvState {
@@ -807,6 +827,7 @@ impl RecvState {
             },
             incoming: VecDeque::new(),
             recv_buf,
+            connection_events: FxHashMap::default(),
         }
     }
 
@@ -825,6 +846,7 @@ impl RecvState {
             });
         }
         let mut received_connection_packet = false;
+        let mut peak_messages = 0;
         let mut metas = [RecvMeta::default(); BATCH_SIZE];
         let slots = self.recv_buf.slots();
         let mut iovs: [IoSliceMut; BATCH_SIZE] = {
@@ -835,16 +857,14 @@ impl RecvState {
         loop {
             match socket.poll_recv(cx, &mut iovs[..slots], &mut metas[..slots]) {
                 Poll::Ready(Ok(msgs)) => {
+                    peak_messages = peak_messages.max(msgs);
                     let logical_datagrams = metas
                         .iter()
                         .take(msgs)
                         .map(|meta| logical_datagram_count(meta.len, meta.stride))
                         .sum();
                     *receive_work = receive_work.saturating_add(logical_datagrams);
-                    let mut connection_events: FxHashMap<
-                        ConnectionHandle,
-                        Vec<proto::ConnectionEvent>,
-                    > = FxHashMap::default();
+                    let connection_events = &mut self.connection_events;
                     for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
                         // Give each logical packet one independent allocation. A
                         // shared GRO allocation forces another complete copy when
@@ -871,7 +891,14 @@ impl RecvState {
                                 }
                                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
                                     received_connection_packet = true;
-                                    connection_events.entry(handle).or_default().push(event);
+                                    match connection_events.entry(handle) {
+                                        std::collections::hash_map::Entry::Vacant(entry) => {
+                                            entry.insert(crate::ConnectionEvents::One(event));
+                                        }
+                                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                            entry.get_mut().push(event);
+                                        }
+                                    }
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
                                     respond(transmit, &response_buffer, socket);
@@ -880,7 +907,7 @@ impl RecvState {
                             }
                         }
                     }
-                    for (handle, events) in connection_events {
+                    for (handle, events) in connection_events.drain() {
                         // Ignore events for a connection that closed during this receive call.
                         if let Some(sender) = self.connections.senders.get_mut(&handle) {
                             let socket_id =
@@ -899,6 +926,8 @@ impl RecvState {
                     }
                 }
                 Poll::Pending => {
+                    drop(iovs);
+                    self.recv_buf.observe_usage(peak_messages, now);
                     return Ok(PollProgress {
                         received_connection_packet,
                         keep_going: false,
@@ -914,6 +943,10 @@ impl RecvState {
                 }
             }
             if receive_cycle_complete(*receive_work) {
+                // A saturated cycle is not a quiet interval even if each syscall
+                // returned few messages. Drop views before any possible resize.
+                drop(iovs);
+                self.recv_buf.low_usage_since = None;
                 return Ok(PollProgress {
                     received_connection_packet,
                     keep_going: true,
@@ -1000,5 +1033,34 @@ mod tests {
         buffer.reset();
         assert_eq!(buffer.storage.as_ptr(), allocation);
         assert_eq!(buffer.storage.len(), 1500 * BATCH_SIZE);
+    }
+
+    #[test]
+    fn scratch_shrinks_only_after_sustained_low_usage_and_regrows() {
+        let mut buffer = ReceiveBuffer::new(1500, 64);
+        for _ in 0..4 {
+            buffer.grow();
+        }
+        let slots = buffer.slots();
+        if slots < 4 {
+            return;
+        }
+        let now = crate::Instant::now();
+        let quiet = std::time::Duration::from_secs(30);
+        buffer.observe_usage(1, now);
+        buffer.observe_usage(1, now + quiet / 2);
+        assert_eq!(buffer.slots(), slots);
+        buffer.observe_usage(slots, now + quiet);
+        buffer.observe_usage(1, now + quiet * 2);
+        assert_eq!(buffer.slots(), slots);
+        buffer.observe_usage(1, now + quiet * 3);
+        assert_eq!(buffer.slots(), slots / 2);
+        buffer.grow();
+        assert_eq!(buffer.slots(), slots);
+        assert!(
+            buffer.storage[1500 * 64 * slots / 2..]
+                .iter()
+                .all(|b| *b == 0)
+        );
     }
 }
