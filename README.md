@@ -72,7 +72,7 @@ It does not provide ARP, raw Ethernet, transparent ping, or host routes.
 
 ## Build the command-line programs
 
-Install a stable Rust toolchain and the platform build tools.
+Install rustup and the platform build tools; Cargo selects the nightly pinned in `rust-toolchain.toml`.
 Then build only the command-line package.
 
 ```bash

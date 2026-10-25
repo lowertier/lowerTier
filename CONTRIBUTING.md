@@ -22,7 +22,7 @@ Thank you for your interest in contributing to LowTier! This document provides g
 ### Prerequisites
 
 #### Required Tools
-- Rust toolchain (version 1.95)
+- Rust nightly pinned in `rust-toolchain.toml` (currently `nightly-2026-10-25`)
 - LLVM and Clang
 - Protoc (Protocol Buffers compiler)
 
@@ -56,8 +56,8 @@ sudo apt install -y bridge-utils
 2. Install dependencies:
    ```bash
    # Install Rust toolchain
-   rustup install 1.95
-   rustup default 1.95
+   rustup toolchain install nightly-2026-10-25 --profile minimal --component rustfmt --component clippy
+   # Cargo selects the repository toolchain automatically.
    ```
 
 ## Project Structure

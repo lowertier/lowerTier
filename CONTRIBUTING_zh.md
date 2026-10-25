@@ -30,7 +30,7 @@
 ### 前置要求
 
 #### 必需工具
-- Rust 工具链（版本 1.95）
+- `rust-toolchain.toml` 固定的 Rust nightly（当前为 `nightly-2026-10-25`）
 - LLVM 和 Clang
 - Protoc（Protocol Buffers 编译器）
 
@@ -64,8 +64,8 @@ sudo apt install -y bridge-utils
 2. 安装依赖：
    ```bash
    # 安装 Rust 工具链
-   rustup install 1.95
-   rustup default 1.95
+   rustup toolchain install nightly-2026-10-25 --profile minimal --component rustfmt --component clippy
+   # Cargo 自动选择仓库固定的工具链。
    ```
 
 ## 项目结构

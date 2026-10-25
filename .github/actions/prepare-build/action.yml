@@ -44,7 +44,7 @@ runs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         # Match rust-toolchain.toml so rustfmt unstable options work in CI.
-        toolchain: nightly
+        toolchain: nightly-2026-10-25
         target: ${{ inputs.target }}
         components: ${{ inputs.components }}
         cache: false

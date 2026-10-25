@@ -6,6 +6,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "lowertier/**"
       - "lowertier-contrib/lowertier-ffi/**"
       - "lowertier-tracker/**"
@@ -19,6 +20,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "lowertier/**"
       - "lowertier-contrib/lowertier-ffi/**"
       - "lowertier-tracker/**"
