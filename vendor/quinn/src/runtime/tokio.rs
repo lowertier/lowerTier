@@ -56,6 +56,8 @@ struct UdpSocket {
     // new socket, so it obtains fresh state without querying the kernel per packet.
     #[cfg(target_os = "macos")]
     connected: bool,
+    #[cfg(target_os = "macos")]
+    batch_segments: usize,
 }
 
 impl UdpSocket {
@@ -63,6 +65,12 @@ impl UdpSocket {
         Ok(Self {
             #[cfg(target_os = "macos")]
             connected: sock.peer_addr().is_ok(),
+            #[cfg(target_os = "macos")]
+            batch_segments: std::env::var("LOWTIER_DARWIN_UDP_BATCH_SEGMENTS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| (1..=darwin_send::BATCH_SIZE).contains(value))
+                .unwrap_or(1),
             inner: udp::UdpSocketState::new((&sock).into())?,
             io: tokio::net::UdpSocket::from_std(sock)?,
         })
@@ -123,7 +131,7 @@ impl AsyncUdpSocket for UdpSocket {
     fn max_batch_segments(&self) -> usize {
         #[cfg(target_os = "macos")]
         if self.connected {
-            return darwin_send::BATCH_SIZE;
+            return self.batch_segments;
         }
         1
     }
