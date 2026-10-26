@@ -1,131 +1,88 @@
 use super::super::{
-    args::{ApplyArgs, ConfigCommand, PatchArgs},
+    args::ApplyArgs,
     client::{Client, Response, checked},
     error::{CliError, Result},
 };
-use crate::proto::api::control::v1::*;
-use serde_json::{Value, json};
-use std::path::Path;
+use crate::{common::config_schema, proto::api::control::v1::*};
+use serde::Serialize;
+use std::io::Write as _;
+use toml::{Table, Value};
 
-pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|_| CliError::new("invalid_argument", "Cannot read the JSON file.", "file"))?;
-    Ok(serde_json::from_str(&text)?)
+/// `lowertier get` output: values in the public TOML layout.
+#[derive(Serialize)]
+pub struct ConfigView {
+    pub path: Option<String>,
+    pub revision: u64,
+    pub active: Option<Value>,
+    /// Present when staged changes differ from the active configuration.
+    pub desired: Option<Value>,
+    pub restart_fields: Vec<String>,
 }
 
-fn qualify(path: &str, prefix: &str) -> String {
-    if prefix.is_empty() || path.starts_with(&format!("{prefix}.")) || path == prefix {
-        path.to_owned()
-    } else {
-        format!("{prefix}.{path}")
-    }
+fn table(config: Option<&NodeConfig>) -> Result<Table> {
+    config
+        .map_or("", |config| config.toml.as_str())
+        .parse::<Table>()
+        .map_err(|error| {
+            CliError::new(
+                "internal",
+                format!("The daemon returned invalid TOML: {error}"),
+                "",
+            )
+        })
 }
 
-fn set_value(document: &mut Value, path: &str, value: Value) -> Result<()> {
-    let parts = path.split('.').collect::<Vec<_>>();
-    if parts.iter().any(|part| part.is_empty()) {
+pub fn lookup<'a>(table: &'a Table, path: &str) -> Option<&'a Value> {
+    let (parent, key) = match path.rsplit_once('.') {
+        Some((parent, key)) => (lookup(table, parent)?.as_table()?, key),
+        None => (table, path),
+    };
+    parent.get(key)
+}
+
+/// The desired configuration and its revision.
+pub async fn desired(client: &Client, apply: &ApplyArgs) -> Result<(Table, u64)> {
+    let config = client.config().await?;
+    let revision = config.snapshot.map_or(0, |snapshot| snapshot.revision);
+    if apply
+        .expected_revision
+        .is_some_and(|expected| expected != revision)
+    {
         return Err(CliError::new(
-            "invalid_argument",
-            "The field path is invalid.",
-            path,
+            "conflict",
+            format!("The configuration is at revision {revision}, not the expected revision."),
+            "expected_revision",
         ));
     }
-    let mut object = document.as_object_mut().ok_or_else(|| {
-        CliError::new(
-            "invalid_argument",
-            "Configuration values must be a JSON object.",
-            "values",
-        )
-    })?;
-    for part in &parts[..parts.len() - 1] {
-        object = object
-            .entry((*part).to_owned())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| {
-                CliError::new("invalid_argument", "A parent field is not an object.", path)
-            })?;
-    }
-    object.insert(parts.last().unwrap().to_string(), value);
-    Ok(())
+    Ok((table(config.desired.as_ref())?, revision))
 }
 
+/// Apply values for `mask` and remove `clear`. The change is saved to the configuration file
+/// unless --no-persist is given or the file cannot be written.
 pub async fn patch(
     client: &Client,
-    args: &PatchArgs,
-    prefix: &str,
-    validate: bool,
+    values: Table,
+    mask: Vec<String>,
+    clear: Vec<String>,
+    apply: &ApplyArgs,
+    revision: Option<u64>,
 ) -> Result<Response> {
-    let mut values = match &args.values {
-        Some(path) => read_json(path)?,
-        None => json!({}),
+    let revision = match revision {
+        Some(revision) => revision,
+        None => client.revision(apply.expected_revision).await?,
     };
-    let mut mask = args
-        .field
-        .iter()
-        .map(|path| qualify(path, prefix))
-        .collect::<Vec<_>>();
-    for assignment in &args.assignments {
-        let (path, text) = assignment.split_once('=').ok_or_else(|| {
-            CliError::new(
-                "invalid_argument",
-                "Use PATH=JSON for each assignment.",
-                "assignments",
-            )
-        })?;
-        let path = qualify(path, prefix);
-        let value = match serde_json::from_str(text) {
-            Ok(value) => value,
-            Err(_) if !text.is_empty() && !matches!(text.as_bytes()[0], b'[' | b'{' | b'"') => {
-                Value::String(text.into())
-            }
-            Err(error) => return Err(error.into()),
-        };
-        set_value(&mut values, &path, value)?;
-        mask.push(path);
-    }
-    let clear_paths = args
-        .clear
-        .iter()
-        .map(|path| qualify(path, prefix))
-        .collect::<Vec<_>>();
-    if mask.is_empty() && clear_paths.is_empty() {
-        return Err(CliError::new(
-            "invalid_argument",
-            "Specify assignments, --field, or --clear.",
-            "field_mask",
-        ));
-    }
-    // Deserialize before reading state. Unknown fields must fail before a mutation.
-    let values: NodeConfig = serde_json::from_value(values)?;
-    let patch = ConfigPatch {
-        expected_revision: client.revision(args.apply.expected_revision).await?,
+    let mut patch = ConfigPatch {
+        expected_revision: revision,
         field_mask: mask,
-        values: Some(values),
-        clear_paths,
-        persist: args.apply.persist,
-        stage: args.apply.stage,
+        values: Some(NodeConfig {
+            toml: toml::to_string(&values)
+                .map_err(|error| CliError::new("invalid_argument", error.to_string(), "values"))?,
+        }),
+        clear_paths: clear,
+        persist: !apply.no_persist,
+        stage: apply.stage,
     };
-    if validate {
-        checked(
-            client
-                .rpc
-                .validate_config(
-                    client.controller(),
-                    ValidateConfigRequest {
-                        meta: client.meta(),
-                        patch: Some(patch),
-                    },
-                )
-                .await?,
-        )
-    } else {
-        apply_patch(client, patch).await
-    }
-}
-
-pub async fn apply_patch(client: &Client, patch: ConfigPatch) -> Result<Response> {
-    checked(
+    let send = |patch: ConfigPatch| async move {
         client
             .rpc
             .patch_config(
@@ -135,44 +92,221 @@ pub async fn apply_patch(client: &Client, patch: ConfigPatch) -> Result<Response
                     patch: Some(patch),
                 },
             )
-            .await?,
-    )
+            .await
+    };
+    let mut response = send(patch.clone()).await?;
+    // Nodes started from --set values or read-only files have nothing to persist to.
+    if patch.persist
+        && response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.field_path == "patch.persist")
+    {
+        let reason = response.error.take().unwrap().message;
+        eprintln!("note: the change is not saved to a file: {reason}");
+        patch.persist = false;
+        response = send(patch).await?;
+    }
+    checked(response)
 }
 
-pub async fn desired(client: &Client, apply: &ApplyArgs) -> Result<(NodeConfig, u64)> {
-    let config = client.config().await?;
-    let revision = config
-        .snapshot
-        .map(|snapshot| snapshot.revision)
-        .ok_or_else(|| {
-            CliError::new(
-                "internal",
-                "The configuration revision is absent.",
-                "snapshot",
-            )
-        })?;
-    require_revision(apply.expected_revision, revision)?;
-    Ok((
-        config.desired.ok_or_else(|| {
-            CliError::new(
-                "internal",
-                "The desired configuration is absent.",
-                "desired",
-            )
-        })?,
-        revision,
-    ))
-}
-
-fn require_revision(expected: Option<u64>, actual: u64) -> Result<()> {
-    if expected.is_some_and(|expected| expected != actual) {
+pub async fn get(client: &Client, path: Option<&str>) -> Result<Response> {
+    if let Some(path) = path
+        && let Some(message) = config_schema::retired_message(path)
+    {
         return Err(CliError::new(
-            "conflict",
-            "The expected revision does not match the configuration snapshot.",
-            "expected_revision",
+            "invalid_argument",
+            format!("{message}."),
+            "path",
         ));
     }
-    Ok(())
+    let config = client.config().await?;
+    let active = table(config.active.as_ref())?;
+    let desired = table(config.desired.as_ref())?;
+    let select = |table: &Table| match path {
+        Some(path) => lookup(table, path).cloned(),
+        None => Some(Value::Table(table.clone())),
+    };
+    let active_value = select(&active);
+    let desired_value = select(&desired);
+    if let Some(path) = path
+        && active_value.is_none()
+        && desired_value.is_none()
+        && config_schema::lookup(path).is_none()
+        && !config_schema::OPTIONS
+            .iter()
+            .any(|spec| spec.path.starts_with(&format!("{path}.")))
+    {
+        return Err(CliError::new(
+            "invalid_argument",
+            format!("Unknown option {path:?}. See `lowertier config explain`."),
+            "path",
+        ));
+    }
+    Ok(Response::Config(ConfigView {
+        path: path.map(str::to_owned),
+        revision: config.snapshot.map_or(0, |snapshot| snapshot.revision),
+        desired: (desired_value != active_value)
+            .then_some(desired_value)
+            .flatten(),
+        active: active_value,
+        restart_fields: config.restart_fields,
+    }))
+}
+
+pub async fn set(client: &Client, assignments: &[String], apply: &ApplyArgs) -> Result<Response> {
+    let mut values = Table::new();
+    let mut mask = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        let spec = config_schema::apply_set(&mut values, assignment).map_err(|error| {
+            CliError::new("invalid_argument", format!("{error:#}"), "assignments")
+        })?;
+        if !mask.contains(&spec.path.to_owned()) {
+            mask.push(spec.path.to_owned());
+        }
+    }
+    patch(client, values, mask, Vec::new(), apply, None).await
+}
+
+pub async fn unset(client: &Client, paths: &[String], apply: &ApplyArgs) -> Result<Response> {
+    for path in paths {
+        if let Some(message) = config_schema::retired_message(path) {
+            return Err(CliError::new(
+                "invalid_argument",
+                format!("{message}."),
+                "paths",
+            ));
+        }
+    }
+    patch(
+        client,
+        Table::new(),
+        Vec::new(),
+        paths.to_vec(),
+        apply,
+        None,
+    )
+    .await
+}
+
+/// Leaves that `edit` compares: every registry option, with opaque tables compared whole.
+fn option_values(table: &Table) -> Vec<(&'static str, Option<Value>)> {
+    config_schema::OPTIONS
+        .iter()
+        .map(|spec| {
+            let mut value = lookup(table, spec.path).cloned();
+            if let Some(Value::Table(inner)) = &mut value
+                && spec.kind == config_schema::Kind::Table
+            {
+                inner.retain(|key, _| {
+                    config_schema::lookup(&format!("{}.{key}", spec.path)).is_none()
+                });
+            }
+            (spec.path, value)
+        })
+        .collect()
+}
+
+/// Paths to set and to clear when the configuration changes from `before` to `after`.
+pub fn diff(before: &Table, after: &Table) -> (Vec<String>, Vec<String>) {
+    let mut mask = Vec::new();
+    let mut clear = Vec::new();
+    for ((path, old), (_, new)) in option_values(before).into_iter().zip(option_values(after)) {
+        match (old, new) {
+            (old, Some(new)) if old.as_ref() != Some(&new) => mask.push(path.to_owned()),
+            (Some(_), None) => clear.push(path.to_owned()),
+            _ => {}
+        }
+    }
+    (mask, clear)
+}
+
+fn editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "notepad".into()
+            } else {
+                "vi".into()
+            }
+        })
+}
+
+fn ask(question: &str) -> bool {
+    eprint!("{question} [Y/n] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).is_ok()
+        && !matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
+const EDIT_HEADER: &str = "# Edit and save to apply. [REDACTED] values stay unchanged.\n\
+                           # `lowertier config explain PATH` documents each option.\n";
+
+pub async fn edit(client: &Client, apply: &ApplyArgs) -> Result<Response> {
+    let (before, revision) = desired(client, apply).await?;
+    let original = toml::to_string_pretty(&before).unwrap_or_default();
+    let file = tempfile::Builder::new()
+        .prefix("lowertier-")
+        .suffix(".toml")
+        .tempfile()
+        .map_err(|error| CliError::new("internal", error.to_string(), "edit"))?;
+    let mut text = format!("{EDIT_HEADER}\n{original}");
+    loop {
+        std::fs::write(file.path(), &text)
+            .map_err(|error| CliError::new("internal", error.to_string(), "edit"))?;
+        let editor = editor();
+        let mut parts = editor.split_whitespace();
+        let status = std::process::Command::new(parts.next().unwrap_or("vi"))
+            .args(parts)
+            .arg(file.path())
+            .status()
+            .map_err(|error| {
+                CliError::new("internal", format!("Cannot run {editor}: {error}"), "edit")
+            })?;
+        if !status.success() {
+            return Err(CliError::new(
+                "internal",
+                format!("{editor} exited with {status}."),
+                "edit",
+            ));
+        }
+        text = std::fs::read_to_string(file.path())
+            .map_err(|error| CliError::new("internal", error.to_string(), "edit"))?;
+        let failure = match text.parse::<Table>() {
+            Err(error) => format!("The file is not valid TOML: {error}"),
+            Ok(after) => {
+                let (mask, clear) = diff(&before, &after);
+                if mask.is_empty() && clear.is_empty() {
+                    return Ok(Response::Text {
+                        text: "No changes.\n".into(),
+                    });
+                }
+                match patch(client, after, mask, clear, apply, Some(revision)).await {
+                    Ok(response) => return Ok(response),
+                    Err(error) if error.0.code == "conflict" => return Err(error),
+                    Err(error) => error.0.message,
+                }
+            }
+        };
+        eprintln!("error: {failure}");
+        if !ask("Edit again?") {
+            return Err(CliError::new("invalid_argument", failure, "edit"));
+        }
+        let body = text
+            .lines()
+            .filter(|line| !line.starts_with("# error:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        text = format!(
+            "{}{body}\n",
+            failure
+                .lines()
+                .map(|line| format!("# error: {line}\n"))
+                .collect::<String>()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -180,39 +314,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replacement_uses_the_read_revision() {
-        assert!(require_revision(None, 3).is_ok());
-        assert!(require_revision(Some(3), 3).is_ok());
-        assert_eq!(require_revision(Some(2), 3).unwrap_err().exit_code(), 5);
-        assert_eq!(require_revision(Some(4), 3).unwrap_err().exit_code(), 5);
-    }
-}
-
-pub async fn replace(
-    client: &Client,
-    apply: &ApplyArgs,
-    revision: u64,
-    field: &str,
-    values: NodeConfig,
-) -> Result<Response> {
-    apply_patch(
-        client,
-        ConfigPatch {
-            expected_revision: revision,
-            field_mask: vec![field.into()],
-            values: Some(values),
-            persist: apply.persist,
-            stage: apply.stage,
-            ..Default::default()
-        },
-    )
-    .await
-}
-
-pub async fn execute(client: &Client, command: &ConfigCommand) -> Result<Response> {
-    match command {
-        ConfigCommand::Get => checked(client.config().await?),
-        ConfigCommand::Set(args) => patch(client, args, "", false).await,
-        ConfigCommand::Validate(args) => patch(client, args, "", true).await,
+    fn edit_diff_finds_set_and_cleared_options() {
+        let before: Table =
+            "[relay]\npolicy = \"hop\"\n[tun]\nmtu = 1380\n[acl]\ntcp_ports = [\"22\"]\n"
+                .parse()
+                .unwrap();
+        let after: Table = "[relay]\npolicy = \"latency\"\n[acl]\ntcp_ports = [\"22\"]\n[acl.acl_v1]\nchains = []\n"
+            .parse()
+            .unwrap();
+        let (mask, clear) = diff(&before, &after);
+        assert_eq!(mask, vec!["relay.policy".to_owned(), "acl".to_owned()]);
+        assert_eq!(clear, vec!["tun.mtu".to_owned()]);
     }
 }

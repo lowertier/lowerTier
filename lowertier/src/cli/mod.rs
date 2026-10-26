@@ -1,13 +1,14 @@
 pub mod args;
-mod client;
-mod commands;
-mod error;
-mod render;
+pub(crate) mod client;
+pub(crate) mod commands;
+pub(crate) mod error;
+pub(crate) mod render;
 
-use args::{Arguments, Command, LogCommand, Output, PageArgs, StatsCommand};
+use args::{Arguments, Command, ConfigCommand, Output, PageArgs};
 use clap::Parser;
 use client::{Client, Response};
 use error::{CliError, Result};
+use std::process::ExitCode;
 
 fn output_from_args(args: &[std::ffi::OsString]) -> Output {
     for (index, arg) in args.iter().enumerate().skip(1) {
@@ -23,7 +24,8 @@ fn output_from_args(args: &[std::ffi::OsString]) -> Output {
     Output::Table
 }
 
-pub async fn run() -> u8 {
+/// Entry point of the `lowertier` binary.
+pub async fn main() -> ExitCode {
     let raw = std::env::args_os().collect::<Vec<_>>();
     let request_id = uuid::Uuid::new_v4().to_string();
     let args = match Arguments::try_parse_from(&raw) {
@@ -31,12 +33,18 @@ pub async fn run() -> u8 {
         Err(error)
             if matches!(
                 error.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayVersion
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             ) =>
         {
+            let code = match error.kind() {
+                clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 2,
+                _ => 0,
+            };
             return match render::help(&error, output_from_args(&raw), &request_id) {
-                Ok(()) => 0,
-                Err(_) => 1,
+                Ok(()) => ExitCode::from(code),
+                Err(_) => ExitCode::FAILURE,
             };
         }
         Err(error) => {
@@ -52,24 +60,89 @@ pub async fn run() -> u8 {
             } else {
                 render::clap_message(&error);
             }
-            return 2;
+            return ExitCode::from(2);
         }
     };
+    if let Command::Run(run) = args.command {
+        return crate::core::run(crate::core::RunOptions {
+            config_files: run.config,
+            config_dir: run.config_dir,
+            sets: run.sets,
+            daemon: run.daemon,
+            log_level: run.log_level,
+        })
+        .await;
+    }
+    ExitCode::from(dispatch(&args, &request_id).await)
+}
+
+fn local_text(text: String) -> Result<Response> {
+    Ok(Response::Text { text })
+}
+
+async fn local(args: &Arguments) -> Result<Response> {
+    let invalid =
+        |error: anyhow::Error| CliError::new("invalid_argument", format!("{error:#}"), "");
+    match &args.command {
+        Command::Init(init) => {
+            let written = crate::core::init(&crate::core::InitOptions {
+                output: init.file.clone(),
+                network: init.network.clone(),
+                listen_port: init.listen,
+                peers: init.peers.clone(),
+                tun_mode: init.tun.clone(),
+                ipv4: init.ipv4.clone(),
+                force: init.force,
+            })
+            .map_err(invalid)?;
+            let files = written
+                .iter()
+                .map(|path| format!("  {}\n", path.display()))
+                .collect::<String>();
+            local_text(format!(
+                "Wrote\n{files}\nStart the node:\n  lowertier run -c {}\n\nShare the network name and the \
+                 secret file with peers. Keep the .key file private.\n",
+                init.file.display()
+            ))
+        }
+        Command::Check(check) => {
+            let files = crate::core::check(&check.config, &check.sets)
+                .await
+                .map_err(invalid)?;
+            local_text(files.iter().map(|file| format!("ok  {file}\n")).collect())
+        }
+        Command::Nodes => Ok(Response::Nodes {
+            nodes: crate::common::runtime_registry::live_records(),
+        }),
+        Command::Config {
+            command: ConfigCommand::Explain { path },
+        } => local_text(crate::common::config_schema::explain(path.as_deref()).map_err(invalid)?),
+        Command::Service(service) => commands::service::execute(service),
+        _ => unreachable!("not a local command"),
+    }
+}
+
+async fn dispatch(args: &Arguments, request_id: &str) -> u8 {
     if let Command::Completion { shell } = &args.command {
-        return match render::completion(shell, args.output, &request_id) {
+        return match render::completion(shell, args.output, request_id) {
             Ok(()) => 0,
             Err(_) => 1,
         };
     }
-    if let Command::Service(service) = &args.command {
-        return finish(&args, &request_id, "", commands::service::execute(service));
+    if args.command.local() {
+        return finish(args, request_id, "", local(args).await);
     }
-    let mut client = match Client::connect(&args, request_id.clone()).await {
+    if let Command::Doctor = args.command {
+        let (response, failed) = commands::doctor::execute(args).await;
+        let code = finish(args, request_id, "", Ok(response));
+        return if failed { 7 } else { code };
+    }
+    let mut client = match Client::connect(args, request_id.to_owned()).await {
         Ok(client) => client,
         Err(error) => {
             return finish(
-                &args,
-                &request_id,
+                args,
+                request_id,
                 args.instance.as_deref().unwrap_or(""),
                 Err(error),
             );
@@ -77,27 +150,35 @@ pub async fn run() -> u8 {
     };
     if args.verbose > 0 {
         render::diagnostic(&format!(
-            "Control API v1 portal: {}; instance: {}",
-            args.rpc_portal, client.meta.instance_id
+            "portal {} ({}); instance {}; token {}",
+            client.target.portal,
+            client.target.name.as_deref().unwrap_or("unnamed"),
+            client.meta.instance_id,
+            client.target.token_file.display()
         ));
+    }
+    if let Command::Top(top) = &args.command {
+        return match crate::tui::run(client, std::time::Duration::from_millis(top.interval)).await {
+            Ok(()) => 0,
+            Err(error) => {
+                let _ = render::write_error(args.output, request_id, "", &error);
+                error.exit_code()
+            }
+        };
     }
     let streaming = matches!(
         args.command,
-        Command::Stats {
-            command: StatsCommand::Watch { .. }
-        } | Command::Log {
-            command: LogCommand::Follow(_)
-        }
+        Command::Stats { watch: true, .. } | Command::Logs { follow: true, .. }
     );
     if streaming {
         let result = tokio::select! {
-            result = stream(&args, &mut client) => result,
+            result = stream(args, &mut client) => result,
             result = tokio::signal::ctrl_c() => result.map_err(|_| CliError::new("internal", "Cannot receive the interrupt signal.", "")),
         };
         match result {
             Ok(()) => 0,
             Err(error) => finish(
-                &args,
+                args,
                 &client.meta.request_id,
                 &client.meta.instance_id,
                 Err(error),
@@ -105,8 +186,8 @@ pub async fn run() -> u8 {
         }
     } else {
         finish(
-            &args,
-            &request_id,
+            args,
+            request_id,
             &client.meta.instance_id,
             commands::execute(&client, &args.command).await,
         )
@@ -130,30 +211,32 @@ fn finish(args: &Arguments, request_id: &str, instance_id: &str, result: Result<
 }
 
 async fn stream(args: &Arguments, client: &mut Client) -> Result<()> {
-    let resource = if matches!(args.command, Command::Log { .. }) {
-        "logs"
-    } else {
-        "stats"
-    };
+    let logs = matches!(args.command, Command::Logs { .. });
+    let resource = if logs { "logs" } else { "stats" };
     let mut cursor = commands::stats::wait(client, resource, String::new())
         .await?
         .cursor;
     let mut page = match &args.command {
-        Command::Log {
-            command: LogCommand::Follow(page),
-        } => PageArgs {
+        Command::Logs { page, .. } => PageArgs {
             limit: page.limit,
             page_token: page.page_token.clone(),
         },
         _ => PageArgs::default(),
     };
+    // Follow from the newest lines unless a cursor was given.
+    let mut first = logs && page.page_token.is_empty();
     loop {
         client.meta.request_id = uuid::Uuid::new_v4().to_string();
-        let (response, more) = if resource == "logs" {
-            let logs = commands::log::read(client, &page).await?;
-            let more = logs.logs.len() == page.limit as usize;
-            page.page_token = logs.next_page_token.clone();
-            (Response::from(logs), more)
+        let (response, more) = if first {
+            first = false;
+            let entries = commands::log::tail(client, page.limit).await?;
+            page.page_token = entries.next_page_token.clone();
+            (Response::from(entries), false)
+        } else if logs {
+            let entries = commands::log::read(client, &page).await?;
+            let more = entries.logs.len() == page.limit as usize;
+            page.page_token = entries.next_page_token.clone();
+            (Response::from(entries), more)
         } else {
             (commands::execute(client, &args.command).await?, false)
         };

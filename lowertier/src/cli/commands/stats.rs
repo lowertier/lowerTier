@@ -1,12 +1,10 @@
 use super::super::{
-    args::StatsCommand,
     client::{Client, Response, checked},
     error::Result,
 };
 use crate::proto::api::control::v1::*;
-pub async fn execute(client: &Client, command: &StatsCommand) -> Result<Response> {
-    let (StatsCommand::Show { prometheus } | StatsCommand::Watch { prometheus }) = command;
-    if *prometheus {
+pub async fn execute(client: &Client, prometheus: bool) -> Result<Response> {
+    if prometheus {
         checked(
             client
                 .rpc

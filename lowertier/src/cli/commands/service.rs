@@ -10,17 +10,13 @@ pub fn execute(args: &ServiceArgs) -> Result<Response> {
         let service = Service::new(args.name.clone())?;
         let status = match &args.command {
             ServiceCommand::Install(install) => {
-                let program = match &install.core_path {
+                let program = match &install.binary {
                     Some(path) => path.clone(),
-                    None => std::env::current_exe()?.with_file_name(if cfg!(windows) {
-                        "lowertier-core.exe"
-                    } else {
-                        "lowertier-core"
-                    }),
+                    None => std::env::current_exe()?,
                 }
                 .canonicalize()?;
                 let directory = install
-                    .service_work_dir
+                    .work_dir
                     .clone()
                     .unwrap_or_else(|| {
                         if cfg!(windows) {
@@ -36,12 +32,14 @@ pub fn execute(args: &ServiceArgs) -> Result<Response> {
                 );
                 service.install(&ServiceInstallOptions {
                     program,
-                    args: install.core_args.clone(),
+                    args: std::iter::once("run".into())
+                        .chain(install.run_args.iter().cloned())
+                        .collect(),
                     work_directory: directory,
-                    disable_autostart: install.disable_autostart.unwrap_or(false),
+                    disable_autostart: install.disable_autostart,
                     description: Some(install.description.clone()),
                     display_name: install.display_name.clone(),
-                    disable_restart_on_failure: install.disable_restart_on_failure.unwrap_or(false),
+                    disable_restart_on_failure: install.disable_restart_on_failure,
                 })?;
                 "installed"
             }

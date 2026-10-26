@@ -4,9 +4,9 @@ use super::super::{
     error::{CliError, Result},
 };
 use crate::proto::api::control::v1::*;
-pub async fn execute(client: &Client, command: &AclCommand) -> Result<Response> {
-    match command {
-        AclCommand::Get => checked(
+pub async fn execute(client: &Client, command: Option<&AclCommand>) -> Result<Response> {
+    match command.unwrap_or(&AclCommand::Show) {
+        AclCommand::Show => checked(
             client
                 .rpc
                 .get_acl(
@@ -36,10 +36,17 @@ pub async fn execute(client: &Client, command: &AclCommand) -> Result<Response> 
                     "stage",
                 ));
             }
-            let mut request: SetAclRequest = super::config::read_json(file)?;
+            let text = std::fs::read_to_string(file).map_err(|error| {
+                CliError::new(
+                    "invalid_argument",
+                    format!("Cannot read {}: {error}", file.display()),
+                    "file",
+                )
+            })?;
+            let mut request: SetAclRequest = serde_json::from_str(&text)?;
             request.meta = client.meta();
             request.expected_revision = client.revision(apply.expected_revision).await?;
-            request.persist = apply.persist;
+            request.persist = !apply.no_persist;
             checked(client.rpc.set_acl(client.controller(), request).await?)
         }
     }

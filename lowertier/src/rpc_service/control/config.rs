@@ -1,13 +1,12 @@
-use std::{collections::BTreeSet, sync::LazyLock};
+use std::collections::BTreeSet;
 
-use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, Kind, SerializeOptions};
 use serde_json::Value;
 
 use crate::{
     common::{
         acl_processor::AclRuleBuilder,
         config::{ConfigFileControl, ConfigLoader, TomlConfigLoader},
+        config_schema::{self, Apply, Kind, OPTIONS},
     },
     proto::{api::control::v1::*, rpc_types::controller::BaseController},
 };
@@ -31,19 +30,15 @@ impl Default for ConfigState {
     }
 }
 
-static POOL: LazyLock<DescriptorPool> = LazyLock::new(|| {
-    DescriptorPool::decode(crate::proto::ALL_DESCRIPTOR_BYTES)
-        .expect("The control schema is valid.")
-});
+const REDACTED: &str = "[REDACTED]";
+const ACL_GROUPS: &str = "acl.acl_v1.group.declares";
 
-const SECRET_PATHS: &[&str] = &[
-    "network_identity.network_secret",
-    "network_identity.network_secret_digest",
-    "secure_mode.local_private_key",
-    "secure_mode.credential_bundle",
-    "secure_mode.credential_certificate",
-    "camouflage.admission_secret",
-];
+fn secret_paths() -> impl Iterator<Item = &'static str> {
+    OPTIONS
+        .iter()
+        .filter(|spec| spec.secret)
+        .map(|spec| spec.path)
+}
 
 fn pointer(path: &str) -> String {
     format!("/{}", path.replace('.', "/"))
@@ -69,50 +64,35 @@ fn set_path(document: &mut Value, path: &str, value: Option<Value>) {
     }
 }
 
-fn prune_nulls(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            object.retain(|_, value| !value.is_null());
-            object.values_mut().for_each(prune_nulls);
-        }
-        Value::Array(array) => array.iter_mut().for_each(prune_nulls),
-        _ => {}
-    }
-}
-
-fn typed_value(config: &NodeConfig) -> anyhow::Result<Value> {
-    let descriptor = POOL
-        .get_message_by_name("api.control.v1.NodeConfig")
-        .unwrap();
-    let message = DynamicMessage::decode(descriptor, config.encode_to_vec().as_slice())?;
-    // Include zero scalars so masks can set false, zero, and empty arrays.
-    let options = SerializeOptions::new()
-        .use_proto_field_name(true)
-        .skip_default_fields(false);
-    let mut value = message.serialize_with_options(serde_json::value::Serializer, &options)?;
-    prune_nulls(&mut value);
-    for path in ["flags.relay", "flags.camouflage", "flags.limits"] {
-        set_path(&mut value, path, None);
-    }
-    Ok(value)
-}
-
+/// The configuration as a JSON object in the public TOML layout.
 fn document(config: &TomlConfigLoader) -> anyhow::Result<Value> {
-    let mut document = serde_json::to_value(config.dump().parse::<toml::Value>()?)?;
-    document["flags"] = typed_value(&NodeConfig {
-        flags: Some(config.get_flags()),
-        ..Default::default()
-    })?["flags"]
-        .clone();
-    for path in ["flags.relay", "flags.camouflage", "flags.limits"] {
-        set_path(&mut document, path, None);
-    }
-    Ok(document)
+    Ok(serde_json::to_value(config.dump().parse::<toml::Table>()?)?)
+}
+
+fn values_document(values: Option<&NodeConfig>) -> anyhow::Result<Value> {
+    let text = values.map_or("", |values| values.toml.as_str());
+    let table = text.parse::<toml::Table>().map_err(|error| {
+        failure(
+            "INVALID_ARGUMENT",
+            &format!(
+                "The configuration values are not valid TOML: {}",
+                error.message()
+            ),
+            "values",
+        )
+    })?;
+    Ok(serde_json::to_value(table)?)
+}
+
+fn node_config(document: &Value) -> anyhow::Result<NodeConfig> {
+    let table = toml::Table::try_from(document)?;
+    Ok(NodeConfig {
+        toml: toml::to_string_pretty(&table)?,
+    })
 }
 
 fn parse(document: &Value) -> anyhow::Result<TomlConfigLoader> {
-    let value = toml::Value::try_from(document)?;
-    TomlConfigLoader::new_from_str(&toml::to_string(&value)?)
+    TomlConfigLoader::new_from_table("control request", &toml::Table::try_from(document)?)
 }
 
 fn redact_urls(value: &mut Value) {
@@ -130,7 +110,7 @@ fn redact_urls(value: &mut Value) {
                         )
                     })
                 {
-                    *text = "[REDACTED]".into();
+                    *text = REDACTED.into();
                 }
             }
         }
@@ -140,77 +120,64 @@ fn redact_urls(value: &mut Value) {
 
 fn projection(config: &TomlConfigLoader) -> anyhow::Result<NodeConfig> {
     let mut value = document(config)?;
-    for path in SECRET_PATHS {
-        set_path(&mut value, path, None);
+    for path in secret_paths() {
+        if value.pointer(&pointer(path)).is_some() {
+            set_path(&mut value, path, Some(REDACTED.into()));
+        }
     }
     if let Some(declares) = value
-        .pointer_mut("/acl/acl_v1/group/declares")
+        .pointer_mut(&pointer(ACL_GROUPS))
         .and_then(Value::as_array_mut)
     {
         for declaration in declares {
-            declaration["group_secret"] = "[REDACTED]".into();
+            declaration["group_secret"] = REDACTED.into();
         }
     }
     redact_urls(&mut value);
-    serde_json::from_value(value).map_err(Into::into)
+    node_config(&value)
+}
+
+/// The registry option that governs a path: the path itself or its closest ancestor.
+fn governing(path: &str) -> Option<&'static config_schema::OptionSpec> {
+    let mut candidate = path;
+    loop {
+        if let Some(spec) = config_schema::lookup(candidate) {
+            return Some(spec);
+        }
+        candidate = candidate.rsplit_once('.')?.0;
+    }
 }
 
 fn valid_path(path: &str) -> anyhow::Result<()> {
-    for (old, replacement) in crate::common::control_config::LEGACY_KEYS {
-        if path == *old || path == format!("flags.{old}") {
-            return Err(failure(
-                "INVALID_ARGUMENT",
-                &format!("Use {replacement}."),
-                path,
-            ));
-        }
+    if let Some(message) = config_schema::retired_message(path) {
+        return Err(failure("INVALID_ARGUMENT", &format!("{message}."), path));
     }
-    let mut descriptor = POOL
-        .get_message_by_name("api.control.v1.NodeConfig")
-        .unwrap();
-    let parts = path.split('.').collect::<Vec<_>>();
-    for (index, part) in parts.iter().enumerate() {
-        let field = descriptor.get_field_by_name(part).ok_or_else(|| {
-            failure(
-                "INVALID_ARGUMENT",
-                "The configuration path is unknown.",
-                path,
-            )
-        })?;
-        if field
-            .field_descriptor_proto()
-            .options
-            .as_ref()
-            .is_some_and(|options| options.deprecated.unwrap_or(false))
-            || path.starts_with("flags.relay")
-            || path.starts_with("flags.camouflage")
-            || path.starts_with("flags.limits")
-        {
-            return Err(failure(
-                "INVALID_ARGUMENT",
-                "Use a canonical top-level configuration section.",
-                path,
-            ));
-        }
-        if index + 1 < parts.len() {
-            descriptor = match field.kind() {
-                Kind::Message(descriptor) if !field.is_list() && !field.is_map() => descriptor,
-                _ => {
-                    return Err(failure(
-                        "INVALID_ARGUMENT",
-                        "Arrays must be replaced completely.",
-                        path,
-                    ));
-                }
-            };
-        }
+    let section = OPTIONS
+        .iter()
+        .any(|spec| spec.path.starts_with(&format!("{path}.")));
+    match governing(path) {
+        _ if section => Ok(()),
+        Some(spec) if spec.path == path || spec.kind == Kind::Table => Ok(()),
+        Some(_) => Err(failure(
+            "INVALID_ARGUMENT",
+            "Arrays and values must be replaced completely.",
+            path,
+        )),
+        None => Err(failure(
+            "INVALID_ARGUMENT",
+            "The configuration path is unknown.",
+            path,
+        )),
     }
-    Ok(())
+}
+
+fn is_process_path(path: &str) -> bool {
+    governing(path).is_some_and(|spec| spec.apply == Apply::Process)
 }
 
 fn contains_placeholder(value: &Value) -> bool {
     match value {
-        Value::String(value) => matches!(value.as_str(), "[REDACTED]" | "<redacted>" | "***"),
+        Value::String(value) => matches!(value.as_str(), REDACTED | "<redacted>" | "***"),
         Value::Object(object) => object.values().any(contains_placeholder),
         Value::Array(array) => array.iter().any(contains_placeholder),
         _ => false,
@@ -247,41 +214,55 @@ fn changed_paths(before: &Value, after: &Value, path: &str, changed: &mut Vec<St
 }
 
 fn classify(path: &str, quic: bool) -> &'static str {
-    if matches!(path, "limits.memory_bytes" | "control.token_file") {
-        return "restart";
+    match governing(path).map_or(Apply::Restart, |spec| spec.apply) {
+        Apply::Live => "live",
+        Apply::NewConnections => "new_connection",
+        Apply::QuicRestart if !quic => "new_connection",
+        Apply::QuicRestart | Apply::Restart | Apply::Process => "restart",
     }
-    if path == "hostname"
-        || path.starts_with("relay.")
-        || path.starts_with("limits.")
-        || matches!(
-            path,
-            "relay" | "limits" | "acl" | "tcp_whitelist" | "udp_whitelist"
-        )
-        || path.starts_with("acl.")
-    {
-        "live"
-    } else if path.starts_with("camouflage.") || path == "camouflage" {
-        if quic
-            && matches!(
-                path,
-                "camouflage"
-                    | "camouflage.tls_cert"
-                    | "camouflage.tls_key"
-                    | "camouflage.server_name"
-                    | "camouflage.admission_secret"
-                    | "camouflage.website_root"
-                    | "camouflage.decoy_upstream"
-                    | "camouflage.decoy_upstream.tcp"
-                    | "camouflage.decoy_upstream.udp"
-                    | "camouflage.sni_routing"
-            )
-        {
-            "restart"
+}
+
+/// Keep stored secrets where a replacement repeats the redaction placeholder or omits them.
+fn restore_secrets(value: &mut Value, path: &str, before: &Value) {
+    for secret in secret_paths() {
+        let child = if secret == path {
+            ""
+        } else if let Some(child) = secret.strip_prefix(&format!("{path}.")) {
+            child
         } else {
-            "new_connection"
+            continue;
+        };
+        let previous = before.pointer(&pointer(secret)).cloned();
+        if child.is_empty() {
+            if value.as_str() == Some(REDACTED) {
+                *value = previous.unwrap_or(Value::Null);
+            }
+        } else if value
+            .pointer(&pointer(child))
+            .is_none_or(|v| v.as_str() == Some(REDACTED))
+        {
+            set_path(value, child, previous);
         }
+    }
+    let groups = if path == ACL_GROUPS {
+        value.as_array_mut()
     } else {
-        "restart"
+        ACL_GROUPS
+            .strip_prefix(&format!("{path}."))
+            .and_then(|child| value.pointer_mut(&pointer(child)))
+            .and_then(Value::as_array_mut)
+    };
+    for declaration in groups.into_iter().flatten() {
+        if declaration["group_secret"] == REDACTED {
+            let name = declaration["group_name"].clone();
+            if let Some(previous) = before
+                .pointer(&pointer(ACL_GROUPS))
+                .and_then(Value::as_array)
+                .and_then(|groups| groups.iter().find(|group| group["group_name"] == name))
+            {
+                declaration["group_secret"] = previous["group_secret"].clone();
+            }
+        }
     }
 }
 
@@ -324,51 +305,14 @@ fn prepare(
         }
     }
     let before = document(current)?;
-    if let Some(values) = &patch.values {
-        validate_flag_sections(values)?;
-    }
-    let values = typed_value(&patch.values.clone().unwrap_or_default())?;
+    let values = values_document(patch.values.as_ref())?;
     let mut after = before.clone();
     for path in &patch.field_mask {
         let mut value = values
             .pointer(&pointer(path))
             .cloned()
             .ok_or_else(|| failure("INVALID_ARGUMENT", "The masked value is absent.", path))?;
-        for groups_path in [
-            "acl.acl_v1.group.declares",
-            "acl_v1.group.declares",
-            "group.declares",
-            "declares",
-            "",
-        ] {
-            if format!("{path}.{groups_path}").trim_end_matches('.') != "acl.acl_v1.group.declares"
-            {
-                continue;
-            }
-            let declarations = if groups_path.is_empty() {
-                value.as_array_mut()
-            } else {
-                value
-                    .pointer_mut(&pointer(groups_path))
-                    .and_then(Value::as_array_mut)
-            };
-            if let Some(declarations) = declarations {
-                for declaration in declarations {
-                    if declaration["group_secret"] == "[REDACTED]" {
-                        let name = declaration["group_name"].clone();
-                        if let Some(previous) = before
-                            .pointer("/acl/acl_v1/group/declares")
-                            .and_then(Value::as_array)
-                            .and_then(|groups| {
-                                groups.iter().find(|group| group["group_name"] == name)
-                            })
-                        {
-                            declaration["group_secret"] = previous["group_secret"].clone();
-                        }
-                    }
-                }
-            }
-        }
+        restore_secrets(&mut value, path, &before);
         if contains_placeholder(&value) {
             return Err(failure(
                 "INVALID_ARGUMENT",
@@ -376,28 +320,22 @@ fn prepare(
                 path,
             ));
         }
-        // A parent replacement preserves secrets unless their own paths are explicit.
-        for secret in SECRET_PATHS {
-            if let Some(child) = secret.strip_prefix(&format!("{path}.")) {
-                set_path(&mut value, child, before.pointer(&pointer(secret)).cloned());
-            }
-        }
-        set_path(&mut after, path, Some(value));
+        set_path(&mut after, path, (!value.is_null()).then_some(value));
     }
     for path in &patch.clear_paths {
         set_path(&mut after, path, None);
     }
-    if after["instance_id"] != before["instance_id"] {
+    if after.pointer("/node/instance_id") != before.pointer("/node/instance_id") {
         return Err(failure(
             "INVALID_ARGUMENT",
             "The instance ID cannot change.",
-            "instance_id",
+            "node.instance_id",
         ));
     }
-    let candidate = parse(&after).map_err(|_| {
+    let candidate = parse(&after).map_err(|error| {
         failure(
             "INVALID_ARGUMENT",
-            "The configuration values are invalid.",
+            &format!("The configuration values are invalid: {error:#}"),
             "patch.values",
         )
     })?;
@@ -442,38 +380,30 @@ fn prepare(
     Ok((candidate, result))
 }
 
-fn validate_flag_sections(values: &NodeConfig) -> anyhow::Result<()> {
-    if values.flags.as_ref().is_some_and(|flags| {
-        flags.relay.is_some() || flags.camouflage.is_some() || flags.limits.is_some()
-    }) {
-        return Err(failure(
-            "INVALID_ARGUMENT",
-            "Use the canonical relay, camouflage, and limits sections.",
-            "flags",
-        ));
-    }
-    Ok(())
+fn desired_forwards(desired: Option<&NodeConfig>) -> anyhow::Result<Vec<Value>> {
+    Ok(values_document(desired)?["forward"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default())
 }
 
 fn validate_values(config: &TomlConfigLoader, document: &Value) -> anyhow::Result<()> {
-    for (key, ipv6) in [
-        ("ipv4", false),
-        ("ipv6", true),
-        ("ipv6_public_addr_prefix", true),
+    for (path, kind) in [
+        ("address.ipv4", 4),
+        ("address.ipv6", 6),
+        ("address.public_ipv6.prefix", 0),
     ] {
-        if let Some(value) = document[key].as_str() {
-            let valid = if key == "ipv6_public_addr_prefix" {
-                value.parse::<cidr::Ipv6Cidr>().is_ok()
-            } else if ipv6 {
-                value.parse::<cidr::Ipv6Inet>().is_ok()
-            } else {
-                value.parse::<cidr::Ipv4Inet>().is_ok()
+        if let Some(value) = document.pointer(&pointer(path)).and_then(Value::as_str) {
+            let valid = match kind {
+                4 => value.parse::<cidr::Ipv4Inet>().is_ok(),
+                6 => value.parse::<cidr::Ipv6Inet>().is_ok(),
+                _ => value.parse::<cidr::Ipv6Cidr>().is_ok(),
             };
             if !valid {
                 return Err(failure(
                     "INVALID_ARGUMENT",
                     "The IP address or prefix is invalid.",
-                    key,
+                    path,
                 ));
             }
         }
@@ -482,8 +412,8 @@ fn validate_values(config: &TomlConfigLoader, document: &Value) -> anyhow::Resul
         crate::common::config::validate_mapped_listener_url(&uri).map_err(|_| {
             failure(
                 "INVALID_ARGUMENT",
-                "The mapped listener is invalid.",
-                "mapped_listeners",
+                "The advertised listener is invalid.",
+                "transport.advertise",
             )
         })?;
     }
@@ -495,7 +425,7 @@ fn validate_values(config: &TomlConfigLoader, document: &Value) -> anyhow::Resul
             return Err(failure(
                 "INVALID_ARGUMENT",
                 "Port forwards require TCP or UDP and nonzero ports.",
-                "port_forward",
+                "forward",
             ));
         }
     }
@@ -691,7 +621,7 @@ fn select_apply(
         || crate::common::config::transport_protocol_enabled(&desired.get_flags(), "quic");
     let mut published = before;
     for path in changed {
-        match if running || matches!(path.as_str(), "limits.memory_bytes" | "control.token_file") {
+        match if running || is_process_path(&path) {
             classify(&path, quic)
         } else {
             "live"
@@ -841,8 +771,7 @@ impl ControlPlaneService {
                 "config",
             )
         })?;
-        validate_flag_sections(&values)?;
-        let value = typed_value(&values)?;
+        let value = values_document(Some(&values))?;
         if contains_placeholder(&value) {
             return Err(failure(
                 "INVALID_ARGUMENT",
@@ -924,7 +853,7 @@ impl ControlPlaneService {
         if state
             .restart_fields
             .iter()
-            .any(|path| matches!(path.as_str(), "limits.memory_bytes" | "control.token_file"))
+            .any(|path| is_process_path(path))
         {
             return Err(failure(
                 "RESTART_REQUIRED",
@@ -1003,15 +932,20 @@ impl ControlPlaneService {
         _: BaseController,
         request: SetAclRequest,
     ) -> anyhow::Result<SetAclResponse> {
+        let mut values = serde_json::json!({ "acl": {
+            "tcp_ports": request.tcp_whitelist,
+            "udp_ports": request.udp_whitelist,
+        }});
+        let acl = serde_json::to_value(request.acl.unwrap_or_default())?;
+        if let Value::Object(acl) = acl {
+            for (key, value) in acl {
+                values["acl"][key] = value;
+            }
+        }
         let patch = ConfigPatch {
             expected_revision: request.expected_revision,
-            field_mask: vec!["acl".into(), "tcp_whitelist".into(), "udp_whitelist".into()],
-            values: Some(NodeConfig {
-                acl: Some(request.acl.unwrap_or_default()),
-                tcp_whitelist: request.tcp_whitelist,
-                udp_whitelist: request.udp_whitelist,
-                ..Default::default()
-            }),
+            field_mask: vec!["acl".into()],
+            values: Some(node_config(&values)?),
             persist: request.persist,
             ..Default::default()
         };
@@ -1041,18 +975,20 @@ impl ControlPlaneService {
                 },
             )
             .await?;
-        let mut values = config.desired.unwrap();
-        values
-            .port_forward
-            .retain(|entry| entry.bind_addr != row.bind_addr || entry.proto != row.proto);
-        values.port_forward.push(row);
+        let mut forwards = desired_forwards(config.desired.as_ref())?;
+        forwards.retain(|entry| {
+            entry["bind"] != row.bind.as_str() || entry["proto"] != row.proto.as_str()
+        });
+        forwards
+            .push(serde_json::json!({ "proto": row.proto, "bind": row.bind, "dest": row.dest }));
+        let values = node_config(&serde_json::json!({ "forward": forwards }))?;
         Ok(PutPortForwardResponse {
             result: Some(
                 self.transact(
                     request.meta.as_ref(),
                     ConfigPatch {
                         expected_revision: request.expected_revision,
-                        field_mask: vec!["port_forward".into()],
+                        field_mask: vec!["forward".into()],
                         values: Some(values),
                         persist: request.persist,
                         stage: request.stage,
@@ -1078,25 +1014,26 @@ impl ControlPlaneService {
                 },
             )
             .await?;
-        let mut values = config.desired.unwrap();
-        let previous = values.port_forward.len();
-        values
-            .port_forward
-            .retain(|entry| entry.bind_addr != request.bind_addr || entry.proto != request.proto);
-        if values.port_forward.len() == previous {
+        let mut forwards = desired_forwards(config.desired.as_ref())?;
+        let previous = forwards.len();
+        forwards.retain(|entry| {
+            entry["bind"] != request.bind.as_str() || entry["proto"] != request.proto.as_str()
+        });
+        if forwards.len() == previous {
             return Err(failure(
                 "NOT_FOUND",
                 "The port forward does not exist.",
-                "bind_addr",
+                "bind",
             ));
         }
+        let values = node_config(&serde_json::json!({ "forward": forwards }))?;
         Ok(DeletePortForwardResponse {
             result: Some(
                 self.transact(
                     request.meta.as_ref(),
                     ConfigPatch {
                         expected_revision: request.expected_revision,
-                        field_mask: vec!["port_forward".into()],
+                        field_mask: vec!["forward".into()],
                         values: Some(values),
                         persist: request.persist,
                         stage: request.stage,
@@ -1223,11 +1160,22 @@ impl ControlPlaneService {
         let (candidate, mut result) =
             select_apply(&active, &desired, state.revision, running.is_some())?;
         if !patch.stage && !result.restart_fields.is_empty() {
-            return Err(failure(
-                "RESTART_REQUIRED",
-                "Stage the configuration or stop the instance before this change.",
-                &result.restart_fields[0],
-            ));
+            let field = &result.restart_fields[0];
+            let requested = patch
+                .field_mask
+                .iter()
+                .chain(&patch.clear_paths)
+                .any(|path| field == path || field.starts_with(&format!("{path}.")));
+            let message = if requested {
+                format!(
+                    "{field} needs an instance restart. Add --stage to store it, or stop the instance first."
+                )
+            } else {
+                format!(
+                    "{field} is staged and waits for an instance restart. Add --stage, or restart the instance first."
+                )
+            };
+            return Err(failure("RESTART_REQUIRED", &message, field));
         }
         let rules = AclRuleBuilder::build_config(&candidate)?;
         let runtime = running

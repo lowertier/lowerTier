@@ -29,7 +29,7 @@ use crate::{
     tunnel::{IpScheme, generate_digest_from_str},
 };
 
-use super::control_config::{CamouflageConfig, LEGACY_KEYS, RelayConfig};
+use super::control_config::{CamouflageConfig, RelayConfig};
 use super::env_parser;
 
 pub type Flags = crate::proto::common::FlagsInConfig;
@@ -39,7 +39,6 @@ pub fn gen_default_flags() -> Flags {
         default_protocol: "quic".to_string(),
         enabled_protocols: Vec::new(),
         dev_name: "".to_string(),
-        enable_encryption: true,
         enable_ipv6: true,
         mtu: 1380,
         enable_exit_node: false,
@@ -97,7 +96,7 @@ pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyho
     );
     anyhow::ensure!(
         transport_protocol_enabled(flags, protocol),
-        "transport {protocol:?} is disabled by enabled_protocols"
+        "transport {protocol:?} is disabled by transport.protocols"
     );
     Ok(())
 }
@@ -116,11 +115,11 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     for (index, protocol) in flags.enabled_protocols.iter().enumerate() {
         anyhow::ensure!(
             matches!(protocol.as_str(), "quic" | "tcp" | "wss"),
-            "invalid enabled_protocols entry {protocol:?}; expected quic, tcp, or wss"
+            "invalid transport.protocols entry {protocol:?}; expected quic, tcp, or wss"
         );
         anyhow::ensure!(
             !flags.enabled_protocols[..index].contains(protocol),
-            "duplicate enabled_protocols entry {protocol:?}"
+            "duplicate transport.protocols entry {protocol:?}"
         );
     }
     ensure_transport_protocol_enabled(flags, &flags.default_protocol)?;
@@ -130,28 +129,28 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
         .parse::<EncryptionAlgorithm>()
         .map_err(|_| {
             anyhow::anyhow!(
-                "unsupported encryption_algorithm {:?}",
+                "unsupported network.cipher {:?}",
                 flags.encryption_algorithm
             )
         })?;
     flags.relay_config().validate()?;
     flags.camouflage_config().validate()?;
     if !(1..=1_048_576).contains(&flags.l2_fdb_capacity) {
-        anyhow::bail!("l2_fdb_capacity must be between 1 and 1048576");
+        anyhow::bail!("l2.fdb_capacity must be between 1 and 1048576");
     }
     if !(1..=86_400).contains(&flags.l2_fdb_age_seconds) {
-        anyhow::bail!("l2_fdb_age_seconds must be between 1 and 86400");
+        anyhow::bail!("l2.fdb_age must be between 1 and 86400 seconds");
     }
     if flags.l2_max_macs_per_peer > flags.l2_fdb_capacity {
-        anyhow::bail!("l2_max_macs_per_peer must not exceed l2_fdb_capacity");
+        anyhow::bail!("l2.max_macs_per_peer must not exceed l2.fdb_capacity");
     }
     if flags.l2_mac_move_hold_seconds > flags.l2_fdb_age_seconds {
-        anyhow::bail!("l2_mac_move_hold_seconds must not exceed l2_fdb_age_seconds");
+        anyhow::bail!("l2.mac_move_hold must not exceed l2.fdb_age");
     }
     if flags.l2_allowed_vlans.len() > 4095
         || flags.l2_allowed_vlans.iter().any(|value| *value > 4094)
     {
-        anyhow::bail!("l2_allowed_vlans must contain at most 4095 VLAN IDs from 0 through 4094");
+        anyhow::bail!("l2.vlans must contain at most 4095 VLAN IDs from 0 through 4094");
     }
     if flags.l2_allowed_ether_types.len() > 256
         || flags
@@ -159,16 +158,14 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
             .iter()
             .any(|value| !(0x0600..=0xffff).contains(value))
     {
-        anyhow::bail!(
-            "l2_allowed_ether_types must contain at most 256 EtherTypes from 1536 through 65535"
-        );
+        anyhow::bail!("l2.ether_types must contain at most 256 EtherTypes from 1536 through 65535");
     }
 
     match flags.default_protocol.as_str() {
         "quic" | "tcp" | "wss" => {}
         protocol => {
             anyhow::bail!(
-                "unsupported default_protocol {protocol:?}; expected \"quic\", \"tcp\", or \"wss\""
+                "unsupported transport.prefer {protocol:?}; expected \"quic\", \"tcp\", or \"wss\""
             )
         }
     }
@@ -176,13 +173,15 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     const MAX_QUIC_VARINT: u64 = (1_u64 << 62) - 1;
     if flags.quic_initial_receive_window == 0 || flags.quic_initial_receive_window > MAX_QUIC_VARINT
     {
-        anyhow::bail!("quic_initial_receive_window must be between 1 and {MAX_QUIC_VARINT}");
+        anyhow::bail!(
+            "transport.quic.initial_receive_window must be between 1 and {MAX_QUIC_VARINT}"
+        );
     }
     if flags.quic_receive_window < flags.quic_initial_receive_window
         || flags.quic_receive_window > MAX_QUIC_VARINT
     {
         anyhow::bail!(
-            "quic_receive_window must be at least quic_initial_receive_window and no more than {MAX_QUIC_VARINT}"
+            "transport.quic.receive_window must be at least transport.quic.initial_receive_window and no more than {MAX_QUIC_VARINT}"
         );
     }
     Ok(())
@@ -873,6 +872,9 @@ struct Config {
     stun_servers_v6: Option<Vec<String>>,
 
     credential_file: Option<PathBuf>,
+    network_secret_file: Option<PathBuf>,
+    private_key_file: Option<PathBuf>,
+    log: Option<LogConfig>,
     #[serde(
         flatten,
         default,
@@ -915,10 +917,51 @@ pub struct TomlConfigLoader {
     config: Arc<Mutex<Config>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// Process-wide management settings from `[control]`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ControlConfig {
-    token_file: Option<PathBuf>,
+pub struct ControlConfig {
+    pub portal: Option<String>,
+    pub portal_allow: Option<Vec<String>>,
+    pub token_file: Option<PathBuf>,
+    pub token_group: Option<String>,
+}
+
+/// Process-wide logging settings from `[log]`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogConfig {
+    pub console: Option<String>,
+    pub file: Option<String>,
+    pub dir: Option<String>,
+    pub max_size_mb: Option<u64>,
+    pub max_files: Option<usize>,
+}
+
+impl LoggingConfigLoader for &LogConfig {
+    fn get_console_logger_config(&self) -> ConsoleLoggerConfig {
+        ConsoleLoggerConfig {
+            level: self.console.clone(),
+        }
+    }
+
+    fn get_file_logger_config(&self) -> FileLoggerConfig {
+        FileLoggerConfig {
+            level: self.file.clone(),
+            file: None,
+            dir: self.dir.clone(),
+            size_mb: self.max_size_mb,
+            count: self.max_files,
+        }
+    }
+}
+
+fn read_secret_file(path: &std::path::Path, option: &str) -> anyhow::Result<String> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("{option}: cannot read {}", path.display()))?;
+    let text = text.trim_end_matches(['\r', '\n']);
+    anyhow::ensure!(!text.is_empty(), "{option}: {} is empty", path.display());
+    Ok(text.to_owned())
 }
 
 impl Default for TomlConfigLoader {
@@ -948,17 +991,32 @@ impl TomlConfigLoader {
         source_name: &str,
         config_str: &str,
     ) -> Result<Self, anyhow::Error> {
-        let config = toml::de::from_str::<Config>(config_str).map_err(|err| {
-            let message = format_toml_parse_error(source_name, config_str, &err);
-            anyhow::Error::new(err).context(message)
-        })?;
+        Self::new_from_str_with_sets(source_name, config_str, &[])
+    }
 
-        for (old, new) in LEGACY_KEYS {
-            anyhow::ensure!(
-                !config.unknown_keys.contains_key(*old),
-                "removed option '{old}': use {new}"
-            );
+    /// Load TOML text and apply `PATH=VALUE` overrides in order.
+    pub fn new_from_str_with_sets(
+        source_name: &str,
+        config_str: &str,
+        sets: &[String],
+    ) -> Result<Self, anyhow::Error> {
+        // The report already contains the parser's message and location.
+        let mut public = config_str.parse::<toml::Table>().map_err(|err| {
+            anyhow::anyhow!(format_toml_parse_error(source_name, config_str, &err))
+        })?;
+        for assignment in sets {
+            super::config_schema::apply_set(&mut public, assignment)?;
         }
+        Self::new_from_table(source_name, &public)
+    }
+
+    /// Load a public sectioned table.
+    pub fn new_from_table(source_name: &str, public: &toml::Table) -> Result<Self, anyhow::Error> {
+        let internal = super::config_schema::to_internal(public)
+            .with_context(|| format!("failed to load config from {source_name}"))?;
+        let config: Config = toml::Value::Table(internal)
+            .try_into()
+            .with_context(|| format!("failed to load config from {source_name}"))?;
         anyhow::ensure!(
             config.unknown_keys.is_empty(),
             "unknown configuration keys: {:?}",
@@ -972,6 +1030,19 @@ impl TomlConfigLoader {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
+        if let Some(path) = &config.network_secret_file {
+            let secret = read_secret_file(path, "network.secret_file")?;
+            config
+                .network_identity
+                .get_or_insert_with(NetworkIdentity::default)
+                .network_secret = Some(secret);
+        }
+        if let Some(path) = &config.private_key_file {
+            let key = read_secret_file(path, "identity.private_key_file")?;
+            let secure_mode = config.secure_mode.get_or_insert_with(Default::default);
+            secure_mode.enabled = true;
+            secure_mode.local_private_key = Some(key);
+        }
         let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
             .map_err(|error| anyhow::anyhow!("failed to parse flags: {error}"))?;
         flags.relay = config.relay.clone();
@@ -1090,42 +1161,27 @@ impl TomlConfigLoader {
     fn gen_flags(
         flags_hashmap: serde_json::Map<String, serde_json::Value>,
     ) -> serde_json::Result<Flags> {
-        for option in [
-            "quic_datagram_fec_parity",
-            "quic_datagram_alternate_path_parity",
-            "data_compress_algo",
-        ] {
-            if flags_hashmap.contains_key(option) {
-                return Err(<serde_json::Error as serde::de::Error>::custom(format!(
-                    "removed option '{option}': FEC and payload compression are no longer supported"
-                )));
-            }
-        }
-        if flags_hashmap.contains_key("l2_flood_bps") {
-            return Err(<serde_json::Error as serde::de::Error>::custom(
-                "removed option 'l2_flood_bps': use l2_flood_bytes_per_second",
-            ));
-        }
-        for (old, new) in LEGACY_KEYS {
-            if flags_hashmap.contains_key(*old) {
-                return Err(<serde_json::Error as serde::de::Error>::custom(format!(
-                    "removed option '{old}': use {new}"
-                )));
-            }
-        }
-        for section in ["relay", "camouflage", "limits"] {
-            if flags_hashmap.contains_key(section) {
-                return Err(<serde_json::Error as serde::de::Error>::custom(format!(
-                    "use the top-level [{section}] section"
-                )));
-            }
-        }
         let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => serde_json::Map::new(),
         };
         merged_hashmap.extend(flags_hashmap);
         serde_json::from_value(serde_json::Value::Object(merged_hashmap))
+    }
+}
+
+impl TomlConfigLoader {
+    pub fn get_control_config(&self) -> ControlConfig {
+        self.config
+            .lock()
+            .unwrap()
+            .control
+            .clone()
+            .unwrap_or_default()
+    }
+
+    pub fn get_log_config(&self) -> LogConfig {
+        self.config.lock().unwrap().log.clone().unwrap_or_default()
     }
 }
 
@@ -1544,7 +1600,19 @@ impl ConfigLoader for TomlConfigLoader {
         if config.stun_servers_v6 == Some(StunInfoCollector::get_default_servers_v6()) {
             config.stun_servers_v6 = None;
         }
-        toml::to_string_pretty(&config).unwrap()
+        // Secrets loaded from files stay in their files.
+        if config.network_secret_file.is_some()
+            && let Some(identity) = config.network_identity.as_mut()
+        {
+            identity.network_secret = None;
+        }
+        if config.private_key_file.is_some()
+            && let Some(secure_mode) = config.secure_mode.as_mut()
+        {
+            secure_mode.local_private_key = None;
+        }
+        let internal = toml::Table::try_from(&config).expect("configuration serializes to TOML");
+        toml::to_string_pretty(&super::config_schema::to_public(&internal)).unwrap()
     }
 }
 
@@ -1662,10 +1730,12 @@ impl ConfigFileControl {
     }
 }
 
+/// Load a config file, or stdin for `-`, expanding `${VAR}` references and applying `sets`.
+/// Files with environment references or overrides are never written back.
 pub async fn load_config_from_file(
     config_file: &PathBuf,
     config_dir: Option<&PathBuf>,
-    disable_env_parsing: bool,
+    sets: &[String],
 ) -> Result<(TomlConfigLoader, ConfigFileControl), anyhow::Error> {
     if config_file.as_os_str() == "-" {
         let mut stdin = String::new();
@@ -1673,7 +1743,7 @@ pub async fn load_config_from_file(
             .read_to_string(&mut stdin)
             .await
             .context("failed to read config from stdin")?;
-        let config = TomlConfigLoader::new_from_str_with_source("stdin", &stdin)?;
+        let config = TomlConfigLoader::new_from_str_with_sets("stdin", &stdin, sets)?;
         return Ok((config, ConfigFileControl::STATIC_CONFIG));
     }
 
@@ -1681,18 +1751,7 @@ pub async fn load_config_from_file(
         .await
         .with_context(|| format!("failed to read config file: {}", config_file.display()))?;
 
-    let (expanded_config_str, uses_env_vars) = if disable_env_parsing {
-        (config_str.clone(), false)
-    } else {
-        env_parser::expand_env_vars(&config_str)
-    };
-
-    if disable_env_parsing {
-        tracing::info!(
-            "Environment variable parsing is disabled for config file: {:?}",
-            config_file
-        );
-    }
+    let (expanded_config_str, uses_env_vars) = env_parser::expand_env_vars(&config_str);
 
     if uses_env_vars {
         tracing::info!(
@@ -1702,11 +1761,12 @@ pub async fn load_config_from_file(
     }
 
     let source_name = config_file.display().to_string();
-    let config = TomlConfigLoader::new_from_str_with_source(&source_name, &expanded_config_str)?;
+    let config =
+        TomlConfigLoader::new_from_str_with_sets(&source_name, &expanded_config_str, sets)?;
 
     let mut control = ConfigFileControl::from_path(config_file.clone()).await;
 
-    if uses_env_vars {
+    if uses_env_vars || !sets.is_empty() {
         control.set_read_only(true);
         control.set_no_delete(true);
         tracing::info!(
@@ -1778,58 +1838,52 @@ pub mod tests {
     }
 
     fn invalid_toml_error_includes_location_and_source_line() {
-        let error = TomlConfigLoader::new_from_str("dhcp = \"yes\"").unwrap_err();
+        let error = TomlConfigLoader::new_from_str("[address]\ndhcp = yes").unwrap_err();
         let display = error.to_string();
 
         assert!(display.contains("failed to parse config TOML"));
         assert!(display.contains("inline config"));
-        assert!(display.contains("dhcp = \"yes\""));
-        assert!(display.contains("^"));
-        assert!(display.contains("invalid type: string"));
+        assert!(display.contains("dhcp = yes"));
+        assert!(display.contains("inline config:2:8"));
+        assert!(display.contains("invalid string"));
         assert!(!display.contains("<unknown>"));
-        assert!(
-            error
-                .chain()
-                .any(|err| err.downcast_ref::<toml::de::Error>().is_some())
-        );
+        let error = TomlConfigLoader::new_from_str("[address]\ndhcp = \"yes\"").unwrap_err();
+        assert!(format!("{error:#}").contains("address.dhcp: expected bool, found string"));
     }
 
     fn invalid_file_toml_error_includes_config_source() {
         let mut config_file = NamedTempFile::new().unwrap();
-        writeln!(config_file, "dhcp = \"yes\"").unwrap();
+        writeln!(config_file, "[address]\ndhcp = yes").unwrap();
 
         let error = TomlConfigLoader::new(&config_file.path().to_path_buf()).unwrap_err();
         let error = error.to_string();
 
         assert!(error.contains(config_file.path().to_string_lossy().as_ref()));
         assert!(error.contains("failed to parse config TOML"));
-        assert!(error.contains("dhcp = \"yes\""));
-        assert!(error.contains("^"));
-        assert!(error.contains("invalid type: string"));
+        assert!(error.contains("dhcp = yes"));
+        assert!(error.contains("invalid string"));
         assert!(!error.contains("<unknown>"));
     }
 
     fn invalid_stdin_toml_error_includes_config_source_in_display() {
-        let error = TomlConfigLoader::new_from_str_with_source("stdin", "dhcp = \"yes\"")
+        let error = TomlConfigLoader::new_from_str_with_source("stdin", "[address]\ndhcp = yes")
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("stdin"));
         assert!(error.contains("failed to parse config TOML"));
-        assert!(error.contains("dhcp = \"yes\""));
-        assert!(error.contains("^"));
-        assert!(error.contains("invalid type: string"));
+        assert!(error.contains("dhcp = yes"));
+        assert!(error.contains("invalid string"));
         assert!(!error.contains("<unknown>"));
     }
 
     fn invalid_toml_error_handles_non_ascii_before_error() {
-        let error = TomlConfigLoader::new_from_str("hostname = \"节点\"\ndhcp = \"yes\"")
+        let error = TomlConfigLoader::new_from_str("[node]\nhostname = \"节点\"\ndhcp = yes")
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("dhcp = \"yes\""));
-        assert!(error.contains("^"));
-        assert!(error.contains("invalid type: string"));
+        assert!(error.contains("dhcp = yes"));
+        assert!(error.contains("invalid string"));
     }
 
     fn invalid_toml_error_handles_non_ascii_before_error_on_same_line() {
@@ -1846,7 +1900,7 @@ pub mod tests {
 
     fn invalid_file_flags_error_includes_config_source_in_display() {
         let mut config_file = NamedTempFile::new().unwrap();
-        writeln!(config_file, "[flags]").unwrap();
+        writeln!(config_file, "[underlay]").unwrap();
         writeln!(config_file, "socket_mark = \"bad\"").unwrap();
 
         let error = TomlConfigLoader::new(&config_file.path().to_path_buf()).unwrap_err();
@@ -1854,11 +1908,14 @@ pub mod tests {
         let display = error.to_string();
         assert!(display.contains(config_file.path().to_string_lossy().as_ref()));
         assert!(display.contains("failed to load config"));
-        assert!(display.contains("failed to parse flags"));
 
         // with_context preserves the cause chain so callers can inspect the root reason.
         let chain: Vec<String> = error.chain().map(|e| e.to_string()).collect();
-        assert!(chain.iter().any(|m| m.contains("failed to parse flags")));
+        assert!(
+            chain
+                .iter()
+                .any(|m| m.contains("underlay.socket_mark: expected integer"))
+        );
     }
 
     #[test]
@@ -1882,9 +1939,9 @@ pub mod tests {
         // Omitting the flag leaves socket_mark unset (None) -> SO_MARK untouched.
         let cfg = TomlConfigLoader::new_from_str(
             r#"
-[network_identity]
-network_name = "n"
-network_secret = "s"
+[network]
+name = "n"
+secret = "s"
 "#,
         )
         .unwrap();
@@ -1893,11 +1950,11 @@ network_secret = "s"
         // socket_mark = 0 is a legitimate value distinct from "unset".
         let cfg = TomlConfigLoader::new_from_str(
             r#"
-[network_identity]
-network_name = "n"
-network_secret = "s"
+[network]
+name = "n"
+secret = "s"
 
-[flags]
+[underlay]
 socket_mark = 0
 "#,
         )
@@ -1907,11 +1964,11 @@ socket_mark = 0
         // A non-zero mark round-trips as Some(v).
         let cfg = TomlConfigLoader::new_from_str(
             r#"
-[network_identity]
-network_name = "n"
-network_secret = "s"
+[network]
+name = "n"
+secret = "s"
 
-[flags]
+[underlay]
 socket_mark = 66
 "#,
         )
@@ -1954,11 +2011,7 @@ socket_mark = 66
 
         let error = validate_flags(&flags).unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported encryption_algorithm")
-        );
+        assert!(error.to_string().contains("unsupported network.cipher"));
     }
 
     fn relay_probes_require_a_valid_budget_and_interval() {
@@ -1988,8 +2041,8 @@ socket_mark = 66
     fn rejects_removed_transport_schemes() {
         for scheme in ["udp", "ws", "ring", "wg", "unknown"] {
             for text in [
-                format!("listeners = [\"{scheme}://127.0.0.1:11010\"]"),
-                format!("mapped_listeners = [\"{scheme}://127.0.0.1:11010\"]"),
+                format!("[transport]\nlisten = [\"{scheme}://127.0.0.1:11010\"]"),
+                format!("[transport]\nadvertise = [\"{scheme}://127.0.0.1:11010\"]"),
                 format!("[[peer]]\nuri = \"{scheme}://127.0.0.1:11010\""),
             ] {
                 let error = TomlConfigLoader::new_from_str(&text).unwrap_err();
@@ -1998,7 +2051,7 @@ socket_mark = 66
         }
         for scheme in ["quic", "tcp", "wss"] {
             TomlConfigLoader::new_from_str(&format!(
-                "listeners = [\"{scheme}://127.0.0.1:11010\"]"
+                "[transport]\nlisten = [\"{scheme}://127.0.0.1:11010\"]"
             ))
             .unwrap();
         }
@@ -2011,19 +2064,26 @@ socket_mark = 66
         ] {
             let error = TomlConfigLoader::new_from_str(retired).unwrap_err();
             let message = format!("{error:#}");
-            assert!(message.contains("removed option 'l2_flood_bps'"));
-            assert!(message.contains("use l2_flood_bytes_per_second"));
+            assert!(
+                message.contains(
+                    "\"flags.l2_flood_bps\" was renamed to \"l2.flood_bytes_per_second\""
+                )
+            );
         }
         let cfg = TomlConfigLoader::new_from_str(
             r#"
-[flags]
-l2_fdb_capacity = 32768
-l2_fdb_age_seconds = 600
-l2_flood_bytes_per_second = 134217728
-underlay_deny_interfaces = ["utun5"]
-underlay_deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
-quic_initial_receive_window = 8388608
-quic_receive_window = 33554432
+[l2]
+fdb_capacity = 32768
+fdb_age = 600
+flood_bytes_per_second = 134217728
+
+[underlay]
+deny_interfaces = ["utun5"]
+deny_cidrs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+
+[transport.quic]
+initial_receive_window = 8388608
+receive_window = 33554432
 "#,
         )
         .unwrap();
@@ -2052,20 +2112,19 @@ quic_receive_window = 33554432
         ] {
             let error =
                 TomlConfigLoader::new_from_str(&format!("[flags]\n{option} = 0\n")).unwrap_err();
-            assert!(format!("{error:#}").contains(option));
-            assert!(format!("{error:#}").contains("removed option"));
+            assert!(format!("{error:#}").contains(&format!("\"flags.{option}\" was removed")));
         }
     }
 
     fn rejects_invalid_l2_flags() {
         for (key, value) in [
-            ("l2_fdb_capacity", "0"),
-            ("l2_fdb_capacity", "1048577"),
-            ("l2_fdb_age_seconds", "0"),
-            ("l2_fdb_age_seconds", "86401"),
+            ("fdb_capacity", "0"),
+            ("fdb_capacity", "1048577"),
+            ("fdb_age", "0"),
+            ("fdb_age", "86401"),
         ] {
             let err =
-                TomlConfigLoader::new_from_str(&format!("[flags]\n{key} = {value}\n")).unwrap_err();
+                TomlConfigLoader::new_from_str(&format!("[l2]\n{key} = {value}\n")).unwrap_err();
             assert!(
                 err.to_string().contains(key),
                 "expected error for {key}={value}, got {err}"
@@ -2092,13 +2151,12 @@ quic_receive_window = 33554432
 
         let dumped = cfg.dump();
 
-        assert!(dumped.contains("dev_name = \"et_test\""));
-        assert!(dumped.contains("disable_tcp_hole_punching = true"));
-        assert!(dumped.contains("disable_sym_hole_punching = true"));
-        assert!(dumped.contains("multi_thread = false"));
+        assert!(dumped.contains("name = \"et_test\""));
+        assert!(dumped.contains("tcp_punch = false"));
+        assert!(dumped.contains("symmetric_punch = false"));
+        assert!(dumped.contains("threads = 1"));
         assert!(dumped.contains("bind_device = false"));
-        assert!(dumped.contains("enable_ipv6 = false"));
-        assert!(dumped.contains("[relay]"));
+        assert!(dumped.contains("ipv6 = false"));
         assert!(dumped.contains("mtu = 0"));
         assert!(dumped.contains("socket_mark = 0"));
 
@@ -2132,13 +2190,13 @@ quic_receive_window = 33554432
 
     fn test_stun_servers_toml_parsing() {
         let config_str = r#"
+[node]
 instance_name = "test"
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-    "txt:stun.example.invalid"
-]
-tcp_stun_servers = ["192.0.2.1:3478"]"#;
+
+[nat]
+stun = ["stun.l.google.com:19302", "stun1.l.google.com:19302", "txt:stun.example.invalid"]
+stun_tcp = ["192.0.2.1:3478"]
+"#;
 
         let config = TomlConfigLoader::new_from_str(config_str).unwrap();
         let stun_servers = config.get_stun_servers().unwrap();
@@ -2169,8 +2227,9 @@ tcp_stun_servers = ["192.0.2.1:3478"]"#;
     fn userspace_proxy_addresses_round_trip_through_toml() {
         let config = TomlConfigLoader::new_from_str(
             r#"
-socks5_proxy = "socks5://127.0.0.1:1055"
-outbound_http_proxy = "http://localhost:1055"
+[proxy]
+socks5 = "socks5://127.0.0.1:1055"
+http = "http://localhost:1055"
 "#,
         )
         .unwrap();
@@ -2202,15 +2261,14 @@ outbound_http_proxy = "http://localhost:1055"
     }
 
     fn test_toml_credential_mode_omits_network_secret() {
-        for network_secret in ["", r#"network_secret = """#] {
+        for network_secret in ["", r#"secret = """#] {
             let result = TomlConfigLoader::new_from_str(&format!(
                 r#"
-[network_identity]
-network_name = "credential-network"
+[network]
+name = "credential-network"
 {network_secret}
 
-[secure_mode]
-enabled = true
+[identity]
 "#
             ));
             assert!(result.is_err());
@@ -2220,8 +2278,7 @@ enabled = true
     fn test_toml_secure_mode_without_network_identity_uses_no_secret() {
         let config = TomlConfigLoader::new_from_str(
             r#"
-[secure_mode]
-enabled = true
+
 "#,
         )
         .unwrap();
@@ -2271,13 +2328,10 @@ enabled = true
             .unwrap();
         let config = format!(
             r#"
-[network_identity]
-network_name = "mixed-network"
-network_secret = "network-secret"
-
-[secure_mode]
-enabled = true
-credential_bundle = "{encoded_bundle}"
+[network]
+name = "mixed-network"
+secret = "network-secret"
+credential = "{encoded_bundle}"
 "#
         );
 
@@ -2295,17 +2349,21 @@ credential_bundle = "{encoded_bundle}"
     }
 
     fn secure_mode_from_toml_generates_a_key_pair() {
-        let config = TomlConfigLoader::new_from_str(
-            r#"
-[secure_mode]
-enabled = true
-"#,
-        )
+        let private = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let public = x25519_dalek::PublicKey::from(&private);
+        let config = TomlConfigLoader::new_from_str(&format!(
+            "[identity]\nprivate_key = \"{}\"\n",
+            BASE64_STANDARD.encode(private.as_bytes())
+        ))
         .unwrap();
 
         let secure_mode = config.get_secure_mode().unwrap();
-        assert!(secure_mode.local_private_key.is_some());
-        assert!(secure_mode.local_public_key.is_some());
+        assert_eq!(
+            secure_mode.local_public_key.as_deref(),
+            Some(BASE64_STANDARD.encode(public.as_bytes()).as_str())
+        );
+        // The identity is written back in the public layout.
+        assert!(config.dump().contains("[identity]"));
     }
 
     fn test_parse_mapped_listener_urls_allows_wss_without_port() {
@@ -2421,15 +2479,22 @@ members = ["admin"]
     #[tokio::test]
     async fn full_example_test() {
         let config_str = r#"
+[node]
 instance_name = "default"
 instance_id = "87ede5a2-9c3d-492d-9bbe-989b9d07e742"
-ipv4 = "10.144.144.10"
-listeners = [ "tcp://0.0.0.0:11010", "quic://0.0.0.0:11012" ]
-routes = [ "192.168.0.0/16" ]
 
-[network_identity]
-network_name = "default"
-network_secret = "test-secret"
+[address]
+ipv4 = "10.144.144.10"
+
+[transport]
+listen = ["tcp://0.0.0.0:11010", "quic://0.0.0.0:11012"]
+
+[routes]
+manual = ["192.168.0.0/16"]
+
+[network]
+name = "default"
+secret = "test-secret"
 
 [[peer]]
 uri = "tcp://public.kkrainbow.top:11010"
@@ -2437,17 +2502,17 @@ uri = "tcp://public.kkrainbow.top:11010"
 [[peer]]
 uri = "quic://192.168.94.33:11012"
 
-[[proxy_network]]
+[[export]]
 cidr = "10.147.223.0/24"
 allow = ["tcp", "udp", "icmp"]
 
-[[proxy_network]]
+[[export]]
 cidr = "10.1.1.0/24"
 allow = ["tcp", "icmp"]
 
-[[port_forward]]
-bind_addr = "0.0.0.0:11011"
-dst_addr = "192.168.94.33:11011"
+[[forward]]
+bind = "0.0.0.0:11011"
+dest = "192.168.94.33:11011"
 proto = "tcp"
 "#;
         let ret = TomlConfigLoader::new_from_str(config_str);
@@ -2502,11 +2567,12 @@ proto = "tcp"
         // 创建临时配置文件，包含环境变量占位符
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "test-instance"
 
-[network_identity]
-network_name = "${TEST_NETWORK}"
-network_secret = "${TEST_SECRET}"
+[network]
+name = "${TEST_NETWORK}"
+secret = "${TEST_SECRET}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
@@ -2514,7 +2580,7 @@ network_secret = "${TEST_SECRET}"
         let config_path = PathBuf::from(temp_file.path());
 
         // 加载配置（启用环境变量解析）
-        let (config, control) = load_config_from_file(&config_path, None, false)
+        let (config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2556,11 +2622,12 @@ network_secret = "${TEST_SECRET}"
         // 创建包含环境变量的配置
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "api-test"
 
-[network_identity]
-network_name = "api-network"
-network_secret = "${API_TEST_SECRET}"
+[network]
+name = "api-network"
+secret = "${API_TEST_SECRET}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
@@ -2568,7 +2635,7 @@ network_secret = "${API_TEST_SECRET}"
         let config_path = PathBuf::from(temp_file.path());
 
         // 加载配置
-        let (_config, control) = load_config_from_file(&config_path, None, false)
+        let (_config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2585,54 +2652,6 @@ network_secret = "${API_TEST_SECRET}"
         remove_env_var("API_TEST_SECRET");
     }
 
-    /// CLI 参数测试（--disable-env-parsing 开关）
-    ///
-    /// 验证：
-    /// - disable_env_parsing = true 时，环境变量不会被替换
-    /// - 配置不会被标记为只读
-    #[tokio::test]
-    async fn test_disable_env_parsing_flag() {
-        set_env_var("DISABLED_TEST_VAR", "should-not-expand");
-
-        // 创建包含环境变量占位符的配置
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-instance_name = "disable-test"
-
-[network_identity]
-network_name = "test"
-network_secret = "${DISABLED_TEST_VAR}"
-"#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config_path = PathBuf::from(temp_file.path());
-
-        // 以 disable_env_parsing = true 加载配置
-        let (config, control) = load_config_from_file(&config_path, None, true)
-            .await
-            .unwrap();
-
-        // 验证环境变量未被替换（保持原样）
-        let network_identity = config.get_network_identity();
-        assert_eq!(
-            network_identity.network_secret.as_ref().unwrap(),
-            "${DISABLED_TEST_VAR}",
-            "Env var should not be expanded when parsing is disabled"
-        );
-
-        // 验证配置不因环境变量而被标记为只读
-        // 注：文件系统权限可能使其只读，但不应因环境变量而只读
-        // 这里我们主要验证 NO_DELETE 标记的逻辑
-        // 由于没有 config_dir，文件会被标记为 NO_DELETE，但不是因为环境变量
-        assert!(
-            control.is_no_delete(),
-            "Config should be NO_DELETE due to no config_dir, not env vars"
-        );
-
-        remove_env_var("DISABLED_TEST_VAR");
-    }
-
     /// 多实例隔离测试
     ///
     /// 验证：
@@ -2646,17 +2665,18 @@ network_secret = "${DISABLED_TEST_VAR}"
 
         let mut temp_file1 = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "${INSTANCE_NAME}"
 
-[network_identity]
-network_name = "multi-test"
-network_secret = "${INSTANCE_SECRET}"
+[network]
+name = "multi-test"
+secret = "${INSTANCE_SECRET}"
 "#;
         temp_file1.write_all(config_content.as_bytes()).unwrap();
         temp_file1.flush().unwrap();
 
         let config_path1 = PathBuf::from(temp_file1.path());
-        let (config1, _) = load_config_from_file(&config_path1, None, false)
+        let (config1, _) = load_config_from_file(&config_path1, None, &[])
             .await
             .unwrap();
 
@@ -2680,7 +2700,7 @@ network_secret = "${INSTANCE_SECRET}"
         temp_file2.flush().unwrap();
 
         let config_path2 = PathBuf::from(temp_file2.path());
-        let (config2, _) = load_config_from_file(&config_path2, None, false)
+        let (config2, _) = load_config_from_file(&config_path2, None, &[])
             .await
             .unwrap();
 
@@ -2726,13 +2746,18 @@ network_secret = "${INSTANCE_SECRET}"
         // 创建包含多个实际字段的完整配置
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "production"
-ipv4 = "10.144.144.1"
-listeners = ["tcp://0.0.0.0:${LISTEN_PORT}"]
 
-[network_identity]
-network_name = "${NETWORK_NAME}"
-network_secret = "${ET_SECRET}"
+[address]
+ipv4 = "10.144.144.1"
+
+[transport]
+listen = ["tcp://0.0.0.0:${LISTEN_PORT}"]
+
+[network]
+name = "${NETWORK_NAME}"
+secret = "${ET_SECRET}"
 
 [[peer]]
 uri = "tcp://${PEER_HOST}:${PEER_PORT}"
@@ -2742,7 +2767,7 @@ uri = "tcp://${PEER_HOST}:${PEER_PORT}"
 
         let config_path = PathBuf::from(temp_file.path());
 
-        let (config, control) = load_config_from_file(&config_path, None, false)
+        let (config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2788,19 +2813,22 @@ uri = "tcp://${PEER_HOST}:${PEER_PORT}"
 
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "default-test"
-listeners = ["tcp://0.0.0.0:${UNDEFINED_PORT:-11010}"]
 
-[network_identity]
-network_name = "test"
-network_secret = "${UNDEFINED_SECRET:-default-secret}"
+[transport]
+listen = ["tcp://0.0.0.0:${UNDEFINED_PORT:-11010}"]
+
+[network]
+name = "test"
+secret = "${UNDEFINED_SECRET:-default-secret}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let config_path = PathBuf::from(temp_file.path());
 
-        let (config, _) = load_config_from_file(&config_path, None, false)
+        let (config, _) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2829,17 +2857,18 @@ network_secret = "${UNDEFINED_SECRET:-default-secret}"
 
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "undefined-test"
 
-[network_identity]
-network_name = "test"
-network_secret = "${COMPLETELY_UNDEFINED}"
+[network]
+name = "test"
+secret = "${COMPLETELY_UNDEFINED}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let config_path = PathBuf::from(temp_file.path());
-        let (config, control) = load_config_from_file(&config_path, None, false)
+        let (config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2869,27 +2898,32 @@ network_secret = "${COMPLETELY_UNDEFINED}"
     async fn test_boolean_type_env_vars() {
         // 设置布尔类型的环境变量
         set_env_var("ENABLE_DHCP", "true");
-        set_env_var("ENABLE_ENCRYPTION", "false");
+        set_env_var("ACCEPT_DNS", "false");
         set_env_var("ENABLE_IPV6", "true");
 
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "bool-test"
+
+[address]
 dhcp = ${ENABLE_DHCP}
 
-[network_identity]
-network_name = "test"
-network_secret = "secret"
+[network]
+name = "test"
+secret = "secret"
 
-[flags]
-enable_encryption = ${ENABLE_ENCRYPTION}
-enable_ipv6 = ${ENABLE_IPV6}
+[tun]
+ipv6 = ${ENABLE_IPV6}
+
+[dns]
+accept = ${ACCEPT_DNS}
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let config_path = PathBuf::from(temp_file.path());
-        let (config, control) = load_config_from_file(&config_path, None, false)
+        let (config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2897,10 +2931,7 @@ enable_ipv6 = ${ENABLE_IPV6}
         assert!(config.get_dhcp(), "dhcp should be true");
 
         let flags = config.get_flags();
-        assert!(
-            !flags.enable_encryption,
-            "enable_encryption should be false"
-        );
+        assert!(!flags.accept_dns, "accept_dns should be false");
         assert!(flags.enable_ipv6, "enable_ipv6 should be true");
 
         // 验证使用环境变量的配置被标记为只读
@@ -2909,7 +2940,7 @@ enable_ipv6 = ${ENABLE_IPV6}
 
         // 清理
         remove_env_var("ENABLE_DHCP");
-        remove_env_var("ENABLE_ENCRYPTION");
+        remove_env_var("ACCEPT_DNS");
         remove_env_var("ENABLE_IPV6");
     }
 
@@ -2926,21 +2957,22 @@ enable_ipv6 = ${ENABLE_IPV6}
 
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "numeric-test"
+threads = ${THREAD_COUNT}
 
-[network_identity]
-network_name = "test"
-network_secret = "secret"
+[network]
+name = "test"
+secret = "secret"
 
-[flags]
+[tun]
 mtu = ${MTU_VALUE}
-multi_thread_count = ${THREAD_COUNT}
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let config_path = PathBuf::from(temp_file.path());
-        let (config, control) = load_config_from_file(&config_path, None, false)
+        let (config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -2974,29 +3006,36 @@ multi_thread_count = ${THREAD_COUNT}
         set_env_var("MIXED_NETWORK", "production");
         set_env_var("MIXED_DHCP", "true");
         set_env_var("MIXED_MTU", "1500");
-        set_env_var("MIXED_ENCRYPTION", "false");
+        set_env_var("MIXED_ACCEPT_DNS", "true");
         set_env_var("MIXED_LISTEN_PORT", "12345");
 
         let mut temp_file = NamedTempFile::new().unwrap();
         let config_content = r#"
+[node]
 instance_name = "mixed-test"
+
+[address]
 ipv4 = "10.0.0.1"
 dhcp = ${MIXED_DHCP}
-listeners = ["tcp://0.0.0.0:${MIXED_LISTEN_PORT}"]
 
-[network_identity]
-network_name = "${MIXED_NETWORK}"
-network_secret = "${MIXED_SECRET}"
+[transport]
+listen = ["tcp://0.0.0.0:${MIXED_LISTEN_PORT}"]
 
-[flags]
+[network]
+name = "${MIXED_NETWORK}"
+secret = "${MIXED_SECRET}"
+
+[tun]
 mtu = ${MIXED_MTU}
-enable_encryption = ${MIXED_ENCRYPTION}
+
+[dns]
+accept = ${MIXED_ACCEPT_DNS}
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let config_path = PathBuf::from(temp_file.path());
-        let (config, control) = load_config_from_file(&config_path, None, false)
+        let (config, control) = load_config_from_file(&config_path, None, &[])
             .await
             .unwrap();
 
@@ -3012,7 +3051,7 @@ enable_encryption = ${MIXED_ENCRYPTION}
         assert!(config.get_dhcp());
 
         let flags = config.get_flags();
-        assert!(!flags.enable_encryption);
+        assert!(flags.accept_dns);
 
         // 验证数字类型
         assert_eq!(flags.mtu, 1500);
@@ -3031,7 +3070,7 @@ enable_encryption = ${MIXED_ENCRYPTION}
         remove_env_var("MIXED_NETWORK");
         remove_env_var("MIXED_DHCP");
         remove_env_var("MIXED_MTU");
-        remove_env_var("MIXED_ENCRYPTION");
+        remove_env_var("MIXED_ACCEPT_DNS");
         remove_env_var("MIXED_LISTEN_PORT");
     }
 }
@@ -3118,21 +3157,23 @@ mod protocol_memory_tests {
     }
     fn disabled_listener_and_bootstrap_are_rejected_before_startup() {
         for prefix in [
-            "listeners = [\"tcp://127.0.0.1:0\"]\n",
-            "mapped_listeners = [\"wss://127.0.0.1:443\"]\n",
-            "[[peer]]\nuri = \"wss://unresolved.invalid:443\"\n",
+            "listen = [\"tcp://127.0.0.1:0\"]\n",
+            "advertise = [\"wss://127.0.0.1:443\"]\n",
+            "peer = [{ uri = \"wss://unresolved.invalid:443\" }]\n",
         ] {
-            let text = format!(
-                "{prefix}[flags]\ndefault_protocol = \"quic\"\nenabled_protocols = [\"quic\"]\n"
-            );
+            let text = if prefix.starts_with("peer") {
+                format!("{prefix}[transport]\nprefer = \"quic\"\nprotocols = [\"quic\"]\n")
+            } else {
+                format!("[transport]\nprefer = \"quic\"\nprotocols = [\"quic\"]\n{prefix}")
+            };
             let error = TomlConfigLoader::new_from_str(&text).unwrap_err();
-            assert!(format!("{error:#}").contains("disabled by enabled_protocols"));
+            assert!(format!("{error:#}").contains("disabled by transport.protocols"));
         }
     }
 
     fn allowlist_round_trips_through_config() {
         let config = TomlConfigLoader::new_from_str(
-            "[flags]\ndefault_protocol = \"wss\"\nenabled_protocols = [\"wss\"]\n",
+            "[transport]\nprefer = \"wss\"\nprotocols = [\"wss\"]\n",
         )
         .unwrap();
         assert_eq!(config.get_flags().enabled_protocols, ["wss"]);

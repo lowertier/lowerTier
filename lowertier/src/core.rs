@@ -1,46 +1,32 @@
-#[cfg(feature = "socks5")]
-use crate::common::config::parse_proxy_listener_url;
+//! Node entry points behind `lowertier run`, `lowertier check`, and `lowertier init`.
+
 use crate::{
-    ShellType,
     common::{
-        config::{
-            ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
-            FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
-            TomlConfigLoader, load_config_from_file, parse_mapped_listener_urls,
-            process_secure_mode_cfg, validate_flags,
-        },
+        config::{ConfigFileControl, ConfigLoader, TomlConfigLoader, load_config_from_file},
+        config_schema,
         constants::LOWTIER_VERSION,
-        log,
+        log, runtime_registry,
     },
     instance_manager::NetworkInstanceManager,
-    launcher::add_proxy_network_to_config,
-    peers::credential_manager::CredentialManager,
-    proto::common::SecureModeConfig,
-    rpc_service::ApiRpcServer,
+    rpc_service::{ApiRpcServer, api::TokenOptions},
     utils::panic::setup_panic_handler,
 };
 use anyhow::Context;
-use base64::{Engine as _, prelude::BASE64_STANDARD};
-use cidr::IpCidr;
-use clap::{CommandFactory, Parser};
 use guarden::defer;
-use prost::Message;
-use rust_i18n::t;
 use std::{
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::{Arc, atomic::AtomicBool},
 };
-use strum::VariantArray;
-use tokio::io::AsyncReadExt;
 
-use crate::tunnel::IpScheme;
 #[cfg(feature = "jemalloc-prof")]
 use jemalloc_ctl::{Access as _, AsName as _, epoch, stats};
 
 #[cfg(target_os = "windows")]
 windows_service::define_windows_service!(ffi_service_main, win_service_main);
+
+#[cfg(target_os = "windows")]
+static SERVICE_OPTIONS: std::sync::OnceLock<RunOptions> = std::sync::OnceLock::new();
 
 fn set_prof_active(_active: bool) {
     #[cfg(feature = "jemalloc-prof")]
@@ -86,1550 +72,170 @@ fn dump_profile(_cur_allocated: usize) {
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "lowertier-core", author, version = LOWTIER_VERSION , about, long_about = None)]
-struct Cli {
-    #[arg(
-        short,
-        long,
-        env = "ET_CONFIG_FILE",
-        value_delimiter = ',',
-        help = t!("core_clap.config_file").to_string(),
-        num_args = 1..,
-    )]
-    config_file: Option<Vec<PathBuf>>,
-
-    #[arg(
-        long,
-        env = "ET_CONFIG_DIR",
-        help = t!("core_clap.config_dir").to_string()
-    )]
-    config_dir: Option<PathBuf>,
-
-    #[command(flatten)]
-    network_options: NetworkOptions,
-
-    #[command(flatten)]
-    logging_options: LoggingOptions,
-
-    #[command(flatten)]
-    rpc_portal_options: RpcPortalOptions,
-
-    #[clap(long, help = t!("core_clap.generate_completions").to_string())]
-    gen_autocomplete: Option<ShellType>,
-
-    #[clap(long, help = t!("core_clap.check_config").to_string())]
-    check_config: bool,
-
-    #[clap(long, help = t!("core_clap.daemon").to_string())]
-    daemon: bool,
-
-    #[clap(long, help = t!("core_clap.disable_env_parsing").to_string())]
-    disable_env_parsing: bool,
+/// Options for `lowertier run`.
+#[derive(Clone, Debug, Default)]
+pub struct RunOptions {
+    pub config_files: Vec<PathBuf>,
+    pub config_dir: Option<PathBuf>,
+    pub sets: Vec<String>,
+    pub daemon: bool,
+    pub log_level: Option<String>,
 }
 
-#[derive(Parser, Debug, Default, PartialEq, Eq)]
-struct NetworkOptions {
-    #[arg(
-        long,
-        env = "ET_NETWORK_NAME",
-        help = t!("core_clap.network_name").to_string(),
-    )]
-    network_name: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_NETWORK_SECRET",
-        help = t!("core_clap.network_secret").to_string(),
-    )]
-    network_secret: Option<String>,
-
-    #[arg(
-        short,
-        long,
-        env = "ET_IPV4",
-        help = t!("core_clap.ipv4").to_string()
-    )]
-    ipv4: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_IPV6",
-        help = t!("core_clap.ipv6").to_string()
-    )]
-    ipv6: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_IPV6_PUBLIC_ADDR_PROVIDER",
-        help = t!("core_clap.ipv6_public_addr_provider").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    ipv6_public_addr_provider: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_IPV6_PUBLIC_ADDR_AUTO",
-        help = t!("core_clap.ipv6_public_addr_auto").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    ipv6_public_addr_auto: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_IPV6_PUBLIC_ADDR_PREFIX",
-        help = t!("core_clap.ipv6_public_addr_prefix").to_string()
-    )]
-    ipv6_public_addr_prefix: Option<String>,
-
-    #[arg(
-        short,
-        long,
-        env = "ET_DHCP",
-        help = t!("core_clap.dhcp").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    dhcp: Option<bool>,
-
-    #[arg(
-        short,
-        long,
-        env = "ET_PEERS",
-        value_delimiter = ',',
-        help = t!("core_clap.peers").to_string(),
-        num_args = 0..
-    )]
-    peers: Vec<String>,
-
-    #[arg(
-        short,
-        long,
-        env = "ET_EXTERNAL_NODE",
-        help = t!("core_clap.external_node").to_string()
-    )]
-    external_node: Option<String>,
-
-    #[arg(
-        short = 'n',
-        long,
-        env = "ET_PROXY_NETWORKS",
-        value_delimiter = ',',
-        help = t!("core_clap.proxy_networks").to_string()
-    )]
-    proxy_networks: Vec<String>,
-
-    #[arg(
-        short,
-        long,
-        env = "ET_LISTENERS",
-        value_delimiter = ',',
-        help = t!("core_clap.listeners").to_string(),
-        num_args = 0..
-    )]
-    listeners: Vec<String>,
-
-    #[arg(
-        long,
-        env = "ET_MAPPED_LISTENERS",
-        value_delimiter = ',',
-        help = t!("core_clap.mapped_listeners").to_string(),
-        num_args = 0..
-    )]
-    mapped_listeners: Vec<String>,
-
-    #[arg(
-        long,
-        env = "ET_NO_LISTENER",
-        help = t!("core_clap.no_listener").to_string(),
-        default_value = "false",
-    )]
-    no_listener: bool,
-
-    #[arg(
-        long,
-        env = "ET_HOSTNAME",
-        help = t!("core_clap.hostname").to_string()
-    )]
-    hostname: Option<String>,
-
-    #[arg(
-        short = 'm',
-        long,
-        env = "ET_INSTANCE_NAME",
-        help = t!("core_clap.instance_name").to_string(),
-    )]
-    instance_name: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_DEFAULT_PROTOCOL",
-        help = t!("core_clap.default_protocol").to_string()
-    )]
-    default_protocol: Option<String>,
-
-    #[arg(
-        short = 'u',
-        long,
-        env = "ET_DISABLE_ENCRYPTION",
-        help = t!("core_clap.disable_encryption").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_encryption: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_ENCRYPTION_ALGORITHM",
-        help = t!("core_clap.encryption_algorithm").to_string(),
-        value_enum,
-    )]
-    encryption_algorithm: Option<EncryptionAlgorithm>,
-
-    #[arg(
-        long,
-        env = "ET_MULTI_THREAD",
-        help = t!("core_clap.multi_thread").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    multi_thread: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_MULTI_THREAD_COUNT",
-        help = t!("core_clap.multi_thread_count").to_string(),
-    )]
-    multi_thread_count: Option<u32>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_IPV6",
-        help = t!("core_clap.disable_ipv6").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_ipv6: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DEV_NAME",
-        help = t!("core_clap.dev_name").to_string()
-    )]
-    dev_name: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_TUN",
-        help = t!("core_clap.tun").to_string()
-    )]
-    tun: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_MTU",
-        help = t!("core_clap.mtu").to_string()
-    )]
-    mtu: Option<u16>,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "Relay route policy: hop, latency, or goodput"
-    )]
-    relay_policy: Option<crate::proto::common::RelayPolicy>,
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    relay_use_relays: Option<bool>,
-    #[arg(long, value_enum, help = "Local data transit permission")]
-    relay_transit: Option<crate::proto::common::TransitPolicy>,
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    relay_transit_networks: Option<Vec<String>>,
-    #[arg(long, help = "All transit traffic limit in bits per second")]
-    relay_transit_bps_limit: Option<u64>,
-    #[arg(long)]
-    relay_transit_burst_bytes: Option<u64>,
-    #[arg(long)]
-    relay_probe_interval_seconds: Option<u64>,
-    #[arg(long, help = "Probe traffic budget in bits per second")]
-    relay_probe_budget_bps: Option<u64>,
-    #[arg(long, value_parser = parse_relay_prefer)]
-    relay_prefer: Vec<crate::proto::common::RelayPrefer>,
-    #[arg(long, value_parser = parse_relay_link_cost)]
-    relay_link_cost: Vec<crate::proto::common::RelayLinkCost>,
-    #[arg(long, env = "LOWTIER_SERVER_NAME")]
-    server_name: Option<String>,
-    #[arg(long, env = "LOWTIER_TLS_CERT")]
-    tls_cert: Option<String>,
-    #[arg(long, env = "LOWTIER_TLS_KEY")]
-    tls_key: Option<String>,
-    #[arg(long, env = "LOWTIER_ADMISSION_SECRET", hide_env_values = true)]
-    admission_secret: Option<String>,
-    #[arg(long, env = "LOWTIER_WEBSITE_ROOT")]
-    website_root: Option<String>,
-    #[arg(long)]
-    decoy_tcp_upstream: Option<String>,
-    #[arg(long)]
-    decoy_udp_upstream: Option<String>,
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    sni_routing: Option<bool>,
-    #[arg(long)]
-    wss_path: Option<String>,
-    #[arg(long)]
-    http_host: Option<String>,
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    trusted_proxy_cidrs: Option<Vec<String>>,
-
-    #[arg(
-        long,
-        env = "ET_EXIT_NODES",
-        value_delimiter = ',',
-        help = t!("core_clap.exit_nodes").to_string(),
-        num_args = 0..
-    )]
-    exit_nodes: Vec<IpAddr>,
-
-    #[arg(
-        long,
-        env = "ET_ENABLE_EXIT_NODE",
-        help = t!("core_clap.enable_exit_node").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_exit_node: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_MANUAL_ROUTES",
-        value_delimiter = ',',
-        help = t!("core_clap.manual_routes").to_string(),
-        num_args = 0..
-    )]
-    manual_routes: Option<Vec<String>>,
-
-    #[arg(
-        long,
-        env = "ET_LAZY_P2P",
-        help = t!("core_clap.lazy_p2p").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    lazy_p2p: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_P2P",
-        help = t!("core_clap.disable_p2p").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_p2p: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_UDP_HOLE_PUNCHING",
-        help = t!("core_clap.disable_udp_hole_punching").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_udp_hole_punching: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_TCP_HOLE_PUNCHING",
-        help = t!("core_clap.disable_tcp_hole_punching").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_tcp_hole_punching: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_DISABLE_SYM_HOLE_PUNCHING",
-        help = t!("core_clap.disable_sym_hole_punching").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    disable_sym_hole_punching: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_ENABLE_UDP_BROADCAST_RELAY",
-        help = t!("core_clap.enable_udp_broadcast_relay").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_udp_broadcast_relay: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_RELAY_ALL_PEER_RPC",
-        help = t!("core_clap.relay_all_peer_rpc").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    relay_all_peer_rpc: Option<bool>,
-
-    #[arg(
-        long,
-        env = "ET_NEED_P2P",
-        help = t!("core_clap.need_p2p").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    need_p2p: Option<bool>,
-
-    #[cfg(feature = "socks5")]
-    #[arg(
-        long,
-        env = "ET_SOCKS5_SERVER",
-        help = t!("core_clap.socks5_server").to_string()
-    )]
-    socks5_server: Option<String>,
-
-    #[cfg(feature = "socks5")]
-    #[arg(
-        long,
-        env = "ET_OUTBOUND_HTTP_PROXY_LISTEN",
-        help = t!("core_clap.outbound_http_proxy_listen").to_string()
-    )]
-    outbound_http_proxy_listen: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_BIND_DEVICE",
-        help = t!("core_clap.bind_device").to_string()
-    )]
-    bind_device: Option<bool>,
-
-    // SO_MARK (fwmark) is a Linux-family kernel feature. Gate the flag out
-    // entirely on other targets so users on Windows/macOS/BSD don't see a
-    // `--socket-mark` they can't act on.
-    #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
-    #[arg(
-        long,
-        env = "ET_SOCKET_MARK",
-        help = t!("core_clap.socket_mark").to_string()
-    )]
-    socket_mark: Option<u32>,
-
-    #[arg(
-        long,
-        env = "ET_UNDERLAY_DENY_INTERFACES",
-        value_delimiter = ',',
-        help = t!("core_clap.underlay_deny_interfaces").to_string(),
-        num_args = 0..
-    )]
-    underlay_deny_interfaces: Vec<String>,
-
-    #[arg(
-        long,
-        env = "ET_UNDERLAY_DENY_CIDRS",
-        value_delimiter = ',',
-        help = t!("core_clap.underlay_deny_cidrs").to_string(),
-        num_args = 0..
-    )]
-    underlay_deny_cidrs: Vec<String>,
-
-    #[arg(
-        long,
-        env = "ET_L2_FDB_CAPACITY",
-        help = t!("core_clap.l2_fdb_capacity").to_string()
-    )]
-    l2_fdb_capacity: Option<u32>,
-
-    #[arg(
-        long,
-        env = "ET_L2_FDB_AGE_SECONDS",
-        help = t!("core_clap.l2_fdb_age_seconds").to_string()
-    )]
-    l2_fdb_age_seconds: Option<u64>,
-
-    #[arg(
-        long,
-        env = "ET_L2_FLOOD_BYTES_PER_SECOND",
-        help = t!("core_clap.l2_flood_bytes_per_second").to_string()
-    )]
-    l2_flood_bytes_per_second: Option<u64>,
-
-    #[arg(
-        long,
-        env = "ET_ENABLE_BRIDGE",
-        help = t!("core_clap.enable_bridge").to_string(),
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    enable_bridge: Option<bool>,
-
-    #[arg(
-        long,
-        help = "Maximum learned MAC and VLAN entries per bridge peer; zero disables the limit"
-    )]
-    l2_max_macs_per_peer: Option<u32>,
-    #[arg(
-        long,
-        help = "Reject MAC movement until the previous source has been idle for this many seconds"
-    )]
-    l2_mac_move_hold_seconds: Option<u64>,
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "Allowed bridge VLAN IDs; zero includes untagged frames"
-    )]
-    l2_allowed_vlans: Vec<u32>,
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "Allowed final Ethernet types as decimal integers"
-    )]
-    l2_allowed_ether_types: Vec<u32>,
-
-    #[arg(
-        long,
-        env = "LOWTIER_QUIC_INITIAL_RECEIVE_WINDOW",
-        help = t!("core_clap.quic_initial_receive_window").to_string()
-    )]
-    quic_initial_receive_window: Option<u64>,
-
-    #[arg(
-        long,
-        env = "LOWTIER_QUIC_RECEIVE_WINDOW",
-        help = t!("core_clap.quic_receive_window").to_string()
-    )]
-    quic_receive_window: Option<u64>,
-
-    #[arg(
-        long,
-        env = "ET_PORT_FORWARD",
-        value_delimiter = ',',
-        help = t!("core_clap.port_forward").to_string(),
-        num_args = 1..
-    )]
-    port_forward: Vec<url::Url>,
-
-    #[arg(
-        long,
-        env = "ET_ACCEPT_DNS",
-        help = t!("core_clap.accept_dns").to_string(),
-    )]
-    accept_dns: Option<bool>,
-
-    #[arg(
-        long = "tld-dns-zone",
-        env = "ET_TLD_DNS_ZONE",
-        help = t!("core_clap.tld_dns_zone").to_string())]
-    tld_dns_zone: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_PRIVATE_MODE",
-        help = t!("core_clap.private_mode").to_string(),
-    )]
-    private_mode: Option<bool>,
-
-    #[arg(
-        long,
-        env = "LOWTIER_RECEIVE_BPS",
-        help = "Instance receive limit in bit/s"
-    )]
-    receive_bps: Option<u64>,
-
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = t!("core_clap.tcp_whitelist").to_string(),
-        num_args = 0..
-    )]
-    tcp_whitelist: Vec<String>,
-
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = t!("core_clap.udp_whitelist").to_string(),
-        num_args = 0..
-    )]
-    udp_whitelist: Vec<String>,
-
-    #[arg(
-        long,
-        env = "ET_STUN_SERVERS",
-        value_delimiter = ',',
-        help = t!("core_clap.stun_servers").to_string(),
-        num_args = 0..
-    )]
-    stun_servers: Option<Vec<String>>,
-
-    #[arg(
-        long,
-        env = "ET_STUN_SERVERS_V6",
-        value_delimiter = ',',
-        help = t!("core_clap.stun_servers_v6").to_string(),
-        num_args = 0..
-    )]
-    stun_servers_v6: Option<Vec<String>>,
-
-    #[arg(
-        long,
-        env = "ET_LOCAL_PRIVATE_KEY",
-        help = t!("core_clap.local_private_key").to_string()
-    )]
-    local_private_key: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_LOCAL_PUBLIC_KEY",
-        help = t!("core_clap.local_public_key").to_string()
-    )]
-    local_public_key: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_CREDENTIAL",
-        help = t!("core_clap.credential").to_string()
-    )]
-    credential: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_CREDENTIAL_FILE",
-        help = t!("core_clap.credential_file").to_string()
-    )]
-    credential_file: Option<PathBuf>,
-}
-
-#[derive(Parser, Debug)]
-struct LoggingOptions {
-    #[arg(
-        long,
-        env = "ET_CONSOLE_LOG_LEVEL",
-        help = t!("core_clap.console_log_level").to_string()
-    )]
-    console_log_level: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_FILE_LOG_LEVEL",
-        help = t!("core_clap.file_log_level").to_string()
-    )]
-    file_log_level: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_FILE_LOG_DIR",
-        help = t!("core_clap.file_log_dir").to_string()
-    )]
-    file_log_dir: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_FILE_LOG_SIZE",
-        help = t!("core_clap.file_log_size_mb").to_string()
-    )]
-    file_log_size: Option<u64>,
-
-    #[arg(
-        long,
-        env = "ET_FILE_LOG_COUNT",
-        help = t!("core_clap.file_log_count").to_string()
-    )]
-    file_log_count: Option<usize>,
-}
-
-#[derive(Parser, Debug)]
-struct RpcPortalOptions {
-    #[arg(
-        short,
-        long,
-        env = "ET_RPC_PORTAL",
-        help = t!("core_clap.rpc_portal").to_string(),
-    )]
-    rpc_portal: Option<String>,
-
-    #[arg(
-        long,
-        env = "ET_RPC_PORTAL_WHITELIST",
-        value_delimiter = ',',
-        help = t!("core_clap.rpc_portal_whitelist").to_string(),
-    )]
-    rpc_portal_whitelist: Option<Vec<IpCidr>>,
-}
-
-impl Cli {
-    fn gen_listeners(addr: SocketAddr) -> impl Iterator<Item = String> {
-        let dynamic = addr.port() == 0;
-        IpScheme::VARIANTS.iter().map(move |proto| {
-            let mut addr = addr;
-            if !dynamic {
-                addr.set_port(addr.port() + proto.port_offset());
-            }
-            format!("{}://{}", proto, addr)
+/// `LOWTIER_CONFIG` holds comma-separated config paths used when no `-c` is given.
+fn config_files(explicit: &[PathBuf]) -> Vec<PathBuf> {
+    if !explicit.is_empty() {
+        return explicit.to_vec();
+    }
+    std::env::var("LOWTIER_CONFIG")
+        .map(|value| {
+            value
+                .split(',')
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .collect()
         })
-    }
+        .unwrap_or_default()
+}
 
-    fn parse_listeners(no_listener: bool, listeners: Vec<String>) -> anyhow::Result<Vec<String>> {
-        if no_listener || listeners.is_empty() {
-            return Ok(vec![]);
+fn config_dir_files(config_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    anyhow::ensure!(
+        config_dir.is_dir(),
+        "config directory {} is not a directory",
+        config_dir.display()
+    );
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(config_dir)? {
+        let path = entry?.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "toml") {
+            files.push(path);
         }
+    }
+    files.sort();
+    Ok(files)
+}
 
-        let mut parsed = vec![];
-
-        for l in listeners.into_iter() {
-            if let Ok(port) = l.parse::<u16>() {
-                parsed.extend(Self::gen_listeners(SocketAddr::new(
-                    "0.0.0.0".parse()?,
-                    port,
-                )));
-                continue;
-            }
-
-            if let Ok(ip) = l.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
-                parsed.extend(Self::gen_listeners(SocketAddr::new(ip, 11010)));
-                continue;
-            }
-
-            if let Ok(addr) = l.parse::<SocketAddr>() {
-                parsed.extend(Self::gen_listeners(addr));
-                continue;
-            }
-
-            let (scheme, rest) = l.split_once(':').unwrap_or((&l, ""));
-            let Ok(scheme) = scheme.parse::<IpScheme>() else {
-                anyhow::bail!("invalid listener: {}", l);
-            };
-
-            if rest.is_empty() {
-                parsed.push(format!(
-                    "{}://0.0.0.0:{}",
-                    scheme,
+/// Listeners used by a node built only from `--set` values.
+fn default_listeners() -> toml::Value {
+    toml::Value::Array(
+        <crate::tunnel::IpScheme as strum::VariantArray>::VARIANTS
+            .iter()
+            .map(|scheme| {
+                toml::Value::String(format!(
+                    "{scheme}://0.0.0.0:{}",
                     11010 + scheme.port_offset()
-                ));
-                continue;
-            }
+                ))
+            })
+            .collect(),
+    )
+}
 
-            if let Ok(port) = rest.parse::<u16>() {
-                parsed.push(format!("{}://0.0.0.0:{}", scheme, port));
-                continue;
-            }
-
-            if !l.parse::<url::Url>()?.has_authority() {
-                anyhow::bail!("invalid listener: {}", l);
-            }
-            parsed.push(l);
-        }
-
-        Ok(parsed)
+/// A node built only from `--set` values, for one-off runs without a file.
+fn config_from_sets(sets: &[String]) -> anyhow::Result<TomlConfigLoader> {
+    let mut public = toml::Table::new();
+    for assignment in sets {
+        config_schema::apply_set(&mut public, assignment)?;
     }
-}
-
-fn parse_relay_prefer(value: &str) -> Result<crate::proto::common::RelayPrefer, String> {
-    let (peer, via) = value.split_once(',').ok_or("expected PEER_KEY,VIA_KEY")?;
-    crate::common::control_config::peer_key(peer).map_err(|error| error.to_string())?;
-    crate::common::control_config::peer_key(via).map_err(|error| error.to_string())?;
-    Ok(crate::proto::common::RelayPrefer {
-        peer: peer.to_owned(),
-        via: via.to_owned(),
-    })
-}
-
-fn parse_relay_link_cost(value: &str) -> Result<crate::proto::common::RelayLinkCost, String> {
-    let (peer, bias) = value.split_once(',').ok_or("expected PEER_KEY,BIAS_MS")?;
-    crate::common::control_config::peer_key(peer).map_err(|error| error.to_string())?;
-    Ok(crate::proto::common::RelayLinkCost {
-        peer: peer.to_owned(),
-        bias_ms: bias.parse::<u32>().map_err(|error| error.to_string())?,
-    })
-}
-
-impl NetworkOptions {
-    fn can_merge(
-        &self,
-        cfg: &TomlConfigLoader,
-        source: ConfigFileSource,
-        explicit_config_file_count: usize,
-        config_dir_file_count: usize,
-    ) -> bool {
-        if (*self) == NetworkOptions::default() {
-            return false;
-        }
-
-        if source == ConfigFileSource::CliConfigFile
-            && explicit_config_file_count == 1
-            && config_dir_file_count == 0
-        {
-            return true;
-        }
-
-        let Some(network_name) = &self.network_name else {
-            return false;
-        };
-
-        if source == ConfigFileSource::ConfigDir {
-            return cfg.get_network_identity().network_name == *network_name;
-        }
-
-        cfg.get_network_identity().network_name == *network_name
+    if public
+        .get("transport")
+        .and_then(|transport| transport.get("listen"))
+        .is_none()
+    {
+        config_schema::set(&mut public, "transport.listen", default_listeners());
     }
-
-    #[allow(deprecated)]
-    fn merge_into(&self, cfg: &TomlConfigLoader) -> anyhow::Result<()> {
-        if self.hostname.is_some() {
-            cfg.set_hostname(self.hostname.clone());
-        }
-
-        let old_ns = cfg.get_network_identity();
-        let network_name = self
-            .network_name
-            .clone()
-            .unwrap_or_else(|| old_ns.network_name.clone());
-
-        if self
-            .network_secret
-            .as_deref()
-            .is_some_and(|secret| !secret.is_empty())
-            && (cfg
-                .get_secure_mode()
-                .and_then(|secure_mode| secure_mode.credential_bundle)
-                .is_some()
-                || self.credential.is_some())
-        {
-            return Err(anyhow::anyhow!(
-                "network secret and credential bundle cannot be used together"
-            ));
-        }
-
-        if let Some(credential_bundle) = self.credential.as_deref() {
-            let pinned_root = old_ns
-                .credential_root_fingerprint()
-                .map(|fingerprint| fingerprint.as_slice());
-            if pinned_root.is_some() && self.network_name.is_none() {
-                return Err(anyhow::anyhow!(
-                    "credential network name is required when a root is pinned"
-                ));
-            }
-            let bundle = CredentialManager::verify_credential_bundle_for_network(
-                credential_bundle,
-                &network_name,
-                pinned_root,
-                crate::peers::credential_manager::current_unix_timestamp(),
-            )
-            .map_err(|error| anyhow::anyhow!("invalid credential bundle: {error}"))?;
-            let private_key: [u8; 32] = bundle
-                .x25519_private_key
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("credential bundle private key is invalid"))?;
-            let expected_private_key = BASE64_STANDARD.encode(private_key);
-            if self
-                .local_private_key
-                .as_deref()
-                .is_some_and(|key| key != expected_private_key.as_str())
-            {
-                return Err(anyhow::anyhow!(
-                    "credential bundle private key does not match --local-private-key"
-                ));
-            }
-            cfg.set_network_identity(NetworkIdentity::new_credential_with_root_fingerprint(
-                network_name,
-                &bundle.root_fingerprint,
-            )?);
-            cfg.set_secure_mode(Some(
-                crate::common::config::normalize_verified_credential_bundle_cfg(
-                    SecureModeConfig {
-                        enabled: true,
-                        local_private_key: Some(expected_private_key),
-                        local_public_key: None,
-                        credential_bundle: Some(CredentialManager::encode_credential_bundle(
-                            &bundle,
-                        )),
-                        credential_root_fingerprint: bundle.root_fingerprint.clone(),
-                        credential_certificate: bundle
-                            .certificate
-                            .as_ref()
-                            .map(Message::encode_to_vec)
-                            .unwrap_or_default(),
-                    },
-                    &bundle,
-                )?,
-            ));
-        } else if let Some(network_secret) = self
-            .network_secret
-            .as_deref()
-            .filter(|secret| !secret.is_empty())
-        {
-            cfg.set_network_identity(NetworkIdentity::new(
-                network_name,
-                network_secret.to_owned(),
-            ));
-        } else if let Some(network_secret) = old_ns
-            .network_secret
-            .clone()
-            .filter(|secret| !secret.is_empty())
-        {
-            cfg.set_network_identity(NetworkIdentity::new(network_name, network_secret));
-        } else if let Some(existing_bundle) = cfg
-            .get_secure_mode()
-            .and_then(|secure_mode| secure_mode.credential_bundle)
-            .filter(|bundle| !bundle.is_empty())
-        {
-            let bundle = CredentialManager::verify_credential_bundle_for_network(
-                &existing_bundle,
-                &network_name,
-                old_ns
-                    .credential_root_fingerprint()
-                    .map(|fingerprint| fingerprint.as_slice()),
-                crate::peers::credential_manager::current_unix_timestamp(),
-            )
-            .map_err(|error| anyhow::anyhow!("invalid existing credential bundle: {error}"))?;
-            cfg.set_network_identity(NetworkIdentity::new_credential_with_root_fingerprint(
-                network_name,
-                &bundle.root_fingerprint,
-            )?);
-        } else if old_ns.network_secret_digest.is_none() {
-            if self.network_name.is_some() || old_ns.network_name != "default" {
-                cfg.set_network_identity(NetworkIdentity {
-                    network_name,
-                    network_secret: None,
-                    network_secret_digest: None,
-                });
-            }
-        } else {
-            return Err(anyhow::anyhow!(
-                "credential mode requires a signed credential bundle"
-            ));
-        }
-
-        if let Some(dhcp) = self.dhcp {
-            cfg.set_dhcp(dhcp);
-        }
-
-        if let Some(ipv4) = &self.ipv4 {
-            cfg.set_ipv4(Some(ipv4.parse().with_context(|| {
-                format!("failed to parse ipv4 address: {}", ipv4)
-            })?))
-        }
-
-        if let Some(ipv6) = &self.ipv6 {
-            cfg.set_ipv6(Some(ipv6.parse().with_context(|| {
-                format!("failed to parse ipv6 address: {}", ipv6)
-            })?))
-        }
-
-        if let Some(enabled) = self.ipv6_public_addr_provider {
-            cfg.set_ipv6_public_addr_provider(enabled);
-        }
-
-        if let Some(enabled) = self.ipv6_public_addr_auto {
-            cfg.set_ipv6_public_addr_auto(enabled);
-        }
-
-        if let Some(prefix) = &self.ipv6_public_addr_prefix {
-            cfg.set_ipv6_public_addr_prefix(Some(prefix.parse().with_context(|| {
-                format!("failed to parse ipv6 public address prefix: {}", prefix)
-            })?));
-        }
-
-        if !self.peers.is_empty() {
-            let mut peers = cfg.get_peers();
-            peers.reserve(peers.len() + self.peers.len());
-            for p in &self.peers {
-                peers.push(PeerConfig {
-                    uri: p
-                        .parse()
-                        .with_context(|| format!("failed to parse peer uri: {}", p))?,
-                    peer_public_key: None,
-                });
-            }
-            cfg.set_peers(peers);
-        }
-
-        if self.no_listener || !self.listeners.is_empty() {
-            cfg.set_listeners(
-                Cli::parse_listeners(self.no_listener, self.listeners.clone())
-                    .with_context(|| format!("failed to parse listeners: {:?}", self.listeners))?
-                    .into_iter()
-                    .map(|s| s.parse().unwrap())
-                    .collect(),
-            );
-        } else if cfg.get_listeners().is_none() {
-            cfg.set_listeners(
-                Cli::parse_listeners(false, vec!["11010".to_string()])?
-                    .into_iter()
-                    .map(|s| s.parse().unwrap())
-                    .collect(),
-            );
-        }
-
-        if !self.mapped_listeners.is_empty() {
-            cfg.set_mapped_listeners(Some(parse_mapped_listener_urls(&self.mapped_listeners)?));
-        }
-
-        for n in self.proxy_networks.iter() {
-            add_proxy_network_to_config(n, cfg)?;
-        }
-
-        if let Some(external_nodes) = self.external_node.as_ref() {
-            let mut old_peers = cfg.get_peers();
-            old_peers.push(PeerConfig {
-                uri: external_nodes.parse().with_context(|| {
-                    format!("failed to parse external node uri: {}", external_nodes)
-                })?,
-                peer_public_key: None,
-            });
-            cfg.set_peers(old_peers);
-        }
-
-        if let Some(inst_name) = &self.instance_name {
-            cfg.set_inst_name(inst_name.clone());
-        }
-
-        if let Some(manual_routes) = self.manual_routes.as_ref() {
-            let mut routes = Vec::<cidr::Ipv4Cidr>::with_capacity(manual_routes.len());
-            for r in manual_routes {
-                routes.push(
-                    r.parse()
-                        .with_context(|| format!("failed to parse route: {}", r))?,
-                );
-            }
-            cfg.set_routes(Some(routes));
-        }
-
-        #[cfg(feature = "socks5")]
-        {
-            if let Some(socks5_server) = self.socks5_server.as_deref() {
-                cfg.set_socks5_portal(Some(parse_proxy_listener_url(socks5_server, "socks5")?));
-            }
-
-            if let Some(http_proxy) = self.outbound_http_proxy_listen.as_deref() {
-                cfg.set_outbound_http_proxy(Some(parse_proxy_listener_url(http_proxy, "http")?));
-            }
-        }
-
-        for port_forward in self.port_forward.iter() {
-            let example_str = ", example: tcp://0.0.0.0:12345/10.126.126.1:12345";
-
-            let bind_addr = format!(
-                "{}:{}",
-                port_forward.host_str().expect("local bind host is missing"),
-                port_forward.port().expect("local bind port is missing")
-            )
-            .parse()
-            .unwrap_or_else(|_| panic!("failed to parse local bind addr {}", example_str));
-
-            let dst_addr = port_forward
-                .path_segments()
-                .unwrap_or_else(|| panic!("remote destination addr is missing {}", example_str))
-                .next()
-                .unwrap_or_else(|| panic!("remote destination addr is missing {}", example_str))
-                .to_string()
-                .parse()
-                .unwrap_or_else(|_| {
-                    panic!("failed to parse remote destination addr {}", example_str)
-                });
-
-            let port_forward_item = PortForwardConfig {
-                bind_addr,
-                dst_addr,
-                proto: port_forward.scheme().to_string(),
-            };
-
-            let mut old = cfg.get_port_forwards();
-            old.push(port_forward_item);
-            cfg.set_port_forwards(old);
-        }
-
-        if let Some(ref credential_file) = self.credential_file {
-            cfg.set_credential_file(Some(credential_file.clone()));
-        }
-
-        if self.credential.is_none()
-            && cfg
-                .get_network_identity()
-                .network_secret
-                .as_deref()
-                .is_none_or(str::is_empty)
-            && cfg.get_network_identity().network_secret_digest.is_some()
-            && (self.local_private_key.is_some() || self.local_public_key.is_some())
-        {
-            return Err(anyhow::anyhow!(
-                "credential mode requires a signed credential bundle"
-            ));
-        } else if self.local_private_key.is_some() || self.local_public_key.is_some() {
-            let c = SecureModeConfig {
-                enabled: true,
-                local_private_key: self.local_private_key.clone(),
-                local_public_key: self.local_public_key.clone(),
-                credential_bundle: None,
-                credential_root_fingerprint: Vec::new(),
-                credential_certificate: Vec::new(),
-            };
-            cfg.set_secure_mode(Some(process_secure_mode_cfg(c)?));
-        }
-
-        let mut f = cfg.get_flags();
-        if let Some(default_protocol) = &self.default_protocol {
-            f.default_protocol = default_protocol.clone()
-        };
-        if let Some(v) = self.disable_encryption {
-            f.enable_encryption = !v;
-        }
-        if let Some(algorithm) = &self.encryption_algorithm {
-            f.encryption_algorithm = algorithm.to_string();
-        }
-        if let Some(v) = self.disable_ipv6 {
-            f.enable_ipv6 = !v;
-        }
-        if let Some(policy) = self.relay_policy {
-            f.relay_config_mut().policy = policy as i32;
-        }
-        if let Some(use_relays) = self.relay_use_relays {
-            f.relay_config_mut().use_relays = Some(use_relays);
-        }
-        if let Some(transit) = self.relay_transit {
-            f.relay_config_mut().transit = transit as i32;
-        }
-        if let Some(networks) = &self.relay_transit_networks {
-            f.relay_config_mut().transit_networks = networks.clone();
-        }
-        if let Some(limit) = self.relay_transit_bps_limit {
-            f.relay_config_mut().transit_bps_limit = Some(limit);
-        }
-        if let Some(burst) = self.relay_transit_burst_bytes {
-            f.relay_config_mut().transit_burst_bytes = Some(burst);
-        }
-        if let Some(interval) = self.relay_probe_interval_seconds {
-            f.relay_config_mut().probe_interval_seconds = Some(interval);
-        }
-        if let Some(budget) = self.relay_probe_budget_bps {
-            f.relay_config_mut().probe_budget_bps = budget;
-        }
-        if !self.relay_prefer.is_empty() {
-            f.relay_config_mut().prefer = self.relay_prefer.clone();
-        }
-        if !self.relay_link_cost.is_empty() {
-            f.relay_config_mut().link_cost = self.relay_link_cost.clone();
-        }
-        if let Some(tun) = self.tun.as_deref()
-            && tun != "userspace-networking"
-            && self.dev_name.as_deref().is_some_and(|name| name != tun)
-        {
-            anyhow::bail!("--tun and --dev-name must use the same device name");
-        }
-        if let Some(dev_name) = self
-            .tun
-            .as_deref()
-            .filter(|tun| *tun != "userspace-networking")
-            .or(self.dev_name.as_deref())
-        {
-            f.dev_name = dev_name.to_string();
-        }
-        if let Some(mtu) = self.mtu {
-            f.mtu = mtu as u32;
-        }
-        f.enable_exit_node = self.enable_exit_node.unwrap_or(f.enable_exit_node);
-        f.no_tun |= cfg!(not(feature = "tun"));
-        f.disable_p2p = self.disable_p2p.unwrap_or(f.disable_p2p);
-        f.lazy_p2p = self.lazy_p2p.unwrap_or(f.lazy_p2p);
-        f.disable_tcp_hole_punching = self
-            .disable_tcp_hole_punching
-            .unwrap_or(f.disable_tcp_hole_punching);
-        f.disable_udp_hole_punching = self
-            .disable_udp_hole_punching
-            .unwrap_or(f.disable_udp_hole_punching);
-        f.relay_all_peer_rpc = self.relay_all_peer_rpc.unwrap_or(f.relay_all_peer_rpc);
-        f.need_p2p = self.need_p2p.unwrap_or(f.need_p2p);
-        f.multi_thread = self.multi_thread.unwrap_or(f.multi_thread);
-        f.bind_device = self.bind_device.unwrap_or(f.bind_device);
-
-        #[cfg(any(target_os = "fuchsia", target_os = "linux"))]
-        {
-            f.socket_mark = self.socket_mark.or(f.socket_mark);
-        }
-        if !self.underlay_deny_interfaces.is_empty() {
-            f.underlay_deny_interfaces = self.underlay_deny_interfaces.clone();
-        }
-        if !self.underlay_deny_cidrs.is_empty() {
-            f.underlay_deny_cidrs = self.underlay_deny_cidrs.clone();
-        }
-        f.l2_fdb_capacity = self.l2_fdb_capacity.unwrap_or(f.l2_fdb_capacity);
-        f.l2_fdb_age_seconds = self.l2_fdb_age_seconds.unwrap_or(f.l2_fdb_age_seconds);
-        f.l2_flood_bytes_per_second = self
-            .l2_flood_bytes_per_second
-            .unwrap_or(f.l2_flood_bytes_per_second);
-        f.enable_bridge = self.enable_bridge.unwrap_or(f.enable_bridge);
-        f.l2_max_macs_per_peer = self.l2_max_macs_per_peer.unwrap_or(f.l2_max_macs_per_peer);
-        f.l2_mac_move_hold_seconds = self
-            .l2_mac_move_hold_seconds
-            .unwrap_or(f.l2_mac_move_hold_seconds);
-        if !self.l2_allowed_vlans.is_empty() {
-            f.l2_allowed_vlans = self.l2_allowed_vlans.clone();
-        }
-        if !self.l2_allowed_ether_types.is_empty() {
-            f.l2_allowed_ether_types = self.l2_allowed_ether_types.clone();
-        }
-        f.quic_initial_receive_window = self
-            .quic_initial_receive_window
-            .unwrap_or(f.quic_initial_receive_window);
-        f.quic_receive_window = self.quic_receive_window.unwrap_or(f.quic_receive_window);
-        if let Some(value) = &self.tls_cert {
-            f.camouflage_config_mut().tls_cert = value.clone();
-        }
-        if let Some(value) = &self.tls_key {
-            f.camouflage_config_mut().tls_key = value.clone();
-        }
-        if let Some(value) = &self.server_name {
-            f.camouflage_config_mut().server_name = value.clone();
-        }
-        if let Some(value) = &self.admission_secret {
-            f.camouflage_config_mut().admission_secret = value.clone();
-        }
-        if let Some(value) = &self.website_root {
-            f.camouflage_config_mut().website_root = value.clone();
-        }
-        if let Some(value) = &self.wss_path {
-            f.camouflage_config_mut().wss_path = value.clone();
-        }
-        if let Some(value) = &self.http_host {
-            f.camouflage_config_mut().http_host = value.clone();
-        }
-        if let Some(value) = self.sni_routing {
-            f.camouflage_config_mut().sni_routing = value;
-        }
-        if let Some(cidrs) = &self.trusted_proxy_cidrs {
-            f.camouflage_config_mut().trusted_proxy_cidrs = cidrs.clone();
-        }
-        if self.decoy_tcp_upstream.is_some() || self.decoy_udp_upstream.is_some() {
-            let upstream = f
-                .camouflage_config_mut()
-                .decoy_upstream
-                .get_or_insert_with(Default::default);
-            if let Some(value) = &self.decoy_tcp_upstream {
-                upstream.tcp = value.clone();
-            }
-            if let Some(value) = &self.decoy_udp_upstream {
-                upstream.udp = value.clone();
-            }
-        }
-        f.accept_dns = self.accept_dns.unwrap_or(f.accept_dns);
-        f.private_mode = self.private_mode.unwrap_or(f.private_mode);
-        if let Some(receive_bps) = self.receive_bps {
-            f.limits.get_or_insert_with(Default::default).receive_bps = Some(receive_bps);
-        }
-        f.multi_thread_count = self.multi_thread_count.unwrap_or(f.multi_thread_count);
-        f.disable_sym_hole_punching = self
-            .disable_sym_hole_punching
-            .unwrap_or(f.disable_sym_hole_punching);
-        f.enable_udp_broadcast_relay = self
-            .enable_udp_broadcast_relay
-            .unwrap_or(f.enable_udp_broadcast_relay);
-        // Configure tld_dns_zone: use provided value if set
-        if let Some(tld_dns_zone) = &self.tld_dns_zone {
-            f.tld_dns_zone = tld_dns_zone.clone();
-        }
-        if self.tun.as_deref() == Some("userspace-networking") {
-            if self.dev_name.is_some() {
-                anyhow::bail!("--tun=userspace-networking cannot be used with --dev-name");
-            }
-            if f.socket_mark.is_some() {
-                anyhow::bail!("--tun=userspace-networking cannot use --socket-mark");
-            }
-            f.no_tun = true;
-            f.use_smoltcp = true;
-            f.bind_device = false;
-            f.proxy_forward_by_system = false;
-            f.accept_dns = false;
-            f.enable_udp_broadcast_relay = false;
-        }
-        validate_flags(&f)?;
-        cfg.set_flags(f);
-
-        if !self.exit_nodes.is_empty() {
-            cfg.set_exit_nodes(self.exit_nodes.clone());
-        }
-
-        let mut old_tcp_whitelist = cfg.get_tcp_whitelist();
-        old_tcp_whitelist.extend(self.tcp_whitelist.clone());
-        cfg.set_tcp_whitelist(old_tcp_whitelist);
-
-        let mut old_udp_whitelist = cfg.get_udp_whitelist();
-        old_udp_whitelist.extend(self.udp_whitelist.clone());
-        cfg.set_udp_whitelist(old_udp_whitelist);
-
-        if let Some(stun_servers) = &self.stun_servers {
-            let mut old_stun_servers = cfg.get_stun_servers().unwrap_or_default();
-            old_stun_servers.extend(stun_servers.iter().cloned());
-            cfg.set_stun_servers(Some(old_stun_servers));
-        }
-
-        if let Some(stun_servers_v6) = &self.stun_servers_v6 {
-            let mut old_stun_servers_v6 = cfg.get_stun_servers_v6().unwrap_or_default();
-            old_stun_servers_v6.extend(stun_servers_v6.iter().cloned());
-            cfg.set_stun_servers_v6(Some(old_stun_servers_v6));
-        }
-        Ok(())
+    if cfg!(not(feature = "tun")) {
+        config_schema::set(&mut public, "tun.mode", toml::Value::String("none".into()));
     }
+    TomlConfigLoader::new_from_table("--set", &public)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigFileSource {
-    CliConfigFile,
-    ConfigDir,
+async fn load_configs(
+    options: &RunOptions,
+) -> anyhow::Result<Vec<(TomlConfigLoader, ConfigFileControl)>> {
+    let mut files = config_files(&options.config_files);
+    if let Some(config_dir) = &options.config_dir {
+        files.extend(config_dir_files(config_dir)?);
+    }
+    let mut configs = Vec::with_capacity(files.len());
+    for file in &files {
+        configs.push(
+            load_config_from_file(file, options.config_dir.as_ref(), &options.sets)
+                .await
+                .with_context(|| format!("cannot load {}", file.display()))?,
+        );
+    }
+    if files.is_empty() && !options.sets.is_empty() {
+        configs.push((
+            config_from_sets(&options.sets)?,
+            ConfigFileControl::STATIC_CONFIG,
+        ));
+    }
+    anyhow::ensure!(
+        !configs.is_empty() || options.daemon || options.config_dir.is_some(),
+        "nothing to run: pass -c FILE, --config-dir DIR, or --set PATH=VALUE (see `lowertier init`)"
+    );
+    Ok(configs)
 }
 
-impl LoggingConfigLoader for &LoggingOptions {
-    fn get_console_logger_config(&self) -> ConsoleLoggerConfig {
-        ConsoleLoggerConfig {
-            level: self.console_log_level.clone(),
-        }
-    }
-
-    fn get_file_logger_config(&self) -> FileLoggerConfig {
-        FileLoggerConfig {
-            level: self.file_log_level.clone(),
-            dir: self.file_log_dir.clone(),
-            file: None,
-            size_mb: self.file_log_size,
-            count: self.file_log_count,
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn win_service_set_work_dir(service_name: &std::ffi::OsString) -> anyhow::Result<()> {
-    use crate::common::constants::WIN_SERVICE_WORK_DIR_REG_KEY;
-    use winreg::{RegKey, enums::*};
-
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = hklm.open_subkey_with_flags(WIN_SERVICE_WORK_DIR_REG_KEY, KEY_READ)?;
-    let dir_pat_str = key.get_value::<std::ffi::OsString, _>(service_name)?;
-    let dir_path = std::fs::canonicalize(dir_pat_str)?;
-
-    std::env::set_current_dir(dir_path)?;
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn win_service_event_loop(
-    stop_notify: std::sync::Arc<tokio::sync::Notify>,
-    cli: Cli,
-    status_handle: windows_service::service_control_handler::ServiceStatusHandle,
-) {
-    use std::time::Duration;
-    use tokio::runtime::Runtime;
-    use windows_service::service::*;
-
-    let normal_status = ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    };
-    let error_status = ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::ServiceSpecific(1u32),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    };
-
-    std::thread::spawn(move || {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            tokio::select! {
-                res = run_main(cli) => {
-                    match res {
-                        Ok(_) => {
-                            status_handle.set_service_status(normal_status).unwrap();
-                            std::process::exit(0);
-                        }
-                        Err(error) => {
-                            status_handle.set_service_status(error_status).unwrap();
-                            log::error!(?error);
-                        }
-                    }
-                },
-                _ = stop_notify.notified() => {
-                    _ = status_handle.set_service_status(normal_status);
-                    std::process::exit(0);
-                }
-            }
-        });
-    });
-}
-
-fn parse_cli() -> Cli {
-    for (old, replacement) in crate::common::control_config::LEGACY_KEYS {
-        let argument = format!("--{}", old.replace('_', "-"));
-        let environment = format!("ET_{}", old.to_uppercase());
-        if std::env::args().any(|value| value.split('=').next() == Some(argument.as_str()))
-            || std::env::var_os(&environment).is_some()
-        {
-            eprintln!("legacy option {argument}/{environment}; use {replacement}");
-            std::process::exit(2);
-        }
-    }
-    for (name, _) in std::env::vars_os() {
-        if let Some(name) = name.to_str()
-            && name.starts_with("ET_QUIC_")
-        {
-            eprintln!(
-                "legacy environment variable {name}; use LOWTIER_{}",
-                name.trim_start_matches("ET_")
-            );
-            std::process::exit(2);
-        }
-    }
-    let mut cli = Cli::parse();
-    // for --stun-servers="", we want vec![], but clap will give vec![""], hack for that
-    if let Some(stun_servers) = &mut cli.network_options.stun_servers {
-        stun_servers.retain(|s| !s.trim().is_empty());
-    }
-    if let Some(stun_servers_v6) = &mut cli.network_options.stun_servers_v6 {
-        stun_servers_v6.retain(|s| !s.trim().is_empty());
-    }
-    cli
-}
-
-#[cfg(target_os = "windows")]
-fn win_service_main(arg: Vec<std::ffi::OsString>) {
-    use std::{sync::Arc, time::Duration};
-    use tokio::sync::Notify;
-    use windows_service::{service::*, service_control_handler::*};
-
-    _ = win_service_set_work_dir(&arg[0]);
-
-    let cli = parse_cli();
-
-    let stop_notify_send = Arc::new(Notify::new());
-    let stop_notify_recv = Arc::clone(&stop_notify_send);
-    let event_handler = move |control_event| -> ServiceControlHandlerResult {
-        match control_event {
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            ServiceControl::Stop => {
-                stop_notify_send.notify_one();
-                ServiceControlHandlerResult::NoError
-            }
-            _ => ServiceControlHandlerResult::NotImplemented,
-        }
-    };
-    let status_handle = register(String::new(), event_handler).expect("register service fail");
-    let next_status = ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    };
-    status_handle
-        .set_service_status(next_status)
-        .expect("set service status fail");
-
-    win_service_event_loop(stop_notify_recv, cli, status_handle);
-}
-
-async fn run_main(cli: Cli) -> anyhow::Result<()> {
+async fn run_main(options: RunOptions) -> anyhow::Result<()> {
     defer!(dump_profile(0););
-    log::init(&cli.logging_options, true)?;
+    let configs = load_configs(&options).await?;
+    // Process-wide settings come from the first configuration.
+    let (control, mut log_config) = configs
+        .first()
+        .map(|(config, _)| (config.get_control_config(), config.get_log_config()))
+        .unwrap_or_default();
+    if let Some(level) = &options.log_level {
+        log_config.console = Some(level.clone());
+    }
+    log::init(&log_config, true)?;
 
-    let manager = Arc::new(NetworkInstanceManager::new().with_config_path(cli.config_dir.clone()));
-
-    let _rpc_server = ApiRpcServer::new(
-        cli.rpc_portal_options.rpc_portal,
-        cli.rpc_portal_options.rpc_portal_whitelist,
+    let manager =
+        Arc::new(NetworkInstanceManager::new().with_config_path(options.config_dir.clone()));
+    let portal_allow = control
+        .portal_allow
+        .iter()
+        .flatten()
+        .map(|cidr| {
+            cidr.parse()
+                .with_context(|| format!("control.portal_allow: {cidr}"))
+        })
+        .collect::<anyhow::Result<Vec<cidr::IpCidr>>>()?;
+    let rpc_server = ApiRpcServer::new(
+        control.portal.clone(),
+        (!portal_allow.is_empty()).then_some(portal_allow),
+        TokenOptions {
+            path: control.token_file.clone(),
+            group: control.token_group.clone(),
+        },
         manager.clone(),
     )?
     .serve()
     .await?;
 
-    let _daemon_guard = if cli.daemon {
-        Some(manager.register_daemon())
-    } else {
-        None
-    };
+    let _daemon_guard = options.daemon.then(|| manager.register_daemon());
 
-    let explicit_config_file_count = cli.config_file.as_ref().map_or(0, |files| files.len());
-    let mut config_dir_file_count = 0;
-    let mut config_files = if let Some(v) = cli.config_file {
-        v.iter()
-            .cloned()
-            .map(|path| (path, ConfigFileSource::CliConfigFile))
-            .collect()
-    } else {
-        vec![]
-    };
-    if let Some(config_dir) = cli.config_dir.as_ref() {
-        if !config_dir.is_dir() {
-            anyhow::bail!("config_dir {} is not a directory", config_dir.display());
-        }
-
-        for entry in std::fs::read_dir(config_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(ext) = path.extension() else {
-                continue;
-            };
-            if ext != "toml" {
-                continue;
-            }
-            config_dir_file_count += 1;
-            config_files.push((path, ConfigFileSource::ConfigDir));
-        }
-    }
-    let config_file_count = config_files.len();
-    let mut crate_cli_network = {
-        if cli.daemon {
-            false
-        } else if config_file_count == 0 {
-            true
-        } else {
-            cli.network_options.network_name.is_some()
-        }
-    };
-    for (config_file, source) in config_files {
-        let (cfg, mut control) = load_config_from_file(
-            &config_file,
-            cli.config_dir.as_ref(),
-            cli.disable_env_parsing,
-        )
-        .await?;
-
-        if cli.network_options.can_merge(
-            &cfg,
-            source,
-            explicit_config_file_count,
-            config_dir_file_count,
-        ) {
-            cli.network_options
-                .merge_into(&cfg)
-                .with_context(|| format!("failed to merge config from cli: {:?}", config_file))?;
-            crate_cli_network = false;
-            control.set_read_only(true);
-            control.set_no_delete(true);
-        }
-
-        log::info!(path = %config_file.display(), permission = ?control.permission, "Starting LowTier from a config file");
-        manager.run_network_instance(cfg, true, control)?;
+    let mut instances = Vec::with_capacity(configs.len());
+    for (config, control) in configs {
+        instances.push(config.get_inst_name());
+        log::info!(instance = %config.get_inst_name(), permission = ?control.permission, "Starting LowTier instance");
+        manager.run_network_instance(config, true, control)?;
     }
 
-    if crate_cli_network {
-        let cfg = TomlConfigLoader::default();
-        cli.network_options
-            .merge_into(&cfg)
-            .with_context(|| "failed to create config from cli".to_string())?;
-        log::info!("Starting LowTier from command-line configuration");
-        manager.run_network_instance(cfg, true, ConfigFileControl::STATIC_CONFIG)?;
-    }
+    let _registration = rpc_server.addr.and_then(|portal| {
+        let record = runtime_registry::Record {
+            name: instances.first().cloned().unwrap_or_else(|| "lowertier".into()),
+            pid: std::process::id(),
+            portal: portal.to_string(),
+            token_file: std::path::absolute(&rpc_server.token_path)
+                .unwrap_or_else(|_| rpc_server.token_path.clone()),
+            instances,
+            version: LOWTIER_VERSION.into(),
+        };
+        runtime_registry::register(&record)
+            .inspect_err(|error| log::warn!(%error, "Cannot write the runtime record; the CLI needs --portal"))
+            .ok()
+    });
 
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1656,6 +262,85 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn win_service_set_work_dir(service_name: &std::ffi::OsString) -> anyhow::Result<()> {
+    use crate::common::constants::WIN_SERVICE_WORK_DIR_REG_KEY;
+    use winreg::{RegKey, enums::*};
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = hklm.open_subkey_with_flags(WIN_SERVICE_WORK_DIR_REG_KEY, KEY_READ)?;
+    let dir_pat_str = key.get_value::<std::ffi::OsString, _>(service_name)?;
+    let dir_path = std::fs::canonicalize(dir_pat_str)?;
+
+    std::env::set_current_dir(dir_path)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn win_service_main(arg: Vec<std::ffi::OsString>) {
+    use std::time::Duration;
+    use tokio::runtime::Runtime;
+    use windows_service::{service::*, service_control_handler::*};
+
+    _ = win_service_set_work_dir(&arg[0]);
+    let options = SERVICE_OPTIONS.get().cloned().unwrap_or_default();
+
+    let stop_notify_send = Arc::new(tokio::sync::Notify::new());
+    let stop_notify_recv = Arc::clone(&stop_notify_send);
+    let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            ServiceControl::Stop => {
+                stop_notify_send.notify_one();
+                ServiceControlHandlerResult::NoError
+            }
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+    let status_handle = register(String::new(), event_handler).expect("register service fail");
+    let status = |state, exit_code| ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: state,
+        controls_accepted: if state == ServiceState::Running {
+            ServiceControlAccept::STOP
+        } else {
+            ServiceControlAccept::empty()
+        },
+        exit_code,
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    };
+    status_handle
+        .set_service_status(status(ServiceState::Running, ServiceExitCode::Win32(0)))
+        .expect("set service status fail");
+
+    std::thread::spawn(move || {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async move {
+            tokio::select! {
+                res = run_main(options) => {
+                    match res {
+                        Ok(_) => {
+                            status_handle.set_service_status(status(ServiceState::Running, ServiceExitCode::Win32(0))).unwrap();
+                            std::process::exit(0);
+                        }
+                        Err(error) => {
+                            status_handle.set_service_status(status(ServiceState::Stopped, ServiceExitCode::ServiceSpecific(1))).unwrap();
+                            log::error!(?error);
+                        }
+                    }
+                },
+                _ = stop_notify_recv.notified() => {
+                    _ = status_handle.set_service_status(status(ServiceState::Running, ServiceExitCode::Win32(0)));
+                    std::process::exit(0);
+                }
+            }
+        });
+    });
 }
 
 fn memory_monitor(_force_dump: Arc<AtomicBool>) {
@@ -1702,26 +387,30 @@ fn memory_monitor(_force_dump: Arc<AtomicBool>) {
     }
 }
 
-pub async fn main() -> ExitCode {
+/// Run nodes until a signal arrives or every instance stops.
+pub async fn run(options: RunOptions) -> ExitCode {
     let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
     rust_i18n::set_locale(&locale);
     setup_panic_handler();
 
     #[cfg(target_os = "windows")]
-    match windows_service::service_dispatcher::start(String::new(), ffi_service_main) {
-        Ok(_) => std::thread::park(),
-        Err(e) => {
-            let should_panic = if let windows_service::Error::Winapi(ref io_error) = e {
-                io_error.raw_os_error() != Some(0x427) // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT
-            } else {
-                true
-            };
+    {
+        _ = SERVICE_OPTIONS.set(options.clone());
+        match windows_service::service_dispatcher::start(String::new(), ffi_service_main) {
+            Ok(_) => std::thread::park(),
+            Err(e) => {
+                let should_panic = if let windows_service::Error::Winapi(ref io_error) = e {
+                    io_error.raw_os_error() != Some(0x427) // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT
+                } else {
+                    true
+                };
 
-            if should_panic {
-                panic!("SCM start an error: {}", e);
+                if should_panic {
+                    panic!("SCM start an error: {}", e);
+                }
             }
-        }
-    };
+        };
+    }
 
     set_prof_active(true);
     // register a signal handler to set force dump when signal usr1 is received
@@ -1739,32 +428,9 @@ pub async fn main() -> ExitCode {
     }
     let _monitor = std::thread::spawn(move || memory_monitor(force_dump));
 
-    let cli = parse_cli();
-
-    if let Some(shell) = cli.gen_autocomplete {
-        let mut cmd = Cli::command();
-        if let Some(shell) = shell.to_shell() {
-            crate::print_completions(shell, &mut cmd, "lowertier-core");
-        } else {
-            // Handle Nushell
-            crate::print_nushell_completions(&mut cmd, "lowertier-core");
-        }
-        return ExitCode::SUCCESS;
-    }
-
-    // Verify configurations
-    if cli.check_config {
-        if let Err(error) = validate_config(&cli).await {
-            log::error!(%error, "Config validation failed");
-            return ExitCode::FAILURE;
-        } else {
-            return ExitCode::SUCCESS;
-        }
-    }
-
     let mut ret_code = 0;
-
-    if let Err(error) = run_main(cli).await {
+    if let Err(error) = run_main(options).await {
+        eprintln!("error: {error:#}");
         log::error!(%error);
         ret_code = 1;
     }
@@ -1775,25 +441,210 @@ pub async fn main() -> ExitCode {
     ExitCode::from(ret_code)
 }
 
-async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
-    // Check if a config file is provided
-    let config_files = cli
-        .config_file
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("--config-file is required when using --check-config"))?;
+/// Validate config files with overrides. Every problem is reported at once.
+pub async fn check(files: &[PathBuf], sets: &[String]) -> anyhow::Result<Vec<String>> {
+    let files = config_files(files);
+    if files.is_empty() {
+        config_from_sets(sets)?;
+        return Ok(vec!["--set values".into()]);
+    }
+    let mut checked = Vec::with_capacity(files.len());
+    let mut errors = Vec::new();
+    for file in &files {
+        match load_config_from_file(file, None, sets).await {
+            Ok(_) => checked.push(file.display().to_string()),
+            Err(error) => errors.push(format!("{error:#}")),
+        }
+    }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("\n"));
+    Ok(checked)
+}
 
-    for config_file in config_files {
-        if config_file == &PathBuf::from("-") {
-            let mut stdin = String::new();
-            _ = tokio::io::stdin()
-                .read_to_string(&mut stdin)
-                .await
-                .context("failed to read config from stdin")?;
-            TomlConfigLoader::new_from_str_with_source("stdin", stdin.as_str())?;
-        } else {
-            TomlConfigLoader::new(config_file)?;
-        };
+/// Options for `lowertier init`.
+#[derive(Clone, Debug)]
+pub struct InitOptions {
+    pub output: PathBuf,
+    pub network: String,
+    pub listen_port: Option<u16>,
+    pub peers: Vec<String>,
+    pub tun_mode: Option<String>,
+    pub ipv4: Option<String>,
+    pub force: bool,
+}
+
+fn write_private(path: &Path, contents: &str, force: bool) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path).with_context(|| {
+        format!(
+            "cannot create {} (use --force to replace it)",
+            path.display()
+        )
+    })?;
+    file.write_all(contents.as_bytes())?;
+    Ok(())
+}
+
+/// Write a new sectioned configuration with a generated secret and identity key.
+/// Returns the paths written.
+pub fn init(options: &InitOptions) -> anyhow::Result<Vec<PathBuf>> {
+    use base64::{Engine as _, prelude::BASE64_STANDARD};
+    use rand::RngCore as _;
+
+    let directory = options
+        .output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let stem = options
+        .output
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("lowertier");
+    let secret_path = directory.join(format!("{stem}.secret"));
+    let key_path = directory.join(format!("{stem}.key"));
+    anyhow::ensure!(
+        options.force || !options.output.exists(),
+        "{} exists (use --force to replace it)",
+        options.output.display()
+    );
+
+    let mut secret = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut secret);
+    let key = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+    let quote = |text: &str| toml::Value::String(text.into()).to_string();
+    let list = |items: &[String]| {
+        format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|item| quote(item))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let base = options.listen_port.unwrap_or(11010);
+    let listen = <crate::tunnel::IpScheme as strum::VariantArray>::VARIANTS
+        .iter()
+        .map(|scheme| format!("{scheme}://0.0.0.0:{}", base + scheme.port_offset()))
+        .collect::<Vec<_>>();
+    let absolute = |path: &Path| {
+        std::path::absolute(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string()
+    };
+
+    let mut text = String::new();
+    text.push_str("# LowTier node. `lowertier config explain` documents every option.\n\n");
+    text.push_str(&format!(
+        "[network]\nname = {}\nsecret_file = {}\n\n",
+        quote(&options.network),
+        quote(&absolute(&secret_path))
+    ));
+    text.push_str(&format!(
+        "[identity]\nprivate_key_file = {}\n\n",
+        quote(&absolute(&key_path))
+    ));
+    match &options.ipv4 {
+        Some(ipv4) => text.push_str(&format!("[address]\nipv4 = {}\n\n", quote(ipv4))),
+        None => text.push_str("[address]\ndhcp = true\n\n"),
+    }
+    if let Some(mode) = &options.tun_mode {
+        text.push_str(&format!("[tun]\nmode = {}\n\n", quote(mode)));
+    }
+    text.push_str(&format!("[transport]\nlisten = {}\n", list(&listen)));
+    for peer in &options.peers {
+        text.push_str(&format!("\n[[peer]]\nuri = {}\n", quote(peer)));
     }
 
-    Ok(())
+    // Validate before writing anything, with the generated secrets in place.
+    let mut check = text.parse::<toml::Table>()?;
+    for path in ["network.secret_file", "identity.private_key_file"] {
+        let (section, key) = path.split_once('.').unwrap();
+        check
+            .get_mut(section)
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .remove(key);
+    }
+    config_schema::set(
+        &mut check,
+        "network.secret",
+        toml::Value::String(BASE64_STANDARD.encode(secret)),
+    );
+    TomlConfigLoader::new_from_table("init", &check)?;
+
+    write_private(
+        &secret_path,
+        &format!("{}\n", BASE64_STANDARD.encode(secret)),
+        options.force,
+    )?;
+    write_private(
+        &key_path,
+        &format!("{}\n", BASE64_STANDARD.encode(key.as_bytes())),
+        options.force,
+    )?;
+    std::fs::write(&options.output, text)?;
+    Ok(vec![options.output.clone(), secret_path, key_path])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn init_output_passes_check_and_old_layout_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("node.toml");
+        let written = init(&InitOptions {
+            output: output.clone(),
+            network: "test-net".into(),
+            listen_port: Some(21010),
+            peers: vec!["quic://127.0.0.1:21012".into()],
+            tun_mode: Some("none".into()),
+            ipv4: None,
+            force: false,
+        })
+        .unwrap();
+        assert_eq!(written.len(), 3);
+        check(&[output.clone()], &["relay.policy=latency".into()])
+            .await
+            .unwrap();
+        let config = TomlConfigLoader::new(&output).unwrap();
+        assert_eq!(config.get_network_identity().network_name, "test-net");
+        assert!(config.get_network_identity().network_secret.is_some());
+        assert!(!config.dump().contains("secret = "), "{}", config.dump());
+        let again = InitOptions {
+            output,
+            network: "x".into(),
+            listen_port: None,
+            peers: vec![],
+            tun_mode: None,
+            ipv4: None,
+            force: false,
+        };
+        assert!(
+            init(&again).is_err(),
+            "init must not overwrite without --force"
+        );
+
+        let old = directory.path().join("old.toml");
+        std::fs::write(&old, "ipv4 = \"10.0.0.1/24\"\n[flags]\nmtu = 1200\n").unwrap();
+        let error = check(&[old], &[]).await.unwrap_err().to_string();
+        assert!(
+            error.contains("address.ipv4") && error.contains("tun.mtu"),
+            "{error}"
+        );
+    }
 }

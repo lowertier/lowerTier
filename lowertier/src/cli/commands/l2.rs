@@ -4,7 +4,8 @@ use super::super::{
     error::Result,
 };
 use crate::proto::api::control::v1::*;
-pub async fn execute(client: &Client, command: &L2Command) -> Result<Response> {
+pub async fn execute(client: &Client, command: Option<&L2Command>) -> Result<Response> {
+    let command = command.unwrap_or(&L2Command::Stats);
     let page = match command {
         L2Command::Fdb(page) => page.page(),
         L2Command::Stats => Some(Page {

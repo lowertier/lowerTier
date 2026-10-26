@@ -22,12 +22,22 @@ use crate::{
 pub struct ApiRpcServer<T: TunnelListener + 'static> {
     rpc_server: StandAloneServer<T>,
     protected_tcp_port: Option<u16>,
+    pub addr: Option<SocketAddr>,
+    pub token_path: std::path::PathBuf,
+}
+
+/// Control token settings from `[control]`.
+#[derive(Default)]
+pub struct TokenOptions {
+    pub path: Option<std::path::PathBuf>,
+    pub group: Option<String>,
 }
 
 impl ApiRpcServer<TcpTunnelListener> {
     pub fn new(
         rpc_portal: Option<String>,
         rpc_portal_whitelist: Option<Vec<IpCidr>>,
+        token: TokenOptions,
         instance_manager: Arc<NetworkInstanceManager>,
     ) -> anyhow::Result<Self> {
         let rpc_addr = parse_rpc_portal(rpc_portal)?;
@@ -37,10 +47,12 @@ impl ApiRpcServer<TcpTunnelListener> {
                     .parse()
                     .context("failed to parse rpc portal address")?,
             ),
+            token,
             instance_manager,
         )?;
         protected_port::register_protected_tcp_port(rpc_addr.port());
         server.protected_tcp_port = Some(rpc_addr.port());
+        server.addr = Some(rpc_addr);
 
         server
             .rpc_server
@@ -53,11 +65,17 @@ impl ApiRpcServer<TcpTunnelListener> {
 impl<T: TunnelListener + 'static> ApiRpcServer<T> {
     fn from_tunnel(
         tunnel: T,
+        token: TokenOptions,
         instance_manager: Arc<NetworkInstanceManager>,
     ) -> anyhow::Result<Self> {
-        let mut configured = instance_manager
-            .iter()
-            .filter_map(|instance| instance.get_config().get_control_token_file())
+        let mut configured = token
+            .path
+            .into_iter()
+            .chain(
+                instance_manager
+                    .iter()
+                    .filter_map(|instance| instance.get_config().get_control_token_file()),
+            )
             .collect::<Vec<_>>();
         configured.sort();
         configured.dedup();
@@ -71,12 +89,15 @@ impl<T: TunnelListener + 'static> ApiRpcServer<T> {
                 instance_manager.get_config_dir().map(|path| path.as_path()),
             )?,
         };
-        let token = ControlToken::load_or_create(&token_path)?;
+        let control_token = ControlToken::load_or_create(&token_path, token.group.as_deref())
+            .with_context(|| format!("control token {}", token_path.display()))?;
         let rpc_server = StandAloneServer::new(tunnel);
-        register_api_rpc_service(&instance_manager, rpc_server.registry(), token);
+        register_api_rpc_service(&instance_manager, rpc_server.registry(), control_token);
         Ok(Self {
             rpc_server,
             protected_tcp_port: None,
+            addr: None,
+            token_path,
         })
     }
 }

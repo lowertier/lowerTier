@@ -9,6 +9,7 @@ use tracing::Instrument;
 
 pub mod acl_processor;
 pub mod config;
+pub mod config_schema;
 pub mod constants;
 pub mod control_config;
 pub mod dataplane_telemetry;
@@ -21,6 +22,7 @@ pub mod ifcfg;
 pub mod log;
 pub mod netns;
 pub mod network;
+pub mod runtime_registry;
 pub mod stats_manager;
 pub mod stun;
 pub mod stun_codec_ext;

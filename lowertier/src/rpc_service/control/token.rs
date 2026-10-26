@@ -10,7 +10,9 @@ use rand::RngCore;
 pub struct ControlToken(Vec<u8>);
 
 impl ControlToken {
-    pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {
+    /// Load the token, creating it when absent. With a group, the file is mode 0640 and
+    /// owned by that group so its members can use the CLI; otherwise it is mode 0600.
+    pub fn load_or_create(path: &Path, group: Option<&str>) -> anyhow::Result<Self> {
         #[cfg(not(windows))]
         let (mut file, created) = Self::open_token_file(path)?;
         #[cfg(windows)]
@@ -26,6 +28,28 @@ impl ControlToken {
             secure_windows_token(path)?;
             (file, created)
         };
+        #[cfg(unix)]
+        let group = group
+            .map(|name| {
+                nix::unistd::Group::from_name(name)?
+                    .ok_or_else(|| anyhow::anyhow!("control.token_group {name:?} does not exist"))
+            })
+            .transpose()?;
+        #[cfg(unix)]
+        if created && let Some(group) = &group {
+            use std::os::unix::fs::PermissionsExt;
+            nix::unistd::fchown(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                None,
+                Some(group.gid),
+            )?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o640))?;
+        }
+        #[cfg(not(unix))]
+        anyhow::ensure!(
+            group.is_none(),
+            "control.token_group requires a Unix system"
+        );
         let metadata = file.metadata()?;
         anyhow::ensure!(
             metadata.is_file(),
@@ -34,11 +58,19 @@ impl ControlToken {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let mode = if group.is_some() { 0o640 } else { 0o600 };
             anyhow::ensure!(
-                metadata.mode() & 0o777 == 0o600
+                metadata.mode() & 0o777 == mode
                     && metadata.uid() == unsafe { nix::libc::geteuid() }
+                    && group
+                        .as_ref()
+                        .is_none_or(|group| metadata.gid() == group.gid.as_raw())
                     && metadata.nlink() == 1,
-                "The control token file requires mode 0600 and the current owner."
+                "The control token file {} requires mode {mode:o}, the current owner{}.",
+                path.display(),
+                group
+                    .as_ref()
+                    .map_or(String::new(), |group| format!(", and group {}", group.name))
             );
         }
         anyhow::ensure!(

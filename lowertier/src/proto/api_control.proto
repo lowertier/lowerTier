@@ -204,48 +204,11 @@ message RevokeCredentialResponse { ApiError error = 1; bool revoked = 2; }
 message ListPortForwardsRequest { RequestMeta meta = 1; }
 message ListPortForwardsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated common.PortForwardConfigPb port_forwards = 3; }
 
-message ControlConfig { optional string token_file = 1; }
-message IdentityConfig { optional string network_name = 1; optional string network_secret = 2; }
-message PeerConfig { string uri = 1; optional string peer_public_key = 2; }
-message ProxyNetworkConfig { string cidr = 1; optional string mapped_cidr = 2; repeated string allow = 3; }
-message ForwardConfig { string bind_addr = 1; string dst_addr = 2; string proto = 3; }
-message DiscoveryConfig { repeated string trackers = 1; repeated string private_trackers = 2; optional string bind = 3; optional string advertise = 4; }
-message NodeConfig {
-  common.RelayConfig relay = 1;
-  common.CamouflageConfig camouflage = 2;
-  common.LimitsConfig limits = 3;
-  DiscoveryConfig discovery = 4;
-  optional string netns = 5;
-  optional string hostname = 6;
-  optional string instance_name = 7;
-  optional string instance_id = 8;
-  optional string ipv4 = 9;
-  optional string ipv6 = 10;
-  optional bool ipv6_public_addr_provider = 11;
-  optional bool ipv6_public_addr_auto = 12;
-  optional string ipv6_public_addr_prefix = 13;
-  optional bool dhcp = 14;
-  IdentityConfig network_identity = 15;
-  repeated string listeners = 16;
-  repeated string mapped_listeners = 17;
-  repeated string exit_nodes = 18;
-  repeated PeerConfig peer = 19;
-  repeated ProxyNetworkConfig proxy_network = 20;
-  repeated string routes = 21;
-  optional string socks5_proxy = 22;
-  optional string outbound_http_proxy = 23;
-  repeated ForwardConfig port_forward = 24;
-  common.SecureModeConfig secure_mode = 25;
-  common.FlagsInConfig flags = 26;
-  acl.Acl acl = 27;
-  repeated string tcp_whitelist = 28;
-  repeated string udp_whitelist = 29;
-  repeated string stun_servers = 30;
-  repeated string tcp_stun_servers = 31;
-  repeated string stun_servers_v6 = 32;
-  optional string credential_file = 33;
-  ControlConfig control = 34;
-}
+// One forward entry, using the [[forward]] field names.
+message ForwardConfig { string bind = 1; string dest = 2; string proto = 3; }
+// A configuration document in the public sectioned TOML layout.
+// Option paths are documented by `lowertier config explain`.
+message NodeConfig { string toml = 1; }
 message ConfigPatch {
   uint64 expected_revision = 1;
   repeated string field_mask = 2;
@@ -302,7 +265,7 @@ message SetAclRequest { RequestMeta meta = 1; uint64 expected_revision = 2; acl.
 message SetAclResponse { ApiError error = 1; ApplyResult result = 2; }
 message PutPortForwardRequest { RequestMeta meta = 1; uint64 expected_revision = 2; ForwardConfig port_forward = 3; bool persist = 4; bool stage = 5; }
 message PutPortForwardResponse { ApiError error = 1; ApplyResult result = 2; }
-message DeletePortForwardRequest { RequestMeta meta = 1; uint64 expected_revision = 2; string bind_addr = 3; string proto = 4; bool persist = 5; bool stage = 6; }
+message DeletePortForwardRequest { RequestMeta meta = 1; uint64 expected_revision = 2; string bind = 3; string proto = 4; bool persist = 5; bool stage = 6; }
 message DeletePortForwardResponse { ApiError error = 1; ApplyResult result = 2; }
 
 message WatchChangesRequest {

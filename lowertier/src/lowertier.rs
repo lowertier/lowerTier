@@ -1,5 +1,3 @@
-use lowertier::core;
-
 #[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
 use mimalloc::MiMalloc;
 
@@ -109,9 +107,22 @@ fn report_mimalloc_options() {
     }
 }
 
+/// Only the node process needs allocator tuning; management commands skip the re-exec.
+fn runs_node() -> bool {
+    std::env::args()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .as_deref()
+        == Some("run")
+}
+
 fn main() -> std::process::ExitCode {
     #[cfg(all(feature = "mimalloc", not(feature = "jemalloc"), unix))]
-    ensure_mimalloc_env();
+    if runs_node() {
+        ensure_mimalloc_env();
+    }
+    #[cfg(not(all(feature = "mimalloc", not(feature = "jemalloc"), unix)))]
+    let _ = runs_node;
     #[cfg(all(feature = "mimalloc", not(feature = "jemalloc"), not(unix)))]
     configure_mimalloc_rss();
     #[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
@@ -120,5 +131,5 @@ fn main() -> std::process::ExitCode {
         .enable_all()
         .build()
         .expect("current-thread runtime")
-        .block_on(core::main())
+        .block_on(lowertier::cli::main())
 }

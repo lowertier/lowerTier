@@ -140,15 +140,11 @@ fn effective_nic_mtu(
         // The parser supports four VLAN tags outside a 1500-byte LAN payload.
         return Ok(flags.mtu.max(1500 + 4 * 4));
     }
-    if flags.enable_encryption {
-        flags
-            .mtu
-            .checked_sub(20)
-            .filter(|mtu| *mtu != 0)
-            .ok_or_else(|| anyhow::anyhow!("encrypted TUN MTU must exceed 20 bytes").into())
-    } else {
-        Ok(flags.mtu)
-    }
+    flags
+        .mtu
+        .checked_sub(20)
+        .filter(|mtu| *mtu != 0)
+        .ok_or_else(|| anyhow::anyhow!("encrypted TUN MTU must exceed 20 bytes").into())
 }
 
 struct HybridTapSink {
@@ -640,10 +636,10 @@ impl VirtualNic {
     fn print_troubleshooting_info() {
         log::info!(
             "Possible solutions:\
-            \n\t1. Run with root privileges: sudo ./lowertier-core [options]\
+            \n\t1. Run with root privileges: sudo lowertier run -c FILE\
             \n\t2. Manually create TUN device: sudo mkdir -p /dev/net && sudo mknod /dev/net/tun c 10 200\
             \n\t3. Load TUN kernel module: sudo modprobe tun\
-            \n\t4. Use --no-tun flag if TUN functionality is not needed\
+            \n\t4. Set tun.mode = \"userspace\" or \"none\" if a kernel device is not needed\
             \n\t5. Check if your system/container supports TUN devices\
             \nNote: TUN functionality may still work if the kernel supports dynamic device creation."
         );
@@ -2228,15 +2224,11 @@ mod tests {
                 1360
             );
             flags.enable_bridge = true;
-            for encrypted in [false, true] {
-                flags.enable_encryption = encrypted;
-                assert_eq!(
-                    super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
-                    1516
-                );
-            }
+            assert_eq!(
+                super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
+                1516
+            );
             flags.mtu = 9000;
-            flags.enable_encryption = true;
             assert_eq!(
                 super::effective_nic_mtu(&flags, InterfaceAdapter::Tap).unwrap(),
                 9000

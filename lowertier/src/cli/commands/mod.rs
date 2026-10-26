@@ -9,36 +9,51 @@ mod camouflage;
 pub(super) mod config;
 mod credential;
 mod discovery;
+pub(super) mod doctor;
+mod forward;
 mod instance;
 mod l2;
 mod listener;
 pub(super) mod log;
-mod node;
-mod peer;
-mod port_forward;
+pub(crate) mod peer;
 mod relay;
-mod route;
+pub(super) mod route;
 pub(super) mod service;
 pub(super) mod stats;
+pub(crate) mod status;
 
 pub async fn execute(client: &Client, command: &Command) -> Result<Response> {
     match command {
-        Command::Node { command } => node::execute(client, command).await,
-        Command::Peer { command } => peer::execute(client, command).await,
-        Command::Route { command } => route::execute(client, command).await,
-        Command::Relay { command } => relay::execute(client, command).await,
-        Command::L2 { command } => l2::execute(client, command).await,
-        Command::Discovery { command } => discovery::execute(client, command).await,
-        Command::Listener { command } => listener::execute(client, command).await,
-        Command::Camouflage { command } => camouflage::execute(client, command).await,
-        Command::Config { command } => config::execute(client, command).await,
-        Command::Stats { command } => stats::execute(client, command).await,
-        Command::Log { command } => log::execute(client, command).await,
-        Command::Acl { command } => acl::execute(client, command).await,
-        Command::Credential { command } => credential::execute(client, command).await,
-        Command::PortForward { command } => port_forward::execute(client, command).await,
+        Command::Status => status::execute(client).await,
+        Command::Get { path } => config::get(client, path.as_deref()).await,
+        Command::Set(args) => config::set(client, &args.assignments, &args.apply).await,
+        Command::Unset { paths, apply } => config::unset(client, paths, apply).await,
+        Command::Edit { apply } => config::edit(client, apply).await,
+        Command::Peers { command } => peer::execute(client, command.as_ref()).await,
+        Command::Routes { command } => route::execute(client, command.as_ref()).await,
+        Command::Relay => relay::execute(client).await,
+        Command::Camouflage => camouflage::execute(client).await,
+        Command::Discovery => discovery::execute(client).await,
+        Command::Listeners { command } => listener::execute(client, command.as_ref()).await,
+        Command::L2 { command } => l2::execute(client, command.as_ref()).await,
+        Command::Acl { command } => acl::execute(client, command.as_ref()).await,
+        Command::Creds { command } => credential::execute(client, command).await,
+        Command::Forward { command } => forward::execute(client, command.as_ref()).await,
         Command::Instance { command } => instance::execute(client, command).await,
-        Command::Service(args) => service::execute(args),
-        Command::Completion { .. } => unreachable!("Completion is local."),
+        Command::Stats { prometheus, .. } => stats::execute(client, *prometheus).await,
+        Command::Logs { page, .. } if page.page_token.is_empty() => {
+            super::client::checked(log::tail(client, page.limit).await?)
+        }
+        Command::Logs { page, .. } => super::client::checked(log::read(client, page).await?),
+        Command::LogLevel { level } => log::level(client, level.as_deref()).await,
+        Command::Init(_)
+        | Command::Run(_)
+        | Command::Check(_)
+        | Command::Nodes
+        | Command::Config { .. }
+        | Command::Doctor
+        | Command::Top(_)
+        | Command::Service(_)
+        | Command::Completion { .. } => unreachable!("handled before connecting"),
     }
 }

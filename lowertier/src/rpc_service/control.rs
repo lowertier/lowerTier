@@ -245,6 +245,22 @@ control_service! {
 mod tests {
     use super::*;
 
+    fn values(text: &str) -> Option<NodeConfig> {
+        Some(NodeConfig { toml: text.into() })
+    }
+
+    fn table(config: Option<NodeConfig>) -> toml::Table {
+        config.unwrap().toml.parse().unwrap()
+    }
+
+    fn lookup<'a>(table: &'a toml::Table, path: &str) -> Option<&'a toml::Value> {
+        let (parent, key) = match path.rsplit_once('.') {
+            Some((parent, key)) => (lookup(table, parent)?.as_table()?, key),
+            None => (table, path),
+        };
+        parent.get(key)
+    }
+
     #[tokio::test]
     async fn portal_requires_token_and_lists_two_node_resources() {
         use crate::{
@@ -257,7 +273,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let token_path = dir.path().join("control.token");
-        let token = ControlToken::load_or_create(&token_path).unwrap();
+        let token = ControlToken::load_or_create(&token_path, None).unwrap();
         let control_token = std::fs::read_to_string(&token_path)
             .unwrap()
             .trim()
@@ -267,22 +283,25 @@ mod tests {
         for name in ["rpc-a", "rpc-b"] {
             let config = TomlConfigLoader::new_from_str(
                 r#"
-listeners = []
-stun_servers = []
-stun_servers_v6 = []
-tcp_stun_servers = []
-[network_identity]
-network_name = "rpc-test"
-network_secret = "rpc-test-secret"
+[node]
+threads = 1
+[network]
+name = "rpc-test"
+secret = "rpc-test-secret"
+[transport]
+listen = []
+[tun]
+mode = "none"
+ipv6 = false
+[nat]
+p2p = "off"
+udp_punch = false
+tcp_punch = false
+stun = []
+stun_v6 = []
+stun_tcp = []
 [acl.acl_v1.group]
 declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
-[flags]
-no_tun = true
-multi_thread = false
-enable_ipv6 = false
-disable_p2p = true
-disable_udp_hole_punching = true
-disable_tcp_hole_punching = true
 "#,
             )
             .unwrap();
@@ -434,22 +453,19 @@ disable_tcp_hole_punching = true
             .unwrap();
         assert!(config.error.is_none(), "{:?}", config.error);
         assert_eq!(config.snapshot.unwrap().revision, 1);
-        let active = config.active.unwrap();
-        assert!(active.network_identity.unwrap().network_secret.is_none());
+        let active = table(config.active);
         assert_eq!(
-            active.acl.unwrap().acl_v1.unwrap().group.unwrap().declares[0].group_secret,
-            "[REDACTED]"
+            lookup(&active, "network.secret").and_then(toml::Value::as_str),
+            Some("[REDACTED]")
+        );
+        assert_eq!(
+            lookup(&active, "acl.acl_v1.group.declares").unwrap()[0]["group_secret"].as_str(),
+            Some("[REDACTED]")
         );
         let patch = ConfigPatch {
             expected_revision: 1,
             field_mask: vec!["relay.use_relays".into()],
-            values: Some(NodeConfig {
-                relay: Some(crate::proto::common::RelayConfig {
-                    use_relays: Some(false),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
+            values: values("[relay]\nuse_relays = false\n"),
             ..Default::default()
         };
         let applied = service
@@ -477,11 +493,8 @@ disable_tcp_hole_punching = true
         assert_eq!(stale.error.unwrap().code, "conflict");
         let patch = ConfigPatch {
             expected_revision: 2,
-            field_mask: vec!["hostname".into()],
-            values: Some(NodeConfig {
-                hostname: Some("unpublished".into()),
-                ..Default::default()
-            }),
+            field_mask: vec!["node.hostname".into()],
+            values: values("[node]\nhostname = \"unpublished\"\n"),
             persist: true,
             ..Default::default()
         };
@@ -498,11 +511,8 @@ disable_tcp_hole_punching = true
         assert!(failed.error.is_some());
         let patch = ConfigPatch {
             expected_revision: 2,
-            field_mask: vec!["listeners".into()],
-            values: Some(NodeConfig {
-                listeners: vec!["quic://127.0.0.1:0".into()],
-                ..Default::default()
-            }),
+            field_mask: vec!["transport.listen".into()],
+            values: values("[transport]\nlisten = [\"quic://127.0.0.1:0\"]\n"),
             ..Default::default()
         };
         let rejected = service
@@ -530,7 +540,10 @@ disable_tcp_hole_punching = true
             .await
             .unwrap();
         assert!(staged.error.is_none(), "{:?}", staged.error);
-        assert_eq!(staged.result.unwrap().restart_fields, vec!["listeners"]);
+        assert_eq!(
+            staged.result.unwrap().restart_fields,
+            vec!["transport.listen"]
+        );
         let config = service
             .get_config(
                 BaseController::default(),
@@ -540,9 +553,20 @@ disable_tcp_hole_punching = true
             .unwrap();
         assert!(config.error.is_none(), "{:?}", config.error);
         assert_eq!(config.snapshot.unwrap().revision, 3);
-        assert!(config.active.as_ref().unwrap().listeners.is_empty());
-        assert_eq!(config.active.unwrap().hostname.as_deref(), None);
-        assert_eq!(config.desired.unwrap().listeners.len(), 1);
+        let active = table(config.active);
+        assert!(
+            lookup(&active, "transport.listen")
+                .is_none_or(|listen| listen.as_array().unwrap().is_empty())
+        );
+        assert!(lookup(&active, "node.hostname").is_none());
+        assert_eq!(
+            lookup(&table(config.desired), "transport.listen")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let validation = service
             .validate_config(
                 BaseController::default(),
@@ -550,11 +574,8 @@ disable_tcp_hole_punching = true
                     meta: meta.clone(),
                     patch: Some(ConfigPatch {
                         expected_revision: 3,
-                        field_mask: vec!["hostname".into()],
-                        values: Some(NodeConfig {
-                            hostname: Some("rpc-host".into()),
-                            ..Default::default()
-                        }),
+                        field_mask: vec!["node.hostname".into()],
+                        values: values("[node]\nhostname = \"rpc-host\"\n"),
                         ..Default::default()
                     }),
                 },
@@ -562,7 +583,10 @@ disable_tcp_hole_punching = true
             .await
             .unwrap();
         assert!(validation.error.is_none(), "{:?}", validation.error);
-        assert_eq!(validation.result.unwrap().restart_fields, vec!["listeners"]);
+        assert_eq!(
+            validation.result.unwrap().restart_fields,
+            vec!["transport.listen"]
+        );
         let camouflage = service
             .patch_config(
                 BaseController::default(),
@@ -571,13 +595,7 @@ disable_tcp_hole_punching = true
                     patch: Some(ConfigPatch {
                         expected_revision: 3,
                         field_mask: vec!["camouflage.http_host".into()],
-                        values: Some(NodeConfig {
-                            camouflage: Some(crate::proto::common::CamouflageConfig {
-                                http_host: "example.test".into(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
+                        values: values("[camouflage]\nhttp_host = \"example.test\"\n"),
                         stage: true,
                         ..Default::default()
                     }),
@@ -612,16 +630,12 @@ disable_tcp_hole_punching = true
                             "camouflage.server_name".into(),
                             "camouflage.website_root".into(),
                         ],
-                        values: Some(NodeConfig {
-                            camouflage: Some(crate::proto::common::CamouflageConfig {
-                                tls_cert: dir.path().join("missing.crt").display().to_string(),
-                                tls_key: dir.path().join("missing.key").display().to_string(),
-                                server_name: "example.test".into(),
-                                website_root: dir.path().display().to_string(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
+                        values: values(&format!(
+                            "[camouflage]\ntls_cert = {:?}\ntls_key = {:?}\nserver_name = \"example.test\"\nwebsite_root = {:?}\n",
+                            dir.path().join("missing.crt").display().to_string(),
+                            dir.path().join("missing.key").display().to_string(),
+                            dir.path().display().to_string(),
+                        )),
                         stage: true,
                         ..Default::default()
                     }),
@@ -640,7 +654,7 @@ disable_tcp_hole_punching = true
         let mut admin_meta = meta.unwrap();
         let admin_service = ControlPlaneService::new(
             manager.clone(),
-            ControlToken::load_or_create(&token_path).unwrap(),
+            ControlToken::load_or_create(&token_path, None).unwrap(),
         );
         let controller = BaseController {
             tunnel_info: Some(ipv6_channel),
@@ -685,11 +699,8 @@ disable_tcp_hole_punching = true
         let owned = ControlPlaneService::for_owned_instances(manager.clone());
         let patch = ConfigPatch {
             expected_revision: 1,
-            field_mask: vec!["hostname".into()],
-            values: Some(NodeConfig {
-                hostname: Some("persisted-host".into()),
-                ..Default::default()
-            }),
+            field_mask: vec!["node.hostname".into()],
+            values: values("[node]\nhostname = \"persisted-host\"\n"),
             persist: true,
             ..Default::default()
         };
@@ -718,10 +729,7 @@ disable_tcp_hole_punching = true
                     meta: stored_meta.clone(),
                     patch: Some(ConfigPatch {
                         expected_revision: 2,
-                        values: Some(NodeConfig {
-                            hostname: Some("failed-host".into()),
-                            ..Default::default()
-                        }),
+                        values: values("[node]\nhostname = \"failed-host\"\n"),
                         ..patch
                     }),
                 },
@@ -738,7 +746,7 @@ disable_tcp_hole_punching = true
             .unwrap();
         assert_eq!(unchanged.snapshot.unwrap().revision, 2);
         assert_eq!(
-            unchanged.active.unwrap().hostname.as_deref(),
+            lookup(&table(unchanged.active), "node.hostname").and_then(toml::Value::as_str),
             Some("persisted-host")
         );
         for id in ids {

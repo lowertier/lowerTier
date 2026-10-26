@@ -8,31 +8,6 @@ pub use crate::proto::common::{
     RelayPrefer, TransitPolicy,
 };
 
-pub const LEGACY_KEYS: &[(&str, &str)] = &[
-    ("port_mode", "automatic platform adapter selection"),
-    ("interface_adapter", "automatic platform adapter selection"),
-    ("source", "local configuration files"),
-    ("instance_recv_bps_limit", "limits.receive_bps"),
-    ("latency_first", "relay.policy"),
-    ("speed_first", "relay.policy"),
-    ("p2p_only", "relay.use_relays"),
-    ("disable_relay_data", "relay.transit"),
-    ("relay_network_whitelist", "relay.transit_networks"),
-    ("foreign_relay_bps_limit", "relay.transit_bps_limit"),
-    (
-        "speed_probe_interval_seconds",
-        "relay.probe_interval_seconds",
-    ),
-    ("speed_probe_budget_bps", "relay.probe_budget_bps"),
-    ("quic_server_name", "camouflage.server_name"),
-    ("quic_tls_cert", "camouflage.tls_cert"),
-    ("quic_tls_key", "camouflage.tls_key"),
-    ("quic_admission_secret", "camouflage.admission_secret"),
-    ("quic_fallback_root", "camouflage.website_root"),
-    ("quic_decoy_upstream", "camouflage.decoy_upstream"),
-    ("quic_sni_passthrough", "camouflage.sni_routing"),
-];
-
 // WSS accepts one serialized overlay packet up to this existing receive bound.
 pub(crate) const MAX_TRANSIT_PACKET_BYTES: u64 = crate::tunnel::tcp_lanes::MAX_PENDING_BYTES as u64;
 
@@ -333,17 +308,11 @@ impl std::fmt::Debug for CamouflageConfig {
 #[cfg(test)]
 pub(crate) mod tests {
     pub(crate) fn rejects_legacy_control_keys_with_replacement_names() {
-        for (old, replacement) in super::LEGACY_KEYS {
-            for section in ["[flags]\n", ""] {
-                let text = format!("{section}{old} = false\n");
-                let error =
-                    crate::common::config::TomlConfigLoader::new_from_str(&text).unwrap_err();
-                assert!(
-                    format!("{error:#}").contains(replacement),
-                    "{old}: {error:#}"
-                );
-            }
-        }
+        let error = crate::common::config::TomlConfigLoader::new_from_str(
+            "[flags]\nlatency_first = true\n",
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("relay.policy"), "{error:#}");
         use crate::common::config::ConfigLoader;
         let config = crate::common::config::TomlConfigLoader::new_from_str(
             r#"

@@ -6,11 +6,9 @@ use super::super::{
 use super::config;
 use crate::proto::api::control::v1::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use toml::{Table, Value};
 
-async fn view(client: &Client, response: ListPeersResponse) -> Result<Response> {
-    if let Some(error) = response.error {
-        return Err(error.into());
-    }
+pub async fn relay(client: &Client) -> Result<GetRelayResponse> {
     let relay = client
         .rpc
         .get_relay(
@@ -23,6 +21,60 @@ async fn view(client: &Client, response: ListPeersResponse) -> Result<Response> 
     if let Some(error) = relay.error {
         return Err(error.into());
     }
+    Ok(relay)
+}
+
+pub async fn list(client: &Client, page: Option<Page>) -> Result<ListPeersResponse> {
+    let response = client
+        .rpc
+        .list_peers(
+            client.controller(),
+            ListPeersRequest {
+                meta: client.meta(),
+                page,
+            },
+        )
+        .await?;
+    if let Some(error) = response.error {
+        return Err(error.into());
+    }
+    Ok(response)
+}
+
+/// Combine peers with their route summaries from the relay snapshot.
+pub fn build(response: ListPeersResponse, relay: &GetRelayResponse) -> PeerView {
+    let active_policy = relay
+        .config
+        .as_ref()
+        .and_then(|config| crate::proto::common::RelayPolicy::try_from(config.policy).ok())
+        .map(|policy| policy.as_str_name())
+        .unwrap_or("unknown")
+        .into();
+    let route_summaries = relay
+        .paths
+        .iter()
+        .filter(|route| {
+            route.route.as_ref().is_some_and(|route| {
+                response
+                    .peers
+                    .iter()
+                    .any(|peer| peer.peer_id == route.peer_id)
+            })
+        })
+        .cloned()
+        .collect();
+    PeerView {
+        snapshot: response.snapshot,
+        peers: response.peers,
+        route_summaries,
+        active_policy,
+        next_page_token: response.next_page_token,
+        detail: false,
+    }
+}
+
+async fn view(client: &Client, response: ListPeersResponse, detail: bool) -> Result<Response> {
+    let relay = relay(client).await?;
     if response
         .snapshot
         .as_ref()
@@ -38,82 +90,75 @@ async fn view(client: &Client, response: ListPeersResponse) -> Result<Response> 
             "snapshot",
         ));
     }
-    let active_policy = relay
-        .config
-        .as_ref()
-        .and_then(|config| crate::proto::common::RelayPolicy::try_from(config.policy).ok())
-        .map(|policy| policy.as_str_name())
-        .unwrap_or("unknown")
-        .into();
-    let route_summaries = relay
-        .paths
-        .into_iter()
-        .filter(|route| {
-            route.route.as_ref().is_some_and(|route| {
-                response
-                    .peers
-                    .iter()
-                    .any(|peer| peer.peer_id == route.peer_id)
-            })
-        })
-        .collect();
-    Ok(Response::Peers(PeerView {
-        snapshot: response.snapshot,
-        peers: response.peers,
-        route_summaries,
-        active_policy,
-        next_page_token: response.next_page_token,
-    }))
+    let mut view = build(response, &relay);
+    view.detail = detail;
+    Ok(Response::Peers(view))
 }
 
-pub async fn execute(client: &Client, command: &PeerCommand) -> Result<Response> {
+pub fn matches(peer: &PeerSnapshot, wanted: &str) -> bool {
+    peer.peer_id.to_string() == wanted
+        || STANDARD.encode(&peer.peer_key) == wanted
+        || peer.route.as_ref().is_some_and(|route| {
+            route.hostname == wanted
+                || route.ipv4_addr.as_ref().is_some_and(|address| {
+                    address.address.map(|ip| ip.to_string()).as_deref() == Some(wanted)
+                })
+        })
+}
+
+fn peers_of(desired: &Table) -> Vec<Value> {
+    desired
+        .get("peer")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+async fn replace(
+    client: &Client,
+    peers: Vec<Value>,
+    apply: &super::super::args::ApplyArgs,
+    revision: u64,
+) -> Result<Response> {
+    let mut values = Table::new();
+    values.insert("peer".into(), Value::Array(peers));
+    config::patch(
+        client,
+        values,
+        vec!["peer".into()],
+        Vec::new(),
+        apply,
+        Some(revision),
+    )
+    .await
+}
+
+pub async fn execute(client: &Client, command: Option<&PeerCommand>) -> Result<Response> {
+    let Some(command) = command else {
+        return view(client, list(client, None).await?, false).await;
+    };
     match command {
-        PeerCommand::List(page) => {
-            view(
-                client,
-                client
-                    .rpc
-                    .list_peers(
-                        client.controller(),
-                        ListPeersRequest {
-                            meta: client.meta(),
-                            page: page.page(),
-                        },
-                    )
-                    .await?,
-            )
-            .await
-        }
+        PeerCommand::List(page) => view(client, list(client, page.page()).await?, false).await,
         PeerCommand::Show { peer } => {
             let mut page_token = String::new();
             loop {
-                let mut response = client
-                    .rpc
-                    .list_peers(
-                        client.controller(),
-                        ListPeersRequest {
-                            meta: client.meta(),
-                            page: Some(Page {
-                                limit: 256,
-                                page_token,
-                            }),
-                        },
-                    )
-                    .await?;
-                if let Some(error) = response.error {
-                    return Err(error.into());
-                }
-                response.peers.retain(|value| {
-                    value.peer_id.to_string() == *peer || STANDARD.encode(&value.peer_key) == *peer
-                });
+                let mut response = list(
+                    client,
+                    Some(Page {
+                        limit: 256,
+                        page_token,
+                    }),
+                )
+                .await?;
+                response.peers.retain(|value| matches(value, peer));
                 if !response.peers.is_empty() {
                     response.next_page_token.clear();
-                    return view(client, response).await;
+                    return view(client, response, true).await;
                 }
                 if response.next_page_token.is_empty() {
                     return Err(CliError::new(
                         "not_found",
-                        "The peer does not exist.",
+                        format!("No peer {peer:?}. `lowertier peers` lists peers."),
                         "peer",
                     ));
                 }
@@ -125,52 +170,39 @@ pub async fn execute(client: &Client, command: &PeerCommand) -> Result<Response>
             public_key,
             apply,
         } => {
-            let (mut desired, revision) = config::desired(client, apply).await?;
-            if desired.peer.iter().any(|peer| peer.uri == *uri) {
+            let (desired, revision) = config::desired(client, apply).await?;
+            let mut peers = peers_of(&desired);
+            if peers
+                .iter()
+                .any(|peer| peer.get("uri").and_then(Value::as_str) == Some(uri))
+            {
                 return Err(CliError::new(
                     "invalid_argument",
-                    "The peer URI already exists.",
-                    "peer",
+                    format!("The peer {uri} is already configured."),
+                    "uri",
                 ));
             }
-            desired.peer.push(PeerConfig {
-                uri: uri.clone(),
-                peer_public_key: public_key.clone(),
-            });
-            config::replace(
-                client,
-                apply,
-                revision,
-                "peer",
-                NodeConfig {
-                    peer: desired.peer,
-                    ..Default::default()
-                },
-            )
-            .await
+            let mut peer = Table::new();
+            peer.insert("uri".into(), Value::String(uri.clone()));
+            if let Some(key) = public_key {
+                peer.insert("public_key".into(), Value::String(key.clone()));
+            }
+            peers.push(Value::Table(peer));
+            replace(client, peers, apply, revision).await
         }
-        PeerCommand::Remove { uri, apply } => {
-            let (mut desired, revision) = config::desired(client, apply).await?;
-            let count = desired.peer.len();
-            desired.peer.retain(|peer| peer.uri != *uri);
-            if count == desired.peer.len() {
+        PeerCommand::Rm { uri, apply } => {
+            let (desired, revision) = config::desired(client, apply).await?;
+            let mut peers = peers_of(&desired);
+            let count = peers.len();
+            peers.retain(|peer| peer.get("uri").and_then(Value::as_str) != Some(uri));
+            if count == peers.len() {
                 return Err(CliError::new(
                     "not_found",
-                    "The configured peer URI does not exist.",
-                    "peer",
+                    format!("No configured peer {uri}. `lowertier get peer` lists them."),
+                    "uri",
                 ));
             }
-            config::replace(
-                client,
-                apply,
-                revision,
-                "peer",
-                NodeConfig {
-                    peer: desired.peer,
-                    ..Default::default()
-                },
-            )
-            .await
+            replace(client, peers, apply, revision).await
         }
     }
 }

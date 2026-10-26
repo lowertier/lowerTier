@@ -16,14 +16,8 @@ build = "build/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name = "lowertier-core"
-path = "src/lowertier-core.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "lowertier-cli"
-path = "src/lowertier-cli.rs"
+name = "lowertier"
+path = "src/lowertier.rs"
 test = false
 bench = false
 
@@ -143,6 +137,8 @@ nix = { version = "0.29.0", features = [
     "net",
     "fs",
     "resource",
+    "signal",
+    "user",
 ] }
 
 uuid = { version = "1.5.0", features = [
@@ -193,6 +189,7 @@ clap = { version = "4.5.30", features = [
     "env",
 ] }
 clap_complete = { version = "4.5.55" }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"], optional = true }
 clap_complete_nushell = { version = "4.5.10" }
 
 async-recursion = "1.0.5"
@@ -361,11 +358,13 @@ tokio-socks = "0.5.2"
 
 
 [features]
-default = ["tun", "socks5", "mimalloc"]
+default = ["tun", "socks5", "mimalloc", "tui"]
 full = [
     "magic-dns",
 ]
 mimalloc = ["dep:mimalloc"]
+# Terminal dashboard for `lowertier top`.
+tui = ["dep:ratatui"]
 tun = ["dep:tun", "dep:quincy-tun", "dep:io-uring"]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]

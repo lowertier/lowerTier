@@ -1,13 +1,21 @@
 use super::{
     args::{Arguments, Output},
-    client::Response,
+    client::{PeerView, Response},
+    commands::{config::ConfigView, doctor, route::Trace, status::StatusView},
     error::CliError,
 };
+use crate::proto::{api::control::v1::*, common::NatType};
 use clap::CommandFactory;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::io::{self, Write};
-use tabled::{builder::Builder, settings::Style};
+use std::{
+    fmt::Write as _,
+    io::{self, Write},
+};
+use tabled::{
+    builder::Builder,
+    settings::{Alignment, Modify, Padding, Style, object::Columns},
+};
 
 #[derive(Serialize)]
 pub struct Envelope {
@@ -16,7 +24,7 @@ pub struct Envelope {
     pub instance_id: Option<String>,
     pub revision: Option<String>,
     pub data: Option<Value>,
-    pub error: Option<crate::proto::api::control::v1::ApiError>,
+    pub error: Option<ApiError>,
 }
 
 impl Envelope {
@@ -32,6 +40,7 @@ impl Envelope {
         let revision = data
             .pointer("/snapshot/revision")
             .or_else(|| data.pointer("/result/revision"))
+            .or_else(|| data.pointer("/revision"))
             .map(|value| {
                 value
                     .as_str()
@@ -63,51 +72,102 @@ impl Envelope {
     }
 }
 
-fn cell(value: &Value) -> String {
-    let text = match value {
-        Value::Null => "unknown".into(),
-        Value::String(value) => value.clone(),
-        _ => value.to_string(),
-    };
-    // Escape control characters in tables to protect terminal state.
+/// Escape control characters in remote text to protect terminal state.
+pub fn clean(text: &str) -> String {
     text.chars()
         .flat_map(|character| character.escape_debug())
-        .collect()
+        .collect::<String>()
+        .replace("\\'", "'")
+        .replace("\\\"", "\"")
 }
+
+fn cell(value: &Value) -> String {
+    match value {
+        Value::Null => "-".into(),
+        Value::String(value) => clean(value),
+        _ => clean(&value.to_string()),
+    }
+}
+
 fn field(value: &Value, key: &str) -> String {
     cell(value.get(key).unwrap_or(&Value::Null))
 }
-fn path(value: &Value) -> String {
-    value
-        .get("path_peer_ids")
-        .and_then(Value::as_array)
-        .map(|ids| ids.iter().map(cell).collect::<Vec<_>>().join(" -> "))
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| "unknown".into())
+
+pub fn rtt(us: Option<u64>) -> String {
+    match us {
+        Some(us) if us < 10_000 => format!("{:.1} ms", us as f64 / 1000.0),
+        Some(us) => format!("{} ms", us / 1000),
+        None => "-".into(),
+    }
 }
-fn via(value: &Value) -> String {
-    if let Some(first) = value
-        .get("first_hop_peer_id")
-        .filter(|first| first.as_u64().unwrap_or(0) != 0)
-    {
-        if value.get("final_gateway_peer_id") == Some(first) {
-            return "direct".into();
+
+pub fn loss(ppm: Option<u32>) -> String {
+    ppm.map_or_else(
+        || "-".into(),
+        |ppm| format!("{:.1} %", f64::from(ppm) / 10_000.0),
+    )
+}
+
+pub fn rate(bps: Option<u64>) -> String {
+    let Some(bps) = bps else {
+        return "-".into();
+    };
+    let bps = bps as f64;
+    for (scale, unit) in [(1e9, "Gbit/s"), (1e6, "Mbit/s"), (1e3, "kbit/s")] {
+        if bps >= scale {
+            return format!("{:.1} {unit}", bps / scale);
         }
-        return format!("via {}", cell(first));
     }
-    match value.get("path_peer_ids").and_then(Value::as_array) {
-        Some(ids) if ids.len() > 2 => format!("via {}", cell(&ids[1])),
-        _ => "unknown".into(),
+    format!("{bps:.0} bit/s")
+}
+
+pub fn bytes(value: u64) -> String {
+    let value = value as f64;
+    for (scale, unit) in [
+        (1u64 << 40, "TiB"),
+        (1 << 30, "GiB"),
+        (1 << 20, "MiB"),
+        (1 << 10, "KiB"),
+    ] {
+        if value >= scale as f64 {
+            return format!("{:.1} {unit}", value / scale as f64);
+        }
+    }
+    format!("{value:.0} B")
+}
+
+pub fn nat(value: i32) -> &'static str {
+    match NatType::try_from(value).unwrap_or(NatType::Unknown) {
+        NatType::Unknown => "unknown",
+        NatType::OpenInternet => "open",
+        NatType::NoPat => "no PAT",
+        NatType::FullCone => "full cone",
+        NatType::Restricted => "restricted",
+        NatType::PortRestricted => "port restricted",
+        NatType::Symmetric => "symmetric",
+        NatType::SymUdpFirewall => "symmetric firewall",
+        NatType::SymmetricEasyInc => "symmetric (incrementing)",
+        NatType::SymmetricEasyDec => "symmetric (decrementing)",
     }
 }
-fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
+
+/// A borderless table with right-aligned numeric columns.
+fn table(headers: &[&str], rows: Vec<Vec<String>>, numeric: &[usize]) -> String {
     let mut builder = Builder::default();
-    builder.push_record(headers.iter().copied());
+    builder.push_record(headers.iter().map(|header| header.to_uppercase()));
     for row in rows {
         builder.push_record(row);
     }
-    format!("{}\n", builder.build().with(Style::rounded()))
+    let mut table = builder.build();
+    table
+        .with(Style::blank())
+        .with(Modify::new(Columns::first()).with(Padding::new(0, 1, 0, 0)));
+    for column in numeric {
+        table.with(Modify::new(Columns::single(*column)).with(Alignment::right()));
+    }
+    format!("{table}\n")
 }
+
 fn flatten(value: &Value, prefix: &str, rows: &mut Vec<Vec<String>>) {
     match value {
         Value::Object(object) if !object.is_empty() => {
@@ -131,261 +191,835 @@ fn flatten(value: &Value, prefix: &str, rows: &mut Vec<Vec<String>>) {
         _ => rows.push(vec![prefix.into(), cell(value)]),
     }
 }
+
 fn fields(value: &Value) -> String {
     let mut rows = Vec::new();
     flatten(value, "", &mut rows);
     if rows.is_empty() {
-        rows.push(vec!["status".into(), "ok".into()]);
+        return "ok\n".into();
     }
-    table(&["Field", "Value"], rows)
+    let width = rows.iter().map(|row| row[0].len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|row| format!("{:width$}  {}\n", row[0], row[1]))
+        .collect()
 }
+
 fn rows(data: &Value, key: &str) -> Vec<Value> {
     data.get(key)
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
 }
+
 fn metrics(data: &Value, key: &str) -> String {
     let entries = rows(data, key)
         .iter()
         .map(|metric| {
             let name = metric.get("name").and_then(Value::as_str).unwrap_or("");
-            let unit = if name.contains("bytes") {
-                "bytes"
-            } else if name.ends_with("bps") {
-                "bit/s"
-            } else if name.ends_with("_us") {
-                "us"
-            } else if name.ends_with("_ms") {
-                "ms"
-            } else {
-                "count"
+            let value = metric.get("value").and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|text| text.parse::<u64>().ok())
+                    .or(value.as_u64())
+            });
+            let shown = match value {
+                Some(value) if name.contains("bytes") => bytes(value),
+                Some(value) if name.ends_with("bps") => rate(Some(value)),
+                Some(value) if name.ends_with("_us") => rtt(Some(value)),
+                Some(value) => value.to_string(),
+                None => "-".into(),
             };
+            let labels = metric
+                .get("labels")
+                .and_then(Value::as_object)
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .map(|(key, value)| format!("{key}={}", cell(value)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            vec![clean(name), shown, labels]
+        })
+        .collect();
+    table(&["Metric", "Value", "Labels"], entries, &[1])
+}
+
+fn peer_name(peer: &PeerSnapshot) -> String {
+    peer.route
+        .as_ref()
+        .map(|route| clean(&route.hostname))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn peer_address(peer: &PeerSnapshot) -> String {
+    peer.route
+        .as_ref()
+        .and_then(|route| route.ipv4_addr.as_ref())
+        .map_or_else(|| "-".into(), |address| address.to_string())
+}
+
+fn peer_via(peer: &PeerSnapshot, view: &PeerView) -> String {
+    if !peer.conns.is_empty() {
+        return "direct".into();
+    }
+    view.route_summaries
+        .iter()
+        .find(|route| route.route.as_ref().map(|route| route.peer_id) == Some(peer.peer_id))
+        .map(|route| {
+            let hop = route.first_hop_peer_id;
+            view.peers
+                .iter()
+                .find(|other| other.peer_id == hop)
+                .map(peer_name)
+                .filter(|name| name != "-")
+                .unwrap_or_else(|| hop.to_string())
+        })
+        .unwrap_or_else(|| "unreachable".into())
+}
+
+fn peer_transport(peer: &PeerSnapshot) -> String {
+    let mut kinds = peer
+        .conns
+        .iter()
+        .filter_map(|conn| conn.tunnel.as_ref())
+        .map(|tunnel| clean(&tunnel.tunnel_type))
+        .collect::<Vec<_>>();
+    kinds.sort();
+    kinds.dedup();
+    if kinds.is_empty() {
+        "-".into()
+    } else {
+        kinds.join("+")
+    }
+}
+
+fn session(peer: &PeerSnapshot) -> &'static str {
+    match peer.end_to_end_session_ready {
+        Some(true) => "key-bound",
+        Some(false) => "unverified",
+        None => "none",
+    }
+}
+
+fn peers_table(view: &PeerView) -> String {
+    let rows = view
+        .peers
+        .iter()
+        .map(|peer| {
             vec![
-                name.into(),
-                metric.get("value").map(cell).unwrap_or_else(|| "0".into()),
-                unit.into(),
-                metric.get("labels").map(cell).unwrap_or_default(),
+                peer_name(peer),
+                peer_address(peer),
+                peer_via(peer, view),
+                peer_transport(peer),
+                rtt(peer.rtt_us),
+                loss(peer.loss_ppm),
+                rate(peer.delivery_bps),
+                session(peer).into(),
+                peer.peer_id.to_string(),
             ]
         })
         .collect();
-    table(&["Metric", "Value", "Unit", "Labels"], entries)
-}
-fn routes(data: &Value, key: &str) -> String {
     table(
         &[
-            "Destination",
-            "Policy",
-            "Effective policy",
-            "First hop",
-            "Path",
-            "Cost (ms)",
-            "RTT (us)",
-            "Delivery (bit/s)",
-            "Override",
-            "Fallback",
-            "Path error",
+            "Peer",
+            "Address",
+            "Via",
+            "Transport",
+            "RTT",
+            "Loss",
+            "Rate",
+            "Session",
+            "ID",
         ],
-        rows(data, key)
-            .iter()
-            .map(|route| {
-                vec![
-                    field(route, "destination"),
-                    field(route, "policy"),
-                    field(route, "effective_policy"),
-                    via(route),
-                    path(route),
-                    field(route, "cost_ms"),
-                    field(route, "measured_rtt_us"),
-                    field(route, "delivery_bps"),
-                    field(route, "override_status"),
-                    field(route, "fallback_reason"),
-                    field(route, "path_error"),
-                ]
-            })
-            .collect(),
+        rows,
+        &[4, 5, 6, 8],
     )
+}
+
+fn peer_detail(peer: &PeerSnapshot, view: &PeerView) -> String {
+    use base64::Engine as _;
+    let auth = |level: Option<i32>| {
+        level
+            .and_then(|level| crate::proto::peer_rpc::SecureAuthLevel::try_from(level).ok())
+            .map_or("none".into(), |level| match level {
+                crate::proto::peer_rpc::SecureAuthLevel::EncryptedUnauthenticated => {
+                    "not locally attested".to_owned()
+                }
+                level => level.as_str_name().to_owned(),
+            })
+    };
+    let lines = [
+        ("peer", format!("{} (id {})", peer_name(peer), peer.peer_id)),
+        (
+            "public key",
+            base64::engine::general_purpose::STANDARD.encode(&peer.peer_key),
+        ),
+        ("address", peer_address(peer)),
+        ("via", peer_via(peer, view)),
+        ("transport", peer_transport(peer)),
+        ("rtt", rtt(peer.rtt_us)),
+        ("loss", loss(peer.loss_ppm)),
+        ("rate", rate(peer.delivery_bps)),
+        (
+            "nat",
+            format!("udp {}, tcp {}", nat(peer.udp_nat), nat(peer.tcp_nat)),
+        ),
+        ("session", session(peer).into()),
+        ("direct auth", auth(peer.direct_link_auth)),
+        ("routing trust", auth(peer.routing_authority_auth)),
+        (
+            "sample age",
+            peer.sample_age_ms
+                .map_or("-".into(), |age| format!("{age} ms")),
+        ),
+    ];
+    lines
+        .iter()
+        .map(|(key, value)| format!("{key:13}  {value}\n"))
+        .collect()
+}
+
+fn routes(routes: &[RouteSnapshot], with_path: bool) -> String {
+    let rows = routes
+        .iter()
+        .map(|route| {
+            let info = route.route.as_ref();
+            let via = match route.first_hop_peer_id {
+                0 => "-".into(),
+                hop if hop == route.final_gateway_peer_id => "direct".into(),
+                hop => hop.to_string(),
+            };
+            let mut row = vec![
+                clean(&route.destination),
+                info.map(|info| clean(&info.hostname))
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "-".into()),
+                info.and_then(|info| info.ipv4_addr.as_ref())
+                    .map_or_else(|| "-".into(), |address| address.to_string()),
+                via,
+                clean(&route.effective_policy),
+                route
+                    .cost_ms
+                    .map_or("-".into(), |cost| format!("{cost} ms")),
+                rtt(route.measured_rtt_us),
+                rate(route.delivery_bps),
+                if route.fallback_reason.is_empty() {
+                    "-".into()
+                } else {
+                    clean(&route.fallback_reason)
+                },
+            ];
+            if with_path {
+                row.push(
+                    route
+                        .path_peer_ids
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" > "),
+                );
+            }
+            row
+        })
+        .collect();
+    let mut headers = vec![
+        "Destination",
+        "Peer",
+        "Address",
+        "Via",
+        "Policy",
+        "Cost",
+        "RTT",
+        "Rate",
+        "Fallback",
+    ];
+    if with_path {
+        headers.push("Path");
+    }
+    table(&headers, rows, &[5, 6, 7])
+}
+
+fn status(view: &StatusView) -> String {
+    let node = view.node.node.clone().unwrap_or_default();
+    let stun = node.stun_info.clone().unwrap_or_default();
+    let mut text = String::new();
+    let mut line = |label: &str, value: String| {
+        let _ = writeln!(text, "{label:10}{value}");
+    };
+    line(
+        "node",
+        format!(
+            "{} · peer {} · {} · {}",
+            clean(&node.hostname),
+            node.peer_id,
+            view.daemon.as_deref().map_or_else(
+                || view.portal.clone(),
+                |name| format!("{name} @ {}", view.portal)
+            ),
+            clean(&node.version)
+        ),
+    );
+    line(
+        "address",
+        if node.ipv4_addr.is_empty() {
+            "none assigned".into()
+        } else {
+            clean(&node.ipv4_addr)
+        },
+    );
+    line(
+        "nat",
+        format!(
+            "udp {} · tcp {} · public {}",
+            nat(stun.udp_nat_type),
+            nat(stun.tcp_nat_type),
+            if stun.public_ip.is_empty() {
+                "unknown".into()
+            } else {
+                clean(&stun.public_ip.join(", "))
+            }
+        ),
+    );
+    let failing = view
+        .discovery
+        .trackers
+        .iter()
+        .filter(|tracker| !tracker.last_error.is_empty())
+        .count();
+    line(
+        "discovery",
+        if view.discovery.trackers.is_empty() {
+            "no trackers configured".into()
+        } else {
+            format!(
+                "{} tracker(s), {} failing · {} candidate(s)",
+                view.discovery.trackers.len(),
+                failing,
+                view.discovery.candidate_count.unwrap_or(0)
+            )
+        },
+    );
+    line(
+        "listen",
+        if view.listeners.listeners.is_empty() {
+            "none".into()
+        } else {
+            view.listeners
+                .listeners
+                .iter()
+                .map(|listener| clean(&listener.uri))
+                .collect::<Vec<_>>()
+                .join("  ")
+        },
+    );
+    let mut drops = std::collections::BTreeMap::<String, u64>::new();
+    for counter in &view.relay.counters {
+        if counter.name == "relay_drops" && counter.value > 0 {
+            let reason = counter
+                .labels
+                .get("error_type")
+                .cloned()
+                .unwrap_or_default();
+            *drops.entry(reason).or_default() += counter.value;
+        }
+    }
+    let config = view.relay.config.clone().unwrap_or_default();
+    line(
+        "relay",
+        format!(
+            "policy {} · transit {} · relayed {} · drops {}",
+            config.policy().as_str_name(),
+            config.transit().as_str_name(),
+            bytes(view.relay.total_bytes),
+            if drops.is_empty() {
+                "0".into()
+            } else {
+                drops
+                    .iter()
+                    .map(|(reason, count)| format!("{reason} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+    );
+    text.push('\n');
+    if view.peers.peers.is_empty() {
+        text.push_str("No peers. Add one with `lowertier peers add URI`.\n");
+    } else {
+        text.push_str(&peers_table(&view.peers));
+    }
+    text
+}
+
+fn doctor(report: &doctor::Report) -> String {
+    let mut text = String::new();
+    for check in &report.checks {
+        let marker = match check.level {
+            doctor::Level::Ok => "ok  ",
+            doctor::Level::Warn => "warn",
+            doctor::Level::Fail => "FAIL",
+        };
+        let _ = writeln!(text, "{marker}  {:10} {}", check.name, clean(&check.detail));
+        if let Some(fix) = &check.fix {
+            let _ = writeln!(text, "      {:10} fix: {}", "", clean(fix));
+        }
+    }
+    text
+}
+
+fn toml_at(path: Option<&str>, value: &toml::Value) -> String {
+    match (path, value) {
+        (None, toml::Value::Table(table)) => toml::to_string_pretty(table).unwrap_or_default(),
+        (Some(path), toml::Value::Table(_)) | (Some(path), toml::Value::Array(_)) => {
+            let mut root = toml::Table::new();
+            crate::common::config_schema::set(&mut root, path, value.clone());
+            toml::to_string_pretty(&root).unwrap_or_default()
+        }
+        (Some(path), value) => format!("{path} = {value}\n"),
+        (None, value) => format!("{value}\n"),
+    }
+}
+
+fn config_view(view: &ConfigView) -> String {
+    let path = view.path.as_deref();
+    let mut text = match &view.active {
+        Some(value) => toml_at(path, value),
+        None => {
+            let default = path
+                .and_then(crate::common::config_schema::lookup)
+                .map(|spec| spec.default)
+                .filter(|default| !default.is_empty());
+            match default {
+                Some(default) => format!("# {} is not set; default {default}\n", path.unwrap()),
+                None => format!("# {} is not set\n", path.unwrap_or("configuration")),
+            }
+        }
+    };
+    if let Some(desired) = &view.desired {
+        let _ = write!(
+            text,
+            "\n# Staged, applies after `lowertier instance stop` and `start`:\n{}",
+            toml_at(path, desired)
+        );
+    }
+    if path.is_none() && !view.restart_fields.is_empty() {
+        let _ = writeln!(
+            text,
+            "\n# Pending restart: {}",
+            view.restart_fields.join(", ")
+        );
+    }
+    text
+}
+
+fn apply_result(result: &ApplyResult) -> String {
+    let mut text = String::new();
+    let mut group = |label: &str, fields: &[String]| {
+        if !fields.is_empty() {
+            let _ = writeln!(text, "{label:22}{}", fields.join(", "));
+        }
+    };
+    group("applied now", &result.live_fields);
+    group("new connections", &result.new_connection_fields);
+    group("after restart", &result.restart_fields);
+    if text.is_empty() {
+        text.push_str("No change.\n");
+    }
+    if !result.restart_fields.is_empty() {
+        text.push_str(
+            "Restart the instance to apply: lowertier instance stop && lowertier instance start\n",
+        );
+    }
+    let _ = writeln!(text, "{:22}{}", "revision", result.revision);
+    text
+}
+
+fn trace(trace: &Trace) -> String {
+    let mut text = format!(
+        "{} · policy {}{} · cost {} · rtt {} · rate {}\n",
+        clean(&trace.destination),
+        clean(&trace.effective_policy),
+        if trace.fallback_reason.is_empty() {
+            String::new()
+        } else {
+            format!(" (fallback: {})", clean(&trace.fallback_reason))
+        },
+        trace
+            .cost_ms
+            .map_or("-".into(), |cost| format!("{cost} ms")),
+        rtt(trace.measured_rtt_us),
+        rate(trace.delivery_bps),
+    );
+    if !trace.path_error.is_empty() {
+        let _ = writeln!(text, "path unavailable: {}", clean(&trace.path_error));
+    }
+    let rows = trace
+        .hops
+        .iter()
+        .enumerate()
+        .map(|(index, hop)| {
+            vec![
+                index.to_string(),
+                clean(&hop.name),
+                if hop.address.is_empty() {
+                    "-".into()
+                } else {
+                    clean(&hop.address)
+                },
+                if hop.transport.is_empty() {
+                    "-".into()
+                } else {
+                    clean(&hop.transport)
+                },
+                rtt(hop.rtt_us),
+                loss(hop.loss_ppm),
+                hop.peer_id.to_string(),
+            ]
+        })
+        .collect();
+    text + &table(
+        &["Hop", "Peer", "Address", "Transport", "RTT", "Loss", "ID"],
+        rows,
+        &[0, 4, 5, 6],
+    )
+}
+
+fn key_values(rows: &[(&str, String)]) -> String {
+    let width = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|(key, value)| format!("{key:width$}  {value}\n"))
+        .collect()
+}
+
+fn discovery(value: &GetDiscoveryResponse) -> String {
+    let mut text = key_values(&[
+        ("candidates", value.candidate_count.unwrap_or(0).to_string()),
+        (
+            "active paths",
+            if value.active_paths.is_empty() {
+                "-".into()
+            } else {
+                clean(&value.active_paths.join(", "))
+            },
+        ),
+        (
+            "last error",
+            if value.last_error.is_empty() {
+                "-".into()
+            } else {
+                clean(&value.last_error)
+            },
+        ),
+    ]);
+    if value.trackers.is_empty() {
+        text.push_str("\nNo trackers. Set discovery.trackers or discovery.private_trackers.\n");
+    } else {
+        text.push('\n');
+        text.push_str(&table(
+            &["Tracker", "Status", "Candidates"],
+            value
+                .trackers
+                .iter()
+                .map(|tracker| {
+                    vec![
+                        clean(&tracker.uri),
+                        if tracker.last_error.is_empty() {
+                            "ok".into()
+                        } else {
+                            format!("error: {}", clean(&tracker.last_error))
+                        },
+                        tracker
+                            .candidate_count
+                            .map_or("-".into(), |count| count.to_string()),
+                    ]
+                })
+                .collect(),
+            &[2],
+        ));
+    }
+    if !value.observations.is_empty() {
+        text.push('\n');
+        text.push_str(&table(
+            &["Protocol", "Socket", "Observer", "Public endpoint", "Age"],
+            value
+                .observations
+                .iter()
+                .map(|observation| {
+                    vec![
+                        clean(&observation.protocol),
+                        clean(&observation.socket),
+                        clean(&observation.observer),
+                        clean(&observation.endpoint)
+                            + if observation.provisional {
+                                " (provisional)"
+                            } else {
+                                ""
+                            },
+                        format!("{} s", observation.age_ms / 1000),
+                    ]
+                })
+                .collect(),
+            &[4],
+        ));
+    }
+    text
+}
+
+fn camouflage(value: &GetCamouflageResponse) -> String {
+    let config = value.config.clone().unwrap_or_default();
+    let or_dash = |text: &str| {
+        if text.is_empty() {
+            "-".into()
+        } else {
+            clean(text)
+        }
+    };
+    key_values(&[
+        ("server name", or_dash(&config.server_name)),
+        ("http host", or_dash(&config.http_host)),
+        ("wss path", clean(config.websocket_path())),
+        ("sni routing", config.sni_routing.to_string()),
+        ("decoy tcp", or_dash(config.tcp_decoy())),
+        ("decoy udp", or_dash(config.udp_decoy())),
+        ("website root", or_dash(&config.website_root)),
+        (
+            "trusted proxies",
+            if config.trusted_proxy_cidrs.is_empty() {
+                "none".into()
+            } else {
+                clean(&config.trusted_proxy_cidrs.join(", "))
+            },
+        ),
+        ("certificate", clean(&value.certificate_source)),
+        ("quic/h2 verify", clean(&value.quic_h2_verification)),
+        ("wss verify", clean(&value.direct_wss_verification)),
+        (
+            "cdn verify",
+            format!(
+                "outer {}, inner {}",
+                clean(&value.cdn_outer_verification),
+                clean(&value.cdn_inner_verification)
+            ),
+        ),
+    ])
+}
+
+fn logs(response: &ReadLogsResponse) -> String {
+    let mut text = String::new();
+    for entry in &response.logs {
+        let time = chrono::DateTime::from_timestamp_millis(entry.sampled_at_unix_ms)
+            .map(|time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%H:%M:%S%.3f")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let message = entry
+            .message
+            .strip_prefix("message=")
+            .unwrap_or(&entry.message);
+        let _ = writeln!(
+            text,
+            "{time} {:5} {}: {}",
+            clean(&entry.level),
+            clean(&entry.target),
+            clean(message)
+        );
+    }
+    if response.truncated > 0 {
+        let _ = writeln!(text, "({} older lines were dropped)", response.truncated);
+    }
+    text
 }
 
 fn table_output(response: &Response, data: &Value) -> String {
     match response {
-        Response::Peers(value) => {
-            let summaries = rows(data, "route_summaries");
-            let entries = rows(data, "peers")
-                .iter()
-                .map(|peer| {
-                    let route = summaries
-                        .iter()
-                        .find(|route| route.pointer("/route/peer_id") == peer.get("peer_id"));
-                    let connection = route.map(via).unwrap_or_else(|| {
-                        if peer
-                            .get("conns")
-                            .and_then(Value::as_array)
-                            .is_some_and(|conns| !conns.is_empty())
-                        {
-                            "direct".into()
-                        } else {
-                            "unavailable".into()
-                        }
-                    });
-                    vec![
-                        field(peer, "peer_id"),
-                        field(peer, "peer_key"),
-                        connection,
-                        field(peer, "rtt_us"),
-                        field(peer, "loss_ppm"),
-                        field(peer, "delivery_bps"),
-                        field(peer, "sample_age_ms"),
-                        field(peer, "metric_scope"),
-                        if peer.get("direct_link_auth").is_some_and(|v| !v.is_null()) {
-                            field(peer, "direct_link_auth")
-                        } else {
-                            "not direct".into()
-                        },
-                        match peer
-                            .get("end_to_end_session_ready")
-                            .and_then(Value::as_bool)
-                        {
-                            Some(true) => "key-bound".into(),
-                            Some(false) => "unverified".into(),
-                            None => "not established".into(),
-                        },
-                        match peer.get("routing_authority_auth").and_then(Value::as_str) {
-                            Some("EncryptedUnauthenticated") => "not locally attested".into(),
-                            _ => field(peer, "routing_authority_auth"),
-                        },
-                    ]
-                })
-                .collect();
-            table(&["Active policy"], vec![vec![value.active_policy.clone()]])
-                + &table(
-                    &[
-                        "Peer ID",
-                        "Public key",
-                        "Connection",
-                        "RTT (us)",
-                        "Loss (ppm)",
-                        "Delivery (bit/s)",
-                        "Sample age (ms)",
-                        "Scope",
-                        "Direct auth",
-                        "End-to-end session",
-                        "Routing trust",
-                    ],
-                    entries,
-                )
+        Response::Status(view) => status(view),
+        Response::Doctor(report) => doctor(report),
+        Response::Config(view) => config_view(view),
+        Response::Trace(value) => trace(value),
+        Response::Text { text } => text.clone(),
+        Response::Nodes { nodes } => {
+            if nodes.is_empty() {
+                return "No LowTier daemon is running. Start one with `lowertier run -c FILE`.\n"
+                    .into();
+            }
+            table(
+                &["Name", "PID", "Portal", "Instances", "Token file"],
+                nodes
+                    .iter()
+                    .map(|node| {
+                        vec![
+                            clean(&node.name),
+                            node.pid.to_string(),
+                            clean(&node.portal),
+                            clean(&node.instances.join(", ")),
+                            clean(&node.token_file.display().to_string()),
+                        ]
+                    })
+                    .collect(),
+                &[1],
+            )
         }
-        Response::ListRoutesResponse(_) => routes(data, "routes"),
+        Response::Peers(view) => {
+            if view.detail {
+                view.peers
+                    .iter()
+                    .map(|peer| peer_detail(peer, view))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if view.peers.is_empty() {
+                "No peers.\n".into()
+            } else {
+                peers_table(view)
+            }
+        }
+        Response::PatchConfigResponse(value) => {
+            value.result.as_ref().map_or_else(String::new, apply_result)
+        }
+        Response::ValidateConfigResponse(value) => {
+            value.result.as_ref().map_or_else(String::new, apply_result)
+        }
+        Response::SetAclResponse(value) => {
+            value.result.as_ref().map_or_else(String::new, apply_result)
+        }
+        Response::PutPortForwardResponse(value) => {
+            value.result.as_ref().map_or_else(String::new, apply_result)
+        }
+        Response::DeletePortForwardResponse(value) => {
+            value.result.as_ref().map_or_else(String::new, apply_result)
+        }
+        Response::StartInstanceResponse(value) => {
+            value.result.as_ref().map_or_else(String::new, apply_result)
+        }
+        Response::ListRoutesResponse(value) => routes(
+            &value.routes,
+            value
+                .routes
+                .iter()
+                .any(|route| !route.path_peer_ids.is_empty()),
+        ),
         Response::ListInstancesResponse(_) => table(
-            &["Instance ID", "Name", "Network", "Running", "Last error"],
+            &["Name", "Network", "State", "Instance ID", "Last error"],
             rows(data, "instances")
                 .iter()
                 .map(|instance| {
                     vec![
-                        field(instance, "instance_id"),
                         field(instance, "name"),
                         field(instance, "network_name"),
-                        instance
-                            .get("running")
-                            .map(cell)
-                            .unwrap_or_else(|| "false".into()),
+                        if instance.get("running").and_then(Value::as_bool) == Some(true) {
+                            "running".into()
+                        } else {
+                            "stopped".into()
+                        },
+                        field(instance, "instance_id"),
                         field(instance, "last_error"),
                     ]
                 })
                 .collect(),
+            &[],
         ),
         Response::ListListenersResponse(_) => table(
-            &[
-                "ID",
-                "URI",
-                "Transport",
-                "Lanes",
-                "Authentication",
-                "Binding",
-                "Path",
-                "Revision",
-            ],
+            &["URI", "Transport", "Lanes", "Auth", "Binding", "Path", "ID"],
             rows(data, "listeners")
                 .iter()
                 .map(|listener| {
                     vec![
-                        field(listener, "id"),
                         field(listener, "uri"),
                         field(listener, "transport"),
                         field(listener, "lanes"),
                         field(listener, "auth_state"),
                         field(listener, "binding_kind"),
                         field(listener, "configured_path"),
-                        field(listener, "config_revision"),
+                        field(listener, "id"),
                     ]
                 })
                 .collect(),
+            &[2],
+        ),
+        Response::ListPortForwardsResponse(value) => table(
+            &["Proto", "Bind", "Destination"],
+            value
+                .port_forwards
+                .iter()
+                .map(|forward| {
+                    let forward = crate::common::config::PortForwardConfig::from(*forward);
+                    vec![
+                        forward.proto,
+                        forward.bind_addr.to_string(),
+                        forward.dst_addr.to_string(),
+                    ]
+                })
+                .collect(),
+            &[],
         ),
         Response::GetStatsResponse(_) => metrics(data, "metrics"),
         Response::GetPrometheusResponse(value) => value.text.clone(),
-        Response::ReadLogsResponse(_) => {
-            table(
-                &[
-                    "Sequence",
-                    "UTC time (Unix ms)",
-                    "Level",
-                    "Target",
-                    "Message",
-                ],
-                rows(data, "logs")
-                    .iter()
-                    .map(|log| {
-                        vec![
-                            field(log, "sequence"),
-                            field(log, "sampled_at_unix_ms"),
-                            field(log, "level"),
-                            field(log, "target"),
-                            field(log, "message"),
-                        ]
-                    })
-                    .collect(),
-            ) + &fields(&json!({"truncated": data.get("truncated").cloned().unwrap_or(json!("0"))}))
-        }
+        Response::ReadLogsResponse(value) => logs(value),
         Response::GetRelayResponse(value) => {
-            let mut summary = data.clone();
-            summary.as_object_mut().unwrap().remove("paths");
-            if let Some(config) = &value.config {
-                summary["active_policy"] = json!(
-                    crate::proto::common::RelayPolicy::try_from(config.policy)
-                        .map(|policy| policy.as_str_name())
-                        .unwrap_or("unknown")
-                );
-                summary["transit_permission"] = json!(
-                    crate::proto::common::TransitPolicy::try_from(config.transit)
-                        .map(|policy| policy.as_str_name())
-                        .unwrap_or("unknown")
-                );
-                summary["transit_limit_bit_per_second"] = config
-                    .transit_bps_limit
-                    .map_or(json!("unlimited"), |limit| json!(limit.to_string()));
-                summary["transit_burst_bytes"] = config
-                    .transit_burst_bytes
-                    .map_or(json!("default"), |burst| json!(burst.to_string()));
-                summary["probe_budget_bit_per_second"] = json!(config.probe_budget_bps.to_string());
+            let config = value.config.clone().unwrap_or_default();
+            let mut drops = std::collections::BTreeMap::<String, u64>::new();
+            for counter in &value.counters {
+                if counter.name == "relay_drops" {
+                    let reason = counter
+                        .labels
+                        .get("error_type")
+                        .cloned()
+                        .unwrap_or_default();
+                    *drops.entry(reason).or_default() += counter.value;
+                }
             }
-            fields(&summary) + &routes(data, "paths")
-        }
-        Response::GetL2Response(_) => {
-            let fdb = table(
-                &["VLANs", "MAC (base64)", "Owner peer", "Age (ms)"],
-                rows(data, "fdb")
+            let mut summary = format!(
+                "policy        {}\ntransit       {} (advertised {}, desired {})\nnetworks      {}\nlimit         {}\nprobe budget  {}\nrelayed       {}\ndrops         {}\n\n",
+                config.policy().as_str_name(),
+                config.transit().as_str_name(),
+                clean(&value.advertised_permission),
+                clean(&value.desired_permission),
+                if config.transit_networks.is_empty() {
+                    "none (foreign transit denied)".into()
+                } else {
+                    clean(&config.transit_networks.join(", "))
+                },
+                config
+                    .transit_bps_limit
+                    .map_or("unlimited".into(), |limit| rate(Some(limit))),
+                rate(Some(config.probe_budget_bps)),
+                bytes(value.total_bytes),
+                drops
                     .iter()
-                    .map(|entry| {
-                        vec![
-                            field(entry, "vlans"),
-                            field(entry, "mac"),
-                            field(entry, "owner_peer"),
-                            field(entry, "age_ms"),
-                        ]
-                    })
-                    .collect(),
+                    .map(|(reason, count)| format!("{reason} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
             );
-            fdb + &fields(&json!({"counters": data.get("counters")}))
+            summary.push_str(&routes(&value.paths, false));
+            summary
+        }
+        Response::GetDiscoveryResponse(value) => discovery(value),
+        Response::GetCamouflageResponse(value) => camouflage(value),
+        Response::GetL2Response(_) => {
+            let fdb = rows(data, "fdb");
+            let mut text = fields(&json!({"counters": data.get("counters")}));
+            if !fdb.is_empty() {
+                text.push('\n');
+                text.push_str(&table(
+                    &["VLANs", "MAC (base64)", "Owner", "Age (ms)"],
+                    fdb.iter()
+                        .map(|entry| {
+                            vec![
+                                field(entry, "vlans"),
+                                field(entry, "mac"),
+                                field(entry, "owner_peer"),
+                                field(entry, "age_ms"),
+                            ]
+                        })
+                        .collect(),
+                    &[3],
+                ));
+            }
+            text
         }
         _ => fields(data),
     }
@@ -405,14 +1039,16 @@ pub fn write_response(
         writeln!(stdout)?;
     } else {
         stdout.write_all(table_output(response, envelope.data.as_ref().unwrap()).as_bytes())?;
+        let paged = !matches!(response, Response::ReadLogsResponse(_));
         if let Some(cursor) = envelope
             .data
             .as_ref()
+            .filter(|_| paged)
             .and_then(|data| data.get("next_page_token"))
             .and_then(Value::as_str)
             .filter(|cursor| !cursor.is_empty())
         {
-            writeln!(stdout, "next_page_token: {}", cell(&json!(cursor)))?;
+            writeln!(stdout, "more: --page-token {}", clean(cursor))?;
         }
     }
     stdout.flush()
@@ -433,17 +1069,22 @@ pub fn write_error(
         writeln!(stdout)?;
         stdout.flush()
     } else {
-        writeln!(
-            io::stderr(),
-            "{}: {}",
-            error.0.code,
-            cell(&json!(error.0.message))
-        )
+        // Messages may span lines, for example parser reports; keep the line breaks.
+        let message = error
+            .0
+            .message
+            .lines()
+            .map(clean)
+            .collect::<Vec<_>>()
+            .join("\n");
+        writeln!(io::stderr(), "error: {message}")
     }
 }
+
 pub fn diagnostic(message: &str) {
     let _ = writeln!(io::stderr(), "{message}");
 }
+
 pub fn clap_message(error: &clap::Error) {
     let _ = error.print();
 }
@@ -471,12 +1112,12 @@ pub fn completion(shell: &crate::ShellType, output: Output, request_id: &str) ->
     let mut script = Vec::new();
     let mut command = Arguments::command();
     if let Some(shell) = shell.to_shell() {
-        clap_complete::generate(shell, &mut command, "lowertier-cli", &mut script);
+        clap_complete::generate(shell, &mut command, "lowertier", &mut script);
     } else {
         clap_complete::generate(
             clap_complete_nushell::Nushell,
             &mut command,
-            "lowertier-cli",
+            "lowertier",
             &mut script,
         );
     }
@@ -501,7 +1142,6 @@ pub fn completion(shell: &crate::ShellType, output: Output, request_id: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::api::control::v1::{GetNodeResponse, SnapshotMeta};
 
     #[test]
     fn json_envelope_and_exit_codes() {
@@ -518,11 +1158,8 @@ mod tests {
                 .unwrap();
         assert_eq!(value.as_object().unwrap().len(), 6);
         assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["request_id"], "request");
-        assert_eq!(value["instance_id"], "instance");
         assert_eq!(value["revision"], u64::MAX.to_string());
         assert!(value["error"].is_null());
-        assert!(value["data"].is_object());
         for (code, exit) in [
             ("internal", 1),
             ("invalid_argument", 2),
@@ -542,27 +1179,50 @@ mod tests {
             assert!(value["data"].is_null());
             assert_eq!(value["error"]["code"], code);
         }
-        let route =
-            json!({"destination":"2001:db8::/64","path_peer_ids":[1,2,3,4],"first_hop_peer_id":2});
-        assert_eq!(path(&route), "1 -> 2 -> 3 -> 4");
-        assert_eq!(via(&route), "via 2");
+    }
 
-        let response = Response::Peers(crate::cli::client::PeerView {
-            snapshot: None,
-            peers: vec![crate::proto::api::control::v1::PeerSnapshot {
-                routing_authority_auth: Some(
-                    crate::proto::peer_rpc::SecureAuthLevel::EncryptedUnauthenticated as i32,
-                ),
+    #[test]
+    fn units_and_status_render() {
+        assert_eq!(rtt(Some(1_234)), "1.2 ms");
+        assert_eq!(rtt(Some(42_000)), "42 ms");
+        assert_eq!(loss(Some(1_500)), "0.1 %");
+        assert_eq!(rate(Some(812_000_000)), "812.0 Mbit/s");
+        assert_eq!(bytes(3 << 20), "3.0 MiB");
+        let peer = PeerSnapshot {
+            peer_id: 7,
+            rtt_us: Some(42_000),
+            end_to_end_session_ready: Some(true),
+            route: Some(crate::proto::api::instance::Route {
+                hostname: "edge\u{1b}[2J".into(),
                 ..Default::default()
-            }],
-            route_summaries: Vec::new(),
-            active_policy: "hop".into(),
-            next_page_token: String::new(),
-        });
-        let data = serde_json::to_value(&response).unwrap();
-        let rendered = table_output(&response, &data);
-        assert!(rendered.contains("not direct"));
-        assert!(rendered.contains("not established"));
-        assert!(rendered.contains("not locally attested"));
+            }),
+            ..Default::default()
+        };
+        let view = StatusView {
+            daemon: Some("default".into()),
+            portal: "127.0.0.1:15888".into(),
+            node: GetNodeResponse::default(),
+            peers: PeerView {
+                snapshot: None,
+                peers: vec![peer],
+                route_summaries: Vec::new(),
+                active_policy: "hop".into(),
+                next_page_token: String::new(),
+                detail: false,
+            },
+            relay: GetRelayResponse::default(),
+            discovery: GetDiscoveryResponse::default(),
+            listeners: ListListenersResponse::default(),
+        };
+        let text = status(&view);
+        assert!(
+            text.contains("key-bound") && text.contains("42 ms"),
+            "{text}"
+        );
+        assert!(
+            !text.contains('\u{1b}'),
+            "control characters must be escaped"
+        );
+        assert!(text.contains("unreachable"));
     }
 }

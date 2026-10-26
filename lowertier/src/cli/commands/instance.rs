@@ -24,7 +24,15 @@ pub async fn execute(client: &Client, command: &InstanceCommand) -> Result<Respo
                     client.controller(),
                     CreateInstanceRequest {
                         meta: client.meta(),
-                        config: Some(super::config::read_json(file)?),
+                        config: Some(NodeConfig {
+                            toml: std::fs::read_to_string(file).map_err(|error| {
+                                super::super::error::CliError::new(
+                                    "invalid_argument",
+                                    format!("Cannot read {}: {error}", file.display()),
+                                    "file",
+                                )
+                            })?,
+                        }),
                     },
                 )
                 .await?,

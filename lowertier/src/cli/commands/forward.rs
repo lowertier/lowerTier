@@ -1,12 +1,13 @@
 use super::super::{
-    args::PortForwardCommand,
+    args::ForwardCommand,
     client::{Client, Response, checked},
     error::Result,
 };
 use crate::proto::api::control::v1::*;
-pub async fn execute(client: &Client, command: &PortForwardCommand) -> Result<Response> {
+
+pub async fn execute(client: &Client, command: Option<&ForwardCommand>) -> Result<Response> {
     match command {
-        PortForwardCommand::List => checked(
+        None | Some(ForwardCommand::List) => checked(
             client
                 .rpc
                 .list_port_forwards(
@@ -17,12 +18,12 @@ pub async fn execute(client: &Client, command: &PortForwardCommand) -> Result<Re
                 )
                 .await?,
         ),
-        PortForwardCommand::Add {
-            protocol,
-            bind_addr,
-            dst_addr,
+        Some(ForwardCommand::Add {
+            proto,
+            bind,
+            dest,
             apply,
-        } => checked(
+        }) => checked(
             client
                 .rpc
                 .put_port_forward(
@@ -31,21 +32,17 @@ pub async fn execute(client: &Client, command: &PortForwardCommand) -> Result<Re
                         meta: client.meta(),
                         expected_revision: client.revision(apply.expected_revision).await?,
                         port_forward: Some(ForwardConfig {
-                            bind_addr: bind_addr.clone(),
-                            dst_addr: dst_addr.clone(),
-                            proto: protocol.clone(),
+                            bind: bind.clone(),
+                            dest: dest.clone(),
+                            proto: proto.clone(),
                         }),
-                        persist: apply.persist,
+                        persist: !apply.no_persist,
                         stage: apply.stage,
                     },
                 )
                 .await?,
         ),
-        PortForwardCommand::Remove {
-            protocol,
-            bind_addr,
-            apply,
-        } => checked(
+        Some(ForwardCommand::Rm { proto, bind, apply }) => checked(
             client
                 .rpc
                 .delete_port_forward(
@@ -53,9 +50,9 @@ pub async fn execute(client: &Client, command: &PortForwardCommand) -> Result<Re
                     DeletePortForwardRequest {
                         meta: client.meta(),
                         expected_revision: client.revision(apply.expected_revision).await?,
-                        bind_addr: bind_addr.clone(),
-                        proto: protocol.clone(),
-                        persist: apply.persist,
+                        bind: bind.clone(),
+                        proto: proto.clone(),
+                        persist: !apply.no_persist,
                         stage: apply.stage,
                     },
                 )
