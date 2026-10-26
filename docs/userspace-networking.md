@@ -60,7 +60,21 @@ It uses the same peer, subnet, exit, service, and blackhole routes as packet for
 The userspace overlay target path currently supports IPv4 destinations.
 One SOCKS5 UDP association can use at most 256 active targets.
 
-Each userspace TCP socket starts with an 8 KiB receive buffer and an 8 KiB transmit buffer.
+For an eligible direct QUIC connection, TCP proxy traffic uses an HTTP/3 CONNECT
+stream on the existing authenticated connection. Both peers must advertise the
+stream capability in the authenticated Noise admission transcript. The receiver
+checks the source peer, destination address, and protected local ports before
+opening the destination socket. Each connection retains bounded send/receive
+storage and uses QUIC flow control and reliable delivery; it does not create a
+second TCP stack for that stream.
+
+This path currently applies when the local peer initiated QUIC, the destination
+is the remote userspace peer's own IPv4 address, and neither endpoint has ACL
+rules enabled. ACL-controlled destinations, relayed or mapped routes, peers
+without the capability, and H2/WSS retain the packet path. Enabling ACL rules
+stops an active direct stream so reconnecting uses the policy-aware packet path.
+
+Each packet-path userspace TCP socket starts with an 8 KiB receive buffer and an 8 KiB transmit buffer.
 Active buffers grow with measured application demand and TCP round-trip time.
 Each buffer can grow to 8 MiB, subject to the shared process memory budget.
 Growth reserves replacement storage before it copies the existing buffer.
@@ -93,4 +107,8 @@ See the [Tailscale userspace networking guide](https://tailscale.com/docs/concep
 See the [Tailscale daemon reference](https://tailscale.com/docs/reference/tailscaled).
 See the [Tailscale router comparison](https://tailscale.com/kb/1177/kernel-vs-userspace-routers).
 
-See the [measured LowTier results](performance/userspace-networking-results.md).
+See the [measured LowTier results](performance/userspace-networking-results.md)
+and the [matched HTTP/3 stream comparison](performance/userspace-stream-results-20261026.md).
+The throughput probe caps each payload transfer at the time needed for 200 Mbps;
+for example, its default 64 MiB payload has a 2.684-second transfer budget.
+Proxy readiness has a separate 15-second deadline.

@@ -7,7 +7,7 @@ use pnet::packet::MutablePacket;
 use pnet::packet::Packet;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
-use pnet::packet::tcp::{MutableTcpPacket, TcpPacket, ipv4_checksum};
+use pnet::packet::tcp::{MutableTcpPacket, TcpPacket};
 use quanta::Instant;
 use socket2::{SockRef, TcpKeepalive};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -367,19 +367,20 @@ impl NicPacketFilter for TcpProxy {
             zc_packet.mut_peer_manager_header().unwrap().to_peer_id = self.get_my_peer_id().into();
         }
 
+        let destination_port = dst_addr.port();
         let mut ip_packet = MutableIpv4Packet::new(zc_packet.mut_payload()).unwrap();
-        ip_packet.set_source(ip);
-        if need_transform_dst {
-            ip_packet.set_destination(my_ipv4);
-        }
-        let dst = ip_packet.get_destination();
-
-        let mut tcp_packet = MutableTcpPacket::new(ip_packet.payload_mut()).unwrap();
-        tcp_packet.set_source(nat_entry.real_dst.port());
-
-        Self::update_tcp_packet_checksum(&mut tcp_packet, &ip, &dst);
-        drop(tcp_packet);
-        Self::update_ip_packet_checksum(&mut ip_packet);
+        let destination = if need_transform_dst {
+            my_ipv4
+        } else {
+            ip_packet.get_destination()
+        };
+        Self::rewrite_tcp_packet(
+            &mut ip_packet,
+            ip,
+            destination,
+            nat_entry.real_dst.port(),
+            destination_port,
+        );
 
         tracing::trace!(dst_addr = ?dst_addr, nat_entry = ?nat_entry, packet = ?ip_packet, "tcp packet after modified");
 
@@ -451,20 +452,50 @@ impl TcpProxy {
         self.peer_manager.upgrade()
     }
 
-    fn update_tcp_packet_checksum(
-        tcp_packet: &mut MutableTcpPacket,
-        ipv4_src: &Ipv4Addr,
-        ipv4_dst: &Ipv4Addr,
+    // RFC 1624: update the header and pseudo-header words without rescanning
+    // the TCP payload. An invalid incoming checksum remains invalid.
+    fn rewrite_tcp_packet(
+        ip: &mut MutableIpv4Packet<'_>,
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
     ) {
-        tcp_packet.set_checksum(ipv4_checksum(
-            &tcp_packet.to_immutable(),
-            ipv4_src,
-            ipv4_dst,
-        ));
-    }
-
-    fn update_ip_packet_checksum(ip_packet: &mut MutableIpv4Packet) {
-        ip_packet.set_checksum(pnet::packet::ipv4::checksum(&ip_packet.to_immutable()));
+        fn replace(sum: &mut u32, old: u16, new: u16) {
+            *sum += u32::from(!old) + u32::from(new);
+        }
+        fn finish(mut sum: u32) -> u16 {
+            while sum >> 16 != 0 {
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+            !(sum as u16)
+        }
+        let old_source = ip.get_source().octets();
+        let old_destination = ip.get_destination().octets();
+        let mut address_delta = 0_u32;
+        for (old, new) in [
+            (old_source, source.octets()),
+            (old_destination, destination.octets()),
+        ] {
+            for offset in [0, 2] {
+                replace(
+                    &mut address_delta,
+                    u16::from_be_bytes([old[offset], old[offset + 1]]),
+                    u16::from_be_bytes([new[offset], new[offset + 1]]),
+                );
+            }
+        }
+        let ip_checksum = finish(u32::from(!ip.get_checksum()) + address_delta);
+        ip.set_source(source);
+        ip.set_destination(destination);
+        ip.set_checksum(ip_checksum);
+        let mut tcp = MutableTcpPacket::new(ip.payload_mut()).unwrap();
+        let mut tcp_sum = u32::from(!tcp.get_checksum()) + address_delta;
+        replace(&mut tcp_sum, tcp.get_source(), source_port);
+        replace(&mut tcp_sum, tcp.get_destination(), destination_port);
+        tcp.set_source(source_port);
+        tcp.set_destination(destination_port);
+        tcp.set_checksum(finish(tcp_sum));
     }
 
     pub async fn start(self: &Arc<Self>, add_pipeline: bool) -> Result<()> {
@@ -568,9 +599,19 @@ impl TcpProxy {
             let peer_mgr = self.peer_manager.clone();
             self.tasks.lock().unwrap().spawn(async move {
                 while let Some(packet) = stack_stream.recv().await {
+                    let mut batch = PacketBatch::new();
                     if Ipv4Packet::new(packet.payload()).is_none() {
                         tracing::error!("smoltcp stack stream produced a non-IPv4 packet");
                         continue;
+                    }
+                    batch.try_push(packet).expect("the new batch has capacity");
+                    while batch.len() < crate::tunnel::batch::MAX_PACKET_BATCH_SIZE {
+                        let Ok(packet) = stack_stream.try_recv() else {
+                            break;
+                        };
+                        if Ipv4Packet::new(packet.payload()).is_some() {
+                            batch.try_push(packet).expect("the batch has capacity");
+                        }
                     }
 
                     let Some(peer_mgr) = peer_mgr.upgrade() else {
@@ -578,10 +619,7 @@ impl TcpProxy {
                         return;
                     };
                     if let Err(e) = peer_mgr
-                        .send_fabric_batch(FabricBatch::new(
-                            FabricPayloadKind::Ip,
-                            PacketBatch::singleton(packet),
-                        ))
+                        .send_fabric_batch(FabricBatch::new(FabricPayloadKind::Ip, batch))
                         .await
                     {
                         tracing::error!("send to peer failed in smoltcp sender: {:?}", e);
@@ -948,19 +986,18 @@ impl TcpProxy {
         }
 
         let mut ip_packet = MutableIpv4Packet::new(payload_bytes).unwrap();
-        if !self.is_smoltcp_enabled() && source_ip == ipv4_addr {
-            // modify the source so the response packet can be handled by tun device
-            ip_packet.set_source(Self::get_fake_local_ipv4(&ipv4_inet));
-        }
-        ip_packet.set_destination(ipv4_addr);
-        let source = ip_packet.get_source();
-
-        let mut tcp_packet = MutableTcpPacket::new(ip_packet.payload_mut()).unwrap();
-        tcp_packet.set_destination(self.get_local_port());
-
-        Self::update_tcp_packet_checksum(&mut tcp_packet, &source, &ipv4_addr);
-        drop(tcp_packet);
-        Self::update_ip_packet_checksum(&mut ip_packet);
+        let source = if !self.is_smoltcp_enabled() && source_ip == ipv4_addr {
+            Self::get_fake_local_ipv4(&ipv4_inet)
+        } else {
+            source_ip
+        };
+        Self::rewrite_tcp_packet(
+            &mut ip_packet,
+            source,
+            ipv4_addr,
+            source_port,
+            self.get_local_port(),
+        );
 
         tracing::trace!(?source, ?ipv4_addr, ?packet, "tcp packet after modified");
 
@@ -976,5 +1013,57 @@ impl TcpProxy {
             entries.push(entry.value().as_ref().parse_as_pb());
         }
         entries
+    }
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+
+    #[test]
+    fn incremental_nat_checksums_match_full_checksums_and_preserve_corruption() {
+        for payload_len in [0, 1, 1240] {
+            let source = Ipv4Addr::new(192, 0, 2, 1);
+            let destination = Ipv4Addr::new(198, 51, 100, 2);
+            let mut data = vec![0x5a; 40 + payload_len];
+            let mut ip = MutableIpv4Packet::new(&mut data).unwrap();
+            ip.set_version(4);
+            ip.set_header_length(5);
+            ip.set_total_length((40 + payload_len) as u16);
+            ip.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
+            ip.set_source(source);
+            ip.set_destination(destination);
+            let mut tcp = MutableTcpPacket::new(ip.payload_mut()).unwrap();
+            tcp.set_data_offset(5);
+            tcp.set_source(12345);
+            tcp.set_destination(443);
+            tcp.set_checksum(pnet::packet::tcp::ipv4_checksum(
+                &tcp.to_immutable(),
+                &source,
+                &destination,
+            ));
+            ip.set_checksum(pnet::packet::ipv4::checksum(&ip.to_immutable()));
+            for corrupt in [false, true] {
+                let mut packet = data.clone();
+                let mut ip = MutableIpv4Packet::new(&mut packet).unwrap();
+                if corrupt {
+                    let mut tcp = MutableTcpPacket::new(ip.payload_mut()).unwrap();
+                    tcp.set_checksum(tcp.get_checksum() ^ 1);
+                }
+                let new_source = Ipv4Addr::new(203, 0, 113, 4);
+                TcpProxy::rewrite_tcp_packet(&mut ip, new_source, source, 65535, 8899);
+                assert_eq!(
+                    ip.get_checksum(),
+                    pnet::packet::ipv4::checksum(&ip.to_immutable())
+                );
+                let tcp = TcpPacket::new(ip.payload()).unwrap();
+                assert_eq!(
+                    tcp.get_checksum()
+                        == pnet::packet::tcp::ipv4_checksum(&tcp, &new_source, &source),
+                    !corrupt
+                );
+                assert_eq!(&tcp.payload(), &vec![0x5a; payload_len].as_slice());
+            }
+        }
     }
 }

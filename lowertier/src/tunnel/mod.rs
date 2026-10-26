@@ -178,6 +178,10 @@ pub trait Tunnel: Send {
         false
     }
 
+    fn tcp_proxy(&self) -> Option<Arc<quic::proxy::ProxyEndpoint>> {
+        None
+    }
+
     /// Report local transport receive backpressure to connection liveness.
     fn receive_backpressure(&self) -> Option<ReceiveBackpressure> {
         None

@@ -16,6 +16,7 @@ from typing import TypedDict, cast
 
 
 READ_TIMEOUT_SECONDS = 15
+MIN_BENCHMARK_BITS_PER_SECOND = 200_000_000
 TRANSFER_CHUNK = b"lowertier-userspace-path\n" * 2731
 RTT_TOKEN = b"ETRTT001"
 HTTP_MARKER = b"userspace-http-ok"
@@ -26,15 +27,29 @@ class MeasurementSummary(TypedDict):
     runs: list[float]
 
 
-def recv_exact(stream: socket.socket, size: int) -> bytes:
+def recv_exact(stream: socket.socket, size: int, *, deadline: float | None = None) -> bytes:
     chunks: list[bytes] = []
     remaining = size
-    while remaining:
-        chunk = stream.recv(remaining)
-        if not chunk:
-            raise RuntimeError(f"The stream closed with {remaining} bytes missing.")
-        chunks.append(chunk)
-        remaining -= len(chunk)
+    original_timeout = stream.gettimeout()
+    try:
+        while remaining:
+            if deadline is not None:
+                seconds_left = deadline - time.monotonic()
+                if seconds_left <= 0:
+                    raise TimeoutError("Transfer exceeded its budget at 200 Mbps.")
+                stream.settimeout(
+                    min(original_timeout, seconds_left)
+                    if original_timeout is not None
+                    else seconds_left
+                )
+            chunk = stream.recv(remaining)
+            if not chunk:
+                raise RuntimeError(f"The stream closed with {remaining} bytes missing.")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        if deadline is not None:
+            stream.settimeout(original_timeout)
     return b"".join(chunks)
 
 
@@ -264,8 +279,11 @@ def measure_throughput(
     for _ in range(runs):
         with connector(proxy_port, target_ip, target_port) as stream:
             start = time.perf_counter_ns()
+            budget = byte_count * 8 / MIN_BENCHMARK_BITS_PER_SECOND
+            deadline = time.monotonic() + budget
+            stream.settimeout(min(READ_TIMEOUT_SECONDS, budget))
             stream.sendall(f"DOWNLOAD {byte_count}\n".encode("ascii"))
-            recv_exact(stream, byte_count)
+            recv_exact(stream, byte_count, deadline=deadline)
             seconds = (time.perf_counter_ns() - start) / 1_000_000_000
             values.append(byte_count * 8 / seconds / 1_000_000)
     return values

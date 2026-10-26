@@ -244,6 +244,7 @@ pub struct BatchTunnelWrapper<R, W> {
     transport_authenticated: bool,
     receive_backpressure: Option<ReceiveBackpressure>,
     path_state: Option<Arc<super::TunnelPathState>>,
+    tcp_proxy: Option<Arc<super::quic::proxy::ProxyEndpoint>>,
 }
 
 impl<R, W> BatchTunnelWrapper<R, W> {
@@ -257,6 +258,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_authenticated: false,
             receive_backpressure: None,
             path_state: None,
+            tcp_proxy: None,
         }
     }
 
@@ -275,6 +277,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_authenticated,
             receive_backpressure: None,
             path_state: None,
+            tcp_proxy: None,
         }
     }
 
@@ -294,11 +297,20 @@ impl<R, W> BatchTunnelWrapper<R, W> {
             transport_authenticated,
             receive_backpressure: None,
             path_state: None,
+            tcp_proxy: None,
         }
     }
 
     pub fn with_receive_backpressure(mut self, signal: ReceiveBackpressure) -> Self {
         self.receive_backpressure = Some(signal);
+        self
+    }
+
+    pub(crate) fn with_tcp_proxy(
+        mut self,
+        proxy: Option<Arc<super::quic::proxy::ProxyEndpoint>>,
+    ) -> Self {
+        self.tcp_proxy = proxy;
         self
     }
 
@@ -340,6 +352,10 @@ where
 
     fn receive_backpressure(&self) -> Option<ReceiveBackpressure> {
         self.receive_backpressure.clone()
+    }
+
+    fn tcp_proxy(&self) -> Option<Arc<super::quic::proxy::ProxyEndpoint>> {
+        self.tcp_proxy.clone()
     }
 }
 

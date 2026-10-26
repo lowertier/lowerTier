@@ -272,6 +272,10 @@ where
         self.inner.transport_binding()
     }
 
+    fn tcp_proxy(&self) -> Option<Arc<quic::proxy::ProxyEndpoint>> {
+        self.inner.tcp_proxy()
+    }
+
     fn path_state(&self) -> Option<Arc<super::TunnelPathState>> {
         self.inner.path_state()
     }

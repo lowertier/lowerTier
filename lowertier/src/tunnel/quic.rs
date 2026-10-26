@@ -63,6 +63,7 @@ use super::packet_def::{NIC_TUNNEL_HEADROOM, PEER_MANAGER_HEADER_SIZE, ZCPacket}
 mod decoy_tests;
 mod fragments;
 mod migration;
+pub mod proxy;
 #[cfg(test)]
 mod rebind_tests;
 #[cfg(target_os = "linux")]
@@ -411,7 +412,15 @@ async fn open_connect_ip_request(
     connection: &Connection,
     authority: &str,
     bearer: Option<&str>,
-) -> Result<(Box<dyn ConnectIpRequestStream>, u64), TunnelError> {
+    context: ArcGlobalCtx,
+) -> Result<
+    (
+        Box<dyn ConnectIpRequestStream>,
+        u64,
+        Arc<proxy::ProxyEndpoint>,
+    ),
+    TunnelError,
+> {
     let mut builder = h3::client::builder();
     builder.enable_extended_connect(true).enable_datagram(true);
     let (mut driver, mut requests) = builder
@@ -457,12 +466,13 @@ async fn open_connect_ip_request(
         )));
     }
     let stream_id = connect_ip_stream_id(stream.id());
+    let proxy = proxy::ProxyEndpoint::new(Some(requests.clone()), context);
     let guard_connection = connection.clone();
     tokio::spawn(async move {
         let _requests = requests;
         let _ = guard_connection.closed().await;
     });
-    Ok((Box::new(stream), stream_id))
+    Ok((Box::new(stream), stream_id, proxy))
 }
 
 const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/%2A/%2A/";
@@ -631,8 +641,9 @@ async fn send_normal_http3_response(
 async fn serve_additional_http3_requests(
     connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
     fallback_root: Option<PathBuf>,
+    proxy: Option<Arc<proxy::ProxyEndpoint>>,
 ) {
-    serve_http3_requests(connection, fallback_root, None).await;
+    serve_http3_requests(connection, fallback_root, None, proxy).await;
 }
 
 struct Http3Website {
@@ -641,7 +652,11 @@ struct Http3Website {
 }
 
 enum ConnectIpAccept {
-    Tunnel(Box<dyn ConnectIpRequestStream>, u64),
+    Tunnel(
+        Box<dyn ConnectIpRequestStream>,
+        u64,
+        Option<Arc<proxy::ProxyEndpoint>>,
+    ),
     Website(Box<Http3Website>),
 }
 
@@ -649,6 +664,7 @@ async fn serve_http3_requests(
     mut connection: h3::server::Connection<h3_quinn::Connection, Bytes>,
     fallback_root: Option<PathBuf>,
     first: Option<(http::Request<()>, H3ServerStream)>,
+    proxy: Option<Arc<proxy::ProxyEndpoint>>,
 ) {
     let website = first.is_some();
     let mut responses = tokio::task::JoinSet::new();
@@ -675,11 +691,17 @@ async fn serve_http3_requests(
         match tokio::time::timeout(super::decoy::CONNECT_TIMEOUT, resolver.resolve_request()).await
         {
             Ok(Ok((request, stream))) => {
-                responses.spawn(send_normal_http3_response(
-                    request,
-                    stream,
-                    fallback_root.clone(),
-                ));
+                if proxy::ProxyEndpoint::is_request(&request)
+                    && let Some(proxy) = &proxy
+                {
+                    responses.spawn(proxy.clone().receive(request, stream));
+                } else {
+                    responses.spawn(send_normal_http3_response(
+                        request,
+                        stream,
+                        fallback_root.clone(),
+                    ));
+                }
             }
             Err(error) => tracing::debug!(?error, "reject malformed HTTP/3 request"),
             Ok(Err(error)) => tracing::debug!(?error, "reject malformed HTTP/3 request"),
@@ -691,6 +713,7 @@ async fn accept_connect_ip_request(
     connection: &Connection,
     admission: Option<&ConnectIpAdmission>,
     fallback_root: Option<PathBuf>,
+    context: Option<ArcGlobalCtx>,
 ) -> Result<ConnectIpAccept, TunnelError> {
     let mut builder = h3::server::builder();
     builder.enable_extended_connect(true).enable_datagram(true);
@@ -739,10 +762,16 @@ async fn accept_connect_ip_request(
             TunnelError::InternalError(format!("send CONNECT-IP response: {error}"))
         })?;
         let stream_id = connect_ip_stream_id(stream.id());
-        tokio::spawn(serve_additional_http3_requests(h3, fallback_root));
+        let proxy = context.map(|context| proxy::ProxyEndpoint::new(None, context));
+        tokio::spawn(serve_additional_http3_requests(
+            h3,
+            fallback_root,
+            proxy.clone(),
+        ));
         return Ok(ConnectIpAccept::Tunnel(
             Box::new(stream) as Box<dyn ConnectIpRequestStream>,
             stream_id,
+            proxy,
         ));
     }
 }
@@ -2820,6 +2849,7 @@ fn build_connect_ip_tunnel(
     connection: Connection,
     stream: Box<dyn ConnectIpRequestStream>,
     connect_stream_id: u64,
+    proxy: Option<Arc<proxy::ProxyEndpoint>>,
     info: TunnelInfo,
     transport_authenticated: bool,
     memory_permit: Option<ProcessMemoryPermit>,
@@ -2893,7 +2923,8 @@ fn build_connect_ip_tunnel(
             transport_authenticated,
             Some(transport_binding),
         )
-        .with_path_state(path_state),
+        .with_path_state(path_state)
+        .with_tcp_proxy(proxy),
     ))
 }
 
@@ -3521,13 +3552,18 @@ impl QuicTunnelListener {
         };
         let activation = tokio::time::timeout(
             Duration::from_secs(7),
-            accept_connect_ip_request(&conn, admission.as_ref(), fallback_root.clone()),
+            accept_connect_ip_request(
+                &conn,
+                admission.as_ref(),
+                fallback_root.clone(),
+                Some(global_ctx.clone()),
+            ),
         )
         .await
         .map_err(|_| TunnelError::InternalError("CONNECT-IP admission timed out".into()))
         .and_then(|result| result);
-        let (connect_stream, connect_stream_id) = match activation {
-            Ok(ConnectIpAccept::Tunnel(stream, id)) => (stream, id),
+        let (connect_stream, connect_stream_id, proxy) = match activation {
+            Ok(ConnectIpAccept::Tunnel(stream, id, proxy)) => (stream, id, proxy),
             Ok(ConnectIpAccept::Website(website)) => {
                 drop(source_permit);
                 let Some(website_permit) = super::decoy::process_limiter().admit(remote_addr.ip())
@@ -3556,6 +3592,7 @@ impl QuicTunnelListener {
                             website.connection,
                             fallback_root,
                             Some(website.first),
+                            None,
                         ),
                     )
                     .await;
@@ -3588,6 +3625,7 @@ impl QuicTunnelListener {
             conn,
             connect_stream,
             connect_stream_id,
+            proxy,
             info,
             transport_authenticated,
             Some(memory_permit),
@@ -4027,8 +4065,13 @@ impl TunnelConnector for QuicTunnelConnector {
             http_host
         };
         let bearer = connect_ip_bearer(&self.global_ctx);
-        let (connect_stream, connect_stream_id) =
-            open_connect_ip_request(&connection, &authority, bearer.as_deref()).await?;
+        let (connect_stream, connect_stream_id, proxy) = open_connect_ip_request(
+            &connection,
+            &authority,
+            bearer.as_deref(),
+            self.global_ctx.clone(),
+        )
+        .await?;
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -4046,6 +4089,7 @@ impl TunnelConnector for QuicTunnelConnector {
             connection,
             connect_stream,
             connect_stream_id,
+            Some(proxy),
             info,
             transport_authenticated,
             Some(memory_permit),
@@ -4552,9 +4596,9 @@ mod tests {
             let upstream_task = tokio::spawn(async move {
                 let connection = upstream.accept().await.unwrap().await.unwrap();
                 if let Ok(ConnectIpAccept::Website(website)) =
-                    accept_connect_ip_request(&connection, None, None).await
+                    accept_connect_ip_request(&connection, None, None, None).await
                 {
-                    serve_http3_requests(website.connection, None, Some(website.first)).await;
+                    serve_http3_requests(website.connection, None, Some(website.first), None).await;
                 }
             });
             let global_ctx = global_ctx();

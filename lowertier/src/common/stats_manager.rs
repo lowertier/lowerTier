@@ -132,6 +132,9 @@ pub enum MetricName {
     SpeedSelectedPathDeliveryBps,
 
     TcpProxyConnect,
+    TcpStreamProxyOpen,
+    TcpStreamProxyTxBytes,
+    TcpStreamProxyRxBytes,
 }
 
 impl MetricName {
@@ -255,6 +258,9 @@ impl fmt::Display for MetricName {
             }
 
             MetricName::TcpProxyConnect => write!(f, "tcp_proxy_connect"),
+            MetricName::TcpStreamProxyOpen => write!(f, "tcp_stream_proxy_open"),
+            MetricName::TcpStreamProxyTxBytes => write!(f, "tcp_stream_proxy_tx_bytes"),
+            MetricName::TcpStreamProxyRxBytes => write!(f, "tcp_stream_proxy_rx_bytes"),
         }
     }
 }

@@ -89,6 +89,7 @@ enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
     Overlay(OverlayStream),
+    Transport(crate::tunnel::quic::proxy::ProxyStream),
 }
 
 impl AsyncRead for SocksTcpStream {
@@ -101,6 +102,7 @@ impl AsyncRead for SocksTcpStream {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -111,6 +113,10 @@ impl ProxyTcpStream for SocksTcpStream {
     where
         I: AsyncRead + AsyncWrite + Unpin + Send,
     {
+        if let Self::Transport(stream) = self {
+            stream.copy_owned(inbound).await?;
+            return Ok(());
+        }
         if matches!(&self, SocksTcpStream::Overlay(_)) {
             let SocksTcpStream::Overlay(stream) = self else {
                 unreachable!()
@@ -145,6 +151,7 @@ impl AsyncWrite for SocksTcpStream {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
         }
     }
 
@@ -156,6 +163,7 @@ impl AsyncWrite for SocksTcpStream {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_flush(cx),
         }
     }
 
@@ -167,6 +175,7 @@ impl AsyncWrite for SocksTcpStream {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -655,6 +664,36 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             ));
         }
 
+        // Direct peer services can use the existing HTTP/3 stream. Only the
+        // negotiated capability on the selected live direct connection enables
+        // this path; ACLs, relays, mapped subnets and old peers keep smoltcp.
+        if std::env::var_os("LOWTIER_DISABLE_TCP_STREAM_PROXY").is_none()
+            && !peer_mgr_arc.get_global_ctx().get_acl_filter().is_enabled()
+            && let IpAddr::V4(ip) = addr.ip()
+            && let Some(peer_id) = peer_mgr_arc.get_peer_map().get_peer_id_by_ipv4(&ip).await
+            && dst_peers.is_some_and(|peers| peers.as_slice() == [peer_id])
+            && let Some(connection) = peer_mgr_arc.get_peer_map().only_direct_conn(peer_id)
+            && let Some(proxy) = connection.tcp_proxy()
+        {
+            let source = SocketAddr::new(
+                peer_mgr_arc
+                    .get_global_ctx()
+                    .get_ipv4()
+                    .unwrap()
+                    .address()
+                    .into(),
+                self.src_addr.port(),
+            );
+            if let Some(stream) =
+                timeout(Duration::from_secs(timeout_s), proxy.connect(source, addr))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("TCP transport proxy open timed out"))??
+            {
+                tracing::debug!(?addr, "userspace proxy selected HTTP/3 stream");
+                return Ok(SocksTcpStream::Transport(stream));
+            }
+        }
+
         let overlay_src_addr = peer_mgr_arc
             .get_global_ctx()
             .get_ipv4()
@@ -916,6 +955,12 @@ impl Socks5ServerNet {
         connector: Socks5AutoConnector,
         protocols: ProxyProtocols,
     ) {
+        // Proxy responses may arrive as separate HTTP/3 header/body chunks.
+        // Do not hold a small trailing chunk behind the local client's delayed
+        // ACK; the remote destination socket uses the same no-delay setting.
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::debug!(?error, "could not disable Nagle on the local proxy socket");
+        }
         let mut first_byte = [0_u8; 1];
         let protocol = match timeout(Duration::from_secs(10), stream.peek(&mut first_byte)).await {
             Ok(Ok(1..)) => classify_proxy_protocol(first_byte[0], protocols),

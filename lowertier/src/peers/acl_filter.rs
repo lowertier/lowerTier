@@ -189,6 +189,10 @@ impl AclFilter {
         tracing::info!("ACL rules hot reloaded with preserved state (lock-free)");
     }
 
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.acl_enabled.load(Ordering::Relaxed)
+    }
+
     /// Get current processor for processing packets
     pub fn get_processor(&self) -> Arc<AclProcessor> {
         self.acl_processor.load_full()

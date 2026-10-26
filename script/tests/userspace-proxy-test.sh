@@ -70,8 +70,8 @@ median_values() {
 }
 
 wait_for_socks() {
-    local attempt
-    for attempt in {1..80}; do
+    local deadline=$((SECONDS + 15))
+    while ((SECONDS < deadline)); do
         if curl \
             --silent \
             --show-error \

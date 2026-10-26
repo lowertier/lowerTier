@@ -1613,7 +1613,25 @@ impl PeerManager {
             ));
         }
         let peer_id = peer_conn.get_peer_id();
+        let tcp_proxy = peer_conn.tcp_proxy();
+        let close = peer_conn.get_close_notifier();
         self.peers.add_new_peer_conn(peer_conn).await?;
+        if let Some(proxy) = tcp_proxy {
+            proxy.authenticated(true);
+            if let Some(incoming) = proxy.take_incoming() {
+                self.tasks
+                    .lock()
+                    .await
+                    .spawn(crate::gateway::transport_proxy::serve(
+                        proxy,
+                        incoming,
+                        self.peers.clone(),
+                        self.global_ctx.clone(),
+                        peer_id,
+                        close,
+                    ));
+            }
+        }
         self.clear_recent_traffic(peer_id);
         Ok(())
     }

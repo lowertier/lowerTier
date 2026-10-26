@@ -19,6 +19,7 @@ pub mod http_proxy;
 pub mod socks5;
 
 pub mod overlay_stream;
+pub(crate) mod transport_proxy;
 
 fn cidr_mappings(cidrs: &[ProxyNetworkConfig]) -> Vec<(cidr::Ipv4Cidr, cidr::Ipv4Cidr)> {
     let mut mappings = Vec::with_capacity(cidrs.len());

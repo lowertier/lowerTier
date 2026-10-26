@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import socket
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -42,6 +43,30 @@ class Socks5AddressEncodingTests(unittest.TestCase):
             encoded,
             b"\x03" + bytes((len(encoded_address),)) + encoded_address,
         )
+
+
+class TransferDeadlineTests(unittest.TestCase):
+    def test_progress_does_not_extend_the_deadline(self) -> None:
+        stream = Mock(spec=socket.socket)
+        stream.gettimeout.return_value = 15
+        stream.recv.return_value = b"x"
+
+        with patch.object(PROBE.time, "monotonic", side_effect=[0.0, 0.4, 0.8, 1.2]):
+            with self.assertRaises(TimeoutError):
+                PROBE.recv_exact(stream, 100, deadline=1.0)
+
+        self.assertEqual(stream.recv.call_count, 3)
+        stream.settimeout.assert_called_with(15)
+
+    def test_complete_payload_restores_socket_timeout(self) -> None:
+        stream = Mock(spec=socket.socket)
+        stream.gettimeout.return_value = 15
+        stream.recv.return_value = b"payload"
+
+        with patch.object(PROBE.time, "monotonic", return_value=0.1):
+            self.assertEqual(PROBE.recv_exact(stream, 7, deadline=1.0), b"payload")
+
+        stream.settimeout.assert_called_with(15)
 
 
 if __name__ == "__main__":

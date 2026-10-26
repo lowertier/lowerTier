@@ -246,9 +246,9 @@ async fn http3_decoy_large_certificate_and_body_are_lossless_and_rate_limited() 
                 let connection = upstream.accept().await.unwrap().await.unwrap();
                 connection_tx.send(connection.clone()).unwrap();
                 if let Ok(ConnectIpAccept::Website(website)) =
-                    accept_connect_ip_request(&connection, None, Some(root.clone())).await
+                    accept_connect_ip_request(&connection, None, Some(root.clone()), None).await
                 {
-                    serve_http3_requests(website.connection, Some(root), Some(website.first)).await;
+                    serve_http3_requests(website.connection, Some(root), Some(website.first), None).await;
                 }
             }));
 

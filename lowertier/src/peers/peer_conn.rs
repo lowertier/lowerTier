@@ -118,11 +118,15 @@ const MAX_PENDING_HANDSHAKE_BYTES: usize =
     MAX_PENDING_HANDSHAKE_PACKETS * (4096 + PEER_MANAGER_HEADER_SIZE);
 pub(crate) const SPEED_ROUTING_FEATURE: &str = "speed-routing-v2";
 
-fn handshake_features() -> Vec<String> {
-    vec![
+fn handshake_features(receive_capabilities: u64) -> Vec<String> {
+    let mut features = vec![
         SPEED_ROUTING_FEATURE.to_string(),
         RECEIVER_PACING_FEATURE.to_string(),
-    ]
+    ];
+    if receive_capabilities & crate::tunnel::quic::proxy::RECEIVE_CAPABILITY != 0 {
+        features.push(crate::tunnel::quic::proxy::FEATURE.to_string());
+    }
+    features
 }
 
 fn validate_protocol_version(version: u32) -> Result<(), Error> {
@@ -717,6 +721,7 @@ struct NoiseHandshakeResult {
     private_admission: PrivateAdmission,
     peer_identity_type: PeerIdentityType,
     remote_network_name: String,
+    receive_capabilities: u64,
 
     secret_digest: Vec<u8>,
     // foreign network manager use this to verify peer.
@@ -1285,6 +1290,7 @@ pub struct PeerConn {
     tunnel_path_state: Option<Arc<crate::tunnel::TunnelPathState>>,
     transport_binding: Option<TransportBinding>,
     receive_backpressure: Option<crate::tunnel::ReceiveBackpressure>,
+    tcp_proxy: Option<Arc<crate::tunnel::quic::proxy::ProxyEndpoint>>,
 
     tasks: JoinSet<Result<(), TunnelError>>,
 
@@ -1354,6 +1360,7 @@ impl PeerConn {
         let tunnel_path_state = tunnel.path_state();
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
+        let tcp_proxy = tunnel.tcp_proxy();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
         let (speed_ack_sender, _speed_ack_receiver) = broadcast::channel(8);
 
@@ -1405,6 +1412,7 @@ impl PeerConn {
             tunnel_path_state,
             transport_binding,
             receive_backpressure,
+            tcp_proxy,
 
             tasks: JoinSet::new(),
 
@@ -2011,7 +2019,7 @@ impl PeerConn {
             acknowledged_transition_id: acknowledged_transition_id
                 .map(|id| id.to_vec())
                 .unwrap_or_default(),
-            receive_capabilities: 0,
+            receive_capabilities: crate::tunnel::quic::proxy::RECEIVE_CAPABILITY,
             transmit_capabilities: 0,
             credential_root_fingerprint: local_root_fingerprint.to_vec(),
             initiator_certificate_digest: local_certificate_digest.to_vec(),
@@ -2441,7 +2449,7 @@ impl PeerConn {
             responder_identity_type_for_msg3,
             initiator_auth_level_for_context,
             responder_auth_level_for_context,
-            0,
+            crate::tunnel::quic::proxy::RECEIVE_CAPABILITY,
             msg2_pb.receive_capabilities,
             0,
             msg2_pb.transmit_capabilities,
@@ -2840,6 +2848,7 @@ impl PeerConn {
             private_admission,
             peer_identity_type,
             remote_network_name,
+            receive_capabilities: msg2_pb.receive_capabilities,
             // we have authorized the peer with noise handshake, so just set secret digest same as us even remote is a shared node.
             secret_digest,
         })
@@ -3202,7 +3211,7 @@ impl PeerConn {
                 .map_err(|_| Error::WaitRespError("invalid Admin certificate status".to_owned()))?
                 .sequence
         };
-        let responder_receive_capabilities = 0;
+        let responder_receive_capabilities = crate::tunnel::quic::proxy::RECEIVE_CAPABILITY;
         let responder_transmit_capabilities = 0;
         let local_data_protection = self.local_data_protection()?;
         let (transport_binding_kind, transport_binding_digest) =
@@ -3897,6 +3906,7 @@ impl PeerConn {
             private_admission,
             peer_identity_type,
             remote_network_name,
+            receive_capabilities: msg1_pb.receive_capabilities,
             secret_digest: msg3_pb.secret_digest,
         })
     }
@@ -3914,7 +3924,7 @@ impl PeerConn {
             version: VERSION,
             network_name: noise.remote_network_name.clone(),
 
-            features: handshake_features(),
+            features: handshake_features(noise.receive_capabilities),
             network_secret_digest: noise.secret_digest.clone(),
         }
     }
@@ -4019,6 +4029,21 @@ impl PeerConn {
             .as_ref()
             .map(|state| state.info.read().clone())
             .or_else(|| self.tunnel_info.clone())
+    }
+
+    pub(crate) fn tcp_proxy(&self) -> Option<Arc<crate::tunnel::quic::proxy::ProxyEndpoint>> {
+        if self
+            .info
+            .as_ref()?
+            .features
+            .iter()
+            .any(|feature| feature == crate::tunnel::quic::proxy::FEATURE)
+            && !self.is_closed()
+        {
+            self.tcp_proxy.clone()
+        } else {
+            None
+        }
     }
 
     pub fn handshake_done(&self) -> bool {
@@ -4869,6 +4894,9 @@ impl PeerConn {
 
 impl Drop for PeerConn {
     fn drop(&mut self) {
+        if let Some(proxy) = &self.tcp_proxy {
+            proxy.authenticated(false);
+        }
         // if someone drop a conn manually, the notifier is not called.
         self.close_event_notifier.notify_close();
     }
@@ -5071,6 +5099,22 @@ pub mod tests {
                 assert!(a.is_valid() && b.is_valid());
             }
         }
+    }
+
+    #[test]
+    fn stream_feature_requires_the_authenticated_remote_capability() {
+        let feature = crate::tunnel::quic::proxy::FEATURE;
+        assert!(!handshake_features(0).iter().any(|value| value == feature));
+        assert!(
+            handshake_features(crate::tunnel::quic::proxy::RECEIVE_CAPABILITY)
+                .iter()
+                .any(|value| value == feature)
+        );
+        assert!(
+            !handshake_features(1 << 63)
+                .iter()
+                .any(|value| value == feature)
+        );
     }
 
     #[test]
