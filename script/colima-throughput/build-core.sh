@@ -5,7 +5,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 docker_context=${DOCKER_CONTEXT:-colima}
 builder_image=${LOWTIER_BUILDER_IMAGE:-easytier-throughput:wan-builder}
 cache_volume=${LOWTIER_BUILD_CACHE_VOLUME:-lowertier-linux-build-cache}
-output=${LOWTIER_CORE_OUTPUT:-$repo_root/benchmark-results/.work/lowertier-core-linux}
+output=${LOWTIER_CORE_OUTPUT:-$repo_root/benchmark-results/.work/lowertier-linux}
 host_cargo_dir=${CARGO_HOME:-$HOME/.cargo}
 work_dir=$repo_root/benchmark-results/.work
 mkdir -p "$work_dir"
@@ -82,9 +82,9 @@ build_features=${LOWTIER_BUILD_FEATURES:-tun}
         find /cache/source -type f -exec touch {} +
         cd /cache/source
         RUSTUP_TOOLCHAIN=1.95.0 /usr/local/cargo/bin/cargo --offline build --locked --release \
-            -p lowertier --bin lowertier-core \
+            -p lowertier --bin lowertier \
             --no-default-features --features "${LOWTIER_BUILD_FEATURES:-tun}"
-        install -m 0755 /cache/target/release/lowertier-core "/output/$1"
+        install -m 0755 /cache/target/release/lowertier "/output/$1"
     ' sh "$output_name"
 
 printf 'Linux binary: %s\n' "$output"

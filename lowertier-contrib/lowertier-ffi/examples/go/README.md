@@ -27,16 +27,21 @@ To use another library path, export `LOWTIER_FFI_LIB=/path/to/liblowertier_ffi.s
 `LOWTIER_FFI_CONFIG` is a string of the LowTier config in TOML format which is passed to the FFI library. For example:
 
 ```sh
-export LOWTIER_FFI_CONFIG='instance_name = "default"
+export LOWTIER_FFI_CONFIG='[node]
+instance_name = "default"
+
+[address]
 ipv4 = "10.0.0.1"
 
-[network_identity]
-network_name = "testnet"
-network_secret = "mysecret"
+[network]
+name = "testnet"
+secret = "mysecret"
 
-[flags]
-no_tun = true # disable tun device to avoid permission issues.
-bind_device = false # allow loopback peers in local examples.
+[tun]
+mode = "none" # no tun device, which avoids permission issues
+
+[underlay]
+bind_device = false # allow loopback peers in local examples
 
 [[peer]]
 uri = "tcp://123.123.123.123:11010"
@@ -56,15 +61,20 @@ To run the TCP listen integration test in the same `go test` process as the SSH
 test, use a separate instance name and config:
 
 ```sh
-export LOWTIER_FFI_LISTEN_CONFIG='instance_name = "listener"
+export LOWTIER_FFI_LISTEN_CONFIG='[node]
+instance_name = "listener"
+
+[address]
 ipv4 = "10.0.0.3"
 
-[network_identity]
-network_name = "testnet"
-network_secret = "mysecret"
+[network]
+name = "testnet"
+secret = "mysecret"
 
-[flags]
-no_tun = true
+[tun]
+mode = "none"
+
+[underlay]
 bind_device = false
 
 [[peer]]

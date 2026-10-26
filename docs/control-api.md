@@ -59,9 +59,12 @@ Report the current certificate verification inference. CDN outer TLS uses PKI; i
 ## Configuration and runtime apply
 
 Methods: `GetConfig`, `ValidateConfig`, `PatchConfig`.
-`NodeConfig` projects TOML, including relay, camouflage, limits, discovery, identity, endpoints, L2, underlay,
-ACL, port forwards, and retained core settings. Optional scalars preserve presence. Arrays replace completely.
+`NodeConfig { toml }` carries a configuration document in the public sectioned TOML layout.
+The option registry in `common/config_schema.rs` is the only list of option paths; the API has no
+second, per-field message. Arrays replace completely.
 Reject unknown keys and retired options. Return the replacement path for retired options.
+Field masks and clear paths use registry paths, such as `relay.policy` or `tun.mtu`, or a section such as `relay`.
+The registry's apply class decides whether a change is live, affects new connections, or needs a restart.
 
 `ConfigPatch { expected_revision, field_mask, values, clear_paths, persist, stage }` uses optimistic concurrency.
 Reject stale revisions and conflicting mask/clear paths. Preserve untouched secrets. Redacted placeholders cannot set secrets.
@@ -132,11 +135,13 @@ ACL and credential methods retain existing authorization checks. Port forward ch
 
 ## CLI contract
 
-Keep `lowertier-cli.rs` small. Use `cli/{args,client,render,error,commands}`.
+One binary, `lowertier`, runs nodes (`run`, `check`, `init`), manages them, and shows `top`.
+Keep `lowertier.rs` small. Use `cli/{args,client,render,error,commands}` and `tui/`.
 Command modules construct typed requests. Only render writes results or applies table width limits.
-Commands cover node, peer, route, relay, L2, discovery, listener, camouflage, config, stats, log,
-ACL, credential, port-forward, and instance resources. Service installation and completion remain local operations.
+Daemons announce their portal and token path in a runtime record; the CLI selects the sole running daemon,
+otherwise `--node` or `--portal`. Records never contain the token.
 Select the sole instance automatically. Otherwise require `--instance`. Never fan out mutations implicitly.
+`set`, `unset`, and `edit` persist by default; `--no-persist` limits a change to the running node.
 
 Default output is a table. `--output json` emits one envelope:
 `{ schema_version, request_id, instance_id, revision, data, error }`.
@@ -153,4 +158,4 @@ Diagnostics use stderr. `-v` changes diagnostics only. Mutations return apply re
 | 4 | Missing or ambiguous resource |
 | 5 | Revision conflict or restart required |
 | 6 | Connection or deadline |
-| 7 | Partial failure |
+| 7 | Partial failure, or a failed `doctor` check |

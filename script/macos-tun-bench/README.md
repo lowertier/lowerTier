@@ -1,6 +1,6 @@
 # Native macOS TUN efficiency benchmark
 
-This harness runs `lowertier-core` natively through macOS utun and connects it to a Linux LowTier
+This harness runs `lowertier run` natively through macOS utun and connects it to a Linux LowTier
 peer in Colima. It measures TUN in both directions with parallel TCP streams, unloaded and
 loaded latency, and native LowTier CPU per Gbit.
 
@@ -14,7 +14,7 @@ Use the Colima throughput harness for the Linux software ceiling.
 
 ## Prerequisites
 
-- a release `lowertier-core` binary built with the `tun` feature;
+- a release `lowertier` binary built with the `tun` feature;
 - passwordless `sudo` for launching and stopping the native client;
 - a running Colima profile and an LowTier benchmark image containing iperf3;
 - host `iperf3` and `jq`.
@@ -22,9 +22,9 @@ Use the Colima throughput harness for the Linux software ceiling.
 Build and run:
 
 ```bash
-cargo build --locked --release -p lowertier --bin lowertier-core \
+cargo build --locked --release -p lowertier --bin lowertier \
   --no-default-features --features tun
-script/macos-tun-bench/e2e.sh target/release/lowertier-core
+script/macos-tun-bench/e2e.sh target/release/lowertier
 ```
 
 The harness explicitly selects `chacha20-poly1305` so throughput results always include

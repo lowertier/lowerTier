@@ -59,18 +59,18 @@ start_node() {
         --network "${private_net}" --ip "${private_ip}" "${image_name}" sleep infinity >/dev/null
     "${docker_cmd[@]}" exec "${name}" ip route replace default via "${gateway}"
     "${docker_cmd[@]}" exec -d "${name}" sh -c '
-        exec lowertier-core \
-          --network-name colima-stun \
-          --network-secret colima-stun-secret \
-          --ipv4 "$1/24" \
-          --dev-name et0 \
-          --listeners quic://0.0.0.0:11010 \
-          --peers quic://172.30.0.10:11010 \
-          --disable-sym-hole-punching true \
-          --need-p2p true \
-          --relay-policy latency \
-          --stun-servers 172.30.0.10:3478 172.30.0.10:3479 \
-          --console-log-level debug \
+        exec lowertier run \
+          --set network.name=colima-stun \
+          --set network.secret=colima-stun-secret \
+          --set "address.ipv4=$1/24" \
+          --set tun.name=et0 \
+          --set transport.listen=quic://0.0.0.0:11010 \
+          --set peer=quic://172.30.0.10:11010 \
+          --set nat.symmetric_punch=false \
+          --set nat.p2p=required \
+          --set relay.policy=latency \
+          --set nat.stun=172.30.0.10:3478,172.30.0.10:3479 \
+          --log-level debug \
           > /tmp/lowertier.log 2>&1
     ' sh "${overlay_ip}"
 }
@@ -122,10 +122,10 @@ create_networks
 "${docker_cmd[@]}" run -d --name et-stun-relay --network "${public_net}" --ip 172.30.0.10 \
     --cap-add NET_ADMIN --device /dev/net/tun "${image_name}" sleep infinity >/dev/null
 "${docker_cmd[@]}" exec -d et-stun-relay sh -c '
-    exec lowertier-core --network-name colima-stun --network-secret colima-stun-secret \
-      --ipv4 10.230.0.1/24 --dev-name et0 \
-      --listeners quic://0.0.0.0:11010 \
-      --disable-udp-hole-punching true > /tmp/lowertier.log 2>&1
+    exec lowertier run --set network.name=colima-stun --set network.secret=colima-stun-secret \
+      --set address.ipv4=10.230.0.1/24 --set tun.name=et0 \
+      --set transport.listen=quic://0.0.0.0:11010 \
+      --set nat.udp_punch=false > /tmp/lowertier.log 2>&1
 '
 "${docker_cmd[@]}" exec -d et-stun-relay sh -c '
     exec lowertier-tracker --udp-listen 0.0.0.0:3478,0.0.0.0:3479 \

@@ -33,10 +33,11 @@ Run the same binary in both benchmark containers:
 
 ```bash
 BUILD_IMAGE=0 \
-LOWTIER_CORE_BINARY=benchmark-results/.work/lowertier-core-linux \
+LOWTIER_CORE_BINARY=benchmark-results/.work/lowertier-linux \
 script/colima-throughput/e2e.sh
 ```
 
+`LOWTIER_CORE_ARGS` takes extra `lowertier run` arguments, such as `--set PATH=VALUE`.
 The runtime containers use the selected existing runtime image. They receive `NET_ADMIN` and
 `/dev/net/tun`. The binary mount is read-only.
 
@@ -84,7 +85,7 @@ QUIC DATAGRAM TUN test with 100-180 ms one-way delay and 3% random loss:
 
 ```bash
 BUILD_IMAGE=0 \
-LOWTIER_CORE_BINARY=benchmark-results/.work/lowertier-core-linux \
+LOWTIER_CORE_BINARY=benchmark-results/.work/lowertier-linux \
 UNDERLAY_PROTOCOL=quic \
 NETEM_DELAY=140ms \
 NETEM_JITTER=40ms \
@@ -95,7 +96,7 @@ UDP_RATES=100M \
 DURATION=10 \
 OMIT=2 \
 TCP_CONGESTION_CONTROL=bbr \
-LOWTIER_CORE_ARGS="--quic-congestion tunnel" \
+LOWTIER_CORE_ARGS="--set transport.quic.receive_window=8MiB" \
 script/colima-throughput/e2e.sh
 ```
 
@@ -194,7 +195,7 @@ For a matched comparison, use one binary and select `UNDERLAY_PROTOCOL=tcp`
 The harness applies the corresponding `?lanes=N` to both listener and peer
 URLs. A multi-lane group retains one authenticated logical peer connection.
 
-For ordinary TLS on H2, use `--quic-sni-passthrough true`; the legacy routing
+For ordinary TLS on H2, use `--set camouflage.sni_routing=true`; the legacy routing
 prefix mode is deliberately distinguishable and is outside the browser TLS
 profile. WSS uses normal TLS followed by the WebSocket upgrade. Multiple
 lanes require end-to-end TLS; plain WS and `via=cdn` / `via=proxy` are rejected.

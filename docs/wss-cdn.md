@@ -5,7 +5,8 @@ Configure the option on both the client URL and the origin listener URL.
 
 ```toml
 # Origin configuration
-listeners = ["wss://0.0.0.0:11012?via=cdn"]
+[transport]
+listen = ["wss://0.0.0.0:11012?via=cdn"]
 
 # Client configuration, in a separate file
 [[peer]]

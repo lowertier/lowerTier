@@ -21,8 +21,9 @@
 
 .NOTES
     Administrator privileges are required.
-    After installation, run: lowertier-cli service install
-    to register LowTier as a system service.
+    After installation, create a configuration and register the service:
+      lowertier init C:\LowTier\node.toml
+      lowertier service install -- -c C:\LowTier\node.toml
 #>
 param(
     [Parameter(Position = 0)]
@@ -228,6 +229,8 @@ Write-Host ''
 Write-Host "  [OK] LowTier $releaseVersion installation complete!" -ForegroundColor Green
 Write-Host ''
 Write-Host "  Install dir : $InstallDir" -ForegroundColor White
+Write-Host '  Next steps  : lowertier init node.toml' -ForegroundColor White
+Write-Host '                lowertier service install -- -c <full path>\node.toml' -ForegroundColor White
 Write-Host '  User guide  : https://github.com/lowertier/lowertier' -ForegroundColor DarkGray
 Write-Host ''
 Write-Host '  NOTE: If PATH was just updated, please restart your terminal.' -ForegroundColor DarkYellow

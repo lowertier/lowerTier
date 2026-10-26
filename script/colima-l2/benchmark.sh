@@ -142,29 +142,32 @@ start_core() {
     local relay_node=${6:-false}
     local enable_bridge=${7:-false}
     local args=(
-        lowertier-core
-        --network-name l2-benchmark
-        --network-secret l2-benchmark-secret
-        --listeners quic://0.0.0.0:11010
-        --disable-p2p "$disable_p2p"
+        lowertier run
+        --set network.name=l2-benchmark
+        --set network.secret=l2-benchmark-secret
+        --set transport.listen=quic://0.0.0.0:11010
     )
+    if [[ "$disable_p2p" == true ]]; then
+        args+=(--set nat.p2p=off)
+    fi
     if [[ -n "$overlay_ip" ]]; then
-        args+=(--dev-name et0 --ipv4 "$overlay_ip/24")
+        args+=(--set tun.name=et0 --set "address.ipv4=$overlay_ip/24")
     fi
     if [[ "$no_tun" == true ]]; then
-        args+=(--no-tun true)
+        args+=(--set tun.mode=none)
     fi
     if [[ "$relay_node" == true ]]; then
-        args+=(--relay-transit-networks l2-benchmark)
+        args+=(--set relay.transit_networks=l2-benchmark)
     fi
     if [[ "$enable_bridge" == true ]]; then
-        args+=(--enable-bridge true)
+        args+=(--set l2.bridge=true)
     fi
     if [[ -n "$peer_url" ]]; then
-        args+=(--peers "$peer_url")
+        args+=(--set "peer=$peer_url")
     fi
+    # The node replaces this shell, so its PID is written before exec.
     "${docker_cmd[@]}" exec -d "$node" \
-        sh -c 'export LOWTIER_TUN_QUEUES="$1"; shift; printf "%s\n" "$@" >/tmp/lowertier.args; exec "$@" >/tmp/lowertier.log 2>&1' \
+        sh -c 'export LOWTIER_TUN_QUEUES="$1"; shift; printf "%s\n" "$@" >/tmp/lowertier.args; echo $$ >/tmp/lowertier.pid; exec "$@" >/tmp/lowertier.log 2>&1' \
         sh "$queue_count" "${args[@]}"
 }
 
@@ -183,8 +186,8 @@ capture_route_proof() {
 
     local routes_a="$result_dir/${scenario}-q${queue_count}-r${repeat}.a.routes.json"
     local routes_b="$result_dir/${scenario}-q${queue_count}-r${repeat}.b.routes.json"
-    "${docker_cmd[@]}" exec "$node_a" lowertier-cli -o json route list --path >"$routes_a"
-    "${docker_cmd[@]}" exec "$node_b" lowertier-cli -o json route list --path >"$routes_b"
+    "${docker_cmd[@]}" exec "$node_a" lowertier -o json routes list --path >"$routes_a"
+    "${docker_cmd[@]}" exec "$node_b" lowertier -o json routes list --path >"$routes_b"
     "${docker_cmd[@]}" cp "$node_a:/tmp/lowertier.args" \
         "$result_dir/${scenario}-q${queue_count}-r${repeat}.a.args"
     "${docker_cmd[@]}" cp "$node_b:/tmp/lowertier.args" \
@@ -265,10 +268,9 @@ sample=0
 previous_cpu=0
 previous_time=0
 clock_ticks=$(getconf CLK_TCK)
-process_pid=$(pidof lowertier-core)
-set -- $process_pid
-if [ "$#" -ne 1 ]; then
-    printf "expected one lowertier-core process, found %s\n" "$#" >&2
+process_pid=$(cat /tmp/lowertier.pid)
+if [ ! -d "/proc/$process_pid" ]; then
+    printf "the lowertier node process %s is not running\n" "$process_pid" >&2
     exit 1
 fi
 process_start_ticks=$(awk "{print \$22}" "/proc/$process_pid/stat")
@@ -374,7 +376,7 @@ write_empty_resource_file() {
 capture_mode_stats() {
     local node=$1
     local local_file=$2
-    "${docker_cmd[@]}" exec "$node" lowertier-cli stats show --prometheus >"$local_file"
+    "${docker_cmd[@]}" exec "$node" lowertier stats --prometheus >"$local_file"
 }
 
 write_empty_mode_stats() {
@@ -726,7 +728,7 @@ fi
 uname -a >"$result_dir/system.txt"
 runtime_arch=$("${docker_cmd[@]}" run --rm "$image_name" uname -m)
 core_elf_machine=$("${docker_cmd[@]}" run --rm "$image_name" python3 -c \
-    'import struct; print(struct.unpack("<H", open("/usr/local/bin/lowertier-core", "rb").read()[18:20])[0])')
+    'import struct; print(struct.unpack("<H", open("/usr/local/bin/lowertier", "rb").read()[18:20])[0])')
 printf "runtime_uname_m=%s\ncore_elf_machine=%s\n" \
     "$runtime_arch" "$core_elf_machine" >"$result_dir/runtime-architecture.txt"
 printf "runtime_uname_m=%s\ncore_elf_machine=%s\n" \

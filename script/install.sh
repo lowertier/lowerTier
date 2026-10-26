@@ -174,7 +174,7 @@ fi
 
 CHECK() {
   if ! $SKIP_FOLDER_VERIFY; then
-    if [ -f "$INSTALL_PATH/lowertier-core" ]; then
+    if [ -f "$INSTALL_PATH/lowertier" ] || [ -f "$INSTALL_PATH/lowertier-core" ]; then
       echo "There is LowTier in $INSTALL_PATH. Please choose other path or use \"update\""
         echo -e "Or use Try ${GREEN_COLOR}--skip-folder-verify${RES} to skip"
       exit 0
@@ -221,8 +221,8 @@ INSTALL() {
   mkdir $INSTALL_PATH/config
   mv $INSTALL_PATH/lowertier-linux-${ARCH}/* $INSTALL_PATH/
   rm -rf $INSTALL_PATH/lowertier-linux-${ARCH}/
-  chmod +x $INSTALL_PATH/lowertier-core $INSTALL_PATH/lowertier-cli $INSTALL_PATH/lowertier-tracker
-  if [ -f $INSTALL_PATH/lowertier-core ] || [ -f $INSTALL_PATH/lowertier-cli ]; then
+  chmod +x $INSTALL_PATH/lowertier $INSTALL_PATH/lowertier-tracker
+  if [ -f $INSTALL_PATH/lowertier ]; then
     echo -e "${GREEN_COLOR} Download successfully! ${RES}"
   else
     echo -e "${RED_COLOR} Download failed! ${RES}"
@@ -231,46 +231,17 @@ INSTALL() {
 }
 
 INIT() {
-  if [ ! -f "$INSTALL_PATH/lowertier-core" ]; then
+  if [ ! -f "$INSTALL_PATH/lowertier" ]; then
     echo -e "\r\n${RED_COLOR}Opus${RES}, unable to find LowTier\r\n"
     exit 1
   fi
 
-  # Create default blank file config
-  cat >$INSTALL_PATH/config/default.conf <<EOF
-instance_name = "default"
-dhcp = true
-listeners = [
-    "quic://0.0.0.0:11012",
-    "tcp://0.0.0.0:11010",
-    "wss://0.0.0.0:11011/",
-]
-exit_nodes = []
-peer = []
+  # Write the default node configuration with a generated network secret and identity key.
+  "$INSTALL_PATH/lowertier" init "$INSTALL_PATH/config/default.toml" --network default
+  cat >>$INSTALL_PATH/config/default.toml <<EOF
 
-[network_identity]
-network_name = "default"
-network_secret = "default"
-
-[flags]
-default_protocol = "quic"
-dev_name = ""
-enable_encryption = true
-enable_ipv6 = true
-mtu = 1380
-enable_exit_node = false
-no_tun = false
-use_smoltcp = false
-disable_p2p = false
-relay_all_peer_rpc = false
-disable_tcp_hole_punching = false
-disable_udp_hole_punching = false
-
-[relay]
-policy = "hop"
-transit = "allow"
-transit_networks = []
-
+[control]
+token_file = "$INSTALL_PATH/config/control.token"
 EOF
 
   # Create init script
@@ -280,8 +251,8 @@ EOF
 
 name="LowTier"
 description="LowTier Service"
-command="$INSTALL_PATH/lowertier-core"
-command_args="-c $INSTALL_PATH/config/default.conf"
+command="$INSTALL_PATH/lowertier"
+command_args="run -c $INSTALL_PATH/config/default.toml"
 command_user="nobody:nobody"
 command_background=true
 
@@ -308,7 +279,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_PATH
-ExecStart=$INSTALL_PATH/lowertier-core -c $INSTALL_PATH/config/%i.conf
+ExecStart=$INSTALL_PATH/lowertier run -c $INSTALL_PATH/config/%i.toml
 Restart=always
 RestartSec=1s
 
@@ -319,7 +290,7 @@ EOF
 
 #   # Create run script
 #   cat >$INSTALL_PATH/run.sh <<EOF
-# $INSTALL_PATH/lowertier-core
+# $INSTALL_PATH/lowertier run -c $INSTALL_PATH/config/default.toml
 # EOF
 
   # Startup
@@ -334,21 +305,21 @@ EOF
 
   # For issues from the previous version
   rm -rf /etc/systemd/system/lowertier.service
-  rm -rf /usr/bin/lowertier-core
-  rm -rf /usr/bin/lowertier-cli
+  rm -rf /usr/bin/lowertier-core /usr/sbin/lowertier-core
+  rm -rf /usr/bin/lowertier-cli /usr/sbin/lowertier-cli
   rm -f /usr/bin/lowertier-tracker
 
   # Add link
-  ln -s $INSTALL_PATH/lowertier-core /usr/sbin/lowertier-core
-  ln -s $INSTALL_PATH/lowertier-cli /usr/sbin/lowertier-cli
-  ln -s $INSTALL_PATH/lowertier-tracker /usr/sbin/lowertier-tracker
+  ln -sf $INSTALL_PATH/lowertier /usr/sbin/lowertier
+  ln -sf $INSTALL_PATH/lowertier-tracker /usr/sbin/lowertier-tracker
 }
 
 SUCCESS() {
   clear
   echo " Install LowTier successfully!"
-  echo -e "\r\nDefault Port: ${GREEN_COLOR}11010(UDP+TCP)${RES}, Notice allowing in firewall!\r\n"
-  echo -e "Default Network Name: ${GREEN_COLOR}default${RES}, Please change it to your own network name!\r\n"
+  echo -e "\r\nDefault ports: ${GREEN_COLOR}TCP 11010, TCP+UDP 11012${RES}. Allow them in the firewall.\r\n"
+  echo -e "Network name: ${GREEN_COLOR}default${RES}. Peers need the same name and ${GREEN_COLOR}${INSTALL_PATH}/config/default.secret${RES}.\r\n"
+  echo -e "Check the node: ${GREEN_COLOR}sudo lowertier status${RES}, ${GREEN_COLOR}sudo lowertier doctor${RES}, ${GREEN_COLOR}sudo lowertier top${RES}\r\n"
 
   echo -e "Now LowTier supports multiple config files. You can create config files in the ${GREEN_COLOR}${INSTALL_PATH}/config/${RES} folder"
   echo -e "For more information, please check the documents in official site"
@@ -382,10 +353,10 @@ UNINSTALL() {
   echo -e "${GREEN_COLOR}Delete files ...${RES}"
   rm -f /usr/bin/lowertier-tracker /usr/sbin/lowertier-tracker
   if [ "$INIT_SYSTEM" = "systemd" ]; then
-    rm -rf $INSTALL_PATH /etc/systemd/system/lowertier.service /usr/bin/lowertier-core /usr/bin/lowertier-cli /etc/systemd/system/lowertier@.service /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
+    rm -rf $INSTALL_PATH /etc/systemd/system/lowertier.service /usr/bin/lowertier-core /usr/bin/lowertier-cli /etc/systemd/system/lowertier@.service /usr/sbin/lowertier /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
     systemctl daemon-reload
   else
-    rm -rf $INSTALL_PATH /etc/init.d/lowertier /usr/bin/lowertier-core /usr/bin/lowertier-cli /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
+    rm -rf $INSTALL_PATH /etc/init.d/lowertier /usr/bin/lowertier-core /usr/bin/lowertier-cli /usr/sbin/lowertier /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
   fi
   echo -e "\r\n${GREEN_COLOR}LowTier was removed successfully! ${RES}\r\n"
 }
@@ -393,7 +364,7 @@ UNINSTALL() {
 # Minimizes downtime by preparing new files before stopping the service.
 # Correctly handles restarting multiple systemd service instances.
 UPDATE() {
-  if [ ! -f "$INSTALL_PATH/lowertier-core" ]; then
+  if [ ! -f "$INSTALL_PATH/lowertier" ] && [ ! -f "$INSTALL_PATH/lowertier-core" ]; then
     echo -e "\r\n${RED_COLOR}Error${RES}: LowTier not found in $INSTALL_PATH. Cannot perform update.\r\n"
     exit 1
   fi
@@ -428,7 +399,7 @@ UPDATE() {
   
   unzip -o "$TEMP_UPDATE_DIR/lowertier.zip" -d "$TEMP_UPDATE_DIR/"
   
-  NEW_CORE_FILE="$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}/lowertier-core"
+  NEW_CORE_FILE="$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}/lowertier"
   if [ ! -f "$NEW_CORE_FILE" ]; then
       echo -e "${RED_COLOR}Extraction failed or the downloaded archive is invalid.${RES}"
       rm -rf "$TEMP_UPDATE_DIR"
@@ -466,17 +437,31 @@ UPDATE() {
   
   echo "Replacing files..."
   # Remove old binaries and docs, but not the config directory
-  rm -f "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/lowertier-tracker" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
+  rm -f "$INSTALL_PATH/lowertier" "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/lowertier-tracker" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
   
   # Move new files into the installation directory
   mv "$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}"/* "$INSTALL_PATH/"
-  chmod +x "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/lowertier-tracker"
+  chmod +x "$INSTALL_PATH/lowertier" "$INSTALL_PATH/lowertier-tracker"
+  ln -sf "$INSTALL_PATH/lowertier" /usr/sbin/lowertier
+  rm -f /usr/sbin/lowertier-core /usr/sbin/lowertier-cli
 
   # Restore configuration to prevent user-defined settings from being overwritten
   if [ -d "$BACKUP_CONFIG_DIR/config" ]; then
       cp -af "$BACKUP_CONFIG_DIR/config/." "$INSTALL_PATH/config/"
   fi
   
+  # The configuration layout changed in this release. Report every file that needs edits.
+  for config in "$INSTALL_PATH"/config/*.toml "$INSTALL_PATH"/config/*.conf; do
+    [ -f "$config" ] || continue
+    if ! "$INSTALL_PATH/lowertier" check -c "$config"; then
+      echo -e "${YELLOW_COLOR}Update $config as listed above before the service can start.${RES}"
+    fi
+  done
+  if [ "$INIT_SYSTEM" = "systemd" ] && grep -q lowertier-core /etc/systemd/system/lowertier@.service 2>/dev/null; then
+    sed -i "s|$INSTALL_PATH/lowertier-core -c|$INSTALL_PATH/lowertier run -c|" /etc/systemd/system/lowertier@.service
+    systemctl daemon-reload
+  fi
+
   # 4. Start the services, restoring operation
   if [ "$INIT_SYSTEM" = "systemd" ]; then
     if [ ${#ACTIVE_SERVICES[@]} -gt 0 ]; then
@@ -519,7 +504,7 @@ elif [ "$COMMEND" = "install" ]; then
   CHECK
   INSTALL
   INIT
-  if [ -f "$INSTALL_PATH/lowertier-core" ]; then
+  if [ -f "$INSTALL_PATH/lowertier" ]; then
     SUCCESS
   else
     echo -e "${RED_COLOR} Install fail, try install by hand${RES}"

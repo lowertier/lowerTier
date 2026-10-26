@@ -9,25 +9,26 @@ Native TAP is available on Linux and FreeBSD.
 LowTier uses TUN on other operating systems.
 
 ```toml
-[flags]
-dev_name = "et0"
-enable_bridge = true
+[tun]
+name = "et0"
 
-l2_fdb_capacity = 16384
-l2_fdb_age_seconds = 300
-l2_flood_bytes_per_second = 67108864
+[l2]
+bridge = true
+fdb_capacity = 16384
+fdb_age = "5m"
+flood_bytes_per_second = "64MiB"
 
 # Default source ownership limits and optional frame policy.
-l2_max_macs_per_peer = 256
-l2_mac_move_hold_seconds = 5
-l2_allowed_vlans = [0, 100, 200]
-l2_allowed_ether_types = [2048, 2054, 34525, 35020]
+max_macs_per_peer = 256
+mac_move_hold = "5s"
+vlans = [0, 100, 200]
+ether_types = [2048, 2054, 34525, 35020]
 ```
 
 Users do not select TAP or TUN.
 
-Set `enable_bridge = true` on each native Ethernet bridge.
-The command-line equivalent is `--enable-bridge`.
+Set `l2.bridge = true` on each native Ethernet bridge.
+The command-line equivalent is `--set l2.bridge=true`.
 The default is false and does not authorize arbitrary Ethernet input.
 Both endpoints must also pass the existing peer and bridge authorization checks.
 
@@ -45,9 +46,7 @@ The ingress bucket counts complete Ethernet frame bytes.
 Compact IP broadcast and multicast share that bucket and include the reconstructed Ethernet header.
 Ingress unknown unicast uses the receiving node's FDB state.
 Zero disables both byte limits.
-The retired TOML key `l2_flood_bps` produces an error naming `l2_flood_bytes_per_second`.
-The new CLI option is `--l2-flood-bytes-per-second`.
-The new environment variable is `ET_L2_FLOOD_BYTES_PER_SECOND`.
+The retired keys `l2_flood_bps` and `l2_flood_bytes_per_second` produce an error naming `l2.flood_bytes_per_second`.
 
 The forwarding database does not learn zero, broadcast, or multicast source addresses.
 

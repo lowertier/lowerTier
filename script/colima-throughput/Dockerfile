@@ -9,10 +9,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     cargo build --quiet --locked --release -p lowertier \
-        --bin lowertier-core --bin lowertier-cli \
+        --bin lowertier \
         --no-default-features --features tun \
-    && cp target/release/lowertier-core /tmp/lowertier-core \
-    && cp target/release/lowertier-cli /tmp/lowertier-cli
+    && cp target/release/lowertier /tmp/lowertier
 
 # Explicit target for QEMU/Linux validation. It is not part of the runtime
 # image, but reuses the same registry, git, and target caches as the release
@@ -31,6 +30,5 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates ethtool iperf3 iproute2 iputils-ping jq procps \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /tmp/lowertier-core /usr/local/bin/lowertier-core
-COPY --from=builder /tmp/lowertier-cli /usr/local/bin/lowertier-cli
+COPY --from=builder /tmp/lowertier /usr/local/bin/lowertier
 CMD ["/bin/sh"]

@@ -104,8 +104,7 @@ jobs:
           if [[ "$TARGET" == *windows* ]]; then
             suffix=".exe"
           fi
-          cp "target/$TARGET/release/lowertier-core$suffix" artifacts/
-          cp "target/$TARGET/release/lowertier-cli$suffix" artifacts/
+          cp "target/$TARGET/release/lowertier$suffix" artifacts/
           cp "target/$TARGET/release/lowertier-tracker$suffix" artifacts/
 
           if [[ "$TARGET" == *windows* ]]; then

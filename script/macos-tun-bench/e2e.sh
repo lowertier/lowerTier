@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$repo_root/script/throughput-common.sh"
 
-binary=${1:-target/release/lowertier-core}
+binary=${1:-target/release/lowertier}
 binary=$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")
 runs=${RUNS:-3}
 duration=${DURATION:-10}
@@ -99,16 +99,16 @@ docker --context "$docker_context" run -d \
     --cap-add NET_ADMIN \
     --device /dev/net/tun \
     "$image" \
-    env $runtime_env /usr/local/bin/lowertier-core \
-    --network-name macos-tun-bench \
-    --network-secret macos-tun-bench-secret \
-    --encryption-algorithm "$encryption_algorithm" \
-    --mtu "$mtu" \
-    --ipv4 10.91.0.2/24 \
-    --no-listener \
-    --peers "quic://host.docker.internal:${host_quic_port}" \
-    --default-protocol quic \
-    --rpc-portal 127.0.0.1:15992 >/dev/null
+    env $runtime_env /usr/local/bin/lowertier run \
+    --set network.name=macos-tun-bench \
+    --set network.secret=macos-tun-bench-secret \
+    --set "network.cipher=$encryption_algorithm" \
+    --set "tun.mtu=$mtu" \
+    --set address.ipv4=10.91.0.2/24 \
+    --set transport.listen= \
+    --set "peer=quic://host.docker.internal:${host_quic_port}" \
+    --set transport.prefer=quic \
+    --set control.portal=127.0.0.1:15992 >/dev/null
 
 sleep 1
 if [[ $(docker --context "$docker_context" inspect -f '{{.State.Running}}' "$container_name") != true ]]; then
@@ -119,15 +119,15 @@ fi
 
 (
     cd "$result_dir"
-    exec sudo -n env $runtime_env "$binary" \
-        --network-name macos-tun-bench \
-        --network-secret macos-tun-bench-secret \
-        --encryption-algorithm "$encryption_algorithm" \
-        --mtu "$mtu" \
-        --ipv4 10.91.0.1/24 \
-        --listeners "quic://0.0.0.0:${host_quic_port}" \
-        --default-protocol quic \
-        --rpc-portal 127.0.0.1:15991
+    exec sudo -n env $runtime_env "$binary" run \
+        --set network.name=macos-tun-bench \
+        --set network.secret=macos-tun-bench-secret \
+        --set "network.cipher=$encryption_algorithm" \
+        --set "tun.mtu=$mtu" \
+        --set address.ipv4=10.91.0.1/24 \
+        --set "transport.listen=quic://0.0.0.0:${host_quic_port}" \
+        --set transport.prefer=quic \
+        --set control.portal=127.0.0.1:15991
 ) >"$result_dir/client.log" 2>&1 &
 client_pid=$!
 
@@ -137,7 +137,7 @@ for _ in {1..30}; do
     fi
     sleep 1
 done
-client_core_pid=$(pgrep -n -x lowertier-core)
+client_core_pid=$(pgrep -n -x lowertier)
 client_ifname=$(sed -n 's/.*tun device ready dev="\([^"]*\)".*/\1/p' "$result_dir/client.log" | tail -1)
 test -n "$client_ifname"
 ping -q -c 20 -i 0.1 -W 1000 10.91.0.2 | tee "$result_dir/ping.txt"

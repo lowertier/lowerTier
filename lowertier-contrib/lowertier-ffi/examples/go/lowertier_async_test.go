@@ -115,16 +115,23 @@ func startLocalAsyncTopology(t *testing.T, n *AsyncNative) localAsyncTopology {
 }
 
 func localAsyncConfig(instance, ipv4, networkName, networkSecret string, listeners, peers []string) string {
-	config := fmt.Sprintf(`instance_name = %s
+	config := fmt.Sprintf(`[node]
+instance_name = %s
+
+[address]
 ipv4 = %s
-listeners = %s
 
-[network_identity]
-network_name = %s
-network_secret = %s
+[transport]
+listen = %s
 
-[flags]
-no_tun = true
+[network]
+name = %s
+secret = %s
+
+[tun]
+mode = "none"
+
+[underlay]
 bind_device = false
 `,
 		strconv.Quote(instance),

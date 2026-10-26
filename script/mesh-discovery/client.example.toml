@@ -1,14 +1,28 @@
 # This configuration uses local test services. Set actual addresses and explicit ports before deployment.
 # Each node needs its own VPN address.
-hostname = "rendezvous-client-a"
-ipv4 = "10.216.0.1/24"
-listeners = []
-stun_servers = ["127.0.0.1:16780", "127.0.0.1:16781"]
-tcp_stun_servers = ["127.0.0.1:16780", "127.0.0.1:16781"]
+# Start it with: lowertier run -c client.example.toml
 
-[network_identity]
-network_name = "local-rendezvous-test"
-network_secret = "replace-with-a-random-shared-secret"
+[node]
+hostname = "rendezvous-client-a"
+
+[network]
+name = "local-rendezvous-test"
+secret = "replace-with-a-random-shared-secret"
+
+[address]
+ipv4 = "10.216.0.1/24"
+
+[tun]
+name = "rv0"
+ipv6 = true
+
+[transport]
+listen = []
+prefer = "quic"
+
+[nat]
+stun = ["127.0.0.1:16780", "127.0.0.1:16781"]
+stun_tcp = ["127.0.0.1:16780", "127.0.0.1:16781"]
 
 [discovery]
 trackers = [
@@ -28,10 +42,6 @@ private_trackers = [
 # bind = "127.0.0.1:17001"
 # advertise = "127.0.0.1:17001"
 
-[flags]
-default_protocol = "quic"
-enable_ipv6 = true
-dev_name = "rv0"
-
-# Set the local RPC port explicitly when starting the process:
-# lowertier-core -c client.example.toml --rpc-portal 127.0.0.1:15888
+[control]
+# The local management portal used by `lowertier status` and `lowertier top`.
+portal = "127.0.0.1:15888"

@@ -8,17 +8,25 @@ LowTier sends each proxy connection through its existing encrypted overlay route
 
 ## Start the proxy
 
-The following command starts both proxy protocols on one local TCP port.
+The following configuration starts both proxy protocols on one local TCP port.
 
-```bash
-lowertier-core \
-  --tun=userspace-networking \
-  --socks5-server=127.0.0.1:1055 \
-  --outbound-http-proxy-listen=127.0.0.1:1055 \
-  --network-name=example \
-  --network-secret='replace-this-secret' \
-  --peers=quic://192.0.2.10:11012
+```toml
+[network]
+name = "example"
+secret_file = "example.secret"
+
+[tun]
+mode = "userspace"
+
+[proxy]
+socks5 = "127.0.0.1:1055"
+http = "127.0.0.1:1055"
+
+[[peer]]
+uri = "quic://192.0.2.10:11012"
 ```
+
+Start it without administrator privileges with `lowertier run -c example.toml`.
 
 Replace the example network values before use.
 Use an unprivileged local port above 1023.

@@ -38,7 +38,7 @@ config_dir=${LOWTIER_CONFIG_DIR:-}
 iperf_wrapper=${IPERF_EXEC_WRAPPER:-}
 underlay_mtu=${UNDERLAY_MTU:-1500}
 caddy_binary=${CADDY_BIN:-}
-cpu_processes=lowertier-core
+cpu_processes=lowertier
 listener_port=11010
 peer_host=$node_a
 tcp_congestion_control=${TCP_CONGESTION_CONTROL:-}
@@ -192,7 +192,7 @@ if [[ -n "$caddy_binary" ]]; then
     esac
     listener_port=11011
     peer_host=challenges.cloudflare.com
-    cpu_processes=lowertier-core,caddy
+    cpu_processes=lowertier,caddy
     printf 'caddy_binary_name=%s\n' "$(basename "$caddy_binary")" >>"$result_dir/environment.txt"
 fi
 printf 'cpu_processes=%s\n' "$cpu_processes" >>"$result_dir/environment.txt"
@@ -225,7 +225,7 @@ start_containers() {
     cleanup_nodes
     local run_args=(--pull never -d --network "$network" --cap-add NET_ADMIN --device /dev/net/tun)
     if [[ -n "$core_binary" ]]; then
-        run_args+=(-v "$core_binary:/usr/local/bin/lowertier-core:ro")
+        run_args+=(-v "$core_binary:/usr/local/bin/lowertier:ro")
     fi
     if [[ -n "$tcp_congestion_control" ]]; then
         run_args+=(--sysctl "net.ipv4.tcp_congestion_control=$tcp_congestion_control")
@@ -353,7 +353,7 @@ capture_dataplane_snapshot() {
     fi
     local temporary="${output}.tmp"
     if ! "${docker_cmd[@]}" exec "$node" \
-        lowertier-cli --rpc-portal "127.0.0.1:$portal" stats prometheus \
+        lowertier --portal "127.0.0.1:$portal" stats --prometheus \
         >"$temporary" 2>"${output}.stderr"; then
         cat "$temporary" >"$output" 2>/dev/null || true
         rm -f "$temporary"
@@ -535,13 +535,13 @@ if [[ -n "$config_dir" ]]; then
     for node in "${containers[@]}"; do
         "${docker_cmd[@]}" cp "$config_dir/$node.toml" "$node:/tmp/benchmark.toml"
         "${docker_cmd[@]}" exec -d "$node" sh -lc \
-            "exec env $runtime_env lowertier-core -c /tmp/benchmark.toml $core_args >/tmp/lowertier.log 2>&1"
+            "exec env $runtime_env lowertier run -c /tmp/benchmark.toml $core_args >/tmp/lowertier.log 2>&1"
     done
 else
 "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
-    "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.1/24 --listeners '${underlay_protocol}://0.0.0.0:$listener_port$lane_query' --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
+    "exec env $runtime_env lowertier run --set network.name=throughput-$profile --set network.secret=throughput-secret --set network.cipher=$encryption_algorithm --set tun.name=et0 --set address.ipv4=$subnet.1/24 --set 'transport.listen=${underlay_protocol}://0.0.0.0:$listener_port$lane_query' --set transport.prefer=$underlay_protocol --set control.portal=127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
 "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
-    "exec env $runtime_env lowertier-core --network-name throughput-$profile --network-secret throughput-secret --encryption-algorithm $encryption_algorithm --dev-name et0 --ipv4 $subnet.2/24 --listeners '${underlay_protocol}://0.0.0.0:11010$lane_query' --peers '${underlay_protocol}://$peer_host:11010$lane_query' --default-protocol $underlay_protocol --disable-upnp true --rpc-portal 127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
+    "exec env $runtime_env lowertier run --set network.name=throughput-$profile --set network.secret=throughput-secret --set network.cipher=$encryption_algorithm --set tun.name=et0 --set address.ipv4=$subnet.2/24 --set 'transport.listen=${underlay_protocol}://0.0.0.0:11010$lane_query' --set 'peer=${underlay_protocol}://$peer_host:11010$lane_query' --set transport.prefer=$underlay_protocol --set control.portal=127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
 fi
 wait_for_ping "$subnet.2"
 "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \
@@ -573,8 +573,8 @@ for node in "$node_a" "$node_b"; do
     "${docker_cmd[@]}" exec "$node" ss -u -m -a -n \
         >"$result_dir/logs/${node}-udp-sockets.txt"
 done
-"${docker_cmd[@]}" exec "$node_a" pkill -TERM lowertier-core 2>/dev/null || true
-"${docker_cmd[@]}" exec "$node_b" pkill -TERM lowertier-core 2>/dev/null || true
+"${docker_cmd[@]}" exec "$node_a" pkill -TERM -x lowertier 2>/dev/null || true
+"${docker_cmd[@]}" exec "$node_b" pkill -TERM -x lowertier 2>/dev/null || true
 sleep 1
 for node in "$node_a" "$node_b"; do
     log_file="$result_dir/logs/${profile}-${node}.log"

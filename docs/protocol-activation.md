@@ -5,15 +5,14 @@ LowTier can explicitly restrict an instance to QUIC, H2/TCP, WSS, or a selected 
 ## QUIC-only instance
 
 ```toml
-listeners = ["quic://0.0.0.0:14192"]
-
-# Every optional [[peer]] URI and mapped listener must also use quic.
-[flags]
-default_protocol = "quic"
-enabled_protocols = ["quic"]
+# Every optional [[peer]] URI and advertised listener must also use quic.
+[transport]
+listen = ["quic://0.0.0.0:14192"]
+prefer = "quic"
+protocols = ["quic"]
 ```
 
-For H2-only use `default_protocol = "tcp"`, `enabled_protocols = ["tcp"]`, and `tcp://` listeners/peers. For WSS-only use `"wss"` and `wss://`. A mixed instance can list more than one protocol. An empty list, including the omitted default, preserves the previous all-protocol behavior.
+For H2-only use `prefer = "tcp"`, `protocols = ["tcp"]`, and `tcp://` listeners/peers. For WSS-only use `"wss"` and `wss://`. A mixed instance can list more than one protocol. An empty list, including the omitted default, preserves the previous all-protocol behavior.
 
 The configuration loader rejects unsupported names, duplicates, a disabled preferred protocol, and listeners or bootstrap peers outside the list. Runtime listener/connector factories also reject disabled transports before DNS or socket creation. Direct discovery and authenticated rendezvous cannot reactivate a disabled transport.
 

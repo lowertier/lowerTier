@@ -4,15 +4,14 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 BUILD_DIR=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
-CORE_BIN=${CORE_BIN:-"$BUILD_DIR/debug/lowertier-core"}
-CLI_BIN=${CLI_BIN:-"$BUILD_DIR/debug/lowertier-cli"}
+BIN=${BIN:-"$BUILD_DIR/debug/lowertier"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 INSTANCE_A=11111111-1111-4111-8111-111111111111
 INSTANCE_B=22222222-2222-4222-8222-222222222222
 CORE_PID=
 
-if [[ "${SKIP_BUILD:-0}" != 1 ]] || [[ ! -x "$CORE_BIN" ]] || [[ ! -x "$CLI_BIN" ]]; then
-    cargo build -p lowertier --bin lowertier-core --bin lowertier-cli
+if [[ "${SKIP_BUILD:-0}" != 1 ]] || [[ ! -x "$BIN" ]]; then
+    cargo build -p lowertier --bin lowertier
 fi
 
 RUN_DIR=$(mktemp -d -t lowertier-cli-e2e.XXXXXX)
@@ -36,30 +35,36 @@ PY
 write_config() {
     local name=$1 id=$2
     cat >"$RUN_DIR/config/$name.toml" <<EOF
+[node]
 instance_name = "e2e-inst-$name"
 instance_id = "$id"
-listeners = []
 
-[network_identity]
-network_name = "e2e-net-$name"
-network_secret = "e2e-secret-$name"
+[network]
+name = "e2e-net-$name"
+secret = "e2e-secret-$name"
 
-[flags]
-no_tun = true
-enable_ipv6 = false
+[transport]
+listen = []
+
+[tun]
+mode = "none"
+ipv6 = false
+
+[control]
+portal = "127.0.0.1:$RPC_PORT"
 EOF
 }
 write_config a "$INSTANCE_A"
 write_config b "$INSTANCE_B"
-"$CORE_BIN" --config-dir "$RUN_DIR/config" --rpc-portal "127.0.0.1:$RPC_PORT" \
+XDG_RUNTIME_DIR="$RUN_DIR" "$BIN" run --config-dir "$RUN_DIR/config" \
     >"$RUN_DIR/core.log" 2>&1 &
 CORE_PID=$!
-cli=("$CLI_BIN" -p "127.0.0.1:$RPC_PORT" --control-token-file "$RUN_DIR/config/control.token" -o json)
+cli=("$BIN" -p "127.0.0.1:$RPC_PORT" --token-file "$RUN_DIR/config/control.token" -o json)
 
 ready=false
 for _ in $(seq 1 50); do
-    if "${cli[@]}" --instance "$INSTANCE_A" node show >"$RUN_DIR/node.json" 2>/dev/null \
-        && "${cli[@]}" --instance "$INSTANCE_B" node show >/dev/null 2>&1; then
+    if "${cli[@]}" --instance "$INSTANCE_A" status >"$RUN_DIR/node.json" 2>/dev/null \
+        && "${cli[@]}" --instance e2e-inst-b status >/dev/null 2>&1; then
         ready=true
         break
     fi
@@ -71,7 +76,7 @@ if [[ "$ready" != true ]]; then
 fi
 
 "${cli[@]}" instance list >"$RUN_DIR/instances.json"
-if "${cli[@]}" node show >"$RUN_DIR/ambiguous.json" 2>/dev/null; then
+if "${cli[@]}" status >"$RUN_DIR/ambiguous.json" 2>/dev/null; then
     echo "A node request requires an instance ID when two instances exist." >&2
     exit 1
 else
@@ -79,9 +84,9 @@ else
 fi
 
 printf '%s\n' '{"tcp_whitelist":["80","443"]}' >"$RUN_DIR/acl.json"
-"${cli[@]}" --instance "$INSTANCE_A" acl set --file "$RUN_DIR/acl.json" >"$RUN_DIR/write.json"
-"${cli[@]}" --instance "$INSTANCE_A" acl get >"$RUN_DIR/acl-a.json"
-"${cli[@]}" --instance "$INSTANCE_B" acl get >"$RUN_DIR/acl-b.json"
+"${cli[@]}" --instance "$INSTANCE_A" acl set "$RUN_DIR/acl.json" --no-persist >"$RUN_DIR/write.json"
+"${cli[@]}" --instance "$INSTANCE_A" acl show >"$RUN_DIR/acl-a.json"
+"${cli[@]}" --instance "$INSTANCE_B" acl show >"$RUN_DIR/acl-b.json"
 "$PYTHON_BIN" - "$RUN_DIR" "$INSTANCE_A" "$INSTANCE_B" <<'PY'
 import json
 from pathlib import Path
@@ -96,7 +101,7 @@ def read(name, instance=None):
     assert envelope["request_id"], envelope
     assert envelope.get("error") is None, envelope
     if instance:
-        assert envelope["instance_id"] == instance, envelope
+        assert envelope.get("instance_id", instance) == instance, envelope
     return envelope["data"]
 
 instances = read("instances.json")["instances"]

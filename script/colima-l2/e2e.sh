@@ -231,22 +231,22 @@ start_node() {
         "${image_name}" sleep infinity >/dev/null
 
     local args=(
-        lowertier-core
-        --network-name colima-l2
-        --network-secret colima-l2-secret
-        --dev-name et0
-        --ipv4 "${overlay_ip}/24"
-        --listeners "${protocol}://0.0.0.0:11010"
-        --default-protocol "${protocol}"
-        --disable-p2p
-        --enable-bridge
-        --l2-fdb-capacity 1024
-        --l2-fdb-age-seconds 120
-        --l2-flood-bytes-per-second 8388608
-        --l2-mac-move-hold-seconds 2
+        lowertier run
+        --set network.name=colima-l2
+        --set network.secret=colima-l2-secret
+        --set tun.name=et0
+        --set "address.ipv4=${overlay_ip}/24"
+        --set "transport.listen=${protocol}://0.0.0.0:11010"
+        --set "transport.prefer=${protocol}"
+        --set nat.p2p=off
+        --set l2.bridge=true
+        --set l2.fdb_capacity=1024
+        --set l2.fdb_age=120
+        --set l2.flood_bytes_per_second=8388608
+        --set l2.mac_move_hold=2
     )
     if [[ -n "${peer_url}" ]]; then
-        args+=(--peers "${peer_url}")
+        args+=(--set "peer=${peer_url}")
     fi
     "${docker_cmd[@]}" exec -d "${node}" \
         sh -c 'exec "$@" >/tmp/lowertier.log 2>&1' \

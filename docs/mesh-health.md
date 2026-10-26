@@ -1,6 +1,6 @@
 # Peer authentication and UDP reply health
 
-`lowertier-cli peer list` exposes three separate authentication scopes. The
+`lowertier peers show PEER` exposes three separate authentication scopes. The
 JSON peer fields are additive to the existing route and connection records:
 
 - `direct_link_auth` describes a live direct transport connection. It is absent

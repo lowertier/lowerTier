@@ -8,11 +8,13 @@ TLS exporter binding remains enabled for QUIC, H2, and WSS.
 ## Client configuration
 
 ```toml
-listeners = []
+[network]
+name = "example-network"
+secret_file = "/etc/lowertier/example.secret"
 
-[network_identity]
-network_name = "example-network"
-network_secret = "replace-with-a-random-shared-secret"
+[transport]
+listen = []
+prefer = "quic"
 
 [discovery]
 trackers = [
@@ -20,12 +22,9 @@ trackers = [
   "udp://tracker.torrent.eu.org:451/announce",
   "https://tracker.example.net/announce",
 ]
-
-[flags]
-default_protocol = "quic"
 ```
 
-Use `tcp` for H2 or `wss` for WSS. Use the same transport on nodes that must discover each other directly.
+Set `transport.prefer` to `tcp` for H2 or `wss` for WSS. Use the same transport on nodes that must discover each other directly.
 Remove `[[peer]]` entries when the tracker must supply the entire bootstrap peer set.
 Existing configured peers remain available when both mechanisms are configured.
 Tracker discovery requires a nonempty shared network secret. Credential-only bootstrap is not supported by this initial version.

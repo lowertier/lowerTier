@@ -3,13 +3,16 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 probe="$repo_root/script/tests/userspace_proxy_probe.py"
-core=${LOWTIER_CORE:-"$repo_root/target/debug/lowertier-core"}
+core=${LOWTIER_BINARY:-"$repo_root/target/debug/lowertier"}
 benchmark_bytes=${USERSPACE_BENCHMARK_BYTES:-67108864}
 benchmark_runs=${USERSPACE_BENCHMARK_RUNS:-5}
 rtt_runs=${USERSPACE_RTT_RUNS:-101}
 setup_runs=${USERSPACE_SETUP_RUNS:-11}
 result_file=${USERSPACE_RESULT_FILE:-}
 run_dir=$(mktemp -d -t lowertier-userspace-proxy.XXXXXX)
+# Keep the control token and runtime records inside the test directory.
+export LOWTIER_CONTROL_TOKEN_FILE="$run_dir/control.token"
+export XDG_RUNTIME_DIR="$run_dir"
 
 server_pid=
 client_pid=
@@ -37,7 +40,7 @@ if [[ ! -x "$core" ]]; then
         --manifest-path "$repo_root/Cargo.toml" \
         --locked \
         -p lowertier \
-        --bin lowertier-core
+        --bin lowertier
 fi
 
 read -r underlay_port proxy_port tcp_port udp_port http_port server_rpc_port client_rpc_port < <(
@@ -92,22 +95,22 @@ start_client() {
     local instance_name=$2
     local http_proxy_arg=
     if [[ "$mode" == shared ]]; then
-        http_proxy_arg="--outbound-http-proxy-listen=127.0.0.1:$proxy_port"
+        http_proxy_arg="proxy.http=127.0.0.1:$proxy_port"
     fi
 
-    RUST_LOG=warn "$core" \
-        --instance-name "$instance_name" \
-        --network-name userspace-proxy-test \
-        --network-secret userspace-proxy-secret \
-        --ipv4 10.77.0.1 \
-        --tun=userspace-networking \
-        --no-listener \
-        --rpc-portal="127.0.0.1:$client_rpc_port" \
-        --peers "quic://127.0.0.1:$underlay_port" \
-        --socks5-server="127.0.0.1:$proxy_port" \
-        ${http_proxy_arg:+"$http_proxy_arg"} \
-        --disable-ipv6=true \
-        --disable-p2p=true \
+    RUST_LOG=warn "$core" run \
+        --set "node.instance_name=$instance_name" \
+        --set network.name=userspace-proxy-test \
+        --set network.secret=userspace-proxy-secret \
+        --set address.ipv4=10.77.0.1 \
+        --set tun.mode=userspace \
+        --set transport.listen= \
+        --set "control.portal=127.0.0.1:$client_rpc_port" \
+        --set "peer=quic://127.0.0.1:$underlay_port" \
+        --set "proxy.socks5=127.0.0.1:$proxy_port" \
+        ${http_proxy_arg:+--set "$http_proxy_arg"} \
+        --set tun.ipv6=false \
+        --set nat.p2p=off \
         >"$run_dir/$instance_name.log" 2>&1 &
     client_pid=$!
 }
@@ -121,17 +124,17 @@ python3 "$probe" server \
     >"$run_dir/service.log" 2>&1 &
 service_pid=$!
 
-RUST_LOG=warn "$core" \
-    --instance-name userspace-proxy-server \
-    --network-name userspace-proxy-test \
-    --network-secret userspace-proxy-secret \
-    --hostname userspace-proxy-server \
-    --ipv4 10.77.0.2 \
-    --tun=userspace-networking \
-    --listeners "quic://127.0.0.1:$underlay_port" \
-    --rpc-portal="127.0.0.1:$server_rpc_port" \
-    --disable-ipv6=true \
-    --disable-p2p=true \
+RUST_LOG=warn "$core" run \
+    --set node.instance_name=userspace-proxy-server \
+    --set network.name=userspace-proxy-test \
+    --set network.secret=userspace-proxy-secret \
+    --set node.hostname=userspace-proxy-server \
+    --set address.ipv4=10.77.0.2 \
+    --set tun.mode=userspace \
+    --set "transport.listen=quic://127.0.0.1:$underlay_port" \
+    --set "control.portal=127.0.0.1:$server_rpc_port" \
+    --set tun.ipv6=false \
+    --set nat.p2p=off \
     >"$run_dir/server.log" 2>&1 &
 server_pid=$!
 

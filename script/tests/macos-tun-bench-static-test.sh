@@ -23,14 +23,14 @@ grep -q 'sudo -n vmmap -summary "$client_core_pid"' "$harness"
 grep -q 'perf_read_interface_counters' "$harness"
 grep -q 'interface-counters.tsv' "$harness"
 grep -q 'ENCRYPTION_ALGORITHM' "$harness"
-grep -q -- '--encryption-algorithm' "$harness"
+grep -q -- '--set "network.cipher=$encryption_algorithm"' "$harness"
 ! grep -q -- '--interface-adapter' "$harness"
 grep -q 'mtu=${MTU:-1360}' "$harness"
-grep -q -- '--mtu "$mtu"' "$harness"
-grep -q -- '--rpc-portal 127.0.0.1:15992' "$harness"
+grep -q -- '--set "tun.mtu=$mtu"' "$harness"
+grep -q -- '--set control.portal=127.0.0.1:15992' "$harness"
 grep -q 'server.log' "$harness"
 grep -q 'host.docker.internal' "$harness"
-grep -q -- '--listeners "quic://0.0.0.0:${host_quic_port}"' "$harness"
+grep -q -- '--set "transport.listen=quic://0.0.0.0:${host_quic_port}"' "$harness"
 if grep -q -- '-p "${host_quic_port}:11010/udp"' "$harness"; then
     echo "the macOS TUN benchmark must not use the Colima UDP port forwarder" >&2
     exit 1

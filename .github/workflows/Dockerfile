@@ -30,6 +30,7 @@ EXPOSE 11012/udp
 EXPOSE 16969/udp
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-    CMD ["/usr/local/bin/lowertier-cli", "--rpc-portal", "127.0.0.1:15888", "--output", "json", "node", "show"]
+    CMD ["/usr/local/bin/lowertier", "--output", "json", "status"]
 
-ENTRYPOINT ["/sbin/tini", "--", "lowertier-core"]
+# Arguments go to `lowertier run`, for example `-c /config/node.toml`.
+ENTRYPOINT ["/sbin/tini", "--", "lowertier", "run"]
