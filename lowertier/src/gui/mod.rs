@@ -32,7 +32,7 @@ use crate::{
     },
     common::{config_schema, runtime_registry},
     proto::{
-        api::control::v1::{ControlPlaneV1Rpc as _, ListRoutesRequest, Page},
+        api::control::v1::{ControlPlaneV1Rpc as _, ListPathsRequest, ListRoutesRequest, Page},
         rpc_types::controller::BaseController,
     },
 };
@@ -292,7 +292,7 @@ impl Server {
     }
 
     async fn snapshot(&self, client: &Client) -> Result<Value> {
-        let (view, routes) = tokio::join!(
+        let (view, routes, paths) = tokio::join!(
             status::fetch(client),
             client.rpc.list_routes(
                 client.controller(),
@@ -304,11 +304,21 @@ impl Server {
                     }),
                     include_paths: true,
                 },
+            ),
+            client.rpc.list_paths(
+                client.controller(),
+                ListPathsRequest {
+                    meta: client.meta(),
+                },
             )
         );
         let view = view?;
         let routes = routes?;
         if let Some(error) = routes.error {
+            return Err(error.into());
+        }
+        let paths = paths?;
+        if let Some(error) = paths.error {
             return Err(error.into());
         }
         let peers = &view.peers;
@@ -325,6 +335,7 @@ impl Server {
             "discovery": codec::message("GetDiscoveryResponse", &view.discovery)?,
             "listeners": codec::message("ListListenersResponse", &view.listeners)?,
             "routes": codec::messages("RouteSnapshot", &routes.routes)?,
+            "paths": codec::messages("PathStatus", &paths.paths)?,
         }))
     }
 

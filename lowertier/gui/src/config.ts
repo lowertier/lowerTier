@@ -112,20 +112,49 @@ export async function restartInstance(): Promise<void> {
   }
 }
 
-export interface Preference {
-  peer: string;
-  via: string;
+export interface GroupConfig {
+  name: string;
+  members: string[];
+  balance?: string;
+  weights?: number[];
 }
 
-export function preferences(): Preference[] {
-  return ((configured("relay.prefer") ?? []) as Preference[]).map((entry) => ({ peer: entry.peer, via: entry.via }));
+export interface PathConfig {
+  to: string;
+  via?: string[];
+  gateway?: string;
+  strict?: boolean;
 }
 
-/** Prefer reaching `peer` through `via` as the first hop. `via` undefined restores automatic routing. */
-export function preferRoute(peer: string, via?: string) {
-  const next = preferences().filter((entry) => entry.peer !== peer);
-  if (via) next.push({ peer, via });
-  return apply({ "relay.prefer": next.length ? next : null });
+export const groupsConfigured = () => ((configured("group") ?? []) as GroupConfig[]).map((group) => ({ ...group }));
+export const pathsConfigured = () => ((configured("path") ?? []) as PathConfig[]).map((path) => ({ ...path }));
+
+// Leave out empty fields so the TOML stays as short as a hand-written file.
+function tidyPath(path: PathConfig): PathConfig {
+  const out: PathConfig = { to: path.to };
+  if (path.via?.length) out.via = path.via;
+  if (path.gateway) out.gateway = path.gateway;
+  if (path.strict) out.strict = true;
+  return out;
+}
+
+function tidyGroup(group: GroupConfig): GroupConfig {
+  const out: GroupConfig = { name: group.name, members: group.members };
+  if (group.balance && group.balance !== "flow") out.balance = group.balance;
+  if (group.weights?.length && group.weights.some((weight) => weight !== 1)) out.weights = group.weights;
+  return out;
+}
+
+export function savePaths(paths: PathConfig[]) {
+  return apply({ path: paths.length ? paths.map(tidyPath) : null });
+}
+
+/** Save groups and paths together, so renaming or removing a group stays consistent. */
+export function saveRouting(groups: GroupConfig[], paths: PathConfig[]) {
+  return apply({
+    group: groups.length ? groups.map(tidyGroup) : null,
+    path: paths.length ? paths.map(tidyPath) : null,
+  });
 }
 
 export interface LinkCost {

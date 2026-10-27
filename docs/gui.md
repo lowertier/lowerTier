@@ -9,7 +9,7 @@ lowertier gui --listen 127.0.0.1:18080
 ```
 
 The page shows peers placed by round-trip time, traffic rates, loss, and routes.
-It sets every option in the registry, chooses a first hop for each peer (`relay.prefer`), orders exit nodes, follows logs, and switches between daemons on the machine.
+It sets every option in the registry, edits paths and load-balance groups with live per-member traffic shares, follows logs, and switches between daemons on the machine.
 Options that need a restart are staged; the page then offers an instance restart.
 Light and dark themes follow the system setting.
 

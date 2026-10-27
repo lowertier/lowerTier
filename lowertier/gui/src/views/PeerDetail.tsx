@@ -1,5 +1,6 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
-import { busy, linkCosts, preferRoute, preferences, setLinkCost } from "../config";
+import { For, Show, createSignal } from "solid-js";
+import { busy, linkCosts, pathsConfigured, savePaths, setLinkCost, type PathConfig } from "../config";
+import { PathStatusView, ViaEditor } from "../components/paths";
 import { bytes, latency, loss, rate, shortKey, NONE } from "../format";
 import { history, peerName, peers, selfId, snapshot, tick, type PeerRow } from "../store";
 import { Spark } from "../components/controls";
@@ -35,29 +36,72 @@ export function PathChain(props: { ids: number[]; destination: number }) {
   );
 }
 
-export function ViaSelect(props: { row: PeerRow }) {
-  const current = () => preferences().find((entry) => entry.peer === props.row.key)?.via ?? "";
-  const options = createMemo(() => peers().filter((peer) => peer.key && peer.key !== props.row.key && peer.direct));
-  return (
-    <select
-      aria-label={`Reach ${props.row.name} through`}
-      value={current()}
-      disabled={busy() || !props.row.key}
-      onChange={(event) => preferRoute(props.row.key, event.currentTarget.value || undefined)}
-    >
-      <option value="">Automatic</option>
-      <option value={props.row.key}>Direct</option>
-      <For each={options()}>{(peer) => <option value={peer.key}>Through {peer.name}</option>}</For>
-    </select>
-  );
+/** Index of the configured [[path]] whose destination is this peer, or -1. */
+export function pathIndexFor(row: PeerRow): number {
+  const address = row.address.split("/")[0];
+  return pathsConfigured().findIndex((path) => path.to === row.key || (address !== "" && path.to === address));
 }
 
-export function OverrideStatus(props: { route?: Doc }) {
-  const status = () => props.route?.override_status || "automatic";
+export function pathStatusFor(index: number): Doc | undefined {
+  return ((snapshot()?.paths ?? []) as Doc[]).find((status) => status.index === index);
+}
+
+/** Edit the waypoints that traffic from this node to `row` passes through. */
+export function PeerPath(props: { row: PeerRow }) {
+  const index = () => pathIndexFor(props.row);
+  const configuredPath = () => (index() >= 0 ? pathsConfigured()[index()] : undefined);
+  const [draft, setDraft] = createSignal<string[] | null>(null);
+  const [strict, setStrict] = createSignal<boolean | null>(null);
+  const via = () => draft() ?? configuredPath()?.via ?? [];
+  const isStrict = () => strict() ?? configuredPath()?.strict ?? false;
+  const dirty = () => draft() !== null || strict() !== null;
+  const save = async () => {
+    const paths = pathsConfigured();
+    const entry: PathConfig = { to: configuredPath()?.to ?? props.row.key, via: via(), strict: isStrict() };
+    if (index() >= 0) {
+      if (via().length) paths[index()] = entry;
+      else paths.splice(index(), 1);
+    } else if (via().length) {
+      paths.push(entry);
+    }
+    if (await savePaths(paths)) {
+      setDraft(null);
+      setStrict(null);
+    }
+  };
   return (
-    <span classList={{ status: true, [status()]: true }} title={props.route?.override_inactive_reason || undefined}>
-      {status() === "active" ? "Preferred path in use" : status() === "inactive" ? "Preferred path unavailable" : "Automatic"}
-    </span>
+    <div class="peer-path">
+      <ViaEditor value={via()} exclude={[props.row.key]} onChange={setDraft} disabled={busy() || !props.row.key} />
+      <Show when={via().length}>
+        <label class="check">
+          <input type="checkbox" checked={isStrict()} onChange={(event) => setStrict(event.currentTarget.checked)} /> Strict: drop traffic instead of falling back
+        </label>
+      </Show>
+      <Show when={dirty()}>
+        <div class="row-actions">
+          <button type="button" class="primary" disabled={busy()} onClick={save}>
+            Save path
+          </button>
+          <button
+            type="button"
+            class="link"
+            onClick={() => {
+              setDraft(null);
+              setStrict(null);
+            }}
+          >
+            Discard
+          </button>
+        </div>
+      </Show>
+      <p class="hint">
+        {via().length
+          ? "Waypoints are visited in order. A group sends each flow to one member."
+          : "Automatic routing. Add waypoints to steer this node's traffic through chosen peers or groups."}{" "}
+        Saved as <code>[[path]]</code>, applies live.
+      </p>
+      <PathStatusView status={index() >= 0 && !dirty() ? pathStatusFor(index()) : undefined} />
+    </div>
   );
 }
 
@@ -126,17 +170,12 @@ export default function PeerDetail(props: { id: number; onClose: () => void }) {
             </dl>
 
             <section>
-              <h3>Route</h3>
+              <h3>Automatic route</h3>
               <p class="path">
                 <PathChain ids={peer().hops} destination={peer().id} />
               </p>
-              <label class="field">
-                <span>Reach through</span>
-                <ViaSelect row={peer()} />
-              </label>
-              <p class="hint">
-                <OverrideStatus route={routeFor(peer())} />. Saved as <code>relay.prefer</code>, applies live.
-              </p>
+              <h3>Path from this node</h3>
+              <PeerPath row={peer()} />
               <Show when={peer().direct}>
                 <form
                   class="field inline"
