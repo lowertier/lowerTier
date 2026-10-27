@@ -6,7 +6,7 @@ use super::{
 
 mod acl;
 mod camouflage;
-pub(super) mod config;
+pub(crate) mod config;
 mod credential;
 mod discovery;
 pub(super) mod doctor;
@@ -53,6 +53,7 @@ pub async fn execute(client: &Client, command: &Command) -> Result<Response> {
         | Command::Config { .. }
         | Command::Doctor
         | Command::Top(_)
+        | Command::Gui(_)
         | Command::Service(_)
         | Command::Completion { .. } => unreachable!("handled before connecting"),
     }

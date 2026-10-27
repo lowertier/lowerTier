@@ -17,6 +17,8 @@ pub mod cli;
 pub mod common;
 pub mod connector;
 pub mod core;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod instance_manager;
 pub mod launcher;
 pub mod peers;

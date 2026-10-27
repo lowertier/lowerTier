@@ -358,13 +358,15 @@ tokio-socks = "0.5.2"
 
 
 [features]
-default = ["tun", "socks5", "mimalloc", "tui"]
+default = ["tun", "socks5", "mimalloc", "tui", "gui"]
 full = [
     "magic-dns",
 ]
 mimalloc = ["dep:mimalloc"]
 # Terminal dashboard for `lowertier top`.
 tui = ["dep:ratatui"]
+# Browser interface for `lowertier gui`.
+gui = []
 tun = ["dep:tun", "dep:quincy-tun", "dep:io-uring"]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]

@@ -4,7 +4,7 @@ pub(crate) mod commands;
 pub(crate) mod error;
 pub(crate) mod render;
 
-use args::{Arguments, Command, ConfigCommand, Output, PageArgs};
+use args::{Arguments, Command, ConfigCommand, GuiArgs, Output, PageArgs};
 use clap::Parser;
 use client::{Client, Response};
 use error::{CliError, Result};
@@ -122,6 +122,20 @@ async fn local(args: &Arguments) -> Result<Response> {
     }
 }
 
+#[cfg(feature = "gui")]
+async fn gui_serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
+    crate::gui::serve(args, gui).await
+}
+
+#[cfg(not(feature = "gui"))]
+async fn gui_serve(_: &Arguments, _: &GuiArgs) -> Result<()> {
+    Err(CliError::new(
+        "invalid_argument",
+        "This build has no GUI. Rebuild with the gui feature.",
+        "gui",
+    ))
+}
+
 async fn dispatch(args: &Arguments, request_id: &str) -> u8 {
     if let Command::Completion { shell } = &args.command {
         return match render::completion(shell, args.output, request_id) {
@@ -131,6 +145,15 @@ async fn dispatch(args: &Arguments, request_id: &str) -> u8 {
     }
     if args.command.local() {
         return finish(args, request_id, "", local(args).await);
+    }
+    if let Command::Gui(gui) = &args.command {
+        return match gui_serve(args, gui).await {
+            Ok(()) => 0,
+            Err(error) => {
+                let _ = render::write_error(args.output, request_id, "", &error);
+                error.exit_code()
+            }
+        };
     }
     if let Command::Doctor = args.command {
         let (response, failed) = commands::doctor::execute(args).await;

@@ -26,6 +26,7 @@ It does not cover a web interface or graphical client.
 | `lowertier run` | Runs nodes: the virtual interface, peer links, routing, and proxies. |
 | `lowertier status`, `get`, `set`, and other commands | Read state and change settings through the local management portal. |
 | `lowertier top` | Live terminal dashboard of peers, routes, relay traffic, and logs. |
+| `lowertier gui` | Browser interface for modes, routing, traffic, and settings. See [browser interface](docs/gui.md). |
 | `lowertier-tracker` | Serves UDP and HTTP tracker discovery for public or self-hosted bootstrap. |
 
 See [tracker discovery](docs/tracker-discovery.md) for client configuration, peer-assisted punching, and HTTP deployment behind a proxy or CDN.
@@ -115,6 +116,7 @@ Check the network from either node.
 sudo lowertier status
 sudo lowertier doctor
 sudo lowertier top
+sudo lowertier gui
 ping 10.44.0.2
 ```
 

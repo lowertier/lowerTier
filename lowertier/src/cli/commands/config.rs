@@ -67,6 +67,22 @@ pub async fn patch(
     apply: &ApplyArgs,
     revision: Option<u64>,
 ) -> Result<Response> {
+    let (response, unsaved) = patch_noting(client, values, mask, clear, apply, revision).await?;
+    if let Some(reason) = unsaved {
+        eprintln!("note: the change is not saved to a file: {reason}");
+    }
+    Ok(response)
+}
+
+/// `patch`, returning why the change was not saved to a file instead of printing it.
+pub async fn patch_noting(
+    client: &Client,
+    values: Table,
+    mask: Vec<String>,
+    clear: Vec<String>,
+    apply: &ApplyArgs,
+    revision: Option<u64>,
+) -> Result<(Response, Option<String>)> {
     let revision = match revision {
         Some(revision) => revision,
         None => client.revision(apply.expected_revision).await?,
@@ -95,6 +111,7 @@ pub async fn patch(
             .await
     };
     let mut response = send(patch.clone()).await?;
+    let mut unsaved = None;
     // Nodes started from --set values or read-only files have nothing to persist to.
     if patch.persist
         && response
@@ -102,12 +119,11 @@ pub async fn patch(
             .as_ref()
             .is_some_and(|error| error.field_path == "patch.persist")
     {
-        let reason = response.error.take().unwrap().message;
-        eprintln!("note: the change is not saved to a file: {reason}");
+        unsaved = Some(response.error.take().unwrap().message);
         patch.persist = false;
         response = send(patch).await?;
     }
-    checked(response)
+    Ok((checked(response)?, unsaved))
 }
 
 pub async fn get(client: &Client, path: Option<&str>) -> Result<Response> {

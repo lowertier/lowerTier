@@ -1152,7 +1152,7 @@ fn retired_entry(path: &str) -> Option<String> {
     })
 }
 
-fn table_fields(path: &str) -> &'static [(&'static str, &'static str)] {
+pub fn table_fields(path: &str) -> &'static [(&'static str, &'static str)] {
     TABLE_FIELDS
         .iter()
         .find(|(name, _)| *name == path)

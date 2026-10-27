@@ -69,6 +69,8 @@ pub enum Command {
     Doctor,
     /// Live terminal dashboard.
     Top(TopArgs),
+    /// Open the management interface in a web browser.
+    Gui(GuiArgs),
 
     /// Show configuration values: active, and desired when they differ.
     Get {
@@ -258,6 +260,16 @@ pub struct TopArgs {
     /// Refresh interval in milliseconds.
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..=60_000))]
     pub interval: u64,
+}
+
+#[derive(Args)]
+pub struct GuiArgs {
+    /// Loopback address to serve on. Default 127.0.0.1:15880, or a free port when it is taken.
+    #[arg(long, value_name = "ADDR")]
+    pub listen: Option<std::net::SocketAddr>,
+    /// Print the address without opening a browser.
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 #[derive(Args)]

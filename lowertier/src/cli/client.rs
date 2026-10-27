@@ -286,8 +286,24 @@ impl Client {
 
     /// Connect to a daemon without selecting an instance.
     pub async fn open(args: &Arguments, target: Target, request_id: String) -> Result<Self> {
-        let token = match &args.token {
-            Some(token) => token.clone(),
+        Self::open_with(
+            args.token.clone(),
+            args.admin_token.clone(),
+            target,
+            request_id,
+        )
+        .await
+    }
+
+    /// Connect with explicit credentials. The token file of `target` is read when `token` is None.
+    pub async fn open_with(
+        token: Option<String>,
+        admin_token: Option<String>,
+        target: Target,
+        request_id: String,
+    ) -> Result<Self> {
+        let token = match token {
+            Some(token) => token,
             None => read_token(&target.token_file)?,
         };
         let (transport, rpc) = dial(&target.portal).await?;
@@ -296,7 +312,7 @@ impl Client {
             meta: RequestMeta {
                 instance_id: String::new(),
                 control_token: token,
-                admin_token: args.admin_token.clone().unwrap_or_default(),
+                admin_token: admin_token.unwrap_or_default(),
                 request_id,
             },
             target,
