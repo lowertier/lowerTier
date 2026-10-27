@@ -38,6 +38,8 @@ pub struct NetworkInstanceManager {
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) control_configs:
         std::sync::Mutex<BTreeMap<uuid::Uuid, crate::rpc_service::control::config::ConfigState>>,
+    /// Instances stopped through the control API keep the process alive so they can start again.
+    stopped_holds: DashMap<uuid::Uuid, DaemonGuard>,
 }
 
 impl Default for NetworkInstanceManager {
@@ -58,6 +60,7 @@ impl NetworkInstanceManager {
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             control_configs: std::sync::Mutex::new(BTreeMap::new()),
+            stopped_holds: DashMap::new(),
         }
     }
 
@@ -377,6 +380,15 @@ impl NetworkInstanceManager {
 
     pub fn get_config_dir(&self) -> Option<&PathBuf> {
         self.config_dir.as_ref()
+    }
+
+    /// Keep the process running while `id` is stopped, until it starts again or is deleted.
+    pub(crate) fn hold_stopped(&self, id: uuid::Uuid) {
+        self.stopped_holds.insert(id, self.register_daemon());
+    }
+
+    pub(crate) fn release_stopped(&self, id: &uuid::Uuid) {
+        self.stopped_holds.remove(id);
     }
 
     pub(crate) fn register_daemon(&self) -> DaemonGuard {

@@ -868,6 +868,7 @@ impl ControlPlaneService {
             active.replace_active(&previous);
             return Err(error);
         }
+        self.manager.release_stopped(&id);
         self.manager.control_configs.lock().unwrap().insert(
             id,
             ConfigState {
@@ -892,6 +893,7 @@ impl ControlPlaneService {
     ) -> anyhow::Result<StopInstanceResponse> {
         let _guard = self.mutation_guard().await;
         let id = self.select_instance(request.meta.as_ref())?;
+        self.manager.hold_stopped(id);
         self.manager.stop_network_instance(id).await?;
         Ok(StopInstanceResponse::default())
     }
@@ -923,6 +925,7 @@ impl ControlPlaneService {
             ));
         }
         self.manager.delete_network_instance(vec![id])?;
+        self.manager.release_stopped(&id);
         self.manager.control_configs.lock().unwrap().remove(&id);
         Ok(DeleteInstanceResponse::default())
     }
