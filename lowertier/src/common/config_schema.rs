@@ -617,14 +617,6 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Bandwidth for goodput probes.",
     ),
     opt(
-        "relay.prefer",
-        Tables,
-        Same,
-        Live,
-        "",
-        "First-hop preferences: peer and via public keys.",
-    ),
-    opt(
         "relay.link_cost",
         Tables,
         Same,
@@ -823,20 +815,28 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Routes installed instead of the automatic routes.",
     ),
     opt(
-        "routes.exit_nodes",
-        StrList,
-        To("exit_nodes"),
-        Restart,
-        "",
-        "Virtual IPs of exit nodes, in preference order.",
-    ),
-    opt(
         "routes.serve_exit",
         Bool,
         To("flags.enable_exit_node"),
         Restart,
         "false",
         "Act as an exit node for peers.",
+    ),
+    opt(
+        "group",
+        Tables,
+        Same,
+        Live,
+        "",
+        "Load-balance groups: name, members (peer keys or virtual IPs), balance (flow or failover), weights.",
+    ),
+    opt(
+        "path",
+        Tables,
+        Same,
+        Live,
+        "",
+        "Paths: to (peer, CIDR, or internet), via (peers or groups in order), gateway (peer or group), strict.",
     ),
     opt(
         "export",
@@ -958,7 +958,24 @@ const TABLE_FIELDS: &[(&str, &[(&str, &str)])] = &[
             ("dest", "dst_addr"),
         ],
     ),
-    ("relay.prefer", &[("peer", "peer"), ("via", "via")]),
+    (
+        "group",
+        &[
+            ("name", "name"),
+            ("members", "members"),
+            ("balance", "balance"),
+            ("weights", "weights"),
+        ],
+    ),
+    (
+        "path",
+        &[
+            ("to", "to"),
+            ("via", "via"),
+            ("gateway", "gateway"),
+            ("strict", "strict"),
+        ],
+    ),
     (
         "relay.link_cost",
         &[("peer", "peer"), ("bias_ms", "bias_ms")],
@@ -985,7 +1002,9 @@ const RETIRED: &[(&str, Option<&str>)] = &[
     ),
     ("listeners", Some("transport.listen")),
     ("mapped_listeners", Some("transport.advertise")),
-    ("exit_nodes", Some("routes.exit_nodes")),
+    ("exit_nodes", Some("path")),
+    ("routes.exit_nodes", Some("path")),
+    ("relay.prefer", Some("path")),
     ("routes", Some("routes.manual")),
     ("proxy_network", Some("export")),
     ("socks5_proxy", Some("proxy.socks5")),
@@ -1147,6 +1166,8 @@ fn retired_entry(path: &str) -> Option<String> {
             .map_or_else(|| entry(&format!("flags.{path}")), |_| None)
     })?;
     Some(match found.1 {
+        // First-hop preferences and exit lists became [[path]] entries.
+        Some("path") => format!("\"{path}\" was replaced by [[path]]; see `lowertier config explain path`"),
         Some(new) => format!("\"{path}\" was renamed to \"{new}\""),
         None => format!("\"{path}\" was removed"),
     })
@@ -1835,7 +1856,7 @@ mod tests {
     #[test]
     fn custom_options_round_trip() {
         let public = table(
-            "[node]\nthreads = 4\n[tun]\nmode = \"userspace\"\nmtu = 1200\n[nat]\np2p = \"lazy\"\nudp_punch = false\n[relay]\npolicy = \"latency\"\nforeign_rpc = true\n[[relay.prefer]]\npeer = \"a\"\nvia = \"b\"\n[[forward]]\nproto = \"tcp\"\nbind = \"0.0.0.0:80\"\ndest = \"10.0.0.1:80\"\n[acl]\ntcp_ports = [\"22\"]\n[acl.acl_v1]\nchains = []\n",
+            "[node]\nthreads = 4\n[tun]\nmode = \"userspace\"\nmtu = 1200\n[nat]\np2p = \"lazy\"\nudp_punch = false\n[relay]\npolicy = \"latency\"\nforeign_rpc = true\n[[path]]\nto = \"internet\"\nvia = [\"relays\"]\ngateway = \"10.0.0.9\"\n[[group]]\nname = \"relays\"\nmembers = [\"10.0.0.2\", \"10.0.0.3\"]\nweights = [2, 1]\n[[forward]]\nproto = \"tcp\"\nbind = \"0.0.0.0:80\"\ndest = \"10.0.0.1:80\"\n[acl]\ntcp_ports = [\"22\"]\n[acl.acl_v1]\nchains = []\n",
         );
         let internal = to_internal(&public).unwrap();
         assert_eq!(

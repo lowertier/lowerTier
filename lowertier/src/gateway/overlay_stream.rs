@@ -1020,15 +1020,19 @@ impl OverlayStreamEndpoint {
 
     async fn send_frame(&self, remote_peer: PeerId, frame: Frame) -> LowTierResult<()> {
         let packet = self.packet_for_frame(remote_peer, frame);
-        let cached = self
-            .direct_paths
-            .get(&remote_peer)
-            .map(|connection| connection.clone())
-            .or_else(|| {
-                let connection = self.peer_manager.only_direct_proxy_conn(remote_peer)?;
-                self.direct_paths.insert(remote_peer, connection.clone());
-                Some(connection)
-            });
+        // A [[path]] to this peer must not be bypassed by a direct link.
+        let cached = if self.peer_manager.path_applies_to(remote_peer) {
+            None
+        } else {
+            self.direct_paths
+                .get(&remote_peer)
+                .map(|connection| connection.clone())
+                .or_else(|| {
+                    let connection = self.peer_manager.only_direct_proxy_conn(remote_peer)?;
+                    self.direct_paths.insert(remote_peer, connection.clone());
+                    Some(connection)
+                })
+        };
         if let Some(connection) = cached {
             let result = self
                 .peer_manager

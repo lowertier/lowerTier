@@ -63,6 +63,8 @@ pub enum PacketType {
     RelayHandshakeResetAck = 41,
     ReceiverPressure = 42,
     OverlayStream = 43,
+    // A sealed packet on its way through waypoints. See `ZCPacket::encode_waypoints`.
+    Waypoint = 44,
 }
 
 bitflags::bitflags! {
@@ -91,6 +93,11 @@ pub struct PeerManagerHeader {
     reserved: u8,
     pub len: U32<DefaultEndian>,
 }
+/// Waypoints per packet, including the first.
+pub(crate) const WAYPOINT_LIMIT: usize = 4;
+const WAYPOINT_TAIL: usize = 7;
+const WAYPOINT_VERSION: u8 = 1;
+
 pub const PEER_MANAGER_HEADER_SIZE: usize = std::mem::size_of::<PeerManagerHeader>();
 pub const PEER_MANAGER_STABLE_AUTH_DATA_SIZE: usize = 19;
 const FLOW_SHARD_PRESENT: u8 = 0x80;
@@ -661,6 +668,8 @@ pub struct ZCPacket {
     pub(crate) transit_data: bool,
     pub(crate) transit_network: Option<std::sync::Arc<str>>,
     pub(crate) transit_destination: Option<PeerId>,
+    /// Local-only: the [[path]] chosen for this packet when it was routed by IP.
+    pub(crate) path_rule: Option<u16>,
     inner: BytesMut,
     packet_type: ZCPacketType,
     lossy_hint: Option<bool>,
@@ -691,6 +700,7 @@ impl Clone for ZCPacket {
             transit_data: self.transit_data,
             transit_network: self.transit_network.clone(),
             transit_destination: self.transit_destination,
+            path_rule: self.path_rule,
             packet_type: self.packet_type,
             lossy_hint: self.lossy_hint,
             authenticated_peer_id: self.authenticated_peer_id,
@@ -767,6 +777,7 @@ impl ZCPacket {
             transit_data: false,
             transit_network: None,
             transit_destination: None,
+            path_rule: None,
             packet_type: ZCPacketType::NIC,
             lossy_hint: None,
             authenticated_peer_id: None,
@@ -798,6 +809,7 @@ impl ZCPacket {
             transit_data: false,
             transit_network: None,
             transit_destination: None,
+            path_rule: None,
             inner: buf,
             packet_type,
             lossy_hint: None,
@@ -841,6 +853,7 @@ impl ZCPacket {
             transit_data: false,
             transit_network: None,
             transit_destination: None,
+            path_rule: None,
             inner: buf,
             packet_type,
             lossy_hint: None,
@@ -1214,6 +1227,83 @@ impl ZCPacket {
         self.inner.truncate(self.inner.len() - suffix_len);
         self.parsed_metadata = None;
         Ok(())
+    }
+
+    /// Route a sealed packet through `waypoints` without touching its payload.
+    ///
+    /// The header must name the final destination and must already be sealed for it. The header
+    /// then names the first waypoint, and a trailer keeps the rest:
+    /// `[later waypoints reversed, u32 LE][final u32 LE][original type][count][version]`.
+    /// The final destination receives the original header and bytes, so its authentication holds.
+    pub(crate) fn encode_waypoints(&mut self, waypoints: &[PeerId]) -> Result<(), &'static str> {
+        let (first, rest) = waypoints.split_first().ok_or("no waypoints")?;
+        if waypoints.len() > WAYPOINT_LIMIT {
+            return Err("too many waypoints");
+        }
+        let header = self.peer_manager_header().ok_or("packet without header")?;
+        let destination = header.to_peer_id.get();
+        let original_type = header.packet_type;
+        let mut trailer = [0_u8; 4 * (WAYPOINT_LIMIT - 1) + WAYPOINT_TAIL];
+        let mut length = 0;
+        for peer in rest.iter().rev() {
+            trailer[length..length + 4].copy_from_slice(&peer.to_le_bytes());
+            length += 4;
+        }
+        trailer[length..length + 4].copy_from_slice(&destination.to_le_bytes());
+        trailer[length + 4] = original_type;
+        trailer[length + 5] = rest.len() as u8;
+        trailer[length + 6] = WAYPOINT_VERSION;
+        length += WAYPOINT_TAIL;
+        self.append_payload_preserving_flow_hash(&trailer[..length])?;
+        let header = self.mut_peer_manager_header().ok_or("packet without header")?;
+        header.to_peer_id.set(*first);
+        header.packet_type = PacketType::Waypoint as u8;
+        Ok(())
+    }
+
+    /// At a waypoint: aim the packet at the next waypoint, or restore it for its destination.
+    /// Returns the new destination. Only the header and the trailer change.
+    pub(crate) fn advance_waypoint(&mut self) -> Result<PeerId, &'static str> {
+        let payload = self.payload();
+        let length = payload.len();
+        if length < WAYPOINT_TAIL || payload[length - 1] != WAYPOINT_VERSION {
+            return Err("invalid waypoint trailer");
+        }
+        let remaining = usize::from(payload[length - 2]);
+        let original_type = payload[length - 3];
+        let destination = PeerId::from_le_bytes(
+            payload[length - 7..length - 3]
+                .try_into()
+                .expect("four bytes"),
+        );
+        if remaining >= WAYPOINT_LIMIT
+            || length < WAYPOINT_TAIL + 4 * remaining
+            || original_type == PacketType::Waypoint as u8
+        {
+            return Err("invalid waypoint trailer");
+        }
+        let next = if remaining > 0 {
+            let next = PeerId::from_le_bytes(
+                payload[length - 11..length - 7]
+                    .try_into()
+                    .expect("four bytes"),
+            );
+            let tail = length - WAYPOINT_TAIL;
+            let payload = self.mut_payload_preserving_flow_hash();
+            payload.copy_within(tail..length, tail - 4);
+            payload[length - 6] = (remaining - 1) as u8;
+            self.remove_payload_suffix_preserving_flow_hash(4)?;
+            next
+        } else {
+            self.remove_payload_suffix_preserving_flow_hash(WAYPOINT_TAIL)?;
+            destination
+        };
+        let header = self.mut_peer_manager_header().ok_or("packet without header")?;
+        header.to_peer_id.set(next);
+        if remaining == 0 {
+            header.packet_type = original_type;
+        }
+        Ok(next)
     }
 
     pub fn buf_len(&self) -> usize {
@@ -1714,6 +1804,37 @@ impl ZCPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waypoints_restore_the_sealed_packet_exactly() {
+        let mut packet = ZCPacket::new_with_payload(b"sealed payload");
+        packet.fill_peer_manager_hdr(1, 9, PacketType::Data as u8);
+        packet.mut_peer_manager_header().unwrap().set_encrypted(true);
+        let sealed = packet.payload().to_vec();
+        let auth = packet.peer_manager_header().unwrap().stable_auth_data();
+
+        packet.encode_waypoints(&[5, 6, 7]).unwrap();
+        let header = packet.peer_manager_header().unwrap();
+        assert_eq!(
+            (header.to_peer_id.get(), header.packet_type),
+            (5, PacketType::Waypoint as u8)
+        );
+        assert_eq!(packet.payload().len(), sealed.len() + 7 + 8);
+        assert_eq!(packet.advance_waypoint(), Ok(6));
+        assert_eq!(packet.advance_waypoint(), Ok(7));
+        assert_eq!(
+            packet.peer_manager_header().unwrap().packet_type,
+            PacketType::Waypoint as u8
+        );
+        assert_eq!(packet.advance_waypoint(), Ok(9));
+        assert_eq!(packet.payload(), sealed.as_slice());
+        assert_eq!(packet.peer_manager_header().unwrap().stable_auth_data(), auth);
+
+        let mut short = ZCPacket::new_with_payload(b"xy");
+        short.fill_peer_manager_hdr(1, 2, PacketType::Waypoint as u8);
+        assert!(short.advance_waypoint().is_err());
+        assert!(packet.encode_waypoints(&[1, 2, 3, 4, 5]).is_err());
+    }
 
     #[test]
     fn payload_parts_constructor_initializes_only_the_supplied_payload() {

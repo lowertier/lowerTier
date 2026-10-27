@@ -306,7 +306,6 @@ impl InstanceConfigPatcher {
         self.patch_acl(patch.acl).await?;
         self.patch_proxy_networks(patch.proxy_networks).await?;
         self.patch_routes(patch.routes).await?;
-        self.patch_exit_nodes(patch.exit_nodes).await?;
         self.patch_mapped_listeners(patch.mapped_listeners).await?;
         self.patch_connector(patch.connectors, &candidate_flags)
             .await?;
@@ -520,25 +519,6 @@ impl InstanceConfigPatcher {
         } else {
             global_ctx.config.set_routes(Some(current_routes));
         }
-        Ok(())
-    }
-
-    async fn patch_exit_nodes(
-        &self,
-        exit_nodes: Vec<crate::proto::api::config::ExitNodePatch>,
-    ) -> Result<(), anyhow::Error> {
-        if exit_nodes.is_empty() {
-            return Ok(());
-        }
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-        let peer_manager = weak_upgrade(&self.peer_manager)?;
-        let mut current_exit_nodes = global_ctx.config.get_exit_nodes();
-        let patches = exit_nodes.into_iter().map(Into::into).collect();
-        InstanceConfigPatcher::trace_patchables(&patches);
-        crate::proto::api::config::patch_vec(&mut current_exit_nodes, patches);
-        global_ctx.config.set_exit_nodes(current_exit_nodes);
-        peer_manager.update_exit_nodes().await;
-
         Ok(())
     }
 
@@ -1281,11 +1261,11 @@ mod protocol_memory_tests {
                 .await
                 .err()
                 .unwrap();
-                assert!(err.to_string().contains("disabled by enabled_protocols"));
+                assert!(err.to_string().contains("disabled by transport.protocols"));
                 let err = super::super::listeners::create_listener_by_url(&url, ctx.clone())
                     .err()
                     .unwrap();
-                assert!(err.to_string().contains("disabled by enabled_protocols"));
+                assert!(err.to_string().contains("disabled by transport.protocols"));
             }
         }
     }

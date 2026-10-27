@@ -8,6 +8,7 @@ pub mod credential_manager;
 pub mod peer;
 pub mod peer_conn;
 pub mod peer_conn_ping;
+pub mod path_policy;
 pub mod peer_manager;
 pub mod peer_map;
 pub mod peer_ospf_route;

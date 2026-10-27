@@ -135,7 +135,8 @@ message RoutePeerInfo {
   uint64 bridge_attestation_issued_unix_ms = 28;
   uint64 bridge_attestation_expiry_unix_ms = 29;
   repeated common.RelayLinkCost relay_link_cost = 30;
-  repeated common.RelayPrefer relay_prefer = 31;
+  reserved 31;
+  reserved "relay_prefer";
 }
 
 message PeerIdVersion {

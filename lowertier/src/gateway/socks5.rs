@@ -631,7 +631,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
         let route_plan = if has_smoltcp_net && !addr.ip().is_loopback() {
             Some(
                 peer_mgr_arc
-                    .plan_user_route(addr.ip())
+                    .plan_user_route(addr.ip(), rand::random())
                     .await
                     .map_err(|error| anyhow::anyhow!(error))?,
             )
@@ -763,7 +763,7 @@ impl AsyncUdpConnector for Socks5AutoConnector {
         let route_plan = if self.smoltcp_net.is_some() && !addr.ip().is_loopback() {
             Some(
                 peer_manager
-                    .plan_user_route(addr.ip())
+                    .plan_user_route(addr.ip(), rand::random())
                     .await
                     .map_err(|error| anyhow::anyhow!(error))?,
             )

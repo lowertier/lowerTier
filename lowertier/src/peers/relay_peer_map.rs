@@ -793,6 +793,13 @@ impl Default for RelayPeerState {
     }
 }
 
+/// Why a batch did not go through its waypoints.
+pub(crate) enum WaypointSendError {
+    /// The end-to-end session with the destination is not ready. The batch is returned unsent.
+    NotReady(PacketBatch),
+    Failed(Error),
+}
+
 pub struct RelayPeerMap {
     peer_map: Arc<PeerMap>,
     foreign_network_client: Option<Arc<ForeignNetworkClient>>,
@@ -2443,6 +2450,59 @@ impl RelayPeerMap {
 
         self.send_via_next_hop_batch_at(batch, dst_peer_id, policy, selected_next_hop)
             .await
+    }
+
+    /// Seal `batch` for `dst_peer_id` and send it through `waypoints` in order.
+    ///
+    /// Waypoints forward the sealed bytes without opening them. A first waypoint that is a direct
+    /// neighbor needs no trailer: the packet goes over that link with its own destination.
+    /// Returns the batch unsent while the session with the destination is not ready, so the
+    /// caller can route it automatically or drop it.
+    pub(crate) async fn send_batch_via_waypoints(
+        self: &Arc<Self>,
+        mut batch: PacketBatch,
+        dst_peer_id: PeerId,
+        waypoints: &[PeerId],
+        policy: NextHopPolicy,
+    ) -> Result<(), WaypointSendError> {
+        let failed = |error: String| WaypointSendError::Failed(Error::RouteError(Some(error)));
+        let Some((first, rest)) = waypoints.split_first() else {
+            return Err(failed("no waypoints".into()));
+        };
+        let network = self.global_ctx.get_network_identity();
+        let key = SessionKey::new(network.network_name.clone(), dst_peer_id);
+        let ready = self.current_session(dst_peer_id, &key).filter(|_| {
+            self.send_state(dst_peer_id)
+                .is_none_or(|state| state.phase() == RelaySendPhase::Ready)
+        });
+        let Some(session) = ready else {
+            // Start the handshake. Meanwhile the caller decides what to do with the batch.
+            let _ = self.ensure_session(dst_peer_id, policy).await;
+            return Err(WaypointSendError::NotReady(batch));
+        };
+        self.states.entry(dst_peer_id).or_default().last_active_at = Instant::now();
+        for packet in batch.iter_mut() {
+            attach_relay_origin_proof(packet).map_err(|error| failed(error.to_string()))?;
+        }
+        session
+            .encrypt_payload_batch(self.my_peer_id, dst_peer_id, &mut batch)
+            .map_err(|error| failed(format!("{error:?}")))?;
+        let first_is_neighbor = self.peer_map.has_peer(*first);
+        let encoded = if first_is_neighbor { rest } else { waypoints };
+        let target = match encoded.first() {
+            Some(next) => {
+                for packet in batch.iter_mut() {
+                    packet
+                        .encode_waypoints(encoded)
+                        .map_err(|error| failed(error.into()))?;
+                }
+                *next
+            }
+            None => dst_peer_id,
+        };
+        self.send_via_next_hop_batch_at(batch, target, policy, first_is_neighbor.then_some(*first))
+            .await
+            .map_err(WaypointSendError::Failed)
     }
 
     pub(crate) async fn flush_pending_packets(
@@ -4349,6 +4409,7 @@ impl RelayPeerMap {
             if !header.is_encrypted()
                 || Self::is_handshake_packet_type(header.packet_type)
                 || Self::is_handshake_confirmation_packet_type(header.packet_type)
+                || header.packet_type == PacketType::Waypoint as u8
             {
                 continue;
             }
@@ -4372,6 +4433,10 @@ impl RelayPeerMap {
             let auth_snapshot = self.peer_map.origin_auth_snapshot();
             let group_requires_bridge_grant =
                 indexes.iter().any(|index| requires_bridge_grant[*index]);
+            // A session set up by a direct link has no relay binding until relayed data uses
+            // it, for example through a waypoint. Bind it as the sending side does; the key
+            // must still match the origin authority.
+            let _ = self.bind_existing_relay_session_auth_if_missing(from_peer_id, &session);
             let Ok((origin_entry, _bridge_grant)) = self.validate_relay_session_auth_from_snapshot(
                 from_peer_id,
                 &session,

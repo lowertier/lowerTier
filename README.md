@@ -16,6 +16,7 @@ It does not cover a web interface or graphical client.
 - Unprivileged SOCKS5 and HTTP proxy mode without TUN or TAP.
 - QUIC/HTTP/3 underlay by default, with H2 and WSS also available.
 - Peer discovery, NAT traversal, subnet routes, exit nodes, ACLs, and port forwarding.
+- Paths through chosen nodes, with load-balanced relay groups and exits. See [paths](docs/paths.md).
 - ChaCha20-Poly1305 authenticated encryption, always on.
 - Noise peer authentication with replay protection for every peer.
 
@@ -300,7 +301,6 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `relay.transit_burst_bytes` | bytes | - | live | Transit burst capacity. |
 | `relay.probe_interval_seconds` | duration | `30` | live | Interval between goodput probes. |
 | `relay.probe_budget_bps` | bit/s | `0` | live | Bandwidth for goodput probes. |
-| `relay.prefer` | table array | - | live | First-hop preferences: peer and via public keys. |
 | `relay.link_cost` | table array | - | live | Adjacent link cost bias: peer public key and bias_ms. |
 | `relay.foreign_rpc` | bool | `false` | restart | Relay control RPC for foreign networks outside relay.transit_networks. |
 | `relay.private_mode` | bool | `false` | restart | Reject foreign networks without authorized admission. |
@@ -326,8 +326,9 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `l2.vlans` | integer list | - | restart | Allowed VLAN IDs. Empty allows all; 0 means untagged. |
 | `l2.ether_types` | integer list | - | restart | Allowed EtherTypes. Empty allows all. |
 | `routes.manual` | string list | - | restart | Routes installed instead of the automatic routes. |
-| `routes.exit_nodes` | string list | - | restart | Virtual IPs of exit nodes, in preference order. |
 | `routes.serve_exit` | bool | `false` | restart | Act as an exit node for peers. |
+| `group` | table array | - | live | Load-balance groups: name, members (peer keys or virtual IPs), balance (flow or failover), weights. |
+| `path` | table array | - | live | Paths: to (peer, CIDR, or internet), via (peers or groups in order), gateway (peer or group), strict. |
 | `export` | table array | - | restart | Local subnets exported to peers: cidr, optional mapped_cidr and allow. |
 | `proxy.socks5` | host:port | - | restart | SOCKS5 listener into the network. |
 | `proxy.http` | host:port | - | restart | HTTP proxy listener into the network. |

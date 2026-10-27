@@ -2,7 +2,6 @@ use super::direct_nic::{
     DirectNicBatchWriter, DirectNicEndpoint, DirectNicIngress, plan_direct_nic_delivery,
 };
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use dashmap::DashMap;
@@ -545,6 +544,7 @@ struct HybridBatchRoute {
     peers: HybridRoutePeers,
     is_exit_node: bool,
     blackholed: bool,
+    path_rule: Option<u16>,
 }
 
 fn is_peer_rpc_packet_type(packet_type: u8) -> bool {
@@ -829,9 +829,9 @@ pub struct PeerManager {
     local_bgp_routes_lock: SyncMutex<()>,
     local_bgp_route_generation: AtomicU64,
     topology_service_route_generation: AtomicU64,
-    static_service_route_generation: AtomicU64,
 
-    exit_nodes: ArcSwap<Vec<IpAddr>>,
+    /// `[[group]]` and `[[path]]` selection for traffic this node sends.
+    paths: Arc<super::path_policy::PathRuntime>,
 
     reserved_my_peer_id_map: DashMap<String, PeerId>,
     recent_have_traffic: Arc<DashMap<PeerId, Instant>>,
@@ -1332,7 +1332,6 @@ impl PeerManager {
         peers.install_l2_fabric(l2_fabric.clone());
         let service_routes = Arc::new(ServiceRouteStore::new(65_536, Duration::from_secs(300)));
 
-        let exit_nodes = global_ctx.config.get_exit_nodes();
 
         let stats_manager = global_ctx.stats_manager();
         let network_name = global_ctx.get_network_name();
@@ -1459,9 +1458,8 @@ impl PeerManager {
             local_bgp_routes_lock: SyncMutex::new(()),
             local_bgp_route_generation: AtomicU64::new(0),
             topology_service_route_generation: AtomicU64::new(0),
-            static_service_route_generation: AtomicU64::new(0),
 
-            exit_nodes: ArcSwap::from_pointee(exit_nodes),
+            paths: Arc::new(super::path_policy::PathRuntime::new(my_peer_id)),
 
             reserved_my_peer_id_map: DashMap::new(),
             recent_have_traffic: Arc::new(DashMap::new()),
@@ -2186,6 +2184,34 @@ impl PeerManager {
             .unwrap_or(RelayBatchDecryptOutcome::NotAttempted)
     }
 
+    /// Pass a sealed packet on toward its next waypoint or its destination. The payload stays
+    /// sealed; only the header and the waypoint trailer change.
+    fn advance_waypoint(
+        packet: &mut ZCPacket,
+        from_peer_id: PeerId,
+        my_peer_id: PeerId,
+        is_encrypted: bool,
+        global_ctx: &ArcGlobalCtx,
+    ) -> Result<PeerId, &'static str> {
+        if !is_encrypted {
+            return Err("waypoint packets must be sealed for their destination");
+        }
+        if from_peer_id == my_peer_id {
+            return Err("waypoint packet from this node");
+        }
+        if global_ctx.get_flags().relay_config().transit()
+            == crate::proto::common::TransitPolicy::Deny
+        {
+            return Err("relay.transit is deny");
+        }
+        let next = packet.advance_waypoint()?;
+        if next == my_peer_id {
+            return Err("waypoint packet loops back to this node");
+        }
+        packet.transit_data = true;
+        Ok(next)
+    }
+
     fn relay_batch_should_decrypt(batch: &PacketBatch, my_peer_id: PeerId) -> bool {
         let mut has_relay_ciphertext = false;
         for packet in batch {
@@ -2198,6 +2224,7 @@ impl PeerManager {
             if header.is_encrypted()
                 && !RelayPeerMap::is_handshake_packet_type(header.packet_type)
                 && !RelayPeerMap::is_handshake_confirmation_packet_type(header.packet_type)
+                && header.packet_type != PacketType::Waypoint as u8
             {
                 has_relay_ciphertext = true;
             }
@@ -2440,6 +2467,25 @@ impl PeerManager {
                             } else {
                                 authenticated_peer_id
                             }
+                        };
+                        let (to_peer_id, packet_type) = if to_peer_id == my_peer_id
+                            && packet_type == PacketType::Waypoint as u8
+                        {
+                            match Self::advance_waypoint(
+                                &mut ret,
+                                from_peer_id,
+                                my_peer_id,
+                                is_encrypted,
+                                &global_ctx,
+                            ) {
+                                Ok(next) => (next, ret.peer_manager_header().unwrap().packet_type),
+                                Err(reason) => {
+                                    tracing::debug!(from_peer_id, reason, "drop waypoint packet");
+                                    continue;
+                                }
+                            }
+                        } else {
+                            (to_peer_id, packet_type)
                         };
                         let is_relay_data_packet = if is_foreign_network_packet_type(packet_type) {
                             Self::is_relay_data_zc_packet(&ret)
@@ -3370,6 +3416,23 @@ impl PeerManager {
             self.global_ctx.latency_first(),
         );
 
+        let msg = if self.paths.is_active() {
+            self.paths.refresh(&self.global_ctx.flags_arc());
+            let mut errors = Vec::new();
+            let mut rest = self
+                .send_path_packets(dst_peer_id, PacketBatch::singleton(msg), &mut errors)
+                .await
+                .into_iter();
+            if let Some(error) = errors.pop() {
+                return Err(error);
+            }
+            match rest.next() {
+                Some(msg) => msg,
+                None => return Ok(()),
+            }
+        } else {
+            msg
+        };
         let msg_len = msg.buf_len() as u64;
         let result = Self::send_msg_internal(
             &self.peers,
@@ -3385,6 +3448,47 @@ impl PeerManager {
             self.self_tx_counters.self_tx_packets.inc();
         }
         result
+    }
+
+    /// True when a [[path]] steers traffic to `dst_peer_id`, so streams must not take a direct link.
+    pub(crate) fn path_applies_to(&self, dst_peer_id: PeerId) -> bool {
+        self.paths.refresh(&self.global_ctx.flags_arc());
+        if !self.paths.is_active() {
+            return false;
+        }
+        let descriptor = self.peers.dataplane_descriptor();
+        descriptor
+            .forwarding_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| self.paths.rule_for_destination(snapshot, dst_peer_id).is_some())
+    }
+
+    /// The [[path]] that applies to traffic for `peer_id`, if any.
+    pub fn path_for_peer(&self, peer_id: PeerId) -> Option<u16> {
+        self.paths.refresh(&self.global_ctx.flags_arc());
+        let descriptor = self.peers.dataplane_descriptor();
+        let snapshot = descriptor.forwarding_snapshot.as_ref()?;
+        self.paths.rule_for_destination(snapshot, peer_id)
+    }
+
+    /// Status of every [[path]] for the control API.
+    pub async fn path_status(&self) -> Vec<crate::proto::api::control::v1::PathStatus> {
+        self.paths.refresh(&self.global_ctx.flags_arc());
+        let Some(snapshot) = self.peers.forwarding_decision_snapshot().await else {
+            return Vec::new();
+        };
+        let routes = self.get_route().list_routes().await;
+        let my_hostname = self.global_ctx.get_hostname();
+        self.paths.status(&snapshot, |peer_id| {
+            if peer_id == self.my_peer_id {
+                return my_hostname.clone();
+            }
+            routes
+                .iter()
+                .find(|route| route.peer_id == peer_id)
+                .map(|route| route.hostname.clone())
+                .unwrap_or_default()
+        })
     }
 
     pub(crate) fn only_direct_proxy_conn(&self, dst_peer_id: PeerId) -> Option<Arc<PeerConn>> {
@@ -3681,6 +3785,87 @@ impl PeerManager {
         }
     }
 
+    /// Send the packets of `batch` that follow a [[path]] through their waypoints. Returns the
+    /// packets that route automatically: no path applies, or the path falls back.
+    async fn send_path_packets(
+        &self,
+        peer_id: PeerId,
+        batch: PacketBatch,
+        errors: &mut Vec<Error>,
+    ) -> PacketBatch {
+        use super::path_policy::WaypointPlan;
+        let descriptor = self.peers.dataplane_descriptor();
+        let Some(snapshot) = descriptor.forwarding_snapshot.as_ref() else {
+            return batch;
+        };
+        let destination_rule = self.paths.rule_for_destination(snapshot, peer_id);
+        let mut automatic = PacketBatch::with_capacity(batch.len());
+        let mut routed = SmallVec::<[(SmallVec<[PeerId; 4]>, u16, PacketBatch); 2]>::new();
+        for packet in batch {
+            let rule = packet.peer_manager_header().and_then(|header| {
+                (header.from_peer_id.get() == self.my_peer_id
+                    && !header.is_encrypted()
+                    && (header.packet_type == PacketType::Data as u8
+                        || header.packet_type == PacketType::OverlayStream as u8))
+                    .then(|| packet.path_rule.or(destination_rule))
+                    .flatten()
+            });
+            let Some(rule) = rule else {
+                let _ = automatic.try_push(packet);
+                continue;
+            };
+            let flow = packet
+                .flow_hash()
+                .unwrap_or_else(|| super::flow::classify_packet_flow(&packet).hash);
+            match self.paths.waypoints(snapshot, rule, peer_id, flow) {
+                WaypointPlan::Automatic | WaypointPlan::Fallback => {
+                    let _ = automatic.try_push(packet);
+                }
+                WaypointPlan::Drop => {}
+                WaypointPlan::Via(chain) => {
+                    match routed
+                        .iter_mut()
+                        .find(|(current, current_rule, _)| *current == chain && *current_rule == rule)
+                    {
+                        Some((_, _, packets)) => {
+                            let _ = packets.try_push(packet);
+                        }
+                        None => routed.push((chain, rule, PacketBatch::singleton(packet))),
+                    }
+                }
+            }
+        }
+        for (chain, rule, packets) in routed {
+            let policy = packets
+                .first()
+                .and_then(ZCPacket::peer_manager_header)
+                .map_or(NextHopPolicy::LeastCost, Self::get_next_hop_policy);
+            let count = packets.len() as u64;
+            let bytes = packets.buffer_byte_len() as u64;
+            match self
+                .relay_peer_map
+                .send_batch_via_waypoints(packets, peer_id, &chain, policy)
+                .await
+            {
+                Ok(()) => {
+                    self.self_tx_counters.self_tx_bytes.add(bytes);
+                    self.self_tx_counters.self_tx_packets.add(count);
+                }
+                Err(super::relay_peer_map::WaypointSendError::NotReady(packets)) => {
+                    let strict = self.paths.is_strict(rule);
+                    for packet in packets {
+                        self.paths.record_send_fallback(rule, strict);
+                        if !strict {
+                            let _ = automatic.try_push(packet);
+                        }
+                    }
+                }
+                Err(super::relay_peer_map::WaypointSendError::Failed(error)) => errors.push(error),
+            }
+        }
+        automatic
+    }
+
     async fn send_ordered_peer_batches(
         &self,
         peer_batches: OrderedPeerBatches,
@@ -3755,7 +3940,15 @@ impl PeerManager {
             let first_packet_type = prepared.first_packet_type;
             let first_is_hybrid_ip_ethernet = prepared.first_is_hybrid_ip_ethernet;
             let uniform_direct_priority = prepared.uniform_direct_priority;
-            let peer_batch = prepared.batch;
+            let peer_batch = if self.paths.is_active() {
+                let rest = self.send_path_packets(peer_id, prepared.batch, errors).await;
+                if rest.is_empty() {
+                    continue;
+                }
+                rest
+            } else {
+                prepared.batch
+            };
 
             if single_peer_batch && uniform_direct_priority {
                 let first_header = peer_batch
@@ -4421,13 +4614,6 @@ impl PeerManager {
         send_result
     }
 
-    pub async fn get_msg_dst_peer(&self, addr: &IpAddr) -> (Vec<PeerId>, bool) {
-        match addr {
-            IpAddr::V4(ipv4_addr) => self.get_msg_dst_peer_ipv4(ipv4_addr).await,
-            IpAddr::V6(ipv6_addr) => self.get_msg_dst_peer_ipv6(ipv6_addr).await,
-        }
-    }
-
     fn is_all_peers_broadcast_ipv4(&self, ipv4_addr: &Ipv4Addr) -> bool {
         ipv4_addr.is_broadcast()
             || ipv4_addr.is_multicast()
@@ -4825,13 +5011,14 @@ impl PeerManager {
         &self,
         snapshot: &ForwardingDecisionSnapshotHandle,
         ip_addr: IpAddr,
-        configured_exit_nodes: &[IpAddr],
-    ) -> (Vec<PeerId>, bool) {
+        flow: u64,
+    ) -> (Vec<PeerId>, bool, Option<u16>) {
         let routes = snapshot.capabilities();
         if ip_addr.is_multicast() {
             return (
                 Self::select_ip_multicast_peers(routes, self.my_peer_id, ip_addr),
                 false,
+                None,
             );
         }
         let is_broadcast = match ip_addr {
@@ -4843,23 +5030,33 @@ impl PeerManager {
                 IpAddr::V4(_) => (
                     Self::select_ipv4_broadcast_peers(routes, self.my_peer_id),
                     false,
+                    None,
                 ),
-                IpAddr::V6(_) => (routes.iter().map(|route| route.peer_id).collect(), false),
+                IpAddr::V6(_) => (
+                    routes.iter().map(|route| route.peer_id).collect(),
+                    false,
+                    None,
+                ),
             };
         }
 
         if let Some(peer_id) = snapshot.peer_id_by_ip(&ip_addr) {
-            return (vec![peer_id], false);
+            return (vec![peer_id], false, None);
         }
         let same_network = self.global_ctx.is_ip_in_same_network(&ip_addr);
+        let rule = if same_network {
+            None
+        } else {
+            self.paths.rule_for_address(snapshot, ip_addr)
+        };
         if !same_network && let Some(peer_id) = snapshot.proxy_peer_id_by_ip(&ip_addr) {
-            return (vec![peer_id], false);
+            return (vec![peer_id], false, rule);
         }
 
         if matches!(ip_addr, IpAddr::V6(address) if !address.is_unicast_link_local())
             && let Some(peer_id) = snapshot.public_ipv6_gateway_peer_id()
         {
-            return (vec![peer_id], false);
+            return (vec![peer_id], false, rule);
         }
 
         let allow_configured_exit = match ip_addr {
@@ -4867,20 +5064,12 @@ impl PeerManager {
             IpAddr::V6(address) => !address.is_unicast_link_local(),
         };
         if !allow_configured_exit {
-            return (Vec::new(), false);
+            return (Vec::new(), false, None);
         }
-        for exit_node in configured_exit_nodes {
-            if std::mem::discriminant(exit_node) != std::mem::discriminant(&ip_addr) {
-                continue;
-            }
-            if let Some(peer_id) = snapshot.peer_id_by_ip(exit_node) {
-                return (vec![peer_id], true);
-            }
-            if let Some(peer_id) = snapshot.proxy_peer_id_by_ip(exit_node) {
-                return (vec![peer_id], true);
-            }
+        match self.paths.internet_gateway(snapshot, flow) {
+            Some(choice) => (vec![choice.peer_id], true, Some(choice.rule)),
+            None => (Vec::new(), false, None),
         }
-        (Vec::new(), false)
     }
 
     fn sync_topology_service_routes(&self, snapshot: &ForwardingDecisionSnapshotHandle) {
@@ -4898,44 +5087,15 @@ impl PeerManager {
             self.service_routes
                 .replace_source(RouteSource::Overlay, topology_routes.routes().to_vec());
         }
-        if self.static_service_route_generation.load(Ordering::Acquire) != snapshot.generation()
-            && self
-                .static_service_route_generation
-                .swap(snapshot.generation(), Ordering::AcqRel)
-                != snapshot.generation()
-        {
-            let flags = self.global_ctx.flags_arc();
-            let policy = match flags.relay_config().policy() {
-                crate::proto::common::RelayPolicy::Hop => NextHopPolicy::LeastHop,
-                crate::proto::common::RelayPolicy::Latency => NextHopPolicy::LeastCost,
-                crate::proto::common::RelayPolicy::Goodput => NextHopPolicy::MaxGoodput,
-            };
-            let static_routes = topology_routes
-                .routes()
-                .iter()
-                .filter(|route| {
-                    snapshot
-                        .next_hop(route.gateway, policy.clone())
-                        .is_some_and(|hop| hop.preferred)
-                })
-                .cloned()
-                .map(|mut route| {
-                    route.preference = 10;
-                    route
-                })
-                .collect();
-            self.service_routes
-                .replace_source(RouteSource::Static, static_routes);
-        }
     }
 
+    /// Destination peers, exit flag, blackhole flag, and the [[path]] for one IP packet.
     fn hybrid_destination_from_packet_snapshot_with_synced_routes(
         &self,
         packet: &ZCPacket,
         snapshot: &ForwardingDecisionSnapshotHandle,
         ip_addr: IpAddr,
-        configured_exit_nodes: &[IpAddr],
-    ) -> (Vec<PeerId>, bool, bool) {
+    ) -> (Vec<PeerId>, bool, bool, Option<u16>) {
         let overridden_peer = packet
             .peer_manager_header()
             .map(|header| header.to_peer_id.get())
@@ -4944,11 +5104,20 @@ impl PeerManager {
             let is_exit_node = packet
                 .peer_manager_header()
                 .is_some_and(|header| header.is_exit_node());
-            return (vec![overridden_peer], is_exit_node, false);
+            return (vec![overridden_peer], is_exit_node, false, None);
+        }
+        let flow = packet.flow_hash().unwrap_or_default();
+        // Explicit CIDR paths win over automatic subnet routes, never over overlay addresses.
+        if self.paths.is_active()
+            && snapshot.peer_id_by_ip(&ip_addr).is_none()
+            && !self.global_ctx.is_ip_in_same_network(&ip_addr)
+            && let Some(choice) = self.paths.cidr_gateway(snapshot, ip_addr, flow)
+        {
+            return (vec![choice.peer_id], choice.exit, false, Some(choice.rule));
         }
         if let Some(route) = self.service_routes.select_gateway(
             ip_addr,
-            packet.flow_hash().unwrap_or_default(),
+            flow,
             |gateway| {
                 gateway == self.my_peer_id
                     || snapshot
@@ -4956,18 +5125,27 @@ impl PeerManager {
                         .is_some()
             },
         ) {
+            let rule = (!self.global_ctx.is_ip_in_same_network(&ip_addr))
+                .then(|| self.paths.rule_for_address(snapshot, ip_addr))
+                .flatten();
             return match route.action {
-                ServiceRouteAction::Forward => (vec![route.gateway], false, false),
-                ServiceRouteAction::ExitSnat => (vec![route.gateway], true, false),
-                ServiceRouteAction::Blackhole => (Vec::new(), false, true),
+                ServiceRouteAction::Forward => (vec![route.gateway], false, false, rule),
+                ServiceRouteAction::ExitSnat => (vec![route.gateway], true, false, rule),
+                ServiceRouteAction::Blackhole => (Vec::new(), false, true, None),
             };
         }
-        let (peers, is_exit_node) =
-            self.hybrid_destination_from_snapshot(snapshot, ip_addr, configured_exit_nodes);
-        (peers, is_exit_node, false)
+        let (peers, is_exit_node, rule) =
+            self.hybrid_destination_from_snapshot(snapshot, ip_addr, flow);
+        (peers, is_exit_node, false, rule)
     }
 
-    pub async fn plan_user_route(&self, ip_addr: IpAddr) -> Result<UserRoutePlan, Error> {
+    /// Route a proxied connection. `connection` keys the per-flow [[path]] choice and stays
+    /// fixed for the connection's lifetime.
+    pub async fn plan_user_route(
+        &self,
+        ip_addr: IpAddr,
+        connection: u64,
+    ) -> Result<UserRoutePlan, Error> {
         let snapshot = self
             .peers
             .forwarding_decision_snapshot()
@@ -4978,6 +5156,17 @@ impl PeerManager {
                 ))
             })?;
         self.sync_topology_service_routes(&snapshot);
+        self.paths.refresh(&self.global_ctx.flags_arc());
+        if self.paths.is_active()
+            && snapshot.peer_id_by_ip(&ip_addr).is_none()
+            && !self.global_ctx.is_ip_in_same_network(&ip_addr)
+            && let Some(choice) = self.paths.cidr_gateway(&snapshot, ip_addr, connection)
+        {
+            return Ok(UserRoutePlan::Overlay {
+                peer_ids: vec![choice.peer_id],
+                is_exit_node: choice.exit,
+            });
+        }
         let flow = match ip_addr {
             IpAddr::V4(address) => u64::from(u32::from(address)),
             IpAddr::V6(address) => {
@@ -5006,9 +5195,9 @@ impl PeerManager {
                 ServiceRouteAction::Blackhole => UserRoutePlan::Blackhole,
             });
         }
-        let configured_exit_nodes = self.exit_nodes.load_full();
-        let (peer_ids, is_exit_node) =
-            self.hybrid_destination_from_snapshot(&snapshot, ip_addr, &configured_exit_nodes);
+        self.paths.refresh(&self.global_ctx.flags_arc());
+        let (peer_ids, is_exit_node, _) =
+            self.hybrid_destination_from_snapshot(&snapshot, ip_addr, connection);
         if peer_ids.is_empty() {
             Ok(UserRoutePlan::System)
         } else {
@@ -5017,76 +5206,6 @@ impl PeerManager {
                 is_exit_node,
             })
         }
-    }
-
-    pub async fn get_msg_dst_peer_ipv4(&self, ipv4_addr: &Ipv4Addr) -> (Vec<PeerId>, bool) {
-        let mut is_exit_node = false;
-        let mut dst_peers = vec![];
-        if ipv4_addr.is_multicast() {
-            dst_peers.extend(Self::select_ip_multicast_peers(
-                &*self.peers.list_forwarding_peers().await,
-                self.my_peer_id,
-                IpAddr::V4(*ipv4_addr),
-            ));
-        } else if self.is_all_peers_broadcast_ipv4(ipv4_addr) {
-            dst_peers.extend(Self::select_ipv4_broadcast_peers(
-                &*self.peers.list_forwarding_peers().await,
-                self.my_peer_id,
-            ));
-        } else if let Some(peer_id) = self.peers.get_peer_id_by_ipv4(ipv4_addr).await {
-            dst_peers.push(peer_id);
-        } else if !self
-            .global_ctx
-            .is_ip_in_same_network(&std::net::IpAddr::V4(*ipv4_addr))
-        {
-            let configured_exit_nodes = self.exit_nodes.load_full();
-            for exit_node in configured_exit_nodes.iter() {
-                let IpAddr::V4(exit_node) = exit_node else {
-                    continue;
-                };
-                if let Some(peer_id) = self.peers.get_peer_id_by_ipv4(exit_node).await {
-                    dst_peers.push(peer_id);
-                    is_exit_node = true;
-                    break;
-                }
-            }
-        }
-        (dst_peers, is_exit_node)
-    }
-
-    pub async fn get_msg_dst_peer_ipv6(&self, ipv6_addr: &Ipv6Addr) -> (Vec<PeerId>, bool) {
-        let mut is_exit_node = false;
-        let mut dst_peers = vec![];
-        if ipv6_addr.is_multicast() {
-            dst_peers.extend(Self::select_ip_multicast_peers(
-                &*self.peers.list_forwarding_peers().await,
-                self.my_peer_id,
-                IpAddr::V6(*ipv6_addr),
-            ));
-        } else if self.is_all_peers_broadcast_ipv6(ipv6_addr) {
-            dst_peers.extend(self.peers.list_routes().await.iter().map(|x| *x.key()));
-        } else if let Some(peer_id) = self.peers.get_peer_id_by_ipv6(ipv6_addr).await {
-            dst_peers.push(peer_id);
-        } else if !ipv6_addr.is_unicast_link_local()
-            && let Some(peer_id) = self.get_route().get_public_ipv6_gateway_peer_id().await
-        {
-            dst_peers.push(peer_id);
-        } else if !ipv6_addr.is_unicast_link_local() {
-            // NOTE: never route link local address to exit node.
-            let configured_exit_nodes = self.exit_nodes.load_full();
-            for exit_node in configured_exit_nodes.iter() {
-                let IpAddr::V6(exit_node) = exit_node else {
-                    continue;
-                };
-                if let Some(peer_id) = self.peers.get_peer_id_by_ipv6(exit_node).await {
-                    dst_peers.push(peer_id);
-                    is_exit_node = true;
-                    break;
-                }
-            }
-        }
-
-        (dst_peers, is_exit_node)
     }
 
     fn prepare_packet(msg: &mut ZCPacket) {
@@ -5160,7 +5279,7 @@ impl PeerManager {
                 "forwarding decision snapshot is unavailable".to_string(),
             ))
         })?;
-        let configured_exit_nodes = self.exit_nodes.load_full();
+        self.paths.refresh(&self.global_ctx.flags_arc());
         let origin_auth_snapshot = descriptor.origin_auth_snapshot.as_ref();
         let mut exceptional_inputs = EthernetBatchInputs::new();
         let mut errors = Vec::new();
@@ -5299,16 +5418,14 @@ impl PeerManager {
                 }
                 _ => None,
             };
-            let (candidate_peers, is_exit_node, blackholed) = self
+            let (candidate_peers, is_exit_node, blackholed, path_rule) = self
                 .hybrid_destination_from_packet_snapshot_with_synced_routes(
-                    &ip_packet,
-                    snapshot,
-                    ip_addr,
-                    &configured_exit_nodes,
+                    &ip_packet, snapshot, ip_addr,
                 );
             if blackholed {
                 continue;
             }
+            ip_packet.path_rule = path_rule;
             // Keep explicit policy destinations. The FDB takes priority over automatic IP routes.
             let (candidate_peers, is_exit_node) = if bridged_peer.is_some()
                 && ip_packet
@@ -5509,7 +5626,7 @@ impl PeerManager {
                 "forwarding decision snapshot is unavailable".to_string(),
             ))
         })?;
-        let configured_exit_nodes = self.exit_nodes.load_full();
+        self.paths.refresh(&self.global_ctx.flags_arc());
         let origin_auth_snapshot = descriptor.origin_auth_snapshot.as_ref();
         self.sync_topology_service_routes(snapshot);
         let mut route_cache = SmallVec::<[HybridBatchRoute; 4]>::new();
@@ -5535,6 +5652,7 @@ impl PeerManager {
                     peers: HybridRoutePeers::from_slice(&[overridden_peer]),
                     is_exit_node,
                     blackholed: false,
+                    path_rule: None,
                 }
             } else {
                 let key = HybridBatchRouteKey {
@@ -5549,17 +5667,15 @@ impl PeerManager {
                 ) {
                     route_cache[index].clone()
                 } else {
-                    let (peers, is_exit_node, blackholed) = self
+                    let (peers, is_exit_node, blackholed, path_rule) = self
                         .hybrid_destination_from_packet_snapshot_with_synced_routes(
-                            &packet,
-                            snapshot,
-                            ip_addr,
-                            &configured_exit_nodes,
+                            &packet, snapshot, ip_addr,
                         );
                     let route = HybridBatchRoute {
                         peers: peers.into_iter().collect(),
                         is_exit_node,
                         blackholed,
+                        path_rule,
                     };
                     route_cache.push(route.clone());
                     route
@@ -5572,7 +5688,9 @@ impl PeerManager {
                 peers: candidate_peers,
                 is_exit_node,
                 blackholed: _,
+                path_rule,
             } = route;
+            packet.path_rule = path_rule;
             if let Some(peer_id) =
                 self.hybrid_compact_unicast_peer(&candidate_peers, ip_addr, snapshot)
             {
@@ -6142,10 +6260,6 @@ impl PeerManager {
         ret
     }
 
-    pub async fn update_exit_nodes(&self) {
-        let exit_nodes = self.global_ctx.config.get_exit_nodes();
-        self.exit_nodes.store(Arc::new(exit_nodes));
-    }
 }
 
 #[cfg(test)]
@@ -6573,12 +6687,24 @@ mod tests {
                     }
                 }
             }
-            let (exit, mut nic_exit) =
-                create_tap_peer_manager_with_ipv4(0, Some("10.42.0.3".parse().unwrap())).await;
+            let (exit, mut nic_exit) = create_tap_peer_manager_with_policy(
+                0,
+                Some("10.42.0.3".parse().unwrap()),
+                |flags| flags.enable_exit_node = true,
+            )
+            .await;
             connect_peer_manager(a.clone(), exit.clone()).await;
             wait_route_appear(a.clone(), exit.clone()).await.unwrap();
-            a.exit_nodes
-                .store(Arc::new(vec!["10.42.0.3".parse().unwrap()]));
+            let mut flags = a.global_ctx.get_flags();
+            flags.path_policy = Some(crate::proto::common::PathPolicy {
+                path: vec![crate::proto::common::PathRule {
+                    to: "internet".into(),
+                    gateway: "10.42.0.3".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            a.global_ctx.set_flags(flags);
             a.l2_fabric
                 .learn_source(&ethernet_frame([0xff; 6], mac_b), b.my_peer_id());
             let mut frame = ethernet_frame(mac_b, mac_a);

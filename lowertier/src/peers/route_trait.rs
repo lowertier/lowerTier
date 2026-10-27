@@ -101,6 +101,8 @@ pub struct ForwardingPeerInfo {
     pub peer_id: PeerId,
     pub has_ipv4: bool,
     pub feature_flag: Option<PeerFeatureFlag>,
+    /// Noise static public key from authenticated route information.
+    pub static_pubkey: Option<[u8; 32]>,
     pub multicast_groups: Vec<Vec<u8>>,
     /// Set only from authenticated route identity, never from a peer claim.
     pub bridge_authorized: bool,
@@ -295,7 +297,6 @@ pub struct ForwardingDecisionSnapshot {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForwardingNextHop {
-    pub preferred: bool,
     pub next_hop_peer_id: PeerId,
     pub path_delivery_bps: u64,
     pub path_latency: i32,
@@ -1080,6 +1081,7 @@ pub trait Route {
                     peer_id: route.peer_id,
                     has_ipv4: route.ipv4_addr.is_some(),
                     feature_flag: route.feature_flag,
+                    static_pubkey: None,
                     multicast_groups: route.multicast_groups,
                     bridge_authorized: false,
                     bridge_authorization_deadline: None,

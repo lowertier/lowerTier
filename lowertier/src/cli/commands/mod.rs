@@ -4,6 +4,8 @@ use super::{
     error::Result,
 };
 
+use crate::proto::api::control::v1::ListPathsRequest;
+
 mod acl;
 mod camouflage;
 pub(crate) mod config;
@@ -32,6 +34,17 @@ pub async fn execute(client: &Client, command: &Command) -> Result<Response> {
         Command::Peers { command } => peer::execute(client, command.as_ref()).await,
         Command::Routes { command } => route::execute(client, command.as_ref()).await,
         Command::Relay => relay::execute(client).await,
+        Command::Paths => super::client::checked(
+            client
+                .rpc
+                .list_paths(
+                    client.controller(),
+                    ListPathsRequest {
+                        meta: client.meta(),
+                    },
+                )
+                .await?,
+        ),
         Command::Camouflage => camouflage::execute(client).await,
         Command::Discovery => discovery::execute(client).await,
         Command::Listeners { command } => listener::execute(client, command.as_ref()).await,

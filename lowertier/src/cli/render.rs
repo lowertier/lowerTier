@@ -387,11 +387,14 @@ fn routes(routes: &[RouteSnapshot], with_path: bool) -> String {
         .iter()
         .map(|route| {
             let info = route.route.as_ref();
-            let via = match route.first_hop_peer_id {
+            let mut via = match route.first_hop_peer_id {
                 0 => "-".into(),
                 hop if hop == route.final_gateway_peer_id => "direct".into(),
                 hop => hop.to_string(),
             };
+            if let Some(index) = route.path_index {
+                via = format!("path {}", index + 1);
+            }
             let mut row = vec![
                 clean(&route.destination),
                 info.map(|info| clean(&info.hostname))
@@ -637,6 +640,64 @@ fn apply_result(result: &ApplyResult) -> String {
     text
 }
 
+fn paths(value: &ListPathsResponse) -> String {
+    if value.paths.is_empty() {
+        return "No paths. Add [[path]] entries; see `lowertier config explain path`.\n".into();
+    }
+    let mut text = String::new();
+    for path in &value.paths {
+        let _ = writeln!(
+            text,
+            "path {} · to {} · {}{} · {} via waypoints · {} fallback · {} dropped",
+            path.index + 1,
+            clean(&path.to),
+            clean(&path.state),
+            if path.strict { " (strict)" } else { "" },
+            path.waypoint_packets,
+            path.fallback_packets,
+            path.dropped_packets,
+        );
+        if !path.reason.is_empty() {
+            let _ = writeln!(text, "  {}", clean(&path.reason));
+        }
+        let segments = path
+            .via
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| (format!("via {}", index + 1), segment))
+            .chain(path.gateway.iter().map(|segment| ("gateway".to_owned(), segment)));
+        let rows = segments
+            .flat_map(|(role, segment)| {
+                segment.members.iter().enumerate().map(move |(index, member)| {
+                    vec![
+                        if index == 0 { role.clone() } else { String::new() },
+                        if index == 0 {
+                            format!("{} ({})", clean(&segment.name), clean(&segment.balance))
+                        } else {
+                            String::new()
+                        },
+                        if member.hostname.is_empty() {
+                            clean(&member.r#ref)
+                        } else {
+                            clean(&member.hostname)
+                        },
+                        member.weight.to_string(),
+                        if member.usable {
+                            "usable".into()
+                        } else {
+                            clean(&member.reason)
+                        },
+                        member.picks.to_string(),
+                    ]
+                })
+            })
+            .collect();
+        text += &table(&["Role", "Segment", "Member", "Weight", "State", "Picks"], rows, &[3, 5]);
+        text.push('\n');
+    }
+    text
+}
+
 fn trace(trace: &Trace) -> String {
     let mut text = format!(
         "{} · policy {}{} · cost {} · rtt {} · rate {}\n",
@@ -653,6 +714,13 @@ fn trace(trace: &Trace) -> String {
         rtt(trace.measured_rtt_us),
         rate(trace.delivery_bps),
     );
+    if let Some(path) = &trace.path {
+        let _ = writeln!(
+            text,
+            "{}. Waypoints are chosen per flow; the hops below are the automatic route.",
+            clean(path)
+        );
+    }
     if !trace.path_error.is_empty() {
         let _ = writeln!(text, "path unavailable: {}", clean(&trace.path_error));
     }
@@ -895,6 +963,7 @@ fn table_output(response: &Response, data: &Value) -> String {
         Response::StartInstanceResponse(value) => {
             value.result.as_ref().map_or_else(String::new, apply_result)
         }
+        Response::ListPathsResponse(value) => paths(value),
         Response::ListRoutesResponse(value) => routes(
             &value.routes,
             value

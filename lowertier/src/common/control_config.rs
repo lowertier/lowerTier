@@ -5,7 +5,7 @@ use base64::{Engine as _, prelude::BASE64_STANDARD};
 use crate::common::config::Flags;
 pub use crate::proto::common::{
     CamouflageConfig, DecoyUpstream, LimitsConfig, RelayConfig, RelayLinkCost, RelayPolicy,
-    RelayPrefer, TransitPolicy,
+    TransitPolicy,
 };
 
 // WSS accepts one serialized overlay packet up to this existing receive bound.
@@ -52,12 +52,6 @@ impl RelayConfig {
             return Ok(());
         };
         let local_key = peer_key(local_key)?;
-        for preference in &self.prefer {
-            anyhow::ensure!(
-                peer_key(&preference.peer)? != local_key && peer_key(&preference.via)? != local_key,
-                "relay.prefer cannot reference the local peer key"
-            );
-        }
         for link in &self.link_cost {
             anyhow::ensure!(
                 peer_key(&link.peer)? != local_key,
@@ -82,8 +76,8 @@ impl RelayConfig {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.prefer.len() <= 64 && self.link_cost.len() <= 256,
-            "relay.prefer permits 64 entries; relay.link_cost permits 256 entries"
+            self.link_cost.len() <= 256,
+            "relay.link_cost permits 256 entries"
         );
         RelayPolicy::try_from(self.policy)?;
         TransitPolicy::try_from(self.transit)?;
@@ -106,20 +100,6 @@ impl RelayConfig {
                     && burst >= MAX_TRANSIT_PACKET_BYTES
                     && burst <= u64::MAX / 8,
                 "relay.transit_burst_bytes requires a limit and at least {MAX_TRANSIT_PACKET_BYTES} bytes for a maximum frame"
-            );
-        }
-        for (index, prefer) in self.prefer.iter().enumerate() {
-            peer_key(&prefer.peer)?;
-            peer_key(&prefer.via)?;
-            anyhow::ensure!(
-                self.can_use_relays() || prefer.peer == prefer.via,
-                "relay.prefer requires relay.use_relays for an intermediate first hop"
-            );
-            anyhow::ensure!(
-                !self.prefer[..index]
-                    .iter()
-                    .any(|entry| entry.peer == prefer.peer),
-                "duplicate relay.prefer destination"
             );
         }
         for (index, link) in self.link_cost.iter().enumerate() {

@@ -1,6 +1,6 @@
 use std::{
     hash::Hasher,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -75,6 +75,7 @@ pub fn gen_default_flags() -> Flags {
         l2_allowed_vlans: Vec::new(),
         l2_allowed_ether_types: Vec::new(),
         relay: None,
+        path_policy: None,
         camouflage: None,
         limits: None,
     }
@@ -135,6 +136,9 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
         })?;
     flags.relay_config().validate()?;
     flags.camouflage_config().validate()?;
+    if let Some(policy) = &flags.path_policy {
+        crate::peers::path_policy::PathPolicy::compile(policy)?;
+    }
     if !(1..=1_048_576).contains(&flags.l2_fdb_capacity) {
         anyhow::bail!("l2.fdb_capacity must be between 1 and 1048576");
     }
@@ -286,7 +290,12 @@ fn reflected_flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, s
     current_message
         .descriptor()
         .fields()
-        .filter(|field| !matches!(field.name(), "relay" | "camouflage" | "limits"))
+        .filter(|field| {
+            !matches!(
+                field.name(),
+                "relay" | "camouflage" | "limits" | "path_policy"
+            )
+        })
         .filter_map(|field| {
             let key = field.name();
             let value_changed = default_map.get(key) != current_map.get(key);
@@ -432,8 +441,6 @@ pub trait ConfigLoader: Send + Sync {
     fn get_flags(&self) -> Flags;
     fn set_flags(&self, flags: Flags);
 
-    fn get_exit_nodes(&self) -> Vec<IpAddr>;
-    fn set_exit_nodes(&self, nodes: Vec<IpAddr>);
 
     fn get_routes(&self) -> Option<Vec<cidr::Ipv4Cidr>>;
     fn set_routes(&self, routes: Option<Vec<cidr::Ipv4Cidr>>);
@@ -843,7 +850,9 @@ struct Config {
     network_identity: Option<NetworkIdentity>,
     listeners: Option<Vec<url::Url>>,
     mapped_listeners: Option<Vec<url::Url>>,
-    exit_nodes: Option<Vec<IpAddr>>,
+    /// Load-balance groups and paths. The runtime copy lives in `Flags::path_policy`.
+    group: Option<Vec<crate::proto::common::PathGroup>>,
+    path: Option<Vec<crate::proto::common::PathRule>>,
 
     peer: Option<Vec<PeerConfig>>,
     proxy_network: Option<Vec<ProxyNetworkConfig>>,
@@ -1023,10 +1032,8 @@ impl TomlConfigLoader {
             config.unknown_keys.keys()
         );
 
-        Self::new_from_config(config).map_err(|err| {
-            let message = format!("failed to load config from {source_name}: {err}");
-            err.context(message)
-        })
+        Self::new_from_config(config)
+            .map_err(|err| anyhow::anyhow!("failed to load config from {source_name}: {err:#}"))
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
@@ -1048,6 +1055,12 @@ impl TomlConfigLoader {
         flags.relay = config.relay.clone();
         flags.camouflage = config.camouflage.clone();
         flags.limits = config.limits.clone();
+        flags.path_policy = (config.group.is_some() || config.path.is_some()).then(|| {
+            crate::proto::common::PathPolicy {
+                group: config.group.clone().unwrap_or_default(),
+                path: config.path.clone().unwrap_or_default(),
+            }
+        });
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         crate::common::control_config::validate_camouflage_listeners(
             &flags,
@@ -1456,19 +1469,6 @@ impl ConfigLoader for TomlConfigLoader {
         self.config.lock().unwrap().flags_struct = Some(flags);
     }
 
-    fn get_exit_nodes(&self) -> Vec<IpAddr> {
-        self.config
-            .lock()
-            .unwrap()
-            .exit_nodes
-            .clone()
-            .unwrap_or_default()
-    }
-
-    fn set_exit_nodes(&self, nodes: Vec<IpAddr>) {
-        self.config.lock().unwrap().exit_nodes = Some(nodes);
-    }
-
     fn get_routes(&self) -> Option<Vec<cidr::Ipv4Cidr>> {
         self.config.lock().unwrap().routes.clone()
     }
@@ -1587,6 +1587,9 @@ impl ConfigLoader for TomlConfigLoader {
         config.relay = flags.relay.clone();
         config.camouflage = flags.camouflage.clone();
         config.limits = flags.limits.clone();
+        let policy = flags.path_policy.clone().unwrap_or_default();
+        config.group = (!policy.group.is_empty()).then_some(policy.group);
+        config.path = (!policy.path.is_empty()).then_some(policy.path);
         if config.network_identity.as_ref().is_some_and(|identity| {
             identity.network_secret.is_none()
                 && identity.credential_root_fingerprint().is_none()

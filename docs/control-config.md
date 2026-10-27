@@ -46,7 +46,7 @@ Each egress copy consumes its serialized overlay size once. Transport retransmis
 The final sink checks permission and credit after queued data becomes ready for framing.
 Avoided transit nodes remain available. Routing minimizes their count before the selected policy metric.
 
-Use `[[relay.prefer]]` with `peer` and `via` public keys for a first-hop preference.
+Use [[path]] and [[group]] to send this node's traffic through chosen peers. See [paths](paths.md).
 Use `[[relay.link_cost]]` with `peer` and nonnegative `bias_ms` for an adjacent link cost bias.
 Keys use standard base64 and contain 32 bytes. Invalid or unavailable paths use automatic routing.
 Authenticated routing and handshake control use the hop table.
@@ -160,7 +160,9 @@ Network secrets and identity keys may live in files: `network.secret_file` and `
 | `ipv6_public_addr_prefix` | `address.public_ipv6.prefix` |
 | `listeners` | `transport.listen` |
 | `mapped_listeners` | `transport.advertise` |
-| `exit_nodes` | `routes.exit_nodes` |
+| `exit_nodes` | `[[path]]` with `to = "internet"` and a `gateway` |
+| `routes.exit_nodes` | `[[path]]` with `to = "internet"` and a `gateway` |
+| `relay.prefer` | `[[path]]` with one `via` |
 | `routes` | `routes.manual` |
 | `proxy_network` | `export` |
 | `socks5_proxy` | `proxy.socks5` |

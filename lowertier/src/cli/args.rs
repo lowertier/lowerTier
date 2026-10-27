@@ -107,6 +107,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<RouteCommand>,
     },
+    /// Paths and load-balance groups: members, usability, and traffic.
+    Paths,
     /// Relay policy, transit permission, traffic, and drops.
     Relay,
     /// TLS camouflage settings and certificate verification.

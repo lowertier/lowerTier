@@ -511,7 +511,6 @@ impl RoutePeerInfo {
             bridge_attestation_issued_unix_ms: 0,
             bridge_attestation_expiry_unix_ms: 0,
             relay_link_cost: Vec::new(),
-            relay_prefer: Vec::new(),
         }
     }
 
@@ -632,7 +631,6 @@ impl RoutePeerInfo {
 
             identity_type: identity_type as i32,
             relay_link_cost: global_ctx.get_flags().relay_config().link_cost.clone(),
-            relay_prefer: global_ctx.get_flags().relay_config().prefer.clone(),
 
             ..Default::default()
         };
@@ -2785,36 +2783,6 @@ impl TopologyBuildInput {
                 .unwrap()
                 .contains_key(&3)
         );
-        use base64::{Engine as _, prelude::BASE64_STANDARD};
-        let infos = Arc::make_mut(&mut topology.peer_infos);
-        for info in infos.values_mut() {
-            info.feature_flag.as_mut().unwrap().deny_transit_data = false;
-        }
-        let preference = crate::proto::common::RelayPrefer {
-            peer: BASE64_STANDARD.encode([3_u8; 32]),
-            via: BASE64_STANDARD.encode([2_u8; 32]),
-        };
-        infos.get_mut(&1).unwrap().relay_prefer = vec![preference.clone()];
-        let input = topology.with_measurements(&Measurements, true, true);
-        assert_eq!(
-            RouteTable::build_next_hop_map_from_input_checked(&input, NextHopPolicy::LeastCost)
-                .unwrap()[&3]
-                .next_hop_peer_id,
-            2
-        );
-        let mut opposite = preference;
-        opposite.via = BASE64_STANDARD.encode([1_u8; 32]);
-        Arc::make_mut(&mut topology.peer_infos)
-            .get_mut(&2)
-            .unwrap()
-            .relay_prefer = vec![opposite];
-        let input = topology.with_measurements(&Measurements, true, true);
-        assert_eq!(
-            RouteTable::build_next_hop_map_from_input_checked(&input, NextHopPolicy::LeastCost)
-                .unwrap()[&3]
-                .next_hop_peer_id,
-            4
-        );
     }
 
     fn capture(my_peer_id: PeerId, synced_info: &SyncedRouteInfo) -> Self {
@@ -3739,7 +3707,6 @@ impl RouteTable {
     ) {
         for (dst, (next_hop, path_len)) in next_hops.iter() {
             let info = NextHopInfo {
-                preferred: false,
                 next_hop_peer_id: *graph.node_weight(*next_hop).unwrap(),
                 path_delivery_bps: 0,
                 path_latency: (*costs.get(dst).unwrap()).min(i32::MAX as usize) as i32,
@@ -3781,7 +3748,6 @@ impl RouteTable {
             widest_path_with_preparation(graph, *start_node, preparation, budget, &mut work_stats)?;
         for (dst, route) in routes {
             let info = NextHopInfo {
-                preferred: false,
                 next_hop_peer_id: route.next_hop_peer_id,
                 path_delivery_bps: route.quality.delivery_bps,
                 path_latency: route.quality.latency_ms.min(i32::MAX as u64) as i32,
@@ -3807,187 +3773,7 @@ impl RouteTable {
         input: &RouteBuildInput,
         policy: NextHopPolicy,
     ) -> Result<HashMap<PeerId, NextHopInfo>, WidestPathWorkError> {
-        let mut routes = Self::build_automatic_next_hops(input, policy.clone())?;
-        if policy == NextHopPolicy::ControlHop {
-            return Ok(routes);
-        }
-        let Some(origin) = input.graph.node_weight(input.start_node) else {
-            return Ok(routes);
-        };
-        let Some(preferences) = input.peer_infos.get(origin).map(|info| &info.relay_prefer) else {
-            return Ok(routes);
-        };
-        let per_preference = if policy == NextHopPolicy::MaxGoodput {
-            widest_path_work_limit(
-                input.speed_graph.node_count(),
-                input.speed_graph.edge_count(),
-            )
-            .unwrap_or(usize::MAX)
-        } else {
-            (input.graph.node_count() + input.graph.edge_count()).saturating_mul(4)
-        };
-        let work = per_preference
-            .saturating_mul(preferences.len())
-            .saturating_mul(input.graph.node_count().max(1));
-        if work > MAX_ROUTE_REBUILD_WORK {
-            return Ok(routes);
-        }
-        for preference in preferences {
-            let resolve = |key: &str| {
-                let key = crate::common::control_config::peer_key(key).ok()?;
-                input
-                    .graph
-                    .node_references()
-                    .find(|(_, id)| {
-                        input
-                            .peer_infos
-                            .get(id)
-                            .is_some_and(|info| info.noise_static_pubkey == key)
-                    })
-                    .map(|(node, id)| (node, *id))
-            };
-            let Some((destination, peer)) = resolve(&preference.peer) else {
-                continue;
-            };
-            let Some((via_node, via)) = resolve(&preference.via) else {
-                continue;
-            };
-            if via_node == input.start_node || destination == input.start_node {
-                continue;
-            }
-            let Some(edge) = input.graph.find_edge(input.start_node, via_node) else {
-                continue;
-            };
-            if via == peer {
-                routes.insert(
-                    peer,
-                    NextHopInfo {
-                        preferred: true,
-                        next_hop_peer_id: via,
-                        path_len: 1,
-                        path_latency: input.graph[edge].min(i32::MAX as usize) as i32,
-                        version: input.version,
-                        ..Default::default()
-                    },
-                );
-                continue;
-            }
-            let mut suffix = input.clone();
-            suffix.start_node = via_node;
-            suffix.graph.retain_edges(|graph, edge| {
-                graph
-                    .edge_endpoints(edge)
-                    .is_some_and(|(_, dst)| dst != input.start_node)
-            });
-            suffix.speed_graph.retain_edges(|graph, edge| {
-                graph
-                    .edge_endpoints(edge)
-                    .is_some_and(|(_, dst)| dst != input.start_node)
-            });
-            if policy == NextHopPolicy::MaxGoodput {
-                let Some(first_edge) = input.speed_graph.find_edge(input.start_node, via_node)
-                else {
-                    continue;
-                };
-                let capacity = input.speed_graph[first_edge].delivery_bps;
-                for edge in suffix.speed_graph.edge_weights_mut() {
-                    edge.delivery_bps = edge.delivery_bps.min(capacity);
-                }
-                suffix.speed_preparation = Some(prepare_widest_path(&suffix.speed_graph, via_node));
-            }
-            let Ok(suffix_routes) = Self::build_automatic_next_hops(&suffix, policy.clone()) else {
-                continue;
-            };
-            let Some(mut selected) = suffix_routes.get(&peer).copied() else {
-                continue;
-            };
-            if !Self::preferred_suffix_is_acyclic(input, via_node, destination, policy.clone()) {
-                continue;
-            }
-            if policy == NextHopPolicy::MaxGoodput {
-                let Some(edge) = input.speed_graph.find_edge(input.start_node, via_node) else {
-                    continue;
-                };
-                selected.path_delivery_bps = selected
-                    .path_delivery_bps
-                    .min(input.speed_graph[edge].delivery_bps);
-            }
-            selected.next_hop_peer_id = via;
-            selected.preferred = true;
-            selected.path_len += 1;
-            selected.path_latency = selected
-                .path_latency
-                .saturating_add(input.graph[edge].min(i32::MAX as usize) as i32);
-            routes.insert(peer, selected);
-        }
-        Ok(routes)
-    }
-
-    fn preferred_suffix_is_acyclic(
-        input: &RouteBuildInput,
-        mut current: NodeIndex,
-        destination: NodeIndex,
-        policy: NextHopPolicy,
-    ) -> bool {
-        let mut visited = HashSet::from([input.start_node]);
-        let Some(target) = input.peer_infos.get(&input.graph[destination]) else {
-            return false;
-        };
-        while current != destination {
-            if !visited.insert(current) {
-                return false;
-            }
-            let preferred = input
-                .peer_infos
-                .get(&input.graph[current])
-                .and_then(|info| {
-                    info.relay_prefer.iter().take(64).find(|preference| {
-                        crate::common::control_config::peer_key(&preference.peer)
-                            .is_ok_and(|key| key.as_slice() == target.noise_static_pubkey)
-                    })
-                });
-            let preferred_next = preferred.and_then(|preference| {
-                let key = crate::common::control_config::peer_key(&preference.via).ok()?;
-                input
-                    .graph
-                    .node_references()
-                    .find(|(node, peer)| {
-                        *node != current
-                            && input.graph.find_edge(current, *node).is_some()
-                            && input
-                                .peer_infos
-                                .get(peer)
-                                .is_some_and(|info| info.noise_static_pubkey == key)
-                    })
-                    .map(|(node, _)| node)
-            });
-            let next = if let Some(next) = preferred_next {
-                next
-            } else {
-                let mut suffix = input.clone();
-                suffix.start_node = current;
-                if policy == NextHopPolicy::MaxGoodput {
-                    suffix.speed_preparation =
-                        Some(prepare_widest_path(&suffix.speed_graph, current));
-                }
-                let Ok(routes) = Self::build_automatic_next_hops(&suffix, policy.clone()) else {
-                    return false;
-                };
-                let Some(route) = routes.get(&target.peer_id) else {
-                    return false;
-                };
-                let Some((next, _)) = input
-                    .graph
-                    .node_references()
-                    .find(|(_, peer)| **peer == route.next_hop_peer_id)
-                else {
-                    return false;
-                };
-                next
-            };
-            current = next;
-        }
-        true
+        Self::build_automatic_next_hops(input, policy)
     }
 
     fn build_automatic_next_hops(
@@ -4738,7 +4524,6 @@ impl Drop for SyncRouteSession {
 /// Immutable forwarding state published as one unit.
 #[derive(Debug, Clone)]
 struct ForwardingSnapshot {
-    relay_preferences: Vec<crate::proto::common::RelayPrefer>,
     hop_graph: Option<Arc<PeerGraph>>,
     relay_policy: String,
     route_input: Option<Arc<RouteBuildInput>>,
@@ -4979,7 +4764,6 @@ impl PeerRouteServiceImpl {
             control_hop: std::sync::Mutex::new(Arc::new(HashMap::new())),
             committed_topology: std::sync::Mutex::new(None),
             forwarding_snapshot: ArcSwap::new(Arc::new(ForwardingSnapshot {
-                relay_preferences: Vec::new(),
                 hop_graph: None,
                 relay_policy: "hop".into(),
                 route_input: None,
@@ -6245,6 +6029,11 @@ impl PeerRouteServiceImpl {
                                     peer_id: *peer_id,
                                     has_ipv4: info.ipv4_addr.is_some(),
                                     feature_flag: info.feature_flag,
+                                    static_pubkey: info
+                                        .noise_static_pubkey
+                                        .as_slice()
+                                        .try_into()
+                                        .ok(),
                                     multicast_groups: info.multicast_groups.clone(),
                                     bridge_authorized: bridge_evidence.is_some(),
                                     bridge_authorization_deadline: bridge_evidence
@@ -6376,7 +6165,6 @@ impl PeerRouteServiceImpl {
                     .flatten()
             });
         let next_snapshot = Arc::new(ForwardingSnapshot {
-            relay_preferences: self.global_ctx.get_flags().relay_config().prefer.clone(),
             hop_graph: if route_input_memory.is_none() {
                 None
             } else if domains.topology {
@@ -8885,15 +8673,6 @@ impl Route for PeerRoute {
                 let selected = table
                     .get_next_hop(route.peer_id)
                     .or_else(|| snapshot.route_table.get_next_hop(route.peer_id));
-                let has_preference = snapshot.relay_preferences.iter().any(|preference| {
-                    crate::common::control_config::peer_key(&preference.peer).is_ok_and(|key| {
-                        snapshot
-                            .route_table
-                            .peer_infos
-                            .get(&route.peer_id)
-                            .is_some_and(|info| info.noise_static_pubkey == key)
-                    })
-                });
                 let mut row = RouteSnapshot {
                     destination: route.peer_id.to_string(),
                     policy: policy.clone(),
@@ -8915,21 +8694,6 @@ impl Route for PeerRoute {
                     },
                     delivery_bps: (effective == "goodput")
                         .then_some(selected.map_or(0, |hop| hop.path_delivery_bps)),
-                    override_inactive_reason: if has_preference
-                        && selected.is_none_or(|hop| !hop.preferred)
-                    {
-                        "The preferred first hop is unavailable or invalid.".into()
-                    } else {
-                        String::new()
-                    },
-                    override_status: if selected.is_some_and(|hop| hop.preferred) {
-                        "active"
-                    } else if has_preference {
-                        "inactive"
-                    } else {
-                        "automatic"
-                    }
-                    .into(),
                     ..Default::default()
                 };
                 if path_peers.contains(&route.peer_id) {

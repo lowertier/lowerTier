@@ -127,12 +127,32 @@ message FlagsInConfig {
   RelayConfig relay = 76;
   CamouflageConfig camouflage = 77;
   LimitsConfig limits = 78;
+  PathPolicy path_policy = 79;
 }
 
 enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }
 enum TransitPolicy { allow = 0; avoid = 1; deny = 2; }
 
-message RelayPrefer { string peer = 1; string via = 2; }
+// A set of peers that share one role in a path. Members are peer public keys or virtual IPs.
+message PathGroup {
+  string name = 1;
+  repeated string members = 2;
+  // "flow" spreads flows by weight; "failover" uses the first usable member.
+  string balance = 3;
+  repeated uint32 weights = 4;
+}
+// Traffic to `to` (a peer, a CIDR, or "internet") passes the waypoints in `via` in order and,
+// for a CIDR or the internet, leaves the overlay at `gateway`. Entries name peers or groups.
+message PathRule {
+  string to = 1;
+  repeated string via = 2;
+  string gateway = 3;
+  bool strict = 4;
+}
+message PathPolicy {
+  repeated PathGroup group = 1;
+  repeated PathRule path = 2;
+}
 message RelayLinkCost { string peer = 1; uint32 bias_ms = 2; }
 message RelayConfig {
   RelayPolicy policy = 1;
@@ -143,7 +163,8 @@ message RelayConfig {
   optional uint64 transit_burst_bytes = 6;
   optional uint64 probe_interval_seconds = 7;
   uint64 probe_budget_bps = 8;
-  repeated RelayPrefer prefer = 9;
+  reserved 9;
+  reserved "prefer";
   repeated RelayLinkCost link_cost = 10;
 }
 
@@ -320,6 +341,10 @@ message PeerFeatureFlag {
   bool relay_origin_proof = 17;
   bool deny_transit_data = 18;
   bool relay_semantics_v1 = 19;
+  // Forwards waypoint packets (type 44) without opening them.
+  bool waypoint_v1 = 20;
+  // Serves as an internet exit (routes.serve_exit).
+  bool exit_node = 21;
 }
 
 enum SocketType {

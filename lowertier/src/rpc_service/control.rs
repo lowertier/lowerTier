@@ -212,6 +212,7 @@ control_service! {
     get_node, GetNodeRequest, GetNodeResponse, get_node_inner;
     list_peers, ListPeersRequest, ListPeersResponse, list_peers_inner;
     list_routes, ListRoutesRequest, ListRoutesResponse, list_routes_inner;
+    list_paths, ListPathsRequest, ListPathsResponse, list_paths_inner;
     get_l2, GetL2Request, GetL2Response, get_l2_inner;
     get_discovery, GetDiscoveryRequest, GetDiscoveryResponse, get_discovery_inner;
     list_listeners, ListListenersRequest, ListListenersResponse, list_listeners_inner;

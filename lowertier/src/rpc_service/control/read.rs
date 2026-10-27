@@ -17,6 +17,7 @@ pub(super) const METHODS: &[&str] = &[
     "GetNode",
     "ListPeers",
     "ListRoutes",
+    "ListPaths",
     "GetL2",
     "GetDiscovery",
     "ListListeners",
@@ -385,9 +386,29 @@ impl ControlPlaneService {
                 *row = paths.remove(&row.route.as_ref().unwrap().peer_id).unwrap();
             }
         }
+        let peers = instance.peers()?;
+        for row in &mut routes {
+            if let Some(route) = &row.route {
+                row.path_index = peers.path_for_peer(route.peer_id).map(u32::from);
+            }
+        }
         Ok(ListRoutesResponse {
             routes,
             next_page_token,
+            snapshot: Some(snapshot),
+            ..Default::default()
+        })
+    }
+
+    pub(super) async fn list_paths_inner(
+        &self,
+        _: BaseController,
+        request: ListPathsRequest,
+    ) -> anyhow::Result<ListPathsResponse> {
+        let (_, instance) = self.resolve(request.meta.as_ref())?;
+        let snapshot = self.snapshot(&instance).await?;
+        Ok(ListPathsResponse {
+            paths: instance.peers()?.path_status().await,
             snapshot: Some(snapshot),
             ..Default::default()
         })

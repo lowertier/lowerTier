@@ -29,6 +29,8 @@ pub struct Trace {
     pub measured_rtt_us: Option<u64>,
     pub delivery_bps: Option<u64>,
     pub hops: Vec<Hop>,
+    /// The [[path]] that steers traffic to this destination, summarized.
+    pub path: Option<String>,
 }
 
 async fn routes(
@@ -159,6 +161,31 @@ async fn trace(client: &Client, destination: &str) -> Result<Response> {
             }
         })
         .collect();
+    let path = match route.path_index {
+        Some(index) => client
+            .rpc
+            .list_paths(
+                client.controller(),
+                ListPathsRequest {
+                    meta: client.meta(),
+                },
+            )
+            .await?
+            .paths
+            .into_iter()
+            .find(|path| path.index == index)
+            .map(|path| {
+                let segments = path
+                    .via
+                    .iter()
+                    .map(|segment| segment.name.clone())
+                    .chain(path.gateway.iter().map(|segment| format!("gateway {}", segment.name)))
+                    .collect::<Vec<_>>()
+                    .join(" > ");
+                format!("path {}: {segments} ({})", index + 1, path.state)
+            }),
+        None => None,
+    };
     Ok(Response::Trace(Trace {
         destination: route.destination,
         policy: route.policy,
@@ -169,6 +196,7 @@ async fn trace(client: &Client, destination: &str) -> Result<Response> {
         measured_rtt_us: route.measured_rtt_us,
         delivery_bps: route.delivery_bps,
         hops,
+        path,
     }))
 }
 

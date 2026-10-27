@@ -691,6 +691,8 @@ impl GlobalCtx {
         feature_flags.deny_transit_data =
             flags.relay_config().transit() == crate::proto::common::TransitPolicy::Deny;
         feature_flags.relay_semantics_v1 = true;
+        feature_flags.waypoint_v1 = true;
+        feature_flags.exit_node = flags.enable_exit_node;
         feature_flags.speed_routing = true;
         feature_flags.relay_origin_proof = true;
         feature_flags

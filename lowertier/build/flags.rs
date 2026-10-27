@@ -41,7 +41,10 @@ pub fn generate(pool: &DescriptorPool, out: &Path) -> Result<(), Box<dyn Error>>
         .ok_or("FlagsInConfig schema is missing")?;
     let mut comparisons = Vec::new();
     for field in descriptor.fields() {
-        if matches!(field.name(), "relay" | "camouflage" | "limits") {
+        if matches!(
+            field.name(),
+            "relay" | "camouflage" | "limits" | "path_policy"
+        ) {
             continue;
         }
         if field.is_map()

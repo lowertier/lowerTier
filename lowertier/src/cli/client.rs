@@ -53,6 +53,7 @@ responses!(
     ListInstancesResponse,
     GetNodeResponse,
     ListRoutesResponse,
+    ListPathsResponse,
     GetRelayResponse,
     GetL2Response,
     GetDiscoveryResponse,
