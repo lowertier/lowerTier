@@ -23,7 +23,7 @@ export function Segmented(props: {
       role="radiogroup"
       aria-label={props.label}
       style={{ "--count": props.values.length, "--index": Math.max(0, index()) }}
-      classList={{ unset: index() < 0 }}
+      classList={{ unset: index() < 0, long: props.values.join("").length > 22 }}
       onKeyDown={move}
     >
       <span class="thumb" aria-hidden="true" />

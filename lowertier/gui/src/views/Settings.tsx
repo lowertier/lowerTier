@@ -5,7 +5,7 @@ import { Segmented, Switch } from "../components/controls";
 import { apply, busy, config, configured, loadSchema, lookup, restartPending, say, schema, type OptionSpec } from "../config";
 import { words } from "../format";
 
-const ORDER = ["node", "network", "identity", "address", "tun", "transport", "peer", "nat", "underlay", "discovery", "relay", "routes", "export", "proxy", "forward", "dns", "acl", "camouflage", "limits", "l2", "log", "control"];
+const ORDER = ["node", "network", "identity", "address", "tun", "transport", "peer", "nat", "underlay", "discovery", "relay", "routes", "export", "proxy", "forward", "dns", "acl", "camouflage", "limits", "l2", "log", "control", "gui"];
 const REDACTED = "[REDACTED]";
 
 /** Text shown in an editor for a configured value. */

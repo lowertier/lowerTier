@@ -833,6 +833,7 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
     control: Option<ControlConfig>,
+    gui: Option<GuiConfig>,
     relay: Option<RelayConfig>,
     camouflage: Option<CamouflageConfig>,
     limits: Option<crate::common::control_config::LimitsConfig>,
@@ -934,6 +935,16 @@ pub struct ControlConfig {
     pub portal_allow: Option<Vec<String>>,
     pub token_file: Option<PathBuf>,
     pub token_group: Option<String>,
+}
+
+/// Browser interface served on this instance's overlay address, from `[gui]`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuiConfig {
+    pub enabled: Option<bool>,
+    pub port: Option<u16>,
+    pub key_file: Option<PathBuf>,
+    pub allow: Option<Vec<String>>,
 }
 
 /// Process-wide logging settings from `[log]`.
@@ -1191,6 +1202,10 @@ impl TomlConfigLoader {
             .control
             .clone()
             .unwrap_or_default()
+    }
+
+    pub fn get_gui_config(&self) -> GuiConfig {
+        self.config.lock().unwrap().gui.clone().unwrap_or_default()
     }
 
     pub fn get_log_config(&self) -> LogConfig {

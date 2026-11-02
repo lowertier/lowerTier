@@ -21,7 +21,7 @@ pub(crate) mod config;
 mod instance;
 pub(crate) mod logs;
 mod read;
-mod token;
+pub(crate) mod token;
 mod watch;
 pub use instance::ControlInstance;
 pub use token::ControlToken;

@@ -131,6 +131,11 @@ impl ControlToken {
         }
     }
 
+    /// The token text, for callers that compare it themselves.
+    pub fn expose(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or_default()
+    }
+
     pub fn matches(&self, supplied: &str) -> bool {
         crate::common::verify_slices_are_equal(&self.0, supplied.as_bytes()).is_ok()
     }

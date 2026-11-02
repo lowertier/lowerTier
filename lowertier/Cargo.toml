@@ -366,7 +366,7 @@ mimalloc = ["dep:mimalloc"]
 # Terminal dashboard for `lowertier top`.
 tui = ["dep:ratatui"]
 # Browser interface for `lowertier gui`.
-gui = []
+gui = ["ffi-dataplane"]
 tun = ["dep:tun", "dep:quincy-tun", "dep:io-uring"]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]

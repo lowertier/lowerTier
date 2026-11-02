@@ -270,6 +270,32 @@ h3 {
   height: 32px;
 }
 
+.locked form {
+  display: grid;
+  gap: 8px;
+  width: min(360px, 100%);
+  text-align: left;
+}
+
+.locked label {
+  color: var(--ink-2);
+  font-weight: 560;
+}
+
+.locked .key-row {
+  display: flex;
+  gap: 8px;
+}
+
+.locked .key-row input {
+  flex: 1;
+}
+
+.locked p {
+  margin: 0;
+  font-size: 12.5px;
+}
+
 /* Panels: tonal surfaces with one cut corner. */
 
 .panel {
@@ -1025,6 +1051,26 @@ button.link:hover {
 
 .segmented.unset .thumb {
   opacity: 0;
+}
+
+/* Long labels stack when the control column is too narrow to hold them side by side. */
+@media (max-width: 1100px) {
+  .segmented.long {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .segmented.long .thumb {
+    width: auto;
+    right: 3px;
+    height: calc((100% - 6px) / var(--count));
+    bottom: auto;
+    transform: translateY(calc(var(--index) * 100%));
+  }
+
+  .segmented.long button {
+    text-align: left;
+  }
 }
 
 .segmented button {

@@ -7,6 +7,7 @@
 //! browser cannot reach the daemon through this port.
 
 mod codec;
+pub mod overlay;
 
 use std::{
     collections::HashMap,
@@ -60,6 +61,9 @@ struct Defaults {
 struct Server {
     key: String,
     hosts: Vec<String>,
+    /// Serve only the configured daemon. Set for network-facing servers, whose clients must not
+    /// reach the other daemons of the machine through their token files.
+    pinned: bool,
     defaults: Defaults,
     /// Open connections by portal and instance, with their last use.
     clients: Mutex<HashMap<(String, String), (Arc<Client>, Instant)>>,
@@ -176,7 +180,8 @@ impl Server {
     }
 
     fn target(&self, node: Option<&str>) -> Result<Target> {
-        let Some(node) = node.filter(|node| !node.is_empty()) else {
+        let node = node.filter(|node| !node.is_empty() && !self.pinned);
+        let Some(node) = node else {
             return match (&self.defaults.target, &self.defaults.target_error) {
                 (Some(target), _) => Ok(Target {
                     portal: target.portal.clone(),
@@ -255,7 +260,11 @@ impl Server {
     }
 
     fn nodes(&self) -> Value {
-        let records = runtime_registry::live_records();
+        let records = if self.pinned {
+            Vec::new()
+        } else {
+            runtime_registry::live_records()
+        };
         let selected = self.defaults.target.as_ref().map(|target| &target.portal);
         let mut nodes: Vec<Value> = records
             .iter()
@@ -504,7 +513,7 @@ impl Server {
             if !self.authorized(&request) {
                 return error_reply(&CliError::new(
                     "unauthenticated",
-                    "Open the address printed by `lowertier gui`.",
+                    "The access key is missing or wrong.",
                     "key",
                 ));
             }
@@ -522,6 +531,22 @@ impl Server {
             _ => reply(StatusCode::OK, "text/html; charset=utf-8", INDEX),
         }
     }
+}
+
+/// Serve HTTP/1 on one accepted connection until it closes.
+async fn serve_stream<S>(server: Arc<Server>, stream: S)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(move |request| {
+        let server = server.clone();
+        async move { Ok::<_, Infallible>(server.handle(request).await) }
+    });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10))
+        .serve_connection(TokioIo::new(stream), service)
+        .await;
 }
 
 /// The option registry for the settings view.
@@ -632,6 +657,7 @@ pub async fn serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
     let server = Arc::new(Server {
         key,
         hosts,
+        pinned: false,
         defaults: Defaults {
             target,
             target_error,
@@ -651,16 +677,7 @@ pub async fn serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
             let Ok((stream, _)) = listener.accept().await else {
                 continue;
             };
-            let server = server.clone();
-            tokio::spawn(async move {
-                let service = hyper::service::service_fn(move |request| {
-                    let server = server.clone();
-                    async move { Ok::<_, Infallible>(server.handle(request).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
-            });
+            tokio::spawn(serve_stream(server.clone(), stream));
         }
     };
     tokio::select! {

@@ -1,5 +1,5 @@
 import { For, Match, Show, Switch, createEffect, createSignal, on } from "solid-js";
-import { hasKey } from "./api";
+import { hasKey, saveKey } from "./api";
 import { busy, config, loadConfig, loadSchema, notice, restartInstance } from "./config";
 import { ago } from "./format";
 import { error, nodes, now, sampledAt, select, selection, snapshot } from "./store";
@@ -59,7 +59,7 @@ export default function App() {
       { defer: false },
     ),
   );
-  loadSchema();
+  if (hasKey) loadSchema();
 
   const node = () => snapshot()?.node?.node;
   const current = () => nodes().find((item) => (selection().node ? item.portal === selection().node : item.default));
@@ -70,9 +70,24 @@ export default function App() {
       fallback={
         <main class="locked">
           <Mark />
-          <p>
-            Open the address printed by <code>lowertier gui</code>. It carries the key for this session.
-          </p>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = new FormData(event.currentTarget).get("key");
+              if (typeof value === "string" && value.trim()) saveKey(value);
+            }}
+          >
+            <label for="access-key">Access key</label>
+            <div class="key-row">
+              <input id="access-key" name="key" type="password" autocomplete="off" autofocus spellcheck={false} />
+              <button type="submit" class="primary">
+                Open
+              </button>
+            </div>
+            <p>
+              The key is the content of <code>gui.key</code>, or the address printed by <code>lowertier gui</code>.
+            </p>
+          </form>
         </main>
       }
     >

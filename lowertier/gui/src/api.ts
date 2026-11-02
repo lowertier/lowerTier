@@ -18,7 +18,7 @@ const STORAGE = "lowertier-gui-key";
 // The key arrives in the URL fragment, which browsers never send to servers. Keep it for
 // reloads of this tab and take it out of the address bar.
 function readKey(): string {
-  const found = /key=([0-9a-f]+)/.exec(location.hash);
+  const found = /key=([\w-]+)/.exec(location.hash);
   if (found) {
     try {
       sessionStorage.setItem(STORAGE, found[1]);
@@ -35,6 +35,22 @@ function readKey(): string {
 
 const key = readKey();
 export const hasKey = key !== "";
+
+/** Keep a key typed on the lock screen for this tab and load the page with it. */
+export function saveKey(value: string) {
+  try {
+    sessionStorage.setItem(STORAGE, value.trim());
+  } catch {}
+  location.reload();
+}
+
+// A key the server refuses is dropped, which brings back the lock screen.
+function dropKey() {
+  try {
+    sessionStorage.removeItem(STORAGE);
+  } catch {}
+  location.reload();
+}
 
 let target: { node?: string; instance?: string } = {};
 export function setTarget(node?: string, instance?: string) {
@@ -67,6 +83,7 @@ export async function api(path: string, body?: Doc): Promise<Doc> {
   } catch {
     throw new ApiError({ code: "internal", message: text || response.statusText });
   }
+  if (doc.error?.code === "unauthenticated" && key !== "") dropKey();
   if (!response.ok || doc.error) throw new ApiError(doc.error ?? { message: response.statusText });
   return doc;
 }
