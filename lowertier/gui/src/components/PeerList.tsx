@@ -1,10 +1,17 @@
-// Every peer as one row, nearest first. The bar uses the radar's log scale for round trip.
+// Every peer as one row, nearest first, with a bar on a log scale of round trip.
 import { For, Show } from "solid-js";
 import { latency, loss, rate } from "../format";
 import { peerName, peers, type PeerRow } from "../store";
-import { rttFraction } from "./PeerMap";
 
+// Round trip on a log scale: 0 at 0.1 ms, 1 at 1000 ms.
+const LOW = -1;
+const HIGH = 3;
 const TICKS = [1, 10, 100];
+
+function rttFraction(rttUs: number): number {
+  const log = Math.log10(rttUs / 1000);
+  return Math.min(1, Math.max(0, (log - LOW) / (HIGH - LOW)));
+}
 
 function sorted(rows: PeerRow[]): PeerRow[] {
   const rtt = (row: PeerRow) => (row.rtt != null && row.rtt > 0 ? row.rtt : Infinity);

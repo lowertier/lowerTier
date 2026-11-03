@@ -372,10 +372,6 @@ td .sub {
   gap: 16px;
 }
 
-.map-panel {
-  padding-bottom: 8px;
-}
-
 .legend {
   display: flex;
   gap: 14px;
@@ -403,167 +399,6 @@ td .sub {
 
 .legend .lossy::before {
   border-top-color: var(--loss);
-}
-
-.peer-map {
-  display: block;
-  width: 100%;
-  max-height: 72vh;
-  aspect-ratio: 1;
-  margin: 0 auto;
-  overflow: visible;
-  user-select: none;
-}
-
-.peer-map .ring circle,
-.peer-map circle.ring {
-  fill: none;
-  stroke: var(--edge-strong);
-  stroke-width: 1;
-}
-
-.peer-map circle.unmeasured {
-  stroke-dasharray: 1 5;
-  stroke-linecap: round;
-}
-
-.peer-map .ring text {
-  fill: var(--faint);
-  font-size: 11px;
-}
-
-.peer-map .link .track {
-  fill: none;
-  stroke: var(--ink-2);
-  stroke-linecap: round;
-  opacity: 0.55;
-  transition: opacity 160ms;
-}
-
-.peer-map .link.relayed .track {
-  stroke: var(--relay);
-  stroke-dasharray: 4 5;
-  opacity: 0.8;
-}
-
-.peer-map .link.lossy .track {
-  stroke: var(--loss);
-  opacity: 0.85;
-}
-
-.peer-map .link .flow {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 2.2;
-  stroke-linecap: round;
-  stroke-dasharray: 0.1 14;
-  animation: flow linear infinite;
-}
-
-.peer-map .link.active .track {
-  opacity: 1;
-}
-
-.peer-map .dim {
-  opacity: 0.32;
-}
-
-@keyframes flow {
-  to {
-    stroke-dashoffset: -14.1;
-  }
-}
-
-.peer-map .self circle {
-  fill: var(--accent);
-}
-
-.peer-map text {
-  paint-order: stroke;
-  stroke: var(--panel);
-  stroke-width: 4px;
-  stroke-linejoin: round;
-  fill: var(--ink);
-  font-size: 13px;
-  font-weight: 560;
-}
-
-.peer-map text.sub {
-  fill: var(--muted);
-  font-size: 11px;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-}
-
-.peer-map .peer {
-  cursor: pointer;
-  outline: none;
-}
-
-.peer-map .peer .hit {
-  fill: transparent;
-}
-
-.peer-map .peer .dot {
-  fill: var(--ink);
-  stroke: var(--panel);
-  stroke-width: 2;
-  transition: r 160ms;
-}
-
-.peer-map .peer.relayed .dot {
-  fill: var(--panel);
-  stroke: var(--relay);
-  stroke-width: 2;
-}
-
-.peer-map .peer.lossy .dot {
-  fill: var(--loss);
-}
-
-.peer-map .peer.active .dot,
-.peer-map .peer:focus-visible .dot {
-  stroke: var(--accent);
-  stroke-width: 3;
-}
-
-.peer-map .peer:hover text:not(.sub) {
-  fill: var(--accent);
-}
-
-.map-empty {
-  position: absolute;
-  left: 50%;
-  top: 58%;
-  transform: translateX(-50%);
-  width: min(320px, 80%);
-  text-align: center;
-  color: var(--muted);
-}
-
-.map-card {
-  position: absolute;
-  left: 20px;
-  bottom: 18px;
-  display: grid;
-  gap: 2px;
-  max-width: calc(100% - 40px);
-  padding: 12px 14px;
-  border-radius: var(--radius);
-  background: var(--raised);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 14%, transparent);
-  font-variant-numeric: tabular-nums;
-}
-
-.map-card .mono,
-.map-card span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.map-card button {
-  justify-self: start;
-  margin-top: 8px;
 }
 
 /* Peer list: nearest first, bar on the radar's log scale */
@@ -1041,7 +876,6 @@ button:disabled {
   opacity: 0.5;
 }
 
-.map-card button,
 .field button,
 .control button:not(.link):not(.switch):not([role="radio"]),
 .quiet {
@@ -1054,7 +888,6 @@ button:disabled {
   transition: background 120ms, color 120ms;
 }
 
-.map-card button:hover:not(:disabled),
 .field button:hover:not(:disabled),
 .control button:not(.link):not(.switch):not([role="radio"]):hover:not(:disabled),
 .quiet:hover {
@@ -1780,16 +1613,6 @@ button.link.danger {
 
   .path-row {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  /* The map scales down to about half size: keep labels readable. */
-  .peer-map text {
-    font-size: 22px;
-  }
-
-  .peer-map text.sub,
-  .peer-map .ring text {
-    font-size: 18px;
   }
 
   .line .level,

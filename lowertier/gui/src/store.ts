@@ -201,6 +201,3 @@ export function peerName(id: number): string {
   return peers().find((peer) => peer.id === id)?.name ?? `peer ${id}`;
 }
 
-export function peerById(id?: number): PeerRow | undefined {
-  return id == null ? undefined : peers().find((peer) => peer.id === id);
-}
