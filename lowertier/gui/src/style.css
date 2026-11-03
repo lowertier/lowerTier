@@ -566,6 +566,106 @@ td .sub {
   margin-top: 8px;
 }
 
+/* Peer list: nearest first, bar on the radar's log scale */
+
+.peer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 72vh;
+  overflow-y: auto;
+}
+
+.peer-list button {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.9fr) minmax(0, 1.4fr) 64px;
+  align-items: center;
+  gap: 6px 16px;
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.peer-list button:hover,
+.peer-list button:focus-visible {
+  background: var(--accent-soft);
+}
+
+.peer-list .who {
+  display: grid;
+  min-width: 0;
+}
+
+.peer-list .who b,
+.peer-list .who .sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-list .sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.peer-list .track {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 7%, var(--panel));
+}
+
+.peer-list .track i {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--edge-strong);
+}
+
+.peer-list .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  background: var(--ink-2);
+}
+
+.peer-list .relayed .fill {
+  background: repeating-linear-gradient(115deg, var(--relay) 0 6px, color-mix(in srgb, var(--relay) 45%, var(--panel)) 6px 10px);
+}
+
+.peer-list .lossy .fill {
+  background: var(--loss);
+}
+
+.peer-list .value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 560;
+}
+
+@media (max-width: 760px) {
+  .peer-list {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .peer-list button {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .peer-list .track {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
 .chart {
   margin: 0;
 }

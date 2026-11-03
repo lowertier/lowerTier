@@ -1,8 +1,24 @@
 import { Show, createMemo, createSignal } from "solid-js";
 import Chart from "../components/Chart";
+import PeerList from "../components/PeerList";
 import PeerMap from "../components/PeerMap";
+import { Segmented } from "../components/controls";
 import { bytes, latency, loss, rate, NONE } from "../format";
 import { peerById, peers, snapshot } from "../store";
+
+const MODES = ["Radar", "List"] as const;
+const MODE_KEY = "lowertier-gui-peer-view";
+// The radar reads well up to about a dozen peers; a mesh grows past that.
+const RADAR_LIMIT = 12;
+
+function savedMode(): string | undefined {
+  try {
+    const mode = localStorage.getItem(MODE_KEY);
+    return MODES.find((name) => name === mode);
+  } catch {
+    return undefined;
+  }
+}
 
 export default function Overview(props: { onOpenPeer: (id: number) => void }) {
   const [selected, setSelected] = createSignal<number>();
@@ -15,6 +31,16 @@ export default function Overview(props: { onOpenPeer: (id: number) => void }) {
     return { direct, relayed: rows.length - direct, median: rtts[Math.floor(rtts.length / 2)], worst };
   });
   const picked = () => peerById(selected());
+  const [chosen, setChosen] = createSignal<string | undefined>(savedMode());
+  const narrow = matchMedia("(max-width: 760px)").matches;
+  const mode = () => chosen() ?? (narrow || peers().length > RADAR_LIMIT ? "List" : "Radar");
+  const choose = (value: string) => {
+    setChosen(value);
+    setSelected(undefined);
+    try {
+      localStorage.setItem(MODE_KEY, value);
+    } catch {}
+  };
 
   return (
     <div class="overview">
@@ -26,12 +52,15 @@ export default function Overview(props: { onOpenPeer: (id: number) => void }) {
             <li class="relayed">relayed</li>
             <li class="lossy">over 1% loss</li>
           </ul>
+          <Segmented label="Peer view" values={MODES} value={mode()} onChange={choose} />
         </header>
-        <PeerMap selected={selected()} onSelect={setSelected} />
+        <Show when={mode() === "Radar"} fallback={<PeerList onOpen={props.onOpenPeer} />}>
+          <PeerMap selected={selected()} onSelect={setSelected} />
+        </Show>
         <Show when={snapshot() && !peers().length}>
           <p class="map-empty">No peers yet. Add one under Settings, peer, or wait for discovery.</p>
         </Show>
-        <Show when={picked()}>
+        <Show when={mode() === "Radar" && picked()}>
           {(row) => (
             <div class="map-card">
               <b>{row().name}</b>
