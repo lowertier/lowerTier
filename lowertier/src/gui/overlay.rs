@@ -41,6 +41,7 @@ struct Settings {
     name: String,
     port: u16,
     allow: Vec<IpCidr>,
+    open: Vec<IpCidr>,
     key: String,
     portal: SocketAddr,
     token_file: PathBuf,
@@ -59,12 +60,14 @@ pub fn spawn(
     if !gui.enabled.unwrap_or(false) {
         return Ok(None);
     }
-    let allow = gui
-        .allow
-        .iter()
-        .flatten()
-        .map(|cidr| cidr.parse().with_context(|| format!("gui.allow: {cidr}")))
-        .collect::<anyhow::Result<Vec<IpCidr>>>()?;
+    let cidrs = |list: &Option<Vec<String>>, option: &str| {
+        list.iter()
+            .flatten()
+            .map(|cidr| cidr.parse().with_context(|| format!("{option}: {cidr}")))
+            .collect::<anyhow::Result<Vec<IpCidr>>>()
+    };
+    let open = cidrs(&gui.open, "gui.open")?;
+    let allow = cidrs(&gui.allow, "gui.allow")?;
     let key_file = match gui.key_file {
         Some(path) => path,
         None => token_file.with_file_name("gui.key"),
@@ -76,6 +79,7 @@ pub fn spawn(
         instance = %name,
         key_file = %key_file.display(),
         allow = ?gui.allow.as_deref().unwrap_or_default(),
+        open = ?gui.open.as_deref().unwrap_or_default(),
         "GUI enabled on the overlay address",
     );
     if allow.is_empty() {
@@ -86,6 +90,7 @@ pub fn spawn(
         name,
         port: gui.port.unwrap_or(DEFAULT_PORT),
         allow,
+        open,
         key: key.expose().to_owned(),
         portal,
         token_file: token_file.to_owned(),
@@ -169,11 +174,13 @@ fn server(settings: &Settings, address: Ipv4Addr, qualified: &str) -> Arc<Server
 }
 
 fn allowed(settings: &Settings, own: Ipv4Addr, peer: IpAddr) -> bool {
-    if settings.allow.is_empty() {
-        peer == IpAddr::V4(own)
-    } else {
-        settings.allow.iter().any(|cidr| cidr.contains(&peer))
-    }
+    let listed = settings.allow.iter().chain(&settings.open).any(|cidr| cidr.contains(&peer));
+    listed || (settings.allow.is_empty() && peer == IpAddr::V4(own))
+}
+
+/// Peers in `gui.open` skip the access key.
+fn keyless(settings: &Settings, peer: IpAddr) -> bool {
+    settings.open.iter().any(|cidr| cidr.contains(&peer))
 }
 
 async fn listen(
@@ -210,8 +217,9 @@ async fn listen(
                 continue;
             };
             let server = server.clone();
+            let trusted = keyless(&settings, peer.ip());
             tokio::spawn(async move {
-                serve_stream(server, stream).await;
+                serve_stream(server, stream, trusted).await;
                 drop(permit);
             });
         }
@@ -236,8 +244,9 @@ async fn listen(
                 continue;
             };
             let server = server.clone();
+            let trusted = keyless(&settings, peer.ip());
             tokio::spawn(async move {
-                serve_stream(server, stream).await;
+                serve_stream(server, stream, trusted).await;
                 drop(permit);
             });
         }
@@ -254,6 +263,7 @@ mod tests {
             name: "default".into(),
             port: DEFAULT_PORT,
             allow: allow.iter().map(|cidr| cidr.parse().unwrap()).collect(),
+            open: vec![],
             key: "k".into(),
             portal: "127.0.0.1:1".parse().unwrap(),
             token_file: PathBuf::new(),
@@ -272,6 +282,13 @@ mod tests {
         assert!(allowed(&net, own, peer("10.88.0.9")));
         assert!(!allowed(&net, own, peer("10.88.0.10")));
         assert!(!allowed(&net, own, peer("192.168.1.5")));
+        let mut open = settings(&[]);
+        open.open = vec!["192.168.51.0/24".parse().unwrap()];
+        assert!(allowed(&open, own, peer("10.77.0.2")));
+        assert!(allowed(&open, own, peer("192.168.51.9")));
+        assert!(!allowed(&open, own, peer("10.77.0.1")));
+        assert!(keyless(&open, peer("192.168.51.9")));
+        assert!(!keyless(&open, peer("10.77.0.2")));
     }
 
     #[test]

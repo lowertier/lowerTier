@@ -21,18 +21,20 @@ A daemon can serve the page on its own overlay address, so peers open it without
 [gui]
 enabled = true
 port = 15880                      # default
-allow = ["10.144.0.0/24"]         # overlay CIDRs that may connect
+allow = ["10.144.0.0/24"]         # overlay CIDRs that may connect (with the key)
+open = ["192.168.51.0/24"]        # CIDRs served without the key
 # key_file = "/etc/lowertier/gui.key"
 ```
 
 Open `http://<overlay address>:15880/` from an allowed peer and enter the key. The key is the content of `gui.key`, which the daemon creates with mode 0600 beside the control token (or at `gui.key_file`).
+`open = ["192.168.51.0/24"]` lists networks served without the key: their peers open the page directly and are allowed even when `allow` omits them. Trust is by source address only, so list a network you control. A router that masquerades a LAN into the overlay makes the whole LAN appear as one address.
 Without `allow`, only the node itself may connect. Changes need an instance restart; the Settings page edits the same options.
 
 - With `tun.mode = "userspace"` the listener lives in the userspace stack, so it needs no operating system interface. With a kernel interface it is a normal socket bound to the overlay address.
 - It manages the instance that serves it. `?node=` cannot select another daemon on the machine, so the page never reaches other control tokens.
 - Browsers keep the key in `sessionStorage` for the tab. A key the server refuses is dropped and the key prompt returns.
 - The page is plain HTTP inside the encrypted overlay. Peers outside `allow` get no response, and at most 32 connections are served at once.
-- Keep `allow` narrow: anyone holding the key can change this node's configuration and restart it.
+- Keep `allow` and `open` narrow: anyone holding the key can change this node's configuration and restart it.
 
 ## Security
 

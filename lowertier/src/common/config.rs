@@ -945,6 +945,7 @@ pub struct GuiConfig {
     pub port: Option<u16>,
     pub key_file: Option<PathBuf>,
     pub allow: Option<Vec<String>>,
+    pub open: Option<Vec<String>>,
 }
 
 /// Process-wide logging settings from `[log]`.

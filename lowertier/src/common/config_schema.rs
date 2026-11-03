@@ -246,6 +246,14 @@ pub static OPTIONS: &[OptionSpec] = &[
         "",
         "Overlay CIDRs that may open the interface. Default: this node's own overlay address.",
     ),
+    opt(
+        "gui.open",
+        StrList,
+        Same,
+        Restart,
+        "",
+        "Overlay CIDRs served without the access key, and allowed. Trust is by source address only: use it for a network you control.",
+    ),
     secret(
         "identity.private_key",
         To("secure_mode.local_private_key"),

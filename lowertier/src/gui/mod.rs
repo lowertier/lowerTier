@@ -171,12 +171,13 @@ impl Server {
         }
     }
 
-    fn authorized(&self, request: &Request<Incoming>) -> bool {
+    fn authorized(&self, request: &Request<Incoming>, trusted: bool) -> bool {
         use subtle::ConstantTimeEq as _;
-        request
-            .headers()
-            .get(KEY_HEADER)
-            .is_some_and(|key| key.as_bytes().ct_eq(self.key.as_bytes()).into())
+        trusted
+            || request
+                .headers()
+                .get(KEY_HEADER)
+                .is_some_and(|key| key.as_bytes().ct_eq(self.key.as_bytes()).into())
     }
 
     fn target(&self, node: Option<&str>) -> Result<Target> {
@@ -500,7 +501,7 @@ impl Server {
         result.map(toml_reply)
     }
 
-    async fn handle(self: Arc<Self>, request: Request<Incoming>) -> Reply {
+    async fn handle(self: Arc<Self>, request: Request<Incoming>, trusted: bool) -> Reply {
         if !self.same_origin(&request) {
             return reply(
                 StatusCode::FORBIDDEN,
@@ -510,7 +511,7 @@ impl Server {
         }
         let path = request.uri().path().to_owned();
         if let Some(api) = path.strip_prefix("/api/") {
-            if !self.authorized(&request) {
+            if !self.authorized(&request, trusted) {
                 return error_reply(&CliError::new(
                     "unauthenticated",
                     "The access key is missing or wrong.",
@@ -528,19 +529,28 @@ impl Server {
         match path.as_str() {
             "/app.js" => reply(StatusCode::OK, "text/javascript; charset=utf-8", SCRIPT),
             "/app.css" => reply(StatusCode::OK, "text/css; charset=utf-8", STYLE),
+            _ if trusted => reply(StatusCode::OK, "text/html; charset=utf-8", open_index()),
             _ => reply(StatusCode::OK, "text/html; charset=utf-8", INDEX),
         }
     }
 }
 
+/// The page for a keyless peer: a marker tells the script not to ask for the key.
+fn open_index() -> Bytes {
+    let page = String::from_utf8_lossy(INDEX);
+    Bytes::from(page.replacen("<head>", "<head><meta name=\"lowertier-open\" content=\"1\">", 1))
+}
+
 /// Serve HTTP/1 on one accepted connection until it closes.
-async fn serve_stream<S>(server: Arc<Server>, stream: S)
+///
+/// `trusted` connections come from a `gui.open` network and need no key.
+async fn serve_stream<S>(server: Arc<Server>, stream: S, trusted: bool)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |request| {
         let server = server.clone();
-        async move { Ok::<_, Infallible>(server.handle(request).await) }
+        async move { Ok::<_, Infallible>(server.handle(request, trusted).await) }
     });
     let _ = hyper::server::conn::http1::Builder::new()
         .timer(hyper_util::rt::TokioTimer::new())
@@ -677,7 +687,7 @@ pub async fn serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
             let Ok((stream, _)) = listener.accept().await else {
                 continue;
             };
-            tokio::spawn(serve_stream(server.clone(), stream));
+            tokio::spawn(serve_stream(server.clone(), stream, false));
         }
     };
     tokio::select! {

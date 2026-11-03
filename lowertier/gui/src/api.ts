@@ -34,7 +34,9 @@ function readKey(): string {
 }
 
 const key = readKey();
-export const hasKey = key !== "";
+// A server that trusts this peer's network marks the page and needs no key.
+export const hasKey =
+  key !== "" || document.querySelector('meta[name="lowertier-open"]') !== null;
 
 /** Keep a key typed on the lock screen for this tab and load the page with it. */
 export function saveKey(value: string) {
