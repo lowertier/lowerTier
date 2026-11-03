@@ -749,15 +749,17 @@ impl CredentialManager {
         }
         if bundle.x25519_private_key.len() != 32
             || bundle.expiry_unix <= now
-            || bundle.issued_unix > now
+            || bundle.issued_unix > now.saturating_add(MAX_FUTURE_SKEW)
             || bundle.expiry_unix <= bundle.issued_unix
             || bundle.expiry_unix.saturating_sub(bundle.issued_unix)
                 > MAX_CREDENTIAL_TTL.as_secs() as i64
             || bundle.certificate_id.len() != CERTIFICATE_ID_LEN
             || bundle.certificate_id.iter().all(|byte| *byte == 0)
         {
-            return Err(if bundle.expiry_unix <= now || bundle.issued_unix > now {
+            return Err(if bundle.expiry_unix <= now {
                 CredentialError::Expired
+            } else if bundle.issued_unix > now.saturating_add(MAX_FUTURE_SKEW) {
+                CredentialError::FutureTimestamp
             } else if bundle.expiry_unix <= bundle.issued_unix
                 || bundle.expiry_unix.saturating_sub(bundle.issued_unix)
                     > MAX_CREDENTIAL_TTL.as_secs() as i64
@@ -826,7 +828,7 @@ impl CredentialManager {
             || certificate.serial != 0
             || certificate.subject_x25519_public_key.len() != 32
             || certificate.expiry_unix <= now
-            || certificate.issued_unix > now
+            || certificate.issued_unix > now.saturating_add(MAX_FUTURE_SKEW)
             || certificate.expiry_unix <= certificate.issued_unix
             || certificate
                 .expiry_unix
@@ -837,8 +839,10 @@ impl CredentialManager {
             || !is_canonical_strings(&certificate.allowed_proxy_cidrs)
         {
             return Err(
-                if certificate.expiry_unix <= now || certificate.issued_unix > now {
+                if certificate.expiry_unix <= now {
                     CredentialError::Expired
+                } else if certificate.issued_unix > now.saturating_add(MAX_FUTURE_SKEW) {
+                    CredentialError::FutureTimestamp
                 } else if certificate.expiry_unix <= certificate.issued_unix
                     || certificate
                         .expiry_unix
@@ -1266,4 +1270,42 @@ fn status_signing_bytes(status: &CredentialCertificateStatus) -> Vec<u8> {
 
 fn encode_bundle(bundle: &CredentialBundle) -> String {
     URL_SAFE_NO_PAD.encode(bundle.encode_to_vec())
+}
+
+#[cfg(test)]
+mod skew_tests {
+    use super::*;
+
+    fn verify_at(offset: i64) -> Result<CredentialCertificate, CredentialError> {
+        let manager =
+            CredentialManager::new_with_network_and_bundle(None, "skew-net", Some("secret"), None)
+                .unwrap();
+        let subject = [7_u8; 32];
+        let certificate = manager
+            .new_admin_certificate(&subject, Duration::from_secs(60))
+            .unwrap();
+        CredentialManager::verify_certificate_bytes(
+            &certificate.encode_to_vec(),
+            "skew-net",
+            manager.root_fingerprint(),
+            &subject,
+            "Admin",
+            // The verifier's clock is `offset` seconds behind the issuer's.
+            certificate.issued_unix - offset,
+        )
+    }
+
+    #[test]
+    fn certificate_from_a_slightly_fast_clock_is_accepted() {
+        assert!(verify_at(2).is_ok());
+        assert!(verify_at(MAX_FUTURE_SKEW).is_ok());
+    }
+
+    #[test]
+    fn certificate_from_a_far_future_is_rejected() {
+        assert!(matches!(
+            verify_at(MAX_FUTURE_SKEW + 60),
+            Err(CredentialError::FutureTimestamp)
+        ));
+    }
 }
