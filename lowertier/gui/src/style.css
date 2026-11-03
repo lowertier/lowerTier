@@ -372,134 +372,70 @@ td .sub {
   gap: 16px;
 }
 
-.legend {
-  display: flex;
-  gap: 14px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.legend li::before {
-  content: "";
-  display: inline-block;
-  width: 16px;
-  height: 0;
-  margin-right: 6px;
-  vertical-align: middle;
-  border-top: 2px solid var(--ink-2);
-  border-radius: 2px;
-}
-
-.legend .relayed::before {
-  border-top: 2px dashed var(--relay);
-}
-
-.legend .lossy::before {
-  border-top-color: var(--loss);
-}
-
-/* Peer list: nearest first, bar on the radar's log scale */
-
-.peer-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 72vh;
-  overflow-y: auto;
-}
-
-.peer-list button {
+.main {
   display: grid;
-  grid-template-columns: minmax(120px, 0.9fr) minmax(0, 1.4fr) 64px;
-  align-items: center;
-  gap: 6px 16px;
-  width: 100%;
-  padding: 9px 8px;
-  border: 0;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--ink);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.peer-list button:hover,
-.peer-list button:focus-visible {
-  background: var(--accent-soft);
-}
-
-.peer-list .who {
-  display: grid;
+  gap: 16px;
   min-width: 0;
 }
 
-.peer-list .who b,
-.peer-list .who .sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.panel h3.first {
+  margin-top: 0;
 }
 
-.peer-list .sub {
+.issues,
+.busiest {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.issues li,
+.busiest li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 0;
+}
+
+.issues li + li,
+.busiest li + li {
+  border-top: 1px solid var(--edge);
+}
+
+.issues .reason,
+.busiest span {
   color: var(--muted);
-  font-size: 12px;
-}
-
-.peer-list .track {
-  position: relative;
-  height: 8px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--ink) 7%, var(--panel));
-}
-
-.peer-list .track i {
-  position: absolute;
-  top: -3px;
-  bottom: -3px;
-  width: 1px;
-  background: var(--edge-strong);
-}
-
-.peer-list .fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  border-radius: 4px;
-  background: var(--ink-2);
-}
-
-.peer-list .relayed .fill {
-  background: repeating-linear-gradient(115deg, var(--relay) 0 6px, color-mix(in srgb, var(--relay) 45%, var(--panel)) 6px 10px);
-}
-
-.peer-list .lossy .fill {
-  background: var(--loss);
-}
-
-.peer-list .value {
-  text-align: right;
   font-variant-numeric: tabular-nums;
-  font-weight: 560;
+  text-align: right;
 }
 
-@media (max-width: 760px) {
-  .peer-list {
-    max-height: none;
-    overflow: visible;
-  }
-
-  .peer-list button {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .peer-list .track {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
+.issues .reason.bad {
+  color: var(--loss);
 }
+
+.paths {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 18px;
+  margin: 0;
+}
+
+.paths dt {
+  color: var(--muted);
+}
+
+.paths dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.paths button.link {
+  display: inline;
+  font-weight: 450;
+}
+
 
 .chart {
   margin: 0;

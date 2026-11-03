@@ -1,57 +1,153 @@
-import { Show, createMemo } from "solid-js";
+import { Index, Show, createMemo } from "solid-js";
 import Chart from "../components/Chart";
-import PeerList from "../components/PeerList";
-import { bytes, latency, loss, NONE } from "../format";
-import { peers, snapshot } from "../store";
+import { bytes, latency, loss, rate, NONE } from "../format";
+import { peerName, peers, snapshot, type PeerRow } from "../store";
 
-export default function Overview(props: { onOpenPeer: (id: number) => void }) {
+const LOSSY = 10_000; // parts per million: 1%
+const SLOW_FACTOR = 3;
+const SLOW_FLOOR_US = 50_000;
+const SHOWN = 8;
+const NAMES = 14;
+const BUSY_BPS = 2000;
+
+interface Issue {
+  row: PeerRow;
+  reason: string;
+  rank: number;
+}
+
+function median(values: number[]): number | undefined {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+/** Peers worth a look: loss, a round trip far above the rest, or a direct link with no measurement. */
+function issuesOf(rows: PeerRow[], mid: number | undefined): Issue[] {
+  const found: Issue[] = [];
+  for (const row of rows) {
+    if ((row.loss ?? 0) >= LOSSY) {
+      found.push({ row, reason: `${loss(row.loss)} loss`, rank: 3 + (row.loss ?? 0) / 1e6 });
+    } else if (row.rtt != null && mid != null && row.rtt > SLOW_FLOOR_US && row.rtt > mid * SLOW_FACTOR) {
+      found.push({ row, reason: `${latency(row.rtt)}, ${Math.round(row.rtt / mid)}x the median`, rank: 2 });
+    } else if (row.via == null && row.rtt == null) {
+      found.push({ row, reason: "no round trip measured", rank: 1 });
+    }
+  }
+  return found.sort((a, b) => b.rank - a.rank || a.row.name.localeCompare(b.row.name));
+}
+
+export default function Overview(props: { onOpenPeer: (id: number) => void; onAllPeers: () => void }) {
   const node = () => snapshot()?.node?.node ?? {};
-  const counts = createMemo(() => {
-    const rows = peers();
-    const direct = rows.filter((row) => row.via == null).length;
-    const rtts = rows.flatMap((row) => (row.rtt != null ? [row.rtt] : [])).sort((a, b) => a - b);
-    const worst = rows.reduce<(typeof rows)[number] | undefined>((found, row) => ((row.loss ?? -1) > (found?.loss ?? -1) ? row : found), undefined);
-    return { direct, relayed: rows.length - direct, median: rtts[Math.floor(rtts.length / 2)], worst };
+  const mid = createMemo(() => median(peers().flatMap((row) => (row.rtt != null ? [row.rtt] : []))));
+  const issues = createMemo(() => issuesOf(peers(), mid()));
+  const busiest = createMemo(() =>
+    peers()
+      .filter((row) => row.rx + row.tx > BUSY_BPS)
+      .sort((a, b) => b.rx + b.tx - (a.rx + a.tx))
+      .slice(0, 5),
+  );
+  const worst = createMemo(() => peers().reduce<PeerRow | undefined>((found, row) => ((row.loss ?? -1) > (found?.loss ?? -1) ? row : found), undefined));
+  // Peers grouped by the first hop their traffic takes: direct first, then each relay.
+  const paths = createMemo(() => {
+    const groups = new Map<number, PeerRow[]>();
+    for (const row of peers()) groups.set(row.via ?? -1, [...(groups.get(row.via ?? -1) ?? []), row]);
+    return [...groups.entries()]
+      .map(([via, rows]) => ({ via, rows: rows.sort((a, b) => a.name.localeCompare(b.name)) }))
+      .sort((a, b) => (a.via === -1 ? -1 : b.via === -1 ? 1 : b.rows.length - a.rows.length));
   });
+  const direct = () => peers().filter((row) => row.via == null).length;
 
   return (
     <div class="overview">
-      <section class="panel peers-panel">
-        <header class="panel-head">
-          <h2>Peers by round trip</h2>
-          <ul class="legend" aria-label="Legend">
-            <li class="direct">direct</li>
-            <li class="relayed">relayed</li>
-            <li class="lossy">over 1% loss</li>
-          </ul>
-        </header>
-        <PeerList onOpen={props.onOpenPeer} />
-        <Show when={snapshot() && !peers().length}>
-          <p class="empty">No peers yet. Add one under Settings, peer, or wait for discovery.</p>
-        </Show>
-      </section>
-
-      <div class="side">
+      <div class="main">
         <section class="panel">
-          <Chart />
+          <header class="panel-head">
+            <h2>
+              <Show when={issues().length} fallback={peers().length || !snapshot() ? "Nothing needs attention" : "No peers yet"}>
+                {issues().length} of {peers().length} peers need attention
+              </Show>
+            </h2>
+            <Show when={peers().length}>
+              <button type="button" class="link" onClick={props.onAllPeers}>
+                All {peers().length} peers
+              </button>
+            </Show>
+          </header>
+          <Show
+            when={issues().length}
+            fallback={
+              <p class="hint">
+                <Show when={peers().length} fallback={snapshot() ? "Add a peer under Settings, peer, or wait for discovery." : ""}>
+                  Every peer is reachable with loss under 1% and a round trip close to the median ({latency(mid())}).
+                </Show>
+              </p>
+            }
+          >
+            <ul class="issues">
+              <Index each={issues().slice(0, SHOWN)}>
+                {(issue) => (
+                  <li>
+                    <button type="button" class="link" onClick={() => props.onOpenPeer(issue().row.id)}>
+                      {issue().row.name}
+                    </button>
+                    <span class="reason" classList={{ bad: issue().rank >= 3 }}>
+                      {issue().reason}
+                    </span>
+                  </li>
+                )}
+              </Index>
+            </ul>
+            <Show when={issues().length > SHOWN}>
+              <p class="hint">
+                {issues().length - SHOWN} more on the{" "}
+                <button type="button" class="link" onClick={props.onAllPeers}>
+                  Peers page
+                </button>
+                .
+              </p>
+            </Show>
+          </Show>
         </section>
 
+        <section class="panel">
+          <Chart />
+          <Show when={busiest().length}>
+            <h3>Busiest peers</h3>
+            <ul class="busiest">
+              <Index each={busiest()}>
+                {(row) => (
+                  <li>
+                    <button type="button" class="link" onClick={() => props.onOpenPeer(row().id)}>
+                      {row().name}
+                    </button>
+                    <span>
+                      {rate(row().rx)} in · {rate(row().tx)} out
+                    </span>
+                  </li>
+                )}
+              </Index>
+            </ul>
+          </Show>
+        </section>
+      </div>
+
+      <div class="side">
         <section class="panel">
           <dl class="figures">
             <div>
               <dt>Peers</dt>
               <dd>
-                {counts().direct} direct · {counts().relayed} relayed
+                {direct()} direct · {peers().length - direct()} relayed
               </dd>
             </div>
             <div>
               <dt>Median round trip</dt>
-              <dd>{latency(counts().median)}</dd>
+              <dd>{latency(mid())}</dd>
             </div>
             <div>
               <dt>Highest loss</dt>
-              <dd classList={{ bad: (counts().worst?.loss ?? 0) >= 10_000 }}>
-                {counts().worst?.loss != null ? `${loss(counts().worst!.loss)}${counts().worst!.loss! > 0 ? ` ${counts().worst!.name}` : ""}` : NONE}
+              <dd classList={{ bad: (worst()?.loss ?? 0) >= LOSSY }}>
+                {worst()?.loss != null ? `${loss(worst()!.loss)}${worst()!.loss! > 0 ? ` ${worst()!.name}` : ""}` : NONE}
               </dd>
             </div>
             <div>
@@ -60,6 +156,34 @@ export default function Overview(props: { onOpenPeer: (id: number) => void }) {
             </div>
           </dl>
         </section>
+
+        <Show when={peers().length}>
+          <section class="panel">
+            <h3 class="first">Paths</h3>
+            <dl class="paths">
+              <Index each={paths()}>
+                {(group) => (
+                  <>
+                    <dt>{group().via === -1 ? "Direct" : `Through ${peerName(group().via)}`}</dt>
+                    <dd>
+                      <Index each={group().rows.slice(0, NAMES)}>
+                        {(row, index) => (
+                          <>
+                            <button type="button" class="link" onClick={() => props.onOpenPeer(row().id)}>
+                              {row().name}
+                            </button>
+                            {index < Math.min(group().rows.length, NAMES) - 1 ? ", " : ""}
+                          </>
+                        )}
+                      </Index>
+                      <Show when={group().rows.length > NAMES}> and {group().rows.length - NAMES} more</Show>
+                    </dd>
+                  </>
+                )}
+              </Index>
+            </dl>
+          </section>
+        </Show>
 
         <section class="panel">
           <dl class="facts">

@@ -176,7 +176,7 @@ export default function App() {
           <h1>{TITLES[view()]}</h1>
           <Switch>
             <Match when={view() === "overview"}>
-              <Overview onOpenPeer={openPeer} />
+              <Overview onOpenPeer={openPeer} onAllPeers={() => { setPeer(undefined); go("peers"); }} />
             </Match>
             <Match when={view() === "peers"}>
               <Peers selected={peer()} onSelect={setPeer} />
