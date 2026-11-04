@@ -215,31 +215,16 @@ async fn run_main(options: RunOptions) -> anyhow::Result<()> {
 
     let _daemon_guard = options.daemon.then(|| manager.register_daemon());
 
-    let mut instances = Vec::with_capacity(configs.len());
     #[cfg(feature = "gui")]
-    let mut gui_tasks = Vec::new();
+    if let Some(portal) = rpc_server.addr {
+        manager.configure_gui(portal, rpc_server.token_path.clone());
+    }
+    let mut instances = Vec::with_capacity(configs.len());
     for (config, control) in configs {
         instances.push(config.get_inst_name());
         log::info!(instance = %config.get_inst_name(), permission = ?control.permission, "Starting LowTier instance");
-        #[cfg(feature = "gui")]
-        let gui_config = config.clone();
-        #[allow(unused_variables)]
-        let id = manager.run_network_instance(config, true, control)?;
-        #[cfg(feature = "gui")]
-        if let Some(portal) = rpc_server.addr
-            && let Some(task) = crate::gui::overlay::spawn(
-                manager.clone(),
-                id,
-                &gui_config,
-                portal,
-                &rpc_server.token_path,
-            )?
-        {
-            gui_tasks.push(task);
-        }
+        manager.run_network_instance(config, true, control)?;
     }
-    #[cfg(feature = "gui")]
-    defer!(gui_tasks.iter().for_each(|task| task.abort()););
 
     let _registration = rpc_server.addr.and_then(|portal| {
         let record = runtime_registry::Record {

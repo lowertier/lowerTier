@@ -1,6 +1,8 @@
 # Browser interface
 
-The daemon starts the browser interface on each instance's overlay address by default, once that address is available. Set `[gui] enabled = false` to disable it.
+The daemon starts the browser interface on loopback and each instance's overlay address by default.
+Loopback starts before the overlay address is available.
+Set `[gui] enabled = false` to disable both listeners.
 
 `lowertier gui` also serves a management page on loopback and opens it in the default browser.
 
@@ -23,6 +25,7 @@ A daemon serves the page on its own overlay address, so allowed peers can open i
 [gui]
 enabled = true                    # default; false disables the listener
 port = 15880                      # default
+loopback_port = 15880             # use separate ports for instances on one host
 allow = ["10.144.0.0/24"]         # overlay CIDRs that may connect (with the key)
 open = ["192.168.51.0/24"]        # CIDRs served without the key
 # key_file = "/etc/lowertier/gui.key"
@@ -30,7 +33,11 @@ open = ["192.168.51.0/24"]        # CIDRs served without the key
 
 Open `http://<overlay address>:15880/` from an allowed peer and enter the key. The key is the content of `gui.key`, which the daemon creates with mode 0600 beside the control token (or at `gui.key_file`).
 `open = ["192.168.51.0/24"]` lists networks served without the key: their peers open the page directly and are allowed even when `allow` omits them. Trust is by source address only, so list a network you control. A router that masquerades a LAN into the overlay makes the whole LAN appear as one address.
-Without `allow`, only the node itself may connect. Changes need an instance restart; the Settings page edits the same options.
+Without `allow`, peers in the instance's overlay subnet may connect with the access key.
+An explicit empty list permits only the node itself.
+Loopback clients may connect with the same key.
+Changes need an instance restart; the Settings page edits the same options.
+The restart closes existing listeners and HTTP connections before applying the new settings.
 
 - With `tun.mode = "userspace"` the listener lives in the userspace stack, so it needs no operating system interface. With a kernel interface it is a normal socket bound to the overlay address.
 - It manages the instance that serves it. `?node=` cannot select another daemon on the machine, so the page never reaches other control tokens.

@@ -25,6 +25,7 @@ use netlink_packet_route::{
         RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
         RouteType,
     },
+    rule::{RuleAction, RuleAttribute, RuleMessage},
 };
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
 use nix::{
@@ -36,6 +37,125 @@ use nix::{
 use pnet::ipnetwork::ip_mask_to_prefix;
 
 use super::{Error, IfConfiguerTrait};
+
+fn overlay_source_rule(address: Ipv4Addr) -> RuleMessage {
+    let mut rule = RuleMessage::default();
+    rule.header.family = AddressFamily::Inet;
+    rule.header.src_len = 32;
+    rule.header.table = RouteHeader::RT_TABLE_MAIN;
+    rule.header.action = RuleAction::ToTable;
+    // Replies to advertised subnets must precede other VPN routing tables.
+    // Ignore the default route and preserve explicit packet marks.
+    rule.attributes = vec![
+        RuleAttribute::Source(address.into()),
+        RuleAttribute::Priority(5150),
+        RuleAttribute::FwMask(u32::MAX),
+        RuleAttribute::SuppressPrefixLen(0),
+        RuleAttribute::Protocol(RouteProtocol::Static),
+    ];
+    rule
+}
+
+fn matches_overlay_source_rule(rule: &RuleMessage, expected: &RuleMessage) -> bool {
+    rule.header == expected.header
+        && expected.attributes.iter().all(|attr| rule.attributes.contains(attr))
+        && rule.attributes.iter().all(|attr| {
+            expected.attributes.contains(attr)
+                || matches!(attr, RuleAttribute::FwMark(0))
+                || matches!(attr, RuleAttribute::Table(table) if *table == u32::from(RouteHeader::RT_TABLE_MAIN))
+        })
+}
+
+fn overlay_source_rules(address: Ipv4Addr) -> Result<Vec<RuleMessage>, Error> {
+    let expected = overlay_source_rule(address);
+    let mut query = RuleMessage::default();
+    query.header.family = AddressFamily::Inet;
+    let socket = send_netlink_req(
+        RouteNetlinkMessage::GetRule(query),
+        NLM_F_REQUEST | NLM_F_DUMP,
+    )?;
+    let mut found = Vec::new();
+    'dump: loop {
+        let (mut bytes, _) = socket.recv_from_full()?;
+        while !bytes.is_empty() {
+            let response = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&bytes)
+                .context("Cannot decode routing policy rules")?;
+            bytes = bytes.split_off(response.buffer_len());
+            match response.payload {
+                NetlinkPayload::Done(_) => break 'dump,
+                NetlinkPayload::Error(error) if error.code.is_some() => {
+                    return Err(error.to_io().into());
+                }
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRule(rule))
+                    if matches_overlay_source_rule(&rule, &expected) =>
+                {
+                    found.push(rule);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn update_overlay_source_rule(address: Ipv4Addr, remove: bool) -> Result<(), Error> {
+    let rules = overlay_source_rules(address)?;
+    if remove {
+        for rule in rules {
+            send_netlink_req_and_wait_one_resp(RouteNetlinkMessage::DelRule(rule), true)?;
+        }
+    } else if rules.is_empty() {
+        send_netlink_req_and_wait_one_resp(
+            RouteNetlinkMessage::NewRule(overlay_source_rule(address)),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod source_rule_tests {
+    use super::*;
+
+    fn source_rule_identity_preserves_marked_and_restricted_rules() {
+        let expected = overlay_source_rule(Ipv4Addr::new(192, 0, 2, 254));
+        let mut dumped = expected.clone();
+        dumped
+            .attributes
+            .push(RuleAttribute::Table(u32::from(RouteHeader::RT_TABLE_MAIN)));
+        assert!(matches_overlay_source_rule(&dumped, &expected));
+        dumped.attributes.push(RuleAttribute::FwMark(123));
+        assert!(!matches_overlay_source_rule(&dumped, &expected));
+        dumped.attributes.pop();
+        dumped.attributes.push(RuleAttribute::FwMark(0));
+        assert!(matches_overlay_source_rule(&dumped, &expected));
+        dumped
+            .attributes
+            .push(RuleAttribute::Iifname("another-interface".into()));
+        assert!(!matches_overlay_source_rule(&dumped, &expected));
+    }
+
+    #[test]
+    #[ignore = "requires Linux CAP_NET_ADMIN"]
+    fn source_rule_kernel_round_trip_is_idempotent() {
+        source_rule_identity_preserves_marked_and_restricted_rules();
+        let address = Ipv4Addr::new(192, 0, 2, 254);
+        assert!(overlay_source_rules(address).unwrap().is_empty());
+        struct Cleanup(Ipv4Addr);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                update_overlay_source_rule(self.0, true).unwrap();
+            }
+        }
+        let _cleanup = Cleanup(address);
+        update_overlay_source_rule(address, false).unwrap();
+        update_overlay_source_rule(address, false).unwrap();
+        assert_eq!(overlay_source_rules(address).unwrap().len(), 1);
+        update_overlay_source_rule(address, true).unwrap();
+        update_overlay_source_rule(address, true).unwrap();
+        assert!(overlay_source_rules(address).unwrap().is_empty());
+    }
+}
 
 pub(crate) fn dummy_socket() -> Result<std::net::UdpSocket, Error> {
     Ok(std::net::UdpSocket::bind("0:0")?)
@@ -464,6 +584,10 @@ impl NetlinkIfConfiger {
 
 #[async_trait]
 impl IfConfiguerTrait for NetlinkIfConfiger {
+    fn remove_ipv4_source_rule(&self, address: Ipv4Addr) -> Result<(), Error> {
+        update_overlay_source_rule(address, true)
+    }
+
     async fn add_ipv4_route(
         &self,
         name: &str,
@@ -556,7 +680,8 @@ impl IfConfiguerTrait for NetlinkIfConfiger {
         send_netlink_req_and_wait_one_resp::<RouteNetlinkMessage>(
             RouteNetlinkMessage::NewAddress(message),
             false,
-        )
+        )?;
+        update_overlay_source_rule(address, false)
     }
 
     async fn set_link_status(&self, name: &str, up: bool) -> Result<(), Error> {
@@ -570,11 +695,13 @@ impl IfConfiguerTrait for NetlinkIfConfiger {
         if let Some(ip) = ip {
             let prefix_len = Self::get_prefix_len(name, ip.address())?;
             Self::remove_one_ip(name, ip.address(), prefix_len)?;
+            update_overlay_source_rule(ip.address(), true)?;
         } else {
             let addrs = Self::list_addresses(name)?;
             for addr in addrs {
                 if let IpAddr::V4(ipv4) = addr.address() {
                     Self::remove_one_ip(name, ipv4, addr.network_length())?;
+                    update_overlay_source_rule(ipv4, true)?;
                 }
             }
         }

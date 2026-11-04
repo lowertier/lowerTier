@@ -488,10 +488,17 @@ pub struct VirtualNic {
 
     ifname: Option<String>,
     ifcfg: Box<dyn IfConfiguerTrait + Send + Sync + 'static>,
+    source_rule_address: crossbeam::atomic::AtomicCell<Option<Ipv4Addr>>,
 }
 
 impl Drop for VirtualNic {
     fn drop(&mut self) {
+        if let Some(address) = self.source_rule_address.take() {
+            let _namespace = self.global_ctx.net_ns.guard();
+            if let Err(error) = self.ifcfg.remove_ipv4_source_rule(address) {
+                log::warn!(%error, %address, "Cannot remove the overlay source routing rule");
+            }
+        }
         #[cfg(target_os = "windows")]
         {
             if let Some(ref ifname) = self.ifname {
@@ -559,6 +566,7 @@ impl VirtualNic {
             global_ctx,
             ifname: None,
             ifcfg: Box::new(IfConfiger {}),
+            source_rule_address: crossbeam::atomic::AtomicCell::new(None),
         }
     }
 
@@ -1153,6 +1161,7 @@ impl VirtualNic {
     pub async fn remove_ip(&self, ip: Option<Ipv4Inet>) -> Result<(), Error> {
         let _g = self.global_ctx.net_ns.guard();
         self.ifcfg.remove_ip(self.ifname(), ip).await?;
+        self.source_rule_address.take();
         Ok(())
     }
 
@@ -1167,6 +1176,7 @@ impl VirtualNic {
         self.ifcfg
             .add_ipv4_ip(self.ifname(), ip, cidr as u8)
             .await?;
+        self.source_rule_address.store(Some(ip));
         Ok(())
     }
 

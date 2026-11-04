@@ -220,7 +220,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Restart,
         "true",
-        "Serve the browser interface on this instance's overlay address.",
+        "Serve the browser interface on loopback and this instance's overlay address.",
     ),
     opt(
         "gui.port",
@@ -229,6 +229,14 @@ pub static OPTIONS: &[OptionSpec] = &[
         Restart,
         "15880",
         "TCP port of the interface on the overlay address.",
+    ),
+    opt(
+        "gui.loopback_port",
+        Int,
+        Same,
+        Restart,
+        "15880",
+        "TCP port on 127.0.0.1. Use separate ports for instances on the same host.",
     ),
     opt(
         "gui.key_file",
@@ -244,7 +252,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Restart,
         "",
-        "Overlay CIDRs that may open the interface. Default: this node's own overlay address.",
+        "Source CIDRs that may open the overlay interface. Default: this instance's overlay subnet. API requests require the access key.",
     ),
     opt(
         "gui.open",
@@ -1207,7 +1215,9 @@ fn retired_entry(path: &str) -> Option<String> {
     })?;
     Some(match found.1 {
         // First-hop preferences and exit lists became [[path]] entries.
-        Some("path") => format!("\"{path}\" was replaced by [[path]]; see `lowertier config explain path`"),
+        Some("path") => {
+            format!("\"{path}\" was replaced by [[path]]; see `lowertier config explain path`")
+        }
         Some(new) => format!("\"{path}\" was renamed to \"{new}\""),
         None => format!("\"{path}\" was removed"),
     })

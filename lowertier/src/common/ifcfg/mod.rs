@@ -24,6 +24,9 @@ use super::error::Error;
 
 #[async_trait]
 pub trait IfConfiguerTrait: Send + Sync {
+    fn remove_ipv4_source_rule(&self, _address: Ipv4Addr) -> Result<(), Error> {
+        Ok(())
+    }
     async fn add_ipv4_route(
         &self,
         _name: &str,

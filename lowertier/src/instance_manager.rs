@@ -20,6 +20,14 @@ pub(crate) struct DaemonGuard {
     guard: Option<Arc<()>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
 }
+
+#[cfg(feature = "gui")]
+#[derive(Clone)]
+struct GuiEndpoint {
+    manager: std::sync::Weak<NetworkInstanceManager>,
+    portal: std::net::SocketAddr,
+    token_file: PathBuf,
+}
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
         drop(self.guard.take());
@@ -28,6 +36,10 @@ impl Drop for DaemonGuard {
 }
 
 pub struct NetworkInstanceManager {
+    #[cfg(feature = "gui")]
+    gui_endpoint: std::sync::Mutex<Option<GuiEndpoint>>,
+    #[cfg(feature = "gui")]
+    gui_tasks: Arc<DashMap<uuid::Uuid, AbortOnDropHandle<()>>>,
     pub(crate) control_stats: crate::rpc_service::control::StatsCache,
     instance_map: Arc<DashMap<uuid::Uuid, NetworkInstance>>,
     instance_stop_tasks: Arc<DashMap<uuid::Uuid, AbortOnDropHandle<()>>>,
@@ -51,6 +63,10 @@ impl Default for NetworkInstanceManager {
 impl NetworkInstanceManager {
     pub fn new() -> Self {
         NetworkInstanceManager {
+            #[cfg(feature = "gui")]
+            gui_endpoint: std::sync::Mutex::new(None),
+            #[cfg(feature = "gui")]
+            gui_tasks: Arc::new(DashMap::new()),
             control_stats: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             instance_map: Arc::new(DashMap::new()),
             instance_stop_tasks: Arc::new(DashMap::new()),
@@ -67,6 +83,41 @@ impl NetworkInstanceManager {
     pub fn with_config_path(mut self, config_dir: Option<PathBuf>) -> Self {
         self.config_dir = config_dir;
         self
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn configure_gui(
+        self: &Arc<Self>,
+        portal: std::net::SocketAddr,
+        token_file: PathBuf,
+    ) {
+        *self.gui_endpoint.lock().unwrap() = Some(GuiEndpoint {
+            manager: Arc::downgrade(self),
+            portal,
+            token_file,
+        });
+    }
+
+    #[cfg(feature = "gui")]
+    fn start_gui(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        self.gui_tasks.remove(&id);
+        let Some(endpoint) = self.gui_endpoint.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let Some(manager) = endpoint.manager.upgrade() else {
+            return Ok(());
+        };
+        let config = self
+            .instance_map
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("The instance does not exist."))?
+            .get_config();
+        if let Some(task) =
+            crate::gui::overlay::spawn(manager, id, &config, endpoint.portal, &endpoint.token_file)?
+        {
+            self.gui_tasks.insert(id, AbortOnDropHandle::new(task));
+        }
+        Ok(())
     }
 
     pub fn remote_mutation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
@@ -98,6 +149,8 @@ impl NetworkInstanceManager {
         let instance_map = self.instance_map.clone();
         let instance_stop_tasks = self.instance_stop_tasks.clone();
         let instance_error_messages = self.instance_error_messages.clone();
+        #[cfg(feature = "gui")]
+        let gui_tasks = self.gui_tasks.clone();
 
         let stop_check_notifier = self.stop_check_notifier.clone();
         self.instance_stop_tasks.insert(
@@ -109,15 +162,26 @@ impl NetworkInstanceManager {
                 let _t = instance_event_receiver
                     .map(|event| AbortOnDropHandle::new(handle_event(instance_id, event)));
                 instance_stop_notifier.notified().await;
-                if let Some(instance) = instance_map.get(&instance_id)
-                    && let Some(error) = instance.get_latest_error_msg()
+                let Some(instance) = instance_map.get(&instance_id) else {
+                    return;
+                };
+                // A previous launch must not remove tasks from a restarted instance.
+                if !instance
+                    .get_stop_notifier()
+                    .is_some_and(|current| Arc::ptr_eq(&current, &instance_stop_notifier))
                 {
+                    return;
+                }
+                #[cfg(feature = "gui")]
+                gui_tasks.remove(&instance_id);
+                if let Some(error) = instance.get_latest_error_msg() {
                     log::error!(%error, "instance {} stopped", instance_id);
                     instance_error_messages.insert(instance_id, error);
                 }
                 stop_check_notifier.notify_one();
                 instance_stop_tasks.remove(&instance_id);
                 instance_stop_tasks.shrink_to_fit();
+                drop(instance);
             })),
         );
         Ok(())
@@ -138,6 +202,8 @@ impl NetworkInstanceManager {
         instance.start()?;
 
         self.instance_map.insert(instance_id, instance);
+        #[cfg(feature = "gui")]
+        self.start_gui(instance_id)?;
         if watch_event {
             self.start_instance_task(instance_id)?;
         }
@@ -149,6 +215,10 @@ impl NetworkInstanceManager {
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         self.instance_map.retain(|k, _| instance_ids.contains(k));
+        self.instance_stop_tasks
+            .retain(|id, _| instance_ids.contains(id));
+        #[cfg(feature = "gui")]
+        self.gui_tasks.retain(|id, _| instance_ids.contains(id));
         self.control_stats
             .lock()
             .unwrap()
@@ -183,15 +253,25 @@ impl NetworkInstanceManager {
 
     pub(crate) fn start_network_instance(&self, id: uuid::Uuid) -> anyhow::Result<()> {
         self.control_stats.lock().unwrap().remove(&id);
-        self.instance_map
+        #[cfg(feature = "gui")]
+        self.start_gui(id)?;
+        let started = self
+            .instance_map
             .get_mut(&id)
             .ok_or_else(|| anyhow::anyhow!("The instance does not exist."))?
-            .start()?;
+            .start();
+        if let Err(error) = started {
+            #[cfg(feature = "gui")]
+            self.gui_tasks.remove(&id);
+            return Err(error);
+        }
         self.instance_error_messages.remove(&id);
         self.start_instance_task(id)
     }
 
     pub(crate) async fn stop_network_instance(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        #[cfg(feature = "gui")]
+        self.gui_tasks.remove(&id);
         self.control_stats.lock().unwrap().remove(&id);
         let launcher = self
             .instance_map
@@ -210,6 +290,10 @@ impl NetworkInstanceManager {
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         self.instance_map.retain(|k, _| !instance_ids.contains(k));
+        self.instance_stop_tasks
+            .retain(|id, _| !instance_ids.contains(id));
+        #[cfg(feature = "gui")]
+        self.gui_tasks.retain(|id, _| !instance_ids.contains(id));
         self.control_stats
             .lock()
             .unwrap()

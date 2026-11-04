@@ -441,7 +441,6 @@ pub trait ConfigLoader: Send + Sync {
     fn get_flags(&self) -> Flags;
     fn set_flags(&self, flags: Flags);
 
-
     fn get_routes(&self) -> Option<Vec<cidr::Ipv4Cidr>>;
     fn set_routes(&self, routes: Option<Vec<cidr::Ipv4Cidr>>);
 
@@ -937,12 +936,13 @@ pub struct ControlConfig {
     pub token_group: Option<String>,
 }
 
-/// Browser interface served on this instance's overlay address, from `[gui]`.
+/// Browser interface served on loopback and this instance's overlay address, from `[gui]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuiConfig {
     pub enabled: Option<bool>,
     pub port: Option<u16>,
+    pub loopback_port: Option<u16>,
     pub key_file: Option<PathBuf>,
     pub allow: Option<Vec<String>>,
     pub open: Option<Vec<String>>,
