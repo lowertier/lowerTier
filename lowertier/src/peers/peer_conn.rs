@@ -789,7 +789,8 @@ impl PeerSessionTunnelFilter {
         to_peer_id: PeerId,
     ) -> bool {
         data.peer_manager_header().is_some_and(|header| {
-            header.from_peer_id.get() == from_peer_id
+            header.packet_type != PacketType::Waypoint as u8
+                && header.from_peer_id.get() == from_peer_id
                 && header.to_peer_id.get() == to_peer_id
                 && header.forward_counter == 1
         })
@@ -953,6 +954,10 @@ impl PeerSessionTunnelFilter {
             let Some(header) = packet.peer_manager_header() else {
                 continue;
             };
+            if header.packet_type == PacketType::Waypoint as u8 {
+                keep_unselected[index] = header.is_encrypted();
+                continue;
+            }
             if header.from_peer_id.get() != peer_id || header.to_peer_id.get() != my_peer_id {
                 continue;
             }
@@ -1009,6 +1014,10 @@ impl PeerSessionTunnelFilter {
             let Some(header) = packet.peer_manager_header() else {
                 continue;
             };
+            if header.packet_type == PacketType::Waypoint as u8 {
+                keep[index] = header.is_encrypted();
+                continue;
+            }
             if header.from_peer_id.get() != peer_id || header.to_peer_id.get() != my_peer_id {
                 continue;
             }
@@ -1082,6 +1091,12 @@ impl TunnelFilter for PeerSessionTunnelFilter {
         let Some(hdr) = data.peer_manager_header() else {
             return Some(Ok(data));
         };
+
+        // A waypoint header names the routing target, not the encryption
+        // destination. Only the final peer can authenticate its sealed payload.
+        if hdr.packet_type == PacketType::Waypoint as u8 {
+            return hdr.is_encrypted().then_some(Ok(data));
+        }
 
         let from_peer_id = hdr.from_peer_id.get();
         if from_peer_id == 0 {
@@ -1183,7 +1198,8 @@ impl TunnelFilter for PeerSessionTunnelFilter {
             let my_peer_id = self.my_peer_id.load();
             batch.iter().all(|packet| {
                 packet.peer_manager_header().is_some_and(|header| {
-                    header.is_encrypted()
+                    header.packet_type != PacketType::Waypoint as u8
+                        && header.is_encrypted()
                         && header.from_peer_id.get() == peer_id
                         && header.to_peer_id.get() == my_peer_id
                 })
@@ -5186,6 +5202,124 @@ pub mod tests {
                     test_packet(PacketType::Pong as u8).payload()
                 );
             }
+        }
+    }
+
+    /// A waypoint can become a neighbor after the sender encoded the path.
+    /// Its header then matches the link endpoints, but its ciphertext still
+    /// belongs to the final destination rather than to the link session.
+    #[test]
+    fn waypoint_for_link_neighbor_keeps_destination_encryption() {
+        let destination_root = PeerSession::new_root_key();
+        let destination_session = PeerSession::new(
+            99,
+            destination_root,
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([99; 32]),
+        );
+        let mut packet = ZCPacket::new_with_payload(b"waypoint became a neighbor");
+        packet.fill_peer_manager_hdr(1, 99, PacketType::Data as u8);
+        destination_session
+            .encrypt_payload(1, 99, &mut packet)
+            .unwrap();
+        packet.encode_waypoints(&[22, 33]).unwrap();
+        let sealed = packet.payload().to_vec();
+
+        for mode in [
+            PeerConnDataProtectionPb::QuicExporter,
+            PeerConnDataProtectionPb::SessionAead,
+        ] {
+            let link_root = PeerSession::new_root_key();
+            let link_session = |peer| {
+                Arc::new(PeerSession::new(
+                    peer,
+                    link_root,
+                    1,
+                    0,
+                    "chacha20-poly1305".into(),
+                    "chacha20-poly1305".into(),
+                    Some([peer as u8; 32]),
+                ))
+            };
+            let sender = PeerSessionTunnelFilter::new_with_peer(1, true);
+            sender.set_peer_id(22);
+            sender.set_session(link_session(22));
+            sender.set_data_protection_mode(mode);
+            let receiver = PeerSessionTunnelFilter::new_with_peer(22, true);
+            receiver.set_peer_id(1);
+            receiver.set_session(link_session(1));
+            receiver.set_data_protection_mode(mode);
+
+            let sent = sender.before_send(packet.clone()).expect("send waypoint");
+            let received = receiver
+                .after_received(Ok(sent))
+                .expect("keep waypoint")
+                .expect("link must not decrypt waypoint");
+            assert_eq!(received.payload(), sealed, "{mode:?}: scalar ciphertext");
+            let mut plaintext = packet.clone();
+            plaintext
+                .mut_peer_manager_header()
+                .unwrap()
+                .set_encrypted(false);
+            assert!(receiver.after_received(Ok(plaintext.clone())).is_none());
+
+            // A homogeneous receive batch used to select link AEAD for every
+            // sealed packet whose source and target matched the link.
+            let sent = sender
+                .before_send_batch(PacketBatch::singleton(packet.clone()))
+                .unwrap();
+            assert_eq!(sent.len(), 1, "{mode:?}: batch send dropped waypoint");
+            let received = receiver.after_received_batch(Ok(sent)).unwrap().unwrap();
+            assert_eq!(
+                received.len(),
+                1,
+                "{mode:?}: batch receive dropped waypoint"
+            );
+            assert_eq!(received[0].payload(), sealed, "{mode:?}: batch ciphertext");
+
+            // Mixed batches must still authenticate ordinary direct packets
+            // while leaving both fresh and forwarded waypoint bytes sealed.
+            let mut direct = ZCPacket::new_with_payload(b"direct link payload");
+            direct.fill_peer_manager_hdr(1, 22, PacketType::Data as u8);
+            let mut forwarded = packet.clone();
+            forwarded.mut_peer_manager_header().unwrap().forward_counter = 2;
+            let mut batch = PacketBatch::singleton(packet.clone());
+            batch.try_push(direct).unwrap();
+            batch.try_push(forwarded).unwrap();
+            let mut sent = sender.before_send_batch(batch).unwrap();
+            assert_eq!(sent.len(), 3, "{mode:?}: mixed send dropped waypoint");
+            sent.try_push(plaintext).unwrap();
+            let received = receiver.after_received_batch(Ok(sent)).unwrap().unwrap();
+            assert_eq!(
+                received.len(),
+                3,
+                "{mode:?}: mixed receive must drop only plaintext waypoint"
+            );
+            assert_eq!(received[1].payload(), b"direct link payload");
+            assert!(!received[1].peer_manager_header().unwrap().is_encrypted());
+            assert_eq!(
+                received[2].payload(),
+                sealed,
+                "{mode:?}: forwarded ciphertext"
+            );
+
+            let mut restored = received[0].clone();
+            assert_eq!(restored.advance_waypoint(), Ok(33));
+            assert_eq!(restored.advance_waypoint(), Ok(99));
+            let destination = PeerSession::new(
+                1,
+                destination_root,
+                1,
+                0,
+                "chacha20-poly1305".into(),
+                "chacha20-poly1305".into(),
+                Some([1; 32]),
+            );
+            destination.decrypt_payload(1, 99, &mut restored).unwrap();
+            assert_eq!(restored.payload(), b"waypoint became a neighbor");
         }
     }
 
