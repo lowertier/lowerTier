@@ -132,6 +132,23 @@ impl Protocol {
             Self::Wss => "wss",
         }
     }
+    fn for_attempt(flags: &crate::common::config::Flags, attempt: u32) -> Result<(Self, u32)> {
+        let preferred = if flags.default_protocol == "wss" {
+            [Self::Wss, Self::H2]
+        } else {
+            [Self::H2, Self::Wss]
+        };
+        let mut enabled = preferred.into_iter().filter(|protocol| {
+            crate::common::config::transport_protocol_enabled(flags, protocol.name())
+        });
+        let first = enabled.next().context("no enabled TCP punch transport")?;
+        match enabled.next() {
+            // Try both allowed stream protocols for each source pair. A peer
+            // may support only the alternative to our preferred transport.
+            Some(second) => Ok((if attempt % 2 == 0 { first } else { second }, attempt / 2)),
+            None => Ok((first, attempt)),
+        }
+    }
 }
 struct Reservation {
     listener: TcpListener,
@@ -745,13 +762,9 @@ impl Server {
         ensure!(self.allowed(peer).await, "TCP punch denied by peer policy");
         let _permit = self.permits.clone().try_acquire_owned()?;
         let (_attempt, index) = self.take(peer)?;
-        let (local_index, remote_index) = source_pair(index);
         let ctx = self.peer_mgr.get_global_ctx();
-        let protocol = Protocol::parse(&ctx.get_flags().default_protocol)?;
-        crate::common::config::ensure_transport_protocol_enabled(
-            &ctx.flags_arc(),
-            protocol.name(),
-        )?;
+        let (protocol, source_attempt) = Protocol::for_attempt(&ctx.flags_arc(), index)?;
+        let (local_index, remote_index) = source_pair(source_attempt);
         let reservation = reserve(&ctx, local_index as usize).await?;
         let variable_mapping = hard_nat::mapping_varies(&reservation.mapping);
         let hard_permit = if ctx.get_flags().disable_sym_hole_punching {
@@ -991,6 +1004,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stream_protocol_retries_respect_allow_list_and_cover_each_source_pair() {
+        let mut flags = crate::common::config::gen_default_flags();
+        assert_eq!(Protocol::for_attempt(&flags, 0).unwrap(), (Protocol::H2, 0));
+        assert_eq!(
+            Protocol::for_attempt(&flags, 1).unwrap(),
+            (Protocol::Wss, 0)
+        );
+        assert_eq!(Protocol::for_attempt(&flags, 2).unwrap(), (Protocol::H2, 1));
+        flags.default_protocol = "wss".into();
+        assert_eq!(
+            Protocol::for_attempt(&flags, 0).unwrap(),
+            (Protocol::Wss, 0)
+        );
+        assert_eq!(Protocol::for_attempt(&flags, 1).unwrap(), (Protocol::H2, 0));
+        flags.default_protocol = "quic".into();
+        flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
+        assert_eq!(Protocol::for_attempt(&flags, 1).unwrap(), (Protocol::H2, 1));
+        flags.enabled_protocols = vec!["quic".into()];
+        assert!(Protocol::for_attempt(&flags, 0).is_err());
+    }
+
     struct LocalStun(Option<SocketAddr>);
     #[async_trait::async_trait]
     impl crate::common::stun::StunInfoCollectorTrait for LocalStun {
@@ -1039,13 +1074,20 @@ mod tests {
             let b = create_mock_peer_manager_secure("tcp-rpc".into(), "rpc-secret".into()).await;
             let relay =
                 create_mock_peer_manager_secure("tcp-rpc".into(), "rpc-secret".into()).await;
-            for peer in [&a, &b] {
-                let ctx = peer.get_global_ctx();
-                ctx.replace_stun_info_collector(Box::new(LocalStun(None)));
-                let mut flags = ctx.get_flags();
-                flags.default_protocol = protocol.name().into();
-                ctx.set_flags(flags);
-            }
+            // The initiator prefers QUIC, but must still use the enabled
+            // stream transport when the responder supports only that one.
+            let ctx = a.get_global_ctx();
+            ctx.replace_stun_info_collector(Box::new(LocalStun(None)));
+            let mut flags = ctx.get_flags();
+            flags.default_protocol = "quic".into();
+            flags.enabled_protocols = vec!["quic".into(), protocol.name().into()];
+            ctx.set_flags(flags);
+            let ctx = b.get_global_ctx();
+            ctx.replace_stun_info_collector(Box::new(LocalStun(None)));
+            let mut flags = ctx.get_flags();
+            flags.default_protocol = protocol.name().into();
+            flags.enabled_protocols = vec![protocol.name().into()];
+            ctx.set_flags(flags);
             connect_peer_manager(a.clone(), relay.clone()).await;
             connect_peer_manager(b.clone(), relay.clone()).await;
             wait_route_appear(a.clone(), b.clone()).await.unwrap();
