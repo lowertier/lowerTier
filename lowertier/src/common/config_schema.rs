@@ -219,7 +219,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Bool,
         Same,
         Restart,
-        "false",
+        "true",
         "Serve the browser interface on this instance's overlay address.",
     ),
     opt(

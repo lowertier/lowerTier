@@ -1,6 +1,8 @@
 # Browser interface
 
-`lowertier gui` serves a management page on loopback and opens it in the default browser.
+The daemon starts the browser interface on each instance's overlay address by default, once that address is available. Set `[gui] enabled = false` to disable it.
+
+`lowertier gui` also serves a management page on loopback and opens it in the default browser.
 
 ```bash
 sudo lowertier gui              # http://127.0.0.1:15880/#key=...
@@ -15,11 +17,11 @@ Light and dark themes follow the system setting.
 
 ## On the lt network
 
-A daemon can serve the page on its own overlay address, so peers open it without SSH forwarding.
+A daemon serves the page on its own overlay address, so allowed peers can open it without SSH forwarding.
 
 ```toml
 [gui]
-enabled = true
+enabled = true                    # default; false disables the listener
 port = 15880                      # default
 allow = ["10.144.0.0/24"]         # overlay CIDRs that may connect (with the key)
 open = ["192.168.51.0/24"]        # CIDRs served without the key
@@ -39,7 +41,7 @@ Without `allow`, only the node itself may connect. Changes need an instance rest
 ## Security
 
 The `lowertier gui` process holds the control token. (The `[gui]` section above applies the same checks in the daemon.) The browser never receives it.
-The server listens on loopback only. Use SSH port forwarding to reach it from another machine:
+The standalone `lowertier gui` server listens on loopback only. Use SSH port forwarding to reach it from another machine:
 
 ```bash
 ssh -L 15880:127.0.0.1:15880 host 'sudo lowertier gui --no-open'

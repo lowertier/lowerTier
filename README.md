@@ -30,6 +30,8 @@ It does not cover a web interface or graphical client.
 | `lowertier gui` | Browser interface for modes, routing, traffic, and settings. See [browser interface](docs/gui.md). |
 | `lowertier-tracker` | Serves UDP and HTTP tracker discovery for public or self-hosted bootstrap. |
 
+Each node starts the browser interface on its overlay address by default. Access uses the node's GUI key and configured source networks; see [browser interface](docs/gui.md).
+
 See [tracker discovery](docs/tracker-discovery.md) for client configuration, peer-assisted punching, and HTTP deployment behind a proxy or CDN.
 See [mesh health](docs/mesh-health.md) for the peer authentication scopes and UDP forwarding counters.
 

@@ -1,4 +1,4 @@
-//! The GUI on an instance's overlay address, enabled by `[gui]`.
+//! The GUI on an instance's overlay address, enabled by default.
 //!
 //! The daemon serves the page itself, so it follows the instance and needs no second process.
 //! In userspace mode the listener lives in the data-plane TCP stack. Otherwise it is an operating
@@ -47,7 +47,7 @@ struct Settings {
     token_file: PathBuf,
 }
 
-/// Start the GUI for one instance when `[gui] enabled = true`. Errors in the settings fail the
+/// Start the GUI unless `[gui] enabled = false`. Errors in the settings fail the
 /// start; a missing overlay address only delays the listener.
 pub fn spawn(
     manager: Arc<NetworkInstanceManager>,
@@ -57,7 +57,7 @@ pub fn spawn(
     token_file: &Path,
 ) -> anyhow::Result<Option<JoinHandle<()>>> {
     let gui = config.get_gui_config();
-    if !gui.enabled.unwrap_or(false) {
+    if !gui.enabled.unwrap_or(true) {
         return Ok(None);
     }
     let cidrs = |list: &Option<Vec<String>>, option: &str| {
@@ -99,7 +99,10 @@ pub fn spawn(
 }
 
 /// The instance's overlay address and whether it runs without an operating system interface.
-fn overlay_address(manager: &NetworkInstanceManager, id: &Uuid) -> Option<(Ipv4Addr, bool, String)> {
+fn overlay_address(
+    manager: &NetworkInstanceManager,
+    id: &Uuid,
+) -> Option<(Ipv4Addr, bool, String)> {
     let context = manager.get_instance_service(id)?.context().ok()?;
     let address = context.get_ipv4()?.address();
     let flags = context.get_flags();
@@ -152,7 +155,12 @@ fn server(settings: &Settings, address: Ipv4Addr, qualified: &str) -> Arc<Server
         }
     }
     if port == 80 {
-        hosts.extend(hosts.clone().into_iter().map(|host| host.replace(":80", "")));
+        hosts.extend(
+            hosts
+                .clone()
+                .into_iter()
+                .map(|host| host.replace(":80", "")),
+        );
     }
     Arc::new(Server {
         key: settings.key.clone(),
@@ -174,7 +182,11 @@ fn server(settings: &Settings, address: Ipv4Addr, qualified: &str) -> Arc<Server
 }
 
 fn allowed(settings: &Settings, own: Ipv4Addr, peer: IpAddr) -> bool {
-    let listed = settings.allow.iter().chain(&settings.open).any(|cidr| cidr.contains(&peer));
+    let listed = settings
+        .allow
+        .iter()
+        .chain(&settings.open)
+        .any(|cidr| cidr.contains(&peer));
     listed || (settings.allow.is_empty() && peer == IpAddr::V4(own))
 }
 
@@ -268,6 +280,46 @@ mod tests {
             portal: "127.0.0.1:1".parse().unwrap(),
             token_file: PathBuf::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn default_gui_waits_for_an_address_and_explicit_disable_creates_no_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_file = directory.path().join("control.token");
+        let manager = Arc::new(NetworkInstanceManager::new());
+        let config = TomlConfigLoader::default();
+        let task = spawn(
+            manager.clone(),
+            Uuid::nil(),
+            &config,
+            "127.0.0.1:1".parse().unwrap(),
+            &token_file,
+        )
+        .unwrap()
+        .expect("the GUI must start without an explicit enabled setting");
+        assert!(directory.path().join("gui.key").is_file());
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "a missing overlay address must only delay listening"
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let disabled = tempfile::tempdir().unwrap();
+        let config = TomlConfigLoader::new_from_str("[gui]\nenabled = false\n").unwrap();
+        assert!(
+            spawn(
+                manager,
+                Uuid::nil(),
+                &config,
+                "127.0.0.1:1".parse().unwrap(),
+                &disabled.path().join("control.token"),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(!disabled.path().join("gui.key").exists());
     }
 
     #[test]
