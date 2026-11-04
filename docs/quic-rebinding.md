@@ -33,7 +33,7 @@ The existing idle timeout and relay recovery remain available if neither path wo
 
 Linux and macOS clients monitor interface and route notifications.
 They also check source selection and underlay policy changes every two seconds.
-The client records its routing source and bound interface when it creates a connection.
+The client records its routing source and source interface when it creates a connection.
 The client uses `quinn::Endpoint::rebind` when the source or interface changes, or the current local address becomes disallowed.
 An unrelated route notification preserves the socket and its UDP port.
 This preserves established NAT mappings and explicit discovery source bindings.

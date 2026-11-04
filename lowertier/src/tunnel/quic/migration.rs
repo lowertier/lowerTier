@@ -312,10 +312,12 @@ pub(super) async fn migrate_client_paths(
             complete = false;
             continue;
         }
-        let mut changed = ensure_local_allowed(&policy, previous_local).is_err();
-        let interface = {
+        let (mut changed, interface) = {
             let _namespace = ctx.net_ns.guard();
-            source_interface(previous_local.ip())
+            (
+                ensure_local_allowed(&policy, previous_local).is_err(),
+                source_interface(previous_local.ip()),
+            )
         };
         for (path, source) in paths.iter().zip(&sources) {
             let mut state = path.migration_policy.validation.lock();
