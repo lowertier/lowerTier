@@ -707,8 +707,7 @@ impl ControlPlaneService {
             .map(TomlConfigLoader::new_from_str)
             .transpose()?
             .map_or_else(|| flags.clone(), |config| config.get_flags());
-        let (generation, advertised, paths) =
-            instance.peers()?.get_route().control_routes(&[]).await;
+        let (generation, advertised, paths) = instance.peers()?.control_routes(&[]).await;
         let mut snapshot = self.snapshot(&instance).await?;
         snapshot.topology_generation = generation;
         Ok(GetRelayResponse {

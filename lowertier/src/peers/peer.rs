@@ -458,6 +458,16 @@ impl Peer {
             .collect()
     }
 
+    pub(crate) fn live_conn_info(&self) -> Option<PeerConnInfo> {
+        let connection = self.get_live_conn(self.get_default_conn_id()).or_else(|| {
+            self.conns
+                .iter()
+                .find(|entry| !entry.value().is_closed())
+                .map(|entry| entry.value().clone())
+        });
+        connection.map(|connection| connection.get_conn_info())
+    }
+
     pub fn has_live_conns(&self) -> bool {
         self.conns.iter().any(|entry| !entry.value().is_closed())
     }

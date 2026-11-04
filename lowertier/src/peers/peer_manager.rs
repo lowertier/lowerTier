@@ -1332,7 +1332,6 @@ impl PeerManager {
         peers.install_l2_fabric(l2_fabric.clone());
         let service_routes = Arc::new(ServiceRouteStore::new(65_536, Duration::from_secs(300)));
 
-
         let stats_manager = global_ctx.stats_manager();
         let network_name = global_ctx.get_network_name();
         let traffic_tx_metrics = Arc::new(LogicalTrafficMetrics::new(
@@ -3254,8 +3253,104 @@ impl PeerManager {
         }
     }
 
+    pub(crate) fn apply_direct_route_info(
+        route: &mut instance::Route,
+        latency_us: Option<u64>,
+        delivery_bps: Option<u64>,
+    ) {
+        let destination = route.peer_id;
+        let latency = latency_us.unwrap_or(0).div_ceil(1_000).min(i32::MAX as u64) as i32;
+        route.next_hop_peer_id = destination;
+        route.cost = 1;
+        route.path_latency = latency;
+        route.next_hop_peer_id_latency_first = Some(destination);
+        route.cost_latency_first = Some(1);
+        route.path_latency_latency_first = Some(latency);
+        route.next_hop_peer_id_speed_first = Some(destination);
+        route.path_delivery_bps_speed_first = delivery_bps;
+        route.path_latency_speed_first = Some(latency);
+        route.path_len_speed_first = Some(1);
+    }
+
     pub async fn list_routes(&self) -> Vec<instance::Route> {
-        self.get_route().list_routes().await
+        let mut routes = self.get_route().list_routes().await;
+        let descriptor = self.peers.dataplane_descriptor();
+        for route in &mut routes {
+            if !descriptor
+                .forwarding_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    snapshot
+                        .next_hop(route.peer_id, NextHopPolicy::LeastHop)
+                        .is_some()
+                })
+            {
+                continue;
+            }
+            if let Some(info) = self
+                .peers
+                .get_peer_by_id(route.peer_id)
+                .and_then(|peer| peer.live_conn_info())
+            {
+                Self::apply_direct_route_info(
+                    route,
+                    info.stats.as_ref().map(|stats| stats.latency_us),
+                    info.tx_delivery_bps,
+                );
+            }
+        }
+        routes
+    }
+
+    pub async fn control_routes(
+        &self,
+        path_peers: &[PeerId],
+    ) -> (
+        u64,
+        String,
+        Vec<crate::proto::api::control::v1::RouteSnapshot>,
+    ) {
+        let (generation, policy, mut rows) = self.get_route().control_routes(path_peers).await;
+        let descriptor = self.peers.dataplane_descriptor();
+        for row in &mut rows {
+            let Some(route) = row.route.as_mut() else {
+                continue;
+            };
+            let destination = route.peer_id;
+            if !descriptor
+                .forwarding_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    snapshot
+                        .next_hop(destination, NextHopPolicy::LeastHop)
+                        .is_some()
+                })
+            {
+                continue;
+            }
+            let Some(info) = self
+                .peers
+                .get_peer_by_id(destination)
+                .and_then(|peer| peer.live_conn_info())
+            else {
+                continue;
+            };
+            let latency = info.stats.as_ref().map(|stats| stats.latency_us);
+            Self::apply_direct_route_info(route, latency, info.tx_delivery_bps);
+            row.first_hop_peer_id = destination;
+            row.final_gateway_peer_id = destination;
+            row.measured_rtt_us = latency;
+            row.cost_ms = latency.map(|micros| micros.div_ceil(1_000));
+            row.delivery_bps = info.tx_delivery_bps;
+            row.peer_key = info.noise_remote_static_pubkey;
+            row.source = "direct".into();
+            if path_peers.contains(&destination) {
+                row.path_peer_ids = vec![self.my_peer_id, destination];
+                row.path_error.clear();
+            }
+            row.fallback_reason.clear();
+        }
+        (generation, policy, rows)
     }
 
     pub async fn get_route_peer_info_last_update_time(&self) -> Instant {
@@ -3395,9 +3490,12 @@ impl PeerManager {
         if self.global_ctx.p2p_only() {
             return self.peers.has_peer(destination).then_some(destination);
         }
-        snapshot
-            .next_hop(destination, policy)
-            .map(|hop| hop.next_hop_peer_id)
+        let next_hop = snapshot.next_hop(destination, policy)?;
+        Some(if self.peers.has_live_peer(destination) {
+            destination
+        } else {
+            next_hop.next_hop_peer_id
+        })
     }
 
     pub async fn send_msg_for_proxy(
@@ -3460,7 +3558,11 @@ impl PeerManager {
         descriptor
             .forwarding_snapshot
             .as_ref()
-            .is_some_and(|snapshot| self.paths.rule_for_destination(snapshot, dst_peer_id).is_some())
+            .is_some_and(|snapshot| {
+                self.paths
+                    .rule_for_destination(snapshot, dst_peer_id)
+                    .is_some()
+            })
     }
 
     /// The [[path]] that applies to traffic for `peer_id`, if any.
@@ -3823,10 +3925,9 @@ impl PeerManager {
                 }
                 WaypointPlan::Drop => {}
                 WaypointPlan::Via(chain) => {
-                    match routed
-                        .iter_mut()
-                        .find(|(current, current_rule, _)| *current == chain && *current_rule == rule)
-                    {
+                    match routed.iter_mut().find(|(current, current_rule, _)| {
+                        *current == chain && *current_rule == rule
+                    }) {
                         Some((_, _, packets)) => {
                             let _ = packets.try_push(packet);
                         }
@@ -3941,7 +4042,9 @@ impl PeerManager {
             let first_is_hybrid_ip_ethernet = prepared.first_is_hybrid_ip_ethernet;
             let uniform_direct_priority = prepared.uniform_direct_priority;
             let peer_batch = if self.paths.is_active() {
-                let rest = self.send_path_packets(peer_id, prepared.batch, errors).await;
+                let rest = self
+                    .send_path_packets(peer_id, prepared.batch, errors)
+                    .await;
                 if rest.is_empty() {
                     continue;
                 }
@@ -5115,16 +5218,15 @@ impl PeerManager {
         {
             return (vec![choice.peer_id], choice.exit, false, Some(choice.rule));
         }
-        if let Some(route) = self.service_routes.select_gateway(
-            ip_addr,
-            flow,
-            |gateway| {
+        if let Some(route) = self
+            .service_routes
+            .select_gateway(ip_addr, flow, |gateway| {
                 gateway == self.my_peer_id
                     || snapshot
                         .next_hop(gateway, NextHopPolicy::LeastCost)
                         .is_some()
-            },
-        ) {
+            })
+        {
             let rule = (!self.global_ctx.is_ip_in_same_network(&ip_addr))
                 .then(|| self.paths.rule_for_address(snapshot, ip_addr))
                 .flatten();
@@ -6259,7 +6361,6 @@ impl PeerManager {
         tracing::info!("close_peer_conn in foreign network manager done: {:?}", ret);
         ret
     }
-
 }
 
 #[cfg(test)]
@@ -6284,6 +6385,160 @@ mod tests {
     };
 
     use super::PeerManager;
+
+    #[tokio::test]
+    async fn new_direct_connection_preempts_a_pinned_relay_before_graph_publication() {
+        use crate::peers::{
+            route_trait::{ForwardingDecisionSnapshot, ForwardingNextHop, NextHopPolicy},
+            tests::create_mock_peer_manager_secure,
+        };
+        let a = create_mock_peer_manager_secure("direct-race".into(), "local-secret".into()).await;
+        let b = create_mock_peer_manager_secure("direct-race".into(), "local-secret".into()).await;
+        let relay =
+            create_mock_peer_manager_secure("direct-race".into(), "local-secret".into()).await;
+        connect_peer_manager(a.clone(), relay.clone()).await;
+        connect_peer_manager(b.clone(), relay.clone()).await;
+        wait_route_appear(a.clone(), b.clone()).await.unwrap();
+        // Freeze the published graph with its valid relay route. A direct
+        // handshake is allowed to finish independently of that publication.
+        a.get_route().close().await;
+        let map = a.get_peer_map();
+        let source = map.install_forwarding_snapshot_source().unwrap();
+        let snapshot = |generation, suppressed| {
+            let hops = Arc::new(std::collections::HashMap::from([(
+                b.my_peer_id(),
+                ForwardingNextHop {
+                    next_hop_peer_id: relay.my_peer_id(),
+                    path_delivery_bps: 10_000,
+                    path_latency: 2,
+                    path_len: 2,
+                    version: 1,
+                },
+            )]));
+            ForwardingDecisionSnapshot::from_parts(
+                generation,
+                Arc::new(ForwardingPeerTable::default()),
+                Arc::new(if suppressed {
+                    std::collections::HashSet::from([b.my_peer_id()])
+                } else {
+                    Default::default()
+                }),
+                None,
+                hops.clone(),
+                hops.clone(),
+                hops,
+                Arc::new(Default::default()),
+                Arc::new(Default::default()),
+                Arc::new(Default::default()),
+                Arc::new(Default::default()),
+            )
+        };
+        let stale = snapshot(1, false);
+        map.publish_route_origin_auth_batch(source.source_token(), 1, &[])
+            .unwrap();
+        source.publish(stale.clone()).unwrap();
+        for policy in [
+            NextHopPolicy::LeastHop,
+            NextHopPolicy::LeastCost,
+            NextHopPolicy::MaxGoodput,
+        ] {
+            assert_eq!(
+                map.get_gateway_peer_id_for_flow(b.my_peer_id(), policy, 42)
+                    .await,
+                Some(relay.my_peer_id())
+            );
+        }
+        connect_peer_manager(a.clone(), b.clone()).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !a.has_live_peer_connection(b.my_peer_id())
+                || !b.has_live_peer_connection(a.my_peer_id())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for policy in [
+            NextHopPolicy::LeastHop,
+            NextHopPolicy::LeastCost,
+            NextHopPolicy::MaxGoodput,
+        ] {
+            assert_eq!(
+                map.get_gateway_peer_id_for_flow(b.my_peer_id(), policy.clone(), 42)
+                    .await,
+                Some(b.my_peer_id()),
+                "a flow pin must not delay direct routing"
+            );
+            assert_eq!(
+                a.local_snapshot_next_hop(&stale, b.my_peer_id(), policy),
+                Some(b.my_peer_id())
+            );
+        }
+        let routes = a.list_routes().await;
+        assert_eq!(
+            routes
+                .iter()
+                .find(|route| route.peer_id == b.my_peer_id())
+                .unwrap()
+                .next_hop_peer_id,
+            b.my_peer_id()
+        );
+        let (_, _, displayed) = a.control_routes(&[b.my_peer_id()]).await;
+        let displayed = displayed
+            .iter()
+            .find(|row| row.route.as_ref().unwrap().peer_id == b.my_peer_id())
+            .unwrap();
+        assert_eq!(displayed.first_hop_peer_id, b.my_peer_id());
+        assert_eq!(
+            displayed.path_peer_ids,
+            vec![a.my_peer_id(), b.my_peer_id()]
+        );
+
+        let denied = snapshot(2, true);
+        map.publish_route_origin_auth_batch(source.source_token(), 2, &[])
+            .unwrap();
+        source.publish(denied.clone()).unwrap();
+        for policy in [
+            NextHopPolicy::LeastHop,
+            NextHopPolicy::LeastCost,
+            NextHopPolicy::MaxGoodput,
+        ] {
+            assert_eq!(
+                map.get_gateway_peer_id_for_flow(b.my_peer_id(), policy.clone(), 42)
+                    .await,
+                None
+            );
+            assert_eq!(
+                a.local_snapshot_next_hop(&denied, b.my_peer_id(), policy),
+                None
+            );
+        }
+        let peer = map.get_peer_by_id(b.my_peer_id()).unwrap();
+        let info = peer.live_conn_info().unwrap();
+        peer.close_peer_conn(&info.conn_id.parse().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while a.has_live_peer_connection(b.my_peer_id()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let fallback = snapshot(3, false);
+        map.publish_route_origin_auth_batch(source.source_token(), 3, &[])
+            .unwrap();
+        source.publish(fallback.clone()).unwrap();
+        assert_eq!(
+            map.get_gateway_peer_id_for_flow(b.my_peer_id(), NextHopPolicy::LeastHop, 42)
+                .await,
+            Some(relay.my_peer_id())
+        );
+        assert_eq!(
+            a.local_snapshot_next_hop(&fallback, b.my_peer_id(), NextHopPolicy::LeastHop),
+            Some(relay.my_peer_id())
+        );
+    }
 
     #[test]
     fn locally_suppressed_data_is_not_reproxied() {

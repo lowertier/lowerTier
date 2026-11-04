@@ -318,11 +318,7 @@ impl ControlPlaneService {
         );
         let (mut peers, next_page_token) = page(rows, request.page, &stamp)?;
         let requested = peers.iter().map(|peer| peer.peer_id).collect::<Vec<_>>();
-        let (generation, _, paths) = instance
-            .peers()?
-            .get_route()
-            .control_routes(&requested)
-            .await;
+        let (generation, _, paths) = instance.peers()?.control_routes(&requested).await;
         if generation != snapshot.topology_generation {
             return Err(failure(
                 "CONFLICT",
@@ -334,8 +330,33 @@ impl ControlPlaneService {
             .into_iter()
             .map(|row| (row.route.as_ref().unwrap().peer_id, row.path_peer_ids))
             .collect::<BTreeMap<_, _>>();
+        let descriptor = instance.peers()?.get_peer_map().dataplane_descriptor();
         for peer in &mut peers {
-            peer.path_peer_ids = paths.remove(&peer.peer_id).unwrap_or_default();
+            let permitted = descriptor
+                .forwarding_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    snapshot
+                        .next_hop(
+                            peer.peer_id,
+                            crate::peers::route_trait::NextHopPolicy::LeastHop,
+                        )
+                        .is_some()
+                });
+            if permitted && peer.direct_link_auth.is_some() && peer.route.is_some() {
+                // Use the direct connection captured in this same response,
+                // even if its graph publication (or closure) races the read.
+                peer.path_peer_ids = vec![instance.peers()?.my_peer_id(), peer.peer_id];
+                if let Some(route) = peer.route.as_mut() {
+                    crate::peers::peer_manager::PeerManager::apply_direct_route_info(
+                        route,
+                        peer.rtt_us,
+                        peer.delivery_bps,
+                    );
+                }
+            } else {
+                peer.path_peer_ids = paths.remove(&peer.peer_id).unwrap_or_default();
+            }
         }
         Ok(ListPeersResponse {
             peers,
@@ -352,7 +373,7 @@ impl ControlPlaneService {
     ) -> anyhow::Result<ListRoutesResponse> {
         let (id, instance) = self.resolve(request.meta.as_ref())?;
         let mut snapshot = self.snapshot(&instance).await?;
-        let route = instance.peers()?.get_route();
+        let route = instance.peers()?;
         let (generation, _, mut rows) = route.control_routes(&[]).await;
         snapshot.topology_generation = generation;
         rows.sort_unstable_by_key(|route| route.route.as_ref().unwrap().peer_id);

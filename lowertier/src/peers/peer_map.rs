@@ -1414,6 +1414,11 @@ impl PeerMap {
         peer_id == self.my_peer_id || self.peer_map.contains_key(&peer_id)
     }
 
+    pub(crate) fn has_live_peer(&self, peer_id: PeerId) -> bool {
+        self.get_peer_by_id(peer_id)
+            .is_some_and(|peer| peer.has_live_conns())
+    }
+
     pub async fn send_msg_directly(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), Error> {
         if dst_peer_id == self.my_peer_id {
             return self
@@ -1535,6 +1540,11 @@ impl PeerMap {
         let (candidate, route_generation) = self
             .get_gateway_peer_id_with_generation(dst_peer_id, policy)
             .await?;
+        if candidate == dst_peer_id && self.has_live_peer(dst_peer_id) {
+            // A new authenticated link must win immediately, including when
+            // the graph generation and an existing relay flow pin are unchanged.
+            return Some(dst_peer_id);
+        }
         Some(self.route_flow_paths.select_at_generation(
             dst_peer_id,
             policy_flow,
@@ -1558,13 +1568,21 @@ impl PeerMap {
             return Some((dst_peer_id, snapshot.generation()));
         }
 
-        if self.has_peer(dst_peer_id) && matches!(policy, NextHopPolicy::ControlHop) {
+        if self.has_live_peer(dst_peer_id) && matches!(policy, NextHopPolicy::ControlHop) {
             return Some((dst_peer_id, snapshot.generation()));
         }
 
-        snapshot
-            .next_hop(dst_peer_id, policy)
-            .map(|next_hop| (next_hop.next_hop_peer_id, snapshot.generation()))
+        // Retain the snapshot's authorization/suppression decision, while
+        // choosing a live local link before its adjacency reaches the graph.
+        let next_hop = snapshot.next_hop(dst_peer_id, policy)?;
+        Some((
+            if self.has_live_peer(dst_peer_id) {
+                dst_peer_id
+            } else {
+                next_hop.next_hop_peer_id
+            },
+            snapshot.generation(),
+        ))
     }
 
     pub async fn get_gateway_peer_id_for_packet(
