@@ -64,6 +64,10 @@ pub fn spawn(
     if !gui.enabled.unwrap_or(true) {
         return Ok(None);
     }
+    anyhow::ensure!(
+        gui.port.unwrap_or(DEFAULT_PORT) != 0 && gui.loopback_port.unwrap_or(DEFAULT_PORT) != 0,
+        "GUI ports must be between 1 and 65535"
+    );
     let cidrs = |list: &Option<Vec<String>>, option: &str| {
         list.iter()
             .flatten()
@@ -276,6 +280,17 @@ async fn listen(
         }
     } else {
         drop(manager);
+        let _port_guard = if address.is_loopback() {
+            match crate::rpc_service::protected_port::protect_gui_port(port) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    log::warn!(%error, port, "Cannot protect the loopback GUI port");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let listener = match tokio::net::TcpListener::bind((address, port)).await {
             Ok(listener) => listener,
             Err(error) => {
@@ -330,6 +345,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let token_file = directory.path().join("control.token");
         let manager = Arc::new(NetworkInstanceManager::new());
+        let invalid = TomlConfigLoader::new_from_str("[gui]\nloopback_port = 0\n").unwrap();
+        assert!(
+            spawn(
+                manager.clone(),
+                Uuid::nil(),
+                &invalid,
+                "127.0.0.1:1".parse().unwrap(),
+                &token_file
+            )
+            .is_err()
+        );
+        assert!(!directory.path().join("gui.key").exists());
         let reservation = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();

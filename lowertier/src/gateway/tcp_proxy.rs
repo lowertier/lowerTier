@@ -390,6 +390,13 @@ impl NicPacketFilter for TcpProxy {
 
 impl TcpProxy {
     pub(crate) async fn connect_nat_dst(nat_dst: SocketAddr) -> anyhow::Result<TcpStream> {
+        let _gui_guard = if nat_dst.ip().is_loopback() {
+            Some(crate::rpc_service::protected_port::allow_loopback_proxy(
+                nat_dst.port(),
+            )?)
+        } else {
+            None
+        };
         let socket = TcpSocket::new_v4()
             .inspect_err(|error| log::error!(?error, "create v4 socket failed"))?;
         let stream = timeout(Duration::from_secs(10), socket.connect(nat_dst))
@@ -920,6 +927,26 @@ impl TcpProxy {
                 return None;
             }
 
+            #[cfg(feature = "gui")]
+            if self.global_ctx.no_tun()
+                && self
+                    .global_ctx
+                    .is_ip_local_virtual_ip(&ipv4.get_destination().into())
+            {
+                let tcp = TcpPacket::new(ipv4.payload())?;
+                if tcp.get_flags() & pnet::packet::tcp::TcpFlags::SYN != 0
+                    && tcp.get_flags() & pnet::packet::tcp::TcpFlags::ACK == 0
+                {
+                    let gui = self.global_ctx.config.get_gui_config();
+                    if gui.enabled.unwrap_or(true)
+                        && tcp.get_destination() == gui.port.unwrap_or(15880)
+                    {
+                        // Keep GUI admission in the instance stack, including before its listener starts.
+                        return None;
+                    }
+                }
+            }
+
             ipv4.get_destination()
         };
         let mut real_dst_ip = origin_ip;
@@ -1019,6 +1046,50 @@ impl TcpProxy {
 #[cfg(test)]
 mod rewrite_tests {
     use super::*;
+
+    #[cfg(feature = "gui")]
+    #[tokio::test]
+    async fn userspace_gui_syn_never_enters_the_localhost_proxy_before_listener_start() {
+        use crate::{
+            common::config::TomlConfigLoader,
+            peers::{create_packet_recv_chan, peer_manager::RouteAlgoType},
+        };
+
+        for port in [15880, 18933] {
+            let gui = if port == 15880 {
+                String::new()
+            } else {
+                format!("[gui]\nport = {port}\n")
+            };
+            let config =
+                TomlConfigLoader::new_from_str(&format!("[tun]\nmode = \"userspace\"\n{gui}"))
+                    .unwrap();
+            let context = Arc::new(GlobalCtx::new(config));
+            context.set_ipv4(Some("10.201.70.2/24".parse().unwrap()));
+            let (sender, _receiver) = create_packet_recv_chan();
+            let peer = Arc::new(PeerManager::new(RouteAlgoType::None, context, sender));
+            let proxy = TcpProxy::new(peer.clone());
+            let mut bytes = [0u8; 40];
+            let mut ip = MutableIpv4Packet::new(&mut bytes).unwrap();
+            ip.set_version(4);
+            ip.set_header_length(5);
+            ip.set_total_length(40);
+            ip.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
+            ip.set_source("10.201.70.1".parse().unwrap());
+            ip.set_destination("10.201.70.2".parse().unwrap());
+            let mut tcp = MutableTcpPacket::new(ip.payload_mut()).unwrap();
+            tcp.set_data_offset(5);
+            tcp.set_source(23000);
+            tcp.set_destination(port);
+            tcp.set_flags(pnet::packet::tcp::TcpFlags::SYN);
+            let mut packet = ZCPacket::new_with_payload(&bytes);
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+            assert!(proxy.try_handle_peer_packet(&mut packet).await.is_none());
+            assert_eq!(packet.payload(), bytes);
+            assert!(!proxy.runtime_started.load(Ordering::Acquire));
+            assert!(proxy.syn_map.is_empty());
+        }
+    }
 
     #[test]
     fn incremental_nat_checksums_match_full_checksums_and_preserve_corruption() {

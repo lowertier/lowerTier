@@ -538,7 +538,11 @@ impl Server {
 /// The page for a keyless peer: a marker tells the script not to ask for the key.
 fn open_index() -> Bytes {
     let page = String::from_utf8_lossy(INDEX);
-    Bytes::from(page.replacen("<head>", "<head><meta name=\"lowertier-open\" content=\"1\">", 1))
+    Bytes::from(page.replacen(
+        "<head>",
+        "<head><meta name=\"lowertier-open\" content=\"1\">",
+        1,
+    ))
 }
 
 /// Serve HTTP/1 on one accepted connection until it closes.
@@ -626,14 +630,26 @@ pub async fn serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
             "listen",
         ));
     }
-    let listener = match tokio::net::TcpListener::bind(listen).await {
-        Ok(listener) => listener,
+    let bind = |address: SocketAddr| -> std::io::Result<_> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(address),
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&address.into())?;
+        let port = socket.local_addr()?.as_socket().unwrap().port();
+        let guard = crate::rpc_service::protected_port::protect_gui_port(port)?;
+        // Protect the selected port before the socket can accept proxy connections.
+        socket.listen(128)?;
+        let listener = tokio::net::TcpListener::from_std(socket.into())?;
+        Ok((listener, guard))
+    };
+    let (listener, _port_guard) = match bind(listen) {
+        Ok(bound) => bound,
         // The default port is taken, perhaps by another `lowertier gui`: use any free port.
-        Err(_) if gui.listen.is_none() => {
-            tokio::net::TcpListener::bind(SocketAddr::new(listen.ip(), 0))
-                .await
-                .map_err(|error| CliError::new("unavailable", error.to_string(), "listen"))?
-        }
+        Err(_) if gui.listen.is_none() => bind(SocketAddr::new(listen.ip(), 0))
+            .map_err(|error| CliError::new("unavailable", error.to_string(), "listen"))?,
         Err(error) => {
             return Err(CliError::new(
                 "unavailable",

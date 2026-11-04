@@ -67,9 +67,7 @@ async fn admit(
     let IpAddr::V4(source) = request.source.ip() else {
         return Err(http::StatusCode::FORBIDDEN);
     };
-    if peers.get_peer_id_by_ipv4(&source).await != Some(peer_id)
-        || context.should_deny_proxy(&request.destination, false)
-    {
+    if peers.get_peer_id_by_ipv4(&source).await != Some(peer_id) {
         return Err(http::StatusCode::FORBIDDEN);
     }
     #[cfg(feature = "gui")]
@@ -79,6 +77,9 @@ async fn admit(
             // The overlay GUI must retain its source address and instance in the packet stack.
             return Err(http::StatusCode::NOT_IMPLEMENTED);
         }
+    }
+    if context.should_deny_proxy(&request.destination, false) {
+        return Err(http::StatusCode::FORBIDDEN);
     }
     let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), request.destination.port());
     TcpProxy::connect_nat_dst(destination)

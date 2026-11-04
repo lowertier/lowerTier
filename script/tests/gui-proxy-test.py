@@ -67,10 +67,10 @@ def main():
                 ports.add(value)
                 return value
 
-    proxy, link, gui_port, other_loopback = [port() for _ in range(4)]
+    proxy, link, gui_port, other_loopback, foreign_loopback = [port() for _ in range(5)]
     children = []
     try:
-        for name, address in [('b', '10.201.70.2'), ('a', '10.201.70.1')]:
+        for name, address in [('c', '10.201.70.3'), ('b', '10.201.70.2'), ('a', '10.201.70.1')]:
             node = directory / name
             node.mkdir(mode=0o700)
             configuration = f'''[node]
@@ -97,7 +97,7 @@ deny_cidrs = ["100.64.0.0/10"]
 portal = "127.0.0.1:{port()}"
 token_file = {json.dumps(str(node / 'control.token'))}
 [log]
-console = "warn"
+console = "info"
 '''
             if name == 'a':
                 configuration += f'''[proxy]
@@ -107,11 +107,16 @@ uri = "quic://127.0.0.1:{link}"
 [gui]
 loopback_port = {gui_port}
 '''
-            else:
+            elif name == 'b':
                 configuration += f'''[gui]
 port = {gui_port}
 loopback_port = {other_loopback}
 allow = ["10.201.70.1/32"]
+'''
+            else:
+                configuration += f'''[gui]
+loopback_port = {foreign_loopback}
+allow = []
 '''
             config = node / 'node.toml'
             config.write_text(configuration)
@@ -121,10 +126,17 @@ allow = ["10.201.70.1/32"]
         deadline = time.monotonic() + 40
         while True:
             assert all(child.poll() is None for child in children), 'A test daemon stopped'
+            ready = all(
+                all(message in (directory / name / 'daemon.log').read_text() for message in [
+                    'GUI listening in the userspace stack',
+                    'address=127.0.0.1',
+                ]) for name in ['a', 'b', 'c']
+            )
             try:
-                page = request(proxy, gui_port, '/')
-                if page[0] in (200, 403):
-                    break
+                if ready:
+                    page = request(proxy, gui_port, '/')
+                    if page[0] in (200, 403):
+                        break
             except (OSError, RuntimeError, AssertionError, http.client.HTTPException):
                 pass
             if time.monotonic() >= deadline:
@@ -137,7 +149,13 @@ allow = ["10.201.70.1/32"]
         assert status == 200, status
         assert b'gui-proxy-b' in body
         assert request(proxy, gui_port, '/', host='foreign.invalid')[0] == 403
-        print(json.dumps(dict(result='passed', instance='gui-proxy-b', page=200, unauthorized_api=403, authorized_api=200, foreign_host=403, evidence=str(directory))))
+        for port, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
+            try:
+                status, _ = request(proxy, port, '/api/snapshot', key_file.read_text().strip(), host=f'127.0.0.1:{port}')
+            except (OSError, RuntimeError, AssertionError, http.client.HTTPException):
+                continue
+            assert status != 200, ('The overlay proxy reached a loopback GUI', port)
+        print(json.dumps(dict(result='passed', instance='gui-proxy-b', page=200, unauthorized_api=403, authorized_api=200, foreign_host=403, loopback_proxy='blocked', evidence=str(directory))))
     finally:
         for child in children:
             if child.poll() is None:

@@ -38,6 +38,8 @@ An explicit empty list permits only the node itself.
 Loopback clients may connect with the same key.
 Changes need an instance restart; the Settings page edits the same options.
 The restart closes existing listeners and HTTP connections before applying the new settings.
+Overlay proxies cannot connect to loopback GUI listeners, including listeners in another daemon process.
+GUI requests use the instance's overlay listener and retain its source access checks.
 
 - With `tun.mode = "userspace"` the listener lives in the userspace stack, so it needs no operating system interface. With a kernel interface it is a normal socket bound to the overlay address.
 - It manages the instance that serves it. `?node=` cannot select another daemon on the machine, so the page never reaches other control tokens.
