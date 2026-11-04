@@ -598,7 +598,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "hop",
-        "Route metric. goodput needs relay.probe_budget_bps.",
+        "Automatic routes use direct links first. Metric for relay fallback; goodput needs relay.probe_budget_bps.",
     ),
     opt(
         "relay.use_relays",

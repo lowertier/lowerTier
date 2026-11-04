@@ -3050,6 +3050,101 @@ fn deny_transit_removes_data_edges_and_preserves_control_routes() {
     TopologyBuildInput::check_deny_transit_routes();
 }
 
+#[cfg(test)]
+#[test]
+fn automatic_routes_prefer_direct_and_fall_back_after_disconnect() {
+    struct Measurements {
+        direct_delivery: Option<u64>,
+    }
+    impl RouteCostCalculatorInterface for Measurements {
+        fn calculate_cost(&self, src: PeerId, dst: PeerId) -> i32 {
+            if (src, dst) == (1, 2) { 50 } else { 1 }
+        }
+        fn calculate_delivery_bps(&self, src: PeerId, dst: PeerId) -> Option<u64> {
+            if (src, dst) == (1, 2) {
+                self.direct_delivery
+            } else {
+                Some(100_000)
+            }
+        }
+    }
+    let mut graph = PeerGraph::new();
+    let nodes: Vec<_> = (1..=3).map(|peer| graph.add_node(peer)).collect();
+    for (src, dst) in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)] {
+        graph.add_edge(nodes[src], nodes[dst], 1);
+    }
+    let infos = (1..=3)
+        .map(|peer| {
+            (
+                peer,
+                RoutePeerInfo {
+                    peer_id: peer,
+                    noise_static_pubkey: vec![peer as u8; 32],
+                    identity_type: PeerIdentityType::Admin as i32,
+                    feature_flag: Some(crate::proto::common::PeerFeatureFlag {
+                        relay_semantics_v1: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let mut topology = TopologyBuildInput {
+        version: 1,
+        graph,
+        start_node: nodes[0],
+        peer_infos: Arc::new(infos),
+        conn_map: Arc::new(HashMap::new()),
+        suppressed_peer_ids: Arc::new(HashSet::new()),
+        relay_credential_peers: Arc::new(HashSet::new()),
+        local_proxy_cidrs: Vec::new(),
+    };
+    for direct_delivery in [Some(1_000), None] {
+        let input = topology.with_measurements(&Measurements { direct_delivery }, true, true);
+        for policy in [
+            NextHopPolicy::LeastHop,
+            NextHopPolicy::LeastCost,
+            NextHopPolicy::MaxGoodput,
+        ] {
+            let routes =
+                RouteTable::build_next_hop_map_from_input_checked(&input, policy.clone()).unwrap();
+            assert_eq!(
+                routes[&2].next_hop_peer_id, 2,
+                "{policy:?}: a live direct edge must beat a faster relay"
+            );
+            assert_eq!(routes[&2].path_len, 1);
+            assert_eq!(routes[&2].path_latency, 50);
+            if policy == NextHopPolicy::MaxGoodput {
+                assert_eq!(routes[&2].path_delivery_bps, direct_delivery.unwrap_or(0));
+            }
+        }
+    }
+    let direct = topology.graph.find_edge(nodes[0], nodes[1]).unwrap();
+    topology.graph.remove_edge(direct);
+    topology.version += 1;
+    let input = topology.with_measurements(
+        &Measurements {
+            direct_delivery: Some(1_000),
+        },
+        true,
+        true,
+    );
+    for policy in [
+        NextHopPolicy::LeastHop,
+        NextHopPolicy::LeastCost,
+        NextHopPolicy::MaxGoodput,
+    ] {
+        let routes =
+            RouteTable::build_next_hop_map_from_input_checked(&input, policy.clone()).unwrap();
+        assert_eq!(
+            routes[&2].next_hop_peer_id, 3,
+            "{policy:?}: relay fallback must remain available"
+        );
+        assert_eq!(routes[&2].path_len, 2);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpeedEdge {
     delivery_bps: u64,
@@ -3834,11 +3929,54 @@ impl RouteTable {
                 }
             }
         }
-        Ok(workspace
+        let mut routes: HashMap<_, _> = workspace
             .next_hop_map
             .iter()
             .map(|entry| (*entry.key(), *entry.value()))
-            .collect())
+            .collect();
+        if policy != NextHopPolicy::ControlHop && input.start_node != NodeIndex::end() {
+            // Automatic policies rank relays only after a direct edge is
+            // unavailable. Keep this in the published maps so packet routing,
+            // flow pins, route traces and the GUI use the same decision.
+            let direct_graph = if input.graph.node_count() > 0 {
+                &input.graph
+            } else {
+                &input.control_graph
+            };
+            for edge in direct_graph.edges(input.start_node) {
+                let destination = direct_graph[edge.target()];
+                if input.suppressed_peer_ids.contains(&destination) {
+                    continue;
+                }
+                routes.insert(
+                    destination,
+                    NextHopInfo {
+                        next_hop_peer_id: destination,
+                        path_delivery_bps: 0,
+                        path_latency: if input.graph.node_count() > 0 {
+                            (*edge.weight()).min(i32::MAX as usize) as i32
+                        } else {
+                            0
+                        },
+                        path_len: 1,
+                        version: input.version,
+                    },
+                );
+            }
+            if policy == NextHopPolicy::MaxGoodput {
+                for edge in input.speed_graph.edges(input.start_node) {
+                    let destination = input.speed_graph[edge.target()];
+                    if let Some(route) = routes.get_mut(&destination)
+                        && route.next_hop_peer_id == destination
+                        && route.path_len == 1
+                    {
+                        route.path_delivery_bps = edge.weight().delivery_bps;
+                        route.path_latency = edge.weight().latency_ms.min(i32::MAX as u64) as i32;
+                    }
+                }
+            }
+        }
+        Ok(routes)
     }
 
     fn build_shared_maps(

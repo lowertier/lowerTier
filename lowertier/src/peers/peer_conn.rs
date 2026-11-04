@@ -1655,7 +1655,7 @@ impl PeerConn {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.close_event_notifier.is_closed()
+        self.close_event_notifier.is_closed() || self.sink.is_closed()
     }
 
     async fn recv_next_peer_manager_packet(
@@ -5321,6 +5321,31 @@ pub mod tests {
             destination.decrypt_payload(1, 99, &mut restored).unwrap();
             assert_eq!(restored.payload(), b"waypoint became a neighbor");
         }
+    }
+
+    #[tokio::test]
+    async fn failed_sender_marks_connection_closed_before_liveness_timeout() {
+        let (tunnel, remote) = create_ring_tunnel_pair();
+        drop(remote);
+        let connection = PeerConn::new(
+            1,
+            get_mock_global_ctx(),
+            tunnel,
+            Arc::new(PeerSessionStore::new()),
+        );
+        assert!(!connection.is_closed());
+        // Admission may finish before the background writer observes shutdown.
+        // No receive or ping task is started: sender failure itself must close it.
+        let _ = connection
+            .send_msg(test_packet(PacketType::Ping as u8))
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !connection.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a failed sender must not suppress direct reconnection until ping timeout");
     }
 
     pub fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {

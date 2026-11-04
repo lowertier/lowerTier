@@ -75,5 +75,17 @@ async fn admit(
     let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), request.destination.port());
     TcpProxy::connect_nat_dst(destination)
         .await
-        .map_err(|_| http::StatusCode::BAD_GATEWAY)
+        .map_err(|error| {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+            {
+                // The port may belong to the userspace packet stack (for example
+                // the overlay GUI), rather than an operating-system listener.
+                // Let the client use the normal authenticated packet path.
+                http::StatusCode::NOT_IMPLEMENTED
+            } else {
+                http::StatusCode::BAD_GATEWAY
+            }
+        })
 }

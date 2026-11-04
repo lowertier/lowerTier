@@ -295,7 +295,7 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `discovery.private_trackers` | string list | - | restart | lowertier-tracker servers used for peer discovery. |
 | `discovery.bind` | string | - | restart | Local socket address for discovery traffic. |
 | `discovery.advertise` | string | - | restart | Socket address announced to trackers. |
-| `relay.policy` | hop \| latency \| goodput | `hop` | live | Route metric. goodput needs relay.probe_budget_bps. |
+| `relay.policy` | hop \| latency \| goodput | `hop` | live | Automatic routes use direct links first. Metric for relay fallback; goodput needs relay.probe_budget_bps. |
 | `relay.use_relays` | bool | `true` | live | Send local data through relay peers. |
 | `relay.transit` | allow \| avoid \| deny | `allow` | live | Carry data for other peers. |
 | `relay.transit_networks` | string list | - | live | Foreign network name patterns this node relays. ["*"] permits all. |
@@ -565,6 +565,8 @@ See [WSS CDN mode](docs/wss-cdn.md) for origin configuration and compatibility l
 
 ## Goodput routing
 
+Automatic routes always use an available direct connection first. The `hop`, `latency`, and `goodput` policies rank relay fallbacks when a direct connection is unavailable. Explicit `[[path]]` waypoints still apply to traffic assigned to those paths.
+
 Goodput routing measures each direct direction independently.
 Set a positive probe budget before selecting the goodput policy.
 
@@ -577,7 +579,7 @@ probe_budget_bps = 1000000
 
 The example permits 1 Mbit/s of average probe traffic across the node.
 Set `policy = "goodput"` after fresh samples appear.
-The selector first minimizes avoided transit nodes.
+For relay fallbacks, the selector first minimizes avoided transit nodes.
 It then maximizes the path's minimum valid directed delivery rate.
 Equal bottlenecks use cost, hop count, and first-hop peer ID.
 Destination-specific bottleneck thresholds preserve the cost tie-breaker.

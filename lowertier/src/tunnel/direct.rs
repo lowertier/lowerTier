@@ -329,6 +329,10 @@ impl DirectTunnelSender {
     pub(crate) fn set_transit_context(&self, context: &crate::common::global_ctx::ArcGlobalCtx) {
         let _ = self.state.transit_context.set(Arc::downgrade(context));
     }
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state.terminal_error.get().is_some() || self.state.control_tx.is_closed()
+    }
+
     pub fn send(&self, packet: ZCPacket) -> impl Future<Output = Result<(), TunnelError>> + '_ {
         self.send_batch(PacketBatch::singleton(packet))
     }
