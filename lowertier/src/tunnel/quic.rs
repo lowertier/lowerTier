@@ -2864,6 +2864,21 @@ fn build_connect_ip_tunnel(
         info: RwLock::new(info.clone()),
     });
     let migration_policy = Arc::new(QuicMigrationPolicy::new(&global_ctx, path_state.clone()));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if connection.side().is_client()
+        && let Ok(source) = migration::selected_source(&global_ctx, connection.remote_address())
+    {
+        // Preserve explicit discovery bindings while recording the initial routing choice.
+        migration_policy.record_source_selection(source);
+    }
+    if connection.side().is_client()
+        && let Some(local) = endpoint_owner
+            .as_ref()
+            .and_then(|endpoint| endpoint.local_addr().ok())
+    {
+        let _namespace = global_ctx.net_ns.guard();
+        migration_policy.record_local_interface(local);
+    }
     connection.set_path_policy(migration_policy.clone());
     let connection = Arc::new(ConnWrapper {
         conn: connection,

@@ -48,8 +48,8 @@ struct ValidationState {
     next_allowed: Option<Instant>,
     local: Option<SocketAddr>,
     source: Option<IpAddr>,
-    route_generation: u64,
-    pending_generation: Option<u64>,
+    bound_interface: Option<u32>,
+    pending_interface: Option<u32>,
 }
 
 pub(super) struct QuicMigrationPolicy {
@@ -89,7 +89,16 @@ impl QuicMigrationPolicy {
         let mut state = self.validation.lock();
         state.pending = false;
         state.local = None;
-        state.pending_generation = None;
+        state.pending_interface = None;
+    }
+
+    pub(super) fn record_source_selection(&self, source: IpAddr) {
+        self.validation.lock().source = Some(source);
+    }
+
+    pub(super) fn record_local_interface(&self, local: SocketAddr) {
+        let interface = source_interface(local.ip());
+        self.validation.lock().bound_interface = interface;
     }
 }
 
@@ -123,9 +132,7 @@ impl quinn::PathPolicy for QuicMigrationPolicy {
             let local = state.local.take();
             if let Some(local) = local {
                 state.source = Some(local.ip());
-                if let Some(generation) = state.pending_generation.take() {
-                    state.route_generation = generation;
-                }
+                state.bound_interface = state.pending_interface.take();
             }
             local
         };
@@ -145,8 +152,24 @@ impl quinn::PathPolicy for QuicMigrationPolicy {
     }
 }
 
+fn source_interface(address: IpAddr) -> Option<u32> {
+    use network_interface::NetworkInterfaceConfig as _;
+    let address = address.to_canonical();
+    if address.is_unspecified() {
+        return None;
+    }
+    network_interface::NetworkInterface::show()
+        .ok()?
+        .into_iter()
+        .find(|interface| interface.addr.iter().any(|entry| entry.ip() == address))
+        .map(|interface| interface.index)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn selected_source(ctx: &ArcGlobalCtx, remote: SocketAddr) -> Result<IpAddr, TunnelError> {
+pub(super) fn selected_source(
+    ctx: &ArcGlobalCtx,
+    remote: SocketAddr,
+) -> Result<IpAddr, TunnelError> {
     let _namespace = ctx.net_ns.guard();
     let remote = SocketAddr::new(remote.ip().to_canonical(), remote.port());
     let bind_addr: SocketAddr = if remote.is_ipv4() {
@@ -169,7 +192,7 @@ fn admit_client_group(
     paths: &[Arc<ConnWrapper>],
     sources: &[IpAddr],
     port: u16,
-    generation: u64,
+    interface: Option<u32>,
 ) -> bool {
     let now = Instant::now();
     let mut states = paths
@@ -186,7 +209,7 @@ fn admit_client_group(
     for (state, source) in states.iter_mut().zip(sources) {
         state.pending = true;
         state.local = Some(SocketAddr::new(*source, port));
-        state.pending_generation = Some(generation);
+        state.pending_interface = interface;
         state.next_allowed = Some(now + MIGRATION_COOLDOWN);
     }
     true
@@ -196,7 +219,6 @@ fn admit_client_group(
 pub(super) async fn migrate_client_paths(
     manager: &QuicEndpointManager,
     ctx: &ArcGlobalCtx,
-    generation: u64,
 ) -> bool {
     let paths = {
         let mut paths = manager.client_paths.lock();
@@ -290,10 +312,19 @@ pub(super) async fn migrate_client_paths(
             complete = false;
             continue;
         }
-        let mut changed = false;
+        let mut changed = ensure_local_allowed(&policy, previous_local).is_err();
+        let interface = {
+            let _namespace = ctx.net_ns.guard();
+            source_interface(previous_local.ip())
+        };
         for (path, source) in paths.iter().zip(&sources) {
             let mut state = path.migration_policy.validation.lock();
-            changed |= state.route_generation < generation;
+            changed |= state
+                .bound_interface
+                .is_some_and(|previous| Some(previous) != interface);
+            if state.bound_interface.is_none() {
+                state.bound_interface = interface;
+            }
             match state.source {
                 Some(previous) => changed |= previous != *source,
                 None => {
@@ -302,6 +333,7 @@ pub(super) async fn migrate_client_paths(
             }
         }
         if !changed {
+            // Overlay and neighbor route updates must preserve established NAT port mappings.
             continue;
         }
         let result = (|| -> Result<(), TunnelError> {
@@ -330,7 +362,12 @@ pub(super) async fn migrate_client_paths(
                 None
             };
             let socket = prepare_quic_udp_socket(socket, destination)?;
-            if !admit_client_group(&paths, &sources, local.port(), generation) {
+            if !admit_client_group(
+                &paths,
+                &sources,
+                local.port(),
+                source_interface(bind_addr.ip()),
+            ) {
                 return Err(TunnelError::InternalError(
                     "QUIC migration limit reached".into(),
                 ));
@@ -374,9 +411,6 @@ pub(super) fn observe_network_changes(manager: &Arc<QuicEndpointManager>, ctx: &
             .ok();
         let mut retry = tokio::time::interval(MIGRATION_COOLDOWN);
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut policy = weak_ctx.upgrade().map(|ctx| ctx.get_underlay_policy());
-        let mut pending = false;
-        let mut generation = 0_u64;
         loop {
             tokio::select! {
                 changed = async {
@@ -385,9 +419,7 @@ pub(super) fn observe_network_changes(manager: &Arc<QuicEndpointManager>, ctx: &
                         None => futures::future::pending().await,
                     }
                 } => {
-                    pending = true;
                     if changed.is_err() { notifications = None; }
-                    continue;
                 }
                 _ = retry.tick() => {}
                 event = events.recv() => {
@@ -397,25 +429,12 @@ pub(super) fn observe_network_changes(manager: &Arc<QuicEndpointManager>, ctx: &
                         Ok(_) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    continue;
                 }
             }
             let (Some(manager), Some(ctx)) = (manager.upgrade(), weak_ctx.upgrade()) else {
                 break;
             };
-            let current = ctx.get_underlay_policy();
-            if policy
-                .as_ref()
-                .is_none_or(|previous| !Arc::ptr_eq(previous, &current))
-            {
-                pending = true;
-                policy = Some(current);
-            }
-            if pending {
-                generation = generation.saturating_add(1);
-                pending = false;
-            }
-            migrate_client_paths(&manager, &ctx, generation).await;
+            migrate_client_paths(&manager, &ctx).await;
         }
     });
 }

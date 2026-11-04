@@ -33,7 +33,10 @@ The existing idle timeout and relay recovery remain available if neither path wo
 
 Linux and macOS clients monitor interface and route notifications.
 They also check source selection and underlay policy changes every two seconds.
-The client uses `quinn::Endpoint::rebind` when the route or permitted source changes.
+The client records its routing source and bound interface when it creates a connection.
+The client uses `quinn::Endpoint::rebind` when the source or interface changes, or the current local address becomes disallowed.
+An unrelated route notification preserves the socket and its UDP port.
+This preserves established NAT mappings and explicit discovery source bindings.
 Local changes use the same migration budget and cooldown.
 The previous socket remains available until the replacement socket receives a matching validation response.
 Failed validation restores the connection's previous send socket and keeps its receive socket available.

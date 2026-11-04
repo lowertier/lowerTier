@@ -15,6 +15,7 @@ struct RebindingProxy {
     address: SocketAddr,
     source: watch::Sender<Arc<UdpSocket>>,
     blocked_client_port: Arc<AtomicU32>,
+    allowed_client_port: Arc<AtomicU32>,
     _task: AbortOnDropHandle<()>,
 }
 
@@ -26,6 +27,8 @@ impl RebindingProxy {
         let (source, mut changed) = watch::channel(back.clone());
         let blocked_client_port = Arc::new(AtomicU32::new(0));
         let blocked = blocked_client_port.clone();
+        let allowed_client_port = Arc::new(AtomicU32::new(0));
+        let allowed = allowed_client_port.clone();
         let task = tokio::spawn(async move {
             let mut back = back;
             let mut client = None;
@@ -40,7 +43,10 @@ impl RebindingProxy {
                     }
                     received = front.recv_from(&mut upstream) => {
                         let (length, remote) = received.unwrap();
-                        if u32::from(remote.port()) == blocked.load(Ordering::Relaxed) {
+                        if u32::from(remote.port()) == blocked.load(Ordering::Relaxed)
+                            || allowed.load(Ordering::Relaxed) != 0
+                                && u32::from(remote.port()) != allowed.load(Ordering::Relaxed)
+                        {
                             continue;
                         }
                         client = Some(remote);
@@ -64,6 +70,7 @@ impl RebindingProxy {
             address,
             source,
             blocked_client_port,
+            allowed_client_port,
             _task: AbortOnDropHandle::new(task),
         }
     }
@@ -74,6 +81,39 @@ impl RebindingProxy {
         self.source.send_replace(socket);
         address
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn unrelated_route_changes_preserve_the_nat_bound_quic_socket() {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let mut peers = Peers::new(false).await;
+        peers.deliver().await;
+        let manager = QuicEndpointManager::load(&peers.client_ctx);
+        let path = manager
+            .client_paths
+            .lock()
+            .iter()
+            .find_map(Weak::upgrade)
+            .unwrap();
+        let endpoint = path._endpoint_owner.as_ref().unwrap();
+        let original = endpoint.local_addr().unwrap();
+        peers
+            .proxy
+            .allowed_client_port
+            .store(u32::from(original.port()), Ordering::Relaxed);
+        for _ in 0..3 {
+            assert!(migration::migrate_client_paths(&manager, &peers.client_ctx).await);
+            assert_eq!(
+                endpoint.local_addr().unwrap(),
+                original,
+                "An unrelated route change must preserve the NAT mapping"
+            );
+            peers.deliver().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 struct Peers {
@@ -321,11 +361,11 @@ async fn authenticated_quic_survives_ip_change_and_client_socket_migration() {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            // Use the route watcher operation without changing host routes.
+            // Simulate a routing source change without changing host routes.
             tokio::time::sleep(migration::MIGRATION_COOLDOWN).await;
             let before_local = peers.client_path.info.read().local_addr.clone();
             let manager = QuicEndpointManager::load(&peers.client_ctx);
-            request_client_migration(&manager, &peers.client_ctx, u64::MAX - 1).await;
+            request_client_migration(&manager, &peers.client_ctx).await;
             peers.deliver().await;
             tokio::time::timeout(Duration::from_secs(2), async {
                 while peers.client_path.info.read().local_addr == before_local {
@@ -345,7 +385,7 @@ async fn authenticated_quic_survives_ip_change_and_client_socket_migration() {
                 .find_map(Weak::upgrade)
                 .unwrap();
             let rejected = path.conn.stats().path.migration_rejections;
-            request_client_migration(&manager, &peers.client_ctx, u64::MAX).await;
+            request_client_migration(&manager, &peers.client_ctx).await;
             let replacement = path._endpoint_owner.as_ref().unwrap().local_addr().unwrap();
             peers
                 .proxy
@@ -372,14 +412,17 @@ async fn authenticated_quic_survives_ip_change_and_client_socket_migration() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn request_client_migration(
-    manager: &QuicEndpointManager,
-    ctx: &ArcGlobalCtx,
-    generation: u64,
-) {
-    // Host route events can start a validation before this request reaches the cooldown boundary.
+async fn request_client_migration(manager: &QuicEndpointManager, ctx: &ArcGlobalCtx) {
+    let path = manager
+        .client_paths
+        .lock()
+        .iter()
+        .find_map(Weak::upgrade)
+        .unwrap();
+    path.migration_policy
+        .record_source_selection("127.0.0.2".parse().unwrap());
     tokio::time::timeout(Duration::from_secs(6), async {
-        while !migration::migrate_client_paths(manager, ctx, generation).await {
+        while !migration::migrate_client_paths(manager, ctx).await {
             tokio::time::sleep(migration::MIGRATION_COOLDOWN).await;
         }
     })

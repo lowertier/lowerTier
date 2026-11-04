@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import tomllib
 
 
 def available_port():
@@ -126,12 +127,11 @@ allow = []
         deadline = time.monotonic() + 40
         while True:
             assert all(child.poll() is None for child in children), 'A test daemon stopped'
-            ready = all(
-                all(message in (directory / name / 'daemon.log').read_text() for message in [
-                    'GUI listening in the userspace stack',
-                    'address=127.0.0.1',
-                ]) for name in ['a', 'b', 'c']
-            )
+            ready = True
+            for name in ['a', 'b', 'c']:
+                lines = (directory / name / 'daemon.log').read_text().splitlines()
+                ready &= any('GUI listening in the userspace stack' in line for line in lines)
+                ready &= any('GUI listening on the overlay address' in line and 'address=127.0.0.1' in line for line in lines)
             try:
                 if ready:
                     page = request(proxy, gui_port, '/')
@@ -147,7 +147,7 @@ allow = []
         assert request(proxy, gui_port, '/api/snapshot')[0] == 403
         status, body = request(proxy, gui_port, '/api/snapshot', key)
         assert status == 200, status
-        assert b'gui-proxy-b' in body
+        assert tomllib.loads(body.decode())['node']['node']['hostname'] == 'gui-proxy-b'
         assert request(proxy, gui_port, '/', host='foreign.invalid')[0] == 403
         for port, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
             try:
