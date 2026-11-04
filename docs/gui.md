@@ -96,3 +96,10 @@ pnpm dev            # dev server; proxies /api to a running `lowertier gui`
 ```
 
 Build without the page with `--no-default-features` and the features you need, leaving out `gui`.
+
+Run the userspace proxy regression check after building the binary.
+The check uses two local nodes and verifies instance selection, access keys, and Host checks.
+
+```bash
+python3 script/tests/gui-proxy-test.py --binary target/release/lowertier
+```

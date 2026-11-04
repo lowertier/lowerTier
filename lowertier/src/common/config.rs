@@ -379,6 +379,9 @@ pub struct TrackerDiscoveryConfig {
 
 #[auto_impl::auto_impl(Box, &)]
 pub trait ConfigLoader: Send + Sync {
+    fn get_gui_config(&self) -> GuiConfig {
+        GuiConfig::default()
+    }
     fn get_control_token_file(&self) -> Option<PathBuf> {
         None
     }
@@ -1215,6 +1218,10 @@ impl TomlConfigLoader {
 }
 
 impl ConfigLoader for TomlConfigLoader {
+    fn get_gui_config(&self) -> GuiConfig {
+        TomlConfigLoader::get_gui_config(self)
+    }
+
     fn get_control_token_file(&self) -> Option<PathBuf> {
         self.config
             .lock()

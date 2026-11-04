@@ -72,6 +72,14 @@ async fn admit(
     {
         return Err(http::StatusCode::FORBIDDEN);
     }
+    #[cfg(feature = "gui")]
+    {
+        let gui = context.config.get_gui_config();
+        if gui.enabled.unwrap_or(true) && request.destination.port() == gui.port.unwrap_or(15880) {
+            // The overlay GUI must retain its source address and instance in the packet stack.
+            return Err(http::StatusCode::NOT_IMPLEMENTED);
+        }
+    }
     let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), request.destination.port());
     TcpProxy::connect_nat_dst(destination)
         .await
