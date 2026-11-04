@@ -1,0 +1,276 @@
+{
+  "date": "2026-11-05",
+  "source_commit": "fdc33ef5721d7e9886060efd8a38a2e721ea963d",
+  "hosts": [
+    {
+      "host": "local",
+      "binary_sha256": "5a46d80aa0d0ae636b844e2d11f4d264692d5d63af4b1a0efa7966ad55aa237a",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "native",
+          "overlay_address": "10.126.126.2",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        },
+        {
+          "name": "userspace",
+          "overlay_address": "10.126.126.2",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15881,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "tw2-ingress",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.80",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "alibj",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.110",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "jpaws",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.100",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "861jp",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.81",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "862jp",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.182",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        },
+        {
+          "name": "lowertier-et-zero",
+          "overlay_address": "10.126.126.82",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15881,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "jpali",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.162",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        },
+        {
+          "name": "lowertier-et-zero",
+          "overlay_address": "10.126.126.62",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15881,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "s6916",
+      "binary_sha256": "dc2f6e6c4fad8bb3a0d54c07493fb35033b7be2caf668f29ed8793057d5565d5",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.60",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        },
+        {
+          "name": "lowertier-et-zero",
+          "overlay_address": "10.126.126.61",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15881,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "hattori-opwrt",
+      "binary_sha256": "c06befd7356d6013cd767659b4ff3d2c164d370a76219c8b4a9532d368c1fc4c",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "lowertier",
+          "overlay_address": "10.126.126.1",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    },
+    {
+      "host": "yutoms-mcp",
+      "binary_sha256": "5a46d80aa0d0ae636b844e2d11f4d264692d5d63af4b1a0efa7966ad55aa237a",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "name": "userspace",
+          "overlay_address": "10.126.126.3",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15880,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        },
+        {
+          "name": "legacy",
+          "overlay_address": "10.126.126.70",
+          "overlay_gui_port": 15880,
+          "loopback_gui_port": 15881,
+          "authenticated_overlay_http": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-194-gfdc33ef5~"
+        }
+      ]
+    }
+  ],
+  "instance_count": 15,
+  "measurements": {
+    "lowertier_mac_to_hattori": {
+      "sent": 200,
+      "received": 200,
+      "loss_percent": 0.0,
+      "rtt_ms": {
+        "min": 4.491,
+        "mean": 7.759,
+        "max": 92.368,
+        "stddev": 11.052
+      }
+    },
+    "tailscale_mac_to_hattori": {
+      "sent": 200,
+      "received": 200,
+      "loss_percent": 0.0,
+      "rtt_ms": {
+        "min": 21.722,
+        "mean": 22.727,
+        "max": 28.215,
+        "stddev": 0.659
+      }
+    },
+    "lan_to_alibj": {
+      "sent": 30,
+      "received": 30,
+      "loss_percent": 0.0,
+      "rtt_ms": {
+        "min": 78.687,
+        "mean": 88.618,
+        "max": 122.046,
+        "stddev": 14.095
+      }
+    },
+    "subnet_ssh": {
+      "expected": 120,
+      "delivered": 120,
+      "handshake_seconds": 1.12530054198578,
+      "rtt_ms": {
+        "0": 36.73787496518344,
+        "50": 47.840457991696894,
+        "95": 154.10833398345858,
+        "99": 181.69333296827972,
+        "100": 223.74095802661031
+      },
+      "method": "SSH ProxyCommand through the Hattori LAN host; alternating 32-byte and 4096-byte bodies, each with a newline"
+    },
+    "unrelated_route_events": {
+      "count": 10,
+      "udp_sockets_preserved": true,
+      "delivery": "80 packets transmitted, 80 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 5.052/9.993/91.439/16.295 ms"
+    }
+  },
+  "checks": {
+    "native_core_passed": 482,
+    "caddy_passed": 2,
+    "migration_cases_passed": 4,
+    "gui_proxy_paths": [
+      "QUIC optimized proxy",
+      "packet fallback"
+    ],
+    "standalone_gui": "passed",
+    "linux_policy_rule_identity": "passed",
+    "linux_policy_rule_idempotence": "passed",
+    "lan_to_alibj_ssh_banner": true,
+    "lan_to_hattori_gui_http": 200,
+    "lan_to_alibj_gui_http": 200
+  },
+  "limitations": [
+    "Latency checks use the running network and do not establish a throughput improvement.",
+    "SSH echo latency includes the Tailscale control connection to the LAN host."
+  ],
+  "evidence_directory": "benchmark-results/.work/hattori-connection-20261105",
+  "validation_source_commits": {
+    "native_core": "91e67194",
+    "focused_migration": "fdc33ef5",
+    "caddy": "fdc33ef5",
+    "live_fleet": "fdc33ef5"
+  }
+}

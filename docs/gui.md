@@ -5,9 +5,10 @@ Loopback starts before the overlay address is available.
 Set `[gui] enabled = false` to disable both listeners.
 
 `lowertier gui` also serves a management page on loopback and opens it in the default browser.
+The CLI selects a free port when the daemon already uses the default port.
 
 ```bash
-sudo lowertier gui              # http://127.0.0.1:15880/#key=...
+sudo lowertier gui              # open a page with a temporary access key
 lowertier gui --no-open         # print the address only
 lowertier gui --listen 127.0.0.1:18080
 ```
@@ -53,7 +54,7 @@ The `lowertier gui` process holds the control token. (The `[gui]` section above 
 The standalone `lowertier gui` server listens on loopback only. Use SSH port forwarding to reach it from another machine:
 
 ```bash
-ssh -L 15880:127.0.0.1:15880 host 'sudo lowertier gui --no-open'
+ssh -L 18080:127.0.0.1:18080 host 'sudo lowertier gui --listen 127.0.0.1:18080 --no-open'
 ```
 
 Each run creates a random key and passes it in the URL fragment, which browsers do not send to servers.
