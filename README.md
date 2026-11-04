@@ -453,6 +453,10 @@ group_secret = "<group-secret>"
 
 ### NAT traversal
 
+Nodes allow QUIC over UDP, H2 over TCP, and WSS over TCP by default. Omit `transport.protocols` to keep that default. `transport.prefer` chooses the preferred transport without disabling the others. Both UDP and TCP hole-punching coordinators are enabled by default.
+
+Public tracker discovery is optional. Configured peers provide the initial connection when no `[discovery]` section is present. Once connected, authenticated peer RPCs coordinate punching and STUN supplies NAT mappings. Trackers can provide bootstrap addresses when configured; see [tracker discovery](docs/tracker-discovery.md).
+
 QUIC NAT traversal exchanges candidates through authenticated peer RPC.
 It retains the selected UDP socket for the QUIC connection.
 When one peer has destination-dependent mappings, traversal can use a bounded socket pool and public-port search.
@@ -462,7 +466,7 @@ This UDP procedure does not establish H2 or WSS connections.
 H2 and WSS use authenticated TCP rendezvous and simultaneous open.
 TCP traversal retains one source port for listening, STUN, and peer connections.
 The initiator nominates one TLS connection before the peers verify their identities.
-`transport.prefer = "wss"` selects WSS traversal; other values select H2 for TCP traversal.
+`transport.prefer = "wss"` prioritizes WSS traversal; other preferences prioritize H2 for TCP traversal. When both are allowed, later attempts also try the alternative stream transport.
 `nat.tcp_punch = false` disables both TCP traversal protocols.
 Destination-dependent TCP mappings can still prevent direct connections.
 Candidate discovery uses current interface addresses and configured underlay restrictions.

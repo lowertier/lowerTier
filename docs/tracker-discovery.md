@@ -5,6 +5,10 @@ The tracker returns transport endpoints. It does not authenticate nodes or relay
 Peers still complete the transport handshake and the existing Noise authentication.
 TLS exporter binding remains enabled for QUIC, H2, and WSS.
 
+Tracker discovery is opt-in. A configuration without `[discovery]` uses its configured peers for bootstrap and does not announce to public trackers. After peers connect, encrypted peer RPCs coordinate hole punching while STUN discovers NAT mappings. A tracker supplies bootstrap addresses; a connected peer can coordinate punching and provide relay fallback.
+
+QUIC/UDP, H2/TCP, and WSS/TCP are all allowed by default, and both UDP and TCP punching are enabled. Omit `transport.protocols` to retain those transport defaults. `transport.prefer` chooses a preference and the tracker rendezvous namespace; it does not disable the other allowed transports.
+
 ## Client configuration
 
 ```toml
