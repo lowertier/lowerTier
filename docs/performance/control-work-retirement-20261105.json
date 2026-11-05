@@ -1,0 +1,519 @@
+{
+  "date": "2026-11-05",
+  "source_commit": "e7bd53b030cb53bdb9b5b83640f8e8e9e78f43cf",
+  "hosts": [
+    {
+      "host": "tw2-ingress",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.80",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 8
+        }
+      ]
+    },
+    {
+      "host": "alibj",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.110",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 8
+        }
+      ]
+    },
+    {
+      "host": "jpaws",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.100",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 12
+        }
+      ]
+    },
+    {
+      "host": "861jp",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.81",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 11
+        }
+      ]
+    },
+    {
+      "host": "862jp",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.182",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 12
+        },
+        {
+          "instance": "lowertier-et-zero",
+          "address": "10.126.126.82",
+          "loopback_port": 15881,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 2
+        }
+      ]
+    },
+    {
+      "host": "jpali",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.162",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 11
+        },
+        {
+          "instance": "lowertier-et-zero",
+          "address": "10.126.126.62",
+          "loopback_port": 15881,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 2
+        }
+      ]
+    },
+    {
+      "host": "s6916",
+      "binary_sha256": "fe35bbaf684de02e7410a10623cb7ec6aba138fa286164b95710e25e72e3a257",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.60",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 12
+        },
+        {
+          "instance": "lowertier-et-zero",
+          "address": "10.126.126.61",
+          "loopback_port": 15881,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 3
+        }
+      ]
+    },
+    {
+      "host": "hattori-opwrt",
+      "binary_sha256": "d0d7644f89cca9f9d940fa8359988609f5a529acd77dd611488a7ddf3fd069f6",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "lowertier",
+          "address": "10.126.126.1",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 11
+        }
+      ]
+    },
+    {
+      "host": "yutoms-mcp",
+      "binary_sha256": "f88b7a25d229a2e573de1acad2673bddc82947bc9b06ecc1abfab3057059e621",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "userspace",
+          "address": "10.126.126.3",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 8
+        },
+        {
+          "instance": "legacy",
+          "address": "10.126.126.70",
+          "loopback_port": 15881,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 13
+        }
+      ]
+    },
+    {
+      "host": "local",
+      "binary_sha256": "f88b7a25d229a2e573de1acad2673bddc82947bc9b06ecc1abfab3057059e621",
+      "gui_bindings_verified": true,
+      "instances": [
+        {
+          "instance": "native",
+          "address": "10.126.126.2",
+          "loopback_port": 15880,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 16
+        },
+        {
+          "instance": "userspace",
+          "address": "10.126.126.2",
+          "loopback_port": 15881,
+          "overlay_authenticated_api": 200,
+          "version": "2.6.4-v2.6.4-lowertier.6-196-ge7bd53b0~",
+          "authenticated_delivering_connections": 1
+        }
+      ]
+    }
+  ],
+  "instance_count": 15,
+  "verification": {
+    "local_core_suite_before_final_transport_corrections": {
+      "passed": 484,
+      "failed": 0
+    },
+    "final_transport_suite": {
+      "passed": 181,
+      "failed": 0
+    },
+    "caddy_integration": {
+      "passed": 2,
+      "failed": 0
+    },
+    "linux_namespace_policy": {
+      "passed": 1,
+      "failed": 0
+    },
+    "linux_migration": {
+      "passed": 4,
+      "failed": 0
+    },
+    "linux_source_probe": {
+      "passed": 1,
+      "failed": 0
+    },
+    "linux_cidr_snapshots": {
+      "passed": 2,
+      "failed": 0
+    },
+    "focused_formatting": "passed",
+    "whitespace": "passed",
+    "reviewers": "two read-only source reviews; final changes had no remaining findings"
+  },
+  "measurements": {
+    "hattori_final": {
+      "sent": 100,
+      "received": 100,
+      "loss_percent": 0.0,
+      "rtt_ms": {
+        "min": 4.862,
+        "mean": 6.479,
+        "max": 26.419,
+        "stddev": 2.763
+      }
+    },
+    "tailscale_final": {
+      "sent": 100,
+      "received": 100,
+      "loss_percent": 0.0,
+      "rtt_ms": {
+        "min": 21.014,
+        "mean": 22.596,
+        "max": 25.481,
+        "stddev": 0.637
+      }
+    },
+    "lan_alibj_final": {
+      "sent": 30,
+      "received": 30,
+      "loss_percent": 0.0,
+      "rtt_ms": {
+        "min": 107.002,
+        "mean": 195.421,
+        "max": 533.247,
+        "stddev": 115.159
+      }
+    },
+    "lan_alibj_ssh_banner": true,
+    "lan_ssh": {
+      "expected": 120,
+      "delivered": 120,
+      "handshake_seconds": 1.0292742089368403,
+      "rtt_ms": {
+        "0": 34.56399997230619,
+        "50": 49.72550005186349,
+        "95": 140.71424992289394,
+        "99": 151.92125004250556,
+        "100": 193.61754204146564
+      },
+      "elapsed_seconds": 44.2459827499697,
+      "error": null
+    }
+  },
+  "transfer_experiment": {
+    "planned_order": [
+      "A1",
+      "B1",
+      "B2",
+      "A2"
+    ],
+    "comparison_completed": false,
+    "stream_count": 1,
+    "iperf_seconds": 10,
+    "macos_iperf_version": "3.17.1",
+    "hattori_iperf_version": "3.20",
+    "observed_tun_mtu": 1280,
+    "observed_tap_mtu": 1340,
+    "cpu_scope": "Mac native core and Hattori core; excludes kernel, Tailscale, SSH, and iperf",
+    "samples_per_process_per_trial": 14,
+    "nominal_sample_interval_seconds": 1,
+    "valid_trials": [
+      {
+        "label": "a1-up",
+        "local_sha": "5a46d80aa0d0ae636b844e2d11f4d264692d5d63af4b1a0efa7966ad55aa237a",
+        "remote_sha": "c06befd7356d6013cd767659b4ff3d2c164d370a76219c8b4a9532d368c1fc4c",
+        "receiver_mbps": 20.33285571293482,
+        "delivered_bytes": 25821184,
+        "retransmits": null,
+        "resources": {
+          "macos_native": {
+            "cpu_seconds": 3.7799999999997453,
+            "rss_kib_min": 51760,
+            "rss_kib_max": 53952,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          },
+          "hattori_core": {
+            "cpu_seconds": 4.7800000000002,
+            "rss_kib_min": 72644,
+            "rss_kib_max": 74676,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          }
+        },
+        "core_cpu_seconds_per_delivered_gbit": 41.43884339308349,
+        "10.126.126.1": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 4.252/9.408/96.802/14.794 ms",
+        "100.69.88.25": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 21.467/22.529/23.653/0.431 ms"
+      },
+      {
+        "label": "a1-down",
+        "local_sha": "5a46d80aa0d0ae636b844e2d11f4d264692d5d63af4b1a0efa7966ad55aa237a",
+        "remote_sha": "c06befd7356d6013cd767659b4ff3d2c164d370a76219c8b4a9532d368c1fc4c",
+        "receiver_mbps": 25.934878771934653,
+        "delivered_bytes": 32636928,
+        "retransmits": 2009,
+        "resources": {
+          "macos_native": {
+            "cpu_seconds": 3.150000000000091,
+            "rss_kib_min": 53968,
+            "rss_kib_max": 53984,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          },
+          "hattori_core": {
+            "cpu_seconds": 6.569999999999936,
+            "rss_kib_min": 71220,
+            "rss_kib_max": 71988,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          }
+        },
+        "core_cpu_seconds_per_delivered_gbit": 37.227768495858534,
+        "10.126.126.1": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 4.435/5.480/24.464/2.616 ms",
+        "100.69.88.25": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 21.048/21.924/22.832/0.460 ms"
+      },
+      {
+        "label": "b1-up",
+        "local_sha": "f88b7a25d229a2e573de1acad2673bddc82947bc9b06ecc1abfab3057059e621",
+        "remote_sha": "d0d7644f89cca9f9d940fa8359988609f5a529acd77dd611488a7ddf3fd069f6",
+        "receiver_mbps": 24.584152941080635,
+        "delivered_bytes": 30932992,
+        "retransmits": null,
+        "resources": {
+          "macos_native": {
+            "cpu_seconds": 5.34,
+            "rss_kib_min": 38752,
+            "rss_kib_max": 40208,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          },
+          "hattori_core": {
+            "cpu_seconds": 5.359999999999999,
+            "rss_kib_min": 51056,
+            "rss_kib_max": 53328,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          }
+        },
+        "core_cpu_seconds_per_delivered_gbit": 43.2386236675715,
+        "10.126.126.1": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 4.185/5.897/26.514/3.683 ms",
+        "100.69.88.25": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 20.529/21.462/23.024/0.436 ms"
+      },
+      {
+        "label": "b1-down",
+        "local_sha": "f88b7a25d229a2e573de1acad2673bddc82947bc9b06ecc1abfab3057059e621",
+        "remote_sha": "d0d7644f89cca9f9d940fa8359988609f5a529acd77dd611488a7ddf3fd069f6",
+        "receiver_mbps": 23.587797038274378,
+        "delivered_bytes": 29622272,
+        "retransmits": 3044,
+        "resources": {
+          "macos_native": {
+            "cpu_seconds": 3.869999999999999,
+            "rss_kib_min": 40208,
+            "rss_kib_max": 40224,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          },
+          "hattori_core": {
+            "cpu_seconds": 6.390000000000001,
+            "rss_kib_min": 50292,
+            "rss_kib_max": 51056,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          }
+        },
+        "core_cpu_seconds_per_delivered_gbit": 43.29512604569967,
+        "10.126.126.1": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 4.312/5.682/34.045/3.775 ms",
+        "100.69.88.25": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 20.612/21.686/24.835/0.569 ms"
+      },
+      {
+        "label": "b2-up",
+        "local_sha": "f88b7a25d229a2e573de1acad2673bddc82947bc9b06ecc1abfab3057059e621",
+        "remote_sha": "d0d7644f89cca9f9d940fa8359988609f5a529acd77dd611488a7ddf3fd069f6",
+        "receiver_mbps": 24.059612782757995,
+        "delivered_bytes": 30408704,
+        "retransmits": null,
+        "resources": {
+          "macos_native": {
+            "cpu_seconds": 6.43,
+            "rss_kib_min": 40224,
+            "rss_kib_max": 40880,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          },
+          "hattori_core": {
+            "cpu_seconds": 6.01,
+            "rss_kib_min": 50132,
+            "rss_kib_max": 55080,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          }
+        },
+        "core_cpu_seconds_per_delivered_gbit": 51.13667455212823,
+        "10.126.126.1": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 4.179/8.096/65.185/9.761 ms",
+        "100.69.88.25": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 20.976/21.696/22.974/0.441 ms"
+      },
+      {
+        "label": "b2-down",
+        "local_sha": "f88b7a25d229a2e573de1acad2673bddc82947bc9b06ecc1abfab3057059e621",
+        "remote_sha": "d0d7644f89cca9f9d940fa8359988609f5a529acd77dd611488a7ddf3fd069f6",
+        "receiver_mbps": 26.257125135562845,
+        "delivered_bytes": 33030144,
+        "retransmits": 2660,
+        "resources": {
+          "macos_native": {
+            "cpu_seconds": 6.620000000000001,
+            "rss_kib_min": 40880,
+            "rss_kib_max": 40880,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          },
+          "hattori_core": {
+            "cpu_seconds": 5.899999999999999,
+            "rss_kib_min": 51280,
+            "rss_kib_max": 52856,
+            "samples": 14,
+            "cpu_scope": "core process only",
+            "sample_interval_seconds": 1
+          }
+        },
+        "core_cpu_seconds_per_delivered_gbit": 47.380962069072424,
+        "10.126.126.1": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 4.362/6.022/15.364/1.550 ms",
+        "100.69.88.25": "---\n60 packets transmitted, 60 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 21.110/22.627/27.741/0.941 ms"
+      }
+    ],
+    "failed_trials": [
+      {
+        "label": "a2-up",
+        "error": "TCP connect timeout",
+        "lowertier_sent": 60,
+        "lowertier_received": 0,
+        "tailscale_sent": 60,
+        "tailscale_received": 60
+      }
+    ],
+    "recovery_failures": [
+      {
+        "label": "baseline-target-readiness",
+        "sent": 5,
+        "received": 0
+      },
+      {
+        "label": "restored-candidate-immediate-readiness",
+        "sent": 10,
+        "received": 0
+      }
+    ],
+    "later_recovery": "Captures showed requests and replies at both virtual interfaces. The final candidate delivered 100 of 100 probes. No source change intervened.",
+    "reconnect_delay_cause": "unconfirmed",
+    "performance_improvement_established": false
+  },
+  "ci_test_budget": {
+    "limit": 500,
+    "previous_committed_tree": 525,
+    "existing_user_annotations": 4,
+    "before_cleanup_working_tree": 529,
+    "new_annotations": 3,
+    "current_working_tree": 532,
+    "status": "pre-existing failure remains; full CI success is not claimed"
+  },
+  "preserved_work": [
+    "Uncommitted peer_conn.rs tests",
+    "Untracked skills/"
+  ],
+  "evidence_directory": "benchmark-results/.work/control-cleanup-20261105",
+  "audit_limitations": [
+    "Initial source reads lack complete process audit records.",
+    "The planned repeated baseline comparison did not finish.",
+    "Mac sender TCP retransmission counts are unavailable.",
+    "The reconnect delay remains unexplained."
+  ]
+}
