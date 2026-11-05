@@ -446,6 +446,7 @@ pub struct GlobalCtx {
     multicast_membership_state: Mutex<MulticastMembershipState>,
 
     ip_collector: Mutex<Option<Arc<IPCollector>>>,
+    pub(crate) proxy_cidrs: OnceLock<Arc<crate::gateway::CidrSet>>,
 
     hostname: Mutex<String>,
 
@@ -840,6 +841,7 @@ impl GlobalCtx {
             public_ipv6_lease: AtomicCell::new(None),
             public_ipv6_routes: Mutex::new(BTreeSet::new()),
             multicast_membership_state: Mutex::new(MulticastMembershipState::new()),
+            proxy_cidrs: OnceLock::new(),
 
             ip_collector: Mutex::new(Some(Arc::new(IPCollector::new(
                 net_ns,
@@ -1646,13 +1648,10 @@ impl GlobalCtx {
     pub fn should_deny_proxy(&self, dst_addr: &SocketAddr, is_udp: bool) -> bool {
         let _g = self.net_ns.guard();
         let ip = dst_addr.ip();
-        // first check if ip is an LowTier-managed local address
-        // then try bind this ip, if succ means it is local ip
         let dst_is_local_et_ip = self.is_ip_local_virtual_ip(&ip);
-        // this is an expensive operation, should be called sparingly
-        // 1. tcp/quic call this only after proxy conn is established
-        // 2. udp cache the result in nat entry
-        let dst_is_local_phy_ip = std::net::UdpSocket::bind(format!("{}:0", ip)).is_ok();
+        // Known virtual addresses need no operating system ownership probe.
+        let dst_is_local_phy_ip =
+            !dst_is_local_et_ip && std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).is_ok();
 
         tracing::trace!(
             "check should_deny_proxy: dst_addr={}, dst_is_local_et_ip={}, dst_is_local_phy_ip={}, is_udp={}",

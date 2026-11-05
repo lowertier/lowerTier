@@ -516,33 +516,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http2_skips_the_routing_prefix_behind_sni_passthrough() {
+    async fn http2_routing_modes_do_not_require_decoy_dns() {
         use crate::tunnel::TransportBindingKind;
 
         let mut flags = crate::common::config::gen_default_flags();
         flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
         flags
             .camouflage_config_mut()
-            .set_decoy_upstream("127.0.0.1:9".to_owned());
+            .set_decoy_upstream("decoy.invalid:443".to_owned());
         flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
         flags.camouflage_config_mut().sni_routing = true;
 
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
-        listener.set_flags(flags.clone());
-        listener.listen().await.unwrap();
-        let listener_addr = listener.local_url();
-        let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+        for sni_routing in [false, true] {
+            flags.camouflage_config_mut().sni_routing = sni_routing;
+            let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+            listener.set_flags(flags.clone());
+            listener.listen().await.unwrap();
+            let listener_addr = listener.local_url();
+            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
 
-        let mut connector = TcpTunnelConnector::new(listener_addr);
-        connector.set_flags(flags);
-        let client = connector.connect().await.unwrap();
-        let server = server.await.unwrap();
+            let mut connector = TcpTunnelConnector::new(listener_addr);
+            connector.set_flags(flags.clone());
+            let client = connector.connect().await.unwrap();
+            let server = server.await.unwrap();
 
-        assert_eq!(
-            client.transport_binding().map(|binding| binding.kind),
-            Some(TransportBindingKind::Http2TlsExporterV1)
-        );
-        assert_eq!(client.transport_binding(), server.transport_binding());
+            assert_eq!(
+                client.transport_binding().map(|binding| binding.kind),
+                Some(TransportBindingKind::Http2TlsExporterV1)
+            );
+            assert_eq!(client.transport_binding(), server.transport_binding());
+        }
     }
 
     #[tokio::test]

@@ -77,7 +77,7 @@ pub struct IcmpProxy {
     global_ctx: ArcGlobalCtx,
     peer_manager: Weak<PeerManager>,
 
-    cidr_set: CidrSet,
+    cidr_set: Arc<CidrSet>,
     socket: std::sync::Mutex<Option<Arc<socket2::Socket>>>,
 
     nat_table: IcmpNatTable,

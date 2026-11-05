@@ -1,6 +1,6 @@
 use arc_swap::ArcSwap;
 use std::sync::Arc;
-use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::common::{config::ProxyNetworkConfig, global_ctx::ArcGlobalCtx};
 
@@ -39,36 +39,38 @@ fn cidr_mappings(cidrs: &[ProxyNetworkConfig]) -> Vec<(cidr::Ipv4Cidr, cidr::Ipv
 
 #[derive(Debug)]
 pub(crate) struct CidrSet {
-    global_ctx: ArcGlobalCtx,
     cidr_set: Arc<ArcSwap<Vec<(cidr::Ipv4Cidr, cidr::Ipv4Cidr)>>>,
-    tasks: JoinSet<()>,
+    _updater: AbortOnDropHandle<()>,
 }
 
 impl CidrSet {
-    pub fn new(global_ctx: ArcGlobalCtx) -> Self {
-        let mut ret = Self {
-            global_ctx,
-            cidr_set: Arc::new(ArcSwap::from_pointee(vec![])),
-            tasks: JoinSet::new(),
-        };
-        ret.run_cidr_updater();
-        ret
-    }
-
-    fn run_cidr_updater(&mut self) {
-        let global_ctx = self.global_ctx.clone();
-        let cidr_set = self.cidr_set.clone();
-        self.tasks.spawn(async move {
-            let mut last_cidrs = vec![];
-            loop {
-                let cidrs = global_ctx.config.get_proxy_cidrs();
-                if cidrs != last_cidrs {
-                    last_cidrs = cidrs.clone();
-                    cidr_set.store(Arc::new(cidr_mappings(&cidrs)));
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        });
+    pub fn new(global_ctx: ArcGlobalCtx) -> Arc<Self> {
+        global_ctx
+            .proxy_cidrs
+            .get_or_init(|| {
+                let mut last_cidrs = global_ctx.config.get_proxy_cidrs();
+                let cidr_set = Arc::new(ArcSwap::from_pointee(cidr_mappings(&last_cidrs)));
+                let snapshot = cidr_set.clone();
+                let context = Arc::downgrade(&global_ctx);
+                let updater = tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let Some(context) = context.upgrade() else {
+                            break;
+                        };
+                        let cidrs = context.config.get_proxy_cidrs();
+                        if cidrs != last_cidrs {
+                            snapshot.store(Arc::new(cidr_mappings(&cidrs)));
+                            last_cidrs = cidrs;
+                        }
+                    }
+                });
+                Arc::new(Self {
+                    cidr_set,
+                    _updater: AbortOnDropHandle::new(updater),
+                })
+            })
+            .clone()
     }
 
     pub fn contains_v4(&self, ipv4: std::net::Ipv4Addr, real_ip: &mut std::net::Ipv4Addr) -> bool {
@@ -138,5 +140,50 @@ mod tests {
         }
         writer.join().unwrap();
         assert_eq!(*old_snapshot, vec![(mapped, old_real)]);
+    }
+
+    #[tokio::test]
+    async fn proxy_protocols_share_initial_and_updated_cidr_mappings() {
+        use crate::common::{
+            config::{ConfigLoader, TomlConfigLoader},
+            global_ctx::GlobalCtx,
+        };
+
+        let config = TomlConfigLoader::default();
+        let mapped = "172.20.0.0/16".parse().unwrap();
+        let real = "10.20.0.0/16".parse().unwrap();
+        config.add_proxy_cidr(real, Some(mapped)).unwrap();
+        let context = Arc::new(GlobalCtx::new(config));
+        let tcp = CidrSet::new(context.clone());
+        let udp = CidrSet::new(context.clone());
+        assert!(Arc::ptr_eq(&tcp, &udp));
+        let ip = "172.20.0.5".parse().unwrap();
+        let mut translated = ip;
+        assert!(tcp.contains_v4(ip, &mut translated));
+        assert_eq!(
+            translated,
+            "10.20.0.5".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+
+        let other = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
+        let other_set = CidrSet::new(other);
+        assert!(!Arc::ptr_eq(&tcp, &other_set));
+        assert!(other_set.is_empty());
+
+        context.config.clear_proxy_cidrs();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !tcp.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(udp.is_empty());
+        let weak = Arc::downgrade(&context);
+        drop(context);
+        assert!(
+            weak.upgrade().is_none(),
+            "The updater must not retain the instance"
+        );
     }
 }

@@ -259,7 +259,7 @@ pub struct TcpProxy {
     conn_map: ConnSockMap,
     addr_conn_map: AddrConnSockMap,
 
-    cidr_set: CidrSet,
+    cidr_set: Arc<CidrSet>,
 
     smoltcp_stack_sender: Option<mpsc::Sender<ZCPacket>>,
     smoltcp_stack_receiver: Arc<Mutex<Option<mpsc::Receiver<ZCPacket>>>>,

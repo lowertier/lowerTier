@@ -339,7 +339,6 @@ impl Server {
             "sampled_at_unix_ms": chrono::Utc::now().timestamp_millis(),
             "node": codec::message("GetNodeResponse", &view.node)?,
             "peers": codec::messages("PeerSnapshot", &peers.peers)?,
-            "route_summaries": codec::messages("RouteSnapshot", &peers.route_summaries)?,
             "active_policy": peers.active_policy,
             "relay": codec::message("GetRelayResponse", &view.relay)?,
             "discovery": codec::message("GetDiscoveryResponse", &view.discovery)?,

@@ -81,16 +81,15 @@ pub fn tls_acceptor(flags: &Flags) -> Result<TlsAcceptor, TunnelError> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-fn decoy_upstream(flags: &Flags) -> Option<std::net::SocketAddr> {
+async fn decoy_upstream(flags: &Flags) -> Option<std::net::SocketAddr> {
     let upstream = flags.camouflage_config().tcp_decoy();
     if upstream.is_empty() {
         return None;
     }
-    upstream.parse().ok().or_else(|| {
-        std::net::ToSocketAddrs::to_socket_addrs(&upstream)
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-    })
+    if let Ok(address) = upstream.parse() {
+        return Some(address);
+    }
+    tokio::net::lookup_host(upstream).await.ok()?.next()
 }
 
 fn routing_secret(flags: &Flags) -> Option<Vec<u8>> {
@@ -108,7 +107,7 @@ fn routing_secret(flags: &Flags) -> Option<Vec<u8>> {
 }
 
 fn tcp_routing_prefix(flags: &Flags) -> bool {
-    decoy_upstream(flags).is_some() && !flags.camouflage_config().sni_routing
+    !flags.camouflage_config().sni_routing && !flags.camouflage_config().tcp_decoy().is_empty()
 }
 
 fn tcp_routing_record(cid: &[u8; QUIC_ROUTING_CID_BYTES]) -> [u8; TCP_ROUTING_RECORD_LEN] {
@@ -653,7 +652,7 @@ async fn accept_inner(
         tracing::warn!(?error, "set_nodelay fail in HTTP/2 accept");
     }
     let peer_addr = stream.peer_addr()?;
-    if let Some(upstream) = decoy_upstream(flags).filter(|_| tcp_routing_prefix(flags)) {
+    if tcp_routing_prefix(flags) {
         let secret = routing_secret(flags).ok_or_else(|| {
             TunnelError::InternalError(
                 "HTTP/2 decoy passthrough requires quic_admission_secret".to_owned(),
@@ -665,7 +664,7 @@ async fn accept_inner(
             stream.read_exact(&mut header),
         )
         .await??;
-        if is_tcp_routing_record(&header) {
+        let prefix = if is_tcp_routing_record(&header) {
             let mut marker = [0_u8; QUIC_ROUTING_CID_BYTES];
             tokio::time::timeout(
                 super::decoy::CONNECT_TIMEOUT,
@@ -676,11 +675,18 @@ async fn accept_inner(
                 let mut prefix = [0_u8; TCP_ROUTING_RECORD_LEN];
                 prefix[..5].copy_from_slice(&header);
                 prefix[5..].copy_from_slice(&marker);
-                spawn_passthrough_tcp(stream, prefix.to_vec(), upstream);
-                return Ok(None);
+                Some(prefix.to_vec())
+            } else {
+                None
             }
         } else {
-            spawn_passthrough_tcp(stream, header.to_vec(), upstream);
+            Some(header.to_vec())
+        };
+        if let Some(prefix) = prefix {
+            let upstream = decoy_upstream(flags).await.ok_or_else(|| {
+                TunnelError::InternalError("HTTP/2 decoy upstream resolution failed".to_owned())
+            })?;
+            spawn_passthrough_tcp(stream, prefix, upstream);
             return Ok(None);
         }
     }
@@ -993,6 +999,11 @@ mod tests {
             .camouflage_config_mut()
             .set_decoy_upstream("127.0.0.1:443".to_owned());
         flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
+        assert!(tcp_routing_prefix(&flags));
+        // Prefix selection must not depend on the client's DNS view of the server's decoy.
+        flags
+            .camouflage_config_mut()
+            .set_decoy_upstream("decoy.invalid:443".to_owned());
         assert!(tcp_routing_prefix(&flags));
         flags.camouflage_config_mut().sni_routing = true;
         assert!(!tcp_routing_prefix(&flags));

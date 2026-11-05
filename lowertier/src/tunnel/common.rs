@@ -41,6 +41,22 @@ pub fn ensure_remote_allowed(
 }
 
 pub fn ensure_local_allowed(policy: &UnderlayPolicy, local: SocketAddr) -> Result<(), TunnelError> {
+    if !policy.has_interface_rules() || policy.denied_ip_rule(local.ip()).is_some() {
+        return ensure_local_allowed_on_interface(policy, local, None);
+    }
+    let interface = policy
+        .has_interface_rules()
+        .then(|| get_interface_name_by_ip(&local.ip()))
+        .flatten();
+    ensure_local_allowed_on_interface(policy, local, interface.as_deref())
+}
+
+/// The caller must resolve the interface in the socket's network namespace.
+pub(crate) fn ensure_local_allowed_on_interface(
+    policy: &UnderlayPolicy,
+    local: SocketAddr,
+    interface: Option<&str>,
+) -> Result<(), TunnelError> {
     if let Some(rule) = policy.denied_ip_rule(local.ip()) {
         return Err(TunnelError::UnderlayPolicyDenied(format!(
             "local address {} matches denied CIDR {}",
@@ -49,13 +65,13 @@ pub fn ensure_local_allowed(policy: &UnderlayPolicy, local: SocketAddr) -> Resul
         )));
     }
     if policy.has_interface_rules() {
-        let interface = get_interface_name_by_ip(&local.ip()).ok_or_else(|| {
+        let interface = interface.ok_or_else(|| {
             TunnelError::UnderlayPolicyDenied(format!(
                 "cannot prove the interface for local address {}",
                 local.ip()
             ))
         })?;
-        if let Some(rule) = policy.denied_interface_rule(&interface) {
+        if let Some(rule) = policy.denied_interface_rule(interface) {
             return Err(TunnelError::UnderlayPolicyDenied(format!(
                 "local address {} belongs to denied interface {}",
                 local.ip(),
@@ -793,6 +809,16 @@ impl Bindable for UdpSocket {
     fn finalize(socket: socket2::Socket) -> Result<Self, TunnelError> {
         size_plain_udp_socket_buffers(&socket);
         Ok(UdpSocket::from_std(socket.into())?)
+    }
+}
+
+impl Bindable for std::net::UdpSocket {
+    const TYPE: socket2::Type = socket2::Type::DGRAM;
+    const PROTOCOL: Option<socket2::Protocol> = Some(socket2::Protocol::UDP);
+
+    fn finalize(socket: socket2::Socket) -> Result<Self, TunnelError> {
+        // The owner selects the buffer policy before registering asynchronous I/O.
+        Ok(socket.into())
     }
 }
 

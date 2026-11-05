@@ -540,7 +540,7 @@ impl OverlayStreamEndpoint {
     pub async fn start(peer_manager: Arc<PeerManager>, accept_input: bool) -> Arc<Self> {
         let seed = (u64::from(peer_manager.my_peer_id()) << 32) | 1;
         let endpoint = Arc::new(Self {
-            cidr_set: Arc::new(CidrSet::new(peer_manager.get_global_ctx())),
+            cidr_set: CidrSet::new(peer_manager.get_global_ctx()),
             route: Arc::new(peer_manager.get_route()),
             peer_manager: peer_manager.clone(),
             sessions: DashMap::new(),

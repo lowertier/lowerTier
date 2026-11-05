@@ -305,7 +305,7 @@ pub struct UdpProxy {
     global_ctx: ArcGlobalCtx,
     peer_manager: Weak<PeerManager>,
 
-    cidr_set: CidrSet,
+    cidr_set: Arc<CidrSet>,
 
     nat_table: Arc<DashMap<UdpNatKey, Arc<UdpNatEntry>>>,
 

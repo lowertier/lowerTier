@@ -192,7 +192,7 @@ fn quic_socket_buffer_target_is_met(
 
 #[cfg(target_os = "linux")]
 fn force_linux_quic_socket_buffer(
-    socket: &UdpSocket,
+    socket: &socket2::SockRef<'_>,
     option: nix::libc::c_int,
     target: usize,
 ) -> std::io::Result<()> {
@@ -221,10 +221,9 @@ fn force_linux_quic_socket_buffer(
 }
 
 fn prepare_quic_udp_socket(
-    socket: UdpSocket,
+    std_socket: std::net::UdpSocket,
     destination: Option<SocketAddr>,
 ) -> Result<std::net::UdpSocket, TunnelError> {
-    let std_socket = socket.into_std()?;
     std_socket.set_nonblocking(true)?;
     if let Some(destination) = destination {
         let destination = match (std_socket.local_addr()?, destination) {
@@ -243,8 +242,7 @@ fn prepare_quic_udp_socket(
     Ok(std_socket)
 }
 
-fn configure_quic_socket_buffers(socket: &UdpSocket) {
-    let socket_ref = socket2::SockRef::from(socket);
+fn configure_quic_socket_buffers(socket_ref: &socket2::SockRef<'_>) {
     let target = quic_socket_buffer_bytes();
     if let Err(error) = socket_ref.set_recv_buffer_size(target) {
         tracing::warn!(
@@ -271,7 +269,7 @@ fn configure_quic_socket_buffers(socket: &UdpSocket) {
         let recv_forced = if quic_socket_buffer_target_is_met(recv_reported, target, true) {
             false
         } else {
-            match force_linux_quic_socket_buffer(socket, nix::libc::SO_RCVBUFFORCE, target) {
+            match force_linux_quic_socket_buffer(socket_ref, nix::libc::SO_RCVBUFFORCE, target) {
                 Ok(()) => {
                     recv_reported = socket_ref.recv_buffer_size().ok();
                     true
@@ -290,7 +288,7 @@ fn configure_quic_socket_buffers(socket: &UdpSocket) {
         let send_forced = if quic_socket_buffer_target_is_met(send_reported, target, true) {
             false
         } else {
-            match force_linux_quic_socket_buffer(socket, nix::libc::SO_SNDBUFFORCE, target) {
+            match force_linux_quic_socket_buffer(socket_ref, nix::libc::SO_SNDBUFFORCE, target) {
                 Ok(()) => {
                     send_reported = socket_ref.send_buffer_size().ok();
                     true
@@ -1206,12 +1204,12 @@ impl QuicEndpointManager {
         socket_mark: Option<u32>,
         destination: Option<SocketAddr>,
     ) -> Result<Endpoint, TunnelError> {
-        let socket = bind::<UdpSocket>()
+        let socket = bind::<std::net::UdpSocket>()
             .addr(addr)
             .only_v6(addr.is_ipv6() && !dual_stack)
             .maybe_socket_mark(socket_mark)
             .call()?;
-        configure_quic_socket_buffers(&socket);
+        configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
         let std_socket = prepare_quic_udp_socket(socket, destination)?;
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
@@ -1376,12 +1374,12 @@ impl QuicEndpointManager {
                 "QUIC decoy mode currently requires IPv4 addresses".to_owned(),
             ));
         }
-        let socket = bind::<UdpSocket>()
+        let socket = bind::<std::net::UdpSocket>()
             .addr(addr)
             .only_v6(false)
             .maybe_socket_mark(mgr.flags.socket_mark)
             .call()?;
-        configure_quic_socket_buffers(&socket);
+        configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
         let std_socket = prepare_quic_udp_socket(socket, None)?;
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
@@ -3882,7 +3880,8 @@ pub(crate) fn discovery_endpoint(
     packets: tokio::sync::broadcast::Sender<crate::common::stun::StunPacket>,
 ) -> Result<(Endpoint, Arc<UdpSocket>), TunnelError> {
     ensure_local_allowed(&global_ctx.get_underlay_policy(), socket.local_addr()?)?;
-    configure_quic_socket_buffers(&socket);
+    let socket = socket.into_std()?;
+    configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
     let runtime = default_runtime()
         .ok_or_else(|| TunnelError::InternalError("no async runtime found".to_owned()))?;
     let socket = prepare_quic_udp_socket(socket, None)?;
@@ -3910,7 +3909,8 @@ fn punched_endpoint(
     server: bool,
 ) -> Result<Endpoint, TunnelError> {
     ensure_local_allowed(&global_ctx.get_underlay_policy(), socket.local_addr()?)?;
-    configure_quic_socket_buffers(&socket);
+    let socket = socket.into_std()?;
+    configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
     let runtime = default_runtime()
         .ok_or_else(|| TunnelError::InternalError("no async runtime found".to_owned()))?;
     let socket = runtime.wrap_udp_socket(prepare_quic_udp_socket(socket, None)?)?;
