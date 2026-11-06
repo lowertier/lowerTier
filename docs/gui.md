@@ -21,13 +21,17 @@ Light and dark themes follow the system setting.
 ## On the lt network
 
 A daemon serves the page on its own overlay address, so allowed peers can open it without SSH forwarding.
+Every joined `lt-` node must expose the Web UI to `10.126.126.0/24` by default.
+The listener uses TCP port `15880` on the node's overlay address.
+API requests require the node's GUI key.
+Keep this setting in the configuration when a node joins the fleet.
 
 ```toml
 [gui]
 enabled = true                    # default; false disables the listener
 port = 15880                      # default
 loopback_port = 15880             # use separate ports for instances on one host
-allow = ["10.144.0.0/24"]         # overlay CIDRs that may connect (with the key)
+allow = ["10.126.126.0/24"]        # lt- peers may connect with the key
 open = ["192.168.51.0/24"]        # CIDRs served without the key
 # key_file = "/etc/lowertier/gui.key"
 ```
