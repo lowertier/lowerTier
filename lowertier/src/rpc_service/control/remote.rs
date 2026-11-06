@@ -698,6 +698,10 @@ fn authorize(
                     || path.starts_with("control.")
                     || path == &"gui"
                     || path.starts_with("gui.")
+                    || path == &"network"
+                    || path.starts_with("network.")
+                    || path == &"identity"
+                    || path.starts_with("identity.")
                     || crate::common::config_schema::OPTIONS.iter().any(|option| {
                         option.kind == crate::common::config_schema::Kind::Path
                             && (option.path == *path
@@ -1024,6 +1028,9 @@ stun_tcp = []
             "gui",
             "gui.open",
             "network.secret_file",
+            "network.secret",
+            "network.name",
+            "identity.private_key",
             "identity.private_key_file",
             "log.dir",
         ] {

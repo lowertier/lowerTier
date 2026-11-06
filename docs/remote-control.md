@@ -80,7 +80,7 @@ Available permissions are `admin`, `status.read`, `config.read`, `config.write`,
 
 `allow` entries have full control.
 The `admin` permission also grants full control, subject to the grant's expiry and session limit.
-Instance creation and changes to control policy, GUI settings, or file paths require full control.
+Instance creation and changes to control policy, network trust, node identity, GUI settings, or file paths require full control.
 Process log changes require permission on every affected instance.
 SSH TCP forwarding requires full control.
 The node checks current permissions on each operation and during periodic session cleanup.
