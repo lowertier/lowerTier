@@ -615,8 +615,9 @@ impl Instance {
         let global_ctx = Arc::new(GlobalCtx::new(config));
 
         tracing::info!(
-            "[INIT] instance creating. config: {}",
-            global_ctx.config.dump()
+            instance = %global_ctx.get_id(),
+            name = %global_ctx.config.get_inst_name(),
+            "Creating the network instance"
         );
 
         let (peer_packet_sender, peer_packet_receiver) = create_packet_recv_chan();

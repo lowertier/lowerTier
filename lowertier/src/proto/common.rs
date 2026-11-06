@@ -486,7 +486,7 @@ impl SecureModeConfig {
             .ok_or_else(|| anyhow::anyhow!("local private key is not set"))?;
         let k = BASE64_STANDARD
             .decode(local_private_key)
-            .with_context(|| format!("failed to decode private key: {}", local_private_key))?;
+            .context("The private key is not valid base64")?;
         // convert vec to 32b array
         let len = k.len();
         let k: [u8; 32] = k

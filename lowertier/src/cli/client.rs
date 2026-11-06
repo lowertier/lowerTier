@@ -234,7 +234,7 @@ pub fn read_token(path: &std::path::Path) -> Result<String> {
     Ok(token)
 }
 
-type Rpc = Box<dyn ControlPlaneV1Rpc<Controller = BaseController> + Send + Sync>;
+pub(super) type Rpc = Box<dyn ControlPlaneV1Rpc<Controller = BaseController> + Send + Sync>;
 
 async fn dial(portal: &str) -> Result<(StandAloneClient<TcpTunnelConnector>, Rpc)> {
     let unreachable = || {
@@ -265,6 +265,7 @@ async fn dial(portal: &str) -> Result<(StandAloneClient<TcpTunnelConnector>, Rpc
 }
 
 pub struct Client {
+    remote: Option<super::remote::Options>,
     pub rpc: Rpc,
     pub meta: RequestMeta,
     pub target: Target,
@@ -277,6 +278,22 @@ pub struct Client {
 impl Client {
     pub async fn connect(args: &Arguments, request_id: String) -> Result<Self> {
         let mut client = Self::open(args, target(args)?, request_id).await?;
+        if let Some(target) = &args.remote {
+            client.meta.instance_id = client
+                .select_instance(args.via_instance.as_deref())
+                .await?
+                .0;
+            let options = super::remote::Options {
+                target: target.clone(),
+                secret: super::remote::read_secret(args)?,
+                meta: client.meta.clone(),
+            };
+            client.rpc = super::remote::wrap(client.rpc, options.clone());
+            client.remote = Some(options);
+            client.meta.instance_id.clear();
+            client.meta.control_token.clear();
+            client.meta.admin_token = "remote-policy".into();
+        }
         if !args.command.process_resource() {
             let (id, name) = client.select_instance(args.instance.as_deref()).await?;
             client.meta.instance_id = id;
@@ -309,6 +326,7 @@ impl Client {
         };
         let (transport, rpc) = dial(&target.portal).await?;
         Ok(Self {
+            remote: None,
             rpc,
             meta: RequestMeta {
                 instance_id: String::new(),
@@ -325,7 +343,12 @@ impl Client {
     /// Open a new connection to the same daemon and instance.
     pub async fn reconnect(&self) -> Result<Self> {
         let (transport, rpc) = dial(&self.target.portal).await?;
+        let rpc = match &self.remote {
+            Some(options) => super::remote::wrap(rpc, options.clone()),
+            None => rpc,
+        };
         let mut client = Self {
+            remote: self.remote.clone(),
             rpc,
             meta: self.meta.clone(),
             target: Target {

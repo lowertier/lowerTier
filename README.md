@@ -246,12 +246,20 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `node.hostname` | string | - | live | Name shown to peers. Defaults to the system host name. |
 | `node.instance_name` | string | `default` | restart | Local instance name. Distinguishes instances in one process. |
 | `node.instance_id` | string | - | restart | Stable instance UUID. Generated when absent. |
+| `node.enabled` | bool | `true` | live | Run the instance. False keeps its configuration available for management. |
 | `node.netns` | string | - | restart | Linux network namespace to run in. |
 | `node.threads` | integer | `2` | restart | Runtime worker threads. 1 runs single-threaded. |
 | `control.portal` | string | `127.0.0.1:15888` | process restart | Loopback management portal. Default 127.0.0.1:15888, or a free port up to 15899. |
 | `control.portal_allow` | string list | - | process restart | Extra CIDRs admitted to the portal in addition to loopback. |
 | `control.token_file` | path | - | process restart | Control token file. Created with mode 0600 when absent. |
 | `control.token_group` | string | - | process restart | Unix group that may read the token file (mode 0640). |
+| `control.default` | string | - | live | Pinned alias of the default controller. |
+| `control.allow` | string list | - | live | Keys, aliases, groups, or authenticated network members with full control. |
+| `control.keys` | table | - | live | Local aliases that pin complete X25519 public keys. |
+| `control.groups` | table | - | live | Local groups of pinned aliases. |
+| `control.secret` | secret string | - | live | Optional phrase or random key for remote control. |
+| `control.secret_file` | path | - | live | Protected file that contains the control phrase. |
+| `control.grant` | table list | - | live | Permissions, configuration paths, SSH accounts, and session limits. |
 | `identity.private_key` | secret string | - | restart | Base64 X25519 private key. Generated when absent. |
 | `identity.private_key_file` | path | - | restart | File that holds identity.private_key. |
 | `identity.public_key` | string | - | restart | Base64 X25519 public key. Must match the private key. |
@@ -624,10 +632,15 @@ A running node records its portal and token file, so the commands find it withou
 | `service install -- ARGS` | Register `lowertier run ARGS` with the system service manager. |
 
 `set`, `unset`, and `edit` save the change to the node's configuration file.
-`--no-persist` changes the running node only.
+`--no-persist` is rejected.
 Each change reports whether it applied now, applies to new connections, or waits for an instance restart.
-Changes that need a restart are refused unless `--stage` stores them; `lowertier instance stop` and `start` then apply them.
+Changes that need a restart require `--stage` locally. The file monitor then restarts the affected instance or process.
+Remote changes stage required restarts automatically.
 `--expected-revision N` refuses the change if the configuration moved on.
+
+Nodes can grant remote control and SSH access to pinned public keys or a control phrase.
+Aliases keep public keys out of command lines and permission lists.
+See [remote control and SSH](docs/remote-control.md) for configuration, granular permissions, and automatic file reloads.
 
 ```bash
 lowertier set relay.policy=latency relay.transit_bps_limit=50Mbit

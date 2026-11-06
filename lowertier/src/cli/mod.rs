@@ -2,6 +2,7 @@ pub mod args;
 pub(crate) mod client;
 pub(crate) mod commands;
 pub(crate) mod error;
+mod remote;
 pub(crate) mod render;
 
 use args::{Arguments, Command, ConfigCommand, GuiArgs, Output, PageArgs};
@@ -137,6 +138,21 @@ async fn gui_serve(_: &Arguments, _: &GuiArgs) -> Result<()> {
 }
 
 async fn dispatch(args: &Arguments, request_id: &str) -> u8 {
+    if let Command::Ssh {
+        target,
+        tty,
+        command,
+    } = &args.command
+    {
+        return match remote::ssh(args, request_id, target, *tty, command).await {
+            Ok(code) => code,
+            Err(error) => {
+                let code = error.exit_code();
+                let _ = render::write_error(args.output, request_id, "", &error);
+                code
+            }
+        };
+    }
     if let Command::Completion { shell } = &args.command {
         return match render::completion(shell, args.output, request_id) {
             Ok(()) => 0,

@@ -29,6 +29,13 @@ pub async fn execute(client: &Client, command: Option<&AclCommand>) -> Result<Re
                 .await?,
         ),
         AclCommand::Set { file, apply } => {
+            if apply.no_persist {
+                return Err(CliError::new(
+                    "invalid_argument",
+                    "ACL changes must be saved. Remove --no-persist.",
+                    "no_persist",
+                ));
+            }
             if apply.stage {
                 return Err(CliError::new(
                     "invalid_argument",

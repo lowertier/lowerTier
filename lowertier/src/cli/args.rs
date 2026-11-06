@@ -19,6 +19,15 @@ const GLOBAL: &str = "Global options";
                   `lowertier config explain` lists every configuration option."
 )]
 pub struct Arguments {
+    /// Remote node public key or pinned control.keys alias. Use default for control.default.
+    #[arg(long, global = true, help_heading = GLOBAL)]
+    pub remote: Option<String>,
+    /// Local source instance for a remote operation.
+    #[arg(long, global = true, help_heading = GLOBAL)]
+    pub via_instance: Option<String>,
+    /// Protected file containing the remote node's control phrase or key.
+    #[arg(long, global = true, help_heading = GLOBAL)]
+    pub remote_secret_file: Option<PathBuf>,
     /// Daemon to manage, by name or PID (see `lowertier nodes`).
     #[arg(short = 'n', long, global = true, help_heading = GLOBAL)]
     pub node: Option<String>,
@@ -54,6 +63,17 @@ pub struct Arguments {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Open an SSH session through authenticated LowTier peer connections.
+    Ssh {
+        /// Existing OS account and pinned node alias, for example deploy@server.
+        target: String,
+        /// Request a terminal for the command.
+        #[arg(short = 't', long)]
+        tty: bool,
+        /// Command and arguments. Omit to open a login shell.
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
     /// Write a new node configuration with a generated secret and key.
     Init(InitArgs),
     /// Run a node in the foreground.

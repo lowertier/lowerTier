@@ -68,6 +68,7 @@ pub async fn execute(client: &Client, command: &Command) -> Result<Response> {
         | Command::Top(_)
         | Command::Gui(_)
         | Command::Service(_)
-        | Command::Completion { .. } => unreachable!("handled before connecting"),
+        | Command::Completion { .. }
+        | Command::Ssh { .. } => unreachable!("handled before connecting"),
     }
 }

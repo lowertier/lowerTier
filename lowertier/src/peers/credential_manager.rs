@@ -162,6 +162,7 @@ pub enum CredentialError {
     IssuerUnavailable,
     FutureTimestamp,
     DuplicatePolicyValue,
+    StorageUnavailable,
 }
 
 impl std::fmt::Display for CredentialError {
@@ -423,8 +424,11 @@ impl CredentialManager {
                 created_at_unix: now,
             },
         );
+        if let Err(error) = self.persist_store(&store) {
+            store.credentials.remove(&id);
+            return Err(error);
+        }
         drop(store);
-        self.save_to_disk();
         Ok((id, encoded))
     }
 
@@ -538,10 +542,17 @@ impl CredentialManager {
             .checked_add(1)
             .ok_or(CredentialError::InvalidStateVersion)?;
         store.credentials.remove(credential_id);
-        store.revoked_certificate_ids.insert(entry.certificate_id);
+        store
+            .revoked_certificate_ids
+            .insert(entry.certificate_id.clone());
         store.revocation_state_version = next_version;
+        if let Err(error) = self.persist_store(&store) {
+            store.revocation_state_version = next_version - 1;
+            store.revoked_certificate_ids.remove(&entry.certificate_id);
+            store.credentials.insert(credential_id.to_owned(), entry);
+            return Err(error);
+        }
         drop(store);
-        self.save_to_disk();
         Ok(true)
     }
 
@@ -838,22 +849,20 @@ impl CredentialManager {
             || !is_canonical_strings(&certificate.groups)
             || !is_canonical_strings(&certificate.allowed_proxy_cidrs)
         {
-            return Err(
-                if certificate.expiry_unix <= now {
-                    CredentialError::Expired
-                } else if certificate.issued_unix > now.saturating_add(MAX_FUTURE_SKEW) {
-                    CredentialError::FutureTimestamp
-                } else if certificate.expiry_unix <= certificate.issued_unix
-                    || certificate
-                        .expiry_unix
-                        .saturating_sub(certificate.issued_unix)
-                        > MAX_CREDENTIAL_TTL.as_secs() as i64
-                {
-                    CredentialError::InvalidLifetime
-                } else {
-                    CredentialError::InvalidBundle
-                },
-            );
+            return Err(if certificate.expiry_unix <= now {
+                CredentialError::Expired
+            } else if certificate.issued_unix > now.saturating_add(MAX_FUTURE_SKEW) {
+                CredentialError::FutureTimestamp
+            } else if certificate.expiry_unix <= certificate.issued_unix
+                || certificate
+                    .expiry_unix
+                    .saturating_sub(certificate.issued_unix)
+                    > MAX_CREDENTIAL_TTL.as_secs() as i64
+            {
+                CredentialError::InvalidLifetime
+            } else {
+                CredentialError::InvalidBundle
+            });
         }
         if let Some(pinned) = pinned_root_fingerprint
             && pinned != certificate.root_fingerprint.as_slice()
@@ -1121,6 +1130,15 @@ impl CredentialManager {
             .unwrap()
             .revoked_certificate_ids
             .contains(certificate_id)
+    }
+
+    fn persist_store(&self, store: &CredentialStore) -> Result<(), CredentialError> {
+        let Some(path) = &self.storage_path else {
+            return Ok(());
+        };
+        let json =
+            serde_json::to_vec_pretty(store).map_err(|_| CredentialError::StorageUnavailable)?;
+        Self::write_private_file(path, &json).map_err(|_| CredentialError::StorageUnavailable)
     }
 
     fn save_to_disk(&self) {

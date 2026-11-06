@@ -20,7 +20,12 @@ pub(crate) type StatsCache = Arc<
 pub(crate) mod config;
 mod instance;
 pub(crate) mod logs;
+pub(crate) mod maintenance;
+pub mod policy;
 mod read;
+pub(crate) mod remote;
+#[cfg(unix)]
+mod ssh;
 pub(crate) mod token;
 mod watch;
 pub use instance::ControlInstance;
@@ -32,6 +37,7 @@ pub struct ControlPlaneService {
     token: Option<Arc<ControlToken>>,
     epoch: uuid::Uuid,
     externally_locked: bool,
+    from_file: bool,
     stats: StatsCache,
 }
 
@@ -68,6 +74,7 @@ impl ControlPlaneService {
             token: Some(Arc::new(token)),
             epoch: *std::sync::LazyLock::force(&watch::PROCESS_EPOCH),
             externally_locked: false,
+            from_file: false,
         }
     }
 
@@ -78,6 +85,7 @@ impl ControlPlaneService {
             token: None,
             epoch: *std::sync::LazyLock::force(&watch::PROCESS_EPOCH),
             externally_locked: false,
+            from_file: false,
         }
     }
 
@@ -208,6 +216,7 @@ macro_rules! control_service {
 }
 
 control_service! {
+    call_remote, CallRemoteRequest, CallRemoteResponse, call_remote_inner;
     list_instances, ListInstancesRequest, ListInstancesResponse, list_instances_inner;
     get_node, GetNodeRequest, GetNodeResponse, get_node_inner;
     list_peers, ListPeersRequest, ListPeersResponse, list_peers_inner;
@@ -492,6 +501,12 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
             .await
             .unwrap();
         assert_eq!(stale.error.unwrap().code, "conflict");
+        let editable = manager.get_instance_config_control(&ids[0]).unwrap();
+        let mut read_only = editable.clone();
+        read_only.set_read_only(true);
+        manager
+            .set_instance_file_control(ids[0], read_only)
+            .unwrap();
         let patch = ConfigPatch {
             expected_revision: 2,
             field_mask: vec!["node.hostname".into()],
@@ -510,6 +525,7 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
             .await
             .unwrap();
         assert!(failed.error.is_some());
+        manager.set_instance_file_control(ids[0], editable).unwrap();
         let patch = ConfigPatch {
             expected_revision: 2,
             field_mask: vec!["transport.listen".into()],
@@ -517,16 +533,20 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
             ..Default::default()
         };
         let rejected = service
-            .patch_config(
+            .validate_config(
                 BaseController::default(),
-                PatchConfigRequest {
+                ValidateConfigRequest {
                     meta: meta.clone(),
                     patch: Some(patch.clone()),
                 },
             )
             .await
             .unwrap();
-        assert_eq!(rejected.error.unwrap().code, "restart_required");
+        assert!(rejected.error.is_none());
+        assert_eq!(
+            rejected.result.unwrap().restart_fields,
+            vec!["transport.listen"]
+        );
         let staged = service
             .patch_config(
                 BaseController::default(),

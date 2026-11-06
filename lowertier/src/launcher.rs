@@ -512,6 +512,10 @@ impl NetworkInstance {
         &self.config_file_control
     }
 
+    pub(crate) fn set_config_file_control(&mut self, control: ConfigFileControl) {
+        self.config_file_control = control;
+    }
+
     pub fn get_config(&self) -> TomlConfigLoader {
         self.config.clone()
     }

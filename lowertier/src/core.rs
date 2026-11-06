@@ -192,6 +192,7 @@ async fn run_main(options: RunOptions) -> anyhow::Result<()> {
 
     let manager =
         Arc::new(NetworkInstanceManager::new().with_config_path(options.config_dir.clone()));
+    *manager.process_owner.lock().unwrap() = configs.first().map(|(config, _)| config.get_id());
     let portal_allow = control
         .portal_allow
         .iter()
@@ -249,6 +250,10 @@ async fn run_main(options: RunOptions) -> anyhow::Result<()> {
     let sigterm = std::future::pending::<()>();
 
     tokio::select! {
+        _ = manager.process_restart.notified() => {
+            for id in manager.list_network_instance_ids() { manager.stop_network_instance(id).await?; }
+            log::info!("Restarting the process to apply persisted configuration");
+        }
         _ = manager.wait() => {
             let infos = manager.collect_network_infos().await?;
             if infos
@@ -433,7 +438,7 @@ pub async fn run(options: RunOptions) -> ExitCode {
     let _monitor = std::thread::spawn(move || memory_monitor(force_dump));
 
     let mut ret_code = 0;
-    if let Err(error) = run_main(options).await {
+    if let Err(error) = run_main(options.clone()).await {
         eprintln!("error: {error:#}");
         log::error!(%error);
         ret_code = 1;
@@ -441,6 +446,34 @@ pub async fn run(options: RunOptions) -> ExitCode {
 
     log::info!("Stopping lowertier...");
     set_prof_active(false);
+
+    #[cfg(unix)]
+    if let Some(files) = crate::rpc_service::control::maintenance::RESTART_FILES
+        .lock()
+        .unwrap()
+        .take()
+    {
+        use std::os::unix::process::CommandExt;
+        match std::env::current_exe() {
+            Ok(executable) => {
+                let mut command = std::process::Command::new(executable);
+                command.arg("run");
+                for file in files {
+                    command.arg("-c").arg(file);
+                }
+                if options.daemon {
+                    command.arg("--daemon");
+                }
+                let error = command.exec();
+                eprintln!("error: Cannot restart the process: {error}");
+                ret_code = 1;
+            }
+            Err(error) => {
+                eprintln!("error: Cannot find the process executable: {error}");
+                ret_code = 1;
+            }
+        }
+    }
 
     ExitCode::from(ret_code)
 }

@@ -11,6 +11,8 @@ use toml::{Table, Value};
 /// `lowertier get` output: values in the public TOML layout.
 #[derive(Serialize)]
 pub struct ConfigView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reload_error: Option<String>,
     pub path: Option<String>,
     pub revision: u64,
     pub active: Option<Value>,
@@ -83,11 +85,18 @@ pub async fn patch_noting(
     apply: &ApplyArgs,
     revision: Option<u64>,
 ) -> Result<(Response, Option<String>)> {
+    if apply.no_persist {
+        return Err(CliError::new(
+            "invalid_argument",
+            "Configuration changes must be saved. Remove --no-persist.",
+            "no_persist",
+        ));
+    }
     let revision = match revision {
         Some(revision) => revision,
         None => client.revision(apply.expected_revision).await?,
     };
-    let mut patch = ConfigPatch {
+    let patch = ConfigPatch {
         expected_revision: revision,
         field_mask: mask,
         values: Some(NodeConfig {
@@ -110,20 +119,8 @@ pub async fn patch_noting(
             )
             .await
     };
-    let mut response = send(patch.clone()).await?;
-    let mut unsaved = None;
-    // Nodes started from --set values or read-only files have nothing to persist to.
-    if patch.persist
-        && response
-            .error
-            .as_ref()
-            .is_some_and(|error| error.field_path == "patch.persist")
-    {
-        unsaved = Some(response.error.take().unwrap().message);
-        patch.persist = false;
-        response = send(patch).await?;
-    }
-    Ok((checked(response)?, unsaved))
+    let response = send(patch).await?;
+    Ok((checked(response)?, None))
 }
 
 pub async fn get(client: &Client, path: Option<&str>) -> Result<Response> {
@@ -160,6 +157,7 @@ pub async fn get(client: &Client, path: Option<&str>) -> Result<Response> {
         ));
     }
     Ok(Response::Config(ConfigView {
+        reload_error: (!config.reload_error.is_empty()).then_some(config.reload_error),
         path: path.map(str::to_owned),
         revision: config.snapshot.map_or(0, |snapshot| snapshot.revision),
         desired: (desired_value != active_value)

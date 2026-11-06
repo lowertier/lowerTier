@@ -36,6 +36,11 @@ impl Drop for DaemonGuard {
 }
 
 pub struct NetworkInstanceManager {
+    #[cfg(test)]
+    pub(crate) temporary_configs: tempfile::TempDir,
+    pub(crate) process_restart: tokio::sync::Notify,
+    pub(crate) process_owner: std::sync::Mutex<Option<uuid::Uuid>>,
+    pub(crate) remote_control: crate::rpc_service::control::remote::Hub,
     #[cfg(feature = "gui")]
     gui_endpoint: std::sync::Mutex<Option<GuiEndpoint>>,
     #[cfg(feature = "gui")]
@@ -50,6 +55,7 @@ pub struct NetworkInstanceManager {
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) control_configs:
         std::sync::Mutex<BTreeMap<uuid::Uuid, crate::rpc_service::control::config::ConfigState>>,
+    pub(crate) reload_errors: std::sync::Mutex<BTreeMap<uuid::Uuid, String>>,
     /// Instances stopped through the control API keep the process alive so they can start again.
     stopped_holds: DashMap<uuid::Uuid, DaemonGuard>,
 }
@@ -63,6 +69,11 @@ impl Default for NetworkInstanceManager {
 impl NetworkInstanceManager {
     pub fn new() -> Self {
         NetworkInstanceManager {
+            #[cfg(test)]
+            temporary_configs: tempfile::tempdir().expect("create test configuration directory"),
+            process_restart: tokio::sync::Notify::new(),
+            process_owner: Default::default(),
+            remote_control: Default::default(),
             #[cfg(feature = "gui")]
             gui_endpoint: std::sync::Mutex::new(None),
             #[cfg(feature = "gui")]
@@ -76,6 +87,7 @@ impl NetworkInstanceManager {
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             control_configs: std::sync::Mutex::new(BTreeMap::new()),
+            reload_errors: Default::default(),
             stopped_holds: DashMap::new(),
         }
     }
@@ -194,6 +206,11 @@ impl NetworkInstanceManager {
         config_file_control: ConfigFileControl,
     ) -> Result<uuid::Uuid, anyhow::Error> {
         let instance_id = cfg.get_id();
+        if !cfg.get_enabled() {
+            let id = self.create_network_instance(cfg, config_file_control)?;
+            self.hold_stopped(id);
+            return Ok(id);
+        }
         if self.instance_map.contains_key(&instance_id) {
             anyhow::bail!("instance {} already exists", instance_id);
         }
@@ -459,6 +476,19 @@ impl NetworkInstanceManager {
             .try_send(Some(fd))
             .map_err(|e| anyhow::anyhow!("failed to send tun fd: {}", e))?;
 
+        Ok(())
+    }
+
+    pub(crate) fn set_instance_file_control(
+        &self,
+        id: uuid::Uuid,
+        mut control: ConfigFileControl,
+    ) -> anyhow::Result<()> {
+        control.expected_exists |= control.path.as_ref().is_some_and(|path| path.exists());
+        self.instance_map
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("The instance does not exist"))?
+            .set_config_file_control(control);
         Ok(())
     }
 

@@ -834,6 +834,7 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
+    enabled: Option<bool>,
     control: Option<ControlConfig>,
     gui: Option<GuiConfig>,
     relay: Option<RelayConfig>,
@@ -930,13 +931,39 @@ pub struct TomlConfigLoader {
 }
 
 /// Process-wide management settings from `[control]`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlConfig {
     pub portal: Option<String>,
     pub portal_allow: Option<Vec<String>>,
     pub token_file: Option<PathBuf>,
     pub token_group: Option<String>,
+    pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub groups: std::collections::BTreeMap<String, Vec<String>>,
+    pub secret: Option<String>,
+    pub secret_file: Option<PathBuf>,
+    #[serde(skip)]
+    pub(crate) resolved_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant: Vec<crate::rpc_service::control::policy::Grant>,
+}
+
+impl std::fmt::Debug for ControlConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlConfig")
+            .field("default", &self.default)
+            .field("allow", &self.allow)
+            .field("keys", &self.keys)
+            .field("groups", &self.groups)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field("grant", &self.grant)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Browser interface served on loopback and this instance's overlay address, from `[gui]`.
@@ -995,6 +1022,23 @@ impl Default for TomlConfigLoader {
 }
 
 impl TomlConfigLoader {
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            config: Arc::new(Mutex::new(self.config.lock().unwrap().clone())),
+        }
+    }
+
+    pub(crate) fn runtime_projection(
+        public: &toml::Table,
+        active: &Self,
+        desired: &Self,
+    ) -> anyhow::Result<Self> {
+        let internal = super::config_schema::to_internal(public)?;
+        let config: Config = toml::Value::Table(internal).try_into()?;
+        let cached = active.config.lock().unwrap().clone();
+        Self::new_from_config_cached(config, Some(&cached), Some(&desired.get_control_config()))
+    }
+
     pub(crate) fn replace_active(&self, candidate: &Self) {
         let config = candidate.config.lock().unwrap().clone();
         *self.config.lock().unwrap() = config;
@@ -1051,16 +1095,56 @@ impl TomlConfigLoader {
             .map_err(|err| anyhow::anyhow!("failed to load config from {source_name}: {err:#}"))
     }
 
-    fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
+    fn new_from_config(config: Config) -> Result<Self, anyhow::Error> {
+        Self::new_from_config_cached(config, None, None)
+    }
+
+    fn new_from_config_cached(
+        mut config: Config,
+        cached: Option<&Config>,
+        control_cache: Option<&ControlConfig>,
+    ) -> Result<Self, anyhow::Error> {
+        if let Some(control) = config.control.as_mut() {
+            if let Some(path) = &control.secret_file {
+                anyhow::ensure!(
+                    control.secret.is_none(),
+                    "Use control.secret or control.secret_file, not both"
+                );
+                control.resolved_secret = Some(
+                    match control_cache
+                        .filter(|previous| previous.secret_file.as_ref() == Some(path))
+                    {
+                        Some(previous) => previous
+                            .secret_value()?
+                            .context("The cached control secret is missing")?,
+                        None => read_secret_file(path, "control.secret_file")?,
+                    },
+                );
+            }
+            control.validate()?;
+        }
         if let Some(path) = &config.network_secret_file {
-            let secret = read_secret_file(path, "network.secret_file")?;
+            let secret = match cached
+                .filter(|previous| previous.network_secret_file.as_ref() == Some(path))
+                .and_then(|previous| previous.network_identity.as_ref()?.network_secret.clone())
+            {
+                Some(secret) => secret,
+                None => read_secret_file(path, "network.secret_file")?,
+            };
             config
                 .network_identity
                 .get_or_insert_with(NetworkIdentity::default)
                 .network_secret = Some(secret);
         }
         if let Some(path) = &config.private_key_file {
-            let key = read_secret_file(path, "identity.private_key_file")?;
+            // Active sessions retain their loaded key until the instance restarts.
+            let key = match cached
+                .filter(|previous| previous.private_key_file.as_ref() == Some(path))
+                .and_then(|previous| previous.secure_mode.as_ref()?.local_private_key.clone())
+            {
+                Some(key) => key,
+                None => read_secret_file(path, "identity.private_key_file")?,
+            };
             let secure_mode = config.secure_mode.get_or_insert_with(Default::default);
             secure_mode.enabled = true;
             secure_mode.local_private_key = Some(key);
@@ -1206,6 +1290,14 @@ impl TomlConfigLoader {
             .control
             .clone()
             .unwrap_or_default()
+    }
+
+    pub fn get_enabled(&self) -> bool {
+        self.config.lock().unwrap().enabled.unwrap_or(true)
+    }
+
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        self.config.lock().unwrap().enabled = Some(enabled);
     }
 
     pub fn get_gui_config(&self) -> GuiConfig {
@@ -1699,18 +1791,28 @@ impl std::fmt::Debug for ConfigFilePermission {
 pub struct ConfigFileControl {
     pub path: Option<PathBuf>,
     pub permission: ConfigFilePermission,
+    pub(crate) expected_exists: bool,
+    pub(crate) reload_enabled: bool,
 }
 
 impl ConfigFileControl {
     pub const STATIC_CONFIG: ConfigFileControl = Self {
         path: None,
+        expected_exists: false,
+        reload_enabled: true,
         permission: ConfigFilePermission(
             ConfigFilePermission::READ_ONLY | ConfigFilePermission::NO_DELETE,
         ),
     };
 
     pub fn new(path: Option<PathBuf>, permission: ConfigFilePermission) -> Self {
-        ConfigFileControl { path, permission }
+        let expected_exists = path.as_ref().is_some_and(|path| path.exists());
+        ConfigFileControl {
+            path,
+            permission,
+            expected_exists,
+            reload_enabled: true,
+        }
     }
 
     pub async fn from_path(path: PathBuf) -> Self {
@@ -1793,6 +1895,7 @@ pub async fn load_config_from_file(
     let mut control = ConfigFileControl::from_path(config_file.clone()).await;
 
     if uses_env_vars || !sets.is_empty() {
+        control.reload_enabled = sets.is_empty();
         control.set_read_only(true);
         control.set_no_delete(true);
         tracing::info!(

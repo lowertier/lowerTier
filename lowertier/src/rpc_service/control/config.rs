@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::BTreeSet;
 
 use serde_json::Value;
@@ -65,7 +66,7 @@ fn set_path(document: &mut Value, path: &str, value: Option<Value>) {
 }
 
 /// The configuration as a JSON object in the public TOML layout.
-fn document(config: &TomlConfigLoader) -> anyhow::Result<Value> {
+pub(super) fn document(config: &TomlConfigLoader) -> anyhow::Result<Value> {
     Ok(serde_json::to_value(config.dump().parse::<toml::Table>()?)?)
 }
 
@@ -84,7 +85,7 @@ fn values_document(values: Option<&NodeConfig>) -> anyhow::Result<Value> {
     Ok(serde_json::to_value(table)?)
 }
 
-fn node_config(document: &Value) -> anyhow::Result<NodeConfig> {
+pub(super) fn node_config(document: &Value) -> anyhow::Result<NodeConfig> {
     let table = toml::Table::try_from(document)?;
     Ok(NodeConfig {
         toml: toml::to_string_pretty(&table)?,
@@ -171,7 +172,7 @@ fn valid_path(path: &str) -> anyhow::Result<()> {
     }
 }
 
-fn is_process_path(path: &str) -> bool {
+pub(super) fn is_process_path(path: &str) -> bool {
     governing(path).is_some_and(|spec| spec.apply == Apply::Process)
 }
 
@@ -184,8 +185,12 @@ fn contains_placeholder(value: &Value) -> bool {
     }
 }
 
-fn changed_paths(before: &Value, after: &Value, path: &str, changed: &mut Vec<String>) {
+pub(super) fn changed_paths(before: &Value, after: &Value, path: &str, changed: &mut Vec<String>) {
     if before == after {
+        return;
+    }
+    if config_schema::lookup(path).is_some_and(|spec| spec.kind == Kind::Table) {
+        changed.push(path.to_owned());
         return;
     }
     if before.is_object() || after.is_object() {
@@ -388,6 +393,18 @@ fn desired_forwards(desired: Option<&NodeConfig>) -> anyhow::Result<Vec<Value>> 
 }
 
 fn validate_values(config: &TomlConfigLoader, document: &Value) -> anyhow::Result<()> {
+    if let Some(level) = config.get_log_config().console {
+        if !matches!(
+            level.as_str(),
+            "off" | "error" | "warn" | "info" | "debug" | "trace"
+        ) {
+            return Err(failure(
+                "INVALID_ARGUMENT",
+                "The log level is invalid.",
+                "log.console",
+            ));
+        }
+    }
     for (path, kind) in [
         ("address.ipv4", 4),
         ("address.ipv6", 6),
@@ -480,7 +497,18 @@ fn validate_values(config: &TomlConfigLoader, document: &Value) -> anyhow::Resul
     Ok(())
 }
 
-fn persist(config: &TomlConfigLoader, control: &ConfigFileControl) -> anyhow::Result<()> {
+pub(super) fn persist(
+    config: &TomlConfigLoader,
+    control: &ConfigFileControl,
+) -> anyhow::Result<()> {
+    persist_change(config, control, None)
+}
+
+pub(super) fn persist_change(
+    config: &TomlConfigLoader,
+    control: &ConfigFileControl,
+    previous: Option<&TomlConfigLoader>,
+) -> anyhow::Result<()> {
     use std::io::Write;
     if control.is_read_only() {
         return Err(failure(
@@ -527,8 +555,34 @@ fn persist(config: &TomlConfigLoader, control: &ConfigFileControl) -> anyhow::Re
         super::token::secure_windows_token(&path)?;
         tempfile::NamedTempFile::from_parts(file, path)
     };
+    let source = previous
+        .map(|_| std::fs::read_to_string(path))
+        .transpose()
+        .map_err(|_| {
+            failure(
+                "CONFLICT",
+                "The configuration file is unavailable. Correct the external edit before retrying.",
+                "patch.persist",
+            )
+        })?;
+    let rendered = match previous {
+        Some(previous) => render_change(source.as_deref().unwrap(), previous, config)?,
+        None => config.dump(),
+    };
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        nix::unistd::fchown(
+            temporary.as_file().as_raw_fd(),
+            Some(metadata.uid().into()),
+            Some(metadata.gid().into()),
+        )?;
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())?;
+    }
     temporary
-        .write_all(config.dump().as_bytes())
+        .write_all(rendered.as_bytes())
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|_| {
             failure(
@@ -537,6 +591,15 @@ fn persist(config: &TomlConfigLoader, control: &ConfigFileControl) -> anyhow::Re
                 "patch.persist",
             )
         })?;
+    if let Some(source) = source {
+        if std::fs::read_to_string(path).ok().as_ref() != Some(&source) {
+            return Err(failure(
+                "CONFLICT",
+                "The configuration file changed during the update.",
+                "patch.expected_revision",
+            ));
+        }
+    }
     #[cfg(not(windows))]
     temporary.persist(path).map_err(|_| {
         failure(
@@ -554,6 +617,106 @@ fn persist(config: &TomlConfigLoader, control: &ConfigFileControl) -> anyhow::Re
         )
     })?;
     Ok(())
+}
+
+pub(super) fn retain_identity(raw: &mut toml::Table, active: &TomlConfigLoader) {
+    let has_key = raw.get("identity").is_some_and(|identity| {
+        identity.get("private_key").is_some() || identity.get("private_key_file").is_some()
+    });
+    let has_credential = raw
+        .get("network")
+        .is_some_and(|network| network.get("credential").is_some());
+    if !has_key && !has_credential {
+        if let Some(mode) = active.get_secure_mode() {
+            for (field, value) in [
+                ("identity.private_key", mode.local_private_key),
+                ("identity.public_key", mode.local_public_key),
+            ] {
+                if let Some(value) = value {
+                    config_schema::set(raw, field, toml::Value::String(value));
+                }
+            }
+        }
+    }
+}
+
+fn render_change(
+    source: &str,
+    before: &TomlConfigLoader,
+    after: &TomlConfigLoader,
+) -> anyhow::Result<String> {
+    let conflict = || {
+        failure(
+            "CONFLICT",
+            "The configuration file changed outside the control API. Wait for reload, then retry.",
+            "patch.expected_revision",
+        )
+    };
+    let mut raw = source.parse::<toml::Table>().map_err(|_| conflict())?;
+    retain_identity(&mut raw, before);
+    let stored =
+        TomlConfigLoader::new_from_table("configuration file", &raw).map_err(|_| conflict())?;
+    if raw
+        .get("node")
+        .and_then(|node| node.get("instance_id"))
+        .is_none()
+    {
+        stored.set_id(before.get_id());
+    }
+    if document(&stored)? != document(before)? {
+        return Err(conflict());
+    }
+    let mut original = source.parse::<toml_edit::DocumentMut>()?;
+    let replacement = after.dump().parse::<toml_edit::DocumentMut>()?;
+    let after_document = document(after)?;
+    let mut paths = Vec::new();
+    changed_paths(&document(before)?, &after_document, "", &mut paths);
+    for path in [
+        "node.instance_id",
+        "identity.private_key",
+        "identity.public_key",
+    ] {
+        let mut item = original.as_item();
+        for part in path.split('.') {
+            item = item.get(part).unwrap_or(&toml_edit::Item::None);
+        }
+        if item.is_none()
+            && after_document.pointer(&pointer(path)).is_some()
+            && !paths.iter().any(|existing| existing == path)
+        {
+            paths.push(path.to_owned());
+        }
+    }
+    for path in paths {
+        let parts = path.split('.').collect::<Vec<_>>();
+        let mut source = replacement.as_item();
+        for part in &parts {
+            source = source.get(*part).unwrap_or(&toml_edit::Item::None);
+        }
+        let mut table = original.as_table_mut();
+        for part in &parts[..parts.len() - 1] {
+            if !table.contains_key(part) {
+                table.insert(part, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            table = table
+                .get_mut(part)
+                .and_then(toml_edit::Item::as_table_mut)
+                .context("The configuration parent is not a table")?;
+        }
+        let name = parts.last().unwrap();
+        if source.is_none() {
+            table.remove(name);
+        } else {
+            let mut item = source.clone();
+            if let Some(old) = table.get(name).and_then(toml_edit::Item::as_value) {
+                if let Some(new) = item.as_value_mut() {
+                    *new.decor_mut() = old.decor().clone();
+                }
+            }
+            table.insert(name, item);
+        }
+    }
+    Ok(original.to_string())
 }
 
 #[cfg(windows)]
@@ -645,10 +808,92 @@ fn select_apply(
             _ => result.restart_fields.push(path),
         }
     }
-    Ok((parse(&published)?, result))
+    Ok((
+        TomlConfigLoader::runtime_projection(&toml::Table::try_from(&published)?, active, desired)?,
+        result,
+    ))
 }
 
 impl ControlPlaneService {
+    async fn persist_enabled(&self, id: uuid::Uuid, enabled: bool) -> anyhow::Result<()> {
+        let mut transaction = self.clone();
+        transaction.externally_locked = true;
+        transaction
+            .transact(
+                Some(&RequestMeta {
+                    instance_id: id.to_string(),
+                    ..Default::default()
+                }),
+                ConfigPatch {
+                    expected_revision: self.manager.config_revision(id),
+                    field_mask: vec!["node.enabled".into()],
+                    values: Some(node_config(
+                        &serde_json::json!({"node": {"enabled": enabled}}),
+                    )?),
+                    persist: true,
+                    stage: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(super) fn ensure_file(&self, id: uuid::Uuid) -> anyhow::Result<ConfigFileControl> {
+        let control = self
+            .manager
+            .get_instance_config_control(&id)
+            .ok_or_else(|| {
+                failure(
+                    "NOT_FOUND",
+                    "The instance does not exist.",
+                    "meta.instance_id",
+                )
+            })?;
+        if control.path.is_some() {
+            return Ok(control);
+        }
+        #[cfg(test)]
+        let directory = self.manager.temporary_configs.path().to_path_buf();
+        #[cfg(not(test))]
+        let directory = self
+            .manager
+            .get_config_dir()
+            .cloned()
+            .or_else(|| {
+                self.manager
+                    .list_network_instance_ids()
+                    .into_iter()
+                    .filter_map(|id| self.manager.get_instance_config_control(&id)?.path)
+                    .find_map(|path| path.parent().map(|path| path.to_path_buf()))
+            })
+            .unwrap_or(
+                super::ControlToken::default_path(None)?
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf(),
+            )
+            .join("managed");
+        let existed = directory.exists();
+        std::fs::create_dir_all(&directory)?;
+        #[cfg(unix)]
+        if !existed {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let path = directory.join(format!("{id}.toml"));
+        anyhow::ensure!(
+            !path.exists(),
+            "A configuration already exists for this instance"
+        );
+        let control = ConfigFileControl::new(Some(path), 0u8.into());
+        let config = self.manager.get_instance_config(&id).unwrap();
+        persist(&config, &control)?;
+        self.manager
+            .set_instance_file_control(id, control.clone())?;
+        Ok(control)
+    }
+
     pub(super) async fn get_relay_inner(
         &self,
         _: BaseController,
@@ -805,12 +1050,20 @@ impl ControlPlaneService {
             ));
         }
         let id = self.manager.create_network_instance(
-            config,
+            {
+                config.set_enabled(false);
+                config
+            },
             ConfigFileControl::new(
                 None,
                 crate::common::config::ConfigFilePermission::READ_ONLY.into(),
             ),
         )?;
+        if let Err(error) = self.ensure_file(id) {
+            self.manager.delete_network_instance(vec![id])?;
+            return Err(error);
+        }
+        self.manager.hold_stopped(id);
         Ok(CreateInstanceResponse {
             instance_id: id.to_string(),
             result: Some(ApplyResult {
@@ -840,7 +1093,8 @@ impl ControlPlaneService {
             ));
         }
         let active = self.manager.get_instance_config(&id).unwrap();
-        let previous = TomlConfigLoader::new_from_str(&active.dump())?;
+        let previous = active.snapshot();
+        self.persist_enabled(id, true).await?;
         let state = self
             .manager
             .control_configs
@@ -863,8 +1117,30 @@ impl ControlPlaneService {
         if let Some(desired) = &state.desired {
             active.replace_active(&TomlConfigLoader::new_from_str(desired)?);
         }
-        if let Err(error) = self.manager.start_network_instance(id) {
+        let started = match self.manager.start_network_instance(id) {
+            Ok(()) => super::maintenance::wait_ready(&self.manager, id).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = started {
+            let _ = self.manager.stop_network_instance(id).await;
+            let failed = active.snapshot();
+            let restored = self
+                .ensure_file(id)
+                .and_then(|control| persist_change(&previous, &control, Some(&failed)))
+                .is_ok();
             active.replace_active(&previous);
+            self.manager.control_configs.lock().unwrap().insert(
+                id,
+                ConfigState {
+                    revision: state.revision.saturating_add(1),
+                    ..Default::default()
+                },
+            );
+            self.manager.reload_errors.lock().unwrap().insert(
+                id,
+                if restored { "Activation failed. The instance remains stopped with its previous configuration." }
+                else { "Activation failed. The instance remains stopped. The configuration file requires correction." }.into(),
+            );
             return Err(error);
         }
         self.manager.release_stopped(&id);
@@ -892,6 +1168,7 @@ impl ControlPlaneService {
     ) -> anyhow::Result<StopInstanceResponse> {
         let _guard = self.mutation_guard().await;
         let id = self.select_instance(request.meta.as_ref())?;
+        self.persist_enabled(id, false).await?;
         self.manager.hold_stopped(id);
         self.manager.stop_network_instance(id).await?;
         Ok(StopInstanceResponse::default())
@@ -922,6 +1199,9 @@ impl ControlPlaneService {
                 "The instance configuration cannot be deleted.",
                 "meta.instance_id",
             ));
+        }
+        if let Some(path) = &control.path {
+            std::fs::remove_file(path)?;
         }
         self.manager.delete_network_instance(vec![id])?;
         self.manager.release_stopped(&id);
@@ -1086,6 +1366,14 @@ impl ControlPlaneService {
             desired: Some(projection(&desired)?),
             active: Some(projection(&active)?),
             restart_fields: state.restart_fields,
+            reload_error: self
+                .manager
+                .reload_errors
+                .lock()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -1161,24 +1449,6 @@ impl ControlPlaneService {
         let running = self.manager.get_instance_service(&id);
         let (candidate, mut result) =
             select_apply(&active, &desired, state.revision, running.is_some())?;
-        if !patch.stage && !result.restart_fields.is_empty() {
-            let field = &result.restart_fields[0];
-            let requested = patch
-                .field_mask
-                .iter()
-                .chain(&patch.clear_paths)
-                .any(|path| field == path || field.starts_with(&format!("{path}.")));
-            let message = if requested {
-                format!(
-                    "{field} needs an instance restart. Add --stage to store it, or stop the instance first."
-                )
-            } else {
-                format!(
-                    "{field} is staged and waits for an instance restart. Add --stage, or restart the instance first."
-                )
-            };
-            return Err(failure("RESTART_REQUIRED", &message, field));
-        }
         let rules = AclRuleBuilder::build_config(&candidate)?;
         let runtime = running
             .as_ref()
@@ -1190,17 +1460,40 @@ impl ControlPlaneService {
                 failure("INTERNAL", "The configuration revision is exhausted.", "")
             })?;
         }
-        if patch.persist {
-            persist(
-                &desired,
-                &self.manager.get_instance_config_control(&id).unwrap(),
-            )?;
+        if !self.from_file {
+            let control = self.ensure_file(id)?;
+            if control.is_read_only() {
+                return Err(failure(
+                    "PERMISSION_DENIED",
+                    "The configuration file is read-only.",
+                    "patch.persist",
+                ));
+            }
+            let path = control.path.as_ref().unwrap();
+            if path.is_dir() {
+                return Err(failure(
+                    "UNAVAILABLE",
+                    "The configuration path is not a regular file.",
+                    "patch.persist",
+                ));
+            }
+            if path.exists() || control.expected_exists {
+                persist_change(&desired, &control, Some(&current))?;
+            } else {
+                persist(&desired, &control)?;
+            }
+            let mut adopted = control;
+            adopted.expected_exists = true;
+            self.manager.set_instance_file_control(id, adopted)?;
         }
         active.replace_active(&candidate);
         if let Some((context, _)) = runtime {
             context.set_hostname(candidate.get_hostname());
             context.set_flags(candidate.get_flags());
             context.get_acl_filter().reload_rules(rules.as_ref());
+            if let Some(level) = candidate.get_log_config().console {
+                super::read::apply_log_level(&level)?;
+            }
         }
         self.manager.control_configs.lock().unwrap().insert(
             id,
@@ -1210,6 +1503,7 @@ impl ControlPlaneService {
                 restart_fields: result.restart_fields.clone(),
             },
         );
+        self.manager.reload_errors.lock().unwrap().remove(&id);
         if let Some(instance) = running {
             let route = instance.peers()?.get_route();
             tokio::spawn(async move {

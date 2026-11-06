@@ -20,6 +20,7 @@ use crate::{
 };
 
 pub struct ApiRpcServer<T: TunnelListener + 'static> {
+    _maintenance: tokio_util::task::AbortOnDropHandle<()>,
     rpc_server: StandAloneServer<T>,
     protected_tcp_port: Option<u16>,
     pub addr: Option<SocketAddr>,
@@ -94,6 +95,7 @@ impl<T: TunnelListener + 'static> ApiRpcServer<T> {
         let rpc_server = StandAloneServer::new(tunnel);
         register_api_rpc_service(&instance_manager, rpc_server.registry(), control_token);
         Ok(Self {
+            _maintenance: crate::rpc_service::control::maintenance::spawn(&instance_manager),
             rpc_server,
             protected_tcp_port: None,
             addr: None,

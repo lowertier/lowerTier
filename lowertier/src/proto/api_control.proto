@@ -265,7 +265,7 @@ message ApplyResult {
   repeated ApiError errors = 5;
 }
 message GetConfigRequest { RequestMeta meta = 1; }
-message GetConfigResponse { ApiError error = 1; SnapshotMeta snapshot = 2; NodeConfig desired = 3; NodeConfig active = 4; repeated string restart_fields = 5; }
+message GetConfigResponse { ApiError error = 1; SnapshotMeta snapshot = 2; NodeConfig desired = 3; NodeConfig active = 4; repeated string restart_fields = 5; string reload_error = 6; }
 message ValidateConfigRequest { RequestMeta meta = 1; ConfigPatch patch = 2; }
 message ValidateConfigResponse { ApiError error = 1; ApplyResult result = 2; }
 message PatchConfigRequest { RequestMeta meta = 1; ConfigPatch patch = 2; }
@@ -316,6 +316,21 @@ message WatchChangesRequest {
 }
 message WatchChangesResponse { ApiError error = 1; string cursor = 2; repeated string changed = 3; bool reset = 4; }
 
+message CallRemoteRequest {
+  RequestMeta meta = 1;
+  string target = 2;
+  string method = 3;
+  bytes payload = 4;
+  string secret = 5;
+  string session_id = 6;
+  bool keep_session = 7;
+}
+message CallRemoteResponse {
+  ApiError error = 1;
+  bytes payload = 2;
+  string session_id = 3;
+}
+
 service ControlPlaneV1Rpc {
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
   rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
@@ -350,4 +365,5 @@ service ControlPlaneV1Rpc {
   rpc SetAcl(SetAclRequest) returns (SetAclResponse);
   rpc PutPortForward(PutPortForwardRequest) returns (PutPortForwardResponse);
   rpc DeletePortForward(DeletePortForwardRequest) returns (DeletePortForwardResponse);
+  rpc CallRemote(CallRemoteRequest) returns (CallRemoteResponse);
 }

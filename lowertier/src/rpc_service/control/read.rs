@@ -55,6 +55,40 @@ pub(super) fn now_ms() -> i64 {
         })
 }
 
+pub(super) fn apply_log_level(value: &str) -> anyhow::Result<()> {
+    if !matches!(value, "off" | "error" | "warn" | "info" | "debug" | "trace") {
+        return Err(failure(
+            "INVALID_ARGUMENT",
+            "The log level is invalid.",
+            "log.console",
+        ));
+    }
+    if let Some(sender) = crate::rpc_service::logger::LOGGER_LEVEL_SENDER.get() {
+        sender
+            .lock()
+            .map_err(|_| {
+                failure(
+                    "UNAVAILABLE",
+                    "The log reloader is not available.",
+                    "log.console",
+                )
+            })?
+            .send(value.to_owned())?;
+    }
+    logs::set_level(value.parse()?);
+    *crate::rpc_service::logger::CURRENT_LOG_LEVEL
+        .get_or_init(|| std::sync::Mutex::new("info".into()))
+        .lock()
+        .map_err(|_| {
+            failure(
+                "UNAVAILABLE",
+                "The log configuration is not available.",
+                "log.console",
+            )
+        })? = value.to_owned();
+    Ok(())
+}
+
 fn page<T>(rows: Vec<T>, request: Option<Page>, stamp: &str) -> anyhow::Result<(Vec<T>, String)> {
     let request = request.unwrap_or_default();
     let limit = if request.limit == 0 {
@@ -714,22 +748,48 @@ impl ControlPlaneService {
                 "level",
             ));
         }
-        if let Some(sender) = crate::rpc_service::logger::LOGGER_LEVEL_SENDER.get() {
-            sender
-                .lock()
-                .map_err(|_| failure("UNAVAILABLE", "The log reloader is not available.", "level"))?
-                .send(request.level.clone())?;
+        let _guard = self.mutation_guard().await;
+        let mut transaction = self.clone();
+        transaction.externally_locked = true;
+        let ids = self.manager.list_network_instance_ids();
+        if ids.is_empty() {
+            return Err(failure(
+                "NOT_FOUND",
+                "The process has no persistent node configuration.",
+                "meta.instance_id",
+            ));
         }
-        logs::set_level(request.level.parse()?);
-        let level = crate::rpc_service::logger::CURRENT_LOG_LEVEL
-            .get_or_init(|| std::sync::Mutex::new("info".into()));
-        *level.lock().map_err(|_| {
-            failure(
-                "UNAVAILABLE",
-                "The log configuration is not available.",
-                "level",
-            )
-        })? = request.level;
+        for (index, id) in ids.into_iter().enumerate() {
+            let result = transaction
+                .transact(
+                    Some(&RequestMeta {
+                        instance_id: id.to_string(),
+                        ..Default::default()
+                    }),
+                    ConfigPatch {
+                        expected_revision: self.manager.config_revision(id),
+                        field_mask: vec!["log.console".into()],
+                        values: Some(super::config::node_config(
+                            &serde_json::json!({"log": {"console": request.level}}),
+                        )?),
+                        persist: true,
+                        stage: true,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            if let Err(error) = result {
+                if index > 0 {
+                    return Err(failure(
+                        "PARTIAL_FAILURE",
+                        "The log level was saved for only part of this process. Correct the remaining configuration files.",
+                        "log.console",
+                    ));
+                }
+                return Err(error);
+            }
+        }
+        apply_log_level(&request.level)?;
         Ok(SetLogConfigResponse::default())
     }
 
@@ -857,6 +917,13 @@ impl ControlPlaneService {
             ));
         }
         let context = instance.context()?;
+        if context.config.get_credential_file().is_none() {
+            return Err(failure(
+                "INVALID_ARGUMENT",
+                "Set network.credential_file before issuing credentials.",
+                "network.credential_file",
+            ));
+        }
         let (credential_id, credential_secret) = context
             .get_credential_manager()
             .generate_credential_bundle(
@@ -883,6 +950,13 @@ impl ControlPlaneService {
         let (_, instance) = self.resolve(request.meta.as_ref())?;
         self.authorize_admin(&controller, &instance, request.meta.as_ref())?;
         let context = instance.context()?;
+        if context.config.get_credential_file().is_none() {
+            return Err(failure(
+                "INVALID_ARGUMENT",
+                "Set network.credential_file before revoking credentials.",
+                "network.credential_file",
+            ));
+        }
         let revoked = context
             .get_credential_manager()
             .try_revoke_credential(&request.credential_id)?;
