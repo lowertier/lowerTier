@@ -25,6 +25,7 @@ Every joined `lt-` node must expose the Web UI to `10.126.126.0/24` by default.
 The listener uses TCP port `15880` on the node's overlay address.
 API requests require the node's GUI key.
 Keep this setting in the configuration when a node joins the fleet.
+The [fleet inventory](lt-fleet.json) lists verified instances and pending migrations.
 
 ```toml
 [gui]

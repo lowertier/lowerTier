@@ -1,0 +1,169 @@
+{
+  "verified_at": "2026-11-07T16:05:34.299235+00:00",
+  "network": "lt-",
+  "subnet": "10.126.126.0/24",
+  "controller": "hattori-wrt",
+  "application_commit": "4a5b7dfe",
+  "repository_commit_at_verification": "21393c1e",
+  "application_note": "Commit 21393c1e changes documentation only.",
+  "webui": {
+    "enabled": true,
+    "port": 15880,
+    "allow": [
+      "10.126.126.0/24"
+    ],
+    "api_key_required": true
+  },
+  "instances": [
+    {
+      "node": "tw2-ingress",
+      "address": "10.126.126.80/24",
+      "public_key": "XvlUi9g7B3LGdo00+VrOyRMGdhysAK/cWaoLuuc6/Ec=",
+      "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864"
+    },
+    {
+      "node": "alibj",
+      "address": "10.126.126.110/24",
+      "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
+      "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a"
+    },
+    {
+      "node": "jpaws",
+      "address": "10.126.126.100/24",
+      "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
+      "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed"
+    },
+    {
+      "node": "861jp",
+      "address": "10.126.126.81/24",
+      "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
+      "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc"
+    },
+    {
+      "node": "862jp",
+      "address": "10.126.126.182/24",
+      "public_key": "PKG7C+O5UVoGs4hA44gHjeFSO1ggJ4dBqzDI4vt02z8=",
+      "instance_id": "063d4675-4de9-47cc-923d-1ef6170b6243"
+    },
+    {
+      "node": "862jp-secondary",
+      "address": "10.126.126.82/24",
+      "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
+      "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f"
+    },
+    {
+      "node": "jpali",
+      "address": "10.126.126.162/24",
+      "public_key": "QT4xpDjbEzdYu+tnJf42hxy7q0NnFljSiKUlwQpINBg=",
+      "instance_id": "a68c5a14-cc32-4027-b183-80ecfe7a73b5"
+    },
+    {
+      "node": "jpali-secondary",
+      "address": "10.126.126.62/24",
+      "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
+      "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37"
+    },
+    {
+      "node": "s6916",
+      "address": "10.126.126.60/24",
+      "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
+      "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f"
+    },
+    {
+      "node": "s6916-secondary",
+      "address": "10.126.126.61/24",
+      "public_key": "Ah4xt1Ttek4cuFQg/pd5Jq5S6D7SDZhF+elKNzKRwH0=",
+      "instance_id": "e9a2a583-8b9d-44a9-9e79-7ba3b1ed323a"
+    },
+    {
+      "node": "hattori-wrt",
+      "address": "10.126.126.1/24",
+      "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
+      "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523"
+    },
+    {
+      "node": "yutoms-mcp-userspace",
+      "address": "10.126.126.3/24",
+      "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
+      "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349"
+    },
+    {
+      "node": "yutoms-mcp-legacy",
+      "address": "10.126.126.70/24",
+      "public_key": "sPpLOcYhUvKT7PWkUGHo+aTDB2tipI1pFZABc8cpQS4=",
+      "instance_id": "96bbc508-766a-474f-9494-3ff7b4907f06"
+    },
+    {
+      "node": "local-native",
+      "address": "10.126.126.2/24",
+      "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
+      "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80"
+    },
+    {
+      "node": "local-userspace",
+      "address": "10.126.126.202/24",
+      "public_key": "dIA/yFah6zGKA6HVm6SmH2eRlJUuSz4nkueWMTiMrQA=",
+      "instance_id": "33890c62-ac32-4e7a-9f81-0e8faa2771c7"
+    },
+    {
+      "node": "la",
+      "address": "10.126.126.87/24",
+      "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
+      "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c"
+    },
+    {
+      "node": "btrouter",
+      "address": "10.126.126.40/24",
+      "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
+      "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642"
+    }
+  ],
+  "verification": {
+    "known_peers_per_instance": 16,
+    "running_images": 17,
+    "controller_ssh": 17,
+    "webui_pages": 17,
+    "webui_unauthenticated_api_rejections": 17,
+    "router_delivery": [
+      {
+        "test": "la-to-btrouter",
+        "source": "la",
+        "destination": "10.126.126.40",
+        "packets_sent": 5,
+        "packets_received": 5,
+        "loss_percent": 0,
+        "interface": "lowertier"
+      },
+      {
+        "test": "la-to-btrouter-lan",
+        "source": "la",
+        "destination": "192.168.40.1",
+        "packets_sent": 5,
+        "packets_received": 5,
+        "loss_percent": 0,
+        "interface": "lowertier"
+      },
+      {
+        "test": "btrouter-to-la",
+        "source": "btrouter",
+        "destination": "10.126.126.87",
+        "packets_sent": 5,
+        "packets_received": 5,
+        "loss_percent": 0,
+        "interface": "lowertier"
+      }
+    ]
+  },
+  "pending_historical_hosts": [
+    {
+      "node": "btower",
+      "status": "offline",
+      "migration_verified": false
+    },
+    {
+      "node": "UTMOWRT",
+      "status": "offline",
+      "migration_verified": false
+    }
+  ]
+}
