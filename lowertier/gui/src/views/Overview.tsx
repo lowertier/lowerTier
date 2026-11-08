@@ -1,45 +1,23 @@
 import { Index, Show, createMemo } from "solid-js";
 import Chart from "../components/Chart";
 import { bytes, latency, loss, rate, NONE } from "../format";
+import { issuesOf } from "../peerIssues";
 import { peerName, peers, snapshot, type PeerRow } from "../store";
 
 const LOSSY = 10_000; // parts per million: 1%
-const SLOW_FACTOR = 3;
-const SLOW_FLOOR_US = 50_000;
 const SHOWN = 8;
 const NAMES = 14;
 const BUSY_BPS = 2000;
-
-interface Issue {
-  row: PeerRow;
-  reason: string;
-  rank: number;
-}
 
 function median(values: number[]): number | undefined {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
 }
 
-/** Peers worth a look: loss, a round trip far above the rest, or a direct link with no measurement. */
-function issuesOf(rows: PeerRow[], mid: number | undefined): Issue[] {
-  const found: Issue[] = [];
-  for (const row of rows) {
-    if ((row.loss ?? 0) >= LOSSY) {
-      found.push({ row, reason: `${loss(row.loss)} loss`, rank: 3 + (row.loss ?? 0) / 1e6 });
-    } else if (row.rtt != null && mid != null && row.rtt > SLOW_FLOOR_US && row.rtt > mid * SLOW_FACTOR) {
-      found.push({ row, reason: `${latency(row.rtt)}, ${Math.round(row.rtt / mid)}x the median`, rank: 2 });
-    } else if (row.via == null && row.rtt == null) {
-      found.push({ row, reason: "no round trip measured", rank: 1 });
-    }
-  }
-  return found.sort((a, b) => b.rank - a.rank || a.row.name.localeCompare(b.row.name));
-}
-
 export default function Overview(props: { onOpenPeer: (id: number) => void; onAllPeers: () => void }) {
   const node = () => snapshot()?.node?.node ?? {};
   const mid = createMemo(() => median(peers().flatMap((row) => (row.rtt != null ? [row.rtt] : []))));
-  const issues = createMemo(() => issuesOf(peers(), mid()));
+  const issues = createMemo(() => issuesOf(peers(), node().version ?? ""));
   const busiest = createMemo(() =>
     peers()
       .filter((row) => row.rx + row.tx > BUSY_BPS)
@@ -55,7 +33,7 @@ export default function Overview(props: { onOpenPeer: (id: number) => void; onAl
       .map(([via, rows]) => ({ via, rows: rows.sort((a, b) => a.name.localeCompare(b.name)) }))
       .sort((a, b) => (a.via === -1 ? -1 : b.via === -1 ? 1 : b.rows.length - a.rows.length));
   });
-  const direct = () => peers().filter((row) => row.via == null).length;
+  const direct = () => peers().filter((row) => row.direct).length;
 
   return (
     <div class="overview">
@@ -78,7 +56,7 @@ export default function Overview(props: { onOpenPeer: (id: number) => void; onAl
             fallback={
               <p class="hint">
                 <Show when={peers().length} fallback={snapshot() ? "Add a peer under Settings, peer, or wait for discovery." : ""}>
-                  Every peer is reachable with loss under 1% and a round trip close to the median ({latency(mid())}).
+                  All peers have direct connections. No older LowTier versions detected.
                 </Show>
               </p>
             }
@@ -90,7 +68,7 @@ export default function Overview(props: { onOpenPeer: (id: number) => void; onAl
                     <button type="button" class="link" onClick={() => props.onOpenPeer(issue().row.id)}>
                       {issue().row.name}
                     </button>
-                    <span class="reason" classList={{ bad: issue().rank >= 3 }}>
+                    <span class="reason" classList={{ bad: !issue().row.direct }}>
                       {issue().reason}
                     </span>
                   </li>
@@ -137,7 +115,7 @@ export default function Overview(props: { onOpenPeer: (id: number) => void; onAl
             <div>
               <dt>Peers</dt>
               <dd>
-                {direct()} direct · {peers().length - direct()} relayed
+                {direct()} of {peers().length} direct
               </dd>
             </div>
             <div>

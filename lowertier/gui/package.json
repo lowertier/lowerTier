@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
+    "test": "node --test test/*.test.mjs",
     "dev": "vite"
   },
   "dependencies": {
