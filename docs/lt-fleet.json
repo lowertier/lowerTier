@@ -1,11 +1,11 @@
 {
-  "verified_at": "2026-11-08T08:23:25.204027+00:00",
+  "verified_at": "2026-11-08T09:44:07.509974+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
-  "application_commit": "ee5a608f",
-  "repository_commit_at_verification": "ee5a608f",
-  "application_note": "Authenticated QUIC links support NAT port changes at either peer. Server port rebinding is a LowTier extension to QUIC v1.",
+  "application_commit": "5f04ec44",
+  "repository_commit_at_verification": "5f04ec44",
+  "application_note": "QUIC, H2, and WSS maintain independent authenticated paths. QUIC server port rebinding remains a LowTier extension to QUIC v1.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -21,7 +21,7 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-08T08:23:25.204027+00:00",
+    "access_verified_at": "2026-11-08T09:44:07.509974+00:00",
     "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. LAN checks and checks outside gui.open retain earlier evidence."
   },
   "instances": [
@@ -129,7 +129,7 @@
     }
   ],
   "verification": {
-    "evidence": "benchmark-results/.work/nat-port-flexibility-20261108/fleet-verification.json",
+    "evidence": "benchmark-results/.work/multi-protocol-punch-20261108/fleet-verification.json",
     "known_peers_per_instance": 16,
     "running_images": 17,
     "controller_ssh": 17,
@@ -140,6 +140,20 @@
     "webui_keyless_control_writes": 17,
     "webui_foreign_origin_rejections": 17,
     "webui_key_required_outside_open": 17,
+    "protocol_path_observations": {
+      "protocol_capabilities_match_config": 17,
+      "instances_with_all_protocols_enabled": 17,
+      "unique_peer_pairs_with_three_authenticated_protocols": 32,
+      "authenticated_directional_paths": {
+        "quic": 160,
+        "tcp": 110,
+        "wss": 94
+      },
+      "minimum_connections_per_instance": 8,
+      "maximum_connections_per_instance": 46,
+      "connection_limit_per_peer_map": 64,
+      "scope": "One snapshot per instance after rollout. Direct path availability depends on NAT and firewall rules. These counts do not measure failover time or throughput."
+    },
     "webui_lan_source_checks": [
       {
         "source": "192.168.51.1",
