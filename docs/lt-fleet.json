@@ -1,12 +1,12 @@
 {
-  "verified_at": "2026-11-08T09:44:07.509974+00:00",
-  "connectivity_verified_at": "2026-11-08T11:07:45.942021+00:00",
+  "verified_at": "2026-11-08T13:54:38.072745+00:00",
+  "connectivity_verified_at": "2026-11-08T13:54:38.072745+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
-  "application_commit": "5f04ec44",
-  "repository_commit_at_verification": "5f04ec44",
-  "application_note": "QUIC, H2, and WSS maintain independent authenticated paths. QUIC server port rebinding remains a LowTier extension to QUIC v1.",
+  "application_commit": "19fcfda7",
+  "repository_commit_at_verification": "19fcfda7",
+  "application_note": "Peer transport names are quic, h2, and wss. All 17 instances run the migrated configuration. QUIC server port rebinding remains a LowTier extension to QUIC v1.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -23,7 +23,9 @@
     "api_key_required": false,
     "api_key_required_outside_open": true,
     "access_verified_at": "2026-11-08T09:44:07.509974+00:00",
-    "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. LAN checks and checks outside gui.open retain earlier evidence."
+    "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. LAN checks and checks outside gui.open retain earlier evidence.",
+    "schema_verified_at": "2026-11-08T13:54:38.072745+00:00",
+    "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json"
   },
   "nat_discovery": {
     "policy": "Each instance configures explicit IPv4 STUN addresses for UDP and TCP. Underlay deny rules exclude the hostname defaults.",
@@ -233,7 +235,36 @@
         "loss_percent": 0,
         "interface": "lowertier"
       }
-    ]
+    ],
+    "h2_transport_migration": {
+      "verified_at": "2026-11-08T13:54:38.072745+00:00",
+      "application_commit": "19fcfda7",
+      "evidence": "benchmark-results/.work/h2-domain-20261108/result.json",
+      "instances": 17,
+      "running_images": 17,
+      "identities_preserved": 17,
+      "webui_settings_preserved": 17,
+      "domain_option": "camouflage.server_name",
+      "domain_allowlist": false,
+      "webui_domain_fields": 17,
+      "transport_names": [
+        "quic",
+        "h2",
+        "wss"
+      ],
+      "old_tcp_peer_scheme_rejected": true,
+      "controller_remote_identity_reads": 17,
+      "controller_ping_packets_sent": 51,
+      "controller_ping_packets_received": 51,
+      "connection_entries_by_protocol": {
+        "quic": 220,
+        "h2": 119,
+        "wss": 191
+      },
+      "instances_with_observed_h2_connections": 16,
+      "scope": "One snapshot per instance. The snapshots do not measure availability, failover time, or throughput.",
+      "h2_observation_limit": "BTROUTER had QUIC and WSS peer connections in the snapshot. It had no H2 peer connection in that snapshot."
+    }
   },
   "pending_historical_hosts": [
     {
