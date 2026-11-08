@@ -1,11 +1,11 @@
 {
-  "verified_at": "2026-11-07T16:05:34.299235+00:00",
+  "verified_at": "2026-11-08T07:35:53.267058+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
-  "application_commit": "4a5b7dfe",
-  "repository_commit_at_verification": "21393c1e",
-  "application_note": "Commit 21393c1e changes documentation only.",
+  "application_commit": "bf1abf5b",
+  "repository_commit_at_verification": "bf1abf5b",
+  "application_note": "Overview warnings use direct connection state and version age.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -21,8 +21,8 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-08T05:52:49+00:00",
-    "verification_scope": "All 17 instances passed from 10.126.126.2. Hattori and BTROUTER also passed from their own LAN addresses."
+    "access_verified_at": "2026-11-08T07:35:53.267058+00:00",
+    "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. The router LAN checks preceded this UI rollout."
   },
   "instances": [
     {
@@ -132,6 +132,7 @@
     "known_peers_per_instance": 16,
     "running_images": 17,
     "controller_ssh": 17,
+    "controller_remote_reads": 16,
     "webui_pages": 17,
     "webui_keyless_pages": 17,
     "webui_keyless_api_reads": 17,
@@ -154,6 +155,7 @@
         "control_write_without_key": 200
       }
     ],
+    "router_delivery_verified_at": "2026-11-07T16:05:34.299235+00:00",
     "router_delivery": [
       {
         "test": "la-to-btrouter",

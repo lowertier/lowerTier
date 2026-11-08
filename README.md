@@ -386,6 +386,11 @@ Listeners are QUIC/HTTP/3, H2 over TLS, and WSS. Plain `ws://` and raw `udp://` 
 | `wss` | WebSocket over TLS/TCP | 11012 |
 
 An empty `transport.listen` creates an outbound-only node.
+Hole punching uses OS-selected source ports independently of `transport.listen`.
+Use port `0` in listener URLs when the OS should select listener ports too.
+For example, a node behind NAT can use `quic://0.0.0.0:0` and `tcp://0.0.0.0:0`.
+Public bootstrap endpoints need a stable, reachable listener port.
+For QUIC, keep the successful UDP socket open so STUN and tunnel traffic retain the same NAT mapping.
 The default QUIC listener is `11012`, not `443`. HTTP/3 does not require port 443.
 Bind `quic://0.0.0.0:443` only when a network allows UDP/443 and blocks other UDP.
 That bind needs root or `CAP_NET_BIND_SERVICE`, and it collides with a local HTTPS server.

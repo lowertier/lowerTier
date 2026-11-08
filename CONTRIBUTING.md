@@ -94,6 +94,11 @@ Build artifacts: `target/[target-triple]/release/`
 
 ## Development Workflow
 
+This development stage does not require backward compatibility.
+Use the current LowTier protocol and configuration format.
+Do not add compatibility branches for older LowTier builds.
+Update joined test nodes after breaking changes.
+
 1. Create a feature branch from `develop`:
    ```bash
    git checkout develop
