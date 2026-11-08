@@ -1,12 +1,12 @@
 {
-  "verified_at": "2026-11-08T15:30:26.887811+00:00",
-  "connectivity_verified_at": "2026-11-08T15:30:26.887811+00:00",
+  "verified_at": "2026-11-08T16:14:02.751627+00:00",
+  "connectivity_verified_at": "2026-11-08T16:11:16.994468+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
-  "application_commit": "3d4e4033",
-  "repository_commit_at_verification": "3d4e4033",
-  "application_note": "Software version 0.01 uses peer admission version 0. The peer admission version follows the software major version. All 17 joined instances run binaries from the published GitHub build. Peer transport names are quic, h2, and wss.",
+  "application_commit": "920e216d",
+  "repository_commit_at_verification": "920e216d",
+  "application_note": "Software version 0.01 uses peer admission version 0. All 17 joined instances run the shared probe admission fix from committed source. Peer transport names are quic, h2, and wss. The published 0.01 release remains the recorded release baseline.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -22,8 +22,8 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-08T13:51:06.831874+00:00",
-    "verification_scope": "All 17 instances passed keyless page and API reads. Sixteen used 10.126.126.2. LA used JPaws at 10.126.126.100. LAN and outside-source checks retain earlier evidence.",
+    "access_verified_at": "2026-11-08T16:14:02.751627+00:00",
+    "verification_scope": "All 17 instances passed keyless page, API, and control checks with foreign-origin rejection. Sixteen checks used 10.126.126.2. LA used JPaws at 10.126.126.100. Earlier LAN and outside-source evidence remains valid.",
     "schema_verified_at": "2026-11-08T13:54:38.072745+00:00",
     "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json"
   },
@@ -54,7 +54,7 @@
       "public_key": "XvlUi9g7B3LGdo00+VrOyRMGdhysAK/cWaoLuuc6/Ec=",
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "alibj",
@@ -62,7 +62,7 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "jpaws",
@@ -70,7 +70,7 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "861jp",
@@ -78,7 +78,7 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "862jp",
@@ -86,7 +86,7 @@
       "public_key": "PKG7C+O5UVoGs4hA44gHjeFSO1ggJ4dBqzDI4vt02z8=",
       "instance_id": "063d4675-4de9-47cc-923d-1ef6170b6243",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "862jp-secondary",
@@ -94,7 +94,7 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "jpali",
@@ -102,7 +102,7 @@
       "public_key": "QT4xpDjbEzdYu+tnJf42hxy7q0NnFljSiKUlwQpINBg=",
       "instance_id": "a68c5a14-cc32-4027-b183-80ecfe7a73b5",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "jpali-secondary",
@@ -110,7 +110,7 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "s6916",
@@ -118,7 +118,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "s6916-secondary",
@@ -126,7 +126,7 @@
       "public_key": "Ah4xt1Ttek4cuFQg/pd5Jq5S6D7SDZhF+elKNzKRwH0=",
       "instance_id": "e9a2a583-8b9d-44a9-9e79-7ba3b1ed323a",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "hattori-wrt",
@@ -134,7 +134,7 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -142,7 +142,7 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "yutoms-mcp-legacy",
@@ -150,7 +150,7 @@
       "public_key": "sPpLOcYhUvKT7PWkUGHo+aTDB2tipI1pFZABc8cpQS4=",
       "instance_id": "96bbc508-766a-474f-9494-3ff7b4907f06",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "local-native",
@@ -158,7 +158,7 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "local-userspace",
@@ -166,7 +166,7 @@
       "public_key": "dIA/yFah6zGKA6HVm6SmH2eRlJUuSz4nkueWMTiMrQA=",
       "instance_id": "33890c62-ac32-4e7a-9f81-0e8faa2771c7",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "la",
@@ -174,7 +174,7 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     },
     {
       "node": "btrouter",
@@ -182,7 +182,7 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.01",
-      "application_commit": "3d4e4033"
+      "application_commit": "920e216d"
     }
   ],
   "verification": {
@@ -356,6 +356,53 @@
       "source_commit": "3d4e40336a6b633d2aa0fda5d4d534f0eeb677fc",
       "python_ci_type_errors": 139,
       "scope": "All joined instances passed identity, configuration, GUI, running binary integrity, and controller delivery checks. These checks do not measure throughput or all direct peer pairs."
+    },
+    "probe_admission": {
+      "verified_at": "2026-11-08T16:14:02.751627+00:00",
+      "application_commit": "920e216d",
+      "version": "0.01",
+      "peer_protocol_version": 0,
+      "joined_instances": 17,
+      "hosts": 12,
+      "probe_sessions_per_source": 2,
+      "rolling_window_seconds": 60,
+      "forwarded_session_combined_bytes": 65536,
+      "forwarded_session_idle_seconds": 5,
+      "forwarded_session_lifetime_seconds": 10,
+      "source_grouping": "IPv4 address or IPv6 /64; mapped IPv4 shares its IPv4 counter.",
+      "shared_protocols": [
+        "quic",
+        "h2",
+        "wss"
+      ],
+      "counter_scope": "All listeners and instances in one process.",
+      "admitted_vpn_traffic_exempt": true,
+      "tokenless_h2_wss_setup_bounded_until_noise": true,
+      "configured_local_website_uses_separate_resource_limits": true,
+      "default_http3_page_uses_response_byte_limit": true,
+      "running_transfer_integrity": true,
+      "identities_and_configuration_preserved": true,
+      "gui_policy_preserved": true,
+      "transfer_files_removed": true,
+      "legacy_binary_backups_retained": false,
+      "packets_sent": 51,
+      "packets_received": 51,
+      "loss_percent": 0,
+      "authenticated_protocol_observations": {
+        "quic": 189,
+        "h2": 130,
+        "wss": 173
+      },
+      "checks": {
+        "core_passed": 494,
+        "caddy_passed": 2,
+        "local_passthrough_demo": true,
+        "full_feature_compile": true,
+        "native_release_build": true,
+        "x86_64_linux_release_build": true,
+        "aarch64_linux_release_build": true
+      },
+      "evidence": "benchmark-results/.work/short-probes-20261108/result.json"
     }
   },
   "pending_historical_hosts": [
