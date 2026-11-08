@@ -453,9 +453,12 @@ pub struct GlobalCtx {
     stun_info_collection: Mutex<Arc<dyn StunInfoCollectorTrait>>,
 
     running_listeners: Mutex<Vec<url::Url>>,
-    discovery_listeners: Mutex<HashMap<SocketAddr, Vec<url::Url>>>,
+    discovery_listeners: Mutex<HashMap<(SocketAddr, String), Vec<url::Url>>>,
     discovery_sources: Mutex<
-        HashMap<SocketAddr, std::sync::Weak<crate::connector::tracker_discovery::PathConnections>>,
+        HashMap<
+            (SocketAddr, String),
+            std::sync::Weak<crate::connector::tracker_discovery::PathConnections>,
+        >,
     >,
     discovery_observations: Mutex<Vec<crate::connector::tracker_discovery::DiscoveryObservation>>,
     advertised_ipv6_public_addr_prefix: Mutex<Option<cidr::Ipv6Cidr>>,
@@ -696,6 +699,9 @@ impl GlobalCtx {
         feature_flags.exit_node = flags.enable_exit_node;
         feature_flags.speed_routing = true;
         feature_flags.relay_origin_proof = true;
+        feature_flags.quic_hole_punch = super::config::hole_punch_protocol_enabled(flags, "quic");
+        feature_flags.tcp_hole_punch = super::config::hole_punch_protocol_enabled(flags, "tcp");
+        feature_flags.wss_hole_punch = super::config::hole_punch_protocol_enabled(flags, "wss");
         feature_flags
     }
 
@@ -1215,26 +1221,35 @@ impl GlobalCtx {
         self.discovery_listeners
             .lock()
             .unwrap()
-            .insert(local, listeners);
+            .insert((local, protocol.to_owned()), listeners);
         self.control_generation.fetch_add(1, Ordering::Release);
     }
 
-    pub(crate) fn remove_discovery_listeners(&self, local: SocketAddr) {
-        self.discovery_listeners.lock().unwrap().remove(&local);
-        self.discovery_sources.lock().unwrap().remove(&local);
+    pub(crate) fn remove_discovery_listeners(&self, local: SocketAddr, protocol: &str) {
+        let key = (local, protocol.to_owned());
+        self.discovery_listeners.lock().unwrap().remove(&key);
+        self.discovery_sources.lock().unwrap().remove(&key);
         self.discovery_observations
             .lock()
             .unwrap()
-            .retain(|observation| observation.socket != local);
+            .retain(|observation| {
+                observation.socket != local
+                    || (observation.protocol != protocol
+                        && !(protocol == "quic" && observation.protocol == "udp"))
+            });
         self.control_generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn register_discovery_source(
         &self,
         local: SocketAddr,
+        protocol: &str,
         source: std::sync::Weak<crate::connector::tracker_discovery::PathConnections>,
     ) {
-        self.discovery_sources.lock().unwrap().insert(local, source);
+        self.discovery_sources
+            .lock()
+            .unwrap()
+            .insert((local, protocol.to_owned()), source);
     }
 
     pub(crate) fn mark_control_change(&self) {
@@ -1251,7 +1266,7 @@ impl GlobalCtx {
         sources.retain(|_, source| source.strong_count() != 0);
         sources
             .iter()
-            .filter_map(|(&local, source)| source.upgrade().map(|source| (local, source)))
+            .filter_map(|((local, _), source)| source.upgrade().map(|source| (*local, source)))
             .collect()
     }
 

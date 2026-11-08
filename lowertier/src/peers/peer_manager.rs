@@ -1766,6 +1766,21 @@ impl PeerManager {
                 .is_some_and(|peer| peer.has_live_conns())
     }
 
+    pub(crate) fn has_live_peer_connection_for_protocol(
+        &self,
+        peer_id: PeerId,
+        protocol: &str,
+    ) -> bool {
+        self.peers
+            .get_peer_by_id(peer_id)
+            .is_some_and(|peer| peer.has_live_conn_for_protocol(protocol))
+            || self
+                .foreign_network_client
+                .get_peer_map()
+                .get_peer_by_id(peer_id)
+                .is_some_and(|peer| peer.has_live_conn_for_protocol(protocol))
+    }
+
     #[tracing::instrument]
     pub async fn try_direct_connect<C>(&self, connector: C) -> Result<(PeerId, PeerConnId), Error>
     where

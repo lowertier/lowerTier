@@ -90,6 +90,17 @@ pub fn transport_protocol_enabled(flags: &Flags, protocol: &str) -> bool {
             .any(|enabled| enabled == protocol)
 }
 
+pub(crate) const TRANSPORT_PROTOCOLS: [&str; 3] = ["quic", "tcp", "wss"];
+
+pub(crate) fn hole_punch_protocol_enabled(flags: &Flags, protocol: &str) -> bool {
+    transport_protocol_enabled(flags, protocol)
+        && match protocol {
+            "quic" => !flags.disable_udp_hole_punching,
+            "tcp" | "wss" => !flags.disable_tcp_hole_punching,
+            _ => false,
+        }
+}
+
 pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(protocol, "quic" | "tcp" | "wss"),

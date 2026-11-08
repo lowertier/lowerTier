@@ -472,6 +472,12 @@ impl Peer {
         self.conns.iter().any(|entry| !entry.value().is_closed())
     }
 
+    pub(crate) fn has_live_conn_for_protocol(&self, protocol: &str) -> bool {
+        self.conns.iter().any(|entry| {
+            !entry.value().is_closed() && entry.value().tunnel_type() == Some(protocol)
+        })
+    }
+
     pub fn has_directly_connected_conn(&self) -> bool {
         self.conns
             .iter()

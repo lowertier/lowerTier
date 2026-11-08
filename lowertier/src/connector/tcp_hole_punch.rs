@@ -113,7 +113,7 @@ async fn nominate(
     }))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Protocol {
     H2,
     Wss,
@@ -132,22 +132,15 @@ impl Protocol {
             Self::Wss => "wss",
         }
     }
-    fn for_attempt(flags: &crate::common::config::Flags, attempt: u32) -> Result<(Self, u32)> {
+    fn enabled(flags: &crate::common::config::Flags) -> impl Iterator<Item = Self> + '_ {
         let preferred = if flags.default_protocol == "wss" {
             [Self::Wss, Self::H2]
         } else {
             [Self::H2, Self::Wss]
         };
-        let mut enabled = preferred.into_iter().filter(|protocol| {
-            crate::common::config::transport_protocol_enabled(flags, protocol.name())
-        });
-        let first = enabled.next().context("no enabled TCP punch transport")?;
-        match enabled.next() {
-            // Try both allowed stream protocols for each source pair. A peer
-            // may support only the alternative to our preferred transport.
-            Some(second) => Ok((if attempt % 2 == 0 { first } else { second }, attempt / 2)),
-            None => Ok((first, attempt)),
-        }
+        preferred.into_iter().filter(|protocol| {
+            crate::common::config::hole_punch_protocol_enabled(flags, protocol.name())
+        })
     }
 }
 struct Reservation {
@@ -275,10 +268,11 @@ pub(crate) struct TcpBootstrap {
 impl TcpBootstrap {
     pub(crate) async fn new(
         ctx: ArcGlobalCtx,
+        protocol: &str,
         local: SocketAddr,
         advertised: Option<SocketAddr>,
     ) -> Result<Self> {
-        let protocol = Protocol::parse(&ctx.get_flags().default_protocol)?;
+        let protocol = Protocol::parse(protocol)?;
         crate::common::config::ensure_transport_protocol_enabled(
             &ctx.flags_arc(),
             protocol.name(),
@@ -679,17 +673,17 @@ async fn punch(
 }
 #[derive(Default)]
 struct State {
-    active: Mutex<HashSet<PeerId>>,
-    attempts: Mutex<HashMap<PeerId, (tokio::time::Instant, u32)>>,
+    active: Mutex<HashSet<(PeerId, Protocol)>>,
+    attempts: Mutex<HashMap<(PeerId, Protocol), (tokio::time::Instant, u32)>>,
 }
 struct Attempt {
     state: Arc<State>,
-    peer: PeerId,
+    key: (PeerId, Protocol),
 }
 impl Drop for Attempt {
     fn drop(&mut self) {
-        self.state.active.lock().unwrap().remove(&self.peer);
-        if let Some((time, _)) = self.state.attempts.lock().unwrap().get_mut(&self.peer) {
+        self.state.active.lock().unwrap().remove(&self.key);
+        if let Some((time, _)) = self.state.attempts.lock().unwrap().get_mut(&self.key) {
             *time = tokio::time::Instant::now();
         }
     }
@@ -714,13 +708,14 @@ impl Server {
     fn authenticate(ctrl: &BaseController) -> Result<PeerId> {
         authenticate_rendezvous_peer(ctrl, "TCP")
     }
-    fn take(&self, peer: PeerId) -> Result<(Attempt, u32)> {
+    fn take(&self, peer: PeerId, protocol: Protocol) -> Result<(Attempt, u32)> {
+        let key = (peer, protocol);
         let mut active = self.state.active.lock().unwrap();
-        ensure!(!active.contains(&peer), "TCP punch already active");
+        ensure!(!active.contains(&key), "TCP punch already active");
         let mut attempts = self.state.attempts.lock().unwrap();
         let now = tokio::time::Instant::now();
         attempts.retain(|_, (time, _)| now.duration_since(*time) < Duration::from_secs(600));
-        let index = if let Some((time, index)) = attempts.get_mut(&peer) {
+        let index = if let Some((time, index)) = attempts.get_mut(&key) {
             ensure!(
                 now.duration_since(*time) >= RETRY,
                 "TCP punch retry is rate limited"
@@ -730,19 +725,19 @@ impl Server {
             *index
         } else {
             ensure!(attempts.len() < 1024, "TCP punch peer limit reached");
-            attempts.insert(peer, (now, 0));
+            attempts.insert(key, (now, 0));
             0
         };
-        active.insert(peer);
+        active.insert(key);
         Ok((
             Attempt {
                 state: self.state.clone(),
-                peer,
+                key,
             },
             index,
         ))
     }
-    async fn allowed(&self, peer: PeerId) -> bool {
+    async fn allowed(&self, peer: PeerId, protocol: Protocol) -> bool {
         let flags = self.peer_mgr.get_global_ctx().get_flags();
         let route = self
             .peer_mgr
@@ -750,7 +745,7 @@ impl Server {
             .await
             .into_iter()
             .find(|r| r.peer_id == peer);
-        !flags.disable_tcp_hole_punching
+        crate::common::config::hole_punch_protocol_enabled(&flags, protocol.name())
             && should_try_p2p_with_peer(
                 route.as_ref().and_then(|r| r.feature_flag.as_ref()),
                 false,
@@ -758,13 +753,15 @@ impl Server {
                 flags.need_p2p,
             )
     }
-    async fn initiate(&self, peer: PeerId) -> Result<()> {
-        ensure!(self.allowed(peer).await, "TCP punch denied by peer policy");
+    async fn initiate(&self, peer: PeerId, protocol: Protocol) -> Result<()> {
+        ensure!(
+            self.allowed(peer, protocol).await,
+            "TCP punch denied by peer policy"
+        );
         let _permit = self.permits.clone().try_acquire_owned()?;
-        let (_attempt, index) = self.take(peer)?;
+        let (_attempt, index) = self.take(peer, protocol)?;
         let ctx = self.peer_mgr.get_global_ctx();
-        let (protocol, source_attempt) = Protocol::for_attempt(&ctx.flags_arc(), index)?;
-        let (local_index, remote_index) = source_pair(source_attempt);
+        let (local_index, remote_index) = source_pair(index);
         let reservation = reserve(&ctx, local_index as usize).await?;
         let variable_mapping = hard_nat::mapping_varies(&reservation.mapping);
         let hard_permit = if ctx.get_flags().disable_sym_hole_punching {
@@ -832,8 +829,11 @@ impl TcpHolePunchRpc for Server {
         let ctx = self.peer_mgr.get_global_ctx();
         let checked = async {
             ensure!(request.version == 1, "unsupported TCP rendezvous version");
-            ensure!(self.allowed(peer).await, "TCP punch denied by peer policy");
             let protocol = Protocol::parse(&request.protocol)?;
+            ensure!(
+                self.allowed(peer, protocol).await,
+                "TCP punch denied by peer policy"
+            );
             crate::common::config::ensure_transport_protocol_enabled(
                 &ctx.flags_arc(),
                 protocol.name(),
@@ -845,7 +845,7 @@ impl TcpHolePunchRpc for Server {
                 .context("invalid TCP nomination token")?;
             let remote = candidates(&ctx, &request.candidates)?;
             let permit = self.permits.clone().try_acquire_owned()?;
-            let (attempt, _) = self.take(peer)?;
+            let (attempt, _) = self.take(peer, protocol)?;
             let reservation = tokio::time::timeout(
                 Duration::from_secs(10),
                 reserve(&ctx, request.source_index as usize),
@@ -903,18 +903,28 @@ struct Launcher(Arc<Server>);
 #[async_trait::async_trait]
 impl PeerTaskLauncher for Launcher {
     type Data = Arc<Server>;
-    type CollectPeerItem = PeerId;
+    type CollectPeerItem = (PeerId, Protocol);
     type TaskRet = ();
     fn new_data(&self, _: Arc<PeerManager>) -> Self::Data {
         self.0.clone()
     }
-    async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<PeerId> {
-        hole_punch_peers(&data.peer_mgr).await
+    async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
+        let flags = data.peer_mgr.get_global_ctx().get_flags();
+        let mut tasks = Vec::new();
+        for protocol in Protocol::enabled(&flags) {
+            tasks.extend(
+                hole_punch_peers(&data.peer_mgr, protocol.name())
+                    .await
+                    .into_iter()
+                    .map(|peer| (peer, protocol)),
+            );
+        }
+        tasks
     }
     async fn launch_task(
         &self,
         data: &Self::Data,
-        peer: PeerId,
+        (peer, protocol): Self::CollectPeerItem,
     ) -> tokio::task::JoinHandle<Result<()>> {
         let data = data.clone();
         tokio::spawn(async move {
@@ -923,15 +933,21 @@ impl PeerTaskLauncher for Launcher {
                 .attempts
                 .lock()
                 .unwrap()
-                .get(&peer)
+                .get(&(peer, protocol))
                 .map(|(time, _)| *time + RETRY);
             if let Some(next) = next {
                 tokio::time::sleep_until(next).await;
             }
-            if data.peer_mgr.has_live_peer_connection(peer) {
+            if !crate::common::config::hole_punch_protocol_enabled(
+                &data.peer_mgr.get_global_ctx().flags_arc(),
+                protocol.name(),
+            ) || data
+                .peer_mgr
+                .has_live_peer_connection_for_protocol(peer, protocol.name())
+            {
                 return Ok(());
             }
-            tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer)).await?
+            tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer, protocol)).await?
         })
     }
     async fn all_task_done(&self, _: &Self::Data) {}
@@ -955,9 +971,6 @@ impl TcpHolePunchConnector {
     }
     pub async fn run(&mut self) -> Result<()> {
         let ctx = self.server.peer_mgr.get_global_ctx();
-        if ctx.get_flags().disable_tcp_hole_punching {
-            return Ok(());
-        }
         self.server
             .peer_mgr
             .get_peer_rpc_mgr()
@@ -1005,25 +1018,29 @@ mod tests {
     }
 
     #[test]
-    fn stream_protocol_retries_respect_allow_list_and_cover_each_source_pair() {
+    fn stream_protocols_respect_the_allow_list_and_punch_policy() {
+        crate::peers::peer_map::connection_admission_protocol_cases();
         let mut flags = crate::common::config::gen_default_flags();
-        assert_eq!(Protocol::for_attempt(&flags, 0).unwrap(), (Protocol::H2, 0));
         assert_eq!(
-            Protocol::for_attempt(&flags, 1).unwrap(),
-            (Protocol::Wss, 0)
+            Protocol::enabled(&flags).collect::<Vec<_>>(),
+            [Protocol::H2, Protocol::Wss]
         );
-        assert_eq!(Protocol::for_attempt(&flags, 2).unwrap(), (Protocol::H2, 1));
         flags.default_protocol = "wss".into();
         assert_eq!(
-            Protocol::for_attempt(&flags, 0).unwrap(),
-            (Protocol::Wss, 0)
+            Protocol::enabled(&flags).collect::<Vec<_>>(),
+            [Protocol::Wss, Protocol::H2]
         );
-        assert_eq!(Protocol::for_attempt(&flags, 1).unwrap(), (Protocol::H2, 0));
         flags.default_protocol = "quic".into();
         flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
-        assert_eq!(Protocol::for_attempt(&flags, 1).unwrap(), (Protocol::H2, 1));
+        assert_eq!(
+            Protocol::enabled(&flags).collect::<Vec<_>>(),
+            [Protocol::H2]
+        );
         flags.enabled_protocols = vec!["quic".into()];
-        assert!(Protocol::for_attempt(&flags, 0).is_err());
+        assert_eq!(Protocol::enabled(&flags).count(), 0);
+        flags.enabled_protocols.clear();
+        flags.disable_tcp_hole_punching = true;
+        assert_eq!(Protocol::enabled(&flags).count(), 0);
     }
 
     struct LocalStun(Option<SocketAddr>);
@@ -1031,9 +1048,9 @@ mod tests {
     impl crate::common::stun::StunInfoCollectorTrait for LocalStun {
         async fn get_udp_port_mapping_with_socket(
             &self,
-            _: Arc<tokio::net::UdpSocket>,
+            socket: Arc<tokio::net::UdpSocket>,
         ) -> Result<SocketAddr, crate::common::error::Error> {
-            unreachable!()
+            Ok(socket.local_addr()?)
         }
         fn get_stun_info(&self) -> crate::proto::common::StunInfo {
             Default::default()
@@ -1099,7 +1116,7 @@ mod tests {
             );
             tokio::time::timeout(
                 ATTEMPT_TIMEOUT,
-                Server::new(a.clone()).initiate(b.my_peer_id()),
+                Server::new(a.clone()).initiate(b.my_peer_id(), protocol),
             )
             .await
             .unwrap()
@@ -1107,6 +1124,154 @@ mod tests {
             assert!(a.get_peer_map().has_peer(b.my_peer_id()));
             assert!(b.get_peer_map().has_peer(a.my_peer_id()));
         }
+        maintains_enabled_paths().await;
+    }
+
+    async fn maintains_enabled_paths() {
+        use crate::{
+            connector::quic_hole_punch::QuicHolePunchConnector,
+            peers::tests::{
+                connect_peer_manager, create_mock_peer_manager_secure, wait_route_appear,
+            },
+        };
+        let stage = std::cell::Cell::new("setup");
+        tokio::time::timeout(Duration::from_secs(50), async {
+            let first =
+                create_mock_peer_manager_secure("multi-punch".into(), "secret".into()).await;
+            let second =
+                create_mock_peer_manager_secure("multi-punch".into(), "secret".into()).await;
+            let (a, b) = if first.my_peer_id() < second.my_peer_id() {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let relay =
+                create_mock_peer_manager_secure("multi-punch".into(), "secret".into()).await;
+            for peer in [&a, &b] {
+                peer.get_global_ctx()
+                    .replace_stun_info_collector(Box::new(LocalStun(None)));
+                let mut flags = peer.get_global_ctx().get_flags();
+                flags.need_p2p = false;
+                flags.disable_sym_hole_punching = true;
+                peer.get_global_ctx().set_flags(flags);
+            }
+            let mut flags = b.get_global_ctx().get_flags();
+            flags.enabled_protocols = vec!["tcp".into(), "wss".into()];
+            flags.default_protocol = "wss".into();
+            flags.disable_tcp_hole_punching = true;
+            flags.disable_udp_hole_punching = true;
+            b.get_global_ctx().set_flags(flags);
+            let mut tcp_b = TcpHolePunchConnector::new(b.clone());
+            tcp_b.run().await.unwrap();
+            let server = tcp_b.server.clone();
+            let mut flags = b.get_global_ctx().get_flags();
+            flags.disable_tcp_hole_punching = false;
+            b.get_global_ctx().set_flags(flags);
+            connect_peer_manager(a.clone(), relay.clone()).await;
+            connect_peer_manager(b.clone(), relay.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            assert!(!hole_punch_peers(&a, "quic").await.contains(&b.my_peer_id()));
+            let client = Server::new(a.clone());
+            stage.set("H2 rendezvous");
+            client.initiate(b.my_peer_id(), Protocol::H2).await.unwrap();
+            let mut flags = a.get_global_ctx().get_flags();
+            flags.lazy_p2p = true;
+            a.get_global_ctx().set_flags(flags);
+            let launcher = Launcher(client.clone());
+            let pending = launcher.collect_peers_need_task(&client).await;
+            assert!(!pending.contains(&(b.my_peer_id(), Protocol::H2)));
+            assert!(pending.contains(&(b.my_peer_id(), Protocol::Wss)));
+            stage.set("WSS rendezvous");
+            launcher
+                .launch_task(&client, (b.my_peer_id(), Protocol::Wss))
+                .await
+                .await
+                .unwrap()
+                .unwrap();
+            for peer in [&a, &b] {
+                let remote = if peer.my_peer_id() == a.my_peer_id() {
+                    b.my_peer_id()
+                } else {
+                    a.my_peer_id()
+                };
+                assert!(peer.has_live_peer_connection_for_protocol(remote, "tcp"));
+                assert!(peer.has_live_peer_connection_for_protocol(remote, "wss"));
+            }
+            let mut quic_a = QuicHolePunchConnector::new(a.clone());
+            let mut quic_b = QuicHolePunchConnector::new(b.clone());
+            quic_a.run();
+            quic_b.run();
+            let mut flags = b.get_global_ctx().get_flags();
+            flags.enabled_protocols.clear();
+            flags.disable_udp_hole_punching = false;
+            b.get_global_ctx().set_flags(flags);
+            stage.set("QUIC rendezvous");
+            while !a.has_live_peer_connection_for_protocol(b.my_peer_id(), "quic")
+                || !b.has_live_peer_connection_for_protocol(a.my_peer_id(), "quic")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let connections = a
+                .get_peer_map()
+                .get_peer_by_id(b.my_peer_id())
+                .unwrap()
+                .list_peer_conns()
+                .await;
+            let quic = connections
+                .iter()
+                .find(|info| info.tunnel.as_ref().unwrap().tunnel_type == "quic")
+                .unwrap();
+            stage.set("QUIC close");
+            a.close_peer_conn(b.my_peer_id(), &quic.conn_id.parse().unwrap())
+                .await
+                .unwrap();
+            while a.has_live_peer_connection_for_protocol(b.my_peer_id(), "quic") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(hole_punch_peers(&a, "quic").await.contains(&b.my_peer_id()));
+            let wss = connections
+                .iter()
+                .find(|info| info.tunnel.as_ref().unwrap().tunnel_type == "wss")
+                .unwrap();
+            stage.set("WSS close");
+            a.close_peer_conn(b.my_peer_id(), &wss.conn_id.parse().unwrap())
+                .await
+                .unwrap();
+            while a.has_live_peer_connection_for_protocol(b.my_peer_id(), "wss")
+                || b.has_live_peer_connection_for_protocol(a.my_peer_id(), "wss")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "tcp"));
+            assert!(
+                launcher
+                    .collect_peers_need_task(&client)
+                    .await
+                    .contains(&(b.my_peer_id(), Protocol::Wss))
+            );
+            for (state, remote) in [
+                (&client.state, b.my_peer_id()),
+                (&server.state, a.my_peer_id()),
+            ] {
+                // Keep this fixture on one source pair. The source schedule has a separate test.
+                state
+                    .attempts
+                    .lock()
+                    .unwrap()
+                    .remove(&(remote, Protocol::Wss));
+            }
+            stage.set("WSS repair");
+            launcher
+                .launch_task(&client, (b.my_peer_id(), Protocol::Wss))
+                .await
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "wss"));
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "tcp"));
+        })
+        .await
+        .unwrap_or_else(|_| panic!("enabled transports stopped at {}", stage.get()));
     }
     #[tokio::test]
     async fn locally_mapped_tcp_port_is_reserved_without_sharing_an_existing_listener() {
@@ -1133,7 +1298,7 @@ mod tests {
         flags.default_protocol = "tcp".into();
         ctx.set_flags(flags);
         let bootstrap = Arc::new(
-            TcpBootstrap::new(ctx.clone(), "127.0.0.1:0".parse().unwrap(), None)
+            TcpBootstrap::new(ctx.clone(), "tcp", "127.0.0.1:0".parse().unwrap(), None)
                 .await
                 .unwrap(),
         );

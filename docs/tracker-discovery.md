@@ -7,7 +7,10 @@ TLS exporter binding remains enabled for QUIC, H2, and WSS.
 
 Tracker discovery is opt-in. A configuration without `[discovery]` uses its configured peers for bootstrap and does not announce to public trackers. After peers connect, encrypted peer RPCs coordinate hole punching while STUN discovers NAT mappings. A tracker supplies bootstrap addresses; a connected peer can coordinate punching and provide relay fallback.
 
-QUIC/UDP, H2/TCP, and WSS/TCP are all allowed by default, and both UDP and TCP punching are enabled. Omit `transport.protocols` to retain those transport defaults. `transport.prefer` chooses a preference and the tracker rendezvous namespace; it does not disable the other allowed transports.
+QUIC/UDP, H2/TCP, and WSS/TCP are all allowed by default, and both UDP and TCP punching are enabled.
+Omit `transport.protocols` to retain those transport defaults.
+Tracker discovery maintains an independent rendezvous namespace and path for every enabled protocol.
+`transport.prefer` selects the preferred connection without stopping the other protocols.
 
 ## Client configuration
 
@@ -28,7 +31,8 @@ trackers = [
 ]
 ```
 
-Set `transport.prefer` to `tcp` for H2 or `wss` for WSS. Use the same transport on nodes that must discover each other directly.
+Set `transport.prefer` to `tcp` for H2 or `wss` for WSS.
+Nodes with different preferences can discover each other through every protocol they both enable.
 Remove `[[peer]]` entries when the tracker must supply the entire bootstrap peer set.
 Existing configured peers remain available when both mechanisms are configured.
 Tracker discovery requires a nonempty shared network secret. Credential-only bootstrap is not supported by this initial version.
@@ -58,6 +62,9 @@ This example addresses a local test server. For deployment, use the seed's actua
 The tracker uses the request's observed IP and the advertised port.
 The `advertise` IP must therefore match the public source IP that the tracker observes.
 The seed needs the same network secret as its peers.
+The protocol preferred at instance start retains the configured `bind` and `advertise` endpoints.
+Other protocols use temporary ports on the same permitted local address and discover their own mappings.
+Changing the preference preserves existing socket mappings.
 
 ## Bootstrap sequence
 
@@ -99,8 +106,18 @@ The variable side opens a pool of source ports toward the stable candidate.
 The stable side searches ports at the other peer's public address from its reserved source port.
 Each successful stream still needs TLS authentication, the rendezvous token, and VPN authentication.
 This uses native TCP for both H2 and WSS.
-Older peers and peers with symmetric traversal disabled retain candidate-only traversal.
+Peers with symmetric traversal disabled use candidate-only traversal.
 When both sides report varying mappings, the expanded method is not used.
+
+Authenticated peers advertise their enabled punching protocols.
+Each common protocol schedules and repairs its own direct path.
+A healthy path on another protocol does not cancel the attempt or consume its retry delay.
+An established peer retains this behavior in lazy P2P mode.
+Disabling a protocol prevents new attempts and withdraws its tracker path without closing the other tracker paths.
+The existing process memory budget, handshake limits, traversal permits, and tracker traffic limits remain shared.
+Each peer map retains its limit of 64 live connections.
+Each peer can hold two connections per protocol, which permits a replacement without closing the current path.
+Internal tunnel names share one quota and cannot create additional protocol quotas.
 
 One process-wide permit covers expanded TCP traversal and QUIC socket pools across all networks.
 QUIC port search retains one existing socket and does not need this pool permit.

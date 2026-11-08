@@ -45,16 +45,16 @@ use super::{
 };
 
 const MAX_LIVE_PEER_CONNECTIONS: usize = 64;
-const MAX_LIVE_CONNECTIONS_PER_PEER: usize = 2;
+const MAX_LIVE_CONNECTIONS_PER_PEER_PROTOCOL: usize = 2;
 
 struct PeerConnectionAdmission {
     global: Arc<Semaphore>,
-    per_peer: Mutex<HashMap<PeerId, usize>>,
+    per_peer_protocol: Mutex<HashMap<(PeerId, &'static str), usize>>,
     released: AtomicU64,
 }
 
 pub(crate) struct PeerConnectionPermit {
-    peer_id: PeerId,
+    key: (PeerId, &'static str),
     admission: Arc<PeerConnectionAdmission>,
     global: Option<OwnedSemaphorePermit>,
 }
@@ -63,22 +63,34 @@ impl PeerConnectionAdmission {
     fn new() -> Self {
         Self {
             global: Arc::new(Semaphore::new(MAX_LIVE_PEER_CONNECTIONS)),
-            per_peer: Mutex::new(HashMap::new()),
+            per_peer_protocol: Mutex::new(HashMap::new()),
             released: AtomicU64::new(0),
         }
     }
 
-    fn try_acquire(self: &Arc<Self>, peer_id: PeerId) -> Option<PeerConnectionPermit> {
+    fn try_acquire(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        protocol: Option<&str>,
+    ) -> Option<PeerConnectionPermit> {
+        // Internal tunnels share one quota. Arbitrary names cannot create extra protocol quotas.
+        let protocol = match protocol {
+            Some("quic") => "quic",
+            Some("tcp") => "tcp",
+            Some("wss") => "wss",
+            _ => "internal",
+        };
+        let key = (peer_id, protocol);
         let global = self.global.clone().try_acquire_owned().ok()?;
-        let mut per_peer = self.per_peer.lock();
-        let count = per_peer.entry(peer_id).or_default();
-        if *count >= MAX_LIVE_CONNECTIONS_PER_PEER {
+        let mut per_peer_protocol = self.per_peer_protocol.lock();
+        let count = per_peer_protocol.entry(key).or_default();
+        if *count >= MAX_LIVE_CONNECTIONS_PER_PEER_PROTOCOL {
             return None;
         }
         *count += 1;
-        drop(per_peer);
+        drop(per_peer_protocol);
         Some(PeerConnectionPermit {
-            peer_id,
+            key,
             admission: self.clone(),
             global: Some(global),
         })
@@ -87,17 +99,49 @@ impl PeerConnectionAdmission {
 
 impl Drop for PeerConnectionPermit {
     fn drop(&mut self) {
-        let mut per_peer = self.admission.per_peer.lock();
-        if let Some(count) = per_peer.get_mut(&self.peer_id) {
+        let mut per_peer_protocol = self.admission.per_peer_protocol.lock();
+        if let Some(count) = per_peer_protocol.get_mut(&self.key) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                per_peer.remove(&self.peer_id);
+                per_peer_protocol.remove(&self.key);
             }
         }
-        drop(per_peer);
+        drop(per_peer_protocol);
         drop(self.global.take());
         self.admission.released.fetch_add(1, Ordering::Release);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn connection_admission_protocol_cases() {
+    let admission = Arc::new(PeerConnectionAdmission::new());
+    let mut held = Vec::new();
+    for protocol in crate::common::config::TRANSPORT_PROTOCOLS {
+        for _ in 0..MAX_LIVE_CONNECTIONS_PER_PEER_PROTOCOL {
+            held.push(admission.try_acquire(0, Some(protocol)).unwrap());
+        }
+        assert!(admission.try_acquire(0, Some(protocol)).is_none());
+    }
+    held.push(admission.try_acquire(0, Some("ring")).unwrap());
+    held.push(admission.try_acquire(0, None).unwrap());
+    assert!(admission.try_acquire(0, Some("unknown")).is_none());
+    while held.len() < MAX_LIVE_PEER_CONNECTIONS {
+        held.push(
+            admission
+                .try_acquire(held.len() as PeerId + 1, Some("quic"))
+                .unwrap(),
+        );
+    }
+    assert!(admission.try_acquire(PeerId::MAX, Some("wss")).is_none());
+    held.pop();
+    assert_eq!(admission.released.load(Ordering::Acquire), 1);
+    held.push(admission.try_acquire(PeerId::MAX, Some("wss")).unwrap());
+    drop(held);
+    assert!(admission.per_peer_protocol.lock().is_empty());
+    assert_eq!(
+        admission.global.available_permits(),
+        MAX_LIVE_PEER_CONNECTIONS
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -460,7 +504,7 @@ impl PeerMap {
         let peer_id = peer_conn.get_peer_id();
         let permit = self
             .connection_admission
-            .try_acquire(peer_id)
+            .try_acquire(peer_id, peer_conn.tunnel_type())
             .ok_or_else(|| Error::RouteError(Some("peer connection admission is full".into())))?;
         peer_conn.attach_connection_permit(permit);
         let peer_conn_id = peer_conn.get_conn_id();

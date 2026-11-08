@@ -345,6 +345,10 @@ message PeerFeatureFlag {
   bool waypoint_v1 = 20;
   // Serves as an internet exit (routes.serve_exit).
   bool exit_node = 21;
+  // Each flag permits an independent authenticated rendezvous for this transport.
+  bool quic_hole_punch = 22;
+  bool tcp_hole_punch = 23;
+  bool wss_hole_punch = 24;
 }
 
 enum SocketType {

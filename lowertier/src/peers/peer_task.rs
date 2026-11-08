@@ -25,7 +25,8 @@ async fn peer_changed(events: &mut EventBusSubscriber) {
                 | GlobalCtxEvent::PeerRemoved(_)
                 | GlobalCtxEvent::PeerConnAdded(_)
                 | GlobalCtxEvent::PeerConnRemoved(_)
-                | GlobalCtxEvent::PeerRoutesUpdated,
+                | GlobalCtxEvent::PeerRoutesUpdated
+                | GlobalCtxEvent::ConfigPatched(_),
             )
             | Err(_) => {
                 // One scan covers all changes that are already queued.

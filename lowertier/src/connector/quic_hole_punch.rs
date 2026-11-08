@@ -294,7 +294,10 @@ impl PunchServer {
         };
         let (local_source, remote_source) = source_pair(attempt);
         let ctx = self.peer_mgr.get_global_ctx();
-        crate::common::config::ensure_transport_protocol_enabled(&ctx.flags_arc(), "quic")?;
+        ensure!(
+            crate::common::config::hole_punch_protocol_enabled(&ctx.flags_arc(), "quic"),
+            "QUIC hole punching is disabled"
+        );
         let (socket, candidates) = mapped_socket(&ctx, local_source as usize).await?;
         let variable_mapping = hard_nat::mapping_varies(socket.local_addr()?, &candidates);
         let transaction: [u8; 12] = rand::random();
@@ -504,7 +507,7 @@ impl PeerTaskLauncher for Launcher {
         self.0.clone()
     }
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<PeerId> {
-        hole_punch_peers(&data.peer_mgr).await
+        hole_punch_peers(&data.peer_mgr, "quic").await
     }
     async fn launch_task(
         &self,
@@ -523,7 +526,13 @@ impl PeerTaskLauncher for Launcher {
             if let Some(retry_at) = retry_at {
                 tokio::time::sleep_until(retry_at).await;
             }
-            if data.peer_mgr.has_live_peer_connection(peer) {
+            if !crate::common::config::hole_punch_protocol_enabled(
+                &data.peer_mgr.get_global_ctx().flags_arc(),
+                "quic",
+            ) || data
+                .peer_mgr
+                .has_live_peer_connection_for_protocol(peer, "quic")
+            {
                 return Ok(());
             }
             tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer)).await?
@@ -552,9 +561,6 @@ impl QuicHolePunchConnector {
     }
     pub fn run(&mut self) {
         let ctx = self.server.peer_mgr.get_global_ctx();
-        if ctx.get_flags().disable_udp_hole_punching {
-            return;
-        }
         self.server
             .peer_mgr
             .get_peer_rpc_mgr()

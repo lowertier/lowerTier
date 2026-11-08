@@ -151,10 +151,10 @@ impl CandidateState {
         }
     }
 
-    fn live_peer(&self, peers: &PeerManager) -> bool {
+    fn live_peer(&self, peers: &PeerManager, protocol: &str) -> bool {
         self.hint
             .recent_peer_id(Duration::from_secs(30))
-            .is_some_and(|peer| peers.has_live_peer_connection(peer))
+            .is_some_and(|peer| peers.has_live_peer_connection_for_protocol(peer, protocol))
     }
 
     fn accept_request(&mut self, nonce: [u8; 16], expires: Instant) -> bool {
@@ -194,7 +194,7 @@ impl Drop for PathLifetime {
             ownership.closed = true;
             peers
                 .get_global_ctx()
-                .remove_discovery_listeners(self.local);
+                .remove_discovery_listeners(self.local, self.connections.protocol());
             std::mem::take(&mut ownership.connections)
         };
         // Published tunnels outlive discovery tasks. Release their admission slots when the path stops.
@@ -302,7 +302,7 @@ impl PathConnections {
             .lock()
             .unwrap()
             .get(&address)
-            .is_some_and(|state| state.live_peer(peers))
+            .is_some_and(|state| state.live_peer(peers, &self.protocol))
     }
 
     fn publish_listener(
@@ -341,13 +341,7 @@ impl PathConnections {
                 if info.tunnel_type != "quic" {
                     return None;
                 }
-                let url = url::Url::parse(&info.resolved_remote_addr?.url).ok()?;
-                let ip = match url.host()? {
-                    url::Host::Ipv4(ip) => ip.into(),
-                    url::Host::Ipv6(ip) => ip.into(),
-                    url::Host::Domain(_) => return None,
-                };
-                let remote = SocketAddr::new(ip, url.port()?);
+                let remote = literal_endpoint(&info.resolved_remote_addr?.url)?;
                 (remote != *address).then_some((*address, remote, connection))
             })
             .collect::<Vec<_>>();
@@ -474,13 +468,18 @@ impl PathConnections {
 }
 
 fn tunnel_remote(tunnel: &dyn crate::tunnel::Tunnel) -> Option<SocketAddr> {
-    let remote = url::Url::parse(&tunnel.info()?.remote_addr?.url).ok()?;
+    literal_endpoint(&tunnel.info()?.remote_addr?.url)
+}
+
+fn literal_endpoint(address: &str) -> Option<SocketAddr> {
+    let remote = url::Url::parse(address).ok()?;
     let ip = match remote.host()? {
         url::Host::Ipv4(ip) => ip.into(),
         url::Host::Ipv6(ip) => ip.into(),
-        url::Host::Domain(_) => return None,
+        // Non-special schemes retain numeric IPv4 hosts as opaque domain strings.
+        url::Host::Domain(host) => host.parse::<std::net::IpAddr>().ok()?,
     };
-    Some(SocketAddr::new(ip, remote.port()?))
+    Some(SocketAddr::new(ip, remote.port_or_known_default()?))
 }
 
 #[cfg(test)]
@@ -602,36 +601,44 @@ pub(crate) fn start(
     }
     // One process incarnation can advertise several independent interface endpoints.
     let peer_session = rand::random();
+    // Keep the configured fixed endpoint on its original protocol when preference changes.
+    let pinned_protocol = ctx.get_flags().default_protocol;
     Ok(AbortOnDropHandle::new(tokio::spawn(async move {
         let mut paths = HashMap::new();
-        let (connected_tx, connected_rx) = watch::channel(false);
+        let connected = crate::common::config::TRANSPORT_PROTOCOLS.map(|protocol| {
+            let (sender, receiver) = watch::channel(false);
+            (protocol, sender, receiver)
+        });
         let mut events = ctx.subscribe();
         let mut refresh = tokio::time::interval(Duration::from_secs(2));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let map = peers.get_peer_map();
-            let connected = map.list_peers().into_iter().any(|peer| {
-                use crate::proto::peer_rpc::{PeerIdentityType, SecureAuthLevel};
-                peers.has_live_peer_connection(peer)
-                    && matches!(
-                        map.get_peer_identity_type(peer),
-                        Some(PeerIdentityType::Admin | PeerIdentityType::Credential)
-                    )
-                    && matches!(
-                        map.get_peer_secure_auth_level(peer),
-                        Some(
-                            SecureAuthLevel::PeerVerified | SecureAuthLevel::NetworkSecretConfirmed
+            for (protocol, sender, _) in &connected {
+                let healthy = map.list_peers().into_iter().any(|peer| {
+                    use crate::proto::peer_rpc::{PeerIdentityType, SecureAuthLevel};
+                    peers.has_live_peer_connection_for_protocol(peer, protocol)
+                        && matches!(
+                            map.get_peer_identity_type(peer),
+                            Some(PeerIdentityType::Admin | PeerIdentityType::Credential)
                         )
-                    )
-            });
-            connected_tx.send_if_modified(|current| {
-                if *current == connected {
-                    false
-                } else {
-                    *current = connected;
-                    true
-                }
-            });
+                        && matches!(
+                            map.get_peer_secure_auth_level(peer),
+                            Some(
+                                SecureAuthLevel::PeerVerified
+                                    | SecureAuthLevel::NetworkSecretConfirmed
+                            )
+                        )
+                });
+                sender.send_if_modified(|current| {
+                    if *current == healthy {
+                        false
+                    } else {
+                        *current = healthy;
+                        true
+                    }
+                });
+            }
             tokio::select! {
                 _ = refresh.tick() => {},
                 event = events.recv() => {
@@ -669,21 +676,53 @@ pub(crate) fn start(
             };
             addresses.sort_unstable();
             addresses.dedup();
-            paths.retain(|address, _: &mut AbortOnDropHandle<()>| addresses.contains(address));
-            for local in addresses {
-                if paths.contains_key(&local) {
+            let flags = ctx.flags_arc();
+            let enabled = crate::common::config::TRANSPORT_PROTOCOLS
+                .into_iter()
+                .filter(|protocol| {
+                    crate::common::config::transport_protocol_enabled(&flags, protocol)
+                })
+                .collect::<Vec<_>>();
+            let needed = addresses
+                .into_iter()
+                .flat_map(|local| {
+                    let pinned_protocol = pinned_protocol.as_str();
+                    enabled.iter().map(move |&protocol| {
+                        (
+                            if protocol == pinned_protocol {
+                                local
+                            } else {
+                                SocketAddr::new(local.ip(), 0)
+                            },
+                            protocol,
+                        )
+                    })
+                })
+                .collect::<std::collections::HashSet<_>>();
+            paths.retain(|path, _: &mut AbortOnDropHandle<()>| needed.contains(path));
+            for (local, protocol) in needed {
+                if paths.contains_key(&(local, protocol)) {
                     continue;
                 }
-                let (ctx, peers, config) = (ctx.clone(), peers.clone(), config.clone());
-                let connected = connected_rx.clone();
+                let (ctx, peers, mut config) = (ctx.clone(), peers.clone(), config.clone());
+                if protocol != pinned_protocol {
+                    config.advertise = None;
+                }
+                let connected = connected
+                    .iter()
+                    .find(|(name, _, _)| *name == protocol)
+                    .unwrap()
+                    .2
+                    .clone();
                 paths.insert(
-                    local,
+                    (local, protocol),
                     AbortOnDropHandle::new(tokio::spawn(async move {
                         loop {
                             if let Err(error) = run_path(
                                 ctx.clone(),
                                 peers.clone(),
                                 config.clone(),
+                                protocol.to_owned(),
                                 local,
                                 key,
                                 peer_session,
@@ -706,12 +745,12 @@ async fn run_path(
     ctx: ArcGlobalCtx,
     peers: Arc<PeerManager>,
     config: TrackerDiscoveryConfig,
+    protocol: String,
     local: SocketAddr,
     key: [u8; 32],
     peer_session: wire::Id,
     connected: watch::Receiver<bool>,
 ) -> Result<()> {
-    let protocol = ctx.get_flags().default_protocol;
     let udp_local = if protocol == "quic" {
         local
     } else {
@@ -746,7 +785,7 @@ async fn run_path(
     };
     let bootstrap_tcp = if protocol != "quic" {
         Some(Arc::new(
-            TcpBootstrap::new(ctx.clone(), local, config.advertise).await?,
+            TcpBootstrap::new(ctx.clone(), &protocol, local, config.advertise).await?,
         ))
     } else {
         None
@@ -765,7 +804,7 @@ async fn run_path(
         protocol: protocol.clone(),
         ..Default::default()
     });
-    ctx.register_discovery_source(bound, Arc::downgrade(&connections));
+    ctx.register_discovery_source(bound, &protocol, Arc::downgrade(&connections));
     ctx.record_discovery_observation(super::DiscoveryObservation {
         protocol: protocol.clone(),
         socket: bound,
@@ -1069,7 +1108,7 @@ async fn tracker_loop(
             next_event = Instant::now() + MAPPING_EVENT_INTERVAL;
             connections.record_tracker(&url, String::new(), Some(peers.addresses.len() as u32));
             ctx.mark_control_change();
-            tracing::info!(tracker = %tracker_name, protocol = %ctx.get_flags().default_protocol, count = peers.addresses.len(), interval = peers.interval, ?address, "tracker discovery announce succeeded");
+            tracing::info!(tracker = %tracker_name, protocol = %connections.protocol(), count = peers.addresses.len(), interval = peers.interval, ?address, "tracker discovery announce succeeded");
             for peer in peers.addresses {
                 if peer.is_ipv4() == local.is_ipv4()
                     && peer != address
@@ -1157,6 +1196,7 @@ mod tests {
                     let ctx = peer.get_global_ctx();
                     let mut flags = ctx.get_flags();
                     flags.default_protocol = protocol.into();
+                    flags.enabled_protocols = vec![protocol.into()];
                     ctx.set_flags(flags);
                     ctx.replace_stun_info_collector(Box::new(
                         crate::common::stun::StunInfoCollector::new(
@@ -1212,10 +1252,170 @@ mod tests {
             .await
             .expect("STUN delayed tracker bootstrap");
         }
+        all_enabled_tracker_protocols_bootstrap().await;
+    }
+
+    async fn all_enabled_tracker_protocols_bootstrap() {
+        let stage = std::cell::Cell::new("setup");
+        let progress = std::cell::Cell::new(0_u8);
+        let publication = std::cell::Cell::new(0_u8);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let tracker = TrackerServer::new(1).unwrap();
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("udp://{}/announce", udp.local_addr().unwrap());
+            let _tracker = AbortOnDropHandle::new(tokio::spawn(tracker.clone().serve_udp(udp)));
+            let a = create_mock_peer_manager_secure("all-tracker".into(), "secret".into()).await;
+            let b = create_mock_peer_manager_secure("all-tracker".into(), "secret".into()).await;
+            let blackhole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut paths = Vec::new();
+            for (peer, preference) in [(&a, "quic"), (&b, "wss")] {
+                let ctx = peer.get_global_ctx();
+                let mut flags = ctx.get_flags();
+                flags.default_protocol = preference.into();
+                ctx.set_flags(flags);
+                ctx.replace_stun_info_collector(Box::new(
+                    crate::common::stun::StunInfoCollector::new(
+                        vec![blackhole.local_addr().unwrap().to_string()],
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ));
+                let reserved = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let fixed = reserved.local_addr().unwrap();
+                drop(reserved);
+                paths.push(start(peer.clone(), toml::from_str(&format!(
+                    "private_trackers = [\"{url}\"]\nbind = \"{fixed}\"\nadvertise = \"{fixed}\""
+                )).unwrap()).unwrap());
+            }
+            stage.set("connection establishment");
+            loop {
+                progress.set(
+                    crate::common::config::TRANSPORT_PROTOCOLS
+                        .iter()
+                        .enumerate()
+                        .fold(0, |mask, (index, protocol)| {
+                            mask | ((a
+                                .has_live_peer_connection_for_protocol(b.my_peer_id(), protocol)
+                                as u8)
+                                << index)
+                                | ((b
+                                    .has_live_peer_connection_for_protocol(a.my_peer_id(), protocol)
+                                    as u8)
+                                    << (index + 3))
+                        }),
+                );
+                let connected = crate::common::config::TRANSPORT_PROTOCOLS
+                    .iter()
+                    .all(|protocol| {
+                        a.has_live_peer_connection_for_protocol(b.my_peer_id(), protocol)
+                            && b.has_live_peer_connection_for_protocol(a.my_peer_id(), protocol)
+                    });
+                let published = [&a, &b].into_iter().all(|peer| {
+                    let sources = peer.get_global_ctx().discovery_sources();
+                    crate::common::config::TRANSPORT_PROTOCOLS
+                        .iter()
+                        .all(|protocol| {
+                            sources.iter().any(|(_, source)| {
+                                source.protocol() == *protocol && source.has_live_connections(peer)
+                            })
+                        })
+                });
+                publication.set(
+                    [&a, &b]
+                        .into_iter()
+                        .enumerate()
+                        .fold(0, |mask, (side, peer)| {
+                            let sources = peer.get_global_ctx().discovery_sources();
+                            crate::common::config::TRANSPORT_PROTOCOLS
+                                .iter()
+                                .enumerate()
+                                .fold(mask, |mask, (index, protocol)| {
+                                    mask | ((sources.iter().any(|(_, source)| {
+                                        source.protocol() == *protocol
+                                            && source.has_live_connections(peer)
+                                    }) as u8)
+                                        << (side * 3 + index))
+                                })
+                        }),
+                );
+                if connected && published {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            for peer in [&a, &b] {
+                let ctx = peer.get_global_ctx();
+                let sources = ctx.discovery_sources();
+                for protocol in crate::common::config::TRANSPORT_PROTOCOLS {
+                    assert!(
+                        sources
+                            .iter()
+                            .any(|(_, source)| source.protocol() == protocol
+                                && source.has_live_connections(peer))
+                    );
+                    assert!(
+                        ctx.get_discovery_listeners()
+                            .iter()
+                            .any(|listener| listener.scheme() == protocol)
+                    );
+                }
+            }
+            let ctx = a.get_global_ctx();
+            let mut flags = ctx.get_flags();
+            flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
+            ctx.set_flags(flags);
+            stage.set("WSS withdrawal");
+            while ctx
+                .discovery_sources()
+                .iter()
+                .any(|(_, source)| source.protocol() == "wss")
+                || a.has_live_peer_connection_for_protocol(b.my_peer_id(), "wss")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!ctx.get_feature_flags().wss_hole_punch);
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "quic"));
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "tcp"));
+            assert!(
+                ctx.get_discovery_listeners()
+                    .iter()
+                    .all(|listener| listener.scheme() != "wss")
+            );
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "tracker discovery stopped at {} with protocol mask {} and publication mask {}",
+                stage.get(),
+                progress.get(),
+                publication.get()
+            )
+        });
     }
 
     #[tokio::test]
     async fn udp_mapping_failure_withdraws_and_same_address_recovery_notifies() {
+        for url in [
+            "quic://127.0.0.1:443",
+            "tcp://127.0.0.1:443",
+            "wss://127.0.0.1:443",
+        ] {
+            assert_eq!(
+                literal_endpoint(url),
+                Some("127.0.0.1:443".parse().unwrap())
+            );
+        }
+        assert!(literal_endpoint("quic://example.invalid:443").is_none());
+        let ctx = crate::common::global_ctx::tests::get_mock_global_ctx_with_network(None);
+        let shared = "127.0.0.1:443".parse().unwrap();
+        for protocol in crate::common::config::TRANSPORT_PROTOCOLS {
+            ctx.set_discovery_listeners(shared, protocol, None);
+        }
+        ctx.remove_discovery_listeners(shared, "quic");
+        let listeners = ctx.get_discovery_listeners();
+        assert_eq!(listeners.len(), 2);
+        assert!(listeners.iter().any(|listener| listener.scheme() == "tcp"));
+        assert!(listeners.iter().any(|listener| listener.scheme() == "wss"));
         let address = "198.51.100.7:16969".parse().unwrap();
         let (sender, mut receiver) = watch::channel(None);
         assert_eq!(publish_udp_mapping(&sender, None), Duration::from_secs(5));
@@ -1456,7 +1656,7 @@ mod tests {
                         let reserve = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                         let address = reserve.local_addr().unwrap();
                         drop(reserve);
-                        let tcp = TcpBootstrap::new(ctx, address, Some(address))
+                        let tcp = TcpBootstrap::new(ctx, protocol, address, Some(address))
                             .await
                             .unwrap();
                         bootstraps.push((Arc::new(tcp), address));
@@ -2010,7 +2210,7 @@ async fn candidate_loop(
                 if attempts.len() < 8 && punch_tasks.len() < 16 {
                     candidate = entries.iter()
                         .filter(|(_, state)| state.expires.is_some() && state.connection.is_none()
-                            && state.active_generation.is_none() && !state.live_peer(&peers)
+                            && state.active_generation.is_none() && !state.live_peer(&peers, connections.protocol())
                             && state.retry_at <= Instant::now())
                         .min_by_key(|(_, state)| state.retry_at)
                         .map(|(address, state)| Candidate { address: *address, expires: state.expires.unwrap() });
@@ -2042,7 +2242,7 @@ async fn candidate_loop(
                 }
                 // Retain the authenticated identity for session recovery on every interface.
                 connections.hint(packet.addr).observe(peer);
-                if peers.has_live_peer_connection(peer) { continue; }
+                if peers.has_live_peer_connection_for_protocol(peer, connections.protocol()) { continue; }
                 if my_id < peer && connections.live(&peers, packet.addr).is_none() {
                     connect = Some((packet.addr, Some(peer)));
                 }
@@ -2060,7 +2260,7 @@ async fn candidate_loop(
                 continue;
             };
             state.expires = Some(state.expires.unwrap_or(expires).max(expires));
-            if state.live_peer(&peers)
+            if state.live_peer(&peers, connections.protocol())
                 || state
                     .connection
                     .is_some_and(|connection| connection_alive(&peers, connection))
