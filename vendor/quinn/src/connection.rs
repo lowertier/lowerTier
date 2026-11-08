@@ -690,7 +690,8 @@ impl Connection {
         self.0.state.lock("remote_address").inner.remote_address()
     }
 
-    /// Set the application policy for remote path changes on this server connection.
+    /// Set the application policy for remote path changes.
+    /// Clients permit only port changes at the same server IP address.
     pub fn set_path_policy(&self, policy: Arc<dyn proto::PathPolicy>) {
         self.0
             .state

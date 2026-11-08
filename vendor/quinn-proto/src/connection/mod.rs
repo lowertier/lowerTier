@@ -1649,16 +1649,18 @@ impl Connection {
         self.path.remote
     }
 
-    /// Set the application policy for remote path changes on a server connection.
+    /// Set the application policy for remote path changes.
     ///
     /// The policy can permit NAT rebinding when active migration is disabled.
-    /// Clients and connections that are still handshaking cannot change remote paths.
+    /// Clients permit only port changes at the same server IP address.
+    /// Client-side rebinding is a LowTier extension to RFC 9000 Section 9.
+    /// Connections that are still handshaking cannot change remote paths.
     pub fn set_path_policy(&mut self, policy: Arc<dyn PathPolicy>) {
         self.path_policy = Some(policy);
     }
 
     fn remote_path_allowed(&self, remote: SocketAddr) -> bool {
-        if self.is_handshaking() || self.side.is_client() {
+        if self.is_handshaking() {
             return false;
         }
         if self.path_policy.is_some()
@@ -3462,8 +3464,7 @@ impl Connection {
             && number == self.spaces[SpaceId::Data].rx_packet
         {
             debug_assert!(
-                self.side.is_server()
-                    && (self.side.remote_may_migrate() || self.path_policy.is_some()),
+                self.side.remote_may_migrate() || self.path_policy.is_some(),
                 "migration-initiating packets should have been dropped immediately"
             );
             self.migrate(now, remote);
@@ -4495,7 +4496,7 @@ mod state {
     }
 }
 
-/// Application policy for remote path changes on an established server connection.
+/// Application policy for remote path changes on an established connection.
 ///
 /// Callbacks run inside protocol processing. They must not block or access the connection.
 pub trait PathPolicy: Send + Sync {

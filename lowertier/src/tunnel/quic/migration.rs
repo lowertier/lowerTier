@@ -211,7 +211,8 @@ fn probe_source(remote: SocketAddr, socket_mark: Option<u32>) -> Result<IpAddr, 
         .addr(bind_addr)
         .maybe_socket_mark(socket_mark)
         .call()?;
-    let socket = prepare_quic_udp_socket(socket, Some(remote))?;
+    // This socket only reads route selection and never receives QUIC packets.
+    socket.connect(remote)?;
     Ok(socket.local_addr()?.ip().to_canonical())
 }
 
@@ -409,12 +410,7 @@ pub(super) async fn migrate_client_paths(
             for source in &sources {
                 ensure_local_allowed(&policy, SocketAddr::new(*source, local.port()))?;
             }
-            let destination = if cfg!(target_os = "macos") {
-                Some(paths[0].conn.remote_address())
-            } else {
-                None
-            };
-            let socket = prepare_quic_udp_socket(socket, destination)?;
+            let socket = prepare_quic_udp_socket(socket)?;
             if !admit_client_group(
                 &paths,
                 &sources,

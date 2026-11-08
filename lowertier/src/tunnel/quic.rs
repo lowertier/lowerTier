@@ -222,23 +222,9 @@ fn force_linux_quic_socket_buffer(
 
 fn prepare_quic_udp_socket(
     std_socket: std::net::UdpSocket,
-    destination: Option<SocketAddr>,
 ) -> Result<std::net::UdpSocket, TunnelError> {
+    // An unconnected socket lets Quinn authenticate packets after a NAT port change.
     std_socket.set_nonblocking(true)?;
-    if let Some(destination) = destination {
-        let destination = match (std_socket.local_addr()?, destination) {
-            (SocketAddr::V6(_), SocketAddr::V4(destination)) => {
-                SocketAddr::V6(std::net::SocketAddrV6::new(
-                    destination.ip().to_ipv6_mapped(),
-                    destination.port(),
-                    0,
-                    0,
-                ))
-            }
-            (_, destination) => destination,
-        };
-        std_socket.connect(destination)?;
-    }
     Ok(std_socket)
 }
 
@@ -1195,22 +1181,13 @@ impl QuicEndpointManager {
         dual_stack: bool,
         socket_mark: Option<u32>,
     ) -> Result<Endpoint, TunnelError> {
-        Self::try_create_for_peer(addr, dual_stack, socket_mark, None)
-    }
-
-    fn try_create_for_peer(
-        addr: SocketAddr,
-        dual_stack: bool,
-        socket_mark: Option<u32>,
-        destination: Option<SocketAddr>,
-    ) -> Result<Endpoint, TunnelError> {
         let socket = bind::<std::net::UdpSocket>()
             .addr(addr)
             .only_v6(addr.is_ipv6() && !dual_stack)
             .maybe_socket_mark(socket_mark)
             .call()?;
         configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
-        let std_socket = prepare_quic_udp_socket(socket, destination)?;
+        let std_socket = prepare_quic_udp_socket(socket)?;
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
         ))?;
@@ -1380,7 +1357,7 @@ impl QuicEndpointManager {
             .maybe_socket_mark(mgr.flags.socket_mark)
             .call()?;
         configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
-        let std_socket = prepare_quic_udp_socket(socket, None)?;
+        let std_socket = prepare_quic_udp_socket(socket)?;
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
         ))?;
@@ -1414,7 +1391,7 @@ impl QuicEndpointManager {
         } else {
             (Ipv6Addr::UNSPECIFIED, 0).into()
         };
-        Self::try_create_for_peer(addr, false, socket_mark, Some(destination))
+        Self::try_create(addr, false, socket_mark)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1458,15 +1435,12 @@ impl QuicEndpointManager {
         source: SocketAddr,
         socket_mark: Option<u32>,
         policy: &UnderlayPolicy,
-        destination: SocketAddr,
     ) -> Result<Endpoint, TunnelError> {
         ensure_local_allowed(policy, source)?;
         #[cfg(target_os = "macos")]
         if source.port() == 0 {
-            return Self::try_create_for_peer(source, false, socket_mark, Some(destination));
+            return Self::try_create(source, false, socket_mark);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = destination;
 
         let pool = if source.is_ipv4() {
             &self.ipv4
@@ -1588,7 +1562,7 @@ impl QuicEndpointManager {
         let mut endpoint_stopping_retries = 0;
 
         loop {
-            let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy, addr)?;
+            let endpoint = self.client_endpoint_for_source(source, socket_mark, &policy)?;
             let server_name = if security.flags.camouflage_config().server_name.is_empty() {
                 addr.ip().to_string()
             } else {
@@ -3884,7 +3858,7 @@ pub(crate) fn discovery_endpoint(
     configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
     let runtime = default_runtime()
         .ok_or_else(|| TunnelError::InternalError("no async runtime found".to_owned()))?;
-    let socket = prepare_quic_udp_socket(socket, None)?;
+    let socket = prepare_quic_udp_socket(socket)?;
     let sender = Arc::new(UdpSocket::from_std(socket.try_clone()?)?);
     let socket = crate::connector::tracker_discovery::socket::DiscoverySocket::new(
         runtime.wrap_udp_socket(socket)?,
@@ -3913,7 +3887,7 @@ fn punched_endpoint(
     configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
     let runtime = default_runtime()
         .ok_or_else(|| TunnelError::InternalError("no async runtime found".to_owned()))?;
-    let socket = runtime.wrap_udp_socket(prepare_quic_udp_socket(socket, None)?)?;
+    let socket = runtime.wrap_udp_socket(prepare_quic_udp_socket(socket)?)?;
     let config = if server {
         Some(server_config(&global_ctx.get_flags())?)
     } else {
@@ -3983,12 +3957,7 @@ impl QuicTunnelConnector {
             ensure_local_allowed(&global_ctx.get_underlay_policy(), local)?;
             ensure_remote_allowed(&global_ctx.get_underlay_policy(), remote)?;
             // This path must retain the discovery source even without configured exclusions.
-            QuicEndpointManager::try_create_for_peer(
-                local,
-                false,
-                global_ctx.get_flags().socket_mark,
-                Some(remote),
-            )?
+            QuicEndpointManager::try_create(local, false, global_ctx.get_flags().socket_mark)?
         };
         Ok(Self::from_discovery_endpoint(endpoint, remote, global_ctx))
     }

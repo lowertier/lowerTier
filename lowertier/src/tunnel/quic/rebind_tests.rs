@@ -13,6 +13,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 struct RebindingProxy {
     address: SocketAddr,
+    front: watch::Sender<Arc<UdpSocket>>,
     source: watch::Sender<Arc<UdpSocket>>,
     blocked_client_port: Arc<AtomicU32>,
     allowed_client_port: Arc<AtomicU32>,
@@ -21,8 +22,9 @@ struct RebindingProxy {
 
 impl RebindingProxy {
     async fn new(server: SocketAddr) -> Self {
-        let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let address = front.local_addr().unwrap();
+        let (front_tx, mut front_changed) = watch::channel(front.clone());
         let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let (source, mut changed) = watch::channel(back.clone());
         let blocked_client_port = Arc::new(AtomicU32::new(0));
@@ -30,6 +32,7 @@ impl RebindingProxy {
         let allowed_client_port = Arc::new(AtomicU32::new(0));
         let allowed = allowed_client_port.clone();
         let task = tokio::spawn(async move {
+            let mut front = front;
             let mut back = back;
             let mut client = None;
             let mut upstream = vec![0; 65535];
@@ -37,6 +40,10 @@ impl RebindingProxy {
             loop {
                 tokio::select! {
                     biased;
+                    update = front_changed.changed() => {
+                        if update.is_err() { break; }
+                        front = front_changed.borrow_and_update().clone();
+                    }
                     update = changed.changed() => {
                         if update.is_err() { break; }
                         back = changed.borrow_and_update().clone();
@@ -68,6 +75,7 @@ impl RebindingProxy {
         });
         Self {
             address,
+            front: front_tx,
             source,
             blocked_client_port,
             allowed_client_port,
@@ -192,6 +200,12 @@ impl Peers {
         let initial = proxy.source.borrow().local_addr().unwrap();
         let policy = QuicMigrationPolicy::new(&server_ctx, server_path.clone());
         assert!(!quinn::PathPolicy::allow(&policy, initial, initial));
+        let policy = QuicMigrationPolicy::new(&client_ctx, client_path.clone());
+        assert!(!quinn::PathPolicy::allow(
+            &policy,
+            proxy.address,
+            proxy.address
+        ));
         assert_eq!(
             client_tunnel.transport_binding(),
             server_tunnel.transport_binding()
@@ -274,6 +288,90 @@ impl Peers {
     }
 }
 
+async fn check_authenticated_server_nat_port_rebinding() {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let mut peers = Peers::new(true).await;
+        peers.deliver().await;
+        let client_id = peers.client.get_conn_id();
+        let server_id = peers.server.get_conn_id();
+        let session_key = SessionKey::new("quic-rebinding".into(), 2002);
+        let session = peers.client_sessions.get(&session_key).unwrap();
+        let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let new_remote = front.local_addr().unwrap();
+        peers.proxy.front.send_replace(front);
+
+        // The server must send first because the client still has the old NAT port.
+        let mut packet = ZCPacket::new_with_payload(b"server-nat-rebinding");
+        packet.fill_peer_manager_hdr(2002, 1001, PacketType::Data as u8);
+        peers.server.send_msg(packet).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), peers.client_rx.recv())
+            .await
+            .expect("an authenticated packet from the new NAT port must arrive")
+            .unwrap();
+        assert_eq!(received.payload(), b"server-nat-rebinding");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while peers
+                .client_path
+                .info
+                .read()
+                .resolved_remote_addr
+                .as_ref()
+                .unwrap()
+                .url
+                != super::super::build_url_from_socket_addr(&new_remote.to_string(), "quic")
+                    .as_str()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the client must validate the new NAT port");
+        peers.deliver().await;
+        assert_eq!(peers.client.get_conn_id(), client_id);
+        assert_eq!(peers.server.get_conn_id(), server_id);
+        assert!(Arc::ptr_eq(
+            &session,
+            &peers.client_sessions.get(&session_key).unwrap()
+        ));
+    })
+    .await
+    .unwrap();
+}
+
+async fn check_server_nat_rebinding_when_client_policy_denies() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut peers = Peers::new(false).await;
+        peers.deliver().await;
+        let old_remote = peers.client_path.info.read().resolved_remote_addr.clone();
+        let old_front = peers.proxy.front.borrow().clone();
+        let mut flags = peers.client_ctx.get_flags();
+        flags.underlay_deny_cidrs = vec!["127.0.0.0/8".into()];
+        peers.client_ctx.set_flags(flags);
+        let new_front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        peers.proxy.front.send_replace(new_front);
+        let mut packet = ZCPacket::new_with_payload(b"denied-server-path");
+        packet.fill_peer_manager_hdr(2002, 1001, PacketType::Data as u8);
+        peers.server.send_msg(packet).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), peers.client_rx.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            peers.client_path.info.read().resolved_remote_addr,
+            old_remote
+        );
+        peers.proxy.front.send_replace(old_front);
+        peers.deliver().await;
+        assert_eq!(
+            peers.client_path.info.read().resolved_remote_addr,
+            old_remote
+        );
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn authenticated_quic_survives_source_port_rebinding() {
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -304,6 +402,7 @@ async fn authenticated_quic_survives_source_port_rebinding() {
     })
     .await
     .unwrap();
+    check_authenticated_server_nat_port_rebinding().await;
 }
 
 #[tokio::test]
@@ -335,6 +434,7 @@ async fn quic_rebinding_keeps_the_old_path_when_policy_denies_the_new_path() {
     })
     .await
     .unwrap();
+    check_server_nat_rebinding_when_client_policy_denies().await;
 }
 
 #[tokio::test]

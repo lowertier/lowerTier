@@ -391,6 +391,9 @@ Use port `0` in listener URLs when the OS should select listener ports too.
 For example, a node behind NAT can use `quic://0.0.0.0:0` and `tcp://0.0.0.0:0`.
 Public bootstrap endpoints need a stable, reachable listener port.
 For QUIC, keep the successful UDP socket open so STUN and tunnel traffic retain the same NAT mapping.
+NAT nodes use OS-selected temporary ports for hole punching.
+They do not require the same configured listener port on every node.
+Authenticated QUIC connections support NAT port changes at either endpoint; see [path migration](docs/quic-rebinding.md).
 The default QUIC listener is `11012`, not `443`. HTTP/3 does not require port 443.
 Bind `quic://0.0.0.0:443` only when a network allows UDP/443 and blocks other UDP.
 That bind needs root or `CAP_NET_BIND_SERVICE`, and it collides with a local HTTPS server.

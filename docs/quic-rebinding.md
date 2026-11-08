@@ -1,9 +1,14 @@
 # QUIC path migration
 
 An authenticated H3/CONNECT-IP connection can survive a change to the client's public UDP port or IP address.
+It can also survive a server-side NAT port change at the same server IP address.
+Server port rebinding is an authenticated LowTier extension to [RFC 9000 Section 9](https://www.rfc-editor.org/rfc/rfc9000.html#section-9).
+Standard QUIC v1 clients must discard packets from an unknown server address, including a changed port.
+This extension uses standard QUIC packets and requires the LowTier path policy at the client.
 The connection keeps its TLS exporter binding, Noise session, and memory credit.
 
-The server permits rebinding after CONNECT-IP admission and the complete Noise handshake.
+Both endpoints permit rebinding after CONNECT-IP admission and the complete Noise handshake.
+The client rejects changes to the server IP address.
 Website connections and unauthenticated connections cannot rebind.
 Each new endpoint must pass the current underlay deny policy.
 Established connections do not acquire handshake source-IP permits for migration.
@@ -17,6 +22,10 @@ Receive credit belongs to the packet's source path.
 Probing-only packets from an unknown endpoint receive no path response before migration admission.
 Peer endpoint information changes only after validation.
 Tracker discovery reads this validated information when it updates candidate observations.
+
+QUIC receive sockets remain unconnected so packets from a new NAT port reach packet authentication.
+Explicit source addresses, socket marks, and underlay policy checks still apply.
+The route-selection probe uses a separate connected socket and carries no QUIC traffic.
 
 UDP decoy routing passes short-header packets from a new tuple to Quinn for connection-ID lookup.
 This does not create a route entry or an upstream socket.

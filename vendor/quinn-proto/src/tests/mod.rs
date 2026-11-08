@@ -1417,6 +1417,62 @@ fn rebinding_policy_revocation_preserves_coalesced_stream_data() {
     }
 }
 
+#[test]
+fn server_nat_rebinding_requires_policy_and_preserves_the_server_ip() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Policy(AtomicBool);
+    impl PathPolicy for Policy {
+        fn allow(&self, _current: SocketAddr, _candidate: SocketAddr) -> bool {
+            true
+        }
+        fn validated(&self, _remote: SocketAddr) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let mut pair = Pair::default();
+    let (client, server) = pair.connect();
+    let original = pair.server.addr;
+    pair.server
+        .addr
+        .set_port(SERVER_PORTS.lock().unwrap().next().unwrap());
+    pair.server_conn_mut(server).ping();
+    pair.drive_server();
+    pair.drive_client();
+    assert_eq!(pair.client_conn_mut(client).remote_address(), original);
+
+    let policy = Arc::new(Policy(AtomicBool::new(false)));
+    pair.client_conn_mut(client).set_path_policy(policy.clone());
+    pair.server.addr.set_ip("::2".parse().unwrap());
+    pair.server_conn_mut(server).ping();
+    pair.drive_server();
+    pair.drive_client();
+    assert_eq!(pair.client_conn_mut(client).remote_address(), original);
+    assert!(!policy.0.load(Ordering::Acquire));
+
+    pair.server.addr.set_ip(original.ip());
+    let now = pair.time;
+    let mut forged =
+        pair.server_conn_mut(server)
+            .test_path_frame(now, frame::FrameType::PATH_RESPONSE, 19);
+    *forged.last_mut().unwrap() ^= 1;
+    pair.client.inbound.push_back((now, None, forged));
+    pair.drive_client();
+    assert_eq!(pair.client_conn_mut(client).remote_address(), original);
+    assert!(!policy.0.load(Ordering::Acquire));
+
+    pair.server_conn_mut(server).ping();
+    pair.drive();
+    assert_eq!(
+        pair.client_conn_mut(client).remote_address(),
+        pair.server.addr
+    );
+    assert!(policy.0.load(Ordering::Acquire));
+    assert!(pair.client_conn_mut(client).stats().frame_tx.path_challenge > 0);
+    assert!(pair.client_conn_mut(client).stats().frame_rx.path_response > 0);
+}
+
 fn test_flow_control(config: TransportConfig, window_size: usize) {
     let _guard = subscribe();
     let mut pair = Pair::new(
