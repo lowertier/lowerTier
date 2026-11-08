@@ -1,11 +1,11 @@
 {
-  "verified_at": "2026-11-08T07:35:53.267058+00:00",
+  "verified_at": "2026-11-08T08:23:25.204027+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
-  "application_commit": "bf1abf5b",
-  "repository_commit_at_verification": "bf1abf5b",
-  "application_note": "Overview warnings use direct connection state and version age.",
+  "application_commit": "ee5a608f",
+  "repository_commit_at_verification": "ee5a608f",
+  "application_note": "Authenticated QUIC links support NAT port changes at either peer. Server port rebinding is a LowTier extension to QUIC v1.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -21,8 +21,8 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-08T07:35:53.267058+00:00",
-    "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. The router LAN checks preceded this UI rollout."
+    "access_verified_at": "2026-11-08T08:23:25.204027+00:00",
+    "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. LAN checks and checks outside gui.open retain earlier evidence."
   },
   "instances": [
     {
@@ -129,6 +129,7 @@
     }
   ],
   "verification": {
+    "evidence": "benchmark-results/.work/nat-port-flexibility-20261108/fleet-verification.json",
     "known_peers_per_instance": 16,
     "running_images": 17,
     "controller_ssh": 17,
