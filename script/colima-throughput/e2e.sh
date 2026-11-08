@@ -18,14 +18,14 @@ parallel_streams=${PARALLEL_STREAMS:-8}
 tcp_streams_text=${TCP_STREAMS:-"1 $parallel_streams"}
 encryption_algorithm=${ENCRYPTION_ALGORITHM:-chacha20-poly1305}
 runtime_env=${LOWTIER_RUNTIME_ENV:-}
-underlay_protocol=${UNDERLAY_PROTOCOL:-udp}
+underlay_protocol=${UNDERLAY_PROTOCOL:-quic}
 tcp_lanes=${LOWTIER_TCP_LANES:-1}
 lane_query=
 case "$tcp_lanes" in
     1) ;;
     2|4)
-        if [[ "$underlay_protocol" != tcp && "$underlay_protocol" != wss ]]; then
-            echo "Multiple TCP lanes require tcp (H2) or wss" >&2
+        if [[ "$underlay_protocol" != h2 && "$underlay_protocol" != wss ]]; then
+            echo "Multiple TCP lanes require h2 or wss" >&2
             exit 64
         fi
         lane_query="?lanes=$tcp_lanes"
@@ -176,7 +176,7 @@ if [[ -n "$core_binary" ]]; then
 fi
 
 case "$underlay_protocol" in
-    udp|tcp|quic|ws|wss) ;;
+    quic|h2|wss) ;;
     *) echo "unsupported underlay protocol: $underlay_protocol" >&2; exit 64 ;;
 esac
 if [[ -n "$caddy_binary" ]]; then
@@ -187,8 +187,8 @@ if [[ -n "$caddy_binary" ]]; then
     caddy_binary=$(cd "$(dirname "$caddy_binary")" && pwd -P)/$(basename "$caddy_binary")
     case "$underlay_protocol" in
         quic) proxy_network=udp; proxy_matcher=quic ;;
-        tcp|wss) proxy_network=tcp; proxy_matcher=tls ;;
-        *) echo "Caddy SNI benchmark requires quic, tcp (H2), or wss" >&2; exit 64 ;;
+        h2|wss) proxy_network=tcp; proxy_matcher=tls ;;
+        *) echo "Caddy SNI benchmark requires quic, h2, or wss" >&2; exit 64 ;;
     esac
     listener_port=11011
     peer_host=challenges.cloudflare.com

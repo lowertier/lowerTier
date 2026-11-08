@@ -78,7 +78,7 @@ fn direct_protocol_priority(scheme: &str, configured_default: &str) -> u8 {
     }
     match scheme {
         "quic" => 3,
-        "tcp" => 2,
+        "h2" => 2,
         "wss" => 1,
         _ => 0,
     }
@@ -739,7 +739,7 @@ mod tests {
                 let url = format!("{protocol}://127.0.0.1:0").parse().unwrap();
                 let mut listener: Box<dyn TunnelListener> = match protocol {
                     "quic" => Box::new(QuicTunnelListener::new(url, b.get_global_ctx())),
-                    "tcp" => Box::new(TcpTunnelListener::new(url)),
+                    "h2" => Box::new(TcpTunnelListener::new(url)),
                     "wss" => Box::new(WsTunnelListener::new(url)),
                     _ => unreachable!(),
                 };
@@ -802,7 +802,7 @@ mod tests {
     async fn failed_direct_listener_stays_cold() {
         let peer = create_mock_peer_manager_secure("direct-cold".into(), "secret".into()).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = format!("tcp://{}", listener.local_addr().unwrap());
+        let address = format!("h2://{}", listener.local_addr().unwrap());
         let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = accepts.clone();
         let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {

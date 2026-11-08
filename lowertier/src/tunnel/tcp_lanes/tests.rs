@@ -34,7 +34,7 @@ fn lane_options_are_explicit_and_require_tls() {
     for value in [
         "wss://localhost",
         "wss://localhost?lanes=1",
-        "tcp://localhost",
+        "h2://localhost",
     ] {
         assert_eq!(requested(&value.parse().unwrap()).unwrap(), 1);
     }
@@ -408,7 +408,7 @@ impl Tunnel for BoundTunnel {
     }
     fn info(&self) -> Option<TunnelInfo> {
         let mut info = self.inner.info()?;
-        info.tunnel_type = "tcp".into();
+        info.tunnel_type = "h2".into();
         Some(info)
     }
     fn transport_binding(&self) -> Option<TransportBinding> {
@@ -521,11 +521,11 @@ async fn h2_and_wss_pairs_preserve_frames_and_bind_both_connections() {
         tcp::{TcpTunnelConnector, TcpTunnelListener},
         websocket::{WsTunnelConnector, WsTunnelListener},
     };
-    for (scheme, lane_count) in [("tcp", 2), ("tcp", 4), ("wss", 2), ("wss", 4)] {
+    for (scheme, lane_count) in [("h2", 2), ("h2", 4), ("wss", 2), ("wss", 4)] {
         let addr = format!("{scheme}://127.0.0.1:0?lanes={lane_count}")
             .parse()
             .unwrap();
-        let mut listener: Box<dyn TunnelListener> = if scheme == "tcp" {
+        let mut listener: Box<dyn TunnelListener> = if scheme == "h2" {
             Box::new(TcpTunnelListener::new(addr))
         } else {
             Box::new(WsTunnelListener::new(addr))
@@ -533,7 +533,7 @@ async fn h2_and_wss_pairs_preserve_frames_and_bind_both_connections() {
         listener.listen().await.unwrap();
         let url = listener.local_url();
         let server = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let mut connector: Box<dyn TunnelConnector> = if scheme == "tcp" {
+        let mut connector: Box<dyn TunnelConnector> = if scheme == "h2" {
             Box::new(TcpTunnelConnector::new(url))
         } else {
             Box::new(WsTunnelConnector::new(url))
@@ -659,11 +659,11 @@ async fn h2_and_wss_pairs_authenticate_and_deliver_through_one_peer_connection()
             websocket::{WsTunnelConnector, WsTunnelListener},
         },
     };
-    for (scheme, lane_count) in [("tcp", 2), ("tcp", 4), ("wss", 2), ("wss", 4)] {
+    for (scheme, lane_count) in [("h2", 2), ("h2", 4), ("wss", 2), ("wss", 4)] {
         let addr = format!("{scheme}://127.0.0.1:0?lanes={lane_count}")
             .parse()
             .unwrap();
-        let mut listener: Box<dyn TunnelListener> = if scheme == "tcp" {
+        let mut listener: Box<dyn TunnelListener> = if scheme == "h2" {
             Box::new(TcpTunnelListener::new(addr))
         } else {
             Box::new(WsTunnelListener::new(addr))
@@ -671,7 +671,7 @@ async fn h2_and_wss_pairs_authenticate_and_deliver_through_one_peer_connection()
         listener.listen().await.unwrap();
         let url = listener.local_url();
         let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let mut connector: Box<dyn TunnelConnector> = if scheme == "tcp" {
+        let mut connector: Box<dyn TunnelConnector> = if scheme == "h2" {
             Box::new(TcpTunnelConnector::new(url))
         } else {
             Box::new(WsTunnelConnector::new(url))

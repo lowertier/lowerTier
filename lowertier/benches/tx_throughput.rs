@@ -42,7 +42,7 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Copy, Debug)]
 enum TunnelKind {
     Ring,
-    Tcp,
+    H2,
     Quic,
 }
 
@@ -50,7 +50,7 @@ impl TunnelKind {
     fn as_str(self) -> &'static str {
         match self {
             TunnelKind::Ring => "ring",
-            TunnelKind::Tcp => "tcp",
+            TunnelKind::H2 => "h2",
             TunnelKind::Quic => "quic",
         }
     }
@@ -62,10 +62,10 @@ impl FromStr for TunnelKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "ring" => Ok(TunnelKind::Ring),
-            "tcp" => Ok(TunnelKind::Tcp),
+            "h2" => Ok(TunnelKind::H2),
             "quic" => Ok(TunnelKind::Quic),
             other => Err(format!(
-                "unsupported TX_THROUGHPUT_TUNNEL={other:?}; expected ring, tcp, or quic"
+                "unsupported TX_THROUGHPUT_TUNNEL={other:?}; expected ring, h2, or quic"
             )),
         }
     }
@@ -384,7 +384,7 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
     let tunnel_port = env_parse("TX_THROUGHPUT_TUNNEL_PORT", DEFAULT_TUNNEL_PORT);
     let docker = match tunnel {
         TunnelKind::Ring => None,
-        TunnelKind::Tcp | TunnelKind::Quic => Some(DockerNetns::create()),
+        TunnelKind::H2 | TunnelKind::Quic => Some(DockerNetns::create()),
     };
 
     let (netns_a, netns_b) = match &docker {
@@ -393,7 +393,7 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
     };
     let listeners_a = match tunnel {
         TunnelKind::Ring => Vec::new(),
-        TunnelKind::Tcp | TunnelKind::Quic => vec![
+        TunnelKind::H2 | TunnelKind::Quic => vec![
             format!("{}://0.0.0.0:{}", tunnel.as_str(), tunnel_port)
                 .parse()
                 .unwrap(),
@@ -429,12 +429,12 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
                     .expect("ring benchmark server tunnel");
             });
         }
-        TunnelKind::Tcp => inst_b
+        TunnelKind::H2 => inst_b
             .get_conn_manager()
             .add_connector(TcpTunnelConnector::new(
                 format!(
-                    "tcp://{}:{}",
-                    docker.as_ref().expect("tcp benchmark needs Docker").ip_a,
+                    "h2://{}:{}",
+                    docker.as_ref().expect("H2 benchmark needs Docker").ip_a,
                     tunnel_port
                 )
                 .parse()

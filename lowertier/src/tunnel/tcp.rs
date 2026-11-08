@@ -340,7 +340,7 @@ mod tests {
     async fn tcp_http2_exports_a_tls_binding() {
         use crate::tunnel::TransportBindingKind;
 
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
         listener.listen().await.unwrap();
         let listener_addr = listener.local_url();
         // An idle client must not delay a separate TLS and CONNECT handshake.
@@ -385,7 +385,7 @@ mod tests {
                         let error = super::super::http2::accept(
                             stream,
                             &acceptor,
-                            format!("tcp://{addr}").parse().unwrap(),
+                            format!("h2://{addr}").parse().unwrap(),
                             &flags,
                         )
                         .await
@@ -419,7 +419,7 @@ mod tests {
         use crate::tunnel::{Tunnel, batch::PacketBatch, packet_def::ZCPacket};
         use futures::{SinkExt, StreamExt};
 
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
         listener.listen().await.unwrap();
         let listener_addr = listener.local_url();
         let server = tokio::spawn(async move { listener.accept().await.unwrap() });
@@ -464,7 +464,7 @@ mod tests {
         use crate::tunnel::{batch::PacketBatch, packet_def::ZCPacket};
         use futures::{SinkExt, StreamExt};
 
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
         listener.listen().await.unwrap();
         let listener_addr = listener.local_url();
         let server = tokio::spawn(async move { listener.accept().await.unwrap() });
@@ -520,7 +520,7 @@ mod tests {
         use crate::tunnel::TransportBindingKind;
 
         let mut flags = crate::common::config::gen_default_flags();
-        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+        flags.camouflage_config_mut().server_name = "user-selected.example.test".to_owned();
         flags
             .camouflage_config_mut()
             .set_decoy_upstream("decoy.invalid:443".to_owned());
@@ -529,7 +529,7 @@ mod tests {
 
         for sni_routing in [false, true] {
             flags.camouflage_config_mut().sni_routing = sni_routing;
-            let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+            let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
             listener.set_flags(flags.clone());
             listener.listen().await.unwrap();
             let listener_addr = listener.local_url();
@@ -540,6 +540,8 @@ mod tests {
             let client = connector.connect().await.unwrap();
             let server = server.await.unwrap();
 
+            assert_eq!(client.info().unwrap().tunnel_type, "h2");
+            assert_eq!(server.info().unwrap().tunnel_type, "h2");
             assert_eq!(
                 client.transport_binding().map(|binding| binding.kind),
                 Some(TransportBindingKind::Http2TlsExporterV1)
@@ -569,7 +571,7 @@ mod tests {
             .set_decoy_upstream(decoy_addr.to_string());
         flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
 
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
         listener.set_flags(flags);
         listener.listen().await.unwrap();
         let listen_addr = listener.local_url();
@@ -727,7 +729,7 @@ mod tests {
             .set_decoy_upstream(upstream.to_string());
         flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
 
-        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
         listener.set_flags(flags);
         listener.listen().await.unwrap();
         let backend = SocketAddr::new(
@@ -791,7 +793,7 @@ mod tests {
             flags.camouflage_config_mut().admission_secret =
                 "routing-test-secret-material".to_owned();
 
-            let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+            let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
             listener.set_flags(flags.clone());
             listener.listen().await.unwrap();
             let backend = SocketAddr::new(
@@ -804,7 +806,7 @@ mod tests {
                 None
             };
             let remote = match &proxy {
-                Some(proxy) => format!("tcp://{}", proxy.public).parse().unwrap(),
+                Some(proxy) => format!("h2://{}", proxy.public).parse().unwrap(),
                 None => listener.local_url(),
             };
             let server = tokio::spawn(async move {

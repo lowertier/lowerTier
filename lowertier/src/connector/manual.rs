@@ -177,10 +177,10 @@ impl ManualConnectorManager {
                     continue;
                 };
                 let source_port = seed.port_or_known_default().or(source_default);
-                let tcp_port = crate::tunnel::IpScheme::Tcp.default_port();
+                let tcp_port = crate::tunnel::IpScheme::H2.default_port();
                 let quic_port = crate::tunnel::IpScheme::Quic.default_port();
                 let port = if source_port == Some(tcp_port) || source_port == Some(quic_port) {
-                    Some(if protocol == "tcp" {
+                    Some(if protocol == "h2" {
                         tcp_port
                     } else {
                         quic_port
@@ -573,7 +573,7 @@ mod tests {
         )
         .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url: url::Url = format!("tcp://{}", listener.local_addr().unwrap())
+        let url: url::Url = format!("h2://{}", listener.local_addr().unwrap())
             .parse()
             .unwrap();
         let manager = ManualConnectorManager::new(peer.get_global_ctx(), peer.clone());
@@ -599,7 +599,7 @@ mod tests {
         for member in &members {
             assert_eq!(
                 member.port_or_known_default(),
-                Some(if member.scheme() == "tcp" {
+                Some(if member.scheme() == "h2" {
                     11010
                 } else {
                     11012
@@ -632,7 +632,7 @@ mod tests {
         manager.add_connector_by_url(wss.clone()).await.unwrap();
         let generated = members
             .iter()
-            .find(|member| member.scheme() == "tcp")
+            .find(|member| member.scheme() == "h2")
             .unwrap();
         assert!(ManualConnectorManager::seed_public_key(&manager.data, generated).is_err());
         manager.remove_connector(seed).await.unwrap();
@@ -793,10 +793,10 @@ mod tests {
     #[test]
     fn multi_lane_tcp_has_time_for_noise_after_tls_joins() {
         for (url, seconds) in [
-            ("tcp://localhost?lanes=4", 20),
-            ("tcp://localhost?lanes=2", 20),
-            ("tcp://localhost", 20),
-            ("tcp://localhost?lanes=1", 20),
+            ("h2://localhost?lanes=4", 20),
+            ("h2://localhost?lanes=2", 20),
+            ("h2://localhost", 20),
+            ("h2://localhost?lanes=1", 20),
             ("quic://localhost", 20),
             ("wss://localhost?lanes=4", 20),
         ] {

@@ -31,8 +31,8 @@ Start it without administrator privileges with `lowertier run -c example.toml`.
 Replace the example network values before use.
 Use an unprivileged local port above 1023.
 The retained underlays are QUIC/H3, H2 over TLS, and WSS.
-Use `quic://`, `tcp://`, and `wss://` URLs, respectively.
-The `tcp://` scheme selects H2 over TLS.
+Use `quic://`, `h2://`, and `wss://` URLs, respectively.
+The `h2://` scheme selects HTTP/2 over TLS and TCP.
 Plain `ws://` and raw `udp://` underlays are rejected.
 
 LowTier detects SOCKS5 and HTTP from the first client byte.

@@ -76,7 +76,7 @@ impl PeerConnectionAdmission {
         // Internal tunnels share one quota. Arbitrary names cannot create extra protocol quotas.
         let protocol = match protocol {
             Some("quic") => "quic",
-            Some("tcp") => "tcp",
+            Some("h2") => "h2",
             Some("wss") => "wss",
             _ => "internal",
         };

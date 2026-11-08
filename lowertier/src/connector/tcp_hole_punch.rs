@@ -121,14 +121,14 @@ enum Protocol {
 impl Protocol {
     fn parse(value: &str) -> Result<Self> {
         match value {
-            "tcp" => Ok(Self::H2),
+            "h2" => Ok(Self::H2),
             "wss" => Ok(Self::Wss),
             _ => bail!("unsupported TCP punch protocol"),
         }
     }
     fn name(self) -> &'static str {
         match self {
-            Self::H2 => "tcp",
+            Self::H2 => "h2",
             Self::Wss => "wss",
         }
     }
@@ -1034,7 +1034,7 @@ mod tests {
             [Protocol::Wss, Protocol::H2]
         );
         flags.default_protocol = "quic".into();
-        flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
+        flags.enabled_protocols = vec!["quic".into(), "h2".into()];
         assert_eq!(
             Protocol::enabled(&flags).collect::<Vec<_>>(),
             [Protocol::H2]
@@ -1159,7 +1159,7 @@ mod tests {
                 peer.get_global_ctx().set_flags(flags);
             }
             let mut flags = b.get_global_ctx().get_flags();
-            flags.enabled_protocols = vec!["tcp".into(), "wss".into()];
+            flags.enabled_protocols = vec!["h2".into(), "wss".into()];
             flags.default_protocol = "wss".into();
             flags.disable_tcp_hole_punching = true;
             flags.disable_udp_hole_punching = true;
@@ -1197,7 +1197,7 @@ mod tests {
                 } else {
                     a.my_peer_id()
                 };
-                assert!(peer.has_live_peer_connection_for_protocol(remote, "tcp"));
+                assert!(peer.has_live_peer_connection_for_protocol(remote, "h2"));
                 assert!(peer.has_live_peer_connection_for_protocol(remote, "wss"));
             }
             let mut quic_a = QuicHolePunchConnector::new(a.clone());
@@ -1245,7 +1245,7 @@ mod tests {
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "tcp"));
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "h2"));
             assert!(
                 launcher
                     .collect_peers_need_task(&client)
@@ -1271,7 +1271,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "wss"));
-            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "tcp"));
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "h2"));
         })
         .await
         .unwrap_or_else(|_| panic!("enabled transports stopped at {}", stage.get()));
@@ -1298,10 +1298,10 @@ mod tests {
         );
         drop(reserved);
         let mut flags = ctx.get_flags();
-        flags.default_protocol = "tcp".into();
+        flags.default_protocol = "h2".into();
         ctx.set_flags(flags);
         let bootstrap = Arc::new(
-            TcpBootstrap::new(ctx.clone(), "tcp", "127.0.0.1:0".parse().unwrap(), None)
+            TcpBootstrap::new(ctx.clone(), "h2", "127.0.0.1:0".parse().unwrap(), None)
                 .await
                 .unwrap(),
         );

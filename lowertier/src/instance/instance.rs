@@ -651,7 +651,7 @@ impl Instance {
         let flags = global_ctx.flags_arc();
         let enabled = |name| crate::common::config::transport_protocol_enabled(&flags, name);
         let tcp_hole_puncher = (!flags.disable_tcp_hole_punching
-            && (enabled("tcp") || enabled("wss")))
+            && (enabled("h2") || enabled("wss")))
         .then(|| Arc::new(Mutex::new(TcpHolePunchConnector::new(peer_manager.clone()))));
         let quic_hole_puncher = (!flags.disable_udp_hole_punching && enabled("quic")).then(|| {
             Arc::new(Mutex::new(QuicHolePunchConnector::new(
@@ -1228,7 +1228,7 @@ mod protocol_memory_tests {
     use crate::common::config::TomlConfigLoader;
     #[tokio::test]
     async fn disabled_punchers_are_never_constructed() {
-        for protocol in ["quic", "tcp", "wss"] {
+        for protocol in ["quic", "h2", "wss"] {
             let config = TomlConfigLoader::default();
             let mut flags = config.get_flags();
             flags.default_protocol = protocol.into();
@@ -1242,13 +1242,13 @@ mod protocol_memory_tests {
     #[tokio::test]
     async fn disabled_factories_fail_before_dns_and_socket_allocation() {
         use crate::common::global_ctx::tests::get_mock_global_ctx;
-        for protocol in ["quic", "tcp", "wss"] {
+        for protocol in ["quic", "h2", "wss"] {
             let ctx = get_mock_global_ctx();
             let mut flags = ctx.get_flags();
             flags.default_protocol = protocol.into();
             flags.enabled_protocols = vec![protocol.into()];
             ctx.set_flags(flags);
-            for other in ["quic", "tcp", "wss"] {
+            for other in ["quic", "h2", "wss"] {
                 if protocol == other {
                     continue;
                 }

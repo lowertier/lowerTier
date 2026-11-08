@@ -307,7 +307,7 @@ pub async fn create_connector_by_url(
     let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
     let effective_connector_ip_version = resolved_addr.ip_version;
     let mut connector: Box<dyn TunnelConnector + 'static> = match scheme {
-        IpScheme::Tcp => {
+        IpScheme::H2 => {
             let mut connector = TcpTunnelConnector::new(url);
             connector.set_flags(global_ctx.get_flags());
             connector.boxed()

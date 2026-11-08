@@ -767,9 +767,9 @@ async fn accept_inner(
         }
     }));
 
-    let remote = super::build_url_from_socket_addr(&peer_addr.to_string(), "tcp");
+    let remote = super::build_url_from_socket_addr(&peer_addr.to_string(), "h2");
     let info = TunnelInfo {
-        tunnel_type: "tcp".to_owned(),
+        tunnel_type: "h2".to_owned(),
         local_addr: Some(local_url.into()),
         remote_addr: Some(remote.clone().into()),
         resolved_remote_addr: Some(remote.into()),
@@ -864,11 +864,11 @@ pub async fn connect(
     let recv = response.into_body();
 
     let info = TunnelInfo {
-        tunnel_type: "tcp".to_owned(),
-        local_addr: Some(super::build_url_from_socket_addr(&local_addr.to_string(), "tcp").into()),
+        tunnel_type: "h2".to_owned(),
+        local_addr: Some(super::build_url_from_socket_addr(&local_addr.to_string(), "h2").into()),
         remote_addr: Some(url.into()),
         resolved_remote_addr: Some(
-            super::build_url_from_socket_addr(&peer_addr.to_string(), "tcp").into(),
+            super::build_url_from_socket_addr(&peer_addr.to_string(), "h2").into(),
         ),
     };
     Ok(wrap_http2_tunnel(recv, send, budget, info, binding, driver))

@@ -90,21 +90,21 @@ pub fn transport_protocol_enabled(flags: &Flags, protocol: &str) -> bool {
             .any(|enabled| enabled == protocol)
 }
 
-pub(crate) const TRANSPORT_PROTOCOLS: [&str; 3] = ["quic", "tcp", "wss"];
+pub(crate) const TRANSPORT_PROTOCOLS: [&str; 3] = ["quic", "h2", "wss"];
 
 pub(crate) fn hole_punch_protocol_enabled(flags: &Flags, protocol: &str) -> bool {
     transport_protocol_enabled(flags, protocol)
         && match protocol {
             "quic" => !flags.disable_udp_hole_punching,
-            "tcp" | "wss" => !flags.disable_tcp_hole_punching,
+            "h2" | "wss" => !flags.disable_tcp_hole_punching,
             _ => false,
         }
 }
 
 pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
-        matches!(protocol, "quic" | "tcp" | "wss"),
-        "unsupported transport {protocol:?}; expected quic, tcp, or wss"
+        matches!(protocol, "quic" | "h2" | "wss"),
+        "unsupported transport {protocol:?}; expected quic, h2, or wss"
     );
     anyhow::ensure!(
         transport_protocol_enabled(flags, protocol),
@@ -126,8 +126,8 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     );
     for (index, protocol) in flags.enabled_protocols.iter().enumerate() {
         anyhow::ensure!(
-            matches!(protocol.as_str(), "quic" | "tcp" | "wss"),
-            "invalid transport.protocols entry {protocol:?}; expected quic, tcp, or wss"
+            matches!(protocol.as_str(), "quic" | "h2" | "wss"),
+            "invalid transport.protocols entry {protocol:?}; expected quic, h2, or wss"
         );
         anyhow::ensure!(
             !flags.enabled_protocols[..index].contains(protocol),
@@ -177,10 +177,10 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
     }
 
     match flags.default_protocol.as_str() {
-        "quic" | "tcp" | "wss" => {}
+        "quic" | "h2" | "wss" => {}
         protocol => {
             anyhow::bail!(
-                "unsupported transport.prefer {protocol:?}; expected \"quic\", \"tcp\", or \"wss\""
+                "unsupported transport.prefer {protocol:?}; expected \"quic\", \"h2\", or \"wss\""
             )
         }
     }
@@ -2189,7 +2189,7 @@ socket_mark = 66
                 assert!(format!("{error:#}").contains("unsupported transport"));
             }
         }
-        for scheme in ["quic", "tcp", "wss"] {
+        for scheme in ["quic", "h2", "wss"] {
             TomlConfigLoader::new_from_str(&format!(
                 "[transport]\nlisten = [\"{scheme}://127.0.0.1:11010\"]"
             ))
@@ -2515,10 +2515,10 @@ credential = "{encoded_bundle}"
     }
 
     fn test_parse_mapped_listener_urls_allows_tcp_without_port() {
-        let parsed = parse_mapped_listener_urls(&["tcp://127.0.0.1".to_string()]).unwrap();
+        let parsed = parse_mapped_listener_urls(&["h2://127.0.0.1".to_string()]).unwrap();
 
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].scheme(), "tcp");
+        assert_eq!(parsed[0].scheme(), "h2");
         assert_eq!(parsed[0].port(), None);
     }
 
@@ -2627,7 +2627,7 @@ instance_id = "87ede5a2-9c3d-492d-9bbe-989b9d07e742"
 ipv4 = "10.144.144.10"
 
 [transport]
-listen = ["tcp://0.0.0.0:11010", "quic://0.0.0.0:11012"]
+listen = ["h2://0.0.0.0:11010", "quic://0.0.0.0:11012"]
 
 [routes]
 manual = ["192.168.0.0/16"]
@@ -2637,7 +2637,7 @@ name = "default"
 secret = "test-secret"
 
 [[peer]]
-uri = "tcp://public.kkrainbow.top:11010"
+uri = "h2://public.kkrainbow.top:11010"
 
 [[peer]]
 uri = "quic://192.168.94.33:11012"
@@ -2667,7 +2667,7 @@ proto = "tcp"
         assert_eq!("10.144.144.10/24", ret.get_ipv4().unwrap().to_string());
 
         assert_eq!(
-            vec!["tcp://0.0.0.0:11010", "quic://0.0.0.0:11012"],
+            vec!["h2://0.0.0.0:11010", "quic://0.0.0.0:11012"],
             ret.get_listener_uris()
                 .iter()
                 .map(|u| u.to_string())
@@ -2893,14 +2893,14 @@ instance_name = "production"
 ipv4 = "10.144.144.1"
 
 [transport]
-listen = ["tcp://0.0.0.0:${LISTEN_PORT}"]
+listen = ["h2://0.0.0.0:${LISTEN_PORT}"]
 
 [network]
 name = "${NETWORK_NAME}"
 secret = "${ET_SECRET}"
 
 [[peer]]
-uri = "tcp://${PEER_HOST}:${PEER_PORT}"
+uri = "h2://${PEER_HOST}:${PEER_PORT}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
@@ -2922,12 +2922,12 @@ uri = "tcp://${PEER_HOST}:${PEER_PORT}"
         // 验证 listeners 字段
         let listeners = config.get_listener_uris();
         assert_eq!(listeners.len(), 1);
-        assert_eq!(listeners[0].to_string(), "tcp://0.0.0.0:11010");
+        assert_eq!(listeners[0].to_string(), "h2://0.0.0.0:11010");
 
         // 验证 peer 字段
         let peers = config.get_peers();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].uri.to_string(), "tcp://peer.example.com:11011");
+        assert_eq!(peers[0].uri.to_string(), "h2://peer.example.com:11011");
 
         // 验证配置被正确标记
         assert!(control.is_read_only());
@@ -2957,7 +2957,7 @@ uri = "tcp://${PEER_HOST}:${PEER_PORT}"
 instance_name = "default-test"
 
 [transport]
-listen = ["tcp://0.0.0.0:${UNDEFINED_PORT:-11010}"]
+listen = ["h2://0.0.0.0:${UNDEFINED_PORT:-11010}"]
 
 [network]
 name = "test"
@@ -2983,7 +2983,7 @@ secret = "${UNDEFINED_SECRET:-default-secret}"
         );
         assert_eq!(
             config.get_listener_uris()[0].to_string(),
-            "tcp://0.0.0.0:11010"
+            "h2://0.0.0.0:11010"
         );
     }
 
@@ -3159,7 +3159,7 @@ ipv4 = "10.0.0.1"
 dhcp = ${MIXED_DHCP}
 
 [transport]
-listen = ["tcp://0.0.0.0:${MIXED_LISTEN_PORT}"]
+listen = ["h2://0.0.0.0:${MIXED_LISTEN_PORT}"]
 
 [network]
 name = "${MIXED_NETWORK}"
@@ -3199,7 +3199,7 @@ accept = ${MIXED_ACCEPT_DNS}
         // 验证 URL 中的端口号（数字）
         let listeners = config.get_listener_uris();
         assert_eq!(listeners.len(), 1);
-        assert_eq!(listeners[0].to_string(), "tcp://0.0.0.0:12345");
+        assert_eq!(listeners[0].to_string(), "h2://0.0.0.0:12345");
 
         // 验证配置被标记为只读
         assert!(control.is_read_only());
@@ -3274,30 +3274,36 @@ mod protocol_memory_tests {
 
     fn allowlist_is_explicit_and_empty_is_backwards_compatible() {
         let mut flags = gen_default_flags();
-        for protocol in ["quic", "tcp", "wss"] {
+        for protocol in ["quic", "h2", "wss"] {
             assert!(transport_protocol_enabled(&flags, protocol));
         }
-        for protocol in ["quic", "tcp", "wss"] {
+        for protocol in ["quic", "h2", "wss"] {
             flags.default_protocol = protocol.into();
             flags.enabled_protocols = vec![protocol.into()];
             validate_flags(&flags).unwrap();
-            for other in ["quic", "tcp", "wss"] {
+            for other in ["quic", "h2", "wss"] {
                 assert_eq!(transport_protocol_enabled(&flags, other), other == protocol);
             }
         }
     }
     fn allowlist_rejects_typos_duplicates_and_disabled_default() {
         let mut flags = gen_default_flags();
-        for values in [vec!["udp"], vec!["QUIC"], vec!["quic", "quic"], vec!["tcp"]] {
+        for values in [
+            vec!["udp"],
+            vec!["QUIC"],
+            vec!["quic", "quic"],
+            vec!["h2"],
+            vec!["tcp"],
+        ] {
             flags.enabled_protocols = values.into_iter().map(String::from).collect();
             assert!(validate_flags(&flags).is_err());
         }
-        flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
+        flags.enabled_protocols = vec!["quic".into(), "h2".into()];
         validate_flags(&flags).unwrap();
     }
     fn disabled_listener_and_bootstrap_are_rejected_before_startup() {
         for prefix in [
-            "listen = [\"tcp://127.0.0.1:0\"]\n",
+            "listen = [\"h2://127.0.0.1:0\"]\n",
             "advertise = [\"wss://127.0.0.1:443\"]\n",
             "peer = [{ uri = \"wss://unresolved.invalid:443\" }]\n",
         ] {
@@ -3319,6 +3325,21 @@ mod protocol_memory_tests {
         assert_eq!(config.get_flags().enabled_protocols, ["wss"]);
         let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
         assert_eq!(restored.get_flags().enabled_protocols, ["wss"]);
+        let config = TomlConfigLoader::new_from_str(
+            "[transport]\nprefer = \"h2\"\nprotocols = [\"h2\"]\nlisten = [\"h2://127.0.0.1:0\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.get_flags().default_protocol, "h2");
+        assert_eq!(config.get_flags().enabled_protocols, ["h2"]);
+        let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+        assert_eq!(restored.get_listener_uris()[0].scheme(), "h2");
+        for text in [
+            "[transport]\nprefer = \"tcp\"\n",
+            "[transport]\nlisten = [\"tcp://127.0.0.1:0\"]\n",
+            "[[peer]]\nuri = \"tcp://127.0.0.1:11010\"\n",
+        ] {
+            assert!(TomlConfigLoader::new_from_str(text).is_err(), "{text}");
+        }
     }
 }
 

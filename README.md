@@ -192,7 +192,7 @@ private_key_file = "/etc/lowertier/office.key"
 ipv4 = "10.44.0.1/24"
 
 [transport]
-listen = ["quic://0.0.0.0:11012", "tcp://0.0.0.0:11010", "wss://0.0.0.0:11012"]
+listen = ["quic://0.0.0.0:11012", "h2://0.0.0.0:11010", "wss://0.0.0.0:11012"]
 
 [[peer]]
 uri = "quic://192.0.2.11:11012"
@@ -281,8 +281,8 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `tun.mtu` | integer | `1380` | restart | Overlay MTU in bytes. |
 | `tun.ipv6` | bool | `true` | restart | Carry IPv6 on the virtual interface. |
 | `tun.udp_broadcast_relay` | bool | `false` | restart | Relay UDP broadcasts from the virtual interface (Windows). |
-| `transport.protocols` | string list | - | restart | Allowed transports: quic, tcp, wss. Empty allows all. |
-| `transport.prefer` | quic \| tcp \| wss | `quic` | restart | Initial transport priority. Measured connection quality takes precedence after setup. |
+| `transport.protocols` | string list | - | restart | Allowed transports: quic, h2, wss. Empty allows all. |
+| `transport.prefer` | quic \| h2 \| wss | `quic` | restart | Initial transport priority. Measured connection quality takes precedence after setup. |
 | `transport.listen` | string list | - | restart | Listener URLs, for example quic://0.0.0.0:11012. |
 | `transport.advertise` | string list | - | restart | Public listener URLs announced to peers, for port mappings. |
 | `transport.quic.initial_receive_window` | bytes | `2MiB` | restart | Initial QUIC stream receive window. |
@@ -314,7 +314,7 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `relay.link_cost` | table array | - | live | Adjacent link cost bias: peer public key and bias_ms. |
 | `relay.foreign_rpc` | bool | `false` | restart | Relay control RPC for foreign networks outside relay.transit_networks. |
 | `relay.private_mode` | bool | `false` | restart | Reject foreign networks without authorized admission. |
-| `camouflage.server_name` | string | - | new connections; QUIC restart | TLS server name (SNI). |
+| `camouflage.server_name` | string | - | new connections; QUIC restart | User-selected TLS domain (SNI). Configure a decoy upstream or a website with a matching certificate. |
 | `camouflage.tls_cert` | path | - | new connections; QUIC restart | TLS certificate file. Set together with tls_key. |
 | `camouflage.tls_key` | path | - | new connections; QUIC restart | TLS private key file. |
 | `camouflage.admission_secret` | secret string | - | new connections; QUIC restart | Secret that separates VPN clients from website visitors (16+ bytes). |
@@ -373,7 +373,7 @@ bind = "127.0.0.1:8080"
 dest = "10.44.0.2:80"
 ```
 
-Peer schemes are `quic` (HTTP/3), `tcp` (HTTP/2), and `wss`.
+Peer schemes are `quic` (HTTP/3), `h2` (HTTP/2), and `wss`.
 Connector-only discovery schemes are `http`, `https`, `txt`, and `srv`.
 Unix builds also support `unix` sockets.
 
@@ -382,13 +382,13 @@ Listeners are QUIC/HTTP/3, H2 over TLS, and WSS. Plain `ws://` and raw `udp://` 
 | Scheme | Network protocol | Default port |
 | --- | --- | ---: |
 | `quic` | HTTP/3 over QUIC/UDP | 11012 |
-| `tcp` | HTTP/2 over TLS/TCP | 11010 |
+| `h2` | HTTP/2 over TLS/TCP | 11010 |
 | `wss` | WebSocket over TLS/TCP | 11012 |
 
 An empty `transport.listen` creates an outbound-only node.
 Hole punching uses OS-selected source ports independently of `transport.listen`.
 Use port `0` in listener URLs when the OS should select listener ports too.
-For example, a node behind NAT can use `quic://0.0.0.0:0` and `tcp://0.0.0.0:0`.
+For example, a node behind NAT can use `quic://0.0.0.0:0` and `h2://0.0.0.0:0`.
 Public bootstrap endpoints need a stable, reachable listener port.
 For QUIC, keep the successful UDP socket open so STUN and tunnel traffic retain the same NAT mapping.
 NAT nodes use OS-selected temporary ports for hole punching.
@@ -520,6 +520,19 @@ See the [osku–UTMOWRT measurements](docs/performance/osku-utmowrt-20260922.md)
 
 ### Camouflage
 
+Set `camouflage.server_name` to the TLS domain you choose. There is no domain allowlist.
+The Web UI exposes this field under Settings → Camouflage.
+The CLI can save the domain and decoy endpoints in one transaction:
+
+```sh
+lowertier set --stage camouflage.server_name=challenges.cloudflare.com \
+  camouflage.decoy_upstream.tcp=challenges.cloudflare.com:443 \
+  camouflage.decoy_upstream.udp=challenges.cloudflare.com:443
+```
+
+Configure the shared admission secret before enabling decoy forwarding.
+Restart the instance when QUIC settings are staged.
+
 Tests, demos, and examples use `challenges.cloudflare.com` because that
 host is reachable. Peers connect to your public IP on port 443 with that
 SNI. Nginx stream-passthroughs TCP and UDP to LowTier. Marked LowTier
@@ -532,8 +545,8 @@ rotates the encrypted admission token every five minutes.
 
 ```toml
 [transport]
-listen = ["tcp://127.0.0.1:8443", "quic://127.0.0.1:8443"]
-advertise = ["tcp://0.0.0.0:443", "quic://0.0.0.0:443"]
+listen = ["h2://127.0.0.1:8443", "quic://127.0.0.1:8443"]
+advertise = ["h2://0.0.0.0:443", "quic://0.0.0.0:443"]
 
 [camouflage]
 server_name = "challenges.cloudflare.com"

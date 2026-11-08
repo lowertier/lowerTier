@@ -139,7 +139,7 @@ use Apply::*;
 use Kind::*;
 use Map::*;
 
-const TRANSPORTS: &[&str] = &["quic", "tcp", "wss"];
+const TRANSPORTS: &[&str] = &["quic", "h2", "wss"];
 
 pub static OPTIONS: &[OptionSpec] = &[
     opt(
@@ -492,7 +492,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         To("flags.enabled_protocols"),
         Restart,
         "",
-        "Allowed transports: quic, tcp, wss. Empty allows all.",
+        "Allowed transports: quic, h2, wss. Empty allows all.",
     ),
     opt(
         "transport.prefer",
@@ -756,7 +756,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         QuicRestart,
         "",
-        "TLS server name (SNI).",
+        "User-selected TLS domain (SNI). Configure a decoy upstream or a website with a matching certificate.",
     ),
     opt(
         "camouflage.tls_cert",
@@ -1935,7 +1935,16 @@ mod tests {
         let mut public = Table::new();
         apply_set(&mut public, "relay.transit_bps_limit=8Mbit").unwrap();
         apply_set(&mut public, "tun.mode=userspace").unwrap();
-        apply_set(&mut public, "peer=quic://a.example:1,tcp://b.example:2").unwrap();
+        apply_set(&mut public, "peer=quic://a.example:1,h2://b.example:2").unwrap();
+        apply_set(
+            &mut public,
+            "camouflage.server_name=user-selected.example.test",
+        )
+        .unwrap();
+        assert_eq!(
+            get(&public, "camouflage.server_name").and_then(Value::as_str),
+            Some("user-selected.example.test")
+        );
         apply_set(&mut public, "l2.vlans=0,10,0x14").unwrap();
         assert_eq!(
             get(&public, "relay.transit_bps_limit"),

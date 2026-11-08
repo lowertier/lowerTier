@@ -650,7 +650,7 @@ secret_file = {:?}
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mut table: toml::Table = text.parse().unwrap();
         table["transport"]["listen"] = toml::Value::Array(vec![
-            format!("tcp://{}", occupied.local_addr().unwrap()).into(),
+            format!("h2://{}", occupied.local_addr().unwrap()).into(),
         ]);
         let invalid_start = toml::to_string_pretty(&table).unwrap();
         std::fs::write(&path, &invalid_start).unwrap();
@@ -675,7 +675,7 @@ secret_file = {:?}
         stopped.set_id(stopped_id);
         stopped.set_enabled(false);
         stopped.set_listeners(vec![
-            format!("tcp://{}", occupied.local_addr().unwrap())
+            format!("h2://{}", occupied.local_addr().unwrap())
                 .parse()
                 .unwrap(),
         ]);

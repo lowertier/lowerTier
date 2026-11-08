@@ -80,20 +80,20 @@ TX_THROUGHPUT_SAMPLE_SIZE=10 \
 cargo bench --bench tx_throughput -- --quiet
 ```
 
-### tcp / udp tunnels (requires Docker + root)
+### H2 and QUIC tunnels (requires Docker + root)
 
 The benchmark creates a Docker network and registers each container's netns
 under `/var/run/netns`, which requires root. Run the whole command under
 `sudo`:
 
 ```bash
-sudo TX_THROUGHPUT_TUNNEL=tcp \
+sudo TX_THROUGHPUT_TUNNEL=h2 \
      TX_THROUGHPUT_MEASUREMENT_SECS=5 \
      TX_THROUGHPUT_WARMUP_SECS=2 \
      TX_THROUGHPUT_INFLIGHT=64 \
      cargo bench --bench tx_throughput -- --quiet
 
-sudo TX_THROUGHPUT_TUNNEL=udp cargo bench --bench tx_throughput -- --quiet
+sudo TX_THROUGHPUT_TUNNEL=quic cargo bench --bench tx_throughput -- --quiet
 ```
 
 > If `sudo` cannot find `cargo`, use `sudo -E` or the absolute path
@@ -103,7 +103,7 @@ sudo TX_THROUGHPUT_TUNNEL=udp cargo bench --bench tx_throughput -- --quiet
 
 | Variable                         | Default               | Notes                                  |
 | -------------------------------- | --------------------- | -------------------------------------- |
-| `TX_THROUGHPUT_TUNNEL`           | `ring`                | `ring` / `tcp` / `udp`                 |
+| `TX_THROUGHPUT_TUNNEL`           | `ring`                | `ring` / `h2` / `quic`                 |
 | `TX_THROUGHPUT_PKT_SIZE`         | `1400`                | IP total length in bytes               |
 | `TX_THROUGHPUT_WORKER_THREADS`   | `4`                   | tokio worker threads                   |
 | `TX_THROUGHPUT_INFLIGHT`         | `64`                  | saturate-mode concurrency (task count) |

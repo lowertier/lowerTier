@@ -246,7 +246,7 @@ async fn dial(portal: &str) -> Result<(StandAloneClient<TcpTunnelConnector>, Rpc
             "portal",
         )
     };
-    let connector = TcpTunnelConnector::new(format!("tcp://{portal}").parse().map_err(|_| {
+    let connector = TcpTunnelConnector::new(format!("h2://{portal}").parse().map_err(|_| {
         CliError::new(
             "invalid_argument",
             format!("The portal address {portal:?} is invalid."),

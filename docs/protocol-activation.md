@@ -12,7 +12,10 @@ prefer = "quic"
 protocols = ["quic"]
 ```
 
-For H2-only use `prefer = "tcp"`, `protocols = ["tcp"]`, and `tcp://` listeners/peers. For WSS-only use `"wss"` and `wss://`. A mixed instance can list more than one protocol. An empty list, including the omitted default, preserves the previous all-protocol behavior.
+For H2-only use `prefer = "h2"`, `protocols = ["h2"]`, and `h2://` listeners/peers. For WSS-only use `"wss"` and `wss://`. A mixed instance can list more than one protocol. An empty list allows all transports.
+
+The H2 transport uses HTTP/2 over TLS and TCP. The old `tcp` transport name and peer scheme are rejected.
+TCP tracker URLs, `nat.tcp_punch`, ACL protocols, and TCP port forwarding retain their TCP names.
 
 The configuration loader rejects unsupported names, duplicates, a disabled preferred protocol, and listeners or bootstrap peers outside the list. Runtime listener/connector factories also reject disabled transports before DNS or socket creation. Direct discovery and authenticated rendezvous cannot reactivate a disabled transport.
 

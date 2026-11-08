@@ -43,7 +43,7 @@ pub(crate) fn requested(url: &url::Url) -> Result<usize, TunnelError> {
     if values.next().is_some() {
         return Err(TunnelError::InvalidAddr("duplicate lanes option".into()));
     }
-    if count > 1 && !matches!(url.scheme(), "wss" | "tcp") {
+    if count > 1 && !matches!(url.scheme(), "wss" | "h2") {
         return Err(TunnelError::InvalidAddr(
             "TCP lanes require end-to-end TLS".into(),
         ));

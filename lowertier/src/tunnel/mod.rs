@@ -378,7 +378,7 @@ struct IpSchemeAttributes {
 #[derive(Debug, Clone, Copy, PartialEq, Display, EnumString, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "lowercase")]
 pub enum IpScheme {
-    Tcp,
+    H2,
     Quic,
     Wss,
 }
@@ -386,7 +386,7 @@ pub enum IpScheme {
 impl IpScheme {
     const fn attributes(self) -> IpSchemeAttributes {
         let (protocol, port_offset) = match self {
-            Self::Tcp => (Protocol::TCP, 0),
+            Self::H2 => (Protocol::TCP, 0),
             Self::Quic => (Protocol::UDP, 2),
             Self::Wss => (Protocol::TCP, 2),
         };

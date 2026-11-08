@@ -99,6 +99,9 @@ Existing TCP receive windows do not shrink when the budget decreases.
 
 Camouflage supports `server_name`, `tls_cert`, `tls_key`, `admission_secret`, `website_root`,
 `sni_routing`, `wss_path`, `http_host`, and `trusted_proxy_cidrs`.
+Users select the TLS domain with `camouflage.server_name` in TOML, `lowertier set`, or Web UI settings.
+There is no domain allowlist. Decoy forwarding does not require that domain's private key.
+Local TLS termination requires a matching certificate and private key.
 Set separate TCP and UDP endpoints when necessary:
 
 ```toml
@@ -115,7 +118,7 @@ Otherwise QUIC/H2 uses the existing Noise-authenticated certificate verifier.
 Direct WSS retains its existing Noise verifier. CDN outer TLS always validates the public CDN certificate.
 CDN inner TLS retains the end-to-end exporter binding. Missing subprotocol negotiation fails the connection.
 
-TCP and WSS listeners read camouflage changes for new connections.
+H2 and WSS listeners read camouflage changes for new connections.
 Existing connections keep their authenticated transport binding.
 QUIC listeners cache certificates and decoy settings until listener recreation.
 The control API stages cached QUIC settings as restart fields while QUIC is enabled.

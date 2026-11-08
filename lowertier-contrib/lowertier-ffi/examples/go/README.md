@@ -44,7 +44,7 @@ mode = "none" # no tun device, which avoids permission issues
 bind_device = false # allow loopback peers in local examples
 
 [[peer]]
-uri = "tcp://123.123.123.123:11010"
+uri = "h2://123.123.123.123:11010"
 '
 ```
 
@@ -78,7 +78,7 @@ mode = "none"
 bind_device = false
 
 [[peer]]
-uri = "tcp://123.123.123.123:11010"
+uri = "h2://123.123.123.123:11010"
 '
 export LOWTIER_FFI_LISTEN_INSTANCE=listener
 export LOWTIER_FFI_LISTEN_PORT=12345

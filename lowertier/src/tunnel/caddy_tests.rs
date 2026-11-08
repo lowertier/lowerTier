@@ -69,7 +69,7 @@ async fn caddy_multiplexes_camouflaged_transports() {
                             ))
                         }
                         1 => {
-                            let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+                            let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
                             listener.set_flags(flags.clone());
                             Box::new(listener)
                         }
@@ -235,7 +235,7 @@ https://web.invalid:{web_port}, https://{HOST}:{web_port} {{
                         0 => QuicTunnelConnector::new(format!("quic://{public}").parse().unwrap(), contexts[0].clone())
                             .connect().await.unwrap(),
                         1 => {
-                            let mut connector = TcpTunnelConnector::new(format!("tcp://{public}").parse().unwrap());
+                            let mut connector = TcpTunnelConnector::new(format!("h2://{public}").parse().unwrap());
                             connector.set_flags(flags.clone());
                             connector.connect().await.unwrap()
                         }

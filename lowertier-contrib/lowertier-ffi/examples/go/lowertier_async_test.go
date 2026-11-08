@@ -76,7 +76,7 @@ func startLocalAsyncTopology(t *testing.T, n *AsyncNative) localAsyncTopology {
 	listenerIP := "10.251.1.2"
 	dialerIP := "10.251.1.1"
 	listenerPort := freeLocalTCPPort(t)
-	listenerEndpoint := fmt.Sprintf("tcp://127.0.0.1:%d", listenerPort)
+	listenerEndpoint := fmt.Sprintf("h2://127.0.0.1:%d", listenerPort)
 	t.Cleanup(func() {
 		if err := n.deleteNetworkInstances([]string{dialerInstance, listenerInstance}); err != nil {
 			t.Errorf("cleanup async test LowTier instances: %v", err)

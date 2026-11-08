@@ -180,7 +180,7 @@ pub(super) async fn hole_punch_peers(peer_mgr: &PeerManager, protocol: &str) -> 
                     .as_ref()
                     .is_some_and(|feature| match protocol {
                         "quic" => feature.quic_hole_punch,
-                        "tcp" => feature.tcp_hole_punch,
+                        "h2" => feature.tcp_hole_punch,
                         "wss" => feature.wss_hole_punch,
                         _ => false,
                     })

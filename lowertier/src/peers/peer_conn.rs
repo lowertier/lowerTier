@@ -608,7 +608,7 @@ fn tls_exporter_tunnel(tunnel_type: Option<&str>) -> bool {
     if value.eq_ignore_ascii_case("quic") || value.eq_ignore_ascii_case("wss") {
         return true;
     }
-    if value.eq_ignore_ascii_case("tcp") {
+    if value.eq_ignore_ascii_case("h2") {
         return true;
     }
     false
@@ -5208,7 +5208,7 @@ pub mod tests {
                 kind: TransportBindingKind::Http2TlsExporterV1,
                 bytes: [9; 32],
             };
-            assert!(validate_transport_binding(Some("tcp"), Some(tcp_binding)).is_ok());
+            assert!(validate_transport_binding(Some("h2"), Some(tcp_binding)).is_ok());
             assert_eq!(transport_binding_context(Some(tcp_binding)).0, 3);
         }
         for enabled in [false, true] {

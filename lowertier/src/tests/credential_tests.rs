@@ -189,8 +189,8 @@ fn create_admin_config(
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
     config.set_listeners(vec![
-        "tcp://0.0.0.0:11010".parse().unwrap(),
-        "tcp://0.0.0.0:11010".parse().unwrap(),
+        "h2://0.0.0.0:11010".parse().unwrap(),
+        "h2://0.0.0.0:11010".parse().unwrap(),
     ]);
     config.set_network_identity(NetworkIdentity::new(
         "test_network".to_string(),
@@ -213,8 +213,8 @@ fn create_shared_config(
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
     config.set_listeners(vec![
-        "tcp://0.0.0.0:11010".parse().unwrap(),
-        "tcp://0.0.0.0:11010".parse().unwrap(),
+        "h2://0.0.0.0:11010".parse().unwrap(),
+        "h2://0.0.0.0:11010".parse().unwrap(),
     ]);
     config.set_network_identity(NetworkIdentity::new(
         "shared_network".to_string(),
@@ -374,7 +374,7 @@ async fn credential_basic_connectivity() {
     cred_inst
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.1:11010".parse().unwrap(),
+            "h2://10.1.1.1:11010".parse().unwrap(),
         ));
 
     let cred_peer_id = cred_inst.peer_id();
@@ -490,7 +490,7 @@ async fn credential_non_reusable_allows_only_one_peer() {
         .unwrap()
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.1:11010".parse().unwrap(),
+            "h2://10.1.1.1:11010".parse().unwrap(),
         ));
 
     let cred1_peer_id = cred1_inst.as_ref().unwrap().peer_id();
@@ -515,7 +515,7 @@ async fn credential_non_reusable_allows_only_one_peer() {
         .unwrap()
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.1:11010".parse().unwrap(),
+            "h2://10.1.1.1:11010".parse().unwrap(),
         ));
 
     let cred2_peer_id = cred2_inst.as_ref().unwrap().peer_id();
@@ -617,12 +617,12 @@ async fn credential_non_reusable_across_two_admins_allows_only_one_peer() {
     admin_a_inst
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.2:11010".parse().unwrap(),
+            "h2://10.1.1.2:11010".parse().unwrap(),
         ));
     admin_c_inst
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.2:11010".parse().unwrap(),
+            "h2://10.1.1.2:11010".parse().unwrap(),
         ));
 
     let admin_c_peer_id = admin_c_inst.peer_id();
@@ -682,7 +682,7 @@ async fn credential_non_reusable_across_two_admins_allows_only_one_peer() {
         .unwrap()
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.1:11010".parse().unwrap(),
+            "h2://10.1.1.1:11010".parse().unwrap(),
         ));
 
     let mut cred_right_inst = Some(Instance::new(cred_right_config));
@@ -692,7 +692,7 @@ async fn credential_non_reusable_across_two_admins_allows_only_one_peer() {
         .unwrap()
         .get_conn_manager()
         .add_connector(TcpTunnelConnector::new(
-            "tcp://10.1.1.4:11010".parse().unwrap(),
+            "h2://10.1.1.4:11010".parse().unwrap(),
         ));
 
     let cred_left_peer_id = cred_left_inst.as_ref().unwrap().peer_id();

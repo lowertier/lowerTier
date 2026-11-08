@@ -164,7 +164,7 @@ async fn demo() -> Result<()> {
         .camouflage_config_mut()
         .set_decoy_upstream(origin_addr.to_string());
     flags.camouflage_config_mut().admission_secret = uuid::Uuid::new_v4().to_string();
-    let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse()?);
+    let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse()?);
     listener.set_flags(flags);
     listener.listen().await?;
     let public = SocketAddr::from(([127, 0, 0, 1], listener.local_url().port().unwrap()));

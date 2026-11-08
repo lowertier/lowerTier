@@ -593,7 +593,7 @@ pub(crate) fn start(
     ensure!(
         matches!(
             ctx.get_flags().default_protocol.as_str(),
-            "quic" | "tcp" | "wss"
+            "quic" | "h2" | "wss"
         ),
         "unsupported discovery protocol"
     );
@@ -1219,7 +1219,7 @@ mod tests {
             .finish();
         let _logs = std::env::var_os("LOWTIER_TRACKER_TEST_LOG")
             .map(|_| tracing::subscriber::set_default(subscriber));
-        for protocol in ["quic", "tcp", "wss"] {
+        for protocol in ["quic", "h2", "wss"] {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let tracker = TrackerServer::new(1).unwrap();
                 let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1482,7 +1482,7 @@ mod tests {
             }
             let ctx = a.get_global_ctx();
             let mut flags = ctx.get_flags();
-            flags.enabled_protocols = vec!["quic".into(), "tcp".into()];
+            flags.enabled_protocols = vec!["quic".into(), "h2".into()];
             ctx.set_flags(flags);
             stage.set("WSS withdrawal");
             while ctx
@@ -1495,7 +1495,7 @@ mod tests {
             }
             assert!(!ctx.get_feature_flags().wss_hole_punch);
             assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "quic"));
-            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "tcp"));
+            assert!(a.has_live_peer_connection_for_protocol(b.my_peer_id(), "h2"));
             assert!(
                 ctx.get_discovery_listeners()
                     .iter()
@@ -1517,7 +1517,7 @@ mod tests {
     async fn udp_mapping_failure_withdraws_and_same_address_recovery_notifies() {
         for url in [
             "quic://127.0.0.1:443",
-            "tcp://127.0.0.1:443",
+            "h2://127.0.0.1:443",
             "wss://127.0.0.1:443",
         ] {
             assert_eq!(
@@ -1534,7 +1534,7 @@ mod tests {
         ctx.remove_discovery_listeners(shared, "quic");
         let listeners = ctx.get_discovery_listeners();
         assert_eq!(listeners.len(), 2);
-        assert!(listeners.iter().any(|listener| listener.scheme() == "tcp"));
+        assert!(listeners.iter().any(|listener| listener.scheme() == "h2"));
         assert!(listeners.iter().any(|listener| listener.scheme() == "wss"));
         let address = "198.51.100.7:16969".parse().unwrap();
         let (sender, mut receiver) = watch::channel(None);
@@ -1771,7 +1771,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_bootstrap_retries_failed_authentication_and_stalled_tls() {
-        for protocol in ["tcp", "wss"] {
+        for protocol in ["h2", "wss"] {
             for stalled in [false, true] {
                 tokio::time::timeout(BOOTSTRAP_TIMEOUT + Duration::from_secs(1), async {
                     let client =
@@ -2167,7 +2167,7 @@ mod tests {
         }
         for (bind_ip, interval) in [("127.0.0.1", 1800), ("[::1]", 2)] {
             for tracker_protocol in ["udp", "tcp", "http"] {
-                for protocol in ["quic", "tcp", "wss"] {
+                for protocol in ["quic", "h2", "wss"] {
                     let started = Instant::now();
                     tokio::time::timeout(Duration::from_secs(20), async {
                         let server = TrackerServer::new(interval).unwrap();
@@ -2374,7 +2374,7 @@ mod tests {
                 }
             }
         }));
-        for protocol in ["tcp", "wss"] {
+        for protocol in ["h2", "wss"] {
             let a =
                 create_mock_peer_manager_secure(format!("https-{protocol}"), "secret".into()).await;
             let b =

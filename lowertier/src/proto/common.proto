@@ -113,7 +113,7 @@ message FlagsInConfig {
   reserved "quic_tls_cert", "quic_tls_key", "quic_server_name", "quic_admission_secret";
   reserved "quic_fallback_root", "quic_decoy_upstream", "quic_sni_passthrough";
   // Startup-only transport allowlist; empty preserves all transports.
-  // Include every listener and bootstrap scheme: quic, tcp (HTTP/2), wss.
+  // Include every listener and bootstrap scheme: quic, h2, wss.
   repeated string enabled_protocols = 70;
   // Startup-only bridge policy. Zero disables each source ownership limit.
   uint32 l2_max_macs_per_peer = 71;

@@ -516,7 +516,7 @@ mod tests {
         assert!(http_response(b"d8:intervali0e5:peers0:e").is_err());
         assert_ne!(
             rendezvous_id(b"secret", "quic"),
-            rendezvous_id(b"secret", "tcp")
+            rendezvous_id(b"secret", "h2")
         );
         assert_ne!(
             rendezvous_id(b"secret", "quic"),

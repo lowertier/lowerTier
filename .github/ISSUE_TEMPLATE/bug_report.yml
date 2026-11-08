@@ -64,7 +64,7 @@ body:
         
         **节点 B 配置 / Node B Config:**
         ```
-        lowertier run --set address.ipv4=10.1.1.2/24 --set peer=tcp://1.2.3.4:11010
+        lowertier run --set address.ipv4=10.1.1.2/24 --set peer=h2://1.2.3.4:11010
         ```
         
         请贴出完整的配置文件内容或命令行参数

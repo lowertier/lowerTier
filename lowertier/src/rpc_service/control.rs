@@ -349,7 +349,7 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         drop(socket);
-        let uri: url::Url = format!("tcp://{address}").parse().unwrap();
+        let uri: url::Url = format!("h2://{address}").parse().unwrap();
         let mut server = StandAloneServer::new(TcpTunnelListener::new(uri.clone()));
         server.set_hook(Arc::new(InstanceRpcServerHook::new(None)));
         crate::rpc_service::api::register_api_rpc_service(&manager, server.registry(), token);
@@ -668,7 +668,7 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
         use crate::proto::{common::TunnelInfo, rpc_impl::standalone::RpcServerHook};
         let hook = InstanceRpcServerHook::new(None);
         let ipv6_channel = TunnelInfo {
-            remote_addr: Some("tcp://[::1]:15888".parse::<url::Url>().unwrap().into()),
+            remote_addr: Some("h2://[::1]:15888".parse::<url::Url>().unwrap().into()),
             ..Default::default()
         };
         assert!(hook.on_new_client(Some(ipv6_channel.clone())).await.is_ok());

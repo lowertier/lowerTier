@@ -32,7 +32,7 @@ trackers = [
 ]
 ```
 
-Set `transport.prefer` to `tcp` for H2 or `wss` for WSS.
+Set `transport.prefer` to `h2` for H2 or `wss` for WSS.
 Nodes with different preferences can discover each other through every protocol they both enable.
 Tracker contact and peer transport are independent.
 H2 and WSS bootstrap with QUIC disabled through TCP, HTTP, or HTTPS trackers.
@@ -181,7 +181,7 @@ QUIC uses:
 H = HMAC-SHA256(key, "vpn-rendezvous-v1")[0..20]
 ```
 
-H2 appends `\0transport=tcp` to the HMAC message.
+H2 appends `\0transport=h2` to the HMAC message.
 WSS appends `\0transport=wss`.
 This prevents compact tracker entries from mixing transport types.
 Each tracker, protocol, and local path has an independent random 20-byte tracker peer ID.

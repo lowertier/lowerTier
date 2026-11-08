@@ -190,7 +190,7 @@ avoidable syscalls and queue handoffs, and reduces CPU cores consumed per Gbit/s
 ## Browser TLS and independent TCP lanes
 
 Build with `LOWTIER_BUILD_FEATURES=tun` for both H2 and WSS.
-For a matched comparison, use one binary and select `UNDERLAY_PROTOCOL=tcp`
+For a matched comparison, use one binary and select `UNDERLAY_PROTOCOL=h2`
 (H2) or `UNDERLAY_PROTOCOL=wss`, with `LOWTIER_TCP_LANES=1`, `2` or `4`.
 The harness applies the corresponding `?lanes=N` to both listener and peer
 URLs. A multi-lane group retains one authenticated logical peer connection.

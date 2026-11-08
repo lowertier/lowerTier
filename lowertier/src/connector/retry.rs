@@ -306,7 +306,7 @@ mod tests {
         }
         fn info(&self) -> Option<TunnelInfo> {
             let mut info = self.inner.info()?;
-            let remote = url::Url::parse(&format!("tcp://{}", self.remote)).unwrap();
+            let remote = url::Url::parse(&format!("h2://{}", self.remote)).unwrap();
             info.remote_addr = Some(remote.clone().into());
             info.resolved_remote_addr = Some(remote.into());
             Some(info)
@@ -329,22 +329,22 @@ mod tests {
             Some(Instant::now()),
         );
         assert!(retries.begin("quic", address).is_ok());
-        let live = retries.begin("tcp", address).unwrap();
+        let live = retries.begin("h2", address).unwrap();
         live._lease.paths.lock().push(Arc::new(TunnelPathState {
             peer_authenticated: std::sync::atomic::AtomicBool::new(true),
             info: parking_lot::RwLock::new(TunnelInfo::default()),
         }));
         drop(live);
-        assert!(retries.begin("tcp", address).is_ok());
+        assert!(retries.begin("h2", address).is_ok());
         let full = Arc::new(TransportRetries::default());
         let active = (1..=1024)
             .map(|port| {
-                full.begin("tcp", SocketAddr::new(address.ip(), port))
+                full.begin("h2", SocketAddr::new(address.ip(), port))
                     .unwrap()
             })
             .collect::<Vec<_>>();
         assert!(
-            full.begin("tcp", "127.0.0.1:65535".parse().unwrap())
+            full.begin("h2", "127.0.0.1:65535".parse().unwrap())
                 .is_err()
         );
         drop(active);
@@ -379,8 +379,8 @@ mod tests {
         let candidates = Arc::new(TransportRetries::default());
         let other: SocketAddr = "127.0.0.1:11013".parse().unwrap();
         let attempts = vec![
-            candidates.begin("tcp", address).unwrap(),
-            candidates.begin("tcp", other).unwrap(),
+            candidates.begin("h2", address).unwrap(),
+            candidates.begin("h2", other).unwrap(),
         ];
         let (inner, _remote) = crate::tunnel::ring::create_ring_tunnel_pair();
         let tunnel = retain_attempts(
@@ -396,7 +396,7 @@ mod tests {
             .peer_authenticated
             .store(true, std::sync::atomic::Ordering::Release);
         drop(tunnel);
-        assert!(candidates.begin("tcp", address).is_ok());
-        assert!(candidates.begin("tcp", other).is_err());
+        assert!(candidates.begin("h2", address).is_ok());
+        assert!(candidates.begin("h2", other).is_err());
     }
 }

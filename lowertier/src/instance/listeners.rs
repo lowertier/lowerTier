@@ -106,7 +106,7 @@ pub fn create_listener_by_url(
     let socket_mark = global_ctx.config.get_flags().socket_mark;
     let scheme = IpScheme::try_from(l)?;
     Ok(match scheme {
-        IpScheme::Tcp => {
+        IpScheme::H2 => {
             let mut l = TcpTunnelListener::new(l.clone());
             l.set_socket_mark(socket_mark);
             l.set_underlay_policy(global_ctx.get_underlay_policy());

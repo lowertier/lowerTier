@@ -60,7 +60,7 @@ async fn caddy_multiplexes_tcp_transports() {
                     let mut listener: Box<dyn TunnelListener> = match protocol {
                         0 => {
                             let mut listener = TcpTunnelListener::new(
-                                format!("tcp://127.0.0.1:0?lanes={lane_count}")
+                                format!("h2://127.0.0.1:0?lanes={lane_count}")
                                     .parse()
                                     .unwrap(),
                             );
@@ -216,9 +216,7 @@ https://web.invalid:{web_port}, https://{HOST}:{web_port} {{
                     let client = match protocol {
                         0 => {
                             let mut connector = TcpTunnelConnector::new(
-                                format!("tcp://{public}?lanes={lane_count}")
-                                    .parse()
-                                    .unwrap(),
+                                format!("h2://{public}?lanes={lane_count}").parse().unwrap(),
                             );
                             connector.set_flags(flags.clone());
                             connector.connect().await.unwrap()

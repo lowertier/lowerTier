@@ -241,7 +241,7 @@ pub(crate) fn validate_camouflage_listeners(
             crate::tunnel::tcp_lanes::requested(listener)?;
         }
         let address = match listener.scheme() {
-            "tcp" => flags.camouflage_config().tcp_decoy(),
+            "h2" => flags.camouflage_config().tcp_decoy(),
             "quic" => flags.camouflage_config().udp_decoy(),
             _ => continue,
         };

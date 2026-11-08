@@ -701,7 +701,7 @@ impl GlobalCtx {
         feature_flags.speed_routing = true;
         feature_flags.relay_origin_proof = true;
         feature_flags.quic_hole_punch = super::config::hole_punch_protocol_enabled(flags, "quic");
-        feature_flags.tcp_hole_punch = super::config::hole_punch_protocol_enabled(flags, "tcp");
+        feature_flags.tcp_hole_punch = super::config::hole_punch_protocol_enabled(flags, "h2");
         feature_flags.wss_hole_punch = super::config::hole_punch_protocol_enabled(flags, "wss");
         feature_flags
     }
@@ -770,7 +770,7 @@ impl GlobalCtx {
                 .expect("underlay policy was validated"),
         )));
         let udp_nat = crate::common::config::transport_protocol_enabled(&flags, "quic");
-        let tcp_nat = crate::common::config::transport_protocol_enabled(&flags, "tcp")
+        let tcp_nat = crate::common::config::transport_protocol_enabled(&flags, "h2")
             || crate::common::config::transport_protocol_enabled(&flags, "wss");
         stun_info_collector.set_nat_protocols(udp_nat, tcp_nat);
         if !udp_nat {
