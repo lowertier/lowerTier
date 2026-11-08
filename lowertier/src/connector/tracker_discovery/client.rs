@@ -1,5 +1,6 @@
 use super::wire::{self, Announce, Peers};
 use crate::common::stun::StunPacket;
+use crate::tunnel::common::ensure_remote_allowed;
 use anyhow::{Context, Result, ensure};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -158,24 +159,19 @@ pub async fn http_announce(
     http_announce_rotating(url, announce, local, ctx, 0).await
 }
 
-pub(super) async fn http_announce_rotating(
+async fn tracker_stream(
     url: &url::Url,
-    announce: &Announce,
     local: SocketAddr,
     ctx: &crate::common::global_ctx::ArcGlobalCtx,
     address_index: usize,
-) -> Result<Peers> {
-    use crate::tunnel::common::{bind, ensure_remote_allowed};
+) -> Result<(tokio::net::TcpStream, String)> {
+    use crate::tunnel::common::bind;
     use tokio::net::TcpSocket;
     let host = match url.host().context("tracker URL has no host")? {
         url::Host::Domain(host) => host.to_owned(),
         url::Host::Ipv4(ip) => ip.to_string(),
         url::Host::Ipv6(ip) => ip.to_string(),
     };
-    ensure!(
-        url.scheme() == "http" || url.scheme() == "https",
-        "invalid HTTP tracker scheme"
-    );
     ensure!(
         url.username().is_empty() && url.password().is_none(),
         "tracker userinfo is unsupported"
@@ -201,6 +197,63 @@ pub(super) async fn http_announce_rotating(
         .maybe_socket_mark(ctx.get_flags().socket_mark)
         .call()?;
     let stream = socket.connect(remote).await?;
+    Ok((stream, host))
+}
+
+pub(super) async fn tcp_announce_rotating(
+    url: &url::Url,
+    announce: &Announce,
+    local: SocketAddr,
+    ctx: &crate::common::global_ctx::ArcGlobalCtx,
+    address_index: usize,
+) -> Result<Peers> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn exchange(stream: &mut tokio::net::TcpStream, request: &[u8]) -> Result<Vec<u8>> {
+        ensure!(
+            request.len() <= wire::MAX_TCP_REQUEST,
+            "tracker request too large"
+        );
+        stream.write_u32(request.len() as u32).await?;
+        stream.write_all(request).await?;
+        let length = stream.read_u32().await? as usize;
+        ensure!(
+            (8..=wire::MAX_RESPONSE).contains(&length),
+            "invalid tracker frame length"
+        );
+        let mut response = vec![0; length];
+        stream.read_exact(&mut response).await?;
+        Ok(response)
+    }
+    ensure!(
+        url.scheme() == "tcp" && announce.port != 0,
+        "invalid TCP tracker announce"
+    );
+    let (mut stream, _) = tracker_stream(url, local, ctx, address_index).await?;
+    let transaction = rand::random();
+    let response = exchange(&mut stream, &wire::connect_request(transaction)).await?;
+    let cookie = wire::connect_response(&response, transaction)?;
+    let transaction = rand::random();
+    let mut request = announce.udp(cookie, transaction).to_vec();
+    wire::append_url_data(
+        &mut request,
+        &url[url::Position::BeforePath..url::Position::AfterQuery],
+    )?;
+    let response = exchange(&mut stream, &request).await?;
+    wire::announce_response(&response, transaction, stream.peer_addr()?.is_ipv6())
+}
+
+pub(super) async fn http_announce_rotating(
+    url: &url::Url,
+    announce: &Announce,
+    local: SocketAddr,
+    ctx: &crate::common::global_ctx::ArcGlobalCtx,
+    address_index: usize,
+) -> Result<Peers> {
+    ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "invalid HTTP tracker scheme"
+    );
+    let (stream, host) = tracker_stream(url, local, ctx, address_index).await?;
     let observation_socket = stream.local_addr()?;
     let mut target = url.clone();
     let query = match url.query() {
@@ -268,7 +321,6 @@ where
     let request = http::Request::builder()
         .uri(path)
         .header(http::header::HOST, host)
-        .header(http::header::USER_AGENT, "aria2/1.37.0")
         .header(http::header::CACHE_CONTROL, "no-cache")
         .body(Empty::<Bytes>::new())?;
     let response = sender.send_request(request).await?;

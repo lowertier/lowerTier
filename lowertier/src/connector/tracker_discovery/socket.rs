@@ -38,18 +38,19 @@ mod tests {
             meta: &mut [quinn::udp::RecvMeta],
         ) -> Poll<io::Result<usize>> {
             let punch =
-                crate::connector::tracker_discovery::wire::punch(b"test", 1, [2; 16], 10, false);
-            bufs[0][..65].copy_from_slice(&punch);
-            bufs[0][65..130].fill(0x40);
-            bufs[1][..65].fill(0);
+                crate::connector::tracker_discovery::wire::punch(&[7; 32], 1, [2; 16], 10, false);
+            let stride = punch.len();
+            bufs[0][..stride].copy_from_slice(&punch);
+            bufs[0][stride..2 * stride].fill(0x40);
+            bufs[1][..stride].fill(0);
             bufs[1][4..8].copy_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
-            bufs[1][65..130].fill(0x20);
-            bufs[1][130..137].fill(0xc0);
-            for (index, length) in [130, 137].into_iter().enumerate() {
+            bufs[1][stride..2 * stride].fill(0x60);
+            bufs[1][2 * stride..2 * stride + 7].fill(0xc0);
+            for (index, length) in [2 * stride, 2 * stride + 7].into_iter().enumerate() {
                 meta[index] = quinn::udp::RecvMeta {
                     addr: self.local_addr().unwrap(),
                     len: length,
-                    stride: 65,
+                    stride,
                     ecn: None,
                     dst_ip: None,
                 };
@@ -62,7 +63,7 @@ mod tests {
     async fn mixed_gro_preserves_quic_and_only_extracts_control_packets() {
         let (packets, mut receiver) = broadcast::channel(8);
         let socket = DiscoverySocket::new(Arc::new(Batch), packets);
-        let (mut a, mut b) = ([0; 256], [0; 256]);
+        let (mut a, mut b) = ([0; 512], [0; 512]);
         let mut buffers = [IoSliceMut::new(&mut a), IoSliceMut::new(&mut b)];
         let mut metadata = [quinn::udp::RecvMeta::default(); 2];
         let count =
@@ -70,14 +71,18 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 2);
+        let stride = metadata[0].len;
+        assert_eq!(metadata[1].len, stride + 7);
+        assert_eq!(metadata[1].stride, stride);
+        assert!(buffers[0][..stride].iter().all(|byte| *byte == 0x40));
+        assert!(buffers[1][..stride].iter().all(|byte| *byte == 0x60));
+        assert_eq!(&buffers[1][stride..stride + 7], &[0xc0; 7]);
+        let probe = receiver.recv().await.unwrap().data;
+        assert_eq!(probe.len(), stride);
         assert_eq!(
-            (metadata[0].len, metadata[1].len, metadata[1].stride),
-            (65, 72, 65)
+            super::super::wire::read_punch(&probe, &[7; 32], 10).unwrap(),
+            (1, [2; 16], false, 10)
         );
-        assert_eq!(&buffers[0][..65], &[0x40; 65]);
-        assert_eq!(&buffers[1][..65], &[0x20; 65]);
-        assert_eq!(&buffers[1][65..72], &[0xc0; 7]);
-        assert_eq!(receiver.recv().await.unwrap().data.len(), 65);
         assert_eq!(
             receiver.recv().await.unwrap().data[4..8],
             [0x21, 0x12, 0xa4, 0x42]
@@ -95,7 +100,7 @@ impl DiscoverySocket {
     }
 
     fn control(&self, bytes: &[u8], source: SocketAddr) -> bool {
-        // Discovery endpoints do not negotiate fixed-bit greasing. Unknown packets still reach Quinn.
+        // The fixed bit separates QUIC data from bounded encrypted probes without decryption.
         let stun =
             bytes.len() >= 20 && bytes[0] & 0xc0 == 0 && bytes[4..8] == [0x21, 0x12, 0xa4, 0x42];
         let tracker = bytes.len() >= 8
@@ -105,7 +110,7 @@ impl DiscoverySocket {
                 [0, 0, 0, 3] => true,
                 _ => false,
             };
-        let punch = bytes.len() == super::wire::PUNCH_BYTES && bytes[..4] == [0, b'L', b'T', 1];
+        let punch = super::wire::possible_punch(bytes);
         if !stun && !tracker && !punch {
             return false;
         }

@@ -636,7 +636,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Restart,
         "",
-        "Public BitTorrent trackers used for peer discovery.",
+        "Tracker URLs: udp, http, https, or tcp for a LowTier hosted tracker.",
     ),
     opt(
         "discovery.private_trackers",
@@ -644,7 +644,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Restart,
         "",
-        "lowertier-tracker servers used for peer discovery.",
+        "Private tracker URLs. Supports udp, tcp, http, and https.",
     ),
     opt(
         "discovery.bind",

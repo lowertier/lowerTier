@@ -10,6 +10,9 @@ struct Options {
     udp_listen: Vec<SocketAddr>,
     #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:16969")]
     http_listen: Vec<SocketAddr>,
+    /// Accept length-prefixed tracker messages over TCP.
+    #[arg(long, value_delimiter = ',')]
+    tcp_listen: Vec<SocketAddr>,
     #[arg(long, default_value_t = 2)]
     interval: u32,
     #[arg(long)]
@@ -70,6 +73,11 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .serve_udp_with_alternate(socket.clone(), alternate),
         );
+    }
+    for address in options.tcp_listen {
+        let listener = tcp_listener(address)?;
+        eprintln!("Rendezvous TCP={}", listener.local_addr()?);
+        tasks.spawn(server.clone().serve_tcp(listener));
     }
     for address in options.stun_tcp_listen {
         let listener = tcp_listener(address)?;

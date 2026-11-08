@@ -491,6 +491,11 @@ Each protocol retains the existing resource limits.
 
 Public tracker discovery is optional. Configured peers provide the initial connection when no `[discovery]` section is present. Once connected, authenticated peer RPCs coordinate punching and STUN supplies NAT mappings. Trackers can provide bootstrap addresses when configured; see [tracker discovery](docs/tracker-discovery.md).
 
+Tracker contact supports UDP, TCP, HTTP, and HTTPS independently of the peer transport.
+H2 and WSS can bootstrap with QUIC disabled.
+Configure a TCP or HTTP(S) tracker when UDP tracker traffic is unavailable.
+The `tcp://` format is a LowTier extension for hosted trackers.
+
 QUIC NAT traversal exchanges candidates through authenticated peer RPC.
 It retains the selected UDP socket for the QUIC connection.
 When one peer has destination-dependent mappings, traversal can use a bounded socket pool and public-port search.

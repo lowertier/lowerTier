@@ -30,6 +30,8 @@ trackers = [
   "udp://[::1]:16969/announce",
   "http://127.0.0.1:16969/announce",
   "http://[::1]:16969/announce",
+  "tcp://127.0.0.1:16970/announce",
+  "tcp://[::1]:16970/announce",
 ]
 # Omit bind to discover through every permitted interface.
 private_trackers = [
@@ -37,6 +39,8 @@ private_trackers = [
   "udp://[::1]:16969/announce",
   "http://127.0.0.1:16969/announce",
   "http://[::1]:16969/announce",
+  "tcp://127.0.0.1:16970/announce",
+  "tcp://[::1]:16970/announce",
 ]
 # Use explicit endpoints when a fixed local port is required.
 # bind = "127.0.0.1:17001"

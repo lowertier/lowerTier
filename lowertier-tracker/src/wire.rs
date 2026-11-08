@@ -1,12 +1,18 @@
 //! Tracker records contain candidates. They never authenticate a VPN peer.
 use anyhow::{Context, Result, bail, ensure};
+use chacha20poly1305::{
+    Tag, XChaCha20Poly1305, XNonce,
+    aead::{AeadInPlace, KeyInit},
+};
 use hmac::{Hmac, Mac};
+use rand::{Rng, RngCore};
 use sha2::Sha256;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub const CONNECT_MAGIC: u64 = 0x41727101980;
 pub const MAX_PEERS: usize = 16;
 pub const MAX_RESPONSE: usize = 16 * 1024;
+pub const MAX_TCP_REQUEST: usize = 2048;
 pub const IDLE_ANNOUNCE_INTERVAL_SECS: u32 = 30;
 pub type Id = [u8; 20];
 pub const ECHO_MAGIC: &[u8; 4] = b"LTO1";
@@ -72,7 +78,7 @@ pub fn unix_seconds() -> u64 {
 }
 
 pub fn rendezvous_id(key: &[u8], protocol: &str) -> Id {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(b"vpn-rendezvous-v1");
     // Compact tracker entries cannot identify the transport of an advertised port.
     if protocol != "quic" {
@@ -122,7 +128,7 @@ pub struct Announce {
     pub key: u32,
     pub port: u16,
     pub event: u32,
-    // Both values stay nonzero to retain leecher discovery on public trackers.
+    // A nonzero value retains peer discovery without reporting torrent completion.
     pub left: u64,
     pub numwant: i32,
 }
@@ -368,39 +374,64 @@ pub fn http_response(bytes: &[u8]) -> Result<Peers> {
     })
 }
 
-pub const PUNCH_BYTES: usize = 65;
-pub const PUNCH_MAGIC: [u8; 4] = [0, b'L', b'T', 1];
+pub const PUNCH_MIN_BYTES: usize = 96;
+pub const PUNCH_MAX_BYTES: usize = 192;
+const PUNCH_HEADER_BYTES: usize = 25;
+const PUNCH_TAG_BYTES: usize = 16;
+const PUNCH_VERSION: u8 = 2;
 
-pub fn punch(key: &[u8], peer: u32, nonce: [u8; 16], now: u64, reply: bool) -> [u8; PUNCH_BYTES] {
-    let mut bytes = [0; PUNCH_BYTES];
-    bytes[..4].copy_from_slice(&PUNCH_MAGIC);
-    bytes[4] = u8::from(reply);
-    bytes[5..9].copy_from_slice(&peer.to_be_bytes());
-    bytes[9..25].copy_from_slice(&nonce);
-    bytes[25..33].copy_from_slice(&now.to_be_bytes());
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(b"vpn-punch-v1\0");
-    mac.update(&bytes[..33]);
-    bytes[33..].copy_from_slice(&mac.finalize().into_bytes());
+/// Classify bounded control datagrams without decrypting ordinary QUIC packets.
+pub fn possible_punch(bytes: &[u8]) -> bool {
+    (PUNCH_MIN_BYTES..=PUNCH_MAX_BYTES).contains(&bytes.len()) && bytes[0] & 0xc0 == 0
+}
+
+pub fn punch(key: &[u8; 32], peer: u32, challenge: [u8; 16], now: u64, reply: bool) -> Vec<u8> {
+    let mut rng = rand::thread_rng();
+    let mut bytes = vec![0; rng.gen_range(PUNCH_MIN_BYTES..=PUNCH_MAX_BYTES)];
+    rng.fill_bytes(&mut bytes);
+    // These endpoints do not negotiate QUIC fixed-bit greasing.
+    bytes[0] &= 0x3f;
+    let header: [u8; PUNCH_HEADER_BYTES] = bytes[..PUNCH_HEADER_BYTES].try_into().unwrap();
+    let payload_end = bytes.len() - PUNCH_TAG_BYTES;
+    let payload = &mut bytes[PUNCH_HEADER_BYTES..payload_end];
+    payload[0] = PUNCH_VERSION;
+    payload[1] = u8::from(reply);
+    payload[2..6].copy_from_slice(&peer.to_be_bytes());
+    payload[6..22].copy_from_slice(&challenge);
+    payload[22..30].copy_from_slice(&now.to_be_bytes());
+    let tag = XChaCha20Poly1305::new(key.into())
+        .encrypt_in_place_detached(XNonce::from_slice(&header[1..]), &header, payload)
+        .expect("the bounded probe fits the cipher message limit");
+    bytes[payload_end..].copy_from_slice(&tag);
     bytes
 }
 
-pub fn read_punch(bytes: &[u8], key: &[u8], now: u64) -> Result<(u32, [u8; 16], bool)> {
-    ensure!(
-        bytes.len() == PUNCH_BYTES && bytes[..4] == PUNCH_MAGIC && bytes[4] <= 1,
-        "invalid punch packet"
-    );
-    let sent = u64::from_be_bytes(bytes[25..33].try_into()?);
-    ensure!(now.abs_diff(sent) <= 60, "expired punch packet");
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(b"vpn-punch-v1\0");
-    mac.update(&bytes[..33]);
-    mac.verify_slice(&bytes[33..])
+pub fn read_punch(bytes: &[u8], key: &[u8; 32], now: u64) -> Result<(u32, [u8; 16], bool, u64)> {
+    ensure!(possible_punch(bytes), "invalid punch packet");
+    let payload_end = bytes.len() - PUNCH_TAG_BYTES;
+    let payload_len = payload_end - PUNCH_HEADER_BYTES;
+    let mut storage = [0; PUNCH_MAX_BYTES - PUNCH_HEADER_BYTES - PUNCH_TAG_BYTES];
+    let payload = &mut storage[..payload_len];
+    payload.copy_from_slice(&bytes[PUNCH_HEADER_BYTES..payload_end]);
+    XChaCha20Poly1305::new(key.into())
+        .decrypt_in_place_detached(
+            XNonce::from_slice(&bytes[1..PUNCH_HEADER_BYTES]),
+            &bytes[..PUNCH_HEADER_BYTES],
+            payload,
+            Tag::from_slice(&bytes[payload_end..]),
+        )
         .map_err(|_| anyhow::anyhow!("invalid punch authentication"))?;
+    ensure!(
+        payload[0] == PUNCH_VERSION && payload[1] <= 1,
+        "invalid punch payload"
+    );
+    let sent = u64::from_be_bytes(payload[22..30].try_into()?);
+    ensure!(now.abs_diff(sent) <= 60, "expired punch packet");
     Ok((
-        u32::from_be_bytes(bytes[5..9].try_into()?),
-        bytes[9..25].try_into()?,
-        bytes[4] != 0,
+        u32::from_be_bytes(payload[2..6].try_into()?),
+        payload[6..22].try_into()?,
+        payload[1] != 0,
+        sent,
     ))
 }
 
@@ -491,13 +522,24 @@ mod tests {
             rendezvous_id(b"secret", "quic"),
             rendezvous_id(b"other", "quic")
         );
-        let mut packet = punch(b"key", 17, [8; 16], 100, false);
+        let key = [7; 32];
+        let mut packet = punch(&key, 17, [8; 16], 100, false);
         assert_eq!(
-            read_punch(&packet, b"key", 110).unwrap(),
-            (17, [8; 16], false)
+            read_punch(&packet, &key, 110).unwrap(),
+            (17, [8; 16], false, 100)
         );
-        assert!(read_punch(&packet, b"key", 161).is_err());
+        assert_ne!(packet, punch(&key, 17, [8; 16], 100, false));
+        assert!(read_punch(&packet, &[9; 32], 110).is_err());
+        assert!(read_punch(&packet, &key, 161).is_err());
+        packet[0] ^= 1;
+        assert!(read_punch(&packet, &key, 110).is_err());
+        packet[0] ^= 1;
         packet[5] ^= 1;
-        assert!(read_punch(&packet, b"key", 110).is_err());
+        assert!(read_punch(&packet, &key, 110).is_err());
+        packet[5] ^= 1;
+        let last = packet.len() - 1;
+        packet[last] ^= 1;
+        assert!(read_punch(&packet, &key, 110).is_err());
+        assert!(read_punch(&packet[..PUNCH_MIN_BYTES - 1], &key, 110).is_err());
     }
 }

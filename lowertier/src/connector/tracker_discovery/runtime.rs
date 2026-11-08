@@ -599,7 +599,7 @@ pub(crate) fn start(
     );
     for url in &config.trackers {
         ensure!(
-            matches!(url.scheme(), "udp" | "http" | "https")
+            matches!(url.scheme(), "udp" | "tcp" | "http" | "https")
                 && url[url::Position::BeforePath..url::Position::AfterQuery].len() <= 1024
                 && url.host_str().is_some()
                 && url.port_or_known_default().is_some()
@@ -629,8 +629,6 @@ pub(crate) fn start(
             "discovery advertise requires bind and a valid endpoint"
         );
     }
-    // One process incarnation can advertise several independent interface endpoints.
-    let peer_session = rand::random();
     // Keep the configured fixed endpoint on its original protocol when preference changes.
     let pinned_protocol = ctx.get_flags().default_protocol;
     Ok(AbortOnDropHandle::new(tokio::spawn(async move {
@@ -755,7 +753,6 @@ pub(crate) fn start(
                                 protocol.to_owned(),
                                 local,
                                 key,
-                                peer_session,
                                 connected.clone(),
                             )
                             .await
@@ -778,7 +775,6 @@ async fn run_path(
     protocol: String,
     local: SocketAddr,
     key: [u8; 32],
-    peer_session: wire::Id,
     connected: watch::Receiver<bool>,
 ) -> Result<()> {
     let udp_local = if protocol == "quic" {
@@ -865,7 +861,6 @@ async fn run_path(
                 mapped,
                 candidates,
                 hash,
-                peer_session,
                 connected,
                 bound,
                 private,
@@ -1035,7 +1030,6 @@ async fn tracker_loop(
     mut mapped: watch::Receiver<Option<SocketAddr>>,
     candidates: mpsc::Sender<Candidate>,
     hash: wire::Id,
-    peer: wire::Id,
     mut connected: watch::Receiver<bool>,
     bound: SocketAddr,
     private: bool,
@@ -1043,6 +1037,9 @@ async fn tracker_loop(
     connections: Arc<PathConnections>,
 ) -> Result<()> {
     let local = udp.local_addr()?;
+    // Each tracker, protocol, and interface receives an independent temporary identity.
+    let peer: wire::Id = rand::random();
+    let announce_key: u32 = rand::random();
     let tracker_name = url.host_str().unwrap().to_owned();
     let mut started = true;
     let mut cached_tracker = None;
@@ -1051,7 +1048,7 @@ async fn tracker_loop(
     let mut next_event = Instant::now();
     loop {
         mapping_changes.borrow_and_update();
-        let idle = *connected.borrow_and_update() && !started;
+        connected.borrow_and_update();
         let result = async {
             if started {
                 tokio::time::sleep_until(next_event).await;
@@ -1112,14 +1109,20 @@ async fn tracker_loop(
             let announce = Announce {
                 hash,
                 peer,
-                key: u32::from_be_bytes(peer[..4].try_into().unwrap()),
+                key: announce_key,
                 port: address.port(),
                 event: if started { 2 } else { 0 },
-                left: if idle { 2 } else { 1 },
+                left: if private { 2 } else { 1 },
                 numwant: wire::MAX_PEERS as i32,
             };
             let peers = if let Some(tracker) = cached_tracker.as_ref() {
                 tracker.announce(&announce).await?
+            } else if url.scheme() == "tcp" {
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    client::tcp_announce_rotating(&url, &announce, local, &ctx, address_index),
+                )
+                .await??
             } else {
                 let mut target = url.clone();
                 if private {
@@ -1209,7 +1212,7 @@ mod tests {
     use crate::peers::tests::create_mock_peer_manager_secure;
 
     #[tokio::test]
-    async fn blocked_stun_does_not_block_quic_tracker_bootstrap() {
+    async fn blocked_stun_does_not_block_enabled_tracker_protocols() {
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
@@ -1260,6 +1263,18 @@ mod tests {
                 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
+                for (local, remote) in [(&a, &b), (&b, &a)] {
+                    for transport in crate::common::config::TRANSPORT_PROTOCOLS {
+                        assert_eq!(
+                            local.has_live_peer_connection_for_protocol(
+                                remote.my_peer_id(),
+                                transport
+                            ),
+                            transport == protocol,
+                            "bootstrap used an unexpected protocol"
+                        );
+                    }
+                }
                 for peer in [&a, &b] {
                     let context = peer.get_global_ctx();
                     let sources = context.discovery_sources();
@@ -1289,6 +1304,75 @@ mod tests {
             .expect("STUN delayed tracker bootstrap");
         }
         all_enabled_tracker_protocols_bootstrap().await;
+        independent_tracker_identities().await;
+    }
+
+    async fn independent_tracker_identities() {
+        let records = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut trackers = Vec::new();
+        let mut urls = Vec::new();
+        for tracker in 0..2 {
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            urls.push(format!("udp://{}/announce", udp.local_addr().unwrap()));
+            let records = records.clone();
+            trackers.push(AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut packet = [0; wire::MAX_RESPONSE];
+                loop {
+                    let (length, source) = udp.recv_from(&mut packet).await.unwrap();
+                    assert!(length >= 16);
+                    let action = u32::from_be_bytes(packet[8..12].try_into().unwrap());
+                    let mut response = Vec::from(&packet[8..16]);
+                    match action {
+                        0 => response.extend_from_slice(&1_u64.to_be_bytes()),
+                        1 => {
+                            let hash: wire::Id = packet[16..36].try_into().unwrap();
+                            let peer: wire::Id = packet[36..56].try_into().unwrap();
+                            let key = u32::from_be_bytes(packet[88..92].try_into().unwrap());
+                            records.lock().unwrap().insert((tracker, hash), (peer, key));
+                            response.extend_from_slice(&30_u32.to_be_bytes());
+                            response.extend_from_slice(&[0; 8]);
+                        }
+                        _ => panic!("unexpected tracker action"),
+                    }
+                    udp.send_to(&response, source).await.unwrap();
+                }
+            })));
+        }
+        let peer =
+            create_mock_peer_manager_secure("tracker-identity".into(), "secret".into()).await;
+        peer.get_global_ctx().replace_stun_info_collector(Box::new(
+            crate::common::stun::StunInfoCollector::new(Vec::new(), Vec::new(), Vec::new()),
+        ));
+        let _paths = start(
+            peer,
+            toml::from_str(&format!(
+                "private_trackers = {}\nbind = \"127.0.0.1:0\"",
+                serde_json::to_string(&urls).unwrap()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while records.lock().unwrap().len() < 6 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("enabled protocols did not announce to both trackers");
+        let records = records.lock().unwrap();
+        assert_eq!(
+            records
+                .values()
+                .map(|(peer, _)| *peer)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            6
+        );
+        assert!(
+            records
+                .values()
+                .any(|(peer, key)| *key != u32::from_be_bytes(peer[..4].try_into().unwrap()))
+        );
     }
 
     async fn all_enabled_tracker_protocols_bootstrap() {
@@ -1543,7 +1627,7 @@ mod tests {
         )));
         let address = remote.local_addr().unwrap();
         candidates.send(address.into()).await.unwrap();
-        let mut bytes = [0; 128];
+        let mut bytes = [0; wire::PUNCH_MAX_BYTES];
         let (length, _) =
             tokio::time::timeout(Duration::from_secs(2), remote.recv_from(&mut bytes))
                 .await
@@ -1560,9 +1644,10 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
+            let current = wire::read_punch(&bytes[..length], &key, unix_seconds()).unwrap();
             assert_eq!(
-                wire::read_punch(&bytes[..length], &key, unix_seconds()).unwrap(),
-                first
+                (current.0, current.1, current.2),
+                (first.0, first.1, first.2)
             );
         }
         assert!(
@@ -1570,7 +1655,7 @@ mod tests {
                 loop {
                     let (length, _) = remote.recv_from(&mut bytes).await.unwrap();
                     assert!(
-                        !(length == wire::PUNCH_BYTES && bytes[..4] == [0, b'L', b'T', 1]),
+                        wire::read_punch(&bytes[..length], &key, unix_seconds()).is_err(),
                         "duplicate probe burst"
                     );
                 }
@@ -1630,7 +1715,7 @@ mod tests {
                 let (length, source) = proxy.recv_from(&mut bytes).await.unwrap();
                 if source == server_address {
                     proxy.send_to(&bytes[..length], original).await.unwrap();
-                } else if let Ok((_, challenge, false)) =
+                } else if let Ok((_, challenge, false, _)) =
                     wire::read_punch(&bytes[..length], &key, unix_seconds())
                 {
                     assert_eq!(source, original);
@@ -2075,9 +2160,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_and_http_trackers_bootstrap_all_transports_without_peer_urls() {
+    async fn udp_tcp_and_http_trackers_bootstrap_all_transports_without_peer_urls() {
+        if let Some(directory) = std::env::var_os("LOWERTIER_TRACKER_HTTPS_CHILD_DIR") {
+            https_bootstrap_child(std::path::Path::new(&directory)).await;
+            return;
+        }
         for (bind_ip, interval) in [("127.0.0.1", 1800), ("[::1]", 2)] {
-            for tracker_protocol in ["udp", "http"] {
+            for tracker_protocol in ["udp", "tcp", "http"] {
                 for protocol in ["quic", "tcp", "wss"] {
                     let started = Instant::now();
                     tokio::time::timeout(Duration::from_secs(20), async {
@@ -2091,12 +2180,17 @@ mod tests {
                         let http = tokio::net::TcpListener::bind(format!("{bind_ip}:0"))
                             .await
                             .unwrap();
+                        let tcp = tokio::net::TcpListener::bind(format!("{bind_ip}:0"))
+                            .await
+                            .unwrap();
                         let http_url: url::Url =
                             format!("http://{}/announce", http.local_addr().unwrap())
                                 .parse()
                                 .unwrap();
                         let tracker_address = if tracker_protocol == "udp" {
                             udp.local_addr().unwrap()
+                        } else if tracker_protocol == "tcp" {
+                            tcp.local_addr().unwrap()
                         } else {
                             http.local_addr().unwrap()
                         };
@@ -2111,6 +2205,8 @@ mod tests {
                         let _http = AbortOnDropHandle::new(tokio::spawn(
                             server.clone().serve_http(http, vec![], "X-Real-IP".into()),
                         ));
+                        let _tcp =
+                            AbortOnDropHandle::new(tokio::spawn(server.clone().serve_tcp(tcp)));
                         let a = create_mock_peer_manager_secure(
                             "tracker-test".into(),
                             "tracker-test-secret".into(),
@@ -2161,6 +2257,7 @@ mod tests {
                             let ctx = peer.get_global_ctx();
                             let mut flags = ctx.get_flags();
                             flags.default_protocol = protocol.into();
+                            flags.enabled_protocols = vec![protocol.into()];
                             ctx.set_flags(flags);
                             let reserve =
                                 std::net::TcpListener::bind(format!("{bind_ip}:0")).unwrap();
@@ -2199,6 +2296,137 @@ mod tests {
                 }
             }
         }
+        https_bootstrap_process().await;
+    }
+
+    async fn https_bootstrap_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        std::fs::write(
+            directory.path().join("cert.pem"),
+            certificate.serialize_pem().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("key.pem"),
+            certificate.serialize_private_key_pem(),
+        )
+        .unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(45),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "connector::tracker_discovery::runtime::tests::udp_tcp_and_http_trackers_bootstrap_all_transports_without_peer_urls", "--nocapture", "--test-threads=1"])
+                .env("LOWERTIER_TRACKER_HTTPS_CHILD_DIR", directory.path())
+                .env("SSL_CERT_FILE", directory.path().join("cert.pem"))
+                .kill_on_drop(true)
+                .output()
+        ).await.unwrap().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("HTTPS_BOOTSTRAP_VERIFIED"));
+    }
+
+    async fn https_bootstrap_child(directory: &std::path::Path) {
+        let certificate = std::fs::read(directory.join("cert.pem")).unwrap();
+        let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(certificate))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = std::fs::read(directory.join("key.pem")).unwrap();
+        let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key))
+            .unwrap()
+            .unwrap();
+        let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let tracker = TrackerServer::new(1).unwrap();
+        let _origin = AbortOnDropHandle::new(tokio::spawn(tracker.serve_http(
+            origin,
+            vec![],
+            "X-Real-IP".into(),
+        )));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _proxy = AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut tasks = JoinSet::new();
+            loop {
+                tokio::select! {
+                    Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let acceptor = acceptor.clone();
+                        tasks.spawn(async move {
+                            let Ok(mut stream) = acceptor.accept(stream).await else { return; };
+                            let mut upstream = tokio::net::TcpStream::connect(origin_address).await.unwrap();
+                            let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                        });
+                    }
+                }
+            }
+        }));
+        for protocol in ["tcp", "wss"] {
+            let a =
+                create_mock_peer_manager_secure(format!("https-{protocol}"), "secret".into()).await;
+            let b =
+                create_mock_peer_manager_secure(format!("https-{protocol}"), "secret".into()).await;
+            let mut paths = Vec::new();
+            for peer in [&a, &b] {
+                let ctx = peer.get_global_ctx();
+                let mut flags = ctx.get_flags();
+                flags.default_protocol = protocol.into();
+                flags.enabled_protocols = vec![protocol.into()];
+                ctx.set_flags(flags);
+                ctx.replace_stun_info_collector(Box::new(
+                    crate::common::stun::StunInfoCollector::new(Vec::new(), Vec::new(), Vec::new()),
+                ));
+                paths.push(start(peer.clone(), toml::from_str(&format!(
+                    "private_trackers = [\"https://localhost:{}/announce\"]\nbind = \"127.0.0.1:0\"", address.port()
+                )).unwrap()).unwrap());
+            }
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !a.has_live_peer_connection_for_protocol(b.my_peer_id(), protocol)
+                    || !b.has_live_peer_connection_for_protocol(a.my_peer_id(), protocol)
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("HTTPS tracker did not bootstrap the enabled TCP transport");
+            assert!(!a.has_live_peer_connection_for_protocol(b.my_peer_id(), "quic"));
+            let announce = Announce {
+                hash: [1; 20],
+                peer: [2; 20],
+                key: 3,
+                port: 17000,
+                event: 2,
+                left: 1,
+                numwant: 16,
+            };
+            let wrong_name = format!("https://127.0.0.1:{}/announce", address.port())
+                .parse()
+                .unwrap();
+            assert!(
+                client::http_announce(
+                    &wrong_name,
+                    &announce,
+                    "127.0.0.1:0".parse().unwrap(),
+                    &a.get_global_ctx()
+                )
+                .await
+                .is_err()
+            );
+        }
+        println!("HTTPS_BOOTSTRAP_VERIFIED");
     }
 }
 
@@ -2278,7 +2506,7 @@ async fn candidate_loop(
             packet = incoming.recv(), if endpoint.is_some() => {
                 let packet = match packet { Ok(packet) => packet, Err(broadcast::error::RecvError::Lagged(_)) => continue, Err(error) => return Err(error.into()) };
                 if ensure_remote_allowed(&ctx.get_underlay_policy(), packet.addr).is_err() { continue; }
-                let Ok((peer, nonce, reply)) = wire::read_punch(&packet.data, &key, unix_seconds()) else { continue; };
+                let Ok((peer, nonce, reply, sent)) = wire::read_punch(&packet.data, &key, unix_seconds()) else { continue; };
                 if peer == my_id { continue; }
                 {
                     let mut entries = connections.candidates.lock().unwrap();
@@ -2286,14 +2514,14 @@ async fn candidate_loop(
                     if reply {
                         if !state.probe.is_some_and(|(sent, time)| sent == nonce && time.elapsed() < Duration::from_secs(15)) { continue; }
                     } else {
-                        let sent = u64::from_be_bytes(packet.data[25..33].try_into().unwrap());
                         let lifetime = sent.saturating_add(60).saturating_sub(unix_seconds()).saturating_add(1);
                         if !state.accept_request(nonce, Instant::now() + Duration::from_secs(lifetime)) { continue; }
                     }
                 }
                 if !reply {
-                    if admit_discovery(wire::PUNCH_BYTES, false) {
-                        let _ = udp.send_to(&wire::punch(&key, my_id, nonce, unix_seconds(), true), packet.addr).await;
+                    let response = wire::punch(&key, my_id, nonce, unix_seconds(), true);
+                    if admit_discovery(response.len(), false) {
+                        let _ = udp.send_to(&response, packet.addr).await;
                     }
                 }
                 // Retain the authenticated identity for session recovery on every interface.
@@ -2355,15 +2583,11 @@ async fn candidate_loop(
                     let start = Instant::now();
                     for millis in [0, 50, 150, 350, 750] {
                         tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
-                        if !admit_discovery(wire::PUNCH_BYTES, false) {
+                        let packet = wire::punch(&key, my_id, nonce, unix_seconds(), false);
+                        if !admit_discovery(packet.len(), false) {
                             continue;
                         }
-                        let _ = udp
-                            .send_to(
-                                &wire::punch(&key, my_id, nonce, unix_seconds(), false),
-                                address,
-                            )
-                            .await;
+                        let _ = udp.send_to(&packet, address).await;
                     }
                     let _ = fallback.try_send(address);
                 });

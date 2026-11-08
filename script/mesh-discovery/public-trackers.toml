@@ -1,0 +1,10 @@
+# Public tracker choices from ngosang/trackerslist, checked on 2026-11-08.
+# Public HTTP and HTTPS trackers use TCP. Native tcp:// requires a LowTier tracker.
+# Add these values to an existing discovery section.
+[discovery]
+trackers = [
+  "udp://tracker.opentrackr.org:1337/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "https://open.ftorrent.com:443/announce",
+  "https://tracker.pmman.tech:443/announce",
+]

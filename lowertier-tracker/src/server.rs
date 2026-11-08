@@ -20,6 +20,17 @@ use tokio::{
 const MAX_SWARMS: usize = 4096;
 const MAX_ENTRIES: usize = 65_536;
 const MAX_SWARM_ENTRIES: usize = 256;
+const MAX_CONNECTIONS: usize = 64;
+const MAX_TCP_CONNECTIONS_PER_IP: usize = MAX_CONNECTIONS / 4;
+
+fn source_group(source: IpAddr) -> IpAddr {
+    match source {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or_else(|| {
+            IpAddr::V6(std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 64)))
+        }),
+        ip => ip,
+    }
+}
 
 struct Entry {
     address: SocketAddr,
@@ -33,6 +44,23 @@ struct Store {
     rates: HashMap<IpAddr, u32>,
     requests: u32,
     response_bytes: usize,
+    tcp_sources: HashMap<IpAddr, usize>,
+}
+
+struct TcpSourcePermit {
+    server: Arc<TrackerServer>,
+    source: IpAddr,
+}
+
+impl Drop for TcpSourcePermit {
+    fn drop(&mut self) {
+        let mut store = self.server.store.lock().unwrap();
+        let count = store.tcp_sources.get_mut(&self.source).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            store.tcp_sources.remove(&self.source);
+        }
+    }
 }
 
 pub struct TrackerServer {
@@ -44,6 +72,20 @@ pub struct TrackerServer {
 }
 
 impl TrackerServer {
+    fn tcp_source_permit(self: &Arc<Self>, source: IpAddr) -> Option<TcpSourcePermit> {
+        let source = source_group(source);
+        let mut store = self.store.lock().unwrap();
+        let count = store.tcp_sources.entry(source).or_default();
+        if *count >= MAX_TCP_CONNECTIONS_PER_IP {
+            return None;
+        }
+        *count += 1;
+        Some(TcpSourcePermit {
+            server: self.clone(),
+            source,
+        })
+    }
+
     fn announce_interval(&self, announce: &Announce) -> u32 {
         // LowTier uses a nonzero private hint. Public trackers still see an incomplete download.
         if announce.left == 2 {
@@ -78,7 +120,7 @@ impl TrackerServer {
         Ok(Arc::new(Self {
             secret,
             passkey_tag,
-            connections: Arc::new(Semaphore::new(64)),
+            connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             interval,
             store: Mutex::new(Store {
                 swarms: HashMap::new(),
@@ -88,6 +130,7 @@ impl TrackerServer {
                 rates: HashMap::new(),
                 requests: 0,
                 response_bytes: 0,
+                tcp_sources: HashMap::new(),
             }),
         }))
     }
@@ -133,12 +176,7 @@ impl TrackerServer {
 
     fn admit(&self, source: IpAddr, now: u64) -> bool {
         // A rotating IPv6 interface identifier must not bypass source limits.
-        let source = match source {
-            IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or_else(|| {
-                IpAddr::V6(std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 64)))
-            }),
-            ip => ip,
-        };
+        let source = source_group(source);
         let mut store = self.store.lock().unwrap();
         if store.rate_second != now {
             store.rate_second = now;
@@ -351,6 +389,42 @@ impl TrackerServer {
         }
     }
 
+    pub async fn serve_tcp(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut tasks = JoinSet::new();
+        loop {
+            tokio::select! {
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+                accepted = listener.accept() => {
+                    let (mut stream, source) = accepted?;
+                    let Ok(permit) = self.connections.clone().try_acquire_owned() else { continue; };
+                    let Some(source_permit) = self.tcp_source_permit(source.ip()) else { continue; };
+                    let server = self.clone();
+                    tasks.spawn(async move {
+                        let (_permit, _source_permit) = (permit, source_permit);
+                        let mut packet = [0; wire::MAX_TCP_REQUEST];
+                        // One connection serves CONNECT and ANNOUNCE, within the client's deadline.
+                        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                          for action in [0_u32, 1] {
+                            let Ok(Ok(length)) = tokio::time::timeout(Duration::from_secs(5), stream.read_u32()).await else { break; };
+                            let length = length as usize;
+                            if !(16..=packet.len()).contains(&length) { break; }
+                            if !matches!(tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut packet[..length])).await, Ok(Ok(_))) { break; }
+                            if packet[8..12] != action.to_be_bytes() { break; }
+                            let Some(reply) = server.udp_response(&packet[..length], source, unix_seconds()) else { break; };
+                            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                                stream.write_u32(reply.len() as u32).await?;
+                                stream.write_all(&reply).await
+                            }).await;
+                            if !matches!(result, Ok(Ok(()))) { break; }
+                          }
+                        }).await;
+                    });
+                }
+            }
+        }
+    }
+
     pub async fn serve_stun_tcp(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut tasks = JoinSet::new();
@@ -522,6 +596,95 @@ fn parse_query(query: &str) -> Result<Announce> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn tcp_frames_reject_oversized_requests_and_invalid_cookies() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let server = TrackerServer::new(1).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let source = "127.0.0.1".parse().unwrap();
+        let held = (0..MAX_TCP_CONNECTIONS_PER_IP)
+            .map(|_| server.tcp_source_permit(source).unwrap())
+            .collect::<Vec<_>>();
+        assert!(server.tcp_source_permit(source).is_none());
+        assert!(
+            server
+                .tcp_source_permit("::ffff:127.0.0.1".parse().unwrap())
+                .is_none()
+        );
+        drop(held);
+        let held = (1..=MAX_TCP_CONNECTIONS_PER_IP)
+            .map(|index| {
+                server
+                    .tcp_source_permit(format!("2001:db8:1:2::{index:x}").parse().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            server
+                .tcp_source_permit("2001:db8:1:2::ffff".parse().unwrap())
+                .is_none()
+        );
+        assert!(
+            server
+                .tcp_source_permit("2001:db8:1:3::1".parse().unwrap())
+                .is_some()
+        );
+        drop(held);
+        assert!(server.store.lock().unwrap().tcp_sources.is_empty());
+        let task = tokio::spawn(server.serve_tcp(listener));
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream
+            .write_u32(wire::MAX_TCP_REQUEST as u32 + 1)
+            .await
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let announce = Announce {
+            hash: [1; 20],
+            peer: [2; 20],
+            key: 3,
+            port: 17000,
+            event: 2,
+            left: 1,
+            numwant: 16,
+        };
+        let request = announce.udp(0, 1);
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_u32(request.len() as u32).await.unwrap();
+        stream.write_all(&request).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let connect = wire::connect_request(7);
+        stream.write_u32(connect.len() as u32).await.unwrap();
+        stream.write_all(&connect).await.unwrap();
+        assert_eq!(stream.read_u32().await.unwrap(), 16);
+        let mut response = [0; 16];
+        stream.read_exact(&mut response).await.unwrap();
+        stream.write_u32(connect.len() as u32).await.unwrap();
+        stream.write_all(&connect).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        task.abort();
+    }
+
     #[tokio::test]
     async fn cookies_scope_announces_and_tracker_never_overrides_advertised_port() {
         let server = TrackerServer::new(1800).unwrap();

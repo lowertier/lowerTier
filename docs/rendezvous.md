@@ -3,6 +3,7 @@
 `lowertier-tracker` supplies temporary endpoints for the initial VPN handshake.
 It accepts standard BEP 15 UDP requests and compact HTTP announcements.
 HTTP can run behind an HTTPS reverse proxy.
+The hosted service also accepts bounded tracker messages over TCP with `--tcp-listen`.
 Public tracker clients remain compatible.
 Client configurations identify private services with `discovery.private_trackers`.
 Discovery uses the deduplicated union of `trackers` and `private_trackers`; the private setting takes priority for duplicate URLs.
@@ -16,10 +17,15 @@ Use `--stun-tcp-listen 0.0.0.0:16780` to enable retained TCP Binding sessions fo
 Use `--stun-change-port` with two UDP ports on each listen address to enable CHANGE-PORT.
 CHANGE-IP and TURN remain unsupported. The Python Binding service remains available during deployment migration.
 
-Use `--passkey-file /path/to/passkey` to restrict HTTP and UDP announcements.
+Use `--passkey-file /path/to/passkey` to restrict HTTP, TCP, and UDP announcements.
 Clients supply `?passkey=...` in each private tracker URL. UDP uses bounded BEP 41 URLData options.
 Passkeys remain visible on plaintext HTTP and UDP paths. Keep passkeys out of shared configuration and request logs.
-HTTP and TCP Binding connections share a limit of 64 across all listeners.
+HTTP, TCP tracker, and TCP Binding connections share a limit of 64 across all listeners.
+Each source IP can hold at most 16 TCP tracker connections.
+IPv6 source limits apply to a /64. IPv4-mapped addresses share the IPv4 quota.
+Each TCP tracker connection serves one CONNECT and one ANNOUNCE within 15 seconds.
+Frames use a four-byte big-endian length and the existing BEP 15 message layout.
+Requests have a 2048-byte limit. Responses have a 16 KiB limit.
 Tracker and Binding responses share a 128 KiB payload limit per second.
 
 Private clients request a padded, versioned UDP CONNECT echo with the `LTO1` marker.
@@ -59,7 +65,7 @@ Use an HTTPS URL with an explicit port when a proxy terminates TLS.
 
 ## Identity and endpoint state
 
-One discovery session identifier covers all interface addresses of a running node.
+Each tracker, protocol, and local path has an independent random discovery identifier.
 Each announcement uses its interface address as the source address.
 The service stores a separate lease for each session and observed endpoint.
 An IPv4 announcement does not replace an IPv6 announcement.
@@ -128,10 +134,11 @@ Initial rendezvous alone cannot guarantee traversal of that NAT.
 ## Timing and HTTP identification
 
 The private service defaults to a two-second announce interval.
-After authentication, clients request an interval of at least 30 seconds from the private service.
+Private clients always request an interval of at least 30 seconds from the private service.
 Clients retain all interface paths and continue to request candidate endpoints.
 This permits new nodes and disconnected groups to establish connections.
-The private hint uses `left=2`; bootstrap uses `left=1`.
+Private clients use `left=2`; public tracker clients use `left=1`.
+These values do not change with peer connection state.
 Both values remain nonzero for compatibility with public trackers that exclude other seeders from seeder replies.
 The private service extends each endpoint lease to three returned intervals.
 Clients honor the interval returned by each public tracker.
@@ -140,9 +147,12 @@ Link loss and mapping changes cancel pending tracker requests.
 Mapping changes also discard tracker cookies that can depend on the previous source IP.
 Independent tracker requests prevent one unavailable service from blocking another service.
 
-HTTP and HTTPS requests send `User-Agent: aria2/1.37.0`.
-This changes the HTTP identification field.
-It does not change TLS behavior or provide an indistinguishability guarantee.
+HTTP and HTTPS requests do not claim another application's user agent.
+QUIC probes use randomized authenticated encryption and variable packet lengths.
+The peer ID, timestamp, and challenge are encrypted.
+Tracker operators still observe stable rendezvous groups, source addresses, and timing.
+The traffic does not reproduce the BitTorrent peer protocol.
+No indistinguishability guarantee is provided.
 
 ## Discovery through authenticated peers
 

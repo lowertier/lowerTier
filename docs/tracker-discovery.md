@@ -1,6 +1,7 @@
 # Tracker discovery
 
 LowTier can discover initial peers through UDP, HTTP, or HTTPS torrent trackers.
+Hosted LowTier trackers also accept length-prefixed tracker messages over TCP.
 The tracker returns transport endpoints. It does not authenticate nodes or relay VPN traffic.
 Peers still complete the transport handshake and the existing Noise authentication.
 TLS exporter binding remains enabled for QUIC, H2, and WSS.
@@ -33,6 +34,12 @@ trackers = [
 
 Set `transport.prefer` to `tcp` for H2 or `wss` for WSS.
 Nodes with different preferences can discover each other through every protocol they both enable.
+Tracker contact and peer transport are independent.
+H2 and WSS bootstrap with QUIC disabled through TCP, HTTP, or HTTPS trackers.
+Configure at least one TCP or HTTP(S) tracker when UDP traffic is blocked.
+The `tcp://` scheme requires a LowTier hosted tracker and an explicit port.
+The public tracker fragment in `script/mesh-discovery/public-trackers.toml` supplies UDP, HTTP, and HTTPS alternatives.
+Public HTTP and HTTPS trackers already use TCP; native `tcp://` framing is a separate hosted-service extension.
 Remove `[[peer]]` entries when the tracker must supply the entire bootstrap peer set.
 Existing configured peers remain available when both mechanisms are configured.
 Tracker discovery requires a nonempty shared network secret. Credential-only bootstrap is not supported by this initial version.
@@ -76,7 +83,9 @@ Changing the preference preserves existing socket mappings.
 6. Use existing encrypted routing and rendezvous RPCs to discover and connect additional peers.
 
 QUIC shares one UDP socket for STUN, BEP 15, authenticated punch packets, and punched VPN connections.
-Punch packets use a network HMAC, a timestamp, and a nonce.
+Punch packets encrypt the peer ID, timestamp, and challenge with XChaCha20-Poly1305.
+Each packet uses a fresh random 24-byte cipher nonce and randomized padding.
+Packets range from 96 to 192 bytes and contain no clear LowTier marker.
 Replies must match a recent probe. The peer ID must pass the subsequent VPN handshake.
 The lower peer ID initiates QUIC after the authenticated exchange.
 Duplicate tracker results retain the same active probe challenge.
@@ -175,9 +184,27 @@ H = HMAC-SHA256(key, "vpn-rendezvous-v1")[0..20]
 H2 appends `\0transport=tcp` to the HMAC message.
 WSS appends `\0transport=wss`.
 This prevents compact tracker entries from mixing transport types.
-Each running socket has a random 20-byte tracker peer ID.
+Each tracker, protocol, and local path has an independent random 20-byte tracker peer ID.
+The announce key is random and does not repeat bytes from the peer ID.
 Public trackers can observe the rendezvous hash, public IP, and advertised port.
 Knowledge of the hash does not authorize VPN access.
+
+## Tracker privacy limits
+
+Public announcements use standard tracker fields.
+HTTP requests do not claim another application's user agent.
+Transfer counters remain zero because these requests do not report torrent payload transfers.
+The `left` value stays constant and does not reveal whether a peer connection is active.
+Private services receive `left=2` to retain their 30-second polling floor.
+Public services receive `left=1` and control their own announce intervals.
+
+Independent peer IDs reduce exact identity reuse across trackers and transports.
+The rendezvous hash remains stable for a network and protocol.
+A tracker can still group endpoints by that hash and correlate their source addresses and timing.
+An active tracker can return an endpoint that it controls and inspect the resulting traffic.
+Encrypted probes remove the clear marker but do not reproduce the BitTorrent peer protocol.
+Private endpoint-observation extensions remain LowTier-specific.
+HTTPS protects tracker requests from intermediate observers; the tracker operator can read them.
 
 ## Self-hosted tracker
 
@@ -187,6 +214,12 @@ lowertier-tracker --udp-listen 0.0.0.0:6969 --http-listen 127.0.0.1:6970
 ```
 
 The service implements BEP 15 CONNECT and ANNOUNCE, plus compact HTTP announcements at `/announce`.
+Use `--tcp-listen 127.0.0.1:16970` to enable native TCP tracker contact.
+Each TCP frame has a four-byte big-endian length followed by a BEP 15 message.
+One connection serves CONNECT and ANNOUNCE, with a 15-second overall deadline.
+Request frames are limited to 2048 bytes; response frames are limited to 16 KiB.
+TCP tracker connections share the existing 64-connection budget and permit at most 16 connections per source IP.
+IPv6 source limits apply to a /64, including rotating interface identifiers.
 It also supports bounded UDP Binding and optional TCP Binding in the same process.
 See [rendezvous options](rendezvous.md) for private echoes, passkeys, and the optional alternate Binding port.
 It keeps bounded, expiring state in memory. Restarting the service clears that state.
