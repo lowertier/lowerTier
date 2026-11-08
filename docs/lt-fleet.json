@@ -1,5 +1,6 @@
 {
   "verified_at": "2026-11-08T09:44:07.509974+00:00",
+  "connectivity_verified_at": "2026-11-08T11:07:45.942021+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
@@ -23,6 +24,26 @@
     "api_key_required_outside_open": true,
     "access_verified_at": "2026-11-08T09:44:07.509974+00:00",
     "verification_scope": "16 instances passed from 10.126.126.2. LA passed from 10.126.126.100. LAN checks and checks outside gui.open retain earlier evidence."
+  },
+  "nat_discovery": {
+    "policy": "Each instance configures explicit IPv4 STUN addresses for UDP and TCP. Underlay deny rules exclude the hostname defaults.",
+    "fleet_endpoints": [
+      "193.32.149.82:16780",
+      "18.183.209.161:16780",
+      "193.32.149.82:16781",
+      "18.183.209.161:16781"
+    ],
+    "configuration_note": "An instance can use a subset of these endpoints. The seven repaired instances use all four for both transports.",
+    "repaired_instances": [
+      "862jp-secondary",
+      "btrouter",
+      "jpali-secondary",
+      "la",
+      "local-userspace",
+      "s6916-secondary",
+      "yutoms-mcp-userspace"
+    ],
+    "evidence": "benchmark-results/.work/p2p-failures-20261108/result.json"
   },
   "instances": [
     {
@@ -140,6 +161,19 @@
     "webui_keyless_control_writes": 17,
     "webui_foreign_origin_rejections": 17,
     "webui_key_required_outside_open": 17,
+    "direct_p2p": {
+      "verified_at": "2026-11-08T11:07:45.942021+00:00",
+      "evidence": "benchmark-results/.work/p2p-failures-20261108/after-final.json",
+      "instances": 17,
+      "direct_peers_per_instance": 16,
+      "authenticated_peer_pairs": 136,
+      "possible_peer_pairs": 136,
+      "peer_pairs_with_three_protocols": 93,
+      "configuration_repairs": 7,
+      "restarted_instance_gui_checks": 7,
+      "scope": "Snapshots show authenticated traffic in both directions for every peer pair. Snapshots were collected across the fleet. These observations do not measure long-term availability or throughput.",
+      "management_limitation": "AliBJ SSH and remote control reads had intermittent timeouts. Its local API was verified through JPaws."
+    },
     "protocol_path_observations": {
       "protocol_capabilities_match_config": 17,
       "instances_with_all_protocols_enabled": 17,

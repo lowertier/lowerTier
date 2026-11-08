@@ -694,6 +694,7 @@ Use deny rules when LowTier must avoid another VPN or physical interface.
 ```toml
 [nat]
 stun = ["192.0.2.20:3478"]
+stun_tcp = ["192.0.2.20:3478"]
 stun_v6 = ["[2001:db8::20]:3478"]
 
 [underlay]
@@ -707,6 +708,10 @@ Interface names such as macOS `utun5` can change after restart.
 
 Strict deny policy requires literal peer and STUN addresses.
 The policy disables hostname and HTTP-based discovery paths.
+The built-in STUN lists use hostnames and cannot supply mappings under this policy.
+Configure reachable IP literals for both `nat.stun` and `nat.stun_tcp`.
+An empty server list disables that STUN service.
+The punching coordinators require a successful STUN mapping before they exchange candidates.
 
 Restart the instance after an underlay policy change.
 
