@@ -5,6 +5,6 @@
 trackers = [
   "udp://tracker.opentrackr.org:1337/announce",
   "http://tracker.opentrackr.org:1337/announce",
-  "https://open.ftorrent.com:443/announce",
-  "https://tracker.pmman.tech:443/announce",
+  "https://tracker.foreverpirates.co:443/announce",
+  "https://tracker.nekomi.cn:443/announce",
 ]
