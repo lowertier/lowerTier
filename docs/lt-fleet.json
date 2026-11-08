@@ -10,9 +10,19 @@
     "enabled": true,
     "port": 15880,
     "allow": [
-      "10.126.126.0/24"
+      "10.126.126.0/24",
+      "192.168.51.0/24",
+      "192.168.40.0/24"
     ],
-    "api_key_required": true
+    "open": [
+      "10.126.126.0/24",
+      "192.168.51.0/24",
+      "192.168.40.0/24"
+    ],
+    "api_key_required": false,
+    "api_key_required_outside_open": true,
+    "access_verified_at": "2026-11-08T05:52:49+00:00",
+    "verification_scope": "All 17 instances passed from 10.126.126.2. Hattori and BTROUTER also passed from their own LAN addresses."
   },
   "instances": [
     {
@@ -123,7 +133,27 @@
     "running_images": 17,
     "controller_ssh": 17,
     "webui_pages": 17,
-    "webui_unauthenticated_api_rejections": 17,
+    "webui_keyless_pages": 17,
+    "webui_keyless_api_reads": 17,
+    "webui_keyless_control_writes": 17,
+    "webui_foreign_origin_rejections": 17,
+    "webui_key_required_outside_open": 17,
+    "webui_lan_source_checks": [
+      {
+        "source": "192.168.51.1",
+        "destination": "10.126.126.1",
+        "page": 200,
+        "api_without_key": 200,
+        "control_write_without_key": 200
+      },
+      {
+        "source": "192.168.40.1",
+        "destination": "10.126.126.40",
+        "page": 200,
+        "api_without_key": 200,
+        "control_write_without_key": 200
+      }
+    ],
     "router_delivery": [
       {
         "test": "la-to-btrouter",
