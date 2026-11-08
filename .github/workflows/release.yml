@@ -1,8 +1,6 @@
 name: lowertier release
 
 on:
-  push:
-    tags: ["v*-lowertier.*"]
   workflow_dispatch:
     inputs:
       core_run_id:
@@ -12,7 +10,7 @@ on:
       version:
         description: "The release version"
         type: string
-        default: "v2.6.4"
+        default: "v0.01"
         required: true
       make_latest:
         description: "Mark this release as latest"
@@ -32,9 +30,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Verify the build source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CORE_RUN_ID: ${{ inputs.core_run_id }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CORE_RUN_ID" > core-run.json
+          git rev-parse HEAD > release-revision
+          python3 - <<'PY'
+          import json, os, pathlib
+          run = json.loads(pathlib.Path('core-run.json').read_text())
+          assert run['conclusion'] == 'success', 'The core build must pass.'
+          assert run['path'] == '.github/workflows/core.yml', 'The run must use the core workflow.'
+          assert run['head_sha'] == pathlib.Path('release-revision').read_text().strip(), 'The tag and build must use the same source.'
+          assert os.environ['RELEASE_TAG'] == 'v' + pathlib.Path('VERSION').read_text().strip(), 'The tag must match VERSION.'
+          PY
 
       - name: Download selected core artifacts
-        if: github.event_name == 'workflow_dispatch'
         uses: dawidd6/action-download-artifact@v11
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -42,23 +58,11 @@ jobs:
           repo: ${{ github.repository }}
           path: release-assets
 
-      - name: Download latest core artifacts
-        if: github.event_name == 'push'
-        uses: dawidd6/action-download-artifact@v11
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: core.yml
-          workflow_conclusion: success
-          branch: main
-          event: push
-          check_artifacts: true
-          repo: ${{ github.repository }}
-          path: release-assets
-
       - name: Create release archives
         env:
-          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          VERSION: ${{ inputs.version }}
         run: |
+          printf 'RELEASE_NAME=lowertier %s\n' "$(cat VERSION)" >> "$GITHUB_ENV"
           mkdir -p zipped-assets
           while IFS= read -r -d '' artifact_dir; do
             artifact_name="$(basename "$artifact_dir")"
@@ -66,6 +70,8 @@ jobs:
               *-windows-*) ;;
               *) chmod 0755 "$artifact_dir/lowertier" "$artifact_dir/lowertier-tracker" ;;
             esac
+            cp lowertier/LICENSE "$artifact_dir/LICENSE"
+            cp README.md VERSION "$artifact_dir/"
             archive="$GITHUB_WORKSPACE/zipped-assets/${artifact_name}-${VERSION}.zip"
             (cd "$artifact_dir" && zip -r "$archive" .)
           done < <(find release-assets -mindepth 1 -maxdepth 1 -type d -print0)
@@ -75,7 +81,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          name: ${{ env.RELEASE_NAME }}
           body: |
             This release contains the lowertier command-line programs.
 
@@ -84,8 +90,8 @@ jobs:
             Verify each archive with `SHA256SUMS`.
           draft: false
           prerelease: false
-          make_latest: ${{ github.event_name == 'push' || inputs.make_latest }}
+          make_latest: ${{ inputs.make_latest }}
           fail_on_unmatched_files: true
           files: zipped-assets/*
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          tag_name: ${{ inputs.version }}

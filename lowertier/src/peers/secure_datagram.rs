@@ -350,7 +350,7 @@ impl SecureDatagramSession {
     }
 
     fn hkdf_traffic_key(&self, epoch: u32, dir: SecureDatagramDirection) -> [u8; 32] {
-        self.hkdf_traffic_key_with_label(epoch, dir, b"et-traffic")
+        self.hkdf_traffic_key_with_label(epoch, dir, b"lowertier-traffic")
     }
 
     fn hkdf_traffic_key_with_label(

@@ -1,6 +1,6 @@
 [package]
 name = "lowertier-tracker"
-version = "2.6.4"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license-file = "../lowertier/LICENSE"

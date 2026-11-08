@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Parser)]
+#[command(name = "lowertier-tracker", version = include_str!("../../VERSION").trim())]
 #[command(about = "Serve minimal LowTier rendezvous through UDP and HTTP tracker discovery")]
 struct Options {
     #[arg(long, value_delimiter = ',', default_value = "0.0.0.0:16969")]

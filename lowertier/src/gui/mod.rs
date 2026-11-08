@@ -298,7 +298,7 @@ impl Server {
             .target_error
             .as_ref()
             .map(|error| json!({ "code": error.0.code, "message": error.0.message }));
-        json!({ "nodes": nodes, "version": env!("CARGO_PKG_VERSION"), "error": error })
+        json!({ "nodes": nodes, "version": crate::VERSION, "error": error })
     }
 
     async fn snapshot(&self, client: &Client) -> Result<Value> {

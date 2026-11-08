@@ -279,7 +279,7 @@ wait_for_ping() {
     local destination=$1
     local attempt
     for attempt in $(seq 1 30); do
-        if "${docker_cmd[@]}" exec "$node_a" ping -I et0 -q -c 1 -W 1 "$destination" >/dev/null 2>&1; then
+        if "${docker_cmd[@]}" exec "$node_a" ping -I lt0 -q -c 1 -W 1 "$destination" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -539,9 +539,9 @@ if [[ -n "$config_dir" ]]; then
     done
 else
 "${docker_cmd[@]}" exec -d "$node_a" sh -lc \
-    "exec env $runtime_env lowertier run --set network.name=throughput-$profile --set network.secret=throughput-secret --set network.cipher=$encryption_algorithm --set tun.name=et0 --set address.ipv4=$subnet.1/24 --set 'transport.listen=${underlay_protocol}://0.0.0.0:$listener_port$lane_query' --set transport.prefer=$underlay_protocol --set control.portal=127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
+    "exec env $runtime_env lowertier run --set network.name=throughput-$profile --set network.secret=throughput-secret --set network.cipher=$encryption_algorithm --set tun.name=lt0 --set address.ipv4=$subnet.1/24 --set 'transport.listen=${underlay_protocol}://0.0.0.0:$listener_port$lane_query' --set transport.prefer=$underlay_protocol --set control.portal=127.0.0.1:15991 $core_args >/tmp/lowertier.log 2>&1"
 "${docker_cmd[@]}" exec -d "$node_b" sh -lc \
-    "exec env $runtime_env lowertier run --set network.name=throughput-$profile --set network.secret=throughput-secret --set network.cipher=$encryption_algorithm --set tun.name=et0 --set address.ipv4=$subnet.2/24 --set 'transport.listen=${underlay_protocol}://0.0.0.0:11010$lane_query' --set 'peer=${underlay_protocol}://$peer_host:11010$lane_query' --set transport.prefer=$underlay_protocol --set control.portal=127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
+    "exec env $runtime_env lowertier run --set network.name=throughput-$profile --set network.secret=throughput-secret --set network.cipher=$encryption_algorithm --set tun.name=lt0 --set address.ipv4=$subnet.2/24 --set 'transport.listen=${underlay_protocol}://0.0.0.0:11010$lane_query' --set 'peer=${underlay_protocol}://$peer_host:11010$lane_query' --set transport.prefer=$underlay_protocol --set control.portal=127.0.0.1:15992 $core_args >/tmp/lowertier.log 2>&1"
 fi
 wait_for_ping "$subnet.2"
 "${docker_cmd[@]}" exec "$node_a" ping -n -c 100 -i 0.02 "$subnet.2" \

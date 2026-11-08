@@ -34,9 +34,6 @@ pub const UDP_HOLE_PUNCH_CONNECTOR_SERVICE_ID: u32 = 2;
 
 pub const WIN_SERVICE_WORK_DIR_REG_KEY: &str = "SOFTWARE\\LowTier\\Service\\WorkDir";
 
-pub const LOWTIER_VERSION: &str = git_version::git_version!(
-    args = ["--abbrev=8", "--always", "--dirty=~"],
-    prefix = concat!(env!("CARGO_PKG_VERSION"), "-"),
-    suffix = "",
-    fallback = env!("CARGO_PKG_VERSION")
-);
+pub const LOWTIER_VERSION: &str = env!("LOWERTIER_RELEASE_VERSION");
+pub const PEER_PROTOCOL_VERSION: u32 =
+    include!(concat!(env!("OUT_DIR"), "/peer_protocol_version.rs"));

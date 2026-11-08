@@ -8,7 +8,7 @@ The FFI crate belongs to the workspace. Its `ffi-dataplane` feature remains avai
 ## Removed components
 
 The core no longer includes the web console client or the managed FFI config-server client.
-The `--config-server` option and `ET_CONFIG_SERVER` are removed.
+The `--config-server` option and its environment variable are removed.
 JSON RPC and the instance-management RPC interface remain available.
 
 Unused UDP vector I/O, insecure TLS helpers, UPnP/NAT-PMP mapping, legacy UDP RPCs, and link envelopes are removed.

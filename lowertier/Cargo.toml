@@ -3,7 +3,7 @@ name = "lowertier"
 description = "A secure peer-to-peer Layer 2 VPN with routed and userspace modes."
 homepage = "https://github.com/lowertier/lowertier"
 repository = "https://github.com/lowertier/lowertier"
-version = "2.6.4"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors = ["kkrainbow"]
@@ -47,7 +47,6 @@ spake2 = "0.4"
 russh = { version = "0.65.1", default-features = false, features = ["ring"] }
 toml_edit = "0.23"
 lowertier-tracker = { path = "../lowertier-tracker" }
-git-version = "0.3.9"
 
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = [

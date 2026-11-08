@@ -6,6 +6,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "VERSION"
       - "lowertier/**"
       - "lowertier-tracker/**"
       - "vendor/**"
@@ -17,6 +18,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "VERSION"
       - "lowertier/**"
       - "lowertier-tracker/**"
       - "vendor/**"

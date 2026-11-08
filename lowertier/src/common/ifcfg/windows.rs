@@ -347,10 +347,9 @@ impl RegistryManager {
         let mut keys_to_delete_unmanaged = Vec::new();
         for subkey_name in profiles_key.enum_keys().filter_map(Result::ok) {
             let subkey = profiles_key.open_subkey(&subkey_name)?;
-            // check if ProfileName contains "et"
             match subkey.get_value::<String, _>("ProfileName") {
                 Ok(profile_name) => {
-                    if profile_name.contains("et_")
+                    if profile_name.starts_with("lt_")
                         || (!dev_name.is_empty() && dev_name == profile_name)
                     {
                         keys_to_delete.push(subkey_name);
@@ -367,10 +366,9 @@ impl RegistryManager {
         }
         for subkey_name in unmanaged_key.enum_keys().filter_map(Result::ok) {
             let subkey = unmanaged_key.open_subkey(&subkey_name)?;
-            // check if ProfileName contains "et"
             match subkey.get_value::<String, _>("Description") {
                 Ok(profile_name) => {
-                    if profile_name.contains("et_")
+                    if profile_name.starts_with("lt_")
                         || (!dev_name.is_empty() && dev_name == profile_name)
                     {
                         keys_to_delete_unmanaged.push(subkey_name);

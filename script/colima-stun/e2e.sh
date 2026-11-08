@@ -4,10 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 docker_context="${COLIMA_DOCKER_CONTEXT:-colima-lowertier-l2}"
 image_name="lowertier-stun-qemu-test:local"
-public_net="et-stun-public"
-private_a_net="et-stun-private-a"
-private_b_net="et-stun-private-b"
-containers=(et-stun-relay et-stun-nat-a et-stun-nat-b et-stun-node-a et-stun-node-b)
+public_net="lt-stun-public"
+private_a_net="lt-stun-private-a"
+private_b_net="lt-stun-private-b"
+containers=(lt-stun-relay lt-stun-nat-a lt-stun-nat-b lt-stun-node-a lt-stun-node-b)
 docker_cmd=(docker --context "${docker_context}")
 
 cleanup() {
@@ -63,7 +63,7 @@ start_node() {
           --set network.name=colima-stun \
           --set network.secret=colima-stun-secret \
           --set "address.ipv4=$1/24" \
-          --set tun.name=et0 \
+          --set tun.name=lt0 \
           --set transport.listen=quic://0.0.0.0:11010 \
           --set peer=quic://172.30.0.10:11010 \
           --set nat.symmetric_punch=false \
@@ -97,7 +97,7 @@ wait_for_hole_punch() {
     local started_at="$2"
     local deadline=$((SECONDS + timeout_seconds))
     while (( SECONDS < deadline )); do
-        for name in et-stun-node-a et-stun-node-b; do
+        for name in lt-stun-node-a lt-stun-node-b; do
             if "${docker_cmd[@]}" exec "${name}" grep -Eq 'QUIC hole punch (connected|accepted)' /tmp/lowertier.log 2>/dev/null; then
                 selected_node="${name}"
                 setup_seconds="$(python3 - <<PY
@@ -119,42 +119,42 @@ cleanup
 "${docker_cmd[@]}" build -f "${repo_root}/script/colima-stun/Dockerfile" -t "${image_name}" "${repo_root}"
 create_networks
 
-"${docker_cmd[@]}" run -d --name et-stun-relay --network "${public_net}" --ip 172.30.0.10 \
+"${docker_cmd[@]}" run -d --name lt-stun-relay --network "${public_net}" --ip 172.30.0.10 \
     --cap-add NET_ADMIN --device /dev/net/tun "${image_name}" sleep infinity >/dev/null
-"${docker_cmd[@]}" exec -d et-stun-relay sh -c '
+"${docker_cmd[@]}" exec -d lt-stun-relay sh -c '
     exec lowertier run --set network.name=colima-stun --set network.secret=colima-stun-secret \
-      --set address.ipv4=10.230.0.1/24 --set tun.name=et0 \
+      --set address.ipv4=10.230.0.1/24 --set tun.name=lt0 \
       --set transport.listen=quic://0.0.0.0:11010 \
       --set nat.udp_punch=false > /tmp/lowertier.log 2>&1
 '
-"${docker_cmd[@]}" exec -d et-stun-relay sh -c '
+"${docker_cmd[@]}" exec -d lt-stun-relay sh -c '
     exec lowertier-tracker --udp-listen 0.0.0.0:3478,0.0.0.0:3479 \
       --stun-change-port > /tmp/tracker.log 2>&1
 '
 
-start_router et-stun-nat-a "${private_a_net}" 10.210.0.2 172.30.0.2 10.210.0.0/24 cone
-start_router et-stun-nat-b "${private_b_net}" 10.220.0.2 172.30.0.3 10.220.0.0/24 cone
+start_router lt-stun-nat-a "${private_a_net}" 10.210.0.2 172.30.0.2 10.210.0.0/24 cone
+start_router lt-stun-nat-b "${private_b_net}" 10.220.0.2 172.30.0.3 10.220.0.0/24 cone
 
 started_at="$(python3 -c 'import time; print(time.monotonic())')"
-start_node et-stun-node-a "${private_a_net}" 10.210.0.10 10.210.0.2 10.230.0.2
+start_node lt-stun-node-a "${private_a_net}" 10.210.0.10 10.210.0.2 10.230.0.2
 sleep 1.4
-start_node et-stun-node-b "${private_b_net}" 10.220.0.10 10.220.0.2 10.230.0.3
-"${docker_cmd[@]}" exec -d et-stun-node-a sh -c '
+start_node lt-stun-node-b "${private_b_net}" 10.220.0.10 10.220.0.2 10.230.0.3
+"${docker_cmd[@]}" exec -d lt-stun-node-a sh -c '
     while :; do ping -n -c 1 -W 1 10.230.0.3 >/dev/null 2>&1 || true; sleep 0.2; done
 '
 
 if ! wait_for_hole_punch 45 "${started_at}"; then
-    for name in et-stun-node-a et-stun-node-b; do
+    for name in lt-stun-node-a lt-stun-node-b; do
         echo "${name} punch diagnostics:" >&2
         "${docker_cmd[@]}" exec "${name}" grep -E \
             'QUIC punch|QUIC hole punch|STUN' \
             /tmp/lowertier.log | tail -160 >&2 || true
     done
-    "${docker_cmd[@]}" exec et-stun-nat-a conntrack -L -p udp >&2 || true
-    "${docker_cmd[@]}" exec et-stun-nat-b conntrack -L -p udp >&2 || true
+    "${docker_cmd[@]}" exec lt-stun-nat-a conntrack -L -p udp >&2 || true
+    "${docker_cmd[@]}" exec lt-stun-nat-b conntrack -L -p udp >&2 || true
     exit 1
 fi
-ping_output="$("${docker_cmd[@]}" exec et-stun-node-a ping -n -c 20 -i 0.1 -W 2 10.230.0.3)"
+ping_output="$("${docker_cmd[@]}" exec lt-stun-node-a ping -n -c 20 -i 0.1 -W 2 10.230.0.3)"
 selected_line="$("${docker_cmd[@]}" exec "${selected_node}" grep -E 'QUIC hole punch (connected|accepted)' /tmp/lowertier.log | tail -1)"
 stun_lines="$("${docker_cmd[@]}" exec "${selected_node}" grep -E 'QUIC punch (mapped socket|reserved locally assigned mapped port)' /tmp/lowertier.log | tail -3)"
 

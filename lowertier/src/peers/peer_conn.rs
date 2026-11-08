@@ -106,7 +106,7 @@ fn is_noise_handshake_packet_type(packet_type: u8) -> bool {
 }
 
 const MAGIC: u32 = 0xd1e1a5e1;
-const VERSION: u32 = 4;
+const VERSION: u32 = crate::common::constants::PEER_PROTOCOL_VERSION;
 const MAX_ADMISSION_CERT_BYTES: usize = 4096;
 const MAX_ADMISSION_STATUS_BYTES: usize = 2048;
 const ADMISSION_CONTEXT_DOMAIN: &[u8] = b"lowertier peer admission context v1\0";

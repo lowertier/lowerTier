@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 docker_context=${DOCKER_CONTEXT:-colima}
-builder_image=${LOWTIER_BUILDER_IMAGE:-easytier-throughput:wan-builder}
+builder_image=${LOWTIER_BUILDER_IMAGE:-lowertier-throughput:wan-builder}
 cache_volume=${LOWTIER_BUILD_CACHE_VOLUME:-lowertier-linux-build-cache}
 output=${LOWTIER_CORE_OUTPUT:-$repo_root/benchmark-results/.work/lowertier-linux}
 host_cargo_dir=${CARGO_HOME:-$HOME/.cargo}

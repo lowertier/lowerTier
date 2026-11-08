@@ -2275,7 +2275,7 @@ receive_window = 33554432
     fn dump_preserves_flags_that_differ_from_lowertier_defaults() {
         let cfg = TomlConfigLoader::default();
         let mut flags = gen_default_flags();
-        flags.dev_name = "et_test".to_string();
+        flags.dev_name = "lt_test".to_string();
         flags.disable_tcp_hole_punching = true;
         flags.disable_sym_hole_punching = true;
         flags.multi_thread = false;
@@ -2291,7 +2291,7 @@ receive_window = 33554432
 
         let dumped = cfg.dump();
 
-        assert!(dumped.contains("name = \"et_test\""));
+        assert!(dumped.contains("name = \"lt_test\""));
         assert!(dumped.contains("tcp_punch = false"));
         assert!(dumped.contains("symmetric_punch = false"));
         assert!(dumped.contains("threads = 1"));
@@ -2302,7 +2302,7 @@ receive_window = 33554432
 
         let reloaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
         let reloaded_flags = reloaded.get_flags();
-        assert_eq!(reloaded_flags.dev_name, "et_test");
+        assert_eq!(reloaded_flags.dev_name, "lt_test");
         assert!(reloaded_flags.disable_tcp_hole_punching);
         assert!(reloaded_flags.disable_sym_hole_punching);
         assert!(!reloaded_flags.multi_thread);
@@ -2877,7 +2877,7 @@ secret = "${INSTANCE_SECRET}"
     #[tokio::test]
     async fn test_real_config_fields_expansion() {
         // 设置各种实际场景的环境变量
-        set_env_var("ET_SECRET", "production-secret-key");
+        set_env_var("LOWERTIER_TEST_SECRET", "production-secret-key");
         set_env_var("PEER_HOST", "peer.example.com");
         set_env_var("PEER_PORT", "11011");
         set_env_var("LISTEN_PORT", "11010");
@@ -2897,7 +2897,7 @@ listen = ["h2://0.0.0.0:${LISTEN_PORT}"]
 
 [network]
 name = "${NETWORK_NAME}"
-secret = "${ET_SECRET}"
+secret = "${LOWERTIER_TEST_SECRET}"
 
 [[peer]]
 uri = "h2://${PEER_HOST}:${PEER_PORT}"
@@ -2934,7 +2934,7 @@ uri = "h2://${PEER_HOST}:${PEER_PORT}"
         assert!(control.is_no_delete());
 
         // 清理环境变量
-        remove_env_var("ET_SECRET");
+        remove_env_var("LOWERTIER_TEST_SECRET");
         remove_env_var("PEER_HOST");
         remove_env_var("PEER_PORT");
         remove_env_var("LISTEN_PORT");

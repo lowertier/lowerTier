@@ -23,7 +23,7 @@ It excludes the large repository `target` directory.
 The script keeps Cargo sources and compiled objects in the `lowertier-linux-build-cache` Docker
 volume. The first build copies the host Cargo cache. Later builds use the VM-local cache.
 
-The default image is `easytier-throughput:wan-builder`. Set `LOWTIER_BUILDER_IMAGE`
+The default image is `lowertier-throughput:wan-builder`. Set `LOWTIER_BUILDER_IMAGE`
 to select another prepared image. H2/WSS client TLS requires CMake and libclang
 (`cmake` and `libclang-dev` on Debian), in addition to the existing C/C++, Rust
 and Protobuf tools. The checked-in Dockerfile includes these dependencies.

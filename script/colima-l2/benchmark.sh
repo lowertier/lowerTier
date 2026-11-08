@@ -94,7 +94,7 @@ wait_for_interface() {
     local node=$1
     local attempt
     for attempt in $(seq 1 60); do
-        if "${docker_cmd[@]}" exec "$node" ip link show et0 >/dev/null 2>&1; then
+        if "${docker_cmd[@]}" exec "$node" ip link show lt0 >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -151,7 +151,7 @@ start_core() {
         args+=(--set nat.p2p=off)
     fi
     if [[ -n "$overlay_ip" ]]; then
-        args+=(--set tun.name=et0 --set "address.ipv4=$overlay_ip/24")
+        args+=(--set tun.name=lt0 --set "address.ipv4=$overlay_ip/24")
     fi
     if [[ "$no_tun" == true ]]; then
         args+=(--set tun.mode=none)
@@ -669,8 +669,8 @@ run_scenario() {
         wait_for_ping "$node_a" "$overlay_b"
         wait_for_ping "$node_b" "$overlay_a"
         if [[ "$scenario" == authorized-bridge-compact-l3 ]]; then
-            "${docker_cmd[@]}" exec "$node_a" ip -d link show et0 | grep -q tap
-            "${docker_cmd[@]}" exec "$node_b" ip -d link show et0 | grep -q tap
+            "${docker_cmd[@]}" exec "$node_a" ip -d link show lt0 | grep -q tap
+            "${docker_cmd[@]}" exec "$node_b" ip -d link show lt0 | grep -q tap
         fi
     fi
     start_iperf_server

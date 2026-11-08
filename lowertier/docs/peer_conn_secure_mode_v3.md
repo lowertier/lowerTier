@@ -251,7 +251,7 @@ root_key: [u8; 32]  // 会话根密钥材料
 随后对每个 epoch 与方向派生 traffic key：
 
 ```text
-k(epoch, dir) = HKDF(root_key, "et-traffic" || epoch_u32_be || dir_byte)
+k(epoch, dir) = HKDF(root_key, "lowertier-traffic" || epoch_u32_be || dir_byte)
 ```
 
 - `dir_byte`：发送方向标识（例如 0=tx, 1=rx）

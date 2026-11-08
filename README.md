@@ -2,6 +2,10 @@
 
 lowertier is an L2-first mesh VPN for command-line deployments.
 
+The current software release is `0.01`. Download binaries from [GitHub Releases](https://github.com/lowertier/lowerTier/releases).
+The peer admission version follows the software major version. Release `0.01` uses peer version `0`.
+Cargo package metadata uses `0.0.1` to meet Cargo version requirements.
+
 LowTier carries Ethernet frames between peers through the LowTier routing and transport engine.
 One binary, `lowertier`, runs nodes, manages them, and shows a live dashboard.
 

@@ -21,12 +21,12 @@ wait_for_interface() {
     local node="$1"
     local attempt
     for attempt in $(seq 1 60); do
-        if "${docker_cmd[@]}" exec "${node}" ip link show et0 >/dev/null 2>&1; then
+        if "${docker_cmd[@]}" exec "${node}" ip link show lt0 >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
     done
-    echo "${node} did not create et0" >&2
+    echo "${node} did not create lt0" >&2
     "${docker_cmd[@]}" exec "${node}" cat /tmp/lowertier.log || true
     return 1
 }
@@ -72,7 +72,7 @@ start_frame_receiver() {
     local result_file="/tmp/frame-${suffix}.result"
     local args=(
         python3 /usr/local/bin/frame_probe.py receive
-        --interface et0
+        --interface lt0
         --case "${case_name}"
         --source-mac "${source_mac}"
         --destination-mac "${destination_mac}"
@@ -110,7 +110,7 @@ send_frame() {
     local token="$5"
     local frame_size="${6:-128}"
     "${docker_cmd[@]}" exec "${node}" python3 /usr/local/bin/frame_probe.py send \
-        --interface et0 \
+        --interface lt0 \
         --case "${case_name}" \
         --source-mac "${source_mac}" \
         --destination-mac "${destination_mac}" \
@@ -141,10 +141,10 @@ run_tap_frame_matrix() {
     local mac_c
     local tap_mtu
     local maximum_frame_size
-    mac_a="$("${docker_cmd[@]}" exec "${nodes[0]}" cat /sys/class/net/et0/address)"
-    mac_b="$("${docker_cmd[@]}" exec "${nodes[1]}" cat /sys/class/net/et0/address)"
-    mac_c="$("${docker_cmd[@]}" exec "${nodes[2]}" cat /sys/class/net/et0/address)"
-    tap_mtu="$("${docker_cmd[@]}" exec "${nodes[0]}" cat /sys/class/net/et0/mtu)"
+    mac_a="$("${docker_cmd[@]}" exec "${nodes[0]}" cat /sys/class/net/lt0/address)"
+    mac_b="$("${docker_cmd[@]}" exec "${nodes[1]}" cat /sys/class/net/lt0/address)"
+    mac_c="$("${docker_cmd[@]}" exec "${nodes[2]}" cat /sys/class/net/lt0/address)"
+    tap_mtu="$("${docker_cmd[@]}" exec "${nodes[0]}" cat /sys/class/net/lt0/mtu)"
     maximum_frame_size=$((tap_mtu + 14))
 
     run_exact_frame_check unknown-ethertype "${nodes[0]}" "${nodes[2]}" \
@@ -198,7 +198,7 @@ run_tap_frame_matrix() {
     check_frame_result "${nodes[2]}" move-c
 
     "${docker_cmd[@]}" exec "${nodes[0]}" python3 /usr/local/bin/frame_probe.py send \
-        --interface et0 \
+        --interface lt0 \
         --case oversized-frame \
         --source-mac "${mac_a}" \
         --destination-mac "${mac_c}" \
@@ -234,7 +234,7 @@ start_node() {
         lowertier run
         --set network.name=colima-l2
         --set network.secret=colima-l2-secret
-        --set tun.name=et0
+        --set tun.name=lt0
         --set "address.ipv4=${overlay_ip}/24"
         --set "transport.listen=${protocol}://0.0.0.0:11010"
         --set "transport.prefer=${protocol}"
@@ -267,7 +267,7 @@ run_suite() {
         wait_for_interface "${node}"
     done
 
-    "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show et0 | grep -q 'tap'
+    "${docker_cmd[@]}" exec "${nodes[0]}" ip -d link show lt0 | grep -q 'tap'
 
     assert_stable_ping "${nodes[0]}" "${subnet}.3"
     assert_stable_ping "${nodes[2]}" "${subnet}.1"

@@ -34,7 +34,7 @@ grep -q 'unknown-unicast' "$harness"
 grep -q 'mac-move' "$harness"
 grep -q 'mtu-boundary' "$harness"
 grep -q 'oversized-frame' "$harness"
-grep -q '/sys/class/net/et0/mtu' "$harness"
+grep -q '/sys/class/net/lt0/mtu' "$harness"
 grep -q 'python3' "$dockerfile"
 grep -q 'traffic_signature_scan.py' "$dockerfile"
 

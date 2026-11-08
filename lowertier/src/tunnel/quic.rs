@@ -1066,7 +1066,7 @@ impl<Item> RwPool<Item> {
         self.resize();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     fn is_full(&self) -> bool {
         let pool = self.ephemeral.read();
         pool.len() >= self.capacity(Some(&pool), None)

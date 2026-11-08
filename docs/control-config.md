@@ -138,7 +138,7 @@ Use explicit loopback endpoints for local tests.
 Old settings fail with an error that names the replacement. There is no migration tool.
 `lowertier check -c FILE` lists every renamed or removed key in a file at once.
 `lowertier run --set` and `lowertier set` use the same option paths as the file.
-Old `ET_*` environment variables are ignored; retained QUIC resource settings use `LOWTIER_QUIC_*` variables.
+Retained QUIC resource settings use `LOWTIER_QUIC_*` environment variables.
 
 ### Sectioned layout (2026-10)
 

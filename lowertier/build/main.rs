@@ -136,6 +136,12 @@ fn check_locale() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=../VERSION");
+    let version = std::fs::read_to_string("../VERSION")?;
+    println!(
+        "cargo:rustc-env=LOWERTIER_RELEASE_VERSION={}",
+        version.trim()
+    );
     // Avoid cfg_aliases!: nightly rejects its trailing-semicolon expansion.
     println!("cargo:rustc-check-cfg=cfg(mobile)");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -170,6 +176,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let out = PathBuf::from(env::var("OUT_DIR")?);
+    let peer_version = version
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .parse::<u32>()?;
+    std::fs::write(
+        out.join("peer_protocol_version.rs"),
+        peer_version.to_string(),
+    )?;
     let descriptor = out.join("descriptors.bin");
 
     let mut config = prost_build::Config::new();

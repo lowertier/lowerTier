@@ -22,7 +22,7 @@ THROUGHPUT_HEADER = (
 ERROR_HEADER = "mode\tdirection\trun\tprotocol\tstreams\toffered_bps\terror\n"
 
 ENVIRONMENT = {
-    "docker_context": "colima-easytier-bench",
+    "docker_context": "colima-lowertier-bench",
     "raw_gate_bps": "12000000000",
     "modes": "routed",
     "udp_rates": "10000M",
