@@ -4646,6 +4646,11 @@ impl PeerConn {
             .copied()
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_latency_for_test(&self, latency_us: u32) {
+        self.latency_stats.record_latency(latency_us);
+    }
+
     fn store_speed_sample(&self, sample: SpeedSample) {
         let mut current = self.speed_sample.write();
         if current

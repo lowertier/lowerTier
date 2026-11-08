@@ -525,13 +525,17 @@ impl OverlayStreamConnector {
     }
 }
 
+struct StreamSession {
+    frames: mpsc::Sender<Frame>,
+    direct_path: Option<Weak<PeerConn>>,
+}
+
 pub struct OverlayStreamEndpoint {
     peer_manager: Arc<PeerManager>,
-    sessions: DashMap<SessionKey, mpsc::Sender<Frame>>,
+    sessions: DashMap<SessionKey, StreamSession>,
     opening: DashSet<SessionKey>,
     next_stream_id: AtomicU64,
     accept_input: bool,
-    direct_paths: DashMap<PeerId, Arc<PeerConn>>,
     cidr_set: Arc<CidrSet>,
     route: Arc<dyn crate::peers::route_trait::Route + Send + Sync + 'static>,
 }
@@ -547,7 +551,6 @@ impl OverlayStreamEndpoint {
             opening: DashSet::new(),
             next_stream_id: AtomicU64::new(seed),
             accept_input,
-            direct_paths: DashMap::new(),
         });
         peer_manager
             .add_packet_process_pipeline(Box::new(OverlayStreamPacketFilter {
@@ -607,7 +610,18 @@ impl OverlayStreamEndpoint {
         let (read_tx, read_rx) = mpsc::channel(APP_READ_QUEUE_CHUNKS);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel();
-        self.sessions.insert((remote_peer, stream_id), frame_tx);
+        // A weak reference preserves this stream's path without retaining a closed transport.
+        let direct_path = self
+            .peer_manager
+            .only_direct_proxy_conn(remote_peer)
+            .map(|connection| Arc::downgrade(&connection));
+        self.sessions.insert(
+            (remote_peer, stream_id),
+            StreamSession {
+                frames: frame_tx,
+                direct_path,
+            },
+        );
         let endpoint = self.clone();
         tokio::spawn(async move {
             endpoint
@@ -631,7 +645,7 @@ impl OverlayStreamEndpoint {
     async fn handle_frame(self: &Arc<Self>, remote_peer: PeerId, frame: Frame) {
         let key = (remote_peer, frame.stream_id);
         if let Some(session) = self.sessions.get(&key) {
-            let _ = session.try_send(frame);
+            let _ = session.frames.try_send(frame);
             return;
         }
         if frame.kind != FrameKind::Open || !self.accept_input || !self.opening.insert(key) {
@@ -763,6 +777,7 @@ impl OverlayStreamEndpoint {
         ready_tx: oneshot::Sender<anyhow::Result<()>>,
     ) {
         let mut receive = ReceiveWindow::new(STREAM_WINDOW_BYTES);
+        let mut read_tx = Some(read_tx);
         let mut send = SendWindow::new(STREAM_WINDOW_BYTES);
         let mut sent_at = HashMap::<u64, Instant>::new();
         let mut remote_window = STREAM_WINDOW_BYTES;
@@ -775,6 +790,7 @@ impl OverlayStreamEndpoint {
         let mut last_advertised_window = STREAM_WINDOW_BYTES;
         let mut finish_requested = false;
         let mut local_fin = None;
+        let mut local_fin_acked = false;
         let mut fin_sent_at: Option<Instant> = None;
         let mut remote_fin_sequence = None;
 
@@ -788,7 +804,12 @@ impl OverlayStreamEndpoint {
         }
 
         loop {
+            // Expose read EOF after all bytes before FIN reach the application queue.
+            if remote_fin_complete(remote_fin_sequence, receive.next_sequence()) {
+                read_tx.take();
+            }
             if local_fin.is_none()
+                && !local_fin_acked
                 && ready_to_send_fin(finish_requested, write_rx.is_closed(), write_rx.is_empty())
             {
                 local_fin = Some(send.next_sequence);
@@ -853,6 +874,9 @@ impl OverlayStreamEndpoint {
                             match receive.insert(frame.sequence, frame.payload) {
                                 Ok(delivered) => {
                                     for bytes in delivered {
+                                        let Some(read_tx) = read_tx.as_ref() else {
+                                            return;
+                                        };
                                         if read_tx.send(bytes).await.is_err() {
                                             return;
                                         }
@@ -872,9 +896,12 @@ impl OverlayStreamEndpoint {
                             send.acknowledge(frame.acknowledgement);
                             sent_at.retain(|sequence, _| send.get(*sequence).is_some());
                             if local_fin.is_some_and(|sequence| frame.acknowledgement > sequence) {
+                                local_fin_acked = true;
                                 local_fin = None;
                                 fin_sent_at = None;
-                                if remote_fin_complete(remote_fin_sequence, receive.next_sequence()) {
+                                if remote_fin_complete(remote_fin_sequence, receive.next_sequence())
+                                    && !ack_pending
+                                {
                                     break;
                                 }
                             }
@@ -925,7 +952,7 @@ impl OverlayStreamEndpoint {
                         ack_deadline = None;
                         last_acknowledgement = acknowledgement;
                         last_advertised_window = receive.available_bytes();
-                        if complete && send.buffered_bytes() == 0 && local_fin.is_none() {
+                        if complete && send.buffered_bytes() == 0 && local_fin_acked {
                             break;
                         }
                     }
@@ -1015,23 +1042,22 @@ impl OverlayStreamEndpoint {
             remote_peer,
             PacketType::OverlayStream as u8,
         );
+        // Control frames and retransmissions must retain the stream's route selection.
+        packet.set_flow_hash(frame.stream_id);
         packet
     }
 
     async fn send_frame(&self, remote_peer: PeerId, frame: Frame) -> LowTierResult<()> {
+        let key = (remote_peer, frame.stream_id);
         let packet = self.packet_for_frame(remote_peer, frame);
         // A [[path]] to this peer must not be bypassed by a direct link.
         let cached = if self.peer_manager.path_applies_to(remote_peer) {
             None
         } else {
-            self.direct_paths
-                .get(&remote_peer)
-                .map(|connection| connection.clone())
-                .or_else(|| {
-                    let connection = self.peer_manager.only_direct_proxy_conn(remote_peer)?;
-                    self.direct_paths.insert(remote_peer, connection.clone());
-                    Some(connection)
-                })
+            self.sessions
+                .get(&key)
+                .and_then(|session| session.direct_path.as_ref()?.upgrade())
+                .filter(|connection| !connection.is_closed())
         };
         if let Some(connection) = cached {
             let result = self
@@ -1039,8 +1065,14 @@ impl OverlayStreamEndpoint {
                 .send_msg_for_proxy_on_conn(packet, remote_peer, &connection)
                 .await;
             if result.is_err() {
-                self.direct_paths
-                    .remove_if(&remote_peer, |_, current| Arc::ptr_eq(current, &connection));
+                if let Some(mut session) = self.sessions.get_mut(&key)
+                    && session
+                        .direct_path
+                        .as_ref()
+                        .is_some_and(|current| current.as_ptr() == Arc::as_ptr(&connection))
+                {
+                    session.direct_path = None;
+                }
             }
             return result;
         }
@@ -1193,6 +1225,201 @@ mod tests {
                 .expect("shutdown must close the write queue")
                 .is_none()
         );
+        new_streams_select_better_connections().await;
+    }
+
+    async fn new_streams_select_better_connections() {
+        use crate::{
+            peers::tests::{create_mock_peer_manager_secure, wait_route_appear},
+            tunnel::{
+                BatchSinkItem, IpVersion, SinkError, SplitTunnel, Tunnel, TunnelListener,
+                quic::QuicTunnelListener, tcp::TcpTunnelListener,
+            },
+        };
+        use futures::{SinkExt, future::ready};
+
+        struct TaggedTunnel {
+            inner: Box<dyn Tunnel>,
+            sent: Arc<parking_lot::Mutex<Vec<u64>>>,
+        }
+        impl Tunnel for TaggedTunnel {
+            fn split(&self) -> SplitTunnel {
+                let (stream, sink) = self.inner.split();
+                let sent = self.sent.clone();
+                let sink = sink.with(move |batch: BatchSinkItem| {
+                    let mut sent = sent.lock();
+                    for packet in batch.iter() {
+                        if packet.peer_manager_header().is_some_and(|header| {
+                            header.packet_type == PacketType::OverlayStream as u8
+                        }) && let Some(flow) = packet.flow_hash()
+                        {
+                            sent.push(flow);
+                        }
+                    }
+                    ready(Ok::<_, SinkError>(batch))
+                });
+                (stream, Box::pin(sink))
+            }
+            fn info(&self) -> Option<crate::proto::common::TunnelInfo> {
+                self.inner.info()
+            }
+            fn transport_binding(&self) -> Option<crate::tunnel::TransportBinding> {
+                self.inner.transport_binding()
+            }
+            fn path_state(&self) -> Option<Arc<crate::tunnel::TunnelPathState>> {
+                self.inner.path_state()
+            }
+            fn is_transport_authenticated(&self) -> bool {
+                self.inner.is_transport_authenticated()
+            }
+        }
+
+        async fn connect_transport(
+            a: &Arc<PeerManager>,
+            b: &Arc<PeerManager>,
+            protocol: &str,
+            sent: Arc<parking_lot::Mutex<Vec<u64>>>,
+        ) -> (crate::peers::peer_conn::PeerConnId, Box<dyn TunnelListener>) {
+            let url = format!("{protocol}://127.0.0.1:0").parse().unwrap();
+            let mut listener: Box<dyn TunnelListener> = match protocol {
+                "quic" => Box::new(QuicTunnelListener::new(url, b.get_global_ctx())),
+                "h2" => Box::new(TcpTunnelListener::new(url)),
+                _ => unreachable!(),
+            };
+            listener.listen().await.unwrap();
+            let mut connector = crate::connector::create_connector_by_url(
+                listener.local_url().as_str(),
+                &a.get_global_ctx(),
+                IpVersion::Both,
+            )
+            .await
+            .unwrap();
+            let (left, right) = tokio::join!(connector.connect(), listener.accept());
+            let left = Box::new(TaggedTunnel {
+                inner: left.unwrap(),
+                sent,
+            });
+            let (client, server) = tokio::join!(
+                a.add_client_tunnel(left, true),
+                b.add_tunnel_as_server(right.unwrap(), true)
+            );
+            server.unwrap();
+            (client.unwrap().1, listener)
+        }
+
+        let stage = std::cell::Cell::new("setup");
+        timeout(Duration::from_secs(15), async {
+            let a =
+                create_mock_peer_manager_secure("stream-selection".into(), "secret".into()).await;
+            let b =
+                create_mock_peer_manager_secure("stream-selection".into(), "secret".into()).await;
+            for (peer, ip) in [(&a, "10.77.0.1/24"), (&b, "10.77.0.2/24")] {
+                let ctx = peer.get_global_ctx();
+                ctx.set_ipv4(Some(ip.parse().unwrap()));
+                let mut flags = ctx.get_flags();
+                flags.no_tun = true;
+                ctx.set_flags(flags);
+            }
+            let quic_sent = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let (quic_id, _quic_listener) =
+                connect_transport(&a, &b, "quic", quic_sent.clone()).await;
+            wait_route_appear(a.clone(), b.clone()).await.unwrap();
+            let endpoint = OverlayStreamEndpoint::start(a.clone(), false).await;
+            let _server_endpoint = OverlayStreamEndpoint::start(b.clone(), true).await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let destination = SocketAddr::new(
+                "10.77.0.2".parse().unwrap(),
+                listener.local_addr().unwrap().port(),
+            );
+            let _echo = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut tasks = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (stream, _) = accepted.unwrap();
+                            tasks.spawn(async move {
+                                let (mut reader, mut writer) = stream.into_split();
+                                let mut first = [0; 1];
+                                if reader.read_exact(&mut first).await.is_err() { return; }
+                                if first == [b'!'] {
+                                    let mut request = Vec::new();
+                                    reader.read_to_end(&mut request).await.unwrap();
+                                    tokio::time::sleep(ACK_DELAY * 2 + Duration::from_millis(10)).await;
+                                    writer.write_all(&request).await.unwrap();
+                                    writer.shutdown().await.unwrap();
+                                    return;
+                                }
+                                writer.write_all(&first).await.unwrap();
+                                let _ = tokio::io::copy(&mut reader, &mut writer).await;
+                            });
+                        }
+                        Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+                    }
+                }
+            }));
+            let first_id = endpoint.next_stream_id.load(Ordering::Relaxed);
+            let mut first = endpoint
+                .connect("10.77.0.1:41001".parse().unwrap(), destination)
+                .await
+                .unwrap();
+            first.write_all(b"first").await.unwrap();
+            let mut reply = [0; 5];
+            first.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"first");
+            assert!(quic_sent.lock().contains(&first_id));
+
+            let h2_sent = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let (h2_id, _h2_listener) = connect_transport(&a, &b, "h2", h2_sent.clone()).await;
+            let map = a.get_peer_map();
+            map.get_live_direct_conn(b.my_peer_id(), quic_id)
+                .unwrap()
+                .record_latency_for_test(100_000);
+            map.get_live_direct_conn(b.my_peer_id(), h2_id)
+                .unwrap()
+                .record_latency_for_test(1);
+            let second_id = endpoint.next_stream_id.load(Ordering::Relaxed);
+            let mut second = endpoint
+                .connect("10.77.0.1:41002".parse().unwrap(), destination)
+                .await
+                .unwrap();
+            second.write_all(b"other").await.unwrap();
+            second.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"other");
+            assert!(h2_sent.lock().contains(&second_id));
+            assert!(!quic_sent.lock().contains(&second_id));
+            first.write_all(b"still").await.unwrap();
+            first.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"still");
+            assert!(!h2_sent.lock().contains(&first_id));
+            a.close_peer_conn(b.my_peer_id(), &quic_id).await.unwrap();
+            stage.set("connection removal");
+            while map.get_live_direct_conn(b.my_peer_id(), quic_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+            stage.set("backup echo");
+            first.write_all(b"again").await.unwrap();
+            first.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"again");
+            assert!(h2_sent.lock().contains(&first_id));
+            stage.set("response after request EOF");
+            let mut delayed = endpoint.connect("10.77.0.1:41003".parse().unwrap(), destination).await.unwrap();
+            delayed.write_all(b"!response").await.unwrap();
+            delayed.shutdown().await.unwrap();
+            let mut response = Vec::new();
+            delayed.read_to_end(&mut response).await.unwrap();
+            assert_eq!(response, b"response");
+            stage.set("stream shutdown");
+            for mut stream in [first, second] {
+                stream.shutdown().await.unwrap();
+                stream.read_to_end(&mut Vec::new()).await.unwrap();
+            }
+            stage.set("session cleanup");
+            while !endpoint.sessions.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("overlay stream test stopped at {}", stage.get()));
     }
 
     #[test]
