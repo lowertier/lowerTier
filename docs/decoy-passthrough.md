@@ -5,6 +5,53 @@ TCP forwards unmarked streams. QUIC forwards unmarked datagrams.
 The endpoints can differ. Visitors cannot select a destination.
 See [control configuration](control-config.md) for admission and SNI settings.
 
+## Shared probe sessions
+
+Each source can open two probe sessions within a rolling 60-second window.
+QUIC, H2, and WSS share this counter across all process listeners and instances.
+Closing a session, changing source ports, or changing protocols does not restore a slot.
+Rejected attempts do not extend the window.
+The third session receives no upstream connection.
+
+Each forwarded session has these limits:
+
+| Resource | Limit |
+| --- | ---: |
+| Combined bytes in both directions | 64 KiB |
+| Inactivity | 5 seconds |
+| Total lifetime | 10 seconds |
+
+The byte limit includes forwarded TLS and HTTP framing.
+TLS hides individual page requests within a connection.
+These limits count sessions and bytes, not page loads.
+A client can request several small resources within one bounded session.
+
+IPv4 addresses have separate counters.
+IPv4-mapped IPv6 addresses share the corresponding IPv4 counter.
+IPv6 addresses within one `/64` share a counter.
+Clients behind NAT share the visible source counter.
+The limiter keeps at most 4,096 source entries.
+It retains probe timestamps for 60 seconds and then reclaims inactive entries.
+Restarting the process clears this in-memory history.
+
+A valid admission token exempts the VPN connection from probe limits.
+H2 and WSS use `network.secret` when no explicit admission secret is configured.
+Credential-only peers can configure the same `camouflage.admission_secret` on both endpoints.
+Tokenless H2 and WSS setup stays bounded until Noise authentication succeeds.
+Successful authentication removes its provisional probe reservation.
+A verified TCP lane group shares one reservation and one setup byte budget.
+Each lane reserves a probe slot before the exporter-bound join.
+A verified follower releases its slot and joins the primary session.
+It cannot forward website traffic during setup.
+Internal control and DNS services use dedicated loopback listeners without probe limits.
+These listeners cannot configure decoy forwarding.
+Control RPC requests still require the control token.
+
+A configured local HTTP/3 website root uses separate website resource limits.
+This website serves local files and does not forward requests to another host.
+Its limits permit eight concurrent connections per source, 30 seconds of inactivity, and five minutes of total lifetime.
+The default HTTP/3 page has the probe session, response byte, and lifetime limits.
+
 ## Shared bandwidth and bursts
 
 Unauthenticated decoy forwarding uses a single process-wide limiter, shared by
@@ -18,7 +65,8 @@ The initial built-in limits are:
 | --- | ---: | ---: |
 | Forwarded payload bytes per second | 1 MiB/s | 128 KiB/s |
 | Payload burst capacity | 256 KiB | 64 KiB |
-| Concurrent decoy flows | 128 | 8 |
+| Concurrent probe sessions | 128 | 2 |
+| Probe admissions per rolling 60 seconds | — | 2 |
 | New decoy flows per second | 16 | 4 |
 | New-flow burst | 32 | 8 |
 | Forwarded UDP datagrams per second | 4,096 | 512 |
@@ -42,15 +90,9 @@ UDP datagrams, with one pending response per flow and bounded ingress channels
 it cannot create an unlimited delay queue. No HTTP status or synthetic TLS/QUIC
 response is injected, and passthrough TLS is not terminated.
 
-There are at most 4,096 retained IP accounting entries. Inactive entries are
-reclaimed after at least 60 seconds, longer than any bucket's refill time.
-IPv4-mapped IPv6 addresses share their IPv4 budget. Actual IPv6 addresses are
-accounted individually, so address rotation can evade a per-IP cap but not the
-process-wide cap. Clients behind NAT share their visible source-IP budget. An
-L4 proxy that replaces source addresses also makes its clients share that proxy
-IP's budget; LowTier does not trust an HTTP forwarding header for this purpose.
+An L4 proxy that replaces source addresses makes clients share the proxy address counter.
+LowTier does not trust HTTP forwarding headers for probe accounting.
 
-Decoy flows have a 30-second I/O idle timeout and a five-minute maximum lifetime.
 TCP upstream connection setup and routing-prefix reads have five-second timeouts.
 Resource/admission exhaustion drops UDP or closes new TCP flows without an HTTP
 response. It does not convert an over-limit visitor into an authenticated peer.
@@ -112,14 +154,12 @@ cargo run --locked --offline -p lowertier --example passthrough_demo
 cargo test --locked --offline -p lowertier --lib tunnel::quic::decoy_tests -- --nocapture --test-threads=1
 ```
 
-The first command starts an ephemeral loopback H2/TLS origin and a real LowTier
-TCP listener, verifies the origin's in-memory test certificate, and downloads
-512 KiB three times. It prints TLS latency, time to receive the first 32 KiB,
-full-download time, effective throughput, and exact byte delivery. The initial
-burst is fast; reconnecting does not create another full IP burst. It checks
-that each entire transfer obeys the sustained-rate-plus-burst bound. All sockets
-are loopback-bound and all demo services stop on exit. No root/TUN access or
-system trust-store modification is required.
+The first command starts a loopback H2/TLS origin and a LowTier H2 listener.
+It verifies the origin certificate and downloads two 8 KiB payloads.
+It checks every payload byte and rejects a third connection before the origin receives it.
+It reports TLS latency, delivery time, and effective throughput.
+All demo services use loopback sockets and stop on exit.
+No root access, TUN, or system trust change is required.
 
 The second command demonstrates real H3 downloads with a large certificate,
 checks byte-for-byte delivery, reports QUIC loss/RTT/MTU, and exercises UDP
@@ -140,9 +180,9 @@ Local tests cover shared global/IP budgets, burst refill and reconnect behavior,
 packet and concurrent-flow caps, cancellation, TCP lossless bidirectional copying
 and half-close, malformed QUIC headers, byte/packet anti-amplification, wrong-CID
 probes, and isolation between source ports. A real loopback HTTP/3 origin exercises
-a large certificate flight and a 512 KiB download three times, checking complete
-payload delivery and the sustained-rate ceiling while recording loss, RTT, MTU,
-and effective throughput. Caddy shared-port tests cover two backends, ordinary
+a large certificate flight and two 8 KiB downloads, then rejects a third session.
+It records delivery, loss, RTT, MTU, and effective throughput.
+Caddy shared-port tests cover two backends, ordinary
 websites, and the existing H2/H3/WSS transport bindings.
 
 Tests use `challenges.cloudflare.com` only as the SNI/example name and connect to

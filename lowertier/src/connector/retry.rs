@@ -281,6 +281,9 @@ impl Tunnel for RetryingTunnel {
     fn is_transport_authenticated(&self) -> bool {
         self.inner.is_transport_authenticated()
     }
+    fn probe_guard(&self) -> Option<Arc<crate::tunnel::ProbeGuard>> {
+        self.inner.probe_guard()
+    }
     fn pinned_peer_key(&self) -> Option<&str> {
         self.pin.as_deref().or_else(|| self.inner.pinned_peer_key())
     }

@@ -34,6 +34,12 @@ CDN mode requires both endpoints to support the inner TLS subprotocol.
 It does not fall back to unbound authentication when the subprotocol is absent.
 Multiple TCP lanes are not available in CDN mode.
 The origin enforces its configured WSS path before the HTTP upgrade.
+With `camouflage.admission_secret`, the origin also requires a valid bearer token before the upgrade.
+Configure the same secret on both endpoints.
+Secret-based networks use `network.secret` when the explicit admission secret is absent.
+Without either secret, setup remains limited until Noise authentication succeeds.
+The setup limit includes the inner TLS handshake.
+See [decoy limits](decoy-passthrough.md) for shared probe limits.
 Set `camouflage.wss_path` or use an explicit endpoint URL path.
 Configure `camouflage.trusted_proxy_cidrs` to accept forwarded client addresses. The default trusts no proxy.
 

@@ -595,9 +595,22 @@ async fn send_normal_http3_response(
     request: http::Request<()>,
     mut stream: H3ServerStream,
     root: Option<PathBuf>,
+    probe: Option<Arc<super::decoy::DecoyPermit>>,
 ) -> Result<(), TunnelError> {
     let response_body = normal_origin_response(&request, root.as_deref()).await;
     let send_body = request.method() != http::Method::HEAD;
+    if let Some(probe) = probe {
+        // Reserve the body and a conservative allowance for these fixed headers.
+        probe
+            .wait(
+                512 + if send_body {
+                    response_body.body.len()
+                } else {
+                    0
+                },
+            )
+            .await?;
+    }
     let response = http::Response::builder()
         .status(response_body.status)
         .header("content-type", response_body.content_type)
@@ -627,7 +640,7 @@ async fn serve_additional_http3_requests(
     fallback_root: Option<PathBuf>,
     proxy: Option<Arc<proxy::ProxyEndpoint>>,
 ) {
-    serve_http3_requests(connection, fallback_root, None, proxy).await;
+    serve_http3_requests(connection, fallback_root, None, proxy, None).await;
 }
 
 struct Http3Website {
@@ -649,6 +662,7 @@ async fn serve_http3_requests(
     fallback_root: Option<PathBuf>,
     first: Option<(http::Request<()>, H3ServerStream)>,
     proxy: Option<Arc<proxy::ProxyEndpoint>>,
+    probe: Option<Arc<super::decoy::DecoyPermit>>,
 ) {
     let website = first.is_some();
     let mut responses = tokio::task::JoinSet::new();
@@ -657,16 +671,17 @@ async fn serve_http3_requests(
             request,
             stream,
             fallback_root.clone(),
+            probe.clone(),
         ));
     }
     loop {
         let accepted = tokio::select! {
             result = responses.join_next(), if !responses.is_empty() => {
-                if let Some(Err(error)) = result { tracing::debug!(?error, "HTTP/3 response task stopped"); }
+                if !matches!(result, Some(Ok(Ok(())))) { return; }
                 continue;
             }
             accepted = connection.accept(), if responses.len() < 2 => accepted,
-            _ = tokio::time::sleep(super::decoy::IDLE_TIMEOUT), if website && responses.is_empty() => return,
+            _ = tokio::time::sleep(if probe.is_some() { super::decoy::IDLE_TIMEOUT } else { super::decoy::WEBSITE_IDLE_TIMEOUT }), if website && responses.is_empty() => return,
         };
         let resolver = match accepted {
             Ok(Some(resolver)) => resolver,
@@ -684,6 +699,7 @@ async fn serve_http3_requests(
                         request,
                         stream,
                         fallback_root.clone(),
+                        probe.clone(),
                     ));
                 }
             }
@@ -2921,6 +2937,7 @@ pub struct QuicTunnelListener {
     endpoint: Option<Endpoint>,
     endpoint_manager: Option<Arc<QuicEndpointManager>>,
     pending_state: std::sync::Mutex<PendingQuicAcceptState>,
+    probe_limiter: Arc<super::decoy::DecoyLimiter>,
 }
 
 const MAX_QUIC_DECOY_FLOWS: usize = 4096;
@@ -2982,6 +2999,7 @@ impl QuicDecoySocket {
             socket_mark,
             routes.clone(),
             decoy_rx,
+            super::decoy::process_limiter(),
         ));
         Arc::new(Self {
             inner,
@@ -3239,7 +3257,7 @@ async fn run_quic_decoy_flow(
     server_ip: Option<IpAddr>,
     mut incoming: mpsc::Receiver<Bytes>,
     cleanup: mpsc::UnboundedSender<SocketAddr>,
-    permit: super::decoy::DecoyPermit,
+    mut permit: super::decoy::DecoyPermit,
 ) {
     let relay = async {
         let socket = bind::<UdpSocket>()
@@ -3260,9 +3278,14 @@ async fn run_quic_decoy_flow(
                 tokio::select! {
                     packet = incoming.recv() => {
                         let Some(packet) = packet else { return false; };
+                        if return_path.is_new_connection(&packet) {
+                            let Some(next) = permit.next_session() else { return false; };
+                            permit = next;
+                        }
                         // UDP cannot backpressure the sender: excess ingress is
                         // dropped. Only forwarded input earns response credit.
                         if !permit.allow_datagram(packet.len()) {
+                            if !permit.can_forward(packet.len()) { return false; }
                             tracing::trace!(?client, length = packet.len(), "decoy ingress limited");
                             return true;
                         }
@@ -3280,7 +3303,7 @@ async fn run_quic_decoy_flow(
                         // One pending response, paced without altering datagrams.
                         // The socket and bounded ingress channel absorb bursts;
                         // overload drops instead of growing a delay queue.
-                        permit.pace_datagram(length).await;
+                        if permit.pace_datagram(length).await.is_err() { return false; }
                         if send_quic_decoy_response(
                             &public,
                             &mut poller,
@@ -3310,6 +3333,7 @@ async fn run_quic_decoy_relays(
     socket_mark: Option<u32>,
     routes: Arc<dashmap::DashMap<SocketAddr, QuicSocketRouteEntry>>,
     mut packets: mpsc::Receiver<QuicDecoyPacket>,
+    limiter: Arc<super::decoy::DecoyLimiter>,
 ) {
     let mut flows: HashMap<SocketAddr, mpsc::Sender<Bytes>> = HashMap::new();
     let (cleanup_tx, mut cleanup_rx) = mpsc::unbounded_channel();
@@ -3325,7 +3349,7 @@ async fn run_quic_decoy_relays(
                 }
                 // Check process-wide/source-IP admission before allocating a
                 // socket or task. Rejected sources cannot fill the route table.
-                let Some(permit) = super::decoy::process_limiter().admit(packet.client.ip()) else {
+                let Some(permit) = limiter.admit(packet.client.ip()) else {
                     continue;
                 };
                 if !super::decoy::is_quic_initial(&packet.bytes) {
@@ -3498,6 +3522,7 @@ impl QuicTunnelListener {
             global_ctx,
             endpoint: None,
             endpoint_manager: None,
+            probe_limiter: super::decoy::process_limiter(),
             pending_state: std::sync::Mutex::new(PendingQuicAcceptState {
                 pending_accepts: futures::stream::FuturesUnordered::new(),
                 pending_by_ip: HashMap::new(),
@@ -3515,6 +3540,7 @@ impl QuicTunnelListener {
         source_permit: QuicSourcePermit,
         endpoint_manager: Option<Arc<QuicEndpointManager>>,
         endpoint_owner: Option<Endpoint>,
+        probe_limiter: Arc<super::decoy::DecoyLimiter>,
     ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
         ensure_remote_allowed(&global_ctx.get_underlay_policy(), initial_remote)?;
         let conn = tokio::time::timeout(Duration::from_secs(7), incoming)
@@ -3553,8 +3579,12 @@ impl QuicTunnelListener {
             Ok(ConnectIpAccept::Tunnel(stream, id, proxy)) => (stream, id, proxy),
             Ok(ConnectIpAccept::Website(website)) => {
                 drop(source_permit);
-                let Some(website_permit) = super::decoy::process_limiter().admit(remote_addr.ip())
-                else {
+                let local_website = fallback_root.is_some();
+                let Some(website_permit) = (if local_website {
+                    probe_limiter.admit_website(remote_addr.ip())
+                } else {
+                    probe_limiter.admit(remote_addr.ip())
+                }) else {
                     conn.close(VarInt::from_u32(1), b"website capacity full");
                     return Ok(None);
                 };
@@ -3566,6 +3596,8 @@ impl QuicTunnelListener {
                     return Ok(None);
                 };
                 tokio::spawn(async move {
+                    let website_permit = Arc::new(website_permit);
+                    let probe = (!local_website).then(|| website_permit.clone());
                     let _owners = (
                         memory_permit,
                         response_memory,
@@ -3574,12 +3606,17 @@ impl QuicTunnelListener {
                         endpoint_owner,
                     );
                     let _ = tokio::time::timeout(
-                        super::decoy::FLOW_LIFETIME,
+                        if local_website {
+                            super::decoy::WEBSITE_FLOW_LIFETIME
+                        } else {
+                            super::decoy::FLOW_LIFETIME
+                        },
                         serve_http3_requests(
                             website.connection,
                             fallback_root,
                             Some(website.first),
                             None,
+                            probe,
                         ),
                     )
                     .await;
@@ -3657,6 +3694,7 @@ impl QuicTunnelListener {
         let local_url = self.local_url();
         let endpoint_manager = self.endpoint_manager.clone();
         let endpoint_owner = self.endpoint.clone();
+        let probe_limiter = self.probe_limiter.clone();
         let state = self.pending_state.get_mut().unwrap();
         let count = state.pending_by_ip.entry(ip).or_default();
         if *count >= MAX_PENDING_QUIC_ACCEPTS_PER_IP {
@@ -3678,6 +3716,7 @@ impl QuicTunnelListener {
                 source_permit,
                 endpoint_manager,
                 endpoint_owner,
+                probe_limiter,
             )
             .await;
             (ip, result)
@@ -4464,8 +4503,17 @@ mod tests {
     fn unrelated_http3_request_gets_a_normal_response() {
         RUNTIME.block_on(async {
             let flags = gen_default_flags();
+            let root = tempfile::tempdir().unwrap();
+            tokio::fs::write(root.path().join("index.html"), DEFAULT_ORIGIN_BODY)
+                .await
+                .unwrap();
+            let context = global_ctx();
+            let mut website_flags = context.get_flags();
+            website_flags.camouflage_config_mut().website_root =
+                root.path().to_str().unwrap().to_owned();
+            context.set_flags(website_flags);
             let mut listener =
-                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), context);
             listener.listen().await.unwrap();
             let url = listener.local_url();
             let server_addr = SocketAddr::from_url(url.clone(), IpVersion::Both)
@@ -4533,6 +4581,48 @@ mod tests {
             assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
             drop(requests);
             driver.abort();
+
+            // The default page has no local-root exception.
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+            listener.listen().await.unwrap();
+            let address = SocketAddr::from_url(listener.local_url(), IpVersion::Both)
+                .await
+                .unwrap();
+            let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let _ = listener.accept().await;
+            }));
+            for attempt in 0..3 {
+                let connection = client_endpoint
+                    .connect(address, "localhost")
+                    .unwrap()
+                    .await
+                    .unwrap();
+                let (mut driver, mut requests) =
+                    h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                        .await
+                        .unwrap();
+                let driver = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                    driver.wait_idle().await
+                }));
+                let request = http::Request::get("https://localhost/").body(()).unwrap();
+                let mut stream = requests.send_request(request).await.unwrap();
+                let response = tokio::time::timeout(Duration::from_secs(2), stream.recv_response())
+                    .await
+                    .unwrap();
+                if attempt < 2 {
+                    assert_eq!(response.unwrap().status(), http::StatusCode::OK);
+                    assert!(stream.recv_data().await.unwrap().is_some());
+                } else {
+                    assert!(
+                        response.is_err(),
+                        "third default website session received a page"
+                    );
+                }
+                connection.close(VarInt::from_u32(0), b"probe complete");
+                drop(driver);
+            }
+            drop(server);
         });
     }
 
@@ -4582,7 +4672,8 @@ mod tests {
                 if let Ok(ConnectIpAccept::Website(website)) =
                     accept_connect_ip_request(&connection, None, None, None).await
                 {
-                    serve_http3_requests(website.connection, None, Some(website.first), None).await;
+                    serve_http3_requests(website.connection, None, Some(website.first), None, None)
+                        .await;
                 }
             });
             let global_ctx = global_ctx();

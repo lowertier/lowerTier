@@ -316,6 +316,16 @@ pub(crate) struct ConnectIpAdmission {
 }
 
 impl ConnectIpAdmission {
+    pub(crate) fn stream_flags(global_ctx: &ArcGlobalCtx) -> Flags {
+        let mut flags = global_ctx.get_flags();
+        if flags.camouflage_config().admission_secret.is_empty()
+            && let Some(secret) = global_ctx.get_network_identity().network_secret
+        {
+            flags.camouflage_config_mut().admission_secret = secret;
+        }
+        flags
+    }
+
     pub(crate) fn from_global_ctx(global_ctx: &ArcGlobalCtx) -> Option<Self> {
         let flags = global_ctx.config.get_flags();
         let key = if flags.camouflage_config().admission_secret.is_empty() {

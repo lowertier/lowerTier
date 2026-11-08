@@ -32,6 +32,8 @@ pub struct TcpTunnelListener {
     global_ctx: std::sync::Weak<crate::common::global_ctx::GlobalCtx>,
     pending: Mutex<FuturesUnordered<PendingAccept>>,
     pending_by_ip: HashMap<IpAddr, usize>,
+    probe_limiter: Arc<super::decoy::DecoyLimiter>,
+    local_service: bool,
 }
 
 impl std::fmt::Debug for TcpTunnelListener {
@@ -57,7 +59,24 @@ impl TcpTunnelListener {
             global_ctx: std::sync::Weak::new(),
             pending: Mutex::new(FuturesUnordered::new()),
             pending_by_ip: HashMap::new(),
+            probe_limiter: super::decoy::process_limiter(),
+            local_service: false,
         }
+    }
+    /// Local RPC services authenticate requests without a Noise peer connection.
+    pub(crate) fn new_local_service(addr: url::Url) -> Result<Self, TunnelError> {
+        if !addr
+            .host_str()
+            .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback())
+        {
+            return Err(TunnelError::InvalidAddr(
+                "local H2 service requires a loopback address".into(),
+            ));
+        }
+        let mut listener = Self::new(addr);
+        listener.local_service = true;
+        Ok(listener)
     }
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
         self.flags = flags;
@@ -65,7 +84,9 @@ impl TcpTunnelListener {
 
     pub(crate) fn set_global_ctx(&mut self, context: &crate::common::global_ctx::ArcGlobalCtx) {
         self.global_ctx = Arc::downgrade(context);
-        self.set_flags(context.get_flags());
+        self.set_flags(super::stealth_tls::ConnectIpAdmission::stream_flags(
+            context,
+        ));
     }
 
     pub fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
@@ -78,7 +99,7 @@ impl TcpTunnelListener {
 
     fn start_accept(&mut self, stream: TcpStream, remote: SocketAddr) -> Result<(), TunnelError> {
         if let Some(context) = self.global_ctx.upgrade() {
-            let flags = context.get_flags();
+            let flags = super::stealth_tls::ConnectIpAdmission::stream_flags(&context);
             if flags.camouflage_config() != self.flags.camouflage_config() {
                 self.tls_acceptor = Some(super::http2::tls_acceptor(&flags)?);
                 self.flags = flags;
@@ -100,11 +121,21 @@ impl TcpTunnelListener {
             .clone();
         let url = self.local_url();
         let flags = self.flags.clone();
+        let limiter = self.probe_limiter.clone();
+        let limit_setup = !self.local_service;
         *self.pending_by_ip.entry(ip).or_default() += 1;
         self.pending.get_mut().unwrap().push(Box::pin(async move {
             (
                 ip,
-                super::http2::accept(stream, &acceptor, url, &flags).await,
+                super::http2::accept_with_limiter(
+                    stream,
+                    &acceptor,
+                    url,
+                    &flags,
+                    limiter,
+                    limit_setup,
+                )
+                .await,
             )
         }));
         Ok(())
@@ -114,6 +145,11 @@ impl TcpTunnelListener {
 #[async_trait]
 impl TunnelListener for TcpTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
+        if self.local_service && self.flags.camouflage_config().has_decoy() {
+            return Err(TunnelError::InvalidAddr(
+                "local H2 services cannot forward probes".into(),
+            ));
+        }
         self.listener = None;
         *self.pending.get_mut().unwrap() = FuturesUnordered::new();
         self.pending_by_ip.clear();
@@ -391,7 +427,11 @@ mod tests {
                         .await
                         .err()
                         .unwrap();
-                        assert!(error.to_string().contains("admission timed out"));
+                        assert!(
+                            error.to_string().contains("admission timed out")
+                                || error.to_string().contains("probe session timeout"),
+                            "{error}"
+                        );
                     }));
                 }
                 while let Some(result) = pending.next().await {
@@ -471,6 +511,8 @@ mod tests {
         let mut connector = TcpTunnelConnector::new(listener_addr);
         let client = connector.connect().await.unwrap();
         let server = server.await.unwrap();
+        // This fixture tests framing after authentication, beyond the setup byte limit.
+        server.probe_guard().unwrap().authenticate();
         let (mut client_recv, mut client_send) = client.split();
         let (mut server_recv, mut server_send) = server.split();
         let count = 257_u32;
@@ -554,51 +596,113 @@ mod tests {
     async fn unmarked_tcp_is_passed_through_to_decoy() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let decoy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let decoy_addr = decoy.local_addr().unwrap();
-        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
-        let decoy_task = tokio::spawn(async move {
-            let (mut stream, _) = decoy.accept().await.unwrap();
-            let mut buf = vec![0_u8; 64];
-            stream.read_exact(&mut buf).await.unwrap();
-            let _ = seen_tx.send(buf);
-        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let decoy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let decoy_addr = decoy.local_addr().unwrap();
+            let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+            let decoy_task = tokio::spawn(async move {
+                let (mut stream, _) = decoy.accept().await.unwrap();
+                let mut buf = vec![0_u8; 64];
+                stream.read_exact(&mut buf).await.unwrap();
+                let _ = seen_tx.send(buf);
+                let _ = stream
+                    .write_all(&vec![0x61; super::super::decoy::MAX_PROBE_BYTES * 2])
+                    .await;
+                drop(stream);
+                let (mut stream, _) = decoy.accept().await.unwrap();
+                let mut byte = [0; 1];
+                while stream.read_exact(&mut byte).await.is_ok() {
+                    if stream.write_all(&byte).await.is_err() {
+                        break;
+                    }
+                }
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(250), decoy.accept())
+                        .await
+                        .is_err(),
+                    "third probe reached the upstream"
+                );
+            });
 
-        let mut flags = crate::common::config::gen_default_flags();
-        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
-        flags
-            .camouflage_config_mut()
-            .set_decoy_upstream(decoy_addr.to_string());
-        flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
+            let mut flags = crate::common::config::gen_default_flags();
+            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+            flags
+                .camouflage_config_mut()
+                .set_decoy_upstream(decoy_addr.to_string());
+            flags.camouflage_config_mut().admission_secret =
+                "routing-test-secret-material".to_owned();
 
-        let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
-        listener.set_flags(flags);
-        listener.listen().await.unwrap();
-        let listen_addr = listener.local_url();
-        let accept = tokio::spawn(async move {
-            let _ = listener.accept().await;
-        });
+            let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
+            listener.set_flags(flags);
+            listener.listen().await.unwrap();
+            let listen_addr = listener.local_url();
+            let accept = tokio::spawn(async move {
+                let _ = listener.accept().await;
+            });
 
-        let mut probe = TcpStream::connect(format!(
-            "{}:{}",
-            listen_addr.host_str().unwrap(),
-            listen_addr.port().unwrap()
-        ))
+            let mut probe = TcpStream::connect(format!(
+                "{}:{}",
+                listen_addr.host_str().unwrap(),
+                listen_addr.port().unwrap()
+            ))
+            .await
+            .unwrap();
+            // A browser ClientHello starts 16 03 01 <length≠8>, so the listener
+            // must splice those bytes intact to the decoy host.
+            let payload = [0x16_u8; 64];
+            probe.write_all(&payload).await.unwrap();
+
+            let received = tokio::time::timeout(std::time::Duration::from_secs(2), seen_rx)
+                .await
+                .expect("decoy did not receive the spliced probe")
+                .unwrap();
+            assert_eq!(received, payload);
+            let mut response = Vec::new();
+            let _ = probe.read_to_end(&mut response).await;
+            assert!(!response.is_empty());
+            assert!(response.len() + payload.len() <= super::super::decoy::MAX_PROBE_BYTES);
+
+            let address = format!(
+                "{}:{}",
+                listen_addr.host_str().unwrap(),
+                listen_addr.port().unwrap()
+            );
+            let mut active = TcpStream::connect(&address).await.unwrap();
+            let started = std::time::Instant::now();
+            active.write_all(b"alive").await.unwrap();
+            let mut prefix = [0; 5];
+            active.read_exact(&mut prefix).await.unwrap();
+            assert_eq!(&prefix, b"alive");
+            loop {
+                if active.write_all(b"x").await.is_err() {
+                    break;
+                }
+                let mut byte = [0; 1];
+                if active.read_exact(&mut byte).await.is_err() {
+                    break;
+                }
+                assert_eq!(&byte, b"x");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert!(
+                started.elapsed() >= std::time::Duration::from_secs(9),
+                "active probe ended before its lifetime bound"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(12),
+                "activity extended the probe lifetime"
+            );
+            let mut third = TcpStream::connect(address).await.unwrap();
+            let _ = third.write_all(&payload).await;
+            let mut response = Vec::new();
+            let _ = third.read_to_end(&mut response).await;
+            assert!(response.is_empty(), "third probe received upstream data");
+            decoy_task.await.unwrap();
+
+            accept.abort();
+        })
         .await
         .unwrap();
-        // A browser ClientHello starts 16 03 01 <length≠8>, so the listener
-        // must splice those bytes intact to the decoy host.
-        let payload = [0x16_u8; 64];
-        probe.write_all(&payload).await.unwrap();
-
-        let received = tokio::time::timeout(std::time::Duration::from_secs(2), seen_rx)
-            .await
-            .expect("decoy did not receive the spliced probe")
-            .unwrap();
-        assert_eq!(received, payload);
-
-        accept.abort();
-        decoy_task.abort();
     }
 
     const CAMOUFLAGE_HOST: &str = "challenges.cloudflare.com";

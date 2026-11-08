@@ -107,19 +107,25 @@ fn wrap<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     info: TunnelInfo,
     binding: TransportBinding,
+    guard: Option<Arc<super::super::ProbeGuard>>,
 ) -> Box<dyn Tunnel> {
     let (read, write) = tokio::io::split(stream);
-    Box::new(TunnelWrapper::new_with_transport_binding(
+    let mut tunnel = TunnelWrapper::new_with_transport_binding(
         FramedReader::new_with_initial_capacity(read, MAX_WS_MESSAGE_BYTES, 4096),
         FramedWriter::new(write),
         Some(info),
         Some(binding),
-    ))
+    );
+    if let Some(guard) = guard {
+        tunnel = tunnel.with_probe_guard(guard);
+    }
+    Box::new(tunnel)
 }
 
 pub(super) async fn accept<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     socket: WebSocketStream<S>,
     info: TunnelInfo,
+    guard: Arc<super::super::ProbeGuard>,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     let mut config = wss_server_config(&crate::common::config::gen_default_flags())?;
     config.alpn_protocols = vec![ALPN.to_vec()];
@@ -137,7 +143,7 @@ pub(super) async fn accept<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             )
             .map(|_| ())
     })?;
-    Ok(wrap(stream, info, binding))
+    Ok(wrap(stream, info, binding, Some(guard)))
 }
 
 pub(super) async fn connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
@@ -164,5 +170,5 @@ pub(super) async fn connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             )
             .map(|_| ())
     })?;
-    Ok(wrap(stream, info, binding))
+    Ok(wrap(stream, info, binding, None))
 }

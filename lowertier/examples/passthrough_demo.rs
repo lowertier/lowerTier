@@ -1,5 +1,5 @@
-//! Local H2/TLS passthrough demo: three verified 512 KiB downloads through a
-//! real LowTier TCP listener. No TUN, root access, or external service required.
+//! Verify two bounded H2/TLS probe sessions and reject a third session.
+//! All services use loopback sockets. No TUN or root access is required.
 //! `challenges.cloudflare.com` is SNI only. The in-memory test certificate is
 //! trusted explicitly by this client, not installed in the system trust store.
 
@@ -21,9 +21,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::task::AbortOnDropHandle;
 
 const HOST: &str = "challenges.cloudflare.com";
-const TRIALS: usize = 3;
-const BODY_BYTES: usize = 512 * 1024;
-const BURST_SAMPLE_BYTES: usize = 32 * 1024;
+const TRIALS: usize = 2;
+const BODY_BYTES: usize = 8 * 1024;
 
 async fn serve(socket: TcpStream, acceptor: TlsAcceptor, body: Bytes) -> Result<()> {
     let tls = acceptor.accept(socket).await.context("origin TLS")?;
@@ -39,8 +38,7 @@ async fn serve(socket: TcpStream, acceptor: TlsAcceptor, body: Bytes) -> Result<
         .send_response(headers, false)?
         .send_data(body, true)?;
     connection.graceful_shutdown();
-    // Keep driving the bounded 512 KiB response until the client closes. The
-    // client below verifies status, length, and every byte before reporting.
+    // Drive the response until the client verifies all bytes and closes.
     while connection.accept().await.is_some() {}
     Ok(())
 }
@@ -76,7 +74,6 @@ async fn download(
     );
     let mut stream = response.into_body();
     let mut received = Vec::with_capacity(BODY_BYTES);
-    let mut first_burst = None;
     while let Some(data) = stream.data().await {
         let data = data?;
         ensure!(
@@ -85,39 +82,26 @@ async fn download(
         );
         received.extend_from_slice(&data);
         stream.flow_control().release_capacity(data.len())?;
-        if received.len() >= BURST_SAMPLE_BYTES && first_burst.is_none() {
-            first_burst = Some((received.len(), start.elapsed()));
-        }
     }
     ensure!(
         received.as_slice() == expected.as_ref(),
         "payload mismatch or truncation"
     );
     let elapsed = start.elapsed();
-    // The entire TLS flow, not just the application body, shares the 128 KiB/s
-    // per-IP bucket with a 64 KiB burst. New TCP connections don't reset it.
-    ensure!(
-        elapsed >= Duration::from_millis(3500),
-        "sustained ceiling exceeded"
-    );
-    let (burst_bytes, burst_elapsed) = first_burst.context("no burst sample")?;
     println!(
-        "H2 trial={trial} status=200 delivered={}/{} TLS_ms={} first_window_bytes={} first_window_ms={} total_ms={} goodput_Mbit_s={:.3} average_KiB_s={:.2}",
+        "H2 trial={trial} status=200 delivered={}/{} TLS_ms={} total_ms={} goodput_Mbit_s={:.3}",
         received.len(),
         expected.len(),
         handshake.as_millis(),
-        burst_bytes,
-        burst_elapsed.as_millis(),
         elapsed.as_millis(),
         received.len() as f64 * 8.0 / elapsed.as_secs_f64() / 1e6,
-        received.len() as f64 / 1024.0 / elapsed.as_secs_f64(),
     );
     Ok(())
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(90), demo())
+    tokio::time::timeout(Duration::from_secs(20), demo())
         .await
         .context("demo timed out")?
 }
@@ -155,6 +139,12 @@ async fn demo() -> Result<()> {
         while let Some(result) = handlers.join_next().await {
             result??;
         }
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(1), origin.accept())
+                .await
+                .is_err(),
+            "third session reached the origin"
+        );
         Ok::<_, anyhow::Error>(())
     }));
 
@@ -174,21 +164,30 @@ async fn demo() -> Result<()> {
         "Local demo: client -> {public} (LowTier passthrough) -> {origin_addr} (H2/TLS origin)"
     );
     println!(
-        "Global: 1 MiB/s, 256 KiB burst; source IP: 128 KiB/s, 64 KiB burst; both directions combined."
+        "Probe policy: two sessions per source per 60 seconds; 64 KiB combined bytes; 5 seconds idle; 10 seconds lifetime."
     );
     println!(
         "TLS certificate verification enabled; no external DNS/network; no HTTP response injection."
     );
     for trial in 0..TRIALS {
         tokio::time::timeout(
-            Duration::from_secs(25),
+            Duration::from_secs(5),
             download(trial, public, &connector, &payload),
         )
         .await
         .context("download timed out")??;
     }
+    let third = tokio::time::timeout(
+        Duration::from_secs(2),
+        download(2, public, &connector, &payload),
+    )
+    .await;
+    ensure!(
+        matches!(third, Ok(Err(_))),
+        "third probe session was not rejected"
+    );
     origin_task.await??;
-    println!("PASS: all three payloads match. Burst budget persisted across reconnections.");
+    println!("PASS: both payloads match. The third session received no upstream connection.");
     println!(
         "TCP kernel retransmission/RTT counters were not sampled; TLS latency is reported above."
     );

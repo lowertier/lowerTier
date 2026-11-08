@@ -108,13 +108,23 @@ fn derive_wss_binding(
     })
 }
 
-fn browser_ws_client(addr: &url::Url) -> Result<ClientBuilder<'_>, TunnelError> {
+fn browser_ws_client<'a>(
+    addr: &'a url::Url,
+    flags: &crate::common::config::Flags,
+) -> Result<ClientBuilder<'a>, TunnelError> {
     let origin = websocket_origin(addr);
     let origin = http::HeaderValue::from_str(&origin)
         .map_err(|_| TunnelError::InvalidAddr(format!("invalid websocket origin for {addr}")))?;
     let mut client =
         ClientBuilder::from_uri(http::Uri::try_from(ws_http_url(addr).to_string()).unwrap())
             .limits(Limits::default().max_payload_len(Some(MAX_WS_MESSAGE_BYTES)));
+    if let Some(admission) = super::stealth_tls::ConnectIpAdmission::from_flags(flags) {
+        client = client.add_header(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_str(&format!("Bearer {}", admission.current_token()))
+                .map_err(|error| TunnelError::InvalidProtocol(error.to_string()))?,
+        )?;
+    }
     if ws_via_cdn(addr) {
         client = client.add_header(
             http::header::SEC_WEBSOCKET_PROTOCOL,
@@ -190,6 +200,7 @@ pub struct WsTunnelListener {
     socket_mark: Option<u32>,
     tls_acceptor: Option<TlsAcceptor>,
     lanes: tokio::sync::Mutex<super::tcp_lanes::LaneListener>,
+    probe_limiter: Arc<super::decoy::DecoyLimiter>,
 }
 
 impl std::fmt::Debug for WsTunnelListener {
@@ -217,6 +228,7 @@ impl WsTunnelListener {
             socket_mark: None,
             tls_acceptor: None,
             lanes: tokio::sync::Mutex::default(),
+            probe_limiter: super::decoy::process_limiter(),
         }
     }
 
@@ -234,7 +246,9 @@ impl WsTunnelListener {
 
     pub(crate) fn set_global_ctx(&mut self, context: &crate::common::global_ctx::ArcGlobalCtx) {
         self.global_ctx = Arc::downgrade(context);
-        self.set_flags(context.get_flags());
+        self.set_flags(super::stealth_tls::ConnectIpAdmission::stream_flags(
+            context,
+        ));
     }
 
     pub(crate) async fn accept_punched(
@@ -289,6 +303,9 @@ impl WsTunnelListener {
         // tokio-util Either implementation falls back to scalar frame writes.
         let mut remote_addr =
             super::build_url_from_socket_addr(&peer_addr.to_string(), self.addr.scheme());
+        let guard = super::decoy::ProbeGuard::new(self.probe_limiter.clone(), peer_addr.ip(), true);
+        let stream = super::decoy::ProbeIo::new(stream, guard.clone());
+        let admission = super::stealth_tls::ConnectIpAdmission::from_flags(&self.flags);
         let mut server = ServerBuilder::new()
             .limits(Limits::default().max_payload_len(Some(MAX_WS_MESSAGE_BYTES)));
         if ws_via_cdn(&self.addr) {
@@ -307,13 +324,25 @@ impl WsTunnelListener {
         let (request, stream) = server
             .max_headers(128)
             .accept_if(stream, |request| {
-                request.uri().path() == self.addr.path()
+                let authorized = admission.as_ref().is_none_or(|admission| {
+                    request
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| admission.verify_header(value))
+                });
+                let accepted = authorized
+                    && request.uri().path() == self.addr.path()
                     && (!ws_via_cdn(&self.addr)
                         || request
                             .headers()
                             .get(http::header::SEC_WEBSOCKET_PROTOCOL)
                             .and_then(|value| value.to_str().ok())
-                            == Some(cdn::SUBPROTOCOL))
+                            == Some(cdn::SUBPROTOCOL));
+                if accepted && admission.is_some() {
+                    guard.authenticate();
+                }
+                accepted && guard.allow_response()
             })
             .await?;
         if self
@@ -355,16 +384,19 @@ impl WsTunnelListener {
         };
 
         if ws_via_cdn(&self.addr) {
-            return cdn::accept(stream, info).await;
+            return cdn::accept(stream, info, guard).await;
         }
         let (write, read) = stream.split();
 
-        Ok(Box::new(TunnelWrapper::new_with_transport_binding(
-            read.filter_map(map_from_ws_message),
-            write.with(sink_from_zc_packet),
-            Some(info),
-            transport_binding,
-        )))
+        Ok(Box::new(
+            TunnelWrapper::new_with_transport_binding(
+                read.filter_map(map_from_ws_message),
+                write.with(sink_from_zc_packet),
+                Some(info),
+                transport_binding,
+            )
+            .with_probe_guard(guard),
+        ))
     }
 }
 
@@ -412,7 +444,7 @@ impl TunnelListener for WsTunnelListener {
             };
             let (stream, _) = accepted?;
             if let Some(context) = self.global_ctx.upgrade() {
-                let flags = context.get_flags();
+                let flags = super::stealth_tls::ConnectIpAdmission::stream_flags(&context);
                 if flags.camouflage_config() != self.flags.camouflage_config() {
                     self.tls_acceptor =
                         Some(TlsAcceptor::from(Arc::new(wss_server_config(&flags)?)));
@@ -580,7 +612,9 @@ impl WsTunnelConnector {
                 TunnelError::InvalidAddr("invalid camouflage.http_host port".into())
             })?;
         }
-        let (client, response) = browser_ws_client(&request_addr)?.connect_on(stream).await?;
+        let (client, response) = browser_ws_client(&request_addr, flags)?
+            .connect_on(stream)
+            .await?;
         if ws_via_cdn(addr) {
             if response
                 .headers()
@@ -717,20 +751,31 @@ pub mod tests {
     async fn configured_wss_path_rejects_other_paths_before_upgrade() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         timeout(Duration::from_secs(3), async {
-            for (path, accepted) in [("/other", false), ("/vpn", true)] {
+            let mut flags = crate::common::config::gen_default_flags();
+            flags.camouflage_config_mut().wss_path = "/vpn".into();
+            flags.camouflage_config_mut().admission_secret = "wss-probe-test-admission-secret".into();
+            let admission = super::super::stealth_tls::ConnectIpAdmission::from_flags(&flags).unwrap();
+            for (path, token, expected) in [
+                ("/other", true, Some("HTTP/1.1 400")),
+                ("/vpn", false, Some("HTTP/1.1 400")),
+                ("/vpn", false, None),
+                ("/vpn", true, Some("HTTP/1.1 101")),
+            ] {
                 let (mut client, server) = tokio::io::duplex(4096);
                 let mut listener = WsTunnelListener::new("wss://127.0.0.1:1234".parse().unwrap());
-                let mut flags = crate::common::config::gen_default_flags();
-                flags.camouflage_config_mut().wss_path = "/vpn".into();
-                listener.set_flags(flags);
-                let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+                listener.set_flags(flags.clone());
+                let authorization = if token { format!("Authorization: Bearer {}\r\n", admission.current_token()) } else { String::new() };
+                let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{authorization}\r\n");
                 client.write_all(request.as_bytes()).await.unwrap();
                 let result = listener.accept_stream(server, None, "127.0.0.1:5678".parse().unwrap()).await;
-                assert_eq!(result.is_ok(), accepted);
+                assert_eq!(result.is_ok(), expected == Some("HTTP/1.1 101"));
                 drop(result);
                 let mut response = String::new();
                 client.read_to_string(&mut response).await.unwrap();
-                assert!(response.starts_with(if accepted { "HTTP/1.1 101" } else { "HTTP/1.1 400" }), "{response}");
+                match expected {
+                    Some(prefix) => assert!(response.starts_with(prefix), "{response}"),
+                    None => assert!(response.is_empty(), "third probe received a response: {response}"),
+                }
             }
         }).await.unwrap();
     }
@@ -803,7 +848,8 @@ pub mod tests {
                 inner: server_io,
                 vectored: vectored.clone(),
             };
-            let client_builder = browser_ws_client(&url).unwrap();
+            let client_builder =
+                browser_ws_client(&url, &crate::common::config::gen_default_flags()).unwrap();
             let (server, client) = tokio::join!(
                 ws_listener.accept_stream(server_io, None, peer),
                 client_builder.connect_on(client_io)
@@ -924,11 +970,12 @@ pub mod tests {
                 super::super::browser_tls::connect(stream, "localhost", &[HTTP_1_1_ALPN], false)
                     .await
                     .unwrap();
-            let (mut client, _) = browser_ws_client(&url)
-                .unwrap()
-                .connect_on(tls)
-                .await
-                .unwrap();
+            let (mut client, _) =
+                browser_ws_client(&url, &crate::common::config::gen_default_flags())
+                    .unwrap()
+                    .connect_on(tls)
+                    .await
+                    .unwrap();
             let mut header = vec![0x82, 0xff];
             header.extend_from_slice(&((MAX_WS_MESSAGE_BYTES + 1) as u64).to_be_bytes());
             header.extend_from_slice(&[0; 4]);

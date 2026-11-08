@@ -67,11 +67,15 @@ async fn caddy_multiplexes_tcp_transports() {
                             listener.set_flags(flags.clone());
                             Box::new(listener)
                         }
-                        _ => Box::new(WsTunnelListener::new(
-                            format!("wss://127.0.0.1:0?lanes={lane_count}")
-                                .parse()
-                                .unwrap(),
-                        )),
+                        _ => {
+                            let mut listener = WsTunnelListener::new(
+                                format!("wss://127.0.0.1:0?lanes={lane_count}")
+                                    .parse()
+                                    .unwrap(),
+                            );
+                            listener.set_flags(flags.clone());
+                            Box::new(listener)
+                        }
                     };
                     listener.listen().await.unwrap();
                     upstreams.push(listener.local_url().port().unwrap());
@@ -227,6 +231,7 @@ https://web.invalid:{web_port}, https://{HOST}:{web_port} {{
                                     .parse()
                                     .unwrap(),
                             );
+                            connector.set_flags(flags.clone());
                             connector.set_resolved_addr(public);
                             connector.connect().await.unwrap()
                         }

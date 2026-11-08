@@ -543,6 +543,13 @@ SNI. Nginx stream-passthroughs TCP and UDP to LowTier. Marked LowTier
 clients become a VPN hop. Unmarked probes are spliced to the real
 Cloudflare host and complete TLS with Cloudflare's certificate.
 
+Probe forwarding permits two sessions per source within a rolling 60-second window.
+QUIC, H2, and WSS share the same counter across all process listeners.
+Each session permits 64 KiB across both directions, five seconds of inactivity, and ten seconds of total lifetime.
+The third session receives no upstream connection.
+TLS prevents counting individual page requests on a reused connection.
+See [decoy limits](docs/decoy-passthrough.md) for source grouping and authentication exceptions.
+
 Configure the same `camouflage.admission_secret` on credential peers. Secret-based
 networks use `network.secret` when `camouflage.admission_secret` is empty. LowTier
 rotates the encrypted admission token every five minutes.

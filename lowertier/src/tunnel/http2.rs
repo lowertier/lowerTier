@@ -128,13 +128,18 @@ fn is_tcp_routing_record(header: &[u8; 5]) -> bool {
         && u16::from_be_bytes([header[3], header[4]]) as usize == QUIC_ROUTING_CID_BYTES
 }
 
-fn spawn_passthrough_tcp(client: TcpStream, prefix: Vec<u8>, upstream: std::net::SocketAddr) {
+fn spawn_passthrough_tcp(
+    client: TcpStream,
+    prefix: Vec<u8>,
+    upstream: std::net::SocketAddr,
+    limiter: &Arc<super::decoy::DecoyLimiter>,
+) {
     let Ok(peer) = client.peer_addr() else {
         return;
     };
     // Acquire before spawning or dialing. All listeners and both protocols share
     // the same process and source-IP budgets; authenticated tunnels bypass this.
-    let Some(permit) = super::decoy::process_limiter().admit(peer.ip()) else {
+    let Some(permit) = limiter.admit(peer.ip()) else {
         return;
     };
     tokio::spawn(async move {
@@ -160,7 +165,7 @@ async fn passthrough_tcp(
     if let Err(error) = upstream.set_nodelay(true) {
         tracing::warn!(?error, "set_nodelay fail on HTTP/2 decoy upstream");
     }
-    permit.wait(prefix.len()).await;
+    permit.wait(prefix.len()).await?;
     tokio::time::timeout(super::decoy::IDLE_TIMEOUT, upstream.write_all(prefix)).await??;
     let (client_read, client_write) = client.split();
     let (upstream_read, upstream_write) = upstream.split();
@@ -633,10 +638,29 @@ pub async fn accept(
     local_url: url::Url,
     flags: &Flags,
 ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
+    accept_with_limiter(
+        stream,
+        acceptor,
+        local_url,
+        flags,
+        super::decoy::process_limiter(),
+        true,
+    )
+    .await
+}
+
+pub(super) async fn accept_with_limiter(
+    stream: TcpStream,
+    acceptor: &TlsAcceptor,
+    local_url: url::Url,
+    flags: &Flags,
+    limiter: Arc<super::decoy::DecoyLimiter>,
+    limit_setup: bool,
+) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
     // One deadline covers routing inspection, TLS, and CONNECT admission.
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        accept_inner(stream, acceptor, local_url, flags),
+        accept_inner(stream, acceptor, local_url, flags, &limiter, limit_setup),
     )
     .await
     .map_err(|_| TunnelError::InternalError("HTTP/2 admission timed out".into()))?
@@ -647,6 +671,8 @@ async fn accept_inner(
     acceptor: &TlsAcceptor,
     local_url: url::Url,
     flags: &Flags,
+    limiter: &Arc<super::decoy::DecoyLimiter>,
+    limit_setup: bool,
 ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
     if let Err(error) = stream.set_nodelay(true) {
         tracing::warn!(?error, "set_nodelay fail in HTTP/2 accept");
@@ -686,7 +712,7 @@ async fn accept_inner(
             let upstream = decoy_upstream(flags).await.ok_or_else(|| {
                 TunnelError::InternalError("HTTP/2 decoy upstream resolution failed".to_owned())
             })?;
-            spawn_passthrough_tcp(stream, prefix, upstream);
+            spawn_passthrough_tcp(stream, prefix, upstream, limiter);
             return Ok(None);
         }
     }
@@ -703,6 +729,12 @@ async fn accept_inner(
             )
             .map(|_| ())
     })?;
+
+    let guard = super::decoy::ProbeGuard::new(limiter.clone(), peer_addr.ip(), false);
+    if !limit_setup {
+        guard.authenticate();
+    }
+    let tls = super::decoy::ProbeIo::new(tls, guard.clone());
 
     let (stream_window, conn_window) = window_sizes();
     let mut server = h2::server::Builder::new();
@@ -739,6 +771,9 @@ async fn accept_inner(
         None => true,
     };
     if !is_connect_ip || !authorized {
+        if !guard.allow_response() {
+            return Err(TunnelError::Shutdown);
+        }
         let _ = respond.send_response(
             Response::builder()
                 .status(StatusCode::BAD_REQUEST)
@@ -751,6 +786,13 @@ async fn accept_inner(
         ));
     }
 
+    if admission.is_some() {
+        guard.authenticate();
+    }
+    if !guard.allow_response() {
+        return Err(TunnelError::Shutdown);
+    }
+
     let recv = request.into_body();
     let send = respond
         .send_response(
@@ -760,10 +802,8 @@ async fn accept_inner(
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 response: {error}")))?;
 
     let driver = AbortOnDropHandle::new(tokio::spawn(async move {
-        while let Some(result) = conn.accept().await {
-            if let Ok((_, mut respond)) = result {
-                respond.send_reset(h2::Reason::REFUSED_STREAM);
-            }
+        while let Some(Ok((_, mut respond))) = conn.accept().await {
+            respond.send_reset(h2::Reason::REFUSED_STREAM);
         }
     }));
 
@@ -774,9 +814,15 @@ async fn accept_inner(
         remote_addr: Some(remote.clone().into()),
         resolved_remote_addr: Some(remote.into()),
     };
-    Ok(Some(wrap_http2_tunnel(
-        recv, send, budget, info, binding, driver,
-    )))
+    let mut tunnel = TunnelWrapper::new_with_transport_binding(
+        H2PacketReader::new(recv),
+        FramedWriter::new(H2Writer::new(send, budget)),
+        Some(info),
+        Some(binding),
+    )
+    .with_probe_guard(guard);
+    tunnel.set_associate_data(Box::new(driver));
+    Ok(Some(Box::new(tunnel)))
 }
 
 pub async fn connect(

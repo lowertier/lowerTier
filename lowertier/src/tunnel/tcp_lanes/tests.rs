@@ -545,6 +545,8 @@ async fn h2_and_wss_pairs_preserve_frames_and_bind_both_connections() {
             client.transport_binding().unwrap().kind,
             TransportBindingKind::TlsExporterLanesV1
         );
+        // This transport fixture starts after peer authentication.
+        server.probe_guard().unwrap().authenticate();
         let (mut cr, mut cw) = client.split();
         let (mut sr, mut sw) = server.split();
         transfer(&mut cw, &mut sr, lane_count).await;
@@ -827,12 +829,17 @@ async fn wss_listener_rejects_oversized_join_without_poisoning_next_group() {
     };
     timeout(Duration::from_secs(10), async {
         let mut listener = WsTunnelListener::new("wss://127.0.0.1:0?lanes=4".parse().unwrap());
+        let mut flags = crate::common::config::gen_default_flags();
+        flags.camouflage_config_mut().admission_secret = "lane-size-admission-test-key".into();
+        listener.set_flags(flags.clone());
         listener.listen().await.unwrap();
         let paired_url = listener.local_url();
         let mut single_url = paired_url.clone();
         single_url.set_query(None);
         let accepted = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let bad = WsTunnelConnector::new(single_url).connect().await.unwrap();
+        let mut connector = WsTunnelConnector::new(single_url);
+        connector.set_flags(flags.clone());
+        let bad = connector.connect().await.unwrap();
         let (mut recv, mut send) = bad.split();
         let oversized = ZCPacket::new_with_payload(&vec![0; MAX_PENDING_BYTES + 1]);
         let _ = send.send(PacketBatch::singleton(oversized)).await;
@@ -840,7 +847,9 @@ async fn wss_listener_rejects_oversized_join_without_poisoning_next_group() {
         drop(send);
         drop(recv);
         drop(bad);
-        let client = WsTunnelConnector::new(paired_url).connect().await.unwrap();
+        let mut connector = WsTunnelConnector::new(paired_url);
+        connector.set_flags(flags);
+        let client = connector.connect().await.unwrap();
         let server = accepted.await.unwrap();
         assert_eq!(client.transport_binding(), server.transport_binding());
     })

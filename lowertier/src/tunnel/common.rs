@@ -147,6 +147,7 @@ pub struct TunnelWrapper<R, W> {
     associate_data: Option<Box<dyn Any + Send + 'static>>,
     transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
+    probe_guard: Option<Arc<super::ProbeGuard>>,
 }
 
 impl<R, W> TunnelWrapper<R, W> {
@@ -167,6 +168,7 @@ impl<R, W> TunnelWrapper<R, W> {
             associate_data,
             transport_binding: None,
             transport_authenticated: false,
+            probe_guard: None,
         }
     }
 
@@ -183,6 +185,7 @@ impl<R, W> TunnelWrapper<R, W> {
             associate_data: None,
             transport_binding: None,
             transport_authenticated,
+            probe_guard: None,
         }
     }
 
@@ -215,11 +218,17 @@ impl<R, W> TunnelWrapper<R, W> {
             associate_data: None,
             transport_binding,
             transport_authenticated,
+            probe_guard: None,
         }
     }
 
     pub fn set_associate_data(&mut self, associate_data: Box<dyn Any + Send + 'static>) {
         self.associate_data = Some(associate_data);
+    }
+
+    pub(crate) fn with_probe_guard(mut self, guard: Arc<super::ProbeGuard>) -> Self {
+        self.probe_guard = Some(guard);
+        self
     }
 }
 
@@ -247,6 +256,10 @@ where
 
     fn is_transport_authenticated(&self) -> bool {
         self.transport_authenticated
+    }
+
+    fn probe_guard(&self) -> Option<Arc<super::ProbeGuard>> {
+        self.probe_guard.clone()
     }
 }
 

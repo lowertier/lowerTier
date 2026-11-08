@@ -8,19 +8,33 @@ use std::{
     collections::HashMap,
     io,
     net::IpAddr,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use parking_lot::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
 const MAX_IPS: usize = 4096;
 const MAX_FLOWS: usize = 128;
-const MAX_IP_FLOWS: usize = 8;
+const MAX_IP_FLOWS: usize = 2;
 const IP_RETENTION: Duration = Duration::from_secs(60);
-pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-pub(super) const FLOW_LIFETIME: Duration = Duration::from_secs(300);
+pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const FLOW_LIFETIME: Duration = Duration::from_secs(10);
+pub(super) const MAX_PROBE_BYTES: usize = 64 * 1024;
+pub(super) const WEBSITE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const WEBSITE_FLOW_LIFETIME: Duration = Duration::from_secs(300);
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
@@ -78,7 +92,7 @@ struct Source {
     packets: Bucket,
     opens: Bucket,
     active: usize,
-    used: Instant,
+    probes: [Option<Instant>; MAX_IP_FLOWS],
 }
 
 #[derive(Debug)]
@@ -99,21 +113,31 @@ pub(super) struct DecoyLimiter {
 pub(super) struct DecoyPermit {
     limiter: Arc<DecoyLimiter>,
     ip: IpAddr,
+    remaining: AtomicUsize,
+    probe_started: Option<Instant>,
 }
 
 pub(super) fn process_limiter() -> Arc<DecoyLimiter> {
-    static LIMITER: OnceLock<Arc<DecoyLimiter>> = OnceLock::new();
-    LIMITER
-        .get_or_init(|| DecoyLimiter::new(Limits::default()))
-        .clone()
+    #[cfg(test)]
+    {
+        // Each test owns a listener group. Capture this owner before spawning tasks.
+        thread_local! { static LIMITER: Arc<DecoyLimiter> = DecoyLimiter::new(Limits::default()); }
+        return LIMITER.with(Arc::clone);
+    }
+    #[cfg(not(test))]
+    {
+        static LIMITER: OnceLock<Arc<DecoyLimiter>> = OnceLock::new();
+        LIMITER
+            .get_or_init(|| DecoyLimiter::new(Limits::default()))
+            .clone()
+    }
 }
 
 fn source_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(ip) => ip
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or_else(|| {
+            IpAddr::V6(std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 64)))
+        }),
         ip => ip,
     }
 }
@@ -138,11 +162,24 @@ impl DecoyLimiter {
         self.admit_at(source_ip(ip), Instant::now())
     }
 
+    pub(super) fn admit_website(self: &Arc<Self>, ip: IpAddr) -> Option<DecoyPermit> {
+        self.admit_inner(source_ip(ip), Instant::now(), false)
+    }
+
     fn admit_at(self: &Arc<Self>, ip: IpAddr, now: Instant) -> Option<DecoyPermit> {
+        self.admit_inner(ip, now, true)
+    }
+
+    fn admit_inner(self: &Arc<Self>, ip: IpAddr, now: Instant, probe: bool) -> Option<DecoyPermit> {
         let mut state = self.state.lock();
-        if now.duration_since(state.cleaned) >= IP_RETENTION {
+        if now.duration_since(state.cleaned) >= Duration::from_secs(1) {
             state.sources.retain(|_, source| {
-                source.active != 0 || now.duration_since(source.used) < IP_RETENTION
+                source.active != 0
+                    || source
+                        .probes
+                        .iter()
+                        .flatten()
+                        .any(|started| now.duration_since(*started) < IP_RETENTION)
             });
             state.cleaned = now;
         }
@@ -157,11 +194,16 @@ impl DecoyLimiter {
             packets: Bucket::new(512, 128, now),
             opens: Bucket::new(4, 8, now),
             active: 0,
-            used: now,
+            probes: [None; 2],
         });
-        source.used = now;
-        if source.active >= MAX_IP_FLOWS || !source.opens.delay(1, now).is_zero() {
+        if source.active >= 8 || !source.opens.delay(1, now).is_zero() {
             return None;
+        }
+        if probe {
+            let slot = source.probes.iter_mut().find(|started| {
+                started.is_none_or(|started| now.duration_since(started) >= IP_RETENTION)
+            })?;
+            *slot = Some(now);
         }
         source.opens.take(1);
         source.active += 1;
@@ -170,13 +212,43 @@ impl DecoyLimiter {
         Some(DecoyPermit {
             limiter: self.clone(),
             ip,
+            remaining: AtomicUsize::new(MAX_PROBE_BYTES),
+            probe_started: probe.then_some(now),
         })
     }
 }
 
 impl DecoyPermit {
+    /// A valid admission token removes only this provisional probe reservation.
+    pub(super) fn exempt(self) {
+        let mut state = self.limiter.state.lock();
+        let source = state
+            .sources
+            .get_mut(&self.ip)
+            .expect("live permit keeps source");
+        if let Some(started) = self.probe_started {
+            if let Some(slot) = source
+                .probes
+                .iter_mut()
+                .find(|slot| **slot == Some(started))
+            {
+                *slot = None;
+            }
+        }
+        source.opens.tokens = (source.opens.tokens + 1.0).min(source.opens.capacity);
+        state.opens.tokens = (state.opens.tokens + 1.0).min(state.opens.capacity);
+    }
+
+    pub(super) fn next_session(&self) -> Option<Self> {
+        self.limiter.admit(self.ip)
+    }
+
     fn delay_at(&self, bytes: usize, udp: bool, now: Instant) -> Duration {
         let mut state = self.limiter.state.lock();
+        let remaining = self.remaining.load(Ordering::Relaxed);
+        if bytes > remaining {
+            return Duration::MAX;
+        }
         let global = state.bytes.delay(bytes, now);
         let packets = if udp {
             state.packets.delay(1, now)
@@ -187,13 +259,13 @@ impl DecoyPermit {
             .sources
             .get_mut(&self.ip)
             .expect("live permit keeps source");
-        source.used = now;
         let mut delay = global.max(packets).max(source.bytes.delay(bytes, now));
         if udp {
             delay = delay.max(source.packets.delay(1, now));
         }
         // Charge both budgets atomically, only if both allow the operation.
         if delay.is_zero() {
+            self.remaining.store(remaining - bytes, Ordering::Relaxed);
             source.bytes.take(bytes);
             if udp {
                 source.packets.take(1);
@@ -210,19 +282,29 @@ impl DecoyPermit {
         self.delay_at(bytes, true, Instant::now()).is_zero()
     }
 
-    pub(super) async fn wait(&self, bytes: usize) {
-        self.wait_for(bytes, false).await;
+    pub(super) fn can_forward(&self, bytes: usize) -> bool {
+        bytes <= self.remaining.load(Ordering::Relaxed)
     }
 
-    pub(super) async fn pace_datagram(&self, bytes: usize) {
-        self.wait_for(bytes, true).await;
+    pub(super) async fn wait(&self, bytes: usize) -> io::Result<()> {
+        self.wait_for(bytes, false).await
     }
 
-    async fn wait_for(&self, bytes: usize, udp: bool) {
+    pub(super) async fn pace_datagram(&self, bytes: usize) -> io::Result<()> {
+        self.wait_for(bytes, true).await
+    }
+
+    async fn wait_for(&self, bytes: usize, udp: bool) -> io::Result<()> {
         loop {
             let delay = self.delay_at(bytes, udp, Instant::now());
+            if delay == Duration::MAX {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "decoy session byte limit",
+                ));
+            }
             if delay.is_zero() {
-                return;
+                return Ok(());
             }
             tokio::time::sleep(delay.max(Duration::from_millis(1))).await;
         }
@@ -238,7 +320,259 @@ impl Drop for DecoyPermit {
             .get_mut(&self.ip)
             .expect("live permit keeps source");
         source.active -= 1;
-        source.used = Instant::now();
+    }
+}
+
+struct ProbeSession {
+    permit: Option<DecoyPermit>,
+    authenticated: bool,
+    remaining: usize,
+    started: Instant,
+    activity: Instant,
+    enforce_admission: bool,
+}
+
+/// Bounds transport setup until admission or Noise authentication succeeds.
+#[doc(hidden)]
+pub struct ProbeGuard {
+    session: Mutex<Arc<Mutex<ProbeSession>>>,
+    limiter: Arc<DecoyLimiter>,
+    source: IpAddr,
+}
+
+impl ProbeGuard {
+    pub(super) fn new(
+        limiter: Arc<DecoyLimiter>,
+        source: IpAddr,
+        enforce_admission: bool,
+    ) -> Arc<Self> {
+        let now = Instant::now();
+        let permit = limiter.admit(source);
+        Arc::new(Self {
+            session: Mutex::new(Arc::new(Mutex::new(ProbeSession {
+                permit,
+                authenticated: false,
+                remaining: MAX_PROBE_BYTES,
+                started: now,
+                activity: now,
+                enforce_admission,
+            }))),
+            limiter,
+            source: source_ip(source),
+        })
+    }
+
+    pub(crate) fn authenticate(&self) {
+        let owner = self.session.lock().clone();
+        let mut session = owner.lock();
+        session.authenticated = true;
+        if let Some(permit) = session.permit.take() {
+            permit.exempt();
+        }
+    }
+
+    pub(super) fn allow_response(&self) -> bool {
+        let owner = self.session.lock().clone();
+        let mut session = owner.lock();
+        session.enforce_admission = true;
+        session.authenticated || session.permit.is_some()
+    }
+
+    pub(super) fn join(&self, primary: &Self) -> Result<(), super::TunnelError> {
+        if self.source != primary.source || !Arc::ptr_eq(&self.limiter, &primary.limiter) {
+            return Err(super::TunnelError::InvalidProtocol(
+                "probe lane source differs".into(),
+            ));
+        }
+        let target = primary.session.lock().clone();
+        let mut current = self.session.lock();
+        if Arc::ptr_eq(&current, &target) {
+            return Ok(());
+        }
+        {
+            let mut old = current.lock();
+            let mut session = target.lock();
+            let consumed = MAX_PROBE_BYTES - old.remaining;
+            if !session.authenticated {
+                session.remaining = session.remaining.checked_sub(consumed).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::PermissionDenied, "probe lane byte limit")
+                })?;
+                session.started = session.started.min(old.started);
+            }
+            if let Some(permit) = old.permit.take() {
+                permit.exempt();
+            }
+        }
+        *current = target;
+        Ok(())
+    }
+}
+
+/// Includes HTTP framing and control traffic in the setup byte and time limits.
+pub(super) struct ProbeIo<S> {
+    inner: S,
+    guard: Option<Arc<ProbeGuard>>,
+    timer: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl<S> ProbeIo<S> {
+    pub(super) fn new(inner: S, guard: Arc<ProbeGuard>) -> Self {
+        Self {
+            inner,
+            guard: Some(guard),
+            timer: Box::pin(tokio::time::sleep(IDLE_TIMEOUT)),
+        }
+    }
+
+    fn authenticated(
+        &mut self,
+        owner: &Mutex<ProbeSession>,
+        cx: &mut Context<'_>,
+    ) -> io::Result<bool> {
+        let session = owner.lock();
+        if session.authenticated {
+            self.guard = None;
+            return Ok(true);
+        }
+        let deadline = (session.started + FLOW_LIFETIME).min(session.activity + IDLE_TIMEOUT);
+        self.timer.as_mut().reset(deadline);
+        if self.timer.as_mut().poll(cx).is_ready() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "probe session timeout",
+            ));
+        }
+        if session.remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "probe byte limit",
+            ));
+        }
+        Ok(false)
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ProbeIo<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if out.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let Some(guard) = this.guard.clone() else {
+            return Pin::new(&mut this.inner).poll_read(cx, out);
+        };
+        // Keep the owner stable while a lane joins the shared session.
+        let owner = guard.session.lock();
+        if this.authenticated(&owner, cx)? {
+            return Pin::new(&mut this.inner).poll_read(cx, out);
+        }
+        let mut session = owner.lock();
+        let count = out.remaining().min(session.remaining);
+        let mut limited = ReadBuf::new(out.initialize_unfilled_to(count));
+        let result = Pin::new(&mut this.inner).poll_read(cx, &mut limited);
+        let count = limited.filled().len();
+        session.remaining -= count;
+        if count != 0 {
+            session.activity = Instant::now();
+        }
+        out.advance(count);
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ProbeIo<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if bytes.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let Some(guard) = this.guard.clone() else {
+            return Pin::new(&mut this.inner).poll_write(cx, bytes);
+        };
+        let owner = guard.session.lock();
+        if this.authenticated(&owner, cx)? {
+            return Pin::new(&mut this.inner).poll_write(cx, bytes);
+        }
+        let mut session = owner.lock();
+        if session.enforce_admission && session.permit.is_none() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "probe session limit",
+            )));
+        }
+        let count = bytes.len().min(session.remaining);
+        let result = Pin::new(&mut this.inner).poll_write(cx, &bytes[..count]);
+        if let Poll::Ready(Ok(count)) = result {
+            session.remaining -= count;
+            if count != 0 {
+                session.activity = Instant::now();
+            }
+        }
+        result
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let Some(guard) = this.guard.clone() else {
+            return Pin::new(&mut this.inner).poll_write_vectored(cx, bytes);
+        };
+        let owner = guard.session.lock();
+        if this.authenticated(&owner, cx)? {
+            return Pin::new(&mut this.inner).poll_write_vectored(cx, bytes);
+        }
+        let mut session = owner.lock();
+        if session.enforce_admission && session.permit.is_none() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "probe session limit",
+            )));
+        }
+        let total = bytes.iter().map(|bytes| bytes.len()).sum::<usize>();
+        let result = if total <= session.remaining {
+            Pin::new(&mut this.inner).poll_write_vectored(cx, bytes)
+        } else {
+            let first = bytes
+                .iter()
+                .find(|bytes| !bytes.is_empty())
+                .map_or(&[][..], |bytes| &bytes[..]);
+            Pin::new(&mut this.inner).poll_write(cx, &first[..first.len().min(session.remaining)])
+        };
+        if let Poll::Ready(Ok(count)) = result {
+            session.remaining -= count;
+            if count != 0 {
+                session.activity = Instant::now();
+            }
+        }
+        result
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(guard) = self.guard.clone() {
+            let owner = guard.session.lock();
+            self.authenticated(&owner, cx)?;
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(guard) = self.guard.clone() {
+            let owner = guard.session.lock();
+            self.authenticated(&owner, cx)?;
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -260,7 +594,7 @@ where
             return writer.shutdown().await;
         }
         activity.notify_one();
-        permit.wait(length).await;
+        permit.wait(length).await?;
         tokio::time::timeout(IDLE_TIMEOUT, writer.write_all(&buffer[..length])).await??;
         activity.notify_one();
     }
@@ -366,6 +700,17 @@ pub(super) struct QuicReturnPath {
 }
 
 impl QuicReturnPath {
+    pub(super) fn is_new_connection(&self, packet: &[u8]) -> bool {
+        !self.original_dcid.is_empty()
+            && long_header(packet).is_some_and(|header| {
+                header.kind == 0
+                    && is_quic_initial(packet)
+                    && !(header.version == self.version
+                        && header.scid == self.client_scid
+                        && (header.dcid == self.original_dcid || header.dcid == self.server_cid))
+            })
+    }
+
     pub(super) fn received(&mut self, packet: &[u8]) {
         if let Some(header) = long_header(packet) {
             let same_connection = header.version == self.version
@@ -444,10 +789,17 @@ mod tests {
         assert_eq!(two.delay_at(50, false, now), Duration::from_millis(500));
         drop(one);
         drop(two);
-        let next = limiter.admit_at(ip(1), now).unwrap();
-        assert_eq!(next.delay_at(50, false, now), Duration::from_millis(500));
+        assert!(limiter.admit_at(ip(1), now).is_none());
         assert!(
-            next.delay_at(50, false, now + Duration::from_millis(500))
+            limiter
+                .admit_at(ip(1), now + Duration::from_secs(59))
+                .is_none()
+        );
+        let next = limiter
+            .admit_at(ip(1), now + Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            next.delay_at(100, false, now + Duration::from_secs(60))
                 .is_zero()
         );
         assert!(
@@ -463,6 +815,7 @@ mod tests {
 
     #[test]
     fn global_budget_is_shared_across_ips_and_protocols_without_partial_charges() {
+        mapped_ipv4_cannot_obtain_a_second_budget();
         let limiter = DecoyLimiter::new(Limits {
             bytes_per_second: 100,
             burst: 100,
@@ -482,31 +835,59 @@ mod tests {
     fn bounded_admission_retains_bursts_and_releases_active_permits() {
         let limiter = DecoyLimiter::new(Limits::default());
         let now = Instant::now();
-        for _ in 0..8 {
+        for _ in 0..2 {
             drop(limiter.admit_at(ip(1), now).unwrap());
         }
         assert!(limiter.admit_at(ip(1), now).is_none());
         assert_eq!(limiter.state.lock().active, 0);
-        let later = now + Duration::from_secs(10);
-        let mut permits = Vec::new();
-        for i in 0..8 {
-            permits.push(
-                limiter
-                    .admit_at(ip(1), later + Duration::from_secs(i))
-                    .unwrap(),
-            );
-        }
         assert!(
             limiter
-                .admit_at(ip(1), later + Duration::from_secs(10))
+                .admit_at(ip(1), now + Duration::from_secs(59))
                 .is_none()
         );
-        drop(permits);
+        let later = now + Duration::from_secs(60);
+        let first = limiter.admit_at(ip(1), later).unwrap();
+        let second = limiter
+            .admit_at(ip(1), later + Duration::from_secs(1))
+            .unwrap();
         assert!(
             limiter
-                .admit_at(ip(1), later + Duration::from_secs(11))
+                .admit_at(ip(1), later + Duration::from_secs(2))
+                .is_none()
+        );
+        drop(first);
+        drop(second);
+        assert!(
+            limiter
+                .admit_at(ip(1), later + Duration::from_secs(59))
+                .is_none()
+        );
+        assert!(
+            limiter
+                .admit_at(ip(1), later + Duration::from_secs(60))
                 .is_some()
         );
+        assert!(
+            limiter
+                .admit_at(ip(1), later + Duration::from_secs(60))
+                .is_none()
+        );
+        assert!(
+            limiter
+                .admit_at(ip(1), later + Duration::from_secs(61))
+                .is_some()
+        );
+        drop(
+            limiter
+                .admit_at(ip(2), later + Duration::from_secs(122))
+                .unwrap(),
+        );
+        assert!(!limiter.state.lock().sources.contains_key(&ip(1)));
+        let authenticated = DecoyLimiter::new(Limits::default());
+        for _ in 0..64 {
+            authenticated.admit_at(ip(3), now).unwrap().exempt();
+        }
+        assert_eq!(authenticated.state.lock().active, 0);
     }
 
     #[test]
@@ -562,10 +943,10 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for _ in 0..3 {
             let limiter = DecoyLimiter::new(Limits {
-                bytes_per_second: 256 * 1024,
-                burst: 32 * 1024,
-                ip_bytes_per_second: 256 * 1024,
-                ip_burst: 32 * 1024,
+                bytes_per_second: 32 * 1024,
+                burst: 4 * 1024,
+                ip_bytes_per_second: 32 * 1024,
+                ip_burst: 4 * 1024,
             });
             let permit = limiter.admit(ip(1)).unwrap();
             let (mut client, mut front) = tokio::io::duplex(1024);
@@ -581,7 +962,7 @@ mod tests {
                 )
                 .unwrap();
             });
-            let payload = vec![0xa5; 128 * 1024];
+            let payload = vec![0xa5; 16 * 1024];
             let expected = payload.clone();
             let peer = tokio::spawn(async move {
                 let mut received = Vec::new();
@@ -601,7 +982,7 @@ mod tests {
             })
             .await
             .unwrap();
-            // Combined directions: (256 KiB - 32 KiB burst) / 256 KiB/s.
+            // Combined directions: (32 KiB - 4 KiB burst) / 32 KiB/s.
             assert!(start.elapsed() >= Duration::from_millis(875));
             assert_eq!(limiter.state.lock().active, 0);
         }
@@ -609,6 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_idle_timer_tracks_activity_from_either_direction() {
+        probe_setup_limits_and_lane_authentication().await;
         let activity = tokio::sync::Notify::new();
         let idle = tcp_idle(&activity, Duration::from_millis(200));
         tokio::pin!(idle);
@@ -625,30 +1007,182 @@ mod tests {
             .unwrap();
     }
 
+    async fn probe_setup_limits_and_lane_authentication() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let limiter = DecoyLimiter::new(Limits::default());
+        let primary = ProbeGuard::new(limiter.clone(), ip(1), true);
+        let mut lanes = Vec::new();
+        for _ in 0..3 {
+            let lane = ProbeGuard::new(limiter.clone(), ip(1), true);
+            assert!(lane.allow_response());
+            lane.join(&primary).unwrap();
+            lanes.push(lane);
+        }
+        assert_eq!(limiter.state.lock().active, 1);
+        assert_eq!(
+            limiter.state.lock().sources[&ip(1)]
+                .probes
+                .iter()
+                .flatten()
+                .count(),
+            1
+        );
+        let mut first = ProbeIo::new(tokio::io::sink(), primary.clone());
+        first
+            .write_all(&vec![1; MAX_PROBE_BYTES / 2])
+            .await
+            .unwrap();
+        let mut second = ProbeIo::new(tokio::io::sink(), lanes[0].clone());
+        second
+            .write_all(&vec![2; MAX_PROBE_BYTES / 2])
+            .await
+            .unwrap();
+        assert!(second.write_all(b"x").await.is_err());
+        primary.authenticate();
+        second
+            .write_all(&vec![3; MAX_PROBE_BYTES * 2])
+            .await
+            .unwrap();
+        assert_eq!(limiter.state.lock().active, 0);
+        assert!(
+            limiter.state.lock().sources[&ip(1)]
+                .probes
+                .iter()
+                .all(Option::is_none)
+        );
+
+        for idle in [true, false] {
+            let guard = ProbeGuard::new(limiter.clone(), ip(2), true);
+            {
+                let owner = guard.session.lock().clone();
+                let mut session = owner.lock();
+                if idle {
+                    session.activity -= IDLE_TIMEOUT;
+                } else {
+                    session.started -= FLOW_LIFETIME;
+                }
+            }
+            let (_sender, reader) = tokio::io::duplex(64);
+            let mut reader = ProbeIo::new(reader, guard);
+            let error = reader.read_u8().await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+        assert!(limiter.admit(ip(2)).is_none());
+    }
+
     #[tokio::test]
     async fn cancelling_a_waiter_releases_flow_state_without_refilling_burst() {
         let limiter = DecoyLimiter::new(Limits {
             bytes_per_second: 1,
-            burst: 64 * 1024,
+            burst: 32 * 1024,
             ip_bytes_per_second: 1,
-            ip_burst: 64 * 1024,
+            ip_burst: 32 * 1024,
         });
         let permit = limiter.admit(ip(1)).unwrap();
-        assert!(permit.delay_at(64 * 1024, false, Instant::now()).is_zero());
+        assert!(permit.delay_at(32 * 1024, false, Instant::now()).is_zero());
         let task = tokio::spawn(async move {
-            permit.wait(64 * 1024).await;
+            permit.wait(32 * 1024).await.unwrap();
         });
         tokio::task::yield_now().await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(limiter.state.lock().active, 0);
-        assert!(limiter.state.lock().sources[&ip(1)].bytes.tokens < 64.0 * 1024.0);
+        assert!(limiter.state.lock().sources[&ip(1)].bytes.tokens < 32.0 * 1024.0);
     }
 
-    #[test]
     fn mapped_ipv4_cannot_obtain_a_second_budget() {
         assert_eq!(source_ip("::ffff:192.0.2.1".parse().unwrap()), ip(1));
         assert!(Arc::ptr_eq(&process_limiter(), &process_limiter()));
+        assert_eq!(
+            source_ip("2001:db8:1:2::1".parse().unwrap()),
+            source_ip("2001:db8:1:2::ffff".parse().unwrap())
+        );
+        assert_ne!(
+            source_ip("2001:db8:1:2::1".parse().unwrap()),
+            source_ip("2001:db8:1:3::1".parse().unwrap())
+        );
+        let limiter = DecoyLimiter::new(Limits::default());
+        let permit = limiter.admit(ip(1)).unwrap();
+        assert!(
+            permit
+                .delay_at(MAX_PROBE_BYTES, false, Instant::now())
+                .is_zero()
+        );
+        assert!(!permit.can_forward(1));
+        assert_eq!(permit.delay_at(1, false, Instant::now()), Duration::MAX);
+    }
+
+    #[tokio::test]
+    async fn h2_quic_and_wss_share_two_probe_slots_and_admitted_wss_bypasses_them() {
+        use crate::common::{
+            config::gen_default_flags, global_ctx::tests::get_mock_global_ctx_with_network,
+        };
+        use crate::proto::common::DecoyUpstream;
+        use crate::tunnel::{
+            TunnelConnector, TunnelListener,
+            quic::QuicTunnelListener,
+            tcp::TcpTunnelListener,
+            websocket::{WsTunnelConnector, WsTunnelListener},
+        };
+        use futures::{SinkExt, StreamExt};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream, UdpSocket},
+        };
+        use tokio_util::task::AbortOnDropHandle;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let tcp_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let udp_origin = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut flags = gen_default_flags();
+            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".into();
+            flags.camouflage_config_mut().admission_secret = "shared-probe-test-admission-key".into();
+            flags.camouflage_config_mut().decoy_upstream = Some(DecoyUpstream {
+                tcp: tcp_origin.local_addr().unwrap().to_string(), udp: udp_origin.local_addr().unwrap().to_string(),
+            });
+            let mut h2 = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
+            h2.set_flags(flags.clone()); h2.listen().await.unwrap();
+            let h2_address = format!("127.0.0.1:{}", h2.local_url().port().unwrap());
+            let _h2 = AbortOnDropHandle::new(tokio::spawn(async move { let _ = h2.accept().await; }));
+            let mut first = TcpStream::connect(h2_address).await.unwrap();
+            first.write_all(b"probe").await.unwrap();
+            let (mut upstream, _) = tcp_origin.accept().await.unwrap();
+            let mut prefix = [0; 5]; upstream.read_exact(&mut prefix).await.unwrap();
+            assert_eq!(&prefix, b"probe");
+            upstream.write_all(b"ok").await.unwrap();
+            let mut reply = [0; 2]; first.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"ok"); drop(first); drop(upstream);
+
+            let context = get_mock_global_ctx_with_network(None); context.set_flags(flags.clone());
+            let mut quic = QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), context);
+            quic.listen().await.unwrap();
+            let quic_address = format!("127.0.0.1:{}", quic.local_url().port().unwrap());
+            let _quic = AbortOnDropHandle::new(tokio::spawn(async move { let _ = quic.accept().await; }));
+            let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            second.send_to(&packet(0, b"original", b"clientid", 1200), quic_address).await.unwrap();
+            let mut datagram = [0; 1500];
+            assert_eq!(udp_origin.recv_from(&mut datagram).await.unwrap().0, 1200);
+
+            let mut wss = WsTunnelListener::new("wss://127.0.0.1:0".parse().unwrap());
+            wss.set_flags(flags.clone()); wss.listen().await.unwrap();
+            let url = wss.local_url();
+            let server = tokio::spawn(async move { wss.accept().await.unwrap() });
+            let stream = TcpStream::connect(format!("127.0.0.1:{}", url.port().unwrap())).await.unwrap();
+            let mut probe = crate::tunnel::browser_tls::connect(stream, "challenges.cloudflare.com", &[b"http/1.1"], false).await.unwrap();
+            probe.write_all(b"GET /other HTTP/1.1\r\nHost: challenges.cloudflare.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+            let mut response = Vec::new(); let _ = probe.read_to_end(&mut response).await;
+            assert!(response.is_empty(), "third protocol received a probe response");
+            let mut connector = WsTunnelConnector::new(url); connector.set_flags(flags);
+            let client = connector.connect().await.unwrap(); let server = server.await.unwrap();
+            assert_eq!(client.transport_binding(), server.transport_binding());
+            let (_, mut send) = client.split(); let (mut receive, _) = server.split();
+            let payload = vec![0x61; MAX_PROBE_BYTES * 2];
+            let mut batch = crate::tunnel::batch::PacketBatch::new();
+            batch.try_push(crate::tunnel::packet_def::ZCPacket::new_with_payload(&payload)).unwrap();
+            send.send(batch).await.unwrap();
+            let received = receive.next().await.unwrap().unwrap().pop_singleton().unwrap();
+            assert_eq!(received.payload(), payload);
+        }).await.unwrap();
     }
 
     fn packet(kind: u8, dcid: &[u8], scid: &[u8], size: usize) -> Vec<u8> {
@@ -682,6 +1216,8 @@ mod tests {
     fn spoofed_udp_cannot_amplify_bytes_or_packets_before_return_path_evidence() {
         let mut path = QuicReturnPath::default();
         path.received(&packet(0, b"original", b"clientid", 1200));
+        assert!(!path.is_new_connection(&packet(0, b"original", b"clientid", 1200)));
+        assert!(path.is_new_connection(&packet(0, b"newstart", b"othercid", 1200)));
         assert!(!path.can_send(1201));
         let response = packet(0, b"clientid", b"serverid", 1200);
         assert!(path.can_send(response.len()));

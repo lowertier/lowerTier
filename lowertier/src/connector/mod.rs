@@ -309,13 +309,17 @@ pub async fn create_connector_by_url(
     let mut connector: Box<dyn TunnelConnector + 'static> = match scheme {
         IpScheme::H2 => {
             let mut connector = TcpTunnelConnector::new(url);
-            connector.set_flags(global_ctx.get_flags());
+            connector.set_flags(tunnel::stealth_tls::ConnectIpAdmission::stream_flags(
+                global_ctx,
+            ));
             connector.boxed()
         }
         IpScheme::Quic => tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed(),
         IpScheme::Wss => {
             let mut connector = tunnel::websocket::WsTunnelConnector::new(url);
-            connector.set_flags(global_ctx.get_flags());
+            connector.set_flags(tunnel::stealth_tls::ConnectIpAdmission::stream_flags(
+                global_ctx,
+            ));
             connector.boxed()
         }
     };

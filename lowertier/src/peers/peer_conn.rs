@@ -1305,6 +1305,7 @@ pub struct PeerConn {
     tunnel_info: Option<TunnelInfo>,
     pinned_peer_key: Option<String>,
     tunnel_path_state: Option<Arc<crate::tunnel::TunnelPathState>>,
+    probe_guard: Option<Arc<crate::tunnel::ProbeGuard>>,
     transport_binding: Option<TransportBinding>,
     receive_backpressure: Option<crate::tunnel::ReceiveBackpressure>,
     tcp_proxy: Option<Arc<crate::tunnel::quic::proxy::ProxyEndpoint>>,
@@ -1376,6 +1377,7 @@ impl PeerConn {
         let tunnel_info = tunnel.info();
         let pinned_peer_key = tunnel.pinned_peer_key().map(str::to_owned);
         let tunnel_path_state = tunnel.path_state();
+        let probe_guard = tunnel.probe_guard();
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
         let tcp_proxy = tunnel.tcp_proxy();
@@ -1429,6 +1431,7 @@ impl PeerConn {
             tunnel_info,
             pinned_peer_key,
             tunnel_path_state,
+            probe_guard,
             transport_binding,
             receive_backpressure,
             tcp_proxy,
@@ -4080,6 +4083,9 @@ impl PeerConn {
     }
 
     fn enable_authenticated_path(&self) {
+        if let Some(guard) = &self.probe_guard {
+            guard.authenticate();
+        }
         if let Some(state) = &self.tunnel_path_state {
             state.peer_authenticated.store(true, Ordering::Release);
         }

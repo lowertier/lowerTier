@@ -70,6 +70,9 @@ impl Tunnel for NominatedTunnel {
     fn is_transport_authenticated(&self) -> bool {
         self.inner.is_transport_authenticated()
     }
+    fn probe_guard(&self) -> Option<Arc<crate::tunnel::ProbeGuard>> {
+        self.inner.probe_guard()
+    }
     fn receive_backpressure(&self) -> Option<crate::tunnel::ReceiveBackpressure> {
         self.inner.receive_backpressure()
     }
@@ -503,7 +506,7 @@ async fn establish(
     ensure_remote_allowed(&ctx.get_underlay_policy(), stream.peer_addr()?)?;
     stream.set_nodelay(true)?;
     crate::tunnel::common::size_tcp_socket_buffers(&socket2::SockRef::from(&stream));
-    let flags = ctx.get_flags();
+    let flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&ctx);
     let local = crate::tunnel::build_url_from_socket_addr(
         &stream.local_addr()?.to_string(),
         protocol.name(),

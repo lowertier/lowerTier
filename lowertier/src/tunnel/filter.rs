@@ -284,6 +284,10 @@ where
         self.inner.is_transport_authenticated()
     }
 
+    fn probe_guard(&self) -> Option<Arc<super::ProbeGuard>> {
+        self.inner.probe_guard()
+    }
+
     fn split(&self) -> SplitTunnel {
         let (stream, sink) = self.inner.split();
         let filter = self.filter.clone();

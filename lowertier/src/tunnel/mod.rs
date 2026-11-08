@@ -27,6 +27,8 @@ mod browser_tls;
 pub mod buf;
 pub mod common;
 mod decoy;
+#[doc(hidden)]
+pub use decoy::ProbeGuard;
 pub mod direct;
 pub mod filter;
 pub mod mpsc;
@@ -176,6 +178,11 @@ pub trait Tunnel: Send {
 
     fn is_transport_authenticated(&self) -> bool {
         false
+    }
+
+    /// Return the setup limits that successful peer authentication can remove.
+    fn probe_guard(&self) -> Option<Arc<ProbeGuard>> {
+        None
     }
 
     fn pinned_peer_key(&self) -> Option<&str> {

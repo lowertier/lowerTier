@@ -73,7 +73,11 @@ async fn caddy_multiplexes_camouflaged_transports() {
                             listener.set_flags(flags.clone());
                             Box::new(listener)
                         }
-                        _ => Box::new(WsTunnelListener::new("wss://127.0.0.1:0".parse().unwrap())),
+                        _ => {
+                            let mut listener = WsTunnelListener::new("wss://127.0.0.1:0".parse().unwrap());
+                            listener.set_flags(flags.clone());
+                            Box::new(listener)
+                        },
                     };
                     listener.listen().await.unwrap();
                     upstreams.push(listener.local_url().port().unwrap());
@@ -241,6 +245,7 @@ https://web.invalid:{web_port}, https://{HOST}:{web_port} {{
                         }
                         _ => {
                             let mut connector = WsTunnelConnector::new(format!("wss://{HOST}:{}/ws", public.port()).parse().unwrap());
+                            connector.set_flags(flags.clone());
                             connector.set_resolved_addr(public);
                             connector.connect().await.unwrap()
                         }

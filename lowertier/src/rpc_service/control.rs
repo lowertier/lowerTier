@@ -350,10 +350,26 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
         let address = socket.local_addr().unwrap();
         drop(socket);
         let uri: url::Url = format!("h2://{address}").parse().unwrap();
-        let mut server = StandAloneServer::new(TcpTunnelListener::new(uri.clone()));
+        assert!(
+            TcpTunnelListener::new_local_service("h2://192.0.2.1:15888".parse().unwrap()).is_err()
+        );
+        let mut server =
+            StandAloneServer::new(TcpTunnelListener::new_local_service(uri.clone()).unwrap());
         server.set_hook(Arc::new(InstanceRpcServerHook::new(None)));
         crate::rpc_service::api::register_api_rpc_service(&manager, server.registry(), token);
         server.serve().await.unwrap();
+        for _ in 0..3 {
+            let mut probe = StandAloneClient::new(TcpTunnelConnector::new(uri.clone()));
+            let rpc = probe
+                .scoped_client::<ControlPlaneV1RpcClientFactory<BaseController>>(String::new())
+                .await
+                .unwrap();
+            let reply = rpc
+                .get_capabilities(BaseController::default(), GetCapabilitiesRequest::default())
+                .await
+                .unwrap();
+            assert_eq!(reply.error.unwrap().code, "permission_denied");
+        }
         let mut client = StandAloneClient::new(TcpTunnelConnector::new(uri));
         let service = client
             .scoped_client::<ControlPlaneV1RpcClientFactory<BaseController>>(String::new())

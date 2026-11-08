@@ -43,11 +43,11 @@ impl ApiRpcServer<TcpTunnelListener> {
     ) -> anyhow::Result<Self> {
         let rpc_addr = parse_rpc_portal(rpc_portal)?;
         let mut server = Self::from_tunnel(
-            TcpTunnelListener::new(
+            TcpTunnelListener::new_local_service(
                 format!("h2://{}", rpc_addr)
                     .parse()
                     .context("failed to parse rpc portal address")?,
-            ),
+            )?,
             token,
             instance_manager,
         )?;

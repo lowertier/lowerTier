@@ -119,7 +119,7 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
         },
     );
     let limiter = crate::tunnel::decoy::process_limiter();
-    let _permits: Vec<_> = (0..8)
+    let _permits: Vec<_> = (0..2)
         .map(|_| limiter.admit(client.ip()).unwrap())
         .collect();
     decoy
@@ -219,11 +219,11 @@ async fn udp_decoy_drops_non_quic_and_cannot_amplify_without_cid_return() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http3_decoy_large_certificate_and_body_are_lossless_and_rate_limited() {
+async fn http3_decoy_allows_two_small_pages_and_rejects_a_third_session() {
     for trial in 0..3 {
         tokio::time::timeout(Duration::from_secs(30), async {
             let directory = tempfile::tempdir().unwrap();
-            let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+            let payload: Vec<u8> = (0..8 * 1024).map(|i| (i % 251) as u8).collect();
             std::fs::write(directory.path().join("index.html"), &payload).unwrap();
             // Exercise multiple server handshake datagrams under the 1x bound.
             // This is a test certificate, not a certificate for the public host.
@@ -248,13 +248,18 @@ async fn http3_decoy_large_certificate_and_body_are_lossless_and_rate_limited() 
                 if let Ok(ConnectIpAccept::Website(website)) =
                     accept_connect_ip_request(&connection, None, Some(root.clone()), None).await
                 {
-                    serve_http3_requests(website.connection, Some(root), Some(website.first), None).await;
+                    serve_http3_requests(website.connection, Some(root), Some(website.first), None, None).await;
                 }
             }));
 
             // The test client explicitly uses the local ephemeral-identity mode.
             let mut client = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client.set_default_client_config(client_config(&gen_default_flags()).unwrap());
+            if trial == 2 {
+                assert!(tokio::time::timeout(Duration::from_secs(1), client.connect(public, HOST).unwrap()).await.is_err(), "third probe completed TLS");
+                client.close(VarInt::from_u32(0), b"third probe rejected");
+                return;
+            }
             let start = Instant::now();
             let connection = client.connect(public, HOST).unwrap().await.unwrap();
             let handshake = start.elapsed();
@@ -273,7 +278,6 @@ async fn http3_decoy_large_certificate_and_body_are_lossless_and_rate_limited() 
             }
             assert_eq!(received, payload);
             let elapsed = start.elapsed();
-            assert!(elapsed >= Duration::from_millis(3500), "per-IP rate/burst exceeded: {elapsed:?}");
             let server_stats = connection_rx.await.unwrap().stats();
             let client_stats = observed.stats();
             eprintln!(

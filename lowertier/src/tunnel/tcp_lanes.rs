@@ -240,6 +240,12 @@ impl LaneListener {
                 })?;
             let primary = pending.lanes[0].binding;
             verify_record(&record, primary, lane.binding, index, count as u8, id)?;
+            if let (Some(guard), Some(primary)) = (
+                lane.tunnel.probe_guard(),
+                pending.lanes[0].tunnel.probe_guard(),
+            ) {
+                guard.join(&primary)?;
+            }
             // Authentication precedes all mutation of another connection's group.
             let reply = join_record(primary, lane.binding, index | 0x80, count as u8, id)?;
             lane.write_record(&reply).await?;
@@ -389,6 +395,10 @@ impl Tunnel for TcpLanes {
 
     fn transport_binding(&self) -> Option<TransportBinding> {
         Some(self.binding)
+    }
+
+    fn probe_guard(&self) -> Option<Arc<super::ProbeGuard>> {
+        self.tunnels[0].probe_guard()
     }
 }
 

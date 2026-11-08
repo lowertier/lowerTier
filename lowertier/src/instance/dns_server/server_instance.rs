@@ -515,7 +515,7 @@ impl MagicDnsServerInstance {
         tun_inet: Ipv4Inet,
         fake_ip: Ipv4Addr,
     ) -> Result<Self, anyhow::Error> {
-        let tcp_listener = TcpTunnelListener::new(MAGIC_DNS_INSTANCE_ADDR.parse()?);
+        let tcp_listener = TcpTunnelListener::new_local_service(MAGIC_DNS_INSTANCE_ADDR.parse()?)?;
         let mut rpc_server = StandAloneServer::new(tcp_listener);
         rpc_server.serve().await?;
 
