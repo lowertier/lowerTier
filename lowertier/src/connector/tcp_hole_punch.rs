@@ -41,7 +41,7 @@ use tokio::{
 };
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(40);
 const STREAM_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const RETRY: Duration = Duration::from_secs(30);
+const RETRY: Duration = super::COLD_RETRY_INTERVAL;
 mod hard_nat;
 
 struct Expansion {
@@ -714,7 +714,8 @@ impl Server {
         ensure!(!active.contains(&key), "TCP punch already active");
         let mut attempts = self.state.attempts.lock().unwrap();
         let now = tokio::time::Instant::now();
-        attempts.retain(|_, (time, _)| now.duration_since(*time) < Duration::from_secs(600));
+        // Retain the source-pair index across one complete retry interval.
+        attempts.retain(|_, (time, _)| now.duration_since(*time) < RETRY * 2);
         let index = if let Some((time, index)) = attempts.get_mut(&key) {
             ensure!(
                 now.duration_since(*time) >= RETRY,
@@ -807,11 +808,13 @@ impl Server {
             "TCP rendezvous protocol mismatch"
         );
         let remote = candidates(&ctx, &response.candidates)?;
+        let (remote, attempts) = super::retry::reserve_candidates(&ctx, protocol.name(), remote)?;
         let mode = hard_nat::strategy(variable_mapping, response.variable_mapping);
         let expansion = hard_permit
             .filter(|_| response.port_search && mode != hard_nat::Strategy::Candidates)
             .map(|permit| Expansion { mode, permit });
         let tunnel = punch(reservation, remote, ctx, protocol, true, token, expansion).await?;
+        let tunnel = super::retry::retain_attempts(tunnel, attempts);
         self.peer_mgr.add_punched_tunnel(tunnel, peer, true).await?;
         tracing::info!(peer, ?protocol, "TCP hole punch connected");
         Ok(())

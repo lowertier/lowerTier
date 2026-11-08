@@ -1,14 +1,15 @@
 pub(crate) mod direct_nic;
+pub(crate) mod exit_dns;
 mod graph_algo;
 
 pub mod l2_fabric;
 
 pub mod acl_filter;
 pub mod credential_manager;
+pub mod path_policy;
 pub mod peer;
 pub mod peer_conn;
 pub mod peer_conn_ping;
-pub mod path_policy;
 pub mod peer_manager;
 pub mod peer_map;
 pub mod peer_ospf_route;

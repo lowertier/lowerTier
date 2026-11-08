@@ -435,6 +435,7 @@ pub struct GlobalCtx {
     pub config: Box<dyn ConfigLoader>,
     pub net_ns: NetNS,
     pub network: NetworkIdentity,
+    pub(crate) transport_retries: Arc<crate::connector::retry::TransportRetries>,
 
     event_bus: EventBus,
     control_generation: std::sync::atomic::AtomicU64,
@@ -842,6 +843,7 @@ impl GlobalCtx {
 
             event_bus,
             control_generation: std::sync::atomic::AtomicU64::new(1),
+            transport_retries: Arc::default(),
             cached_ipv4: AtomicCell::new(None),
             cached_ipv6: AtomicCell::new(None),
             public_ipv6_lease: AtomicCell::new(None),

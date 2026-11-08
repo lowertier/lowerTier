@@ -152,11 +152,13 @@ enum ConnectorStatus {
   CONNECTED = 0;
   DISCONNECTED = 1;
   CONNECTING = 2;
+  COLD_RETRY = 3;
 }
 
 message Connector {
   common.Url url = 1;
   ConnectorStatus status = 2;
+  uint64 retry_after_seconds = 3;
 }
 
 enum TcpProxyEntryState {

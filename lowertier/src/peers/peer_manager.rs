@@ -5284,16 +5284,9 @@ impl PeerManager {
                 is_exit_node: choice.exit,
             });
         }
-        let flow = match ip_addr {
-            IpAddr::V4(address) => u64::from(u32::from(address)),
-            IpAddr::V6(address) => {
-                let address = u128::from(address);
-                address as u64 ^ (address >> 64) as u64
-            }
-        };
         if let Some(route) = self
             .service_routes
-            .select_gateway(ip_addr, flow, |gateway| {
+            .select_gateway(ip_addr, connection, |gateway| {
                 gateway == self.my_peer_id
                     || snapshot
                         .next_hop(gateway, NextHopPolicy::LeastCost)
@@ -5316,12 +5309,56 @@ impl PeerManager {
         let (peer_ids, is_exit_node, _) =
             self.hybrid_destination_from_snapshot(&snapshot, ip_addr, connection);
         if peer_ids.is_empty() {
-            Ok(UserRoutePlan::System)
+            let strict_internet = !self.global_ctx.is_ip_in_same_network(&ip_addr)
+                && self
+                    .global_ctx
+                    .flags_arc()
+                    .path_policy
+                    .as_ref()
+                    .is_some_and(|policy| {
+                        policy
+                            .path
+                            .iter()
+                            .any(|path| path.to == "internet" && path.strict)
+                    });
+            Ok(if strict_internet {
+                UserRoutePlan::Blackhole
+            } else {
+                UserRoutePlan::System
+            })
         } else {
             Ok(UserRoutePlan::Overlay {
                 peer_ids,
                 is_exit_node,
             })
+        }
+    }
+
+    pub(crate) async fn proxy_dns_exit(&self, connection: u64) -> Result<Option<PeerId>, Error> {
+        // DNS has no destination address yet. Use the default IPv4 route to select its exit.
+        let plan = self
+            .plan_user_route(Ipv4Addr::UNSPECIFIED.into(), connection)
+            .await?;
+        match plan {
+            UserRoutePlan::Overlay {
+                peer_ids,
+                is_exit_node: true,
+            } => Ok(peer_ids.first().copied()),
+            UserRoutePlan::Blackhole => {
+                Err(anyhow::anyhow!("the route policy blocks exit DNS").into())
+            }
+            _ => {
+                let flags = self.global_ctx.flags_arc();
+                if flags.path_policy.as_ref().is_some_and(|policy| {
+                    policy
+                        .path
+                        .iter()
+                        .any(|path| path.to == "internet" && path.strict)
+                }) {
+                    return Err(anyhow::anyhow!("the strict internet path has no DNS exit").into());
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -6164,6 +6201,12 @@ impl PeerManager {
         };
 
         self.init_packet_process_pipeline().await;
+        self.peer_rpc_mgr.rpc_server().registry().register(
+            crate::proto::peer_rpc::ExitDnsRpcServer::new(super::exit_dns::ExitDnsServer::new(
+                self.global_ctx.clone(),
+            )),
+            &self.global_ctx.get_network_name(),
+        );
         self.peer_rpc_mgr.run();
 
         self.start_peer_recv().await;

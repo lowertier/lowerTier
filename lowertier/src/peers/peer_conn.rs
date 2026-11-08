@@ -1303,6 +1303,7 @@ pub struct PeerConn {
     recv: Mutex<Option<Pin<Box<dyn PacketBatchStream>>>>,
     pending_recv: parking_lot::Mutex<VecDeque<ZCPacket>>,
     tunnel_info: Option<TunnelInfo>,
+    pinned_peer_key: Option<String>,
     tunnel_path_state: Option<Arc<crate::tunnel::TunnelPathState>>,
     transport_binding: Option<TransportBinding>,
     receive_backpressure: Option<crate::tunnel::ReceiveBackpressure>,
@@ -1373,6 +1374,7 @@ impl PeerConn {
     ) -> Self {
         let flags = global_ctx.get_flags();
         let tunnel_info = tunnel.info();
+        let pinned_peer_key = tunnel.pinned_peer_key().map(str::to_owned);
         let tunnel_path_state = tunnel.path_state();
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
@@ -1425,6 +1427,7 @@ impl PeerConn {
             recv: Mutex::new(Some(recv)),
             pending_recv: parking_lot::Mutex::new(VecDeque::new()),
             tunnel_info,
+            pinned_peer_key,
             tunnel_path_state,
             transport_binding,
             receive_backpressure,
@@ -1772,6 +1775,9 @@ impl PeerConn {
     }
 
     fn get_pinned_remote_static_pubkey_b64(&self) -> Option<String> {
+        if let Some(key) = &self.pinned_peer_key {
+            return Some(key.clone());
+        }
         let remote_url_str = self
             .tunnel_info
             .as_ref()
@@ -2058,7 +2064,7 @@ impl PeerConn {
         let server_handshake_hash = hs.get_handshake_hash().to_vec();
 
         let msg2 = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(15),
             self.recv_next_peer_manager_packet(Some(PacketType::NoiseHandshakeMsg2)),
         )
         .await??;
@@ -2097,6 +2103,15 @@ impl PeerConn {
             .get_remote_static()
             .map(|static_key: &[u8]| static_key.to_vec())
             .unwrap_or_default();
+        // A seed pin identifies one server, including when the server knows the network secret.
+        if pinned_remote_pubkey
+            .as_deref()
+            .is_some_and(|pinned| pinned != remote_static_after_msg2.as_slice())
+        {
+            return Err(Error::WaitRespError(
+                "pinned remote static pubkey mismatch".to_owned(),
+            ));
+        }
         let local_root_fingerprint = self.admission_root_fingerprint();
         let locally_pinned_remote_root = self.locally_pinned_root_fingerprint(&remote_network_name);
         let same_network_credential_server =
@@ -3001,102 +3016,132 @@ impl PeerConn {
             .map(|recovery| recovery_identity_from_pb(recovery, session_key.clone()))
             .transpose()?;
         let store = self.get_peer_session_store();
-        let pending_responder_proof = if recovery_identity.is_none() {
-            store.responder_recovery_id(&session_key)
-        } else {
-            None
-        };
-        let transition_plan = if let Some(identity) = recovery_identity {
-            match self
-                .get_peer_session_store()
-                .reconcile_active_responder_transition(&identity)?
-            {
-                Some(recovered) => {
-                    if recovered.action != identity.action
-                        || recovered.session_generation != identity.session_generation
-                        || recovered.initial_epoch != identity.initial_epoch
-                        || recovered.transition_id != identity.transition_id
-                        || recovered.session.metadata_session_id() != identity.session_metadata_id
-                    {
-                        return Err(Error::WaitRespError(
-                            "responder recovery identity mismatch".to_owned(),
-                        ));
-                    }
-                    ResponderTransitionPlan::Prepared {
-                        prepared: UpsertResponderSessionReturn::for_recovery(
-                            recovered.session,
-                            recovered.action,
-                            recovered.session_generation,
-                            recovered.root_key,
-                            recovered.initial_epoch,
-                            recovered.transition_id,
-                            (!matches!(recovered.action, PeerSessionAction::Create))
-                                .then_some(recovered.transition_revision),
-                            self.get_peer_session_store().as_ref().clone(),
-                            session_key.clone(),
-                        ),
-                        recovery_active: true,
-                    }
-                }
-                None => {
-                    // The authenticated peer has no record of this exact
-                    // transition. Start an explicit reset confirmation.
-                    if store.has_responder_recovery(&session_key)
-                        || store.has_pending_create(&session_key)
-                        || store.peek(&session_key).is_some()
-                    {
-                        return Err(Error::WaitRespError(
-                            "responder recovery identity does not match local state".to_owned(),
-                        ));
-                    }
-                    ResponderTransitionPlan::Reset(identity)
-                }
-            }
-        } else if let Some(expected_transition_id) = pending_responder_proof {
-            match optional_transition_id_from_wire(&msg1_pb.acknowledged_transition_id)? {
-                Some(supplied_transition_id)
-                    if supplied_transition_id == expected_transition_id =>
+        // Concurrent transports must finish one responder transition before preparing the next.
+        let queue_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let _handshake = tokio::time::timeout_at(
+            queue_deadline,
+            store.responder_handshake_gate(&session_key).lock_owned(),
+        )
+        .await
+        .map_err(|_| Error::WaitRespError("session admission queue timed out".into()))?;
+        let prepare = || -> Result<ResponderTransitionPlan, Error> {
+            let recovery_identity = recovery_identity.clone();
+            let pending_responder_proof = if recovery_identity.is_none() {
+                store.responder_recovery_id(&session_key)
+            } else {
+                None
+            };
+            let transition_plan = if let Some(identity) = recovery_identity {
+                match self
+                    .get_peer_session_store()
+                    .reconcile_active_responder_transition(&identity)?
                 {
-                    ResponderTransitionPlan::Prepared {
-                        prepared: store.prepare_responder_session_with_recovery_proof(
-                            &session_key,
-                            supplied_transition_id,
-                            algo.clone(),
-                            msg1_pb.client_encryption_algorithm.clone(),
-                            None,
-                        )?,
-                        recovery_active: false,
+                    Some(recovered) => {
+                        if recovered.action != identity.action
+                            || recovered.session_generation != identity.session_generation
+                            || recovered.initial_epoch != identity.initial_epoch
+                            || recovered.transition_id != identity.transition_id
+                            || recovered.session.metadata_session_id()
+                                != identity.session_metadata_id
+                        {
+                            return Err(Error::WaitRespError(
+                                "responder recovery identity mismatch".to_owned(),
+                            ));
+                        }
+                        ResponderTransitionPlan::Prepared {
+                            prepared: UpsertResponderSessionReturn::for_recovery(
+                                recovered.session,
+                                recovered.action,
+                                recovered.session_generation,
+                                recovered.root_key,
+                                recovered.initial_epoch,
+                                recovered.transition_id,
+                                (!matches!(recovered.action, PeerSessionAction::Create))
+                                    .then_some(recovered.transition_revision),
+                                self.get_peer_session_store().as_ref().clone(),
+                                session_key.clone(),
+                            ),
+                            recovery_active: true,
+                        }
+                    }
+                    None => {
+                        // The authenticated peer has no record of this exact
+                        // transition. Start an explicit reset confirmation.
+                        if store.has_responder_recovery(&session_key)
+                            || store.has_pending_create(&session_key)
+                            || store.peek(&session_key).is_some()
+                        {
+                            return Err(Error::WaitRespError(
+                                "responder recovery identity does not match local state".to_owned(),
+                            ));
+                        }
+                        ResponderTransitionPlan::Reset(identity)
                     }
                 }
-                Some(_) => {
-                    return Err(Error::WaitRespError(
-                        "responder transition acknowledgement mismatch".to_owned(),
-                    ));
-                }
-                None => {
-                    store.abandon_unacknowledged_responder_recovery(&session_key);
-                    ResponderTransitionPlan::Prepared {
-                        prepared: store.prepare_responder_session(
-                            &session_key,
-                            algo.clone(),
-                            msg1_pb.client_encryption_algorithm.clone(),
-                            None,
-                        )?,
-                        recovery_active: false,
+            } else if let Some(expected_transition_id) = pending_responder_proof {
+                match optional_transition_id_from_wire(&msg1_pb.acknowledged_transition_id)? {
+                    Some(supplied_transition_id)
+                        if supplied_transition_id == expected_transition_id =>
+                    {
+                        ResponderTransitionPlan::Prepared {
+                            prepared: store.prepare_responder_session_with_recovery_proof(
+                                &session_key,
+                                supplied_transition_id,
+                                algo.clone(),
+                                msg1_pb.client_encryption_algorithm.clone(),
+                                None,
+                            )?,
+                            recovery_active: false,
+                        }
+                    }
+                    Some(_) => {
+                        return Err(Error::WaitRespError(
+                            "responder transition acknowledgement mismatch".to_owned(),
+                        ));
+                    }
+                    None => {
+                        store.abandon_unacknowledged_responder_recovery(&session_key);
+                        ResponderTransitionPlan::Prepared {
+                            prepared: store.prepare_responder_session(
+                                &session_key,
+                                algo.clone(),
+                                msg1_pb.client_encryption_algorithm.clone(),
+                                None,
+                            )?,
+                            recovery_active: false,
+                        }
                     }
                 }
-            }
-        } else {
-            // A stale acknowledgement is harmless after its shape is valid.
-            optional_transition_id_from_wire(&msg1_pb.acknowledged_transition_id)?;
-            ResponderTransitionPlan::Prepared {
-                prepared: store.prepare_responder_session(
-                    &session_key,
-                    algo.clone(),
-                    msg1_pb.client_encryption_algorithm.clone(),
-                    None,
-                )?,
-                recovery_active: false,
+            } else {
+                // A stale acknowledgement is harmless after its shape is valid.
+                optional_transition_id_from_wire(&msg1_pb.acknowledged_transition_id)?;
+                ResponderTransitionPlan::Prepared {
+                    prepared: store.prepare_responder_session(
+                        &session_key,
+                        algo.clone(),
+                        msg1_pb.client_encryption_algorithm.clone(),
+                        None,
+                    )?,
+                    recovery_active: false,
+                }
+            };
+            Ok(transition_plan)
+        };
+        let transition_plan = loop {
+            match prepare() {
+                Ok(plan) => break plan,
+                Err(Error::AnyhowError(error))
+                    if error.is::<super::peer_session::SessionTransitionBusy>() =>
+                {
+                    // A local initiator can also own a transition while this responder is queued.
+                    tokio::time::timeout_at(
+                        queue_deadline,
+                        tokio::time::sleep(Duration::from_millis(10)),
+                    )
+                    .await
+                    .map_err(|_| Error::WaitRespError("session transition stayed busy".into()))?;
+                }
+                Err(error) => return Err(error),
             }
         };
         let (

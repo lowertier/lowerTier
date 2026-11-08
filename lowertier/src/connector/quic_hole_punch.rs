@@ -49,7 +49,7 @@ mod hard_nat;
 
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
-const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const RETRY_INTERVAL: Duration = super::COLD_RETRY_INTERVAL;
 
 struct Session {
     transaction: [u8; 12],
@@ -267,7 +267,8 @@ impl PunchServer {
     fn take_attempt(&self, peer: PeerId) -> Option<u32> {
         let mut cooldown = self.state.cooldown.lock().unwrap();
         let now = tokio::time::Instant::now();
-        cooldown.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(600));
+        // Retain the source-pair index across one complete retry interval.
+        cooldown.retain(|_, (start, _)| now.duration_since(*start) < RETRY_INTERVAL * 2);
         if let Some((start, attempt)) = cooldown.get_mut(&peer) {
             if now.duration_since(*start) < RETRY_INTERVAL {
                 return None;
@@ -325,6 +326,7 @@ impl PunchServer {
             )
             .await?;
         let candidates = validate_candidates(&ctx, &response.candidates)?;
+        let (candidates, attempts) = super::retry::reserve_candidates(&ctx, "quic", candidates)?;
         let mode = hard_nat::strategy(variable_mapping, response.variable_mapping);
         let _hard_permit = if mode != hard_nat::Strategy::Candidates {
             Some(self.hard_permits.clone().try_acquire_owned()?)
@@ -345,7 +347,7 @@ impl PunchServer {
         .await?;
         let local = socket.local_addr()?;
         let mut connector = QuicTunnelConnector::from_punched_socket(socket, remote, ctx.clone());
-        let tunnel = connector.connect().await?;
+        let tunnel = super::retry::retain_attempts(connector.connect().await?, attempts);
         self.peer_mgr.add_punched_tunnel(tunnel, peer, true).await?;
         tracing::info!(peer, ?local, ?remote, "QUIC hole punch connected");
         Ok(())

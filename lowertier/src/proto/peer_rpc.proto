@@ -299,6 +299,19 @@ service DirectConnectorRpc {
   // Method index 2 (SendUdpHolePunchPacket) is retired. Do not reuse it.
 }
 
+message ExitDnsRequest {
+  string name = 1;
+  uint32 port = 2;
+}
+
+message ExitDnsResponse {
+  repeated common.SocketAddr addresses = 1;
+}
+
+service ExitDnsRpc {
+  rpc Resolve(ExitDnsRequest) returns (ExitDnsResponse);
+}
+
 message SelectPunchListenerRequest {
   reserved 1, 2;
   reserved "force_new", "prefer_port_mapping";

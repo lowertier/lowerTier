@@ -117,6 +117,7 @@ struct CandidateState {
     expires: Option<Instant>,
     retry_at: Instant,
     attempted: Option<Instant>,
+    retry_admission: Option<crate::connector::retry::Attempt>,
     active_generation: Option<u64>,
     upgrade: Option<oneshot::Sender<u32>>,
     probe: Option<([u8; 16], Instant)>,
@@ -132,6 +133,7 @@ impl CandidateState {
             expires: None,
             retry_at: Instant::now(),
             attempted: None,
+            retry_admission: None,
             active_generation: None,
             upgrade: None,
             probe: None,
@@ -143,9 +145,16 @@ impl CandidateState {
     }
 
     fn retry_now(&mut self) {
+        if let Some(attempted) = self.attempted
+            && attempted.elapsed() < crate::connector::COLD_RETRY_INTERVAL
+        {
+            self.retry_at = attempted + crate::connector::COLD_RETRY_INTERVAL;
+            return;
+        }
         self.retry_at = Instant::now();
         if self.active_generation.is_none() {
             self.attempted = None;
+            self.retry_admission = None;
             self.probe = None;
             self.upgrade = None;
         }
@@ -178,6 +187,23 @@ impl CandidateState {
         self.responded = Some(now);
         true
     }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_candidate_preserves_cooldown_across_connection_events() {
+    let mut state = CandidateState::new();
+    let attempted = Instant::now();
+    state.attempted = Some(attempted);
+    state.retry_now();
+    assert_eq!(
+        state.retry_at,
+        attempted + crate::connector::COLD_RETRY_INTERVAL
+    );
+    assert_eq!(state.attempted, Some(attempted));
+    state.attempted = Some(Instant::now() - crate::connector::COLD_RETRY_INTERVAL);
+    state.retry_now();
+    assert!(state.attempted.is_none());
 }
 
 struct PathLifetime {
@@ -263,9 +289,9 @@ impl PathConnections {
                     state.active_generation.is_none()
                         && state.connection.is_none()
                         && Arc::strong_count(&state.hint) == 1
-                        && state
-                            .attempted
-                            .is_none_or(|time| time.elapsed() >= Duration::from_secs(30))
+                        && state.attempted.is_none_or(|time| {
+                            time.elapsed() >= crate::connector::COLD_RETRY_INTERVAL
+                        })
                         && state
                             .nonces
                             .iter()
@@ -448,6 +474,10 @@ impl PathConnections {
         let mut entries = self.candidates.lock().unwrap();
         if let Some(state) = Self::entry(&mut entries, address) {
             state.connection = Some(selected);
+            state.attempted = None;
+            if let Some(admission) = state.retry_admission.take() {
+                admission.authenticated();
+            }
         }
         drop(entries);
         self.changed.notify_waiters();
@@ -1180,6 +1210,12 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_stun_does_not_block_quic_tracker_bootstrap() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .finish();
+        let _logs = std::env::var_os("LOWTIER_TRACKER_TEST_LOG")
+            .map(|_| tracing::subscriber::set_default(subscriber));
         for protocol in ["quic", "tcp", "wss"] {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let tracker = TrackerServer::new(1).unwrap();
@@ -1500,12 +1536,19 @@ mod tests {
             None,
             receiver,
             key,
-            Arc::default(),
+            Arc::new(PathConnections {
+                protocol: "quic".into(),
+                ..Default::default()
+            }),
         )));
         let address = remote.local_addr().unwrap();
         candidates.send(address.into()).await.unwrap();
         let mut bytes = [0; 128];
-        let (length, _) = remote.recv_from(&mut bytes).await.unwrap();
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), remote.recv_from(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
         let first = wire::read_punch(&bytes[..length], &key, unix_seconds()).unwrap();
         // Independent tracker replies can repeat an endpoint before its first reply arrives.
         for _ in 0..7 {
@@ -1620,7 +1663,10 @@ mod tests {
             None,
             receiver,
             key,
-            Arc::default(),
+            Arc::new(PathConnections {
+                protocol: "quic".into(),
+                ..Default::default()
+            }),
         )));
         candidates.send(address.into()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), fallback_rx)
@@ -1706,7 +1752,8 @@ mod tests {
                             &client,
                             address,
                             &PathConnections::default(),
-                            None
+                            None,
+                            None,
                         )
                         .await
                         .unwrap()
@@ -1784,7 +1831,10 @@ mod tests {
                 None,
                 receiver,
                 key,
-                Arc::default(),
+                Arc::new(PathConnections {
+                    protocol: "quic".into(),
+                    ..Default::default()
+                }),
             ))));
             candidates.send(address.into()).await.unwrap();
             for _ in 0..7 {
@@ -1878,7 +1928,10 @@ mod tests {
                 None,
                 receiver,
                 key,
-                Arc::default(),
+                Arc::new(PathConnections {
+                    protocol: "quic".into(),
+                    ..Default::default()
+                }),
             ))));
             candidates.send(address.into()).await.unwrap();
             for _ in 0..7 {
@@ -1963,7 +2016,10 @@ mod tests {
             None,
             rx,
             key,
-            Arc::default(),
+            Arc::new(PathConnections {
+                protocol: "quic".into(),
+                ..Default::default()
+            }),
         )));
         tx.send(address.into()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -2204,7 +2260,7 @@ async fn candidate_loop(
                 released = generation;
                 entries.retain(|_, state| state.expires.is_some() || state.connection.is_some()
                     || state.active_generation.is_some() || state.probe.is_some()
-                    || state.attempted.is_some_and(|time| time.elapsed() < Duration::from_secs(30))
+                    || state.attempted.is_some_and(|time| time.elapsed() < crate::connector::COLD_RETRY_INTERVAL)
                     || state.nonces.iter().flatten().any(|(_, expires)| *expires > Instant::now())
                     || Arc::strong_count(&state.hint) > 1);
                 if attempts.len() < 8 && punch_tasks.len() < 16 {
@@ -2267,7 +2323,7 @@ async fn candidate_loop(
                 || state.active_generation.is_some()
                 || state
                     .attempted
-                    .is_some_and(|time| time.elapsed() < Duration::from_secs(30))
+                    .is_some_and(|time| time.elapsed() < crate::connector::COLD_RETRY_INTERVAL)
             {
                 continue;
             }
@@ -2278,9 +2334,21 @@ async fn candidate_loop(
                 {
                     continue;
                 }
+                if state.retry_admission.is_none() {
+                    let Ok(admission) = crate::connector::retry::begin_endpoint(
+                        &ctx,
+                        connections.protocol(),
+                        address,
+                    ) else {
+                        state.attempted = Some(Instant::now());
+                        state.retry_at = Instant::now() + crate::connector::COLD_RETRY_INTERVAL;
+                        continue;
+                    };
+                    state.retry_admission = Some(admission);
+                }
                 let nonce = rand::random();
                 state.probe = Some((nonce, Instant::now()));
-                state.retry_at = Instant::now() + Duration::from_secs(30);
+                state.retry_at = Instant::now() + crate::connector::COLD_RETRY_INTERVAL;
                 let udp = udp.clone();
                 let fallback = fallback_tx.clone();
                 punch_tasks.spawn(async move {
@@ -2300,7 +2368,7 @@ async fn candidate_loop(
                     let _ = fallback.try_send(address);
                 });
             } else {
-                state.retry_at = Instant::now() + Duration::from_secs(30);
+                state.retry_at = Instant::now() + crate::connector::COLD_RETRY_INTERVAL;
                 connect = Some((address, None));
             }
         }
@@ -2310,7 +2378,7 @@ async fn candidate_loop(
         if connections.known_live_peer(&peers, address) {
             continue;
         }
-        let mut upgrade_rx = {
+        let (mut upgrade_rx, retry_admission) = {
             let mut entries = connections.candidates.lock().unwrap();
             let Some(state) = PathConnections::entry(&mut entries, address) else {
                 continue;
@@ -2318,7 +2386,7 @@ async fn candidate_loop(
             if state.active_generation.is_some()
                 || state
                     .attempted
-                    .is_some_and(|time| time.elapsed() < Duration::from_secs(30))
+                    .is_some_and(|time| time.elapsed() < crate::connector::COLD_RETRY_INTERVAL)
             {
                 if let Some(peer) = expected {
                     if let Some(upgrade) = state.upgrade.take() {
@@ -2334,6 +2402,21 @@ async fn candidate_loop(
                 state.retry_at = Instant::now() + Duration::from_secs(1);
                 continue;
             }
+            let admission = match state.retry_admission.take() {
+                Some(admission) => admission,
+                None => match crate::connector::retry::begin_endpoint(
+                    &ctx,
+                    connections.protocol(),
+                    address,
+                ) {
+                    Ok(admission) => admission,
+                    Err(_) => {
+                        state.attempted = Some(Instant::now());
+                        state.retry_at = Instant::now() + crate::connector::COLD_RETRY_INTERVAL;
+                        continue;
+                    }
+                },
+            };
             let upgrade = if endpoint.is_some() && expected.is_none() {
                 let (sender, receiver) = oneshot::channel();
                 state.upgrade = Some(sender);
@@ -2342,9 +2425,9 @@ async fn candidate_loop(
                 None
             };
             state.attempted = Some(Instant::now());
-            state.retry_at = Instant::now() + Duration::from_secs(30);
+            state.retry_at = Instant::now() + crate::connector::COLD_RETRY_INTERVAL;
             state.active_generation = Some(peers.get_peer_map().connection_release_generation());
-            upgrade
+            (upgrade, admission)
         };
         let (ctx, peers, endpoint, tcp) =
             (ctx.clone(), peers.clone(), endpoint.clone(), tcp.clone());
@@ -2414,7 +2497,10 @@ async fn candidate_loop(
                         Ok::<_, anyhow::Error>(
                             peers
                                 .add_discovered_tunnel_with_hint(
-                                    tunnel,
+                                    crate::connector::retry::retain_attempt(
+                                        tunnel,
+                                        retry_admission.clone(),
+                                    ),
                                     expected,
                                     true,
                                     Some(connections.hint(address)),
@@ -2434,10 +2520,12 @@ async fn candidate_loop(
                         address,
                         &connections,
                         expected,
+                        Some(retry_admission.clone()),
                     )
                     .await?
                 };
                 connections.record(&peers, address, peer).await;
+                retry_admission.authenticated();
                 Ok::<(), anyhow::Error>(())
             })
             .await;
@@ -2458,12 +2546,19 @@ async fn connect_tcp_candidate(
     address: SocketAddr,
     connections: &PathConnections,
     expected: Option<crate::common::PeerId>,
+    admission: Option<crate::connector::retry::Attempt>,
 ) -> Result<DiscoveryConnection> {
     use futures::{FutureExt, StreamExt};
     let mut attempts = futures::stream::FuturesUnordered::new();
     attempts.push(
         async {
             let (tunnel, client) = tcp.connect_candidate(address).await?;
+            let tunnel = match &admission {
+                Some(admission) => {
+                    crate::connector::retry::retain_attempt(tunnel, admission.clone())
+                }
+                None => tunnel,
+            };
             Ok::<_, anyhow::Error>(
                 peers
                     .add_discovered_tunnel_with_hint(
@@ -2486,6 +2581,12 @@ async fn connect_tcp_candidate(
                 return Ok(connection);
             }
             let tunnel = tcp.connect(address, true).await?;
+            let tunnel = match &admission {
+                Some(admission) => {
+                    crate::connector::retry::retain_attempt(tunnel, admission.clone())
+                }
+                None => tunnel,
+            };
             Ok::<_, anyhow::Error>(
                 peers
                     .add_discovered_tunnel_with_hint(

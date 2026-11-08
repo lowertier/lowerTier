@@ -282,7 +282,7 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `tun.ipv6` | bool | `true` | restart | Carry IPv6 on the virtual interface. |
 | `tun.udp_broadcast_relay` | bool | `false` | restart | Relay UDP broadcasts from the virtual interface (Windows). |
 | `transport.protocols` | string list | - | restart | Allowed transports: quic, tcp, wss. Empty allows all. |
-| `transport.prefer` | quic \| tcp \| wss | `quic` | restart | Transport tried first for discovered peers. |
+| `transport.prefer` | quic \| tcp \| wss | `quic` | restart | Initial transport priority. Measured connection quality takes precedence after setup. |
 | `transport.listen` | string list | - | restart | Listener URLs, for example quic://0.0.0.0:11012. |
 | `transport.advertise` | string list | - | restart | Public listener URLs announced to peers, for port mappings. |
 | `transport.quic.initial_receive_window` | bytes | `2MiB` | restart | Initial QUIC stream receive window. |
@@ -471,9 +471,23 @@ group_secret = "<group-secret>"
 
 Nodes allow QUIC over UDP, H2 over TCP, and WSS over TCP by default. Omit `transport.protocols` to keep that default. `transport.prefer` chooses the preferred transport without disabling the others. Both UDP and TCP hole-punching coordinators are enabled by default.
 
+LowTier attempts each permitted transport and retains authenticated alternatives as backups.
+New flows use fresh delivery-rate measurements when available, then measured RTT.
+The latency policy uses measured RTT first.
+The configured preference breaks ties when measurements do not distinguish connections.
+Failed endpoints enter cold retry for at least 600 seconds.
+Seed connector status reports `COLD_RETRY` and `retry_after_seconds` during this interval.
+
+A seed also supplies alternative transport endpoints.
+The standard listener ports map H2 to TCP 11010 and QUIC/WSS to UDP/TCP 11012.
+Other seed ports use the same port for each permitted protocol, including shared HTTPS ports.
+Explicit `via` bridges retain their configured transport.
+Alternative endpoints retain the configured seed public-key pin.
+Advertised listener endpoints provide the exact ports after authenticated discovery.
+
 Each enabled protocol maintains its own direct path when the peer also permits that protocol.
 A working QUIC path does not stop H2 or WSS traversal.
-Each protocol retries a failed path independently and retains the existing resource limits.
+Each protocol retains the existing resource limits.
 
 Public tracker discovery is optional. Configured peers provide the initial connection when no `[discovery]` section is present. Once connected, authenticated peer RPCs coordinate punching and STUN supplies NAT mappings. Trackers can provide bootstrap addresses when configured; see [tracker discovery](docs/tracker-discovery.md).
 
@@ -486,8 +500,8 @@ This UDP procedure does not establish H2 or WSS connections.
 H2 and WSS use authenticated TCP rendezvous and simultaneous open.
 TCP traversal retains one source port for listening, STUN, and peer connections.
 The initiator nominates one TLS connection before the peers verify their identities.
-H2 and WSS use separate rendezvous sessions and retry delays.
-`transport.prefer` selects the preferred connection after the paths authenticate.
+H2 and WSS use separate rendezvous sessions.
+`transport.prefer` breaks ties after measured connection quality is considered.
 `nat.tcp_punch = false` disables both TCP traversal protocols.
 Destination-dependent TCP mappings can still prevent direct connections.
 Candidate discovery uses current interface addresses and configured underlay restrictions.

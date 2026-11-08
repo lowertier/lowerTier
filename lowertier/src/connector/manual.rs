@@ -1,12 +1,12 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     net::IpAddr,
     sync::{Arc, Weak},
     time::Duration,
 };
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use quanta::Instant;
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
@@ -36,6 +36,8 @@ struct ReconnResult {}
 struct ConnectorManagerData {
     connectors: ConnectorMap,
     reconnecting: DashSet<url::Url>,
+    cold_until: DashMap<url::Url, tokio::time::Instant>,
+    seeds: std::sync::Mutex<BTreeMap<url::Url, BTreeSet<url::Url>>>,
     peer_manager: Weak<PeerManager>,
     _alive_conn_urls: Arc<DashSet<url::Url>>,
     // user removed connector urls
@@ -58,6 +60,8 @@ impl ManualConnectorManager {
             data: Arc::new(ConnectorManagerData {
                 connectors,
                 reconnecting: DashSet::new(),
+                cold_until: DashMap::new(),
+                seeds: std::sync::Mutex::new(BTreeMap::new()),
                 peer_manager: Arc::downgrade(&peer_manager),
                 _alive_conn_urls: Arc::new(DashSet::new()),
                 removed_conn_urls: Arc::new(DashSet::new()),
@@ -73,21 +77,9 @@ impl ManualConnectorManager {
         ret
     }
 
-    fn reconnect_timeout(dead_url: &url::Url) -> Duration {
-        let multiple_tcp_lanes = dead_url.scheme() == "tcp"
-            && dead_url
-                .query_pairs()
-                .any(|(key, value)| key == "lanes" && matches!(value.as_ref(), "2" | "4"));
-        // Sequential TCP/TLS joins must leave time for the final Noise exchange.
-        // UDP uses the same budget: the session handshake is several RTTs, and a
-        // 2s cutoff on a WAN path leaves a committed responder proof that the
-        // next reconnect cannot acknowledge.
-        if matches!(dead_url.scheme(), "quic") || multiple_tcp_lanes {
-            return Duration::from_secs(10);
-        }
-        let use_long_timeout = matches!(dead_url.scheme(), "wss");
-
-        Duration::from_secs(if use_long_timeout { 20 } else { 2 })
+    fn reconnect_timeout(_dead_url: &url::Url) -> Duration {
+        // Transport setup and Noise admission span several RTTs on a satellite path.
+        Duration::from_secs(20)
     }
 
     fn strict_reconnect_ip_versions(dead_url: &url::Url) -> Vec<IpVersion> {
@@ -164,9 +156,67 @@ impl ManualConnectorManager {
         url: url::Url,
         flags: &crate::common::config::Flags,
     ) {
+        let seed = crate::tunnel::websocket::effective_wss_url(url, flags);
+        let mut members = BTreeSet::new();
+        members.insert(seed.clone());
+        // A shared custom port can serve H3, H2, and WSS. Default ports retain their protocol mapping.
+        if !seed.query_pairs().any(|(key, _)| key == "via") {
+            let source_default = crate::tunnel::IpScheme::try_from(&seed)
+                .ok()
+                .map(|scheme| scheme.default_port());
+            for protocol in crate::common::config::TRANSPORT_PROTOCOLS {
+                if !crate::common::config::transport_protocol_enabled(flags, protocol)
+                    || protocol == seed.scheme()
+                {
+                    continue;
+                }
+                let Ok(mut alternate) = url::Url::parse(&format!(
+                    "{protocol}{}",
+                    &seed.as_str()[seed.scheme().len()..]
+                )) else {
+                    continue;
+                };
+                let source_port = seed.port_or_known_default().or(source_default);
+                let tcp_port = crate::tunnel::IpScheme::Tcp.default_port();
+                let quic_port = crate::tunnel::IpScheme::Quic.default_port();
+                let port = if source_port == Some(tcp_port) || source_port == Some(quic_port) {
+                    Some(if protocol == "tcp" {
+                        tcp_port
+                    } else {
+                        quic_port
+                    })
+                } else {
+                    source_port
+                };
+                if let Some(port) = port {
+                    let _ = alternate.set_port(Some(port));
+                }
+                alternate.set_path("");
+                if protocol == "quic" {
+                    let query = alternate
+                        .query_pairs()
+                        .filter(|(key, _)| key != "lanes")
+                        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                        .collect::<Vec<_>>();
+                    alternate.set_query(None);
+                    if !query.is_empty() {
+                        alternate.query_pairs_mut().extend_pairs(query);
+                    }
+                }
+                members.insert(crate::tunnel::websocket::effective_wss_url(
+                    alternate, flags,
+                ));
+            }
+        }
         self.data
-            .connectors
-            .insert(crate::tunnel::websocket::effective_wss_url(url, flags));
+            .seeds
+            .lock()
+            .unwrap()
+            .insert(seed, members.clone());
+        for member in members {
+            self.data.removed_conn_urls.remove(&member);
+            self.data.connectors.insert(member);
+        }
     }
 
     pub async fn remove_connector(&self, url: url::Url) -> Result<(), Error> {
@@ -182,11 +232,24 @@ impl ManualConnectorManager {
         {
             return Err(Error::NotFound);
         }
-        self.data.removed_conn_urls.insert(url.into());
+        let url: url::Url = url.into();
+        let mut seeds = self.data.seeds.lock().unwrap();
+        let removed = seeds.remove(&url).unwrap_or_else(|| {
+            for members in seeds.values_mut() {
+                members.remove(&url);
+            }
+            BTreeSet::from([url])
+        });
+        for member in removed {
+            if !seeds.values().any(|members| members.contains(&member)) {
+                self.data.removed_conn_urls.insert(member);
+            }
+        }
         Ok(())
     }
 
     pub async fn clear_connectors(&self) {
+        self.data.seeds.lock().unwrap().clear();
         self.list_connectors().await.iter().for_each(|x| {
             if let Some(url) = &x.url {
                 self.data.removed_conn_urls.insert(url.clone().into());
@@ -205,14 +268,25 @@ impl ManualConnectorManager {
         for item in self.data.connectors.iter() {
             let conn_url = item.key().clone();
             let mut status = ConnectorStatus::Connected;
+            let mut retry_after_seconds = 0;
             if dead_urls.contains(&conn_url) {
                 status = ConnectorStatus::Disconnected;
+                if let Some(deadline) = self.data.cold_until.get(&conn_url)
+                    && *deadline > tokio::time::Instant::now()
+                {
+                    status = ConnectorStatus::ColdRetry;
+                    retry_after_seconds = deadline
+                        .duration_since(tokio::time::Instant::now())
+                        .as_secs()
+                        .saturating_add(1);
+                }
             }
             ret.insert(
                 0,
                 Connector {
                     url: Some(conn_url.into()),
                     status: status.into(),
+                    retry_after_seconds,
                 },
             );
         }
@@ -226,6 +300,7 @@ impl ManualConnectorManager {
                 Connector {
                     url: Some(conn_url.into()),
                     status: ConnectorStatus::Connecting.into(),
+                    retry_after_seconds: 0,
                 },
             );
         }
@@ -250,6 +325,11 @@ impl ManualConnectorManager {
                         continue;
                     }
                     for dead_url in dead_urls {
+                        if data.cold_until.get(&dead_url)
+                            .is_some_and(|deadline| *deadline > tokio::time::Instant::now())
+                        {
+                            continue;
+                        }
                         let data_clone = data.clone();
                         let sender = reconn_result_send.clone();
                         data.connectors.remove(&dead_url).unwrap();
@@ -258,6 +338,14 @@ impl ManualConnectorManager {
 
                         tasks.lock().unwrap().spawn(async move {
                             let reconn_ret = Self::conn_reconnect(data_clone.clone(), dead_url.clone() ).await;
+                            if reconn_ret.is_err() {
+                                data_clone.cold_until.insert(
+                                    dead_url.clone(),
+                                    tokio::time::Instant::now() + super::COLD_RETRY_INTERVAL,
+                                );
+                            } else {
+                                data_clone.cold_until.remove(&dead_url);
+                            }
                             let _ = sender.send(reconn_ret).await;
 
                             data_clone.reconnecting.remove(&dead_url).unwrap();
@@ -279,6 +367,7 @@ impl ManualConnectorManager {
         for it in data.removed_conn_urls.iter() {
             let url = it.key();
             if data.connectors.remove(url).is_some() {
+                data.cold_until.remove(url);
                 tracing::warn!("connector: {}, removed", url);
                 continue;
             } else if data.reconnecting.contains(url) {
@@ -315,6 +404,31 @@ impl ManualConnectorManager {
         ret
     }
 
+    fn seed_public_key(
+        data: &ConnectorManagerData,
+        member: &url::Url,
+    ) -> Result<Option<String>, Error> {
+        let flags = data.global_ctx.get_flags();
+        let configured = data.global_ctx.config.get_peers();
+        let seeds = data.seeds.lock().unwrap();
+        let mut selected = None;
+        for (seed, _) in seeds.iter().filter(|(_, members)| members.contains(member)) {
+            for peer in configured.iter().filter(|peer| {
+                crate::tunnel::websocket::effective_wss_url(peer.uri.clone(), &flags) == *seed
+            }) {
+                if let Some(key) = &peer.peer_public_key {
+                    if selected.as_ref().is_some_and(|selected| selected != key) {
+                        return Err(Error::SecretKeyError(
+                            "overlapping seeds have different public-key pins".into(),
+                        ));
+                    }
+                    selected = Some(key.clone());
+                }
+            }
+        }
+        Ok(selected)
+    }
+
     async fn conn_reconnect_with_ip_version(
         data: Arc<ConnectorManagerData>,
         dead_url: url::Url,
@@ -322,13 +436,14 @@ impl ManualConnectorManager {
         started_at: Instant,
         total_timeout: Duration,
     ) -> Result<ReconnResult, Error> {
-        let connector = Self::with_reconnect_timeout(
+        let mut connector = Self::with_reconnect_timeout(
             "resolve",
             started_at,
             total_timeout,
             create_connector_by_url(dead_url.as_str(), &data.global_ctx, ip_version),
         )
         .await?;
+        connector.set_pinned_peer_key(Self::seed_public_key(&data, &dead_url)?);
 
         data.global_ctx
             .issue_event(GlobalCtxEvent::Connecting(connector.remote_url()));
@@ -451,6 +566,115 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn failed_seed_reports_cold_retry_without_dialing() {
+        let peer = crate::peers::tests::create_mock_peer_manager_secure(
+            "seed-cold".into(),
+            "secret".into(),
+        )
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url: url::Url = format!("tcp://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let manager = ManualConnectorManager::new(peer.get_global_ctx(), peer.clone());
+        manager.data.connectors.insert(url.clone());
+        manager.data.cold_until.insert(
+            url,
+            tokio::time::Instant::now() + super::super::COLD_RETRY_INTERVAL,
+        );
+        let listed = manager.list_connectors().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, ConnectorStatus::ColdRetry as i32);
+        assert!((599..=601).contains(&listed[0].retry_after_seconds));
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+        let seed: url::Url = "quic://127.0.0.1:11012".parse().unwrap();
+        manager.add_connector_by_url(seed.clone()).await.unwrap();
+        let members = manager.data.seeds.lock().unwrap()[&seed].clone();
+        assert_eq!(members.len(), 3);
+        for member in &members {
+            assert_eq!(
+                member.port_or_known_default(),
+                Some(if member.scheme() == "tcp" {
+                    11010
+                } else {
+                    11012
+                })
+            );
+            manager.data.cold_until.insert(
+                member.clone(),
+                tokio::time::Instant::now() + super::super::COLD_RETRY_INTERVAL,
+            );
+        }
+        let wss: url::Url = "wss://127.0.0.1:11012".parse().unwrap();
+        let wrong_pin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned();
+        let own_pin = peer
+            .get_global_ctx()
+            .config
+            .get_secure_mode()
+            .unwrap()
+            .local_public_key
+            .unwrap();
+        peer.get_global_ctx().config.set_peers(vec![
+            crate::common::config::PeerConfig {
+                uri: seed.clone(),
+                peer_public_key: Some(wrong_pin.clone()),
+            },
+            crate::common::config::PeerConfig {
+                uri: wss.clone(),
+                peer_public_key: Some(own_pin.clone()),
+            },
+        ]);
+        manager.add_connector_by_url(wss.clone()).await.unwrap();
+        let generated = members
+            .iter()
+            .find(|member| member.scheme() == "tcp")
+            .unwrap();
+        assert!(ManualConnectorManager::seed_public_key(&manager.data, generated).is_err());
+        manager.remove_connector(seed).await.unwrap();
+        ManualConnectorManager::handle_remove_connector(manager.data.clone());
+        assert!(
+            members
+                .iter()
+                .all(|member| manager.data.connectors.contains(member))
+        );
+        assert_eq!(
+            ManualConnectorManager::seed_public_key(&manager.data, generated).unwrap(),
+            Some(own_pin)
+        );
+        manager.remove_connector(wss).await.unwrap();
+        ManualConnectorManager::handle_remove_connector(manager.data.clone());
+        assert!(
+            members
+                .iter()
+                .all(|member| !manager.data.connectors.contains(member))
+        );
+        let server = crate::peers::tests::create_mock_peer_manager_secure(
+            "seed-cold".into(),
+            "secret".into(),
+        )
+        .await;
+        let (left, right) = crate::tunnel::ring::create_ring_tunnel_pair();
+        let left = super::super::retry::retain_with_pin(left, Vec::new(), Some(wrong_pin));
+        let (client_result, _) = timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                peer.add_client_tunnel(left, true),
+                server.add_tunnel_as_server(right, true)
+            )
+        })
+        .await
+        .unwrap();
+        assert!(
+            client_result.is_err(),
+            "a generated alternative must retain the seed public-key pin"
+        );
+    }
+
+    #[tokio::test]
     async fn wss_effective_path_matches_the_retained_connector_and_live_connection() {
         use crate::{
             common::config::TomlConfigLoader,
@@ -477,6 +701,8 @@ mod tests {
                 let ctx = client.get_global_ctx();
                 let mut flags = ctx.get_flags();
                 flags.bind_device = false;
+                flags.default_protocol = "wss".into();
+                flags.enabled_protocols = vec!["wss".into()];
                 flags.camouflage_config_mut().wss_path = configured.into();
                 ctx.set_flags(flags.clone());
                 let mut listener = WsTunnelListener::new(
@@ -555,11 +781,9 @@ mod tests {
                 .await
                 .unwrap();
             let listed = instance.get_conn_manager().list_connectors().await;
-            assert_eq!(listed.len(), 1);
-            assert_eq!(
-                listed[0].url,
-                Some("wss://127.0.0.1:9/vpn".parse::<url::Url>().unwrap().into())
-            );
+            assert_eq!(listed.len(), 3);
+            assert!(listed.iter().any(|connector| connector.url
+                == Some("wss://127.0.0.1:9/vpn".parse::<url::Url>().unwrap().into())));
             instance.clear_resources().await;
         })
         .await
@@ -569,11 +793,11 @@ mod tests {
     #[test]
     fn multi_lane_tcp_has_time_for_noise_after_tls_joins() {
         for (url, seconds) in [
-            ("tcp://localhost?lanes=4", 10),
-            ("tcp://localhost?lanes=2", 10),
-            ("tcp://localhost", 2),
-            ("tcp://localhost?lanes=1", 2),
-            ("quic://localhost", 10),
+            ("tcp://localhost?lanes=4", 20),
+            ("tcp://localhost?lanes=2", 20),
+            ("tcp://localhost", 20),
+            ("tcp://localhost?lanes=1", 20),
+            ("quic://localhost", 20),
             ("wss://localhost?lanes=4", 20),
         ] {
             assert_eq!(

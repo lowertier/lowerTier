@@ -612,7 +612,16 @@ pub struct PeerSessionStore {
     in_doubt_initiators: Arc<DashMap<SessionKey, SuspendedInitiatorReservation>>,
     responder_recoveries: Arc<DashMap<SessionKey, ResponderRecoveryRecord>>,
     initiator_receipts: Arc<DashMap<SessionKey, InitiatorReceiptRecord>>,
+    responder_handshakes: Arc<DashMap<SessionKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     creation_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SessionTransitionBusy {
+    #[error("session creation is already pending")]
+    Create,
+    #[error("session synchronization is already pending")]
+    Sync,
 }
 
 struct PeerSessionEntry {
@@ -641,12 +650,24 @@ impl Default for PeerSessionStore {
             in_doubt_initiators: Arc::new(DashMap::new()),
             responder_recoveries: Arc::new(DashMap::new()),
             initiator_receipts: Arc::new(DashMap::new()),
+            responder_handshakes: Arc::new(DashMap::new()),
             creation_lock: Arc::new(Mutex::new(())),
         }
     }
 }
 
 impl PeerSessionStore {
+    pub(crate) fn responder_handshake_gate(&self, key: &SessionKey) -> Arc<tokio::sync::Mutex<()>> {
+        self.responder_handshakes
+            .retain(|_, gate| gate.strong_count() > 0);
+        let mut entry = self.responder_handshakes.entry(key.clone()).or_default();
+        if let Some(gate) = entry.upgrade() {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        *entry = Arc::downgrade(&gate);
+        gate
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -2019,7 +2040,7 @@ impl PeerSessionStore {
         allow_existing_proof: bool,
     ) -> Result<UpsertResponderSessionReturn, anyhow::Error> {
         if self.pending_creates.contains_key(key) {
-            return Err(anyhow!("session creation is already pending"));
+            return Err(SessionTransitionBusy::Create.into());
         }
         if self.in_doubt_initiators.contains_key(key) {
             return Err(anyhow!("session transition is awaiting exact recovery"));
@@ -2074,7 +2095,7 @@ impl PeerSessionStore {
                 entry.insert(session.clone());
             }
             Entry::Occupied(_) => {
-                return Err(anyhow!("session creation is already pending"));
+                return Err(SessionTransitionBusy::Create.into());
             }
         }
         Ok(UpsertResponderSessionReturn {
@@ -2251,7 +2272,7 @@ impl PeerSession {
     ) -> Result<(u32, [u8; 32], u32, u64), anyhow::Error> {
         let mut transition = self.transition.lock().unwrap();
         if transition.pending_epoch.is_some() {
-            return Err(anyhow!("session synchronization is already pending"));
+            return Err(SessionTransitionBusy::Sync.into());
         }
         let session_generation = self.datagram.session_generation();
         let root_key = self.datagram.root_key();

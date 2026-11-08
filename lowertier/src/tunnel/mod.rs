@@ -178,6 +178,10 @@ pub trait Tunnel: Send {
         false
     }
 
+    fn pinned_peer_key(&self) -> Option<&str> {
+        None
+    }
+
     fn tcp_proxy(&self) -> Option<Arc<quic::proxy::ProxyEndpoint>> {
         None
     }
@@ -231,6 +235,7 @@ pub trait TunnelConnector: Send {
     /// untouched; `Some(mark)` applies that exact value (including `Some(0)`).
     /// Default impl is a no-op; IP-based connectors override.
     fn set_socket_mark(&mut self, _socket_mark: Option<u32>) {}
+    fn set_pinned_peer_key(&mut self, _key: Option<String>) {}
 }
 
 pub fn build_url_from_socket_addr(addr: &String, scheme: &str) -> url::Url {

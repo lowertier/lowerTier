@@ -63,10 +63,24 @@ The SOCKS5 listener supports TCP connections and the existing SOCKS5 UDP associa
 The HTTP listener supports `CONNECT` tunnels and normal HTTP proxy requests.
 Both proxy protocols pass unresolved names to one central dial path.
 The dial path resolves peer hostnames and qualified names from the current route table.
-It uses system DNS only when the route table has no matching peer name.
+For other names, it uses the selected internet exit's system resolver when an exit route exists.
+The DNS request and response use the authenticated overlay RPC channel.
+DNS and data retain the same connection key for exit-group selection.
+The dial path checks the resolved IP address against the normal route policy and ACLs.
+An exit lookup failure does not fall back to local DNS.
+A strict internet path also rejects DNS when its gateway is unavailable.
+Without an internet exit, the dial path uses the local system resolver.
 It uses the same peer, subnet, exit, service, and blackhole routes as packet forwarding.
 The userspace overlay target path currently supports IPv4 destinations.
 One SOCKS5 UDP association can use at most 256 active targets.
+
+Only nodes with `routes.serve_exit = true` answer exit DNS requests.
+The server accepts requests only from authenticated network peers.
+Each instance permits at most 16 resolver workers and 16 IPv4 answers per request.
+Requests have a five-second resolver deadline and an eight-second RPC deadline.
+A resolver worker retains its capacity reservation until the operating system lookup returns, including after a request timeout.
+The resolver enters the exit instance's network namespace on its own worker thread.
+Application TLS still terminates at the application and origin server.
 
 For an eligible direct QUIC connection, TCP proxy traffic uses an HTTP/3 CONNECT
 stream on the existing authenticated connection. Both peers must advertise the

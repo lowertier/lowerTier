@@ -11,10 +11,13 @@ use rand::seq::SliceRandom;
 pub mod direct;
 pub mod manual;
 pub mod quic_hole_punch;
+pub(crate) mod retry;
 pub mod tcp_hole_punch;
 pub mod tracker_discovery;
 mod traversal;
 mod traversal_resources;
+
+pub(crate) const COLD_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Debug)]
 pub struct BackOff {
@@ -325,5 +328,12 @@ pub async fn create_connector_by_url(
     }
     connector.set_ip_version(effective_connector_ip_version);
 
-    Ok(connector)
+    let identity = connector.remote_url();
+    Ok(Box::new(retry::RetryingConnector {
+        inner: connector,
+        retries: global_ctx.transport_retries.clone(),
+        address: resolved_addr.addr,
+        pin: None,
+        identity,
+    }))
 }

@@ -1,3 +1,6 @@
+// Authenticated RPC and GUI proxy futures require deeper Send trait evaluation.
+#![recursion_limit = "256"]
+
 use std::io;
 
 use clap::Command;

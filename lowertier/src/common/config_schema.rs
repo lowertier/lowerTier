@@ -500,7 +500,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         To("flags.default_protocol"),
         Restart,
         "quic",
-        "Transport tried first for discovered peers.",
+        "Initial transport priority. Measured connection quality takes precedence after setup.",
     ),
     opt(
         "transport.listen",

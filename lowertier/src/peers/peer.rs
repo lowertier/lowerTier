@@ -244,7 +244,7 @@ impl Peer {
         let preferred_protocol = flags.default_protocol.as_str();
         let current_conn_id = self.default_conn_id.load();
         match policy {
-            NextHopPolicy::MaxGoodput => self
+            NextHopPolicy::MaxGoodput | NextHopPolicy::LeastHop => self
                 .conns
                 .iter()
                 .filter(|entry| !entry.value().is_closed())
@@ -267,7 +267,7 @@ impl Peer {
                     )
                 })
                 .map(|entry| entry.value().clone()),
-            NextHopPolicy::LeastCost => self
+            NextHopPolicy::LeastCost | NextHopPolicy::ControlHop => self
                 .conns
                 .iter()
                 .filter(|entry| !entry.value().is_closed())
@@ -278,22 +278,6 @@ impl Peer {
                         latency_us == 0,
                         latency_us,
                         conn.tunnel_type() != Some(preferred_protocol),
-                        conn.get_conn_id() != current_conn_id,
-                        conn.get_conn_id(),
-                    )
-                })
-                .map(|entry| entry.value().clone()),
-            NextHopPolicy::LeastHop | NextHopPolicy::ControlHop => self
-                .conns
-                .iter()
-                .filter(|entry| !entry.value().is_closed())
-                .min_by_key(|entry| {
-                    let conn = entry.value();
-                    let latency_us = conn.get_stats().latency_us;
-                    (
-                        conn.tunnel_type() != Some(preferred_protocol),
-                        latency_us == 0,
-                        latency_us,
                         conn.get_conn_id() != current_conn_id,
                         conn.get_conn_id(),
                     )

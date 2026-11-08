@@ -85,6 +85,115 @@ impl SocksUdpSocket {
     }
 }
 
+#[cfg(test)]
+mod exit_dns_tests {
+    use super::*;
+    use crate::proto::common::{PathPolicy, PathRule};
+    use pnet::packet::ipv4::{Ipv4Flags, MutableIpv4Packet};
+
+    #[tokio::test]
+    async fn proxy_flow_affinity_survives_fragments_and_strict_startup() {
+        timeout(Duration::from_secs(10), async {
+            let entries = Arc::new(DashMap::new());
+            entries.insert(
+                Socks5Entry {
+                    src: "10.42.0.1:4000".parse().unwrap(),
+                    dst: "192.0.2.17:443".parse().unwrap(),
+                    entry_type: UDP_ENTRY,
+                },
+                Socks5EntryData::ProxyUdp { flow: 37 },
+            );
+            let mut bytes = [0_u8; 44];
+            {
+                let mut ip = MutableIpv4Packet::new(&mut bytes).unwrap();
+                ip.set_version(4);
+                ip.set_header_length(5);
+                ip.set_total_length(44);
+                ip.set_identification(99);
+                ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
+                ip.set_source("10.42.0.1".parse().unwrap());
+                ip.set_destination("192.0.2.17".parse().unwrap());
+                ip.set_flags(Ipv4Flags::MoreFragments);
+            }
+            bytes[20..22].copy_from_slice(&4000_u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443_u16.to_be_bytes());
+            let mut fragments = BTreeMap::new();
+            let mut first = ZCPacket::new_with_payload(&bytes);
+            stamp_proxy_flow(&mut first, &entries, &mut fragments);
+            assert_eq!(first.flow_hash(), Some(37));
+            {
+                let mut ip = MutableIpv4Packet::new(&mut bytes).unwrap();
+                ip.set_flags(0);
+                ip.set_fragment_offset(3);
+            }
+            let mut second = ZCPacket::new_with_payload(&bytes);
+            stamp_proxy_flow(&mut second, &entries, &mut fragments);
+            assert_eq!(second.flow_hash(), Some(37));
+            assert!(fragments.is_empty());
+            for id in 100..400 {
+                {
+                    let mut ip = MutableIpv4Packet::new(&mut bytes).unwrap();
+                    ip.set_identification(id);
+                    ip.set_flags(Ipv4Flags::MoreFragments);
+                    ip.set_fragment_offset(0);
+                }
+                let mut first = ZCPacket::new_with_payload(&bytes);
+                stamp_proxy_flow(&mut first, &entries, &mut fragments);
+                {
+                    let mut ip = MutableIpv4Packet::new(&mut bytes).unwrap();
+                    ip.set_flags(0);
+                    ip.set_fragment_offset(3);
+                }
+                let mut last = ZCPacket::new_with_payload(&bytes);
+                stamp_proxy_flow(&mut last, &entries, &mut fragments);
+                assert_eq!(first.flow_hash(), Some(37));
+                assert_eq!(last.flow_hash(), Some(37));
+                assert!(fragments.is_empty());
+            }
+
+            let peer = crate::peers::tests::create_mock_peer_manager_secure(
+                "dns-startup".into(),
+                "secret".into(),
+            )
+            .await;
+            let context = peer.get_global_ctx();
+            context.set_ipv4(Some("10.42.0.1/24".parse().unwrap()));
+            let mut flags = context.get_flags();
+            flags.path_policy = Some(PathPolicy {
+                group: Vec::new(),
+                path: vec![PathRule {
+                    to: "internet".into(),
+                    gateway: "10.42.0.99".into(),
+                    strict: true,
+                    via: Vec::new(),
+                }],
+            });
+            context.set_flags(flags);
+            let connector = Socks5AutoConnector {
+                overlay_connector: None,
+                peer_mgr: Arc::downgrade(&peer),
+                entries,
+                entry_count: Arc::new(AtomicUsize::new(0)),
+                smoltcp_net: None,
+                src_addr: "127.0.0.1:4000".parse().unwrap(),
+                flow: 37,
+                inner_connector: parking_lot::Mutex::new(None),
+            };
+            assert!(
+                connector
+                    .resolve_target(TargetAddr::Domain("localhost".into(), 443))
+                    .await
+                    .is_err()
+            );
+            let destination = "192.0.2.17:443".parse().unwrap();
+            assert!(connector.tcp_connect(destination, 1).await.is_err());
+            assert!(connector.udp_connect(destination, 1).await.is_err());
+        })
+        .await
+        .unwrap();
+    }
+}
+
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
@@ -184,13 +293,16 @@ enum Socks5EntryData {
     // Keep the listener alive until the routing entry drops.
     Tcp {
         _port: TcpListener,
+        flow: u64,
     },
     #[cfg(feature = "ffi-dataplane")]
     // a data-plane routing entry that owns no resource. the entry_type in the
     // key distinguishes a listen route from an actively outbound route.
     DataPlaneRoute,
     Udp((Arc<SocksUdpSocket>, UdpClientKey)), // hold the socket to send data to dst
-    ProxyUdp,
+    ProxyUdp {
+        flow: u64,
+    },
 }
 
 const UDP_ENTRY: u8 = 1;
@@ -206,6 +318,70 @@ struct Socks5Entry {
 }
 
 type Socks5EntrySet = Arc<DashMap<Socks5Entry, Socks5EntryData>>;
+
+type ProxyFragments = BTreeMap<(Ipv4Addr, Ipv4Addr, u16, u8), (Instant, u64)>;
+
+fn stamp_proxy_flow(
+    packet: &mut ZCPacket,
+    entries: &Socks5EntrySet,
+    fragments: &mut ProxyFragments,
+) {
+    let Some(ip) = Ipv4Packet::new(packet.payload()) else {
+        return;
+    };
+    let protocol = ip.get_next_level_protocol();
+    let key = (
+        ip.get_source(),
+        ip.get_destination(),
+        ip.get_identification(),
+        protocol.0,
+    );
+    if ip.get_fragment_offset() != 0 {
+        let flow = fragments.get(&key).copied();
+        if ip.get_flags() & pnet::packet::ipv4::Ipv4Flags::MoreFragments == 0 {
+            fragments.remove(&key);
+        }
+        if let Some((created, flow)) = flow
+            && created.elapsed() < Duration::from_secs(30)
+        {
+            packet.set_flow_hash(flow);
+        }
+        return;
+    }
+    let (source, destination, entry_type) = match protocol {
+        IpNextHeaderProtocols::Tcp => match TcpPacket::new(ip.payload()) {
+            Some(tcp) => (tcp.get_source(), tcp.get_destination(), TCP_ENTRY),
+            None => return,
+        },
+        IpNextHeaderProtocols::Udp => match UdpPacket::new(ip.payload()) {
+            Some(udp) => (udp.get_source(), udp.get_destination(), UDP_ENTRY),
+            None => return,
+        },
+        _ => return,
+    };
+    let entry = Socks5Entry {
+        src: SocketAddr::new(ip.get_source().into(), source),
+        dst: SocketAddr::new(ip.get_destination().into(), destination),
+        entry_type,
+    };
+    let Some(entry) = entries.get(&entry) else {
+        return;
+    };
+    let flow = match entry.value() {
+        Socks5EntryData::Tcp { flow, .. } | Socks5EntryData::ProxyUdp { flow } => *flow,
+        _ => return,
+    };
+    if ip.get_flags() & pnet::packet::ipv4::Ipv4Flags::MoreFragments != 0 {
+        fragments.retain(|_, (created, _)| created.elapsed() < Duration::from_secs(30));
+        // Completed datagrams release their record. Overflow uses ordinary classification for every fragment.
+        if fragments.len() < 256 || fragments.contains_key(&key) {
+            fragments.insert(key, (Instant::now(), flow));
+        } else {
+            return;
+        }
+    }
+    packet.set_flow_hash(flow);
+}
 
 fn increment_entry_count(entry_count: &AtomicUsize) -> (usize, usize) {
     let old_entry_count = entry_count
@@ -294,6 +470,7 @@ struct SmolTcpConnector {
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
     current_entry: std::sync::Mutex<Option<Socks5Entry>>,
+    flow: u64,
 }
 
 #[async_trait::async_trait]
@@ -321,6 +498,7 @@ impl AsyncTcpConnector for SmolTcpConnector {
             entry.clone(),
             Socks5EntryData::Tcp {
                 _port: tmp_listener,
+                flow: self.flow,
             },
         );
         tracing::trace!(
@@ -404,6 +582,7 @@ struct Socks5AutoConnector {
     entry_count: Arc<AtomicUsize>,
     smoltcp_net: Option<Arc<Net>>,
     src_addr: SocketAddr,
+    flow: u64,
 
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
 }
@@ -596,6 +775,12 @@ impl Socks5AutoConnector {
         ) {
             return Ok(address);
         }
+        if let Some(address) = peer_manager
+            .resolve_proxy_domain(name.clone(), port, self.flow)
+            .await?
+        {
+            return Ok(address);
+        }
         match TargetAddr::Domain(name, port).resolve_dns().await? {
             TargetAddr::Ip(address) => Ok(address),
             TargetAddr::Domain(_, _) => unreachable!("DNS resolution returned a domain"),
@@ -628,10 +813,10 @@ impl AsyncTcpConnector for Socks5AutoConnector {
         }
 
         let has_smoltcp_net = self.smoltcp_net.is_some();
-        let route_plan = if has_smoltcp_net && !addr.ip().is_loopback() {
+        let route_plan = if !addr.ip().is_loopback() {
             Some(
                 peer_mgr_arc
-                    .plan_user_route(addr.ip(), rand::random())
+                    .plan_user_route(addr.ip(), self.flow)
                     .await
                     .map_err(|error| anyhow::anyhow!(error))?,
             )
@@ -645,6 +830,10 @@ impl AsyncTcpConnector for Socks5AutoConnector {
 
         if matches!(route_plan, Some(UserRoutePlan::Blackhole)) {
             return Err(anyhow::anyhow!("the route policy blocks destination {addr}").into());
+        }
+
+        if !has_smoltcp_net && matches!(route_plan, Some(UserRoutePlan::Overlay { .. })) {
+            return Err(anyhow::anyhow!("userspace routing is not ready").into());
         }
 
         if !has_smoltcp_net
@@ -699,7 +888,11 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             .get_ipv4()
             .map(|inet| SocketAddr::new(IpAddr::V4(inet.address()), self.src_addr.port()))
             .unwrap_or(self.src_addr);
-        if let Some(connector) = self.overlay_connector.clone() {
+        if let Some(connector) = self.overlay_connector.clone()
+            && let IpAddr::V4(ip) = addr.ip()
+            && let Some(peer_id) = peer_mgr_arc.get_peer_map().get_peer_id_by_ipv4(&ip).await
+            && dst_peers.is_some_and(|peers| peers.as_slice() == [peer_id])
+        {
             tracing::trace!(?addr, "socks5 auto connector selected overlay stream");
             let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync> =
                 Box::new(Socks5OverlayConnector {
@@ -723,6 +916,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                 entries: self.entries.clone(),
                 entry_count: self.entry_count.clone(),
                 current_entry: std::sync::Mutex::new(None),
+                flow: self.flow,
             })
         };
 
@@ -760,10 +954,10 @@ impl AsyncUdpConnector for Socks5AutoConnector {
             addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
         }
 
-        let route_plan = if self.smoltcp_net.is_some() && !addr.ip().is_loopback() {
+        let route_plan = if !addr.ip().is_loopback() {
             Some(
                 peer_manager
-                    .plan_user_route(addr.ip(), rand::random())
+                    .plan_user_route(addr.ip(), self.flow)
                     .await
                     .map_err(|error| anyhow::anyhow!(error))?,
             )
@@ -774,6 +968,9 @@ impl AsyncUdpConnector for Socks5AutoConnector {
             return Err(anyhow::anyhow!("the route policy blocks destination {addr}").into());
         }
         let use_overlay = matches!(route_plan, Some(UserRoutePlan::Overlay { .. }));
+        if use_overlay && self.smoltcp_net.is_none() {
+            return Err(anyhow::anyhow!("userspace routing is not ready").into());
+        }
 
         if !use_overlay {
             let bind_addr = if addr.is_ipv4() {
@@ -808,7 +1005,7 @@ impl AsyncUdpConnector for Socks5AutoConnector {
             &self.entries,
             &self.entry_count,
             entry.clone(),
-            Socks5EntryData::ProxyUdp,
+            Socks5EntryData::ProxyUdp { flow: self.flow },
         );
 
         Ok(Socks5UdpConnection {
@@ -843,6 +1040,7 @@ impl Socks5ServerNet {
         ipv4_addr: cidr::Ipv4Inet,
         peer_manager: Weak<PeerManager>,
         packet_recv: Arc<Mutex<mpsc::Receiver<PacketBatch>>>,
+        entries: Socks5EntrySet,
     ) -> Self {
         let mut forward_tasks = JoinSet::new();
         let mut cap = smoltcp::phy::DeviceCapabilities::default();
@@ -865,6 +1063,7 @@ impl Socks5ServerNet {
         });
 
         forward_tasks.spawn(async move {
+            let mut fragments = BTreeMap::new();
             while let Some(packet) = stack_stream.recv().await {
                 let mut batch = PacketBatch::new();
                 if Ipv4Packet::new(packet.payload()).is_some() {
@@ -891,6 +1090,9 @@ impl Socks5ServerNet {
                     tracing::warn!("peer manager is gone, smoltcp sender exited");
                     return;
                 };
+                for packet in batch.iter_mut() {
+                    stamp_proxy_flow(packet, &entries, &mut fragments);
+                }
                 if let Err(e) = peer_manager
                     .send_fabric_batch(FabricBatch::new(FabricPayloadKind::Ip, batch))
                     .await
@@ -925,29 +1127,34 @@ impl Socks5ServerNet {
         }
     }
 
-    async fn handle_socks5_stream_task(stream: TcpStream, connector: Socks5AutoConnector) {
-        let reply_ip = stream
-            .local_addr()
-            .map(|address| address.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        let mut config = Config::<AcceptAuthentication>::default();
-        config.set_request_timeout(10);
-        config.set_udp_support(true);
-        config.set_skip_auth(false);
-        config.set_allow_no_auth(true);
-        config.set_dns_resolve(false);
+    fn handle_socks5_stream_task(
+        stream: TcpStream,
+        connector: Socks5AutoConnector,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let reply_ip = stream
+                .local_addr()
+                .map(|address| address.ip())
+                .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            let mut config = Config::<AcceptAuthentication>::default();
+            config.set_request_timeout(10);
+            config.set_udp_support(true);
+            config.set_skip_auth(false);
+            config.set_allow_no_auth(true);
+            config.set_dns_resolve(false);
 
-        let mut socket = Socks5Socket::new(stream, Arc::new(config), connector);
-        socket.set_reply_ip(reply_ip);
+            let mut socket = Socks5Socket::new(stream, Arc::new(config), connector);
+            socket.set_reply_ip(reply_ip);
 
-        match socket.upgrade_to_socks5().await {
-            Ok(_) => {
-                tracing::info!("socks5 handle success");
-            }
-            Err(e) => {
-                tracing::error!("socks5 handshake failed: {:?}", e);
-            }
-        };
+            match socket.upgrade_to_socks5().await {
+                Ok(_) => {
+                    tracing::info!("socks5 handle success");
+                }
+                Err(e) => {
+                    tracing::error!("socks5 handshake failed: {:?}", e);
+                }
+            };
+        })
     }
 
     async fn dispatch_tcp_stream_task(
@@ -1464,6 +1671,7 @@ impl Socks5Server {
                             cur_ipv4,
                             peer_manager.clone(),
                             packet_recv.clone(),
+                            entries.clone(),
                         ));
                         tracing::trace!(
                             ?cur_ipv4,
@@ -1530,6 +1738,7 @@ impl Socks5Server {
                             Ok((socket, addr)) => {
                                 tracing::info!("accept a new connection, {:?}", socket);
                                 let connector = Socks5AutoConnector {
+                                    flow: rand::random(),
                                     smoltcp_net: net
                                         .lock()
                                         .await
@@ -1717,6 +1926,7 @@ impl Socks5Server {
                 );
 
                 let connector = Socks5AutoConnector {
+                    flow: rand::random(),
                     overlay_connector: overlay_connector.clone(),
                     peer_mgr: peer_mgr.clone(),
                     entries: entries.clone(),
