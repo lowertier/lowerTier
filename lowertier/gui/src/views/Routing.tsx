@@ -331,26 +331,24 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
             <Applies path="relay.policy" />
           </div>
         </div>
-        <Show when={policy() === "goodput"}>
-          <form
-            class="row"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (budgetText().trim()) apply({ "relay.probe_budget_bps": budgetText().trim() }).then((ok) => ok && setBudgetText(""));
-            }}
-          >
-            <div class="label">
-              <b>Probe budget</b>
-              <p>Bandwidth spent measuring paths. Current {rate(budget())}.</p>
-            </div>
-            <div class="control">
-              <input type="text" placeholder="2Mbit" aria-label="Probe budget" value={budgetText()} onInput={(event) => setBudgetText(event.currentTarget.value)} />
-              <button type="submit" disabled={busy() || !budgetText().trim()}>
-                Save
-              </button>
-            </div>
-          </form>
-        </Show>
+        <form
+          class="row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (budgetText().trim()) apply({ "relay.probe_budget_bps": budgetText().trim() }).then((ok) => ok && setBudgetText(""));
+          }}
+        >
+          <div class="label">
+            <b>Probe budget</b>
+            <p>Bandwidth spent measuring paths. Current {rate(budget())}. Set 0 to stop probes under hop or latency.</p>
+          </div>
+          <div class="control">
+            <input type="text" placeholder="2Mbit" aria-label="Probe budget" value={budgetText()} onInput={(event) => setBudgetText(event.currentTarget.value)} />
+            <button type="submit" disabled={busy() || !budgetText().trim()}>
+              Save
+            </button>
+          </div>
+        </form>
         <div class="row">
           <div class="label">
             <b>Use relays</b>

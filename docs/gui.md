@@ -16,9 +16,27 @@ lowertier gui --listen 127.0.0.1:18080
 The page shows peers placed by round-trip time, traffic rates, loss, and routes.
 The Overview attention list shows peers without a direct connection or with an older version than the node serving the page.
 Latency, loss, and missing round-trip measurements do not add peers to this list.
-It sets every option in the registry, edits paths and load-balance groups with live per-member traffic shares, follows logs, and switches between daemons on the machine.
+It edits node settings, paths, and load-balance groups with live per-member traffic shares.
+It follows logs and switches between daemons on the machine.
 Options that need a restart are staged; the page then offers an instance restart.
 Light and dark themes follow the system setting.
+
+Settings groups each secret with its value or file source.
+Network authentication selects a shared secret or a signed credential.
+A signed credential supplies the identity key. The public key is read-only.
+The optional root trust pin remains available under Identity.
+The issued credential store holds credentials issued by this node.
+It is not an input file for the node's own signed credential.
+
+Source networks use one table with a key requirement for each rule.
+The table writes `gui.allow` and `gui.open` together.
+The three fleet source networks retain access without a key.
+The ACL has one editor for rules and port lists.
+The Routing page edits paths, groups, relay policy, relay use, transit, probe budget, and exit service.
+Settings links to that page.
+
+The admission secret is an optional override for network-secret admission.
+Decoy forwarding still requires an explicit admission secret of at least 16 bytes.
 
 ## On the lt network
 
@@ -85,7 +103,7 @@ Absent values are omitted. 64-bit counters stay integers.
 | `GET /api/schema` | The option registry: path, type, values, default, and when a change applies. |
 | `GET /api/snapshot` | Node, peers, routes, relay, discovery, and listeners in one sample. |
 | `GET /api/config` | Active and staged configuration and restart-pending options. |
-| `POST /api/config` | Apply `[set]` values in the public layout and a `clear` list. `stage = true` stores restart-class options. |
+| `POST /api/config` | Apply `[set]` values keyed by exact option paths and a `clear` list. `stage = true` stores restart-class options. |
 | `POST /api/rpc/<Method>` | Any Control API method by protobuf name, for example `ReadLogs`. |
 
 Add `?node=<portal or name>` and `?instance=<name>` to address another daemon or instance.
@@ -94,10 +112,14 @@ Add `?node=<portal or name>` and `?instance=<name>` to address another daemon or
 curl -s -H "x-lowertier-key: $KEY" -X POST --data-binary @- \
   http://127.0.0.1:15880/api/config <<'TOML'
 stage = true
-[set.relay]
-policy = "latency"
+[set]
+"relay.policy" = "latency"
 TOML
 ```
+
+Quote dotted keys in `[set]` to preserve the exact update path.
+For example, `"acl.tcp_ports" = ["22"]` changes only that port list.
+Setting `acl` replaces the complete ACL table.
 
 ## Development
 

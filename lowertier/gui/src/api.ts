@@ -1,5 +1,6 @@
 // TOML over HTTP to `lowertier gui`, which forwards calls to the selected daemon.
 import { parse, stringify } from "smol-toml";
+import { optionPatch } from "./settingsModel";
 
 export type Doc = Record<string, any>;
 
@@ -95,22 +96,7 @@ export const rpc = (method: string, body: Doc = {}) => api(`rpc/${method}`, body
 /** Set options by dotted path; `null` clears an option back to its default. Options that need
  * a restart are staged: live options apply now, the rest wait for an instance restart. */
 export async function setOptions(changes: Record<string, unknown>): Promise<Doc> {
-  const set: Doc = {};
-  const clear: string[] = [];
-  for (const [path, value] of Object.entries(changes)) {
-    if (value === null) {
-      clear.push(path);
-      continue;
-    }
-    const keys = path.split(".");
-    let table = set;
-    for (const part of keys.slice(0, -1)) table = table[part] ??= {};
-    table[keys[keys.length - 1]] = value;
-  }
-  const body: Doc = { stage: true };
-  if (Object.keys(set).length) body.set = set;
-  if (clear.length) body.clear = clear;
-  return api("config", body);
+  return api("config", optionPatch(changes));
 }
 
 export { stringify as toToml, parse as fromToml };

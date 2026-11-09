@@ -996,6 +996,51 @@ button.link:hover {
 
 /* Settings rows */
 
+.routing-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.settings .row-meta {
+  flex-wrap: wrap;
+}
+
+.access-rules {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.access-rule {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) 84px auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.access-rule input {
+  min-width: 0;
+  width: 100%;
+}
+
+.access-heading {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.advanced-setting,
+.credential-identity {
+  padding: 12px 0;
+}
+
+.advanced-setting > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;

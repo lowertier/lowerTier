@@ -185,7 +185,7 @@ export default function App() {
               <Routing onOpenPeer={openPeer} />
             </Match>
             <Match when={view() === "settings"}>
-              <Settings />
+              <Settings onRouting={() => go("routing")} />
             </Match>
             <Match when={view() === "logs"}>
               <Logs />

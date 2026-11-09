@@ -29,7 +29,7 @@ def receive(stream, length):
     return result
 
 
-def request(proxy, port, path, key=None, host=None):
+def request(proxy, port, path, key=None, host=None, body=None):
     with socket.create_connection(('127.0.0.1', proxy), timeout=3) as stream:
         stream.sendall(b'\x05\x01\x00')
         assert receive(stream, 2) == b'\x05\x00'
@@ -43,8 +43,13 @@ def request(proxy, port, path, key=None, host=None):
         headers = {'Host': host or f'10.201.70.2:{port}', 'Connection': 'close'}
         if key:
             headers['x-lowertier-key'] = key
-        message = 'GET ' + path + ' HTTP/1.1\r\n'
+        if body is not None:
+            headers['Content-Type'] = 'application/toml'
+            headers['Content-Length'] = str(len(body.encode()))
+        message = ('POST ' if body is not None else 'GET ') + path + ' HTTP/1.1\r\n'
         message += ''.join(name + ': ' + value + '\r\n' for name, value in headers.items()) + '\r\n'
+        if body is not None:
+            message += body
         stream.sendall(message.encode())
         response = http.client.HTTPResponse(stream)
         response.begin()
@@ -149,13 +154,35 @@ allow = []
         assert status == 200, status
         assert tomllib.loads(body.decode())['node']['node']['hostname'] == 'gui-proxy-b'
         assert request(proxy, gui_port, '/', host='foreign.invalid')[0] == 403
+        acl = '''[set.acl]
+udp_ports = ["53"]
+[[set.acl.acl_v1.chains]]
+name = "preserved-rule-chain"
+chain_type = 3
+enabled = true
+default_action = 1
+'''
+        status, body = request(proxy, gui_port, '/api/config', key, body=acl)
+        assert status == 200 and not tomllib.loads(body.decode()).get('result', {}).get('errors'), body
+        status, before = request(proxy, gui_port, '/api/config', key)
+        assert status == 200
+        original = tomllib.loads(before.decode())['active']['acl']
+        patch = '[set]\n"acl.tcp_ports" = ["' + str(gui_port) + '"]\n'
+        status, body = request(proxy, gui_port, '/api/config', key, body=patch)
+        assert status == 200 and not tomllib.loads(body.decode()).get('result', {}).get('errors'), body
+        status, after = request(proxy, gui_port, '/api/config', key)
+        assert status == 200
+        updated = tomllib.loads(after.decode())['active']['acl']
+        assert updated['acl_v1'] == original['acl_v1'], 'A port update replaced unrelated ACL rules'
+        assert updated['udp_ports'] == original['udp_ports'], 'A TCP port update replaced UDP ports'
+        assert updated['tcp_ports'] == [str(gui_port)]
         for port, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
             try:
                 status, _ = request(proxy, port, '/api/snapshot', key_file.read_text().strip(), host=f'127.0.0.1:{port}')
             except (OSError, RuntimeError, AssertionError, http.client.HTTPException):
                 continue
             assert status != 200, ('The overlay proxy reached a loopback GUI', port)
-        print(json.dumps(dict(result='passed', instance='gui-proxy-b', page=200, unauthorized_api=403, authorized_api=200, foreign_host=403, loopback_proxy='blocked', evidence=str(directory))))
+        print(json.dumps(dict(result='passed', instance='gui-proxy-b', page=200, unauthorized_api=403, authorized_api=200, foreign_host=403, loopback_proxy='blocked', acl_rules_preserved=True, evidence=str(directory))))
     finally:
         for child in children:
             if child.poll() is None:
