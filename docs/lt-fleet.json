@@ -1,12 +1,12 @@
 {
-  "verified_at": "2026-11-08T16:14:02.751627+00:00",
-  "connectivity_verified_at": "2026-11-08T16:11:16.994468+00:00",
+  "verified_at": "2026-11-09T06:46:57.175222+00:00",
+  "connectivity_verified_at": "2026-11-09T06:46:00.100160+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
-  "application_commit": "920e216d",
-  "repository_commit_at_verification": "920e216d",
-  "application_note": "Software version 0.01 uses peer admission version 0. All 17 joined instances run the shared probe admission fix from committed source. Peer transport names are quic, h2, and wss. The published 0.01 release remains the recorded release baseline.",
+  "application_commit": "d211a9fc",
+  "repository_commit_at_verification": "d211a9fc",
+  "application_note": "All 17 joined instances run the simplified Settings interface from committed source. The configuration format and peer protocol remain unchanged. Network identities, configuration, and the required Web UI source networks are preserved.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -22,10 +22,12 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-08T16:14:02.751627+00:00",
+    "access_verified_at": "2026-11-09T06:46:57.175222+00:00",
     "verification_scope": "All 17 instances passed keyless page, API, and control checks with foreign-origin rejection. Sixteen checks used 10.126.126.2. LA used JPaws at 10.126.126.100. Earlier LAN and outside-source evidence remains valid.",
     "schema_verified_at": "2026-11-08T13:54:38.072745+00:00",
-    "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json"
+    "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json",
+    "bundle_verified_at": "2026-11-09T06:46:57.175222+00:00",
+    "bundle_evidence": "benchmark-results/.work/settings-dedup-20261109/result.json"
   },
   "nat_discovery": {
     "policy": "Each instance configures explicit IPv4 STUN addresses for UDP and TCP. Underlay deny rules exclude the hostname defaults.",
@@ -54,7 +56,7 @@
       "public_key": "XvlUi9g7B3LGdo00+VrOyRMGdhysAK/cWaoLuuc6/Ec=",
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "alibj",
@@ -62,7 +64,7 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "jpaws",
@@ -70,7 +72,7 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "861jp",
@@ -78,7 +80,7 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "862jp",
@@ -86,7 +88,7 @@
       "public_key": "PKG7C+O5UVoGs4hA44gHjeFSO1ggJ4dBqzDI4vt02z8=",
       "instance_id": "063d4675-4de9-47cc-923d-1ef6170b6243",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "862jp-secondary",
@@ -94,7 +96,7 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "jpali",
@@ -102,7 +104,7 @@
       "public_key": "QT4xpDjbEzdYu+tnJf42hxy7q0NnFljSiKUlwQpINBg=",
       "instance_id": "a68c5a14-cc32-4027-b183-80ecfe7a73b5",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "jpali-secondary",
@@ -110,7 +112,7 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "s6916",
@@ -118,7 +120,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "s6916-secondary",
@@ -126,7 +128,7 @@
       "public_key": "Ah4xt1Ttek4cuFQg/pd5Jq5S6D7SDZhF+elKNzKRwH0=",
       "instance_id": "e9a2a583-8b9d-44a9-9e79-7ba3b1ed323a",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "hattori-wrt",
@@ -134,7 +136,7 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -142,7 +144,7 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "yutoms-mcp-legacy",
@@ -150,7 +152,7 @@
       "public_key": "sPpLOcYhUvKT7PWkUGHo+aTDB2tipI1pFZABc8cpQS4=",
       "instance_id": "96bbc508-766a-474f-9494-3ff7b4907f06",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "local-native",
@@ -158,7 +160,7 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "local-userspace",
@@ -166,7 +168,7 @@
       "public_key": "dIA/yFah6zGKA6HVm6SmH2eRlJUuSz4nkueWMTiMrQA=",
       "instance_id": "33890c62-ac32-4e7a-9f81-0e8faa2771c7",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "la",
@@ -174,7 +176,7 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     },
     {
       "node": "btrouter",
@@ -182,7 +184,7 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.01",
-      "application_commit": "920e216d"
+      "application_commit": "d211a9fc"
     }
   ],
   "verification": {
@@ -403,6 +405,32 @@
         "aarch64_linux_release_build": true
       },
       "evidence": "benchmark-results/.work/short-probes-20261108/result.json"
+    },
+    "settings_dedup": {
+      "verified_at": "2026-11-09T06:46:57.175222+00:00",
+      "application_commit": "d211a9fc",
+      "joined_instances": 17,
+      "hosts": 12,
+      "identities_preserved": true,
+      "configuration_preserved": true,
+      "gui_policy_preserved": true,
+      "running_transfer_integrity": true,
+      "webui_bundle_verified": true,
+      "legacy_binary_backups_retained": false,
+      "packets_sent": 51,
+      "packets_received": 51,
+      "checks": {
+        "frontend_tests": 11,
+        "browser_desktop": true,
+        "browser_mobile": true,
+        "acl_rules_preserved": true,
+        "gui_proxy_authentication": true,
+        "native_release": true,
+        "x86_64_linux_release": true,
+        "aarch64_linux_release": true
+      },
+      "scope": "The checks verify configuration, identity, GUI delivery, authentication, and packet delivery. They do not measure throughput or full mesh convergence.",
+      "evidence": "benchmark-results/.work/settings-dedup-20261109/audit.jsonl"
     }
   },
   "pending_historical_hosts": [
