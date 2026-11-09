@@ -251,7 +251,9 @@ export default function Settings(props: { onRouting: () => void }) {
     <Match when={props.option.path === "control.secret"}><Secret path="control.secret" label="Control secret" automatic="No shared secret" /></Match>
     <Match when={props.option.path === "gui.allow"}><Access /></Match>
     <Match when={props.option.path === "acl"}><Row option={props.option} label="Access rules and ports" help="Edit the complete ACL here, including tcp_ports and udp_ports. Other settings keep these rules unchanged." /></Match>
-    <Match when={props.option.path === "camouflage.admission_secret"}><Row option={props.option} label="Admission secret override" help="Admission uses the network secret when this override is absent. Decoy forwarding requires an explicit secret of at least 16 bytes." resetLabel="Use network secret" /></Match>
+    <Match when={props.option.path === "camouflage.admission_secret"}><Row option={props.option} label="Admission secret override"
+      help={credentialMode() ? "Signed credentials have no shared network secret. Decoy forwarding requires an explicit admission secret of at least 16 bytes." : "Admission can use the network secret when this override is absent. Decoy forwarding requires an explicit secret of at least 16 bytes."}
+      resetLabel={credentialMode() ? "Remove override" : "Use network secret"} /></Match>
   </Pick>;
 
   return (
