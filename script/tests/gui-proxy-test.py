@@ -176,6 +176,14 @@ default_action = 1
         assert updated['acl_v1'] == original['acl_v1'], 'A port update replaced unrelated ACL rules'
         assert updated['udp_ports'] == original['udp_ports'], 'A TCP port update replaced UDP ports'
         assert updated['tcp_ports'] == [str(gui_port)]
+        status, body = request(proxy, gui_port, '/api/config', key, body='clear = ["acl.tcp_ports"]\n')
+        assert status == 200 and not tomllib.loads(body.decode()).get('result', {}).get('errors'), body
+        status, after = request(proxy, gui_port, '/api/config', key)
+        assert status == 200
+        cleared = tomllib.loads(after.decode())['active']['acl']
+        assert 'tcp_ports' not in cleared
+        assert cleared['acl_v1'] == original['acl_v1']
+        assert cleared['udp_ports'] == original['udp_ports']
         for port, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
             try:
                 status, _ = request(proxy, port, '/api/snapshot', key_file.read_text().strip(), host=f'127.0.0.1:{port}')
