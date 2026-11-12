@@ -1,10 +1,11 @@
 # lowertier
 
 lowertier puts your machines on one private network, wherever they are and however many NATs sit in front of them.
+Machines find each other through public BitTorrent trackers: no coordination server, no fixed address, no port forwarding.
 
+- **Finds its own peers.** Give each machine the network name, its secret, and a few public trackers. Members discover each other's current addresses, punch direct paths through NAT, and relay for each other when a direct path fails.
 - **Real Ethernet.** Linux and FreeBSD nodes share a Layer 2 segment: ARP, VLANs, multicast, and any EtherType cross unchanged. macOS and Windows join the same network over IP.
 - **No root needed.** Any machine can join through a local SOCKS5 or HTTP proxy instead of a network device.
-- **Gets through.** Peers punch through NAT over UDP and TCP, find each other through BitTorrent trackers if you like, and relay for each other when a direct path fails.
 - **Standard transports.** Traffic runs over QUIC (HTTP/3), HTTP/2, or WebSocket, all on TLS 1.3, and can share port 443 with a real website.
 - **One binary.** `lowertier` runs the node, manages it from the command line, and serves a web interface.
 
@@ -23,29 +24,33 @@ To build from source, see [getting started](docs/getting-started.md#install).
 
 ## Connect two machines
 
-On machine A:
+On the first machine, write a configuration and add the trackers:
 
 ```bash
 lowertier init office.toml --network office --ipv4 10.44.0.1/24
+cat >> office.toml <<'EOF'
+
+[discovery]
+trackers = [
+  "udp://tracker.opentrackr.org:1337/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "https://tracker.nekomi.cn:443/announce",
+]
+EOF
 sudo lowertier run -c office.toml
 ```
 
-Copy `office.secret` from A to B over a channel you trust. Then on machine B, with A's address:
+On the second machine, do the same with `--ipv4 10.44.0.2/24`, then replace its `office.secret` with the first machine's copy before starting it.
+The secret is the network password: move it over a channel you trust.
 
-```bash
-lowertier init office.toml --network office --ipv4 10.44.0.2/24 --peer quic://192.0.2.10:11012
-cp /path/to/copied/office.secret office.secret
-sudo lowertier run -c office.toml
-```
+Neither machine needs to know the other's address. Once they find each other, `sudo lowertier status` lists the other machine and `ping 10.44.0.1` works.
+In our tests, machines behind different NATs connected directly 2 to 45 seconds after the second one started.
+Two NATs that both refuse direct paths need a third member that both can reach; it relays.
 
-A must accept TCP port 11010 and TCP and UDP port 11012. Then, from B:
+A tracker learns the network's rendezvous hash and the members' public addresses, never the secret or the traffic. See [discovery and NAT traversal](docs/nat-traversal.md).
+If you know an address, `--peer quic://192.0.2.10:11012` on `init` dials it directly, with or without trackers.
 
-```bash
-ping 10.44.0.1
-sudo lowertier status
-```
-
-[Getting started](docs/getting-started.md) continues with join codes, services, and checks.
+[Getting started](docs/getting-started.md) continues with services, checks, and join codes.
 
 ## Documentation
 
@@ -55,7 +60,7 @@ sudo lowertier status
 | [Commands](docs/commands.md) | Every command, JSON output, exit codes |
 | [Ethernet](docs/ethernet.md) | Layer 2 between nodes, bridging a LAN |
 | [Proxy mode](docs/proxy-mode.md) | Joining without root |
-| [NAT traversal](docs/nat-traversal.md) | Hole punching, trackers, your own tracker |
+| [Discovery and NAT traversal](docs/nat-traversal.md) | Trackers, hole punching, your own tracker, measured results |
 | [Routing](docs/routing.md) and [paths](docs/paths.md) | Relays, exit nodes, subnets, chosen routes |
 | [Camouflage](docs/camouflage.md) | Port 443 with a website, CDNs |
 | [Web interface](docs/web-interface.md) | The management page and join codes |

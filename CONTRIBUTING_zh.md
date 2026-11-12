@@ -45,6 +45,13 @@ CI 将核心测试限制在 500 个以内。
 cargo test -p lowertier --lib
 ```
 
+release 构建后，可验证两个未配置任何 peer 的节点能通过 tracker 互相发现并传输数据：
+
+```bash
+cargo build --release -p lowertier --bin lowertier -p lowertier-tracker --features lowertier-tracker/server --bin lowertier-tracker
+python3 script/tests/tracker-bootstrap-test.py
+```
+
 Linux 上的网桥测试需要：
 
 ```bash

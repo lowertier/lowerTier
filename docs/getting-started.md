@@ -33,51 +33,64 @@ Add `--features full` for Magic DNS.
 
 ## Connect two machines
 
-`lowertier init` writes a configuration file, a random network secret, and an identity key.
-The secret and key files get mode 0600 and sit next to the configuration.
+Machines find each other through BitTorrent trackers, so neither needs a fixed address or an open port.
+Each machine announces a hash of the network name and secret to the trackers, gets back the addresses of other members, and connects to them.
+Connected members then share what they know, punch direct paths through NAT, and relay for each other when a direct path fails.
 
-On machine A:
+`lowertier init` writes a configuration file, a random network secret, and an identity key, with mode 0600.
+
+On the first machine:
 
 ```bash
 lowertier init office.toml --network office --ipv4 10.44.0.1/24
+cat >> office.toml <<'EOF'
+
+[discovery]
+trackers = [
+  "udp://tracker.opentrackr.org:1337/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "https://tracker.nekomi.cn:443/announce",
+]
+EOF
 sudo lowertier run -c office.toml
 ```
 
-Copy `office.secret` from A to B over a channel you trust. The secret is the network password.
-On machine B, replacing `192.0.2.10` with A's address:
+On the second machine, run the same commands with `--ipv4 10.44.0.2/24`.
+Before you start it, replace its `office.secret` with the first machine's. The secret is the network password; copy it over a channel you trust.
 
-```bash
-lowertier init office.toml --network office --ipv4 10.44.0.2/24 --peer quic://192.0.2.10:11012
-cp /path/to/copied/office.secret office.secret
-sudo lowertier run -c office.toml
-```
-
-Machine A must accept TCP port `11010` (HTTP/2) and TCP and UDP port `11012` (WSS and QUIC).
-B only dials out, so it needs no open ports.
+Add a third machine, or a tenth, the same way. Each one needs only the network name, the secret, and the trackers.
 
 ## Check it
 
-On machine B:
+On the second machine:
 
 ```bash
-sudo lowertier status
+sudo lowertier peers
 ping 10.44.0.1
 ```
 
-`status` shows the node and its peers on one screen:
-
 ```text
-node      node-b · peer 2006876804 · default @ 127.0.0.1:15888 · 0.01
-address   10.44.0.2/24
-nat       udp symmetric · tcp symmetric · public 203.0.113.7
-discovery no trackers configured
-listen    h2://0.0.0.0:11010  quic://0.0.0.0:11012  wss://0.0.0.0:11012/ws
-relay     policy hop · transit allow · relayed 0 B · drops 0
-
 PEER     ADDRESS        VIA      TRANSPORT       RTT   LOSS   RATE   SESSION     ID
-node-a   10.44.0.1/24   direct   h2+quic+wss   31 ms      -      -   key-bound   2114138755
+node-a   10.44.0.1/24   direct   h2+quic+wss   115 ms     -      -   key-bound   3024484495
 ```
 
+`direct` means the machines punched through their NATs; `TRANSPORT` lists every link they hold.
+`sudo lowertier discovery` shows each tracker's status and the addresses it returned.
+If the first machine started long before the second, finding each other can take until its next announce; see [discovery and NAT traversal](nat-traversal.md#how-long-discovery-takes).
+
+## Connect to a known address
+
+If one machine has a reachable address, the other can dial it directly, with or without trackers:
+
+```bash
+lowertier init office.toml --network office --ipv4 10.44.0.2/24 --peer quic://192.0.2.10:11012
+```
+
+The dialed machine must accept TCP port `11010` (HTTP/2) and TCP and UDP port `11012` (WSS and QUIC).
+
+## More checks
+
+`sudo lowertier status` shows the node, its addresses, NAT type, trackers, listeners, and peers on one screen.
 If something is wrong, `sudo lowertier doctor` checks each layer and prints a fix.
 `sudo lowertier top` is a live dashboard, and `sudo lowertier gui` opens the [web interface](web-interface.md).
 

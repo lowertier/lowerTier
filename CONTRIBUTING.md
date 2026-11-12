@@ -45,6 +45,13 @@ CI holds the core suite to at most 500 tests.
 cargo test -p lowertier --lib
 ```
 
+After a release build, check that two nodes with no configured peers find each other through a tracker and carry data:
+
+```bash
+cargo build --release -p lowertier --bin lowertier -p lowertier-tracker --features lowertier-tracker/server --bin lowertier-tracker
+python3 script/tests/tracker-bootstrap-test.py
+```
+
 On Linux, bridge tests need:
 
 ```bash

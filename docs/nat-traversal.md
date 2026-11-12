@@ -1,14 +1,37 @@
-# NAT traversal and discovery
+# Discovery and NAT traversal
 
-A node needs one way in: a peer it can reach, or a tracker that knows where peers are.
-After that, connected peers introduce each other, punch direct connections through NAT, and relay for each other when punching fails.
+A lowertier network needs no coordination server and no machine with a fixed address.
+Members find each other through ordinary BitTorrent trackers, then punch direct paths through NAT, and relay for each other when a direct path fails.
+
+## Trackers
+
+```toml
+[discovery]
+trackers = [
+  "udp://tracker.opentrackr.org:1337/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "https://tracker.nekomi.cn:443/announce",
+]
+```
+
+These three public trackers answered our nodes on 2026-11-13. Any working BitTorrent tracker will do; list more than one, and at least one HTTP(S) tracker for networks that block UDP.
+
+Each node announces a 20-byte hash derived from the network name and secret, one for each transport, and receives the addresses of other nodes that announced the same hash.
+It then connects to those addresses. A tracker or an address grants nothing by itself: every connection must complete TLS and a Noise handshake with the network secret before it carries data.
+
+What a tracker learns: the hash, the public address and port of each member, and when they announce. It does not learn the network name, the secret, or any traffic.
+Anyone who watches the tracker can see which addresses share a hash.
+
+lowertier speaks the standard tracker protocols, UDP (BEP 15) and HTTP(S), plus a `tcp://` framing that only `lowertier-tracker` serves.
+HTTP/2 and WSS can bootstrap through HTTP(S) or TCP trackers with QUIC disabled.
+Tracker discovery needs a shared network secret; nodes that join with a signed credential cannot use it yet.
 
 ## How a connection forms
 
-1. **Bootstrap.** The node dials its configured `[[peer]]` entries, and announces to trackers if `[discovery]` is set.
-2. **Authenticate.** Every connection completes TLS and a Noise handshake before it carries data. A tracker or an address alone grants nothing.
-3. **Learn.** Connected peers share the peer list and their listener addresses over the encrypted overlay.
-4. **Punch.** STUN reports each node's public mapping. Peers coordinate simultaneous opens over the overlay: UDP for QUIC, TCP for HTTP/2 and WSS.
+1. **Announce.** Each node announces to every tracker and gets back the members that announced before it.
+2. **Dial.** It dials those addresses on QUIC, HTTP/2, and WSS, and authenticates each connection.
+3. **Learn.** Connected members share the peer list and their listener addresses over the encrypted overlay, so one connection is enough to reach the rest.
+4. **Punch.** STUN reports each node's public mapping. Members coordinate simultaneous opens over the overlay: UDP for QUIC, TCP for HTTP/2 and WSS.
    When one side's NAT changes ports for each destination, the other side searches a bounded range of ports.
 5. **Relay.** If no direct path forms, traffic goes through other members. See [routing](routing.md).
 
@@ -18,7 +41,30 @@ A failed endpoint waits 15 seconds before the next try, doubling after each fail
 Whether two NATs can connect directly depends on how each one maps and filters. Two NATs that both change ports per destination usually need a relay.
 Keep at least one member that both can reach.
 
-## Settings
+## How long discovery takes
+
+A tracker tells each client how long to wait before it announces again. Public trackers ask for about 30 to 60 minutes.
+A node re-announces sooner when its own NAT mapping changes, but otherwise follows the tracker.
+
+- **The newcomer finds the earlier members at once**, from its first announce. If it can reach one of them, the network forms within seconds.
+- **The earlier members learn of the newcomer only at their next announce.** That matters when the newcomer cannot reach any earlier member: say, a lone first node behind a NAT that drops unsolicited packets. Then the two connect at the first node's next announce, which on a public tracker can be up to an hour away.
+
+To make discovery fast in every case, keep one member reachable from the internet, or [run your own tracker](#run-your-own-tracker), whose clients announce every 30 seconds.
+
+### Measured
+
+On 2026-11-13, with release 0.01 and only the three public trackers above, no `[[peer]]` entries and no port forwarding:
+
+| Machines | Started | Result |
+| --- | --- | --- |
+| A server with a public address, a cloud VM behind NAT, a Mac behind a symmetric NAT | The server first, the others 4 minutes later | Full mesh of direct links within 30 s of the last start. A 2 MB file crossed with a matching SHA-256. |
+| The cloud VM and the Mac | VM first, Mac 52 s later | Mac connected directly to the VM 2 s after starting, on QUIC, HTTP/2, and WSS. |
+| The cloud VM and the Mac | Mac first, VM 78 s later | Connected directly 45 s after the VM started, when the Mac's next announce returned the VM's address. |
+
+`script/tests/tracker-bootstrap-test.py` repeats the first step on one machine: it starts `lowertier-tracker` and two nodes with no configured peers,
+and passes when they connect directly and a 4 MiB file crosses with a matching hash. With a tracker that does not answer, the same test fails.
+
+## NAT settings
 
 ```toml
 [nat]
@@ -33,44 +79,33 @@ symmetric_punch = true  # port search toward NATs that change ports
 A slow or failing STUN server does not delay tracker replies, outbound connections, or relays.
 QUIC keeps the socket that STUN and punching used, so the NAT mapping stays valid. Connections survive NAT port changes on either side; see [QUIC path migration](design/quic-rebinding.md).
 
-## Trackers
+## Known addresses
 
-Trackers are optional. A node with `[[peer]]` entries needs none.
-Use them when no member has a stable address, or to let new nodes find the network without editing configuration.
+A node can also dial addresses you give it, with or without trackers:
 
 ```toml
-[discovery]
-trackers = [
-  "udp://open.stealth.si:80/announce",
-  "udp://tracker.torrent.eu.org:451/announce",
-  "https://tracker.example.net/announce",
-]
+[[peer]]
+uri = "quic://192.0.2.10:11012"
 ```
 
-lowertier speaks the standard BitTorrent tracker protocols, UDP (BEP 15) and HTTP(S).
-Nodes announce a hash derived from the network name and secret. Anyone watching the tracker can see that hash and the addresses behind it, but every candidate must pass authentication before it carries data.
-Add an HTTP(S) or `tcp://` tracker when UDP is blocked; HTTP/2 and WSS can bootstrap with QUIC disabled.
-Tracker discovery needs a shared network secret; nodes that join with a signed credential cannot use it yet.
+A configured peer connects at startup and keeps retrying. It is the fastest bootstrap when one member has a stable address.
 
-A public tracker learns the rendezvous hash, each node's public address, and timing. It cannot join the network.
-Keep tracker passkeys and network secrets out of shared files.
-
-### Run your own tracker
+## Run your own tracker
 
 ```bash
 cargo build --release -p lowertier-tracker --features server --bin lowertier-tracker
 lowertier-tracker --udp-listen 0.0.0.0:6969 --http-listen 127.0.0.1:6970
 ```
 
-The tracker also answers STUN. List it under `discovery.private_trackers`, which also allows private and local addresses as candidates:
+List it under `discovery.private_trackers`. Clients announce to a private tracker every 30 seconds, and may use private and local addresses it returns:
 
 ```toml
 [discovery]
 private_trackers = ["udp://tracker.example.net:6969/announce"]
 ```
 
-It keeps state in memory only, stores no torrent data, and relays no VPN traffic.
+The tracker also answers STUN. It keeps state in memory only, stores no torrent data, and relays no VPN traffic.
 Behind an HTTPS reverse proxy such as Caddy, start it with `--trusted-proxy 127.0.0.1/32` so it reads the client address from `X-Real-IP`.
 `--passkey-file` restricts who may announce.
 
-The [tracker discovery](design/tracker-discovery.md) and [rendezvous](design/rendezvous.md) notes cover CDN deployment, TCP framing, timing, and the privacy limits in detail.
+The [tracker discovery](design/tracker-discovery.md) and [rendezvous](design/rendezvous.md) notes cover the bootstrap sequence, CDN deployment, TCP framing, timing, and the privacy limits in detail.
