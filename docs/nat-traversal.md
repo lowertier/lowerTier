@@ -13,7 +13,7 @@ After that, connected peers introduce each other, punch direct connections throu
 5. **Relay.** If no direct path forms, traffic goes through other members. See [routing](routing.md).
 
 Each transport punches its own path, so a working QUIC path does not stop an HTTP/2 or WSS attempt.
-A failed endpoint waits at least 600 seconds before the next try, and its status reads `COLD_RETRY`.
+A failed endpoint waits 15 seconds before the next try, doubling after each failure up to 600 seconds. A success resets the wait. While it waits, its status reads `COLD_RETRY`.
 
 Whether two NATs can connect directly depends on how each one maps and filters. Two NATs that both change ports per destination usually need a relay.
 Keep at least one member that both can reach.
