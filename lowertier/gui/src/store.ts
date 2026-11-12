@@ -2,6 +2,7 @@
 import { createSignal } from "solid-js";
 import { api, ApiError, setTarget, type Doc } from "./api";
 import { ipv4 } from "./format";
+import { currentIncarnations } from "./incarnations";
 import { aliasFor } from "./notes";
 
 export const HISTORY = 120;
@@ -71,7 +72,8 @@ function ingest(doc: Doc) {
   const counters = new Map<string, { rx: number; tx: number }>();
   const elapsed = previous ? Math.max(0.2, (at - previous.at) / 1000) : 0;
   const rows: PeerRow[] = [];
-  for (const peer of (doc.peers ?? []) as Doc[]) {
+  const self = doc.node?.node ?? {};
+  for (const peer of currentIncarnations((doc.peers ?? []) as Doc[], self.inst_id, self.peer_id)) {
     const route: Doc = peer.route ?? {};
     const conns = ((peer.conns ?? []) as Doc[]).filter((conn) => !conn.is_closed);
     let rx = 0;

@@ -419,6 +419,44 @@ fn route_peer_inst_id(info: &RoutePeerInfo) -> Option<uuid::Uuid> {
     info.inst_id.map(Into::into)
 }
 
+/// Route entries left behind by earlier runs of an instance. A restarted instance takes a new
+/// peer ID under the same instance ID, and its old entry can stay reachable through stale
+/// adjacency claims for up to [`REMOVE_DEAD_PEER_INFO_AFTER`]. Keep the newest entry per
+/// instance ID, and drop every other entry that carries this node's own instance ID.
+fn superseded_incarnations(
+    my_peer_id: PeerId,
+    my_inst_id: uuid::Uuid,
+    entries: impl IntoIterator<Item = (PeerId, Option<uuid::Uuid>, Option<SystemTime>)>,
+) -> Vec<PeerId> {
+    let mut newest: HashMap<uuid::Uuid, (PeerId, Option<SystemTime>)> = HashMap::new();
+    let mut stale = Vec::new();
+    for (peer_id, inst_id, last_update) in entries {
+        let Some(inst_id) = inst_id.filter(|id| !id.is_nil()) else {
+            continue;
+        };
+        if inst_id == my_inst_id {
+            if peer_id != my_peer_id {
+                stale.push(peer_id);
+            }
+            continue;
+        }
+        match newest.get_mut(&inst_id) {
+            None => {
+                newest.insert(inst_id, (peer_id, last_update));
+            }
+            Some(kept) => {
+                if (last_update, peer_id) > (kept.1, kept.0) {
+                    stale.push(kept.0);
+                    *kept = (peer_id, last_update);
+                } else {
+                    stale.push(peer_id);
+                }
+            }
+        }
+    }
+    stale
+}
+
 #[derive(Debug, Clone)]
 struct AtomicVersion(Arc<AtomicU32>);
 
@@ -7105,6 +7143,23 @@ impl PeerRouteServiceImpl {
             }
         }
 
+        to_remove.extend(superseded_incarnations(
+            self.my_peer_id,
+            self.global_ctx.get_id(),
+            self.synced_route_info
+                .peer_infos
+                .read()
+                .iter()
+                .filter(|(peer_id, _)| !to_remove.contains(*peer_id))
+                .map(|(peer_id, info)| {
+                    (
+                        *peer_id,
+                        route_peer_inst_id(info),
+                        info.last_update
+                            .and_then(|timestamp| SystemTime::try_from(timestamp).ok()),
+                    )
+                }),
+        ));
         self.synced_route_info
             .remove_peers(to_remove.iter().copied());
 
@@ -9243,5 +9298,33 @@ impl Route for PeerRoute {
         if self.service_impl.refresh_acl_groups().await {
             self.session_mgr.sync_now("refresh_acl_groups");
         }
+    }
+}
+
+#[cfg(test)]
+mod incarnation_tests {
+    use super::*;
+
+    #[test]
+    fn superseded_incarnations_keep_the_newest_and_drop_own_ghosts() {
+        let me = uuid::Uuid::from_u128(1);
+        let other = uuid::Uuid::from_u128(2);
+        let at = |seconds| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        let mut stale = superseded_incarnations(
+            10,
+            me,
+            [
+                (10, Some(me), at(50)),
+                (11, Some(me), at(60)),
+                (20, Some(other), at(100)),
+                (21, Some(other), at(200)),
+                (22, Some(other), at(150)),
+                (30, Some(uuid::Uuid::nil()), at(1)),
+                (31, Some(uuid::Uuid::nil()), at(2)),
+                (40, None, at(1)),
+            ],
+        );
+        stale.sort_unstable();
+        assert_eq!(stale, vec![11, 20, 22]);
     }
 }
