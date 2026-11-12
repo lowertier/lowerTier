@@ -589,12 +589,14 @@ impl DirectConnectorManagerData {
         .await;
         // Back off while any enabled transport still lacks a direct connection.
         let flags = self.global_ctx.flags_arc();
-        let missing = crate::common::config::TRANSPORT_PROTOCOLS.iter().any(|protocol| {
-            crate::common::config::transport_protocol_enabled(&flags, protocol)
-                && !self
-                    .peer_manager
-                    .has_live_peer_connection_for_protocol(dst_peer_id, protocol)
-        });
+        let missing = crate::common::config::TRANSPORT_PROTOCOLS
+            .iter()
+            .any(|protocol| {
+                crate::common::config::transport_protocol_enabled(&flags, protocol)
+                    && !self
+                        .peer_manager
+                        .has_live_peer_connection_for_protocol(dst_peer_id, protocol)
+            });
         if missing {
             let wait = self.next_scan.fail(dst_peer_id);
             tracing::debug!(dst_peer_id, ?wait, "direct connect incomplete; retry later");

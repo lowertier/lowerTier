@@ -136,7 +136,8 @@ impl CloseCode {
         match self.0.get() {
             1004 | 1005 | 1006 | 1015 => true,
             1000..=4999 => false,
-            // `TryFrom` is the only way to acquire self and it errors for these values
+            // `TryFrom` is the only way to acquire self and it errors for these
+            // values
             0..=999 | 5000..=u16::MAX => {
                 debug_assert!(false, "unexpected CloseCode");
                 false

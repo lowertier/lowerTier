@@ -723,11 +723,15 @@ fn validate_notes(notes: &[PeerNote]) -> anyhow::Result<()> {
             note.peer
         );
         anyhow::ensure!(
-            note.name.as_ref().is_none_or(|name| name.chars().count() <= 64),
+            note.name
+                .as_ref()
+                .is_none_or(|name| name.chars().count() <= 64),
             "note.name permits 64 characters"
         );
         anyhow::ensure!(
-            note.text.as_ref().is_none_or(|text| text.chars().count() <= 2000),
+            note.text
+                .as_ref()
+                .is_none_or(|text| text.chars().count() <= 2000),
             "note.text permits 2000 characters"
         );
     }

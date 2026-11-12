@@ -625,7 +625,8 @@ mod tests {
             });
 
             let mut flags = crate::common::config::gen_default_flags();
-            flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".to_owned()];
+            flags.camouflage_config_mut().server_names =
+                vec!["challenges.cloudflare.com".to_owned()];
             flags
                 .camouflage_config_mut()
                 .set_decoy_upstream(decoy_addr.to_string());

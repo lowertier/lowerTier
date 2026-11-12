@@ -1109,7 +1109,10 @@ const TABLE_FIELDS: &[(&str, &[(&str, &str)])] = &[
         "relay.link_cost",
         &[("peer", "peer"), ("bias_ms", "bias_ms")],
     ),
-    ("note", &[("peer", "peer"), ("name", "name"), ("text", "text")]),
+    (
+        "note",
+        &[("peer", "peer"), ("name", "name"), ("text", "text")],
+    ),
 ];
 
 /// Old names. `None` means the option was removed.

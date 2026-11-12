@@ -913,7 +913,10 @@ impl PeerSessionStore {
             .get(key)
             .is_some_and(|entry| entry.created_at.elapsed() >= INITIATOR_RECOVERY_LIFETIME);
         if stale {
-            tracing::info!(?key, "initiator receipt was not acknowledged in time; releasing it");
+            tracing::info!(
+                ?key,
+                "initiator receipt was not acknowledged in time; releasing it"
+            );
             self.initiator_receipts.remove(key);
         }
         stale
@@ -3763,13 +3766,18 @@ mod tests {
                     None,
                 )
                 .unwrap();
-            let identity = reservation.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+            let identity =
+                reservation.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
             (reservation, identity)
         };
 
         // A dial without a peer ID hint cannot name the pending receipt.
         let (blocked, blocked_identity) = next(&store);
-        assert!(blocked.commit_with_receipt_replacing(blocked_identity, None).is_err());
+        assert!(
+            blocked
+                .commit_with_receipt_replacing(blocked_identity, None)
+                .is_err()
+        );
         assert_eq!(store.initiator_receipt_identity(&key), Some(first_identity));
 
         store.initiator_receipts.get_mut(&key).unwrap().created_at =
@@ -3778,7 +3786,10 @@ mod tests {
         released
             .commit_with_receipt_replacing(released_identity.clone(), None)
             .unwrap();
-        assert_eq!(store.initiator_receipt_identity(&key), Some(released_identity.clone()));
+        assert_eq!(
+            store.initiator_receipt_identity(&key),
+            Some(released_identity.clone())
+        );
         assert!(store.acknowledge_initiator_receipt_exact(&released_identity));
     }
 

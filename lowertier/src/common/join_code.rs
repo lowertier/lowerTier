@@ -54,8 +54,7 @@ impl JoinCode {
                 "bootstrap peer {peer:?} needs a host and a port"
             );
             ensure!(
-                !uri
-                    .host_str()
+                !uri.host_str()
                     .is_some_and(|host| host == "0.0.0.0" || host == "[::]"),
                 "bootstrap peer {peer:?} has an unspecified address"
             );

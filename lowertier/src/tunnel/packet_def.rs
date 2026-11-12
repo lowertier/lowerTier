@@ -1255,7 +1255,9 @@ impl ZCPacket {
         trailer[length + 6] = WAYPOINT_VERSION;
         length += WAYPOINT_TAIL;
         self.append_payload_preserving_flow_hash(&trailer[..length])?;
-        let header = self.mut_peer_manager_header().ok_or("packet without header")?;
+        let header = self
+            .mut_peer_manager_header()
+            .ok_or("packet without header")?;
         header.to_peer_id.set(*first);
         header.packet_type = PacketType::Waypoint as u8;
         Ok(())
@@ -1298,7 +1300,9 @@ impl ZCPacket {
             self.remove_payload_suffix_preserving_flow_hash(WAYPOINT_TAIL)?;
             destination
         };
-        let header = self.mut_peer_manager_header().ok_or("packet without header")?;
+        let header = self
+            .mut_peer_manager_header()
+            .ok_or("packet without header")?;
         header.to_peer_id.set(next);
         if remaining == 0 {
             header.packet_type = original_type;
@@ -1809,7 +1813,10 @@ mod tests {
     fn waypoints_restore_the_sealed_packet_exactly() {
         let mut packet = ZCPacket::new_with_payload(b"sealed payload");
         packet.fill_peer_manager_hdr(1, 9, PacketType::Data as u8);
-        packet.mut_peer_manager_header().unwrap().set_encrypted(true);
+        packet
+            .mut_peer_manager_header()
+            .unwrap()
+            .set_encrypted(true);
         let sealed = packet.payload().to_vec();
         let auth = packet.peer_manager_header().unwrap().stable_auth_data();
 
@@ -1828,7 +1835,10 @@ mod tests {
         );
         assert_eq!(packet.advance_waypoint(), Ok(9));
         assert_eq!(packet.payload(), sealed.as_slice());
-        assert_eq!(packet.peer_manager_header().unwrap().stable_auth_data(), auth);
+        assert_eq!(
+            packet.peer_manager_header().unwrap().stable_auth_data(),
+            auth
+        );
 
         let mut short = ZCPacket::new_with_payload(b"xy");
         short.fill_peer_manager_hdr(1, 2, PacketType::Waypoint as u8);

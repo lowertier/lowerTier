@@ -553,7 +553,10 @@ impl PeerTaskLauncher for Launcher {
                 return Ok(());
             }
             let permit = data.permits.clone().acquire_owned().await?;
-            if data.peer_mgr.has_live_peer_connection_for_protocol(peer, "quic") {
+            if data
+                .peer_mgr
+                .has_live_peer_connection_for_protocol(peer, "quic")
+            {
                 return Ok(());
             }
             tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate_with(peer, permit)).await?

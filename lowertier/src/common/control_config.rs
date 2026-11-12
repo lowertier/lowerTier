@@ -207,8 +207,9 @@ impl CamouflageConfig {
         );
         for (index, name) in self.server_names.iter().enumerate() {
             anyhow::ensure!(
-                rustls::pki_types::ServerName::try_from(name.as_str())
-                    .is_ok_and(|parsed| matches!(parsed, rustls::pki_types::ServerName::DnsName(_))),
+                rustls::pki_types::ServerName::try_from(name.as_str()).is_ok_and(
+                    |parsed| matches!(parsed, rustls::pki_types::ServerName::DnsName(_))
+                ),
                 "camouflage.server_names: {name:?} is not a DNS name"
             );
             anyhow::ensure!(

@@ -665,34 +665,50 @@ fn paths(value: &ListPathsResponse) -> String {
             .iter()
             .enumerate()
             .map(|(index, segment)| (format!("via {}", index + 1), segment))
-            .chain(path.gateway.iter().map(|segment| ("gateway".to_owned(), segment)));
+            .chain(
+                path.gateway
+                    .iter()
+                    .map(|segment| ("gateway".to_owned(), segment)),
+            );
         let rows = segments
             .flat_map(|(role, segment)| {
-                segment.members.iter().enumerate().map(move |(index, member)| {
-                    vec![
-                        if index == 0 { role.clone() } else { String::new() },
-                        if index == 0 {
-                            format!("{} ({})", clean(&segment.name), clean(&segment.balance))
-                        } else {
-                            String::new()
-                        },
-                        if member.hostname.is_empty() {
-                            clean(&member.r#ref)
-                        } else {
-                            clean(&member.hostname)
-                        },
-                        member.weight.to_string(),
-                        if member.usable {
-                            "usable".into()
-                        } else {
-                            clean(&member.reason)
-                        },
-                        member.picks.to_string(),
-                    ]
-                })
+                segment
+                    .members
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, member)| {
+                        vec![
+                            if index == 0 {
+                                role.clone()
+                            } else {
+                                String::new()
+                            },
+                            if index == 0 {
+                                format!("{} ({})", clean(&segment.name), clean(&segment.balance))
+                            } else {
+                                String::new()
+                            },
+                            if member.hostname.is_empty() {
+                                clean(&member.r#ref)
+                            } else {
+                                clean(&member.hostname)
+                            },
+                            member.weight.to_string(),
+                            if member.usable {
+                                "usable".into()
+                            } else {
+                                clean(&member.reason)
+                            },
+                            member.picks.to_string(),
+                        ]
+                    })
             })
             .collect();
-        text += &table(&["Role", "Segment", "Member", "Weight", "State", "Picks"], rows, &[3, 5]);
+        text += &table(
+            &["Role", "Segment", "Member", "Weight", "State", "Picks"],
+            rows,
+            &[3, 5],
+        );
         text.push('\n');
     }
     text

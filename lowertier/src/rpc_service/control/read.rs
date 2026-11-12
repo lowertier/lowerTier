@@ -1012,7 +1012,11 @@ impl ControlPlaneService {
         }
         let context = instance.context()?;
         let identity = context.get_network_identity();
-        let admission = context.get_flags().camouflage_config().admission_secret.clone();
+        let admission = context
+            .get_flags()
+            .camouflage_config()
+            .admission_secret
+            .clone();
         let mut join = crate::common::join_code::JoinCode {
             network: identity.network_name.clone(),
             secret: None,
@@ -1056,7 +1060,9 @@ impl ControlPlaneService {
                     None,
                     request.reusable,
                 )
-                .map_err(|error| failure("INVALID_ARGUMENT", &error.to_string(), "use_credential"))?;
+                .map_err(|error| {
+                    failure("INVALID_ARGUMENT", &error.to_string(), "use_credential")
+                })?;
             context.issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);
             response.credential_id = credential_id;
             response.expires_unix = chrono::Utc::now()

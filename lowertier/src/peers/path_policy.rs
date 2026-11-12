@@ -49,7 +49,11 @@ impl PeerRef {
         Some(Self::Key(key.try_into().ok()?))
     }
 
-    fn resolve(&self, snapshot: &ForwardingDecisionSnapshot, keys: &HashMap<[u8; 32], PeerId>) -> Option<PeerId> {
+    fn resolve(
+        &self,
+        snapshot: &ForwardingDecisionSnapshot,
+        keys: &HashMap<[u8; 32], PeerId>,
+    ) -> Option<PeerId> {
         match self {
             Self::Key(key) => keys.get(key).copied(),
             Self::Ip(address) => snapshot.peer_id_by_ip(address),
@@ -120,8 +124,14 @@ fn valid_group_name(name: &str) -> bool {
 impl PathPolicy {
     /// Validate the configuration and build the policy. Errors name the entry and field.
     pub fn compile(config: &crate::proto::common::PathPolicy) -> anyhow::Result<Self> {
-        ensure!(config.group.len() <= MAX_GROUPS, "group permits {MAX_GROUPS} entries");
-        ensure!(config.path.len() <= MAX_PATHS, "path permits {MAX_PATHS} entries");
+        ensure!(
+            config.group.len() <= MAX_GROUPS,
+            "group permits {MAX_GROUPS} entries"
+        );
+        ensure!(
+            config.path.len() <= MAX_PATHS,
+            "path permits {MAX_PATHS} entries"
+        );
         let mut groups = HashMap::<&str, Segment>::new();
         for (index, group) in config.group.iter().enumerate() {
             let segment = Self::group(group).with_context(|| format!("group {}", index + 1))?;
@@ -172,8 +182,9 @@ impl PathPolicy {
         );
         let mut members = Vec::with_capacity(group.members.len());
         for (index, text) in group.members.iter().enumerate() {
-            let peer = PeerRef::parse(text)
-                .with_context(|| format!("member {text:?} is not a peer public key or virtual IP"))?;
+            let peer = PeerRef::parse(text).with_context(|| {
+                format!("member {text:?} is not a peer public key or virtual IP")
+            })?;
             ensure!(
                 !members.iter().any(|member: &Member| member.peer == peer),
                 "member {text:?} is listed twice"
@@ -200,8 +211,9 @@ impl PathPolicy {
         if let Some(group) = groups.get(text) {
             return Ok(group.clone());
         }
-        let peer = PeerRef::parse(text)
-            .with_context(|| format!("{text:?} is not a group name, peer public key, or virtual IP"))?;
+        let peer = PeerRef::parse(text).with_context(|| {
+            format!("{text:?} is not a group name, peer public key, or virtual IP")
+        })?;
         Ok(Segment {
             name: text.to_owned(),
             balance: Balance::Failover,
@@ -414,7 +426,10 @@ impl PathRuntime {
             .is_some_and(|compiled| !compiled.policy.rules.is_empty())
     }
 
-    fn resolved(&self, snapshot: &ForwardingDecisionSnapshot) -> Option<(Arc<Compiled>, Arc<Resolved>)> {
+    fn resolved(
+        &self,
+        snapshot: &ForwardingDecisionSnapshot,
+    ) -> Option<(Arc<Compiled>, Arc<Resolved>)> {
         let compiled = self.compiled.load_full()?;
         if compiled.policy.rules.is_empty() {
             return None;
@@ -430,7 +445,11 @@ impl PathRuntime {
         Some((compiled, resolved))
     }
 
-    fn resolve(compiled: &Compiled, snapshot: &ForwardingDecisionSnapshot, my_peer_id: PeerId) -> Resolved {
+    fn resolve(
+        compiled: &Compiled,
+        snapshot: &ForwardingDecisionSnapshot,
+        my_peer_id: PeerId,
+    ) -> Resolved {
         let keys: HashMap<[u8; 32], PeerId> = snapshot
             .capabilities()
             .iter()
@@ -447,9 +466,13 @@ impl PathRuntime {
             ResolvedMember {
                 peer: Some(peer_id),
                 reachable: peer_id != my_peer_id
-                    && snapshot.next_hop(peer_id, NextHopPolicy::LeastCost).is_some(),
+                    && snapshot
+                        .next_hop(peer_id, NextHopPolicy::LeastCost)
+                        .is_some(),
                 waypoint: features.is_some_and(|features| {
-                    features.waypoint_v1 && features.relay_semantics_v1 && !features.deny_transit_data
+                    features.waypoint_v1
+                        && features.relay_semantics_v1
+                        && !features.deny_transit_data
                 }),
                 exit: features.is_some_and(|features| features.exit_node),
             }
@@ -470,7 +493,13 @@ impl PathRuntime {
                 rule.via
                     .iter()
                     .chain(&rule.gateway)
-                    .map(|segment| segment.members.iter().map(|item| member(&item.peer)).collect())
+                    .map(|segment| {
+                        segment
+                            .members
+                            .iter()
+                            .map(|item| member(&item.peer))
+                            .collect()
+                    })
                     .collect(),
             );
             let mut rule_peer = None;
@@ -517,18 +546,17 @@ impl PathRuntime {
                 .iter()
                 .enumerate()
                 .find_map(|(index, member)| Some((index, usable(member)?))),
-            Balance::Flow => members
-                .iter()
-                .enumerate()
-                .filter_map(|(index, member)| Some((index, usable(member)?)))
-                .max_by(|(left, left_peer), (right, right_peer)| {
-                    score(flow, salt, *left_peer, segment.members[*left].weight).total_cmp(&score(
-                        flow,
-                        salt,
-                        *right_peer,
-                        segment.members[*right].weight,
-                    ))
-                }),
+            Balance::Flow => {
+                members
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, member)| Some((index, usable(member)?)))
+                    .max_by(|(left, left_peer), (right, right_peer)| {
+                        score(flow, salt, *left_peer, segment.members[*left].weight).total_cmp(
+                            &score(flow, salt, *right_peer, segment.members[*right].weight),
+                        )
+                    })
+            }
         }
     }
 
@@ -632,9 +660,9 @@ impl PathRuntime {
             .find(|(index, rule)| {
                 rule.gateway.is_some()
                     && !rule.via.is_empty()
-                    && resolved.members[*index]
-                        .last()
-                        .is_some_and(|members| members.iter().any(|member| member.peer == Some(peer_id)))
+                    && resolved.members[*index].last().is_some_and(|members| {
+                        members.iter().any(|member| member.peer == Some(peer_id))
+                    })
             })
             .map(|(index, _)| index as u16)
     }
@@ -865,8 +893,14 @@ mod tests {
         assert_eq!(policy.rules[0].via[1].balance, Balance::Failover);
 
         for (text, message) in [
-            ("[[path]]\nto = \"internet\"\nvia = [\"10.0.0.2\"]\n", "needs a gateway"),
-            ("[[path]]\nto = \"10.0.0.9\"\nvia = [\"nope\"]\n", "not a group name"),
+            (
+                "[[path]]\nto = \"internet\"\nvia = [\"10.0.0.2\"]\n",
+                "needs a gateway",
+            ),
+            (
+                "[[path]]\nto = \"10.0.0.9\"\nvia = [\"nope\"]\n",
+                "not a group name",
+            ),
             ("[[path]]\nto = \"10.0.0.9\"\n", "needs waypoints"),
             (
                 "[[group]]\nname = \"g\"\nmembers = [\"10.0.0.2\"]\nbalance = \"failover\"\nweights = [3]\n",
@@ -913,7 +947,8 @@ mod tests {
         let mut before = Vec::new();
         for flow in 0..20_000_u64 {
             let (index, _) =
-                PathRuntime::pick(&segment, &all, mix(flow), 7, Role::Waypoint, &[], |_| false).unwrap();
+                PathRuntime::pick(&segment, &all, mix(flow), 7, Role::Waypoint, &[], |_| false)
+                    .unwrap();
             counts[index] += 1;
             before.push(index);
         }

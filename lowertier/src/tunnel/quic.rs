@@ -1321,8 +1321,13 @@ impl QuicEndpointManager {
             "no async runtime found".to_owned(),
         ))?;
         let socket = runtime.wrap_udp_socket(std_socket)?;
-        let socket =
-            QuicDecoySocket::new(socket, upstream, secret, mgr.flags.socket_mark, server_names);
+        let socket = QuicDecoySocket::new(
+            socket,
+            upstream,
+            secret,
+            mgr.flags.socket_mark,
+            server_names,
+        );
         let mut endpoint =
             Endpoint::new_with_abstract_socket(endpoint_config(), None, socket, runtime)?;
         endpoint.set_default_client_config(client_config(&gen_default_flags())?);
@@ -4826,7 +4831,8 @@ mod tests {
             });
             let global_ctx = global_ctx();
             let mut listener_flags = global_ctx.get_flags();
-            listener_flags.camouflage_config_mut().server_names = vec!["lowertier.invalid".to_owned()];
+            listener_flags.camouflage_config_mut().server_names =
+                vec!["lowertier.invalid".to_owned()];
             listener_flags
                 .camouflage_config_mut()
                 .set_decoy_upstream(upstream_addr.to_string());

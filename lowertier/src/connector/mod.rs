@@ -53,7 +53,9 @@ impl<K: std::hash::Hash + Eq + Clone> RetryBackoff<K> {
         let now = tokio::time::Instant::now();
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|_, (_, retry_at)| now < *retry_at + COLD_RETRY_INTERVAL);
-        entries.get(key).is_none_or(|(_, retry_at)| *retry_at <= now)
+        entries
+            .get(key)
+            .is_none_or(|(_, retry_at)| *retry_at <= now)
     }
 
     /// Record a failure and return the wait before the next attempt.
@@ -80,7 +82,9 @@ mod backoff_tests {
 
     #[test]
     fn retry_backoff_doubles_to_the_cold_interval() {
-        let waits: Vec<u64> = (1..=8).map(|failures| retry_backoff(failures).as_secs()).collect();
+        let waits: Vec<u64> = (1..=8)
+            .map(|failures| retry_backoff(failures).as_secs())
+            .collect();
         assert_eq!(waits, vec![15, 30, 60, 120, 240, 480, 600, 600]);
         assert_eq!(retry_backoff(u32::MAX), COLD_RETRY_INTERVAL);
     }

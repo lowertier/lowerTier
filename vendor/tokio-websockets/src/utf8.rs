@@ -47,8 +47,8 @@ impl Validator {
             // 0b11110xxx (four-byte code point)
             0b1111_0000..=0b1111_0111 => 4,
             // Invalid first byte.
-            // SAFETY: The first byte must be valid UTF-8, otherwise from_str would return
-            // a FromUtf8Error with error_len() that is Some(_)
+            // SAFETY: The first byte must be valid UTF-8, otherwise from_str
+            // would return a FromUtf8Error with error_len() that is Some(_)
             _ => unsafe { unreachable_unchecked() },
         }
     }

@@ -79,13 +79,21 @@ impl TransportRetries {
             deadline.is_none_or(|deadline| now < deadline + super::COLD_RETRY_INTERVAL)
         });
         let blocking = |deadline: &Option<Instant>| deadline.is_none_or(|deadline| deadline > now);
-        if endpoints.get(&key).is_some_and(|(deadline, _)| blocking(deadline)) {
+        if endpoints
+            .get(&key)
+            .is_some_and(|(deadline, _)| blocking(deadline))
+        {
             return Err(TunnelError::InternalError(
                 "transport endpoint is active or in cold retry".into(),
             ));
         }
         // This bound covers active connections and failed discovery endpoints together.
-        if endpoints.values().filter(|(deadline, _)| blocking(deadline)).count() >= 1024 {
+        if endpoints
+            .values()
+            .filter(|(deadline, _)| blocking(deadline))
+            .count()
+            >= 1024
+        {
             return Err(TunnelError::InternalError(
                 "transport retry table is full".into(),
             ));
@@ -147,10 +155,16 @@ impl Drop for AttemptLease {
         if authenticated {
             endpoints.remove(&self.key);
         } else {
-            let failures = endpoints.get(&self.key).map_or(0, |(_, failures)| *failures) + 1;
+            let failures = endpoints
+                .get(&self.key)
+                .map_or(0, |(_, failures)| *failures)
+                + 1;
             endpoints.insert(
                 self.key.clone(),
-                (Some(Instant::now() + super::retry_backoff(failures)), failures),
+                (
+                    Some(Instant::now() + super::retry_backoff(failures)),
+                    failures,
+                ),
             );
         }
     }

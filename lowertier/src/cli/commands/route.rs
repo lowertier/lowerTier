@@ -179,7 +179,11 @@ async fn trace(client: &Client, destination: &str) -> Result<Response> {
                     .via
                     .iter()
                     .map(|segment| segment.name.clone())
-                    .chain(path.gateway.iter().map(|segment| format!("gateway {}", segment.name)))
+                    .chain(
+                        path.gateway
+                            .iter()
+                            .map(|segment| format!("gateway {}", segment.name)),
+                    )
                     .collect::<Vec<_>>()
                     .join(" > ");
                 format!("path {}: {segments} ({})", index + 1, path.state)
