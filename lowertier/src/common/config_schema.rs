@@ -668,7 +668,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "hop",
-        "Automatic routes use direct links first. Metric for relay fallback; goodput needs relay.probe_budget_bps.",
+        "How to pick a relay route when no direct link exists: hop (fewest hops), latency (lowest round trip), or goodput (highest measured delivery rate; needs relay.probe_budget_bps).",
     ),
     opt(
         "relay.use_relays",
@@ -716,7 +716,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "30",
-        "Interval between goodput probes.",
+        "Seconds between speed test rounds, 1 to 300.",
     ),
     opt(
         "relay.probe_budget_bps",
@@ -724,7 +724,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "0",
-        "Bandwidth for goodput probes.",
+        "Bandwidth limit for speed tests, for the whole machine. The tests measure how fast each direct connection delivers; the results show as RATE, start new flows on each peer's fastest connection (except under relay.policy=latency), and are required by relay.policy=goodput. 0 turns the tests off.",
     ),
     opt(
         "relay.link_cost",

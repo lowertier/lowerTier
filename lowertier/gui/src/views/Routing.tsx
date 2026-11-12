@@ -22,7 +22,7 @@ import type { Doc } from "../api";
 const POLICY: Record<string, string> = {
   hop: "Fewest hops.",
   latency: "Lowest measured round trip.",
-  goodput: "Highest measured delivery rate. Needs a probe budget.",
+  goodput: "Highest measured delivery rate. Needs speed tests (below).",
 };
 
 const TRANSIT: Record<string, string> = {
@@ -256,6 +256,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
   const policy = () => configured("relay.policy") ?? "hop";
   const transit = () => configured("relay.transit") ?? "allow";
   const budget = () => configured("relay.probe_budget_bps");
+  const probeEvery = () => configured("relay.probe_interval_seconds") ?? 30;
   const [budgetText, setBudgetText] = createSignal("");
   // The open path or group editor: an index, "new", or none.
   const [editingPath, setEditingPath] = createSignal<number | "new" | null>(null);
@@ -339,11 +340,16 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
           }}
         >
           <div class="label">
-            <b>Probe budget</b>
-            <p>Bandwidth spent measuring paths. Current {rate(budget())}. Set 0 to stop probes under hop or latency.</p>
+            <b>Speed tests</b>
+            <p>
+              Every {probeEvery()} s, measure how fast each direct connection delivers. The results fill the Rate column,
+              start new traffic on each peer's fastest connection (unless you route by latency), and are required by goodput.
+              The value caps the bandwidth the tests use for the whole machine; 0 turns them off.
+            </p>
+            <p>{budget() ? `On, up to ${rate(budget())}.` : "Off. Enter a limit such as 2Mbit to turn them on."}</p>
           </div>
           <div class="control">
-            <input type="text" placeholder="2Mbit" aria-label="Probe budget" value={budgetText()} onInput={(event) => setBudgetText(event.currentTarget.value)} />
+            <input type="text" placeholder="2Mbit" aria-label="Speed test bandwidth limit" value={budgetText()} onInput={(event) => setBudgetText(event.currentTarget.value)} />
             <button type="submit" disabled={busy() || !budgetText().trim()}>
               Save
             </button>

@@ -13,23 +13,28 @@ When none does, it goes through other members, which relay it without being able
 | `latency` | the lowest measured round-trip time |
 | `goodput` | the highest measured delivery rate at its slowest link |
 
-Goodput needs measurements. Give the node a probe budget first, then switch once samples appear:
+## Speed tests
+
+With `relay.probe_budget_bps` above zero, the node runs speed tests: every `relay.probe_interval_seconds` (30 by default) it sends test packets over each direct connection and measures how fast they arrive.
+The budget caps the bandwidth all tests use together, for the whole machine. It is off (0) by default.
+
+The results are used three ways:
+
+- the `RATE` column of `lowertier peers` and the web interface;
+- when a peer has several connections (QUIC, HTTP/2, WSS), each new flow to it starts on the fastest one, unless `relay.policy = "latency"`, which picks by round trip;
+- the `goodput` policy ranks relay routes by them, so it requires a budget.
 
 ```toml
 [relay]
-policy = "hop"
+probe_budget_bps = "2Mbit"     # speed tests may use up to 2 Mbit/s in total
 probe_interval_seconds = 30
-probe_budget_bps = 1000000   # 1 Mbit/s of probe traffic for the whole node
-```
-
-```bash
-lowertier set relay.policy=goodput
+policy = "goodput"
 ```
 
 Goodput measures each direction separately.
 It first avoids nodes that set `transit = "avoid"`, then maximizes the slowest link, then breaks ties by cost, hop count, and peer ID.
 Routes without fresh samples fall back to latency, then hops.
-Set `probe_budget_bps = 0` to stop probing after switching away.
+Set `probe_budget_bps = 0` to stop the tests; switch the policy away from `goodput` first.
 
 `lowertier routes trace 10.44.0.2` shows the path a packet takes, hop by hop.
 

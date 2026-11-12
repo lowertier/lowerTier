@@ -358,7 +358,7 @@ export default function Settings(props: { page: Page; onPage: (page: Page) => vo
         <Show when={props.page === "keys"}><JoinCodes onAddMachine={props.onAddMachine} /></Show>
         <Show when={!(advanced() && raw())} fallback={<section class="panel"><pre class="toml">{config() ? toToml(config()!.desired ?? config()!.active ?? {}) : "Loading…"}</pre></section>}>
           <Show when={config()} fallback={<p class="empty">Loading settings…</p>}>
-            <Show when={advanced() && matches([...ROUTING_PATHS], "Routing paths groups exit")}><section class="panel routing-settings"><div><b>Routing</b><p class="hint">Paths, groups, route policy, relay use, transit, probe budget, and exit service live on the Routes page.</p></div><button type="button" class="quiet" disabled={changed() > 0} onClick={props.onRouting}>Open Routes</button></section></Show>
+            <Show when={advanced() && matches([...ROUTING_PATHS], "Routing paths groups exit")}><section class="panel routing-settings"><div><b>Routing</b><p class="hint">Paths, groups, route policy, relay use, transit, speed tests, and exit service live on the Routes page.</p></div><button type="button" class="quiet" disabled={changed() > 0} onClick={props.onRouting}>Open Routes</button></section></Show>
             <For each={sections()}>{([title, options]) => advanced()
               ? <details class="panel settings-group" open={filter().trim() !== "" || ["node", "network", "identity", "tun"].includes(title)}><summary><h2>{title}</h2></summary><For each={options}>{(option) => <Option option={option} />}</For></details>
               : <section class="panel settings-group"><h2>{title}</h2><For each={options}>{(option) => <Option option={option} />}</For></section>

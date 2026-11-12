@@ -1042,7 +1042,7 @@ fn table_output(response: &Response, data: &Value) -> String {
                 }
             }
             let mut summary = format!(
-                "policy        {}\ntransit       {} (advertised {}, desired {})\nnetworks      {}\nlimit         {}\nprobe budget  {}\nrelayed       {}\ndrops         {}\n\n",
+                "policy        {}\ntransit       {} (advertised {}, desired {})\nnetworks      {}\nlimit         {}\nspeed tests   {}\nrelayed       {}\ndrops         {}\n\n",
                 config.policy().as_str_name(),
                 config.transit().as_str_name(),
                 clean(&value.advertised_permission),
@@ -1055,7 +1055,11 @@ fn table_output(response: &Response, data: &Value) -> String {
                 config
                     .transit_bps_limit
                     .map_or("unlimited".into(), |limit| rate(Some(limit))),
-                rate(Some(config.probe_budget_bps)),
+                if config.probe_budget_bps == 0 {
+                    "off".into()
+                } else {
+                    format!("up to {}", rate(Some(config.probe_budget_bps)))
+                },
                 bytes(value.total_bytes),
                 drops
                     .iter()

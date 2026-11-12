@@ -136,14 +136,14 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `relay.policy` | `hop` \| `latency` \| `goodput` | `hop` | live | Automatic routes use direct links first. Metric for relay fallback; goodput needs relay.probe_budget_bps. |
+| `relay.policy` | `hop` \| `latency` \| `goodput` | `hop` | live | How to pick a relay route when no direct link exists: hop (fewest hops), latency (lowest round trip), or goodput (highest measured delivery rate; needs relay.probe_budget_bps). |
 | `relay.use_relays` | bool | `true` | live | Send local data through relay peers. |
 | `relay.transit` | `allow` \| `avoid` \| `deny` | `allow` | live | Carry data for other peers. |
 | `relay.transit_networks` | list of strings |  | live | Foreign network name patterns this node relays. ["*"] permits all. |
 | `relay.transit_bps_limit` | bit/s |  | live | Shared transit budget. Unlimited when absent. |
 | `relay.transit_burst_bytes` | size |  | live | Transit burst capacity. |
-| `relay.probe_interval_seconds` | duration | `30` | live | Interval between goodput probes. |
-| `relay.probe_budget_bps` | bit/s | `0` | live | Bandwidth for goodput probes. |
+| `relay.probe_interval_seconds` | duration | `30` | live | Seconds between speed test rounds, 1 to 300. |
+| `relay.probe_budget_bps` | bit/s | `0` | live | Bandwidth limit for speed tests, for the whole machine. The tests measure how fast each direct connection delivers; the results show as RATE, start new flows on each peer's fastest connection (except under relay.policy=latency), and are required by relay.policy=goodput. 0 turns the tests off. |
 | `relay.link_cost` | array of tables |  | live | Adjacent link cost bias: peer public key and bias_ms. |
 | `relay.foreign_rpc` | bool | `false` | instance restart | Relay control RPC for foreign networks outside relay.transit_networks. |
 | `relay.private_mode` | bool | `false` | instance restart | Reject foreign networks without authorized admission. |
