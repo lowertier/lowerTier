@@ -32,7 +32,7 @@ gateway = "exits"
 strict = true
 ```
 
-Changes apply live: `lowertier set`, `lowertier edit`, the configuration file, or the Routing page of `lowertier gui`.
+Changes apply live: `lowertier set`, `lowertier edit`, the configuration file, or the Routes page of the [web interface](web-interface.md).
 
 ## Choosing members
 

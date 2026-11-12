@@ -3,7 +3,7 @@
 `camouflage.decoy_upstream.tcp` and `.udp` select fixed upstream endpoints.
 TCP forwards unmarked streams. QUIC forwards unmarked datagrams.
 The endpoints can differ. Visitors cannot select a destination.
-See [control configuration](control-config.md) for admission and SNI settings.
+See [camouflage](../camouflage.md) for admission and SNI settings.
 
 ## Shared probe sessions
 
@@ -66,7 +66,7 @@ The initial built-in limits are:
 | Forwarded payload bytes per second | 1 MiB/s | 128 KiB/s |
 | Payload burst capacity | 256 KiB | 64 KiB |
 | Concurrent probe sessions | 128 | 2 |
-| Probe admissions per rolling 60 seconds | — | 2 |
+| Probe admissions per rolling 60 seconds | - | 2 |
 | New decoy flows per second | 16 | 4 |
 | New-flow burst | 32 | 8 |
 | Forwarded UDP datagrams per second | 4,096 | 512 |
@@ -190,3 +190,28 @@ explicit loopback addresses. Test certificates do not establish ownership of tha
 public domain. Probe forwarding and speed regulation do not guarantee that
 LowTier traffic is indistinguishable from ordinary browser traffic; notably,
 legacy H2 decoy routing still uses its pre-ClientHello routing record.
+
+## Certificate verification and endpoint URLs
+
+Certificate and key paths must be configured together.
+Decoy forwarding requires an admission secret of at least 16 bytes and a server name.
+`sni_routing=true` replaces marker classification with SNI classification. Noise still authenticates VPN peers.
+Named QUIC/H2 connections validate certificates when no decoy is configured.
+Otherwise QUIC/H2 uses the existing Noise-authenticated certificate verifier.
+Direct WSS retains its existing Noise verifier. CDN outer TLS always validates the public CDN certificate.
+CDN inner TLS retains the end-to-end exporter binding. Missing subprotocol negotiation fails the connection.
+
+H2 and WSS listeners read camouflage changes for new connections.
+Existing connections keep their authenticated transport binding.
+QUIC listeners cache certificates and decoy settings until listener recreation.
+The control API stages cached QUIC settings as restart fields while QUIC is enabled.
+Stop and start the instance to recreate those endpoints.
+
+Endpoint URLs retain `via=cdn`, `lanes=1,2,4`, and WSS paths.
+An explicit WSS URL path overrides `camouflage.wss_path`. The listener rejects a different request path.
+WSS peer URLs with an empty or root path use `camouflage.wss_path`, which defaults to `/ws`.
+Manual connectors retain this effective path so an active connection prevents repeated dialing.
+Multiple lanes are unavailable in CDN mode. Trusted proxy CIDRs default to none.
+CIDR and interface restrictions remain enforced. Strict underlay policy continues to reject peer hostnames.
+VPN/SNI examples use `challenges.cloudflare.com`. This name does not establish certificate ownership.
+Use explicit loopback endpoints for local tests.

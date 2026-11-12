@@ -57,7 +57,7 @@ lowertier-tracker \
 Repeat the listen options or supply comma-separated addresses to bind more interfaces.
 IPv6 sockets use `IPV6_V6ONLY`, which prevents conflicts with IPv4 sockets on the same port.
 
-See [the client configuration example](../script/mesh-discovery/client.example.toml).
+See [the client configuration example](../../script/mesh-discovery/client.example.toml).
 Its addresses refer to local test services.
 Set actual service addresses before deployment.
 Set explicit ports for STUN, discovery, VPN listeners, and the RPC portal.

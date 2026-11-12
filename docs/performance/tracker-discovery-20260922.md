@@ -32,7 +32,7 @@ When bootstrap has no peer, a standard QUIC fallback uses a fresh port on the se
 This path preserves the network namespace and underlay policy.
 H2 and WSS advertise their TCP STUN mapping and retain the reserved source port.
 
-Configuration and deployment instructions are in [Tracker discovery](../tracker-discovery.md).
+Configuration and deployment instructions are in [Tracker discovery](../design/tracker-discovery.md).
 
 ## Fixture and interpretation
 

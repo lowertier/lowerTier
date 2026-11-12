@@ -17,8 +17,7 @@ does not introduce a new cipher.
 - `chacha20` remains accepted as a legacy spelling and normalizes to
   `chacha20-poly1305`.
 - `aes-gcm` and `aes-256-gcm` remain authenticated alternatives.
-- XOR has been removed from the encryption choices. Use the explicit disable-encryption option
-  only when plaintext operation is deliberately required.
+- XOR has been removed from the encryption choices. There is no option to disable encryption.
 
 Unknown algorithm names currently fall back to the secure default with a warning. CLI values are
 validated before startup, while this fallback protects protocol input from selecting an insecure
@@ -30,16 +29,23 @@ The AEAD authenticates the encrypted payload and tag. The existing peer-manager 
 outside the AEAD because relay nodes must update routing fields. Changing that boundary requires a
 versioned packet protocol, not an ad-hoc AAD change.
 
-LowTier secure mode adds existing Noise handshakes and session protections:
+Every peer connection also uses Noise handshakes and session protections:
 
 - Noise XX with X25519, ChaChaPoly, and SHA-256 for direct peer authentication;
 - Noise IK with the same standard primitives on the relay path;
 - per-direction traffic keys, epoch rotation, sequence nonces, and replay windows.
 
-This is still LowTier's protocol construction, not the complete WireGuard protocol. Deployments
-requiring peer identity authentication and replay protection should enable secure mode. A future
+This is still LowTier's protocol construction, not the complete WireGuard protocol. A future
 full WireGuard-compatible peer session would need a separately versioned handshake and packet
 format rather than reusing the LowTier framing under a WireGuard name.
+
+## Direct and relayed packets
+
+Direct QUIC, HTTP/2, and WSS links bind the Noise handshake to the TLS exporter. Packets between
+directly connected peers then rely on that TLS 1.3 protection and skip the inner session AEAD
+(`PeerConn::encrypt_packet_if_needed`). Packets that cross a relay or a waypoint carry the inner
+session AEAD, sealed by the source for the final destination, with the stable peer-header fields
+as associated data.
 
 ## Verification
 

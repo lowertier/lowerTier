@@ -1,4 +1,3 @@
 # lowertier
 
-This translation is not maintained.
-See the [complete CLI guide](README.md) for current L2 setup, security, configuration, and build information.
+中文文档暂未维护。请阅读 [README](README.md) 或[文档网站](https://lowertier.github.io)。

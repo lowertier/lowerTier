@@ -1,29 +1,6 @@
-# Automatic Ethernet interface
+# Ethernet forwarding rules
 
-LowTier carries IP packets and complete Ethernet frames through one fabric protocol.
-
-LowTier uses TAP when the operating system supports the required implementation.
-
-Native TAP is available on Linux and FreeBSD.
-
-LowTier uses TUN on other operating systems.
-
-```toml
-[tun]
-name = "et0"
-
-[l2]
-bridge = true
-fdb_capacity = 16384
-fdb_age = "5m"
-flood_bytes_per_second = "64MiB"
-
-# Default source ownership limits and optional frame policy.
-max_macs_per_peer = 256
-mac_move_hold = "5s"
-vlans = [0, 100, 200]
-ether_types = [2048, 2054, 34525, 35020]
-```
+The [Ethernet guide](../ethernet.md) covers setup. This note records how frames are learned, flooded, filtered, and sized.
 
 Users do not select TAP or TUN.
 
@@ -77,7 +54,7 @@ VLAN zero includes untagged frames.
 Every VLAN tag must be allowed, including inner QinQ tags.
 EtherType policy checks the final type after the tags.
 Compact IP received by TAP must also pass the untagged VLAN and IPv4/IPv6 EtherType policy.
-With `enable_bridge = false` and empty VLAN and EtherType lists, TAP IP traffic skips source learning and bridge flood admission.
+With `l2.bridge = false` and empty VLAN and EtherType lists, TAP IP traffic skips source learning and bridge flood admission.
 Explicit VLAN and EtherType lists still apply in this mode.
 The example permits IPv4, ARP, IPv6, and LLDP.
 Use an empty EtherType list to permit arbitrary Ethernet protocols.
@@ -90,7 +67,7 @@ macOS and Windows use an IP-only TUN interface.
 TUN does not provide raw Ethernet, VLAN bridging, or transparent non-IP protocols.
 Use a Linux or FreeBSD bridge for those devices.
 
-With `enable_bridge = true`, TAP MTU is at least 1516 bytes.
+With `l2.bridge = true`, TAP MTU is at least 1516 bytes.
 This permits a 1500-byte LAN payload with all four supported VLAN tags.
 The configured MTU can raise this minimum for a larger LAN.
 Encryption overhead does not reduce bridge TAP MTU.

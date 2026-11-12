@@ -4,7 +4,7 @@
 
 Implemented process-wide plus per-source-IP decoy limits, shared by TCP/UDP and
 both directions. Defaults and threat-model limits are documented in
-[decoy passthrough](../decoy-passthrough.md). This does not add wildcard upstream
+[decoy passthrough](../design/decoy-passthrough.md). This does not add wildcard upstream
 resolution, change authenticated transport bindings, or claim browser-traffic
 indistinguishability.
 
