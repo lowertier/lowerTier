@@ -506,6 +506,8 @@ pub struct InitOptions {
     pub peers: Vec<String>,
     pub tun_mode: Option<String>,
     pub ipv4: Option<String>,
+    /// Join an existing network: its name, admission material, and bootstrap peers.
+    pub join: Option<crate::common::join_code::JoinCode>,
     pub force: bool,
 }
 
@@ -555,8 +557,27 @@ pub fn init(options: &InitOptions) -> anyhow::Result<Vec<PathBuf>> {
         options.output.display()
     );
 
-    let mut secret = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut secret);
+    let join = options.join.as_ref();
+    let credential = join.and_then(|join| join.credential.as_deref());
+    let secret = match join.and_then(|join| join.secret.clone()) {
+        Some(secret) => secret,
+        None => {
+            let mut secret = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut secret);
+            BASE64_STANDARD.encode(secret)
+        }
+    };
+    let network = join.map_or(options.network.as_str(), |join| join.network.as_str());
+    let peers = join
+        .into_iter()
+        .flat_map(|join| join.peers.iter())
+        .chain(&options.peers)
+        .fold(Vec::<&String>::new(), |mut peers, peer| {
+            if !peers.contains(&peer) {
+                peers.push(peer);
+            }
+            peers
+        });
     let key = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
 
     let quote = |text: &str| toml::Value::String(text.into()).to_string();
@@ -584,15 +605,25 @@ pub fn init(options: &InitOptions) -> anyhow::Result<Vec<PathBuf>> {
 
     let mut text = String::new();
     text.push_str("# LowTier node. `lowertier config explain` documents every option.\n\n");
-    text.push_str(&format!(
-        "[network]\nname = {}\nsecret_file = {}\n\n",
-        quote(&options.network),
-        quote(&absolute(&secret_path))
-    ));
-    text.push_str(&format!(
-        "[identity]\nprivate_key_file = {}\n\n",
-        quote(&absolute(&key_path))
-    ));
+    match credential {
+        // The signed bundle supplies the identity key.
+        Some(credential) => text.push_str(&format!(
+            "[network]\nname = {}\ncredential = {}\n\n",
+            quote(network),
+            quote(credential)
+        )),
+        None => {
+            text.push_str(&format!(
+                "[network]\nname = {}\nsecret_file = {}\n\n",
+                quote(network),
+                quote(&absolute(&secret_path))
+            ));
+            text.push_str(&format!(
+                "[identity]\nprivate_key_file = {}\n\n",
+                quote(&absolute(&key_path))
+            ));
+        }
+    }
     match &options.ipv4 {
         Some(ipv4) => text.push_str(&format!("[address]\nipv4 = {}\n\n", quote(ipv4))),
         None => text.push_str("[address]\ndhcp = true\n\n"),
@@ -600,39 +631,53 @@ pub fn init(options: &InitOptions) -> anyhow::Result<Vec<PathBuf>> {
     if let Some(mode) = &options.tun_mode {
         text.push_str(&format!("[tun]\nmode = {}\n\n", quote(mode)));
     }
+    let admission = join.and_then(|join| join.admission.as_deref());
+    if let Some(admission) = admission {
+        text.push_str(&format!(
+            "[camouflage]\nadmission_secret = {}\n\n",
+            quote(admission)
+        ));
+    }
     text.push_str(&format!("[transport]\nlisten = {}\n", list(&listen)));
-    for peer in &options.peers {
+    for peer in peers {
         text.push_str(&format!("\n[[peer]]\nuri = {}\n", quote(peer)));
     }
 
     // Validate before writing anything, with the generated secrets in place.
     let mut check = text.parse::<toml::Table>()?;
-    for path in ["network.secret_file", "identity.private_key_file"] {
-        let (section, key) = path.split_once('.').unwrap();
-        check
-            .get_mut(section)
-            .and_then(toml::Value::as_table_mut)
-            .unwrap()
-            .remove(key);
+    if credential.is_none() {
+        for path in ["network.secret_file", "identity.private_key_file"] {
+            let (section, key) = path.split_once('.').unwrap();
+            check
+                .get_mut(section)
+                .and_then(toml::Value::as_table_mut)
+                .unwrap()
+                .remove(key);
+        }
+        config_schema::set(
+            &mut check,
+            "network.secret",
+            toml::Value::String(secret.clone()),
+        );
     }
-    config_schema::set(
-        &mut check,
-        "network.secret",
-        toml::Value::String(BASE64_STANDARD.encode(secret)),
-    );
     TomlConfigLoader::new_from_table("init", &check)?;
 
-    write_private(
-        &secret_path,
-        &format!("{}\n", BASE64_STANDARD.encode(secret)),
-        options.force,
-    )?;
+    if credential.is_some() {
+        // The credential and admission secret are secret material inside the configuration.
+        write_private(&options.output, &text, options.force)?;
+        return Ok(vec![options.output.clone()]);
+    }
+    write_private(&secret_path, &format!("{secret}\n"), options.force)?;
     write_private(
         &key_path,
         &format!("{}\n", BASE64_STANDARD.encode(key.as_bytes())),
         options.force,
     )?;
-    std::fs::write(&options.output, text)?;
+    if admission.is_some() {
+        write_private(&options.output, &text, options.force)?;
+    } else {
+        std::fs::write(&options.output, text)?;
+    }
     Ok(vec![options.output.clone(), secret_path, key_path])
 }
 
@@ -651,6 +696,7 @@ mod tests {
             peers: vec!["quic://127.0.0.1:21012".into()],
             tun_mode: Some("none".into()),
             ipv4: None,
+            join: None,
             force: false,
         })
         .unwrap();
@@ -669,11 +715,41 @@ mod tests {
             peers: vec![],
             tun_mode: None,
             ipv4: None,
+            join: None,
             force: false,
         };
         assert!(
             init(&again).is_err(),
             "init must not overwrite without --force"
+        );
+
+        let joined = directory.path().join("joined.toml");
+        let code = crate::common::join_code::JoinCode {
+            network: "join-net".into(),
+            secret: Some("am9pbi1zZWNyZXQ=".into()),
+            credential: None,
+            admission: Some("join-transport-admission".into()),
+            peers: vec!["quic://198.51.100.4:11012".into()],
+        };
+        init(&InitOptions {
+            output: joined.clone(),
+            network: "ignored".into(),
+            listen_port: None,
+            peers: vec!["quic://198.51.100.4:11012".into()],
+            tun_mode: Some("none".into()),
+            ipv4: None,
+            join: Some(code),
+            force: false,
+        })
+        .unwrap();
+        let config = TomlConfigLoader::new(&joined).unwrap();
+        let identity = config.get_network_identity();
+        assert_eq!(identity.network_name, "join-net");
+        assert_eq!(identity.network_secret.as_deref(), Some("am9pbi1zZWNyZXQ="));
+        assert_eq!(config.get_peers().len(), 1, "duplicate peers merge");
+        assert_eq!(
+            config.get_flags().camouflage_config().admission_secret,
+            "join-transport-admission"
         );
 
         let old = directory.path().join("old.toml");

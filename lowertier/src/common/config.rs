@@ -702,6 +702,38 @@ impl LoggingConfigLoader for &LoggingConfig {
     }
 }
 
+/// A local name and free-form note for one peer, keyed by its public key.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PeerNote {
+    pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+fn validate_notes(notes: &[PeerNote]) -> anyhow::Result<()> {
+    anyhow::ensure!(notes.len() <= 1024, "note permits 1024 entries");
+    for (index, note) in notes.iter().enumerate() {
+        anyhow::ensure!(!note.peer.trim().is_empty(), "note.peer is empty");
+        anyhow::ensure!(
+            !notes[..index].iter().any(|other| other.peer == note.peer),
+            "duplicate note.peer {}",
+            note.peer
+        );
+        anyhow::ensure!(
+            note.name.as_ref().is_none_or(|name| name.chars().count() <= 64),
+            "note.name permits 64 characters"
+        );
+        anyhow::ensure!(
+            note.text.as_ref().is_none_or(|text| text.chars().count() <= 2000),
+            "note.text permits 2000 characters"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct PortForwardConfig {
     pub bind_addr: SocketAddr,
@@ -868,6 +900,8 @@ struct Config {
     /// Load-balance groups and paths. The runtime copy lives in `Flags::path_policy`.
     group: Option<Vec<crate::proto::common::PathGroup>>,
     path: Option<Vec<crate::proto::common::PathRule>>,
+    /// Local names and notes for peers. Only the management interface reads them.
+    note: Option<Vec<PeerNote>>,
 
     peer: Option<Vec<PeerConfig>>,
     proxy_network: Option<Vec<ProxyNetworkConfig>>,
@@ -1172,6 +1206,7 @@ impl TomlConfigLoader {
             }
         });
         validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
+        validate_notes(config.note.as_deref().unwrap_or_default())?;
         crate::common::control_config::validate_camouflage_listeners(
             &flags,
             config.listeners.as_deref().unwrap_or_default(),
@@ -2362,6 +2397,21 @@ stun_tcp = ["192.0.2.1:3478"]
         test_parse_mapped_listener_urls_allows_wss_without_port();
         test_parse_mapped_listener_urls_allows_tcp_without_port();
         test_parse_mapped_listener_urls_requires_port_for_non_ip_scheme();
+    }
+
+    #[test]
+    fn peer_notes_round_trip_and_reject_duplicates() {
+        let text = r#"
+[[note]]
+peer = "a2V5LWE="
+name = "build box"
+text = "Rack 2"
+"#;
+        let config = TomlConfigLoader::new_from_str(text).unwrap();
+        let reloaded = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+        assert!(reloaded.dump().contains("Rack 2"), "{}", reloaded.dump());
+        let duplicate = format!("{text}\n[[note]]\npeer = \"a2V5LWE=\"\n");
+        assert!(TomlConfigLoader::new_from_str(&duplicate).is_err());
     }
 
     fn userspace_proxy_addresses_round_trip_through_toml() {

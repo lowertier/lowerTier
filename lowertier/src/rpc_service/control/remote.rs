@@ -582,7 +582,7 @@ impl Endpoint {
         payload["meta"] = json!({ "instance_id": target.to_string() });
         if matches!(
             operation.method.as_str(),
-            "ListCredentials" | "IssueCredential" | "RevokeCredential"
+            "ListCredentials" | "IssueCredential" | "RevokeCredential" | "CreateJoinCode"
         ) {
             payload["meta"]["admin_token"] = config
                 .get_network_identity()
@@ -660,7 +660,7 @@ fn authorize(
         "SetLogConfig" => "logs.write",
         "ListCredentials" => "credentials.read",
         "IssueCredential" | "RevokeCredential" => "credentials.write",
-        "CreateInstance" => "admin",
+        "CreateInstance" | "CreateJoinCode" => "admin",
         "StartInstance" => "instances.start",
         "StopInstance" => "instances.stop",
         "DeleteInstance" => "instances.delete",

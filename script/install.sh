@@ -23,12 +23,14 @@ HELP() {
   echo "  --skip-folder-fix     Skip automatic folder path fixing"
   echo "  --no-gh-proxy        Disable GitHub proxy"
   echo "  --gh-proxy URL       Set custom GitHub proxy URL"
+  echo "  --join CODE          Join an existing network with a code from its management interface"
   echo
   echo "Examples:"
   echo "  ./install.sh install /opt/lowertier"
   echo "  ./install.sh install --skip-folder-verify"
   echo "  ./install.sh install --no-gh-proxy"
   echo "  ./install.sh install --gh-proxy https://your-proxy.com/"
+  echo "  ./install.sh install --join lt1.xxxx"
   echo "  ./install.sh update"
   echo "  ./install.sh uninstall"
 }
@@ -45,6 +47,7 @@ SKIP_FOLDER_VERIFY=false
 SKIP_FOLDER_FIX=false
 NO_GH_PROXY=false
 GH_PROXY='https://ghfast.top/'
+JOIN_CODE=''
 
 COMMEND=$1
 shift
@@ -61,6 +64,15 @@ while [[ "$#" -gt 0 ]]; do
         --skip-folder-verify) SKIP_FOLDER_VERIFY=true ;;
         --skip-folder-fix) SKIP_FOLDER_FIX=true ;;
         --no-gh-proxy) NO_GH_PROXY=true ;;
+        --join)
+            if [ -n "$2" ]; then
+                JOIN_CODE=$2
+                shift
+            else
+                echo "Error: --join requires a code"
+                exit 1
+            fi
+            ;;
         --gh-proxy) 
             if [ -n "$2" ]; then
                 GH_PROXY=$2
@@ -157,7 +169,7 @@ if [ "$(id -u)" != "0" ]; then
   echo -e "\r\n${RED_COLOR}This script requires run as Root !${RES}\r\n" 1>&2
   exit 1
 elif [ "$ARCH" == "UNKNOWN" ]; then
-  echo -e "\r\n${RED_COLOR}Opus${RES}, this script do not support your platform\r\nTry ${GREEN_COLOR}install by hand${RES}\r\n"
+  echo -e "\r\n${RED_COLOR}Error${RES}: this script do not support your platform\r\nTry ${GREEN_COLOR}install by hand${RES}\r\n"
   exit 1
 fi
 
@@ -203,7 +215,7 @@ INSTALL() {
   LATEST_VERSION=$(echo -e "$LATEST_VERSION" | tr -d '[:space:]')
 
   if [ -z "$LATEST_VERSION" ]; then
-    echo -e "\r\n${RED_COLOR}Opus${RES}, failure to get latest version. Check your internet\r\nOr try ${GREEN_COLOR}install by hand${RES}\r\n"
+    echo -e "\r\n${RED_COLOR}Error${RES}: failure to get latest version. Check your internet\r\nOr try ${GREEN_COLOR}install by hand${RES}\r\n"
     exit 1
   fi
 
@@ -219,8 +231,11 @@ INSTALL() {
   echo -e "\r\n${GREEN_COLOR}Unzip resource ...${RES}"
   unzip -o /tmp/lowertier_tmp_install.zip -d $INSTALL_PATH/
   mkdir $INSTALL_PATH/config
-  mv $INSTALL_PATH/lowertier-linux-${ARCH}/* $INSTALL_PATH/
-  rm -rf $INSTALL_PATH/lowertier-linux-${ARCH}/
+  # Older archives nest the files in a lowertier-linux-ARCH directory.
+  if [ -d "$INSTALL_PATH/lowertier-linux-${ARCH}" ]; then
+    mv $INSTALL_PATH/lowertier-linux-${ARCH}/* $INSTALL_PATH/
+    rm -rf $INSTALL_PATH/lowertier-linux-${ARCH}/
+  fi
   chmod +x $INSTALL_PATH/lowertier $INSTALL_PATH/lowertier-tracker
   if [ -f $INSTALL_PATH/lowertier ]; then
     echo -e "${GREEN_COLOR} Download successfully! ${RES}"
@@ -232,12 +247,16 @@ INSTALL() {
 
 INIT() {
   if [ ! -f "$INSTALL_PATH/lowertier" ]; then
-    echo -e "\r\n${RED_COLOR}Opus${RES}, unable to find LowTier\r\n"
+    echo -e "\r\n${RED_COLOR}Error${RES}: unable to find LowTier\r\n"
     exit 1
   fi
 
   # Write the default node configuration with a generated network secret and identity key.
-  "$INSTALL_PATH/lowertier" init "$INSTALL_PATH/config/default.toml" --network default
+  if [ -n "$JOIN_CODE" ]; then
+    "$INSTALL_PATH/lowertier" init "$INSTALL_PATH/config/default.toml" --join "$JOIN_CODE" || exit 1
+  else
+    "$INSTALL_PATH/lowertier" init "$INSTALL_PATH/config/default.toml" --network default
+  fi
   cat >>$INSTALL_PATH/config/default.toml <<EOF
 
 [control]
@@ -318,7 +337,11 @@ SUCCESS() {
   clear
   echo " Install LowTier successfully!"
   echo -e "\r\nDefault ports: ${GREEN_COLOR}TCP 11010, TCP+UDP 11012${RES}. Allow them in the firewall.\r\n"
-  echo -e "Network name: ${GREEN_COLOR}default${RES}. Peers need the same name and ${GREEN_COLOR}${INSTALL_PATH}/config/default.secret${RES}.\r\n"
+  if [ -n "$JOIN_CODE" ]; then
+    echo -e "The node joins the network from the join code.\r\n"
+  else
+    echo -e "Network name: ${GREEN_COLOR}default${RES}. Peers need the same name and ${GREEN_COLOR}${INSTALL_PATH}/config/default.secret${RES}.\r\n"
+  fi
   echo -e "Check the node: ${GREEN_COLOR}sudo lowertier status${RES}, ${GREEN_COLOR}sudo lowertier doctor${RES}, ${GREEN_COLOR}sudo lowertier top${RES}\r\n"
 
   echo -e "Now LowTier supports multiple config files. You can create config files in the ${GREEN_COLOR}${INSTALL_PATH}/config/${RES} folder"
@@ -399,7 +422,10 @@ UPDATE() {
   
   unzip -o "$TEMP_UPDATE_DIR/lowertier.zip" -d "$TEMP_UPDATE_DIR/"
   
-  NEW_CORE_FILE="$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}/lowertier"
+  NEW_CORE_FILE="$TEMP_UPDATE_DIR/lowertier"
+  if [ -d "$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}" ]; then
+    NEW_CORE_FILE="$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}/lowertier"
+  fi
   if [ ! -f "$NEW_CORE_FILE" ]; then
       echo -e "${RED_COLOR}Extraction failed or the downloaded archive is invalid.${RES}"
       rm -rf "$TEMP_UPDATE_DIR"
@@ -440,7 +466,9 @@ UPDATE() {
   rm -f "$INSTALL_PATH/lowertier" "$INSTALL_PATH/lowertier-core" "$INSTALL_PATH/lowertier-cli" "$INSTALL_PATH/lowertier-tracker" "$INSTALL_PATH/LICENSE" "$INSTALL_PATH/README.md"
   
   # Move new files into the installation directory
-  mv "$TEMP_UPDATE_DIR/lowertier-linux-${ARCH}"/* "$INSTALL_PATH/"
+  for file in lowertier lowertier-tracker; do
+    cp -f "$(dirname "$NEW_CORE_FILE")/$file" "$INSTALL_PATH/$file"
+  done
   chmod +x "$INSTALL_PATH/lowertier" "$INSTALL_PATH/lowertier-tracker"
   ln -sf "$INSTALL_PATH/lowertier" /usr/sbin/lowertier
   rm -f /usr/sbin/lowertier-core /usr/sbin/lowertier-cli

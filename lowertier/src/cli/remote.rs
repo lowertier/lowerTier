@@ -116,6 +116,7 @@ proxy_methods! {
     list_credentials, "ListCredentials", ListCredentialsRequest, ListCredentialsResponse;
     issue_credential, "IssueCredential", IssueCredentialRequest, IssueCredentialResponse;
     revoke_credential, "RevokeCredential", RevokeCredentialRequest, RevokeCredentialResponse;
+    create_join_code, "CreateJoinCode", CreateJoinCodeRequest, CreateJoinCodeResponse;
     list_port_forwards, "ListPortForwards", ListPortForwardsRequest, ListPortForwardsResponse;
     watch_changes, "WatchChanges", WatchChangesRequest, WatchChangesResponse;
     get_config, "GetConfig", GetConfigRequest, GetConfigResponse;

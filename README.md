@@ -115,6 +115,20 @@ sudo lowertier run -c office.toml
 ```
 
 Replace `192.0.2.10` with the reachable address of node A.
+
+A join code replaces the copy step. Create one in the browser interface under Add machine, then on node B:
+
+```bash
+lowertier init office.toml --join lt1.xxxx
+```
+
+On Linux, one command installs the release, joins, and starts the service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lowertier/lowerTier/main/script/install.sh | sudo bash -s -- install --join lt1.xxxx
+```
+
+The code carries the network name, the network secret or a signed credential, and bootstrap peers. See [join codes](docs/gui.md#join-codes).
 Permit TCP port `11010` and TCP and UDP port `11012` through the host and network firewalls.
 
 Check the network from either node.
@@ -343,6 +357,7 @@ There is no automatic migration; `lowertier check` lists every rename in a file.
 | `routes.serve_exit` | bool | `false` | restart | Act as an exit node for peers. |
 | `group` | table array | - | live | Load-balance groups: name, members (peer keys or virtual IPs), balance (flow or failover), weights. |
 | `path` | table array | - | live | Paths: to (peer, CIDR, or internet), via (peers or groups in order), gateway (peer or group), strict. |
+| `note` | table array | - | live | Local peer names and notes for the management interface: peer (public key), name, text. |
 | `export` | table array | - | restart | Local subnets exported to peers: cidr, optional mapped_cidr and allow. |
 | `proxy.socks5` | host:port | - | restart | SOCKS5 listener into the network. |
 | `proxy.http` | host:port | - | restart | HTTP proxy listener into the network. |

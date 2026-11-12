@@ -31,6 +31,7 @@ pub(super) const METHODS: &[&str] = &[
     "ListCredentials",
     "IssueCredential",
     "RevokeCredential",
+    "CreateJoinCode",
     "ListPortForwards",
     "WatchChanges",
     "GetConfig",
@@ -832,6 +833,39 @@ impl ControlPlaneService {
         })
     }
 
+    /// The caller is on this host: a loopback socket or an in-process ring channel.
+    fn loopback(controller: &BaseController) -> bool {
+        let Some(url) = controller
+            .get_tunnel_info()
+            .and_then(|info| info.remote_addr.as_ref())
+            .and_then(|address| url::Url::parse(&address.url).ok())
+        else {
+            return false;
+        };
+        url.scheme() == "ring"
+            || match url.host() {
+                Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                Some(url::Host::Domain(address)) => address
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback()),
+                None => false,
+            }
+    }
+
+    /// Portal callers must be on loopback. In-process and policy-checked remote callers have no
+    /// portal token.
+    fn local_caller(&self, controller: &BaseController) -> anyhow::Result<()> {
+        if self.token.is_some() && !Self::loopback(controller) {
+            return Err(failure(
+                "PERMISSION_DENIED",
+                "This operation requires a loopback control channel.",
+                "meta.control_token",
+            ));
+        }
+        Ok(())
+    }
+
     fn authorize_admin(
         &self,
         controller: &BaseController,
@@ -839,16 +873,7 @@ impl ControlPlaneService {
         meta: Option<&RequestMeta>,
     ) -> anyhow::Result<()> {
         let context = instance.context()?;
-        let remote_is_loopback = controller
-            .get_tunnel_info()
-            .and_then(|info| info.remote_addr.as_ref())
-            .and_then(|address| url::Url::parse(&address.url).ok())
-            .and_then(|address| match address.host()? {
-                url::Host::Ipv4(address) => Some(std::net::IpAddr::V4(address)),
-                url::Host::Ipv6(address) => Some(std::net::IpAddr::V6(address)),
-                url::Host::Domain(address) => address.parse::<std::net::IpAddr>().ok(),
-            })
-            .is_some_and(|address| address.is_loopback());
+        let remote_is_loopback = Self::loopback(controller);
         let expected = context
             .get_network_identity()
             .network_secret
@@ -857,7 +882,13 @@ impl ControlPlaneService {
             crate::common::verify_slices_are_equal(meta.admin_token.as_bytes(), expected.as_bytes())
                 .is_ok()
         });
-        if (!remote_is_loopback && self.token.is_some()) || expected.is_empty() || !valid {
+        // A loopback caller with the control token can already replace the network secret, so
+        // the token grants credential administration too.
+        let token_holder = remote_is_loopback && self.token.is_some();
+        if (!remote_is_loopback && self.token.is_some())
+            || expected.is_empty()
+            || !(valid || token_holder)
+        {
             return Err(failure(
                 "PERMISSION_DENIED",
                 "Credential administration requires a loopback channel and a valid administrator token.",
@@ -967,6 +998,85 @@ impl ControlPlaneService {
             revoked,
             ..Default::default()
         })
+    }
+
+    pub(super) async fn create_join_code_inner(
+        &self,
+        controller: BaseController,
+        request: CreateJoinCodeRequest,
+    ) -> anyhow::Result<CreateJoinCodeResponse> {
+        let (_, instance) = self.resolve(request.meta.as_ref())?;
+        self.local_caller(&controller)?;
+        if request.use_credential {
+            self.authorize_admin(&controller, &instance, request.meta.as_ref())?;
+        }
+        let context = instance.context()?;
+        let identity = context.get_network_identity();
+        let admission = context.get_flags().camouflage_config().admission_secret.clone();
+        let mut join = crate::common::join_code::JoinCode {
+            network: identity.network_name.clone(),
+            secret: None,
+            credential: None,
+            admission: (!admission.is_empty()).then_some(admission),
+            peers: request.peers,
+        };
+        let mut response = CreateJoinCodeResponse {
+            network_name: identity.network_name,
+            ..Default::default()
+        };
+        if request.use_credential {
+            if join.admission.is_none() {
+                return Err(failure(
+                    "INVALID_ARGUMENT",
+                    "Set camouflage.admission_secret on this issuer first. Credential machines hold no network secret, so transport admission needs a separate secret.",
+                    "camouflage.admission_secret",
+                ));
+            }
+            if request.ttl_seconds <= 0 {
+                return Err(failure(
+                    "INVALID_ARGUMENT",
+                    "The credential lifetime must be positive.",
+                    "ttl_seconds",
+                ));
+            }
+            if context.config.get_credential_file().is_none() {
+                return Err(failure(
+                    "INVALID_ARGUMENT",
+                    "Set network.credential_file before issuing credentials.",
+                    "network.credential_file",
+                ));
+            }
+            let (credential_id, bundle) = context
+                .get_credential_manager()
+                .generate_credential_bundle(
+                    request.groups,
+                    false,
+                    Vec::new(),
+                    std::time::Duration::from_secs(request.ttl_seconds as u64),
+                    None,
+                    request.reusable,
+                )
+                .map_err(|error| failure("INVALID_ARGUMENT", &error.to_string(), "use_credential"))?;
+            context.issue_event(crate::common::global_ctx::GlobalCtxEvent::CredentialChanged);
+            response.credential_id = credential_id;
+            response.expires_unix = chrono::Utc::now()
+                .timestamp()
+                .saturating_add(request.ttl_seconds);
+            join.credential = Some(bundle);
+        } else {
+            let Some(secret) = identity.network_secret.filter(|secret| !secret.is_empty()) else {
+                return Err(failure(
+                    "INVALID_ARGUMENT",
+                    "This node holds no network secret. Create a credential join code on the credential issuer.",
+                    "use_credential",
+                ));
+            };
+            join.secret = Some(secret);
+        }
+        response.code = join
+            .encode()
+            .map_err(|error| failure("INVALID_ARGUMENT", &format!("{error:#}"), "peers"))?;
+        Ok(response)
     }
 
     pub(super) async fn list_port_forwards_inner(

@@ -86,6 +86,13 @@ async fn local(args: &Arguments) -> Result<Response> {
         |error: anyhow::Error| CliError::new("invalid_argument", format!("{error:#}"), "");
     match &args.command {
         Command::Init(init) => {
+            let join = init
+                .join
+                .as_deref()
+                .map(crate::common::join_code::JoinCode::decode)
+                .transpose()
+                .map_err(invalid)?;
+            let joining = join.as_ref().map(|join| join.network.clone());
             let written = crate::core::init(&crate::core::InitOptions {
                 output: init.file.clone(),
                 network: init.network.clone(),
@@ -93,6 +100,7 @@ async fn local(args: &Arguments) -> Result<Response> {
                 peers: init.peers.clone(),
                 tun_mode: init.tun.clone(),
                 ipv4: init.ipv4.clone(),
+                join,
                 force: init.force,
             })
             .map_err(invalid)?;
@@ -100,9 +108,14 @@ async fn local(args: &Arguments) -> Result<Response> {
                 .iter()
                 .map(|path| format!("  {}\n", path.display()))
                 .collect::<String>();
+            let share = match joining {
+                Some(network) => format!("The node joins network {network:?} when it starts."),
+                None => "Share the network name and the secret file with peers. Keep the .key \
+                         file private."
+                    .into(),
+            };
             local_text(format!(
-                "Wrote\n{files}\nStart the node:\n  lowertier run -c {}\n\nShare the network name and the \
-                 secret file with peers. Keep the .key file private.\n",
+                "Wrote\n{files}\nStart the node:\n  lowertier run -c {}\n\n{share}\n",
                 init.file.display()
             ))
         }

@@ -235,6 +235,7 @@ control_service! {
     list_credentials, ListCredentialsRequest, ListCredentialsResponse, list_credentials_inner;
     issue_credential, IssueCredentialRequest, IssueCredentialResponse, issue_credential_inner;
     revoke_credential, RevokeCredentialRequest, RevokeCredentialResponse, revoke_credential_inner;
+    create_join_code, CreateJoinCodeRequest, CreateJoinCodeResponse, create_join_code_inner;
     list_port_forwards, ListPortForwardsRequest, ListPortForwardsResponse, list_port_forwards_inner;
     watch_changes, WatchChangesRequest, WatchChangesResponse, watch_changes_inner;
     get_config, GetConfigRequest, GetConfigResponse, get_config_inner;
@@ -697,7 +698,27 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
             tunnel_info: Some(ipv6_channel),
             ..Default::default()
         };
+        // A remote portal caller is refused even with the administrator token.
+        let remote = BaseController {
+            tunnel_info: Some(TunnelInfo {
+                remote_addr: Some("h2://192.0.2.1:15888".parse::<url::Url>().unwrap().into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        admin_meta.admin_token = "rpc-test-secret".into();
         let rejected = admin_service
+            .list_credentials(
+                remote,
+                ListCredentialsRequest {
+                    meta: Some(admin_meta.clone()),
+                    page: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.error.unwrap().code, "permission_denied");
+        let accepted = admin_service
             .list_credentials(
                 controller.clone(),
                 ListCredentialsRequest {
@@ -707,19 +728,34 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
             )
             .await
             .unwrap();
-        assert_eq!(rejected.error.unwrap().code, "permission_denied");
-        admin_meta.admin_token = "rpc-test-secret".into();
-        let accepted = admin_service
+        assert!(accepted.error.is_none(), "{:?}", accepted.error);
+        // The control token alone authorizes a loopback caller: it can replace the secret anyway.
+        admin_meta.admin_token.clear();
+        let token_only = admin_service
             .list_credentials(
-                controller,
+                controller.clone(),
                 ListCredentialsRequest {
-                    meta: Some(admin_meta),
+                    meta: Some(admin_meta.clone()),
                     page: None,
                 },
             )
             .await
             .unwrap();
-        assert!(accepted.error.is_none(), "{:?}", accepted.error);
+        assert!(token_only.error.is_none(), "{:?}", token_only.error);
+        let join = admin_service
+            .create_join_code(
+                controller,
+                CreateJoinCodeRequest {
+                    meta: Some(admin_meta),
+                    peers: vec!["quic://198.51.100.4:11012".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(join.error.is_none(), "{:?}", join.error);
+        let decoded = crate::common::join_code::JoinCode::decode(&join.code).unwrap();
+        assert_eq!(decoded.secret.as_deref(), Some("rpc-test-secret"));
         let stored = TomlConfigLoader::default();
         let stored_id = stored.get_id();
         let stored_path = dir.path().join("stored.toml");

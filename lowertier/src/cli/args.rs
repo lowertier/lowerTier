@@ -243,6 +243,9 @@ pub struct InitArgs {
     /// Static virtual IPv4 address with prefix. DHCP is used otherwise.
     #[arg(long)]
     pub ipv4: Option<String>,
+    /// Join an existing network with a code from a member's management interface.
+    #[arg(long, value_name = "CODE", conflicts_with = "network")]
+    pub join: Option<String>,
     /// Replace existing files.
     #[arg(long)]
     pub force: bool,

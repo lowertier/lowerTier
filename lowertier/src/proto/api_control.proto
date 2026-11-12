@@ -241,6 +241,26 @@ message IssueCredentialResponse { ApiError error = 1; string credential_id = 2; 
 message RevokeCredentialRequest { RequestMeta meta = 1; string credential_id = 2; }
 message RevokeCredentialResponse { ApiError error = 1; bool revoked = 2; }
 
+// A join code for a new node. Members of a shared-secret network embed the network secret.
+// Credential issuers can embed a newly issued credential instead.
+message CreateJoinCodeRequest {
+  RequestMeta meta = 1;
+  // Bootstrap peer URIs the new node dials first. Use reachable, specified addresses.
+  repeated string peers = 2;
+  bool use_credential = 3;
+  int64 ttl_seconds = 4;
+  bool reusable = 5;
+  repeated string groups = 6;
+}
+message CreateJoinCodeResponse {
+  ApiError error = 1;
+  string code = 2;
+  string network_name = 3;
+  // Set when the code embeds an issued credential.
+  string credential_id = 4;
+  int64 expires_unix = 5;
+}
+
 message ListPortForwardsRequest { RequestMeta meta = 1; }
 message ListPortForwardsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated common.PortForwardConfigPb port_forwards = 3; }
 
@@ -351,6 +371,7 @@ service ControlPlaneV1Rpc {
   rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
   rpc IssueCredential(IssueCredentialRequest) returns (IssueCredentialResponse);
   rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc CreateJoinCode(CreateJoinCodeRequest) returns (CreateJoinCodeResponse);
   rpc ListPortForwards(ListPortForwardsRequest) returns (ListPortForwardsResponse);
   rpc WatchChanges(WatchChangesRequest) returns (WatchChangesResponse);
   rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);

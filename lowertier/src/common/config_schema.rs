@@ -949,6 +949,14 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Paths: to (peer, CIDR, or internet), via (peers or groups in order), gateway (peer or group), strict.",
     ),
     opt(
+        "note",
+        Tables,
+        Same,
+        Live,
+        "",
+        "Local peer names and notes for the management interface: peer (public key), name, text.",
+    ),
+    opt(
         "export",
         Tables,
         To("proxy_network"),
@@ -1101,6 +1109,7 @@ const TABLE_FIELDS: &[(&str, &[(&str, &str)])] = &[
         "relay.link_cost",
         &[("peer", "peer"), ("bias_ms", "bias_ms")],
     ),
+    ("note", &[("peer", "peer"), ("name", "name"), ("text", "text")]),
 ];
 
 /// Old names. `None` means the option was removed.
