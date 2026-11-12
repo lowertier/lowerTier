@@ -15,4 +15,4 @@ pub mod system_config;
 
 pub static MAGIC_DNS_INSTANCE_ADDR: &str = "h2://127.0.0.1:49813";
 pub static MAGIC_DNS_FAKE_IP: &str = "100.100.100.101";
-pub static DEFAULT_ET_DNS_ZONE: &str = "et.net.";
+pub static DEFAULT_DNS_ZONE: &str = "lt.net.";

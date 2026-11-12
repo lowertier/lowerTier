@@ -13,7 +13,8 @@ type Endpoint = (String, SocketAddr, String);
 
 #[derive(Default)]
 pub(crate) struct TransportRetries {
-    endpoints: Mutex<BTreeMap<Endpoint, Option<Instant>>>,
+    /// Retry time (`None` while an attempt is active) and consecutive failures per endpoint.
+    endpoints: Mutex<BTreeMap<Endpoint, (Option<Instant>, u32)>>,
 }
 
 impl TransportRetries {
@@ -73,19 +74,24 @@ impl TransportRetries {
         let key = (protocol.to_owned(), address, identity);
         let now = Instant::now();
         let mut endpoints = self.endpoints.lock();
-        endpoints.retain(|_, deadline| deadline.is_none_or(|deadline| deadline > now));
-        if endpoints.contains_key(&key) {
+        // Forget failures once an endpoint stays quiet for a cold interval after its retry time.
+        endpoints.retain(|_, (deadline, _)| {
+            deadline.is_none_or(|deadline| now < deadline + super::COLD_RETRY_INTERVAL)
+        });
+        let blocking = |deadline: &Option<Instant>| deadline.is_none_or(|deadline| deadline > now);
+        if endpoints.get(&key).is_some_and(|(deadline, _)| blocking(deadline)) {
             return Err(TunnelError::InternalError(
                 "transport endpoint is active or in cold retry".into(),
             ));
         }
         // This bound covers active connections and failed discovery endpoints together.
-        if endpoints.len() >= 1024 {
+        if endpoints.values().filter(|(deadline, _)| blocking(deadline)).count() >= 1024 {
             return Err(TunnelError::InternalError(
                 "transport retry table is full".into(),
             ));
         }
-        endpoints.insert(key.clone(), None);
+        let failures = endpoints.get(&key).map_or(0, |(_, failures)| *failures);
+        endpoints.insert(key.clone(), (None, failures));
         Ok(Attempt {
             _lease: Arc::new(AttemptLease {
                 retries: self.clone(),
@@ -141,9 +147,10 @@ impl Drop for AttemptLease {
         if authenticated {
             endpoints.remove(&self.key);
         } else {
+            let failures = endpoints.get(&self.key).map_or(0, |(_, failures)| *failures) + 1;
             endpoints.insert(
                 self.key.clone(),
-                Some(Instant::now() + super::COLD_RETRY_INTERVAL),
+                (Some(Instant::now() + super::retry_backoff(failures)), failures),
             );
         }
     }
@@ -324,13 +331,16 @@ mod tests {
         assert!(retries.begin("quic", address).is_err());
         assert!(retries.begin("wss", address).is_ok());
         drop(attempt);
-        let deadline = retries.endpoints.lock()[&("quic".into(), address, String::new())].unwrap();
-        assert!(deadline.duration_since(Instant::now()).as_secs() >= 599);
+        let key = ("quic".to_owned(), address, String::new());
+        let deadline = retries.endpoints.lock()[&key].0.unwrap();
+        assert!(deadline.duration_since(Instant::now()).as_secs() >= 14);
         assert!(retries.begin("quic", address).is_err());
-        retries.endpoints.lock().insert(
-            ("quic".into(), address, String::new()),
-            Some(Instant::now()),
-        );
+        retries.endpoints.lock().get_mut(&key).unwrap().0 = Some(Instant::now());
+        // A second failure doubles the wait.
+        drop(retries.begin("quic", address).unwrap());
+        let deadline = retries.endpoints.lock()[&key].0.unwrap();
+        assert!(deadline.duration_since(Instant::now()).as_secs() >= 29);
+        retries.endpoints.lock().get_mut(&key).unwrap().0 = Some(Instant::now());
         assert!(retries.begin("quic", address).is_ok());
         let live = retries.begin("h2", address).unwrap();
         live._lease.paths.lock().push(Arc::new(TunnelPathState {

@@ -234,7 +234,7 @@ Secrets are redacted in all output.
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
 | `dns.accept` | bool | `false` | instance restart | Serve magic DNS for peer host names. |
-| `dns.zone` | string | `et.net.` | instance restart | Magic DNS zone. |
+| `dns.zone` | string | `lt.net.` | instance restart | Magic DNS zone. |
 
 ## `[acl]`
 

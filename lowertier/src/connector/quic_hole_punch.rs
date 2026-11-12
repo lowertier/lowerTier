@@ -49,7 +49,10 @@ mod hard_nat;
 
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
-const RETRY_INTERVAL: Duration = super::COLD_RETRY_INTERVAL;
+/// Wait after the attempt with this index finished: 15 s doubling to the cold interval.
+fn retry_after(attempt: u32) -> Duration {
+    super::retry_backoff(attempt.saturating_add(1))
+}
 
 struct Session {
     transaction: [u8; 12],
@@ -267,10 +270,12 @@ impl PunchServer {
     fn take_attempt(&self, peer: PeerId) -> Option<u32> {
         let mut cooldown = self.state.cooldown.lock().unwrap();
         let now = tokio::time::Instant::now();
-        // Retain the source-pair index across one complete retry interval.
-        cooldown.retain(|_, (start, _)| now.duration_since(*start) < RETRY_INTERVAL * 2);
+        // Keep the source-pair index until the peer stays quiet for a cold interval.
+        cooldown.retain(|_, (start, attempt)| {
+            now.duration_since(*start) < retry_after(*attempt) + super::COLD_RETRY_INTERVAL
+        });
         if let Some((start, attempt)) = cooldown.get_mut(&peer) {
-            if now.duration_since(*start) < RETRY_INTERVAL {
+            if now.duration_since(*start) < retry_after(*attempt) {
                 return None;
             }
             *start = now;
@@ -285,7 +290,17 @@ impl PunchServer {
     }
 
     async fn initiate(&self, peer: PeerId) -> Result<()> {
-        let _permit = self.permits.clone().try_acquire_owned()?;
+        let permit = self.permits.clone().acquire_owned().await?;
+        self.initiate_with(peer, permit).await
+    }
+
+    /// Run one attempt with a concurrency permit already held. Scheduled attempts wait for a
+    /// permit before their timeout starts, so peers beyond the limit queue instead of failing.
+    async fn initiate_with(
+        &self,
+        peer: PeerId,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<()> {
         let attempt = self
             .take_attempt(peer)
             .context("QUIC punch retry is rate limited")?;
@@ -524,7 +539,7 @@ impl PeerTaskLauncher for Launcher {
                 .lock()
                 .unwrap()
                 .get(&peer)
-                .map(|(finished, _)| *finished + RETRY_INTERVAL);
+                .map(|(finished, attempt)| *finished + retry_after(*attempt));
             if let Some(retry_at) = retry_at {
                 tokio::time::sleep_until(retry_at).await;
             }
@@ -537,7 +552,11 @@ impl PeerTaskLauncher for Launcher {
             {
                 return Ok(());
             }
-            tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer)).await?
+            let permit = data.permits.clone().acquire_owned().await?;
+            if data.peer_mgr.has_live_peer_connection_for_protocol(peer, "quic") {
+                return Ok(());
+            }
+            tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate_with(peer, permit)).await?
         })
     }
     async fn all_task_done(&self, _: &Self::Data) {}

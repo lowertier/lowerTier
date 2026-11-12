@@ -41,7 +41,10 @@ use tokio::{
 };
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(40);
 const STREAM_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const RETRY: Duration = super::COLD_RETRY_INTERVAL;
+/// Wait after the attempt with this index finished: 15 s doubling to the cold interval.
+fn retry_after(index: u32) -> Duration {
+    super::retry_backoff(index.saturating_add(1))
+}
 mod hard_nat;
 
 struct Expansion {
@@ -717,11 +720,13 @@ impl Server {
         ensure!(!active.contains(&key), "TCP punch already active");
         let mut attempts = self.state.attempts.lock().unwrap();
         let now = tokio::time::Instant::now();
-        // Retain the source-pair index across one complete retry interval.
-        attempts.retain(|_, (time, _)| now.duration_since(*time) < RETRY * 2);
+        // Keep the source-pair index until the peer stays quiet for a cold interval.
+        attempts.retain(|_, (time, index)| {
+            now.duration_since(*time) < retry_after(*index) + super::COLD_RETRY_INTERVAL
+        });
         let index = if let Some((time, index)) = attempts.get_mut(&key) {
             ensure!(
-                now.duration_since(*time) >= RETRY,
+                now.duration_since(*time) >= retry_after(*index),
                 "TCP punch retry is rate limited"
             );
             *time = now;
@@ -758,11 +763,21 @@ impl Server {
             )
     }
     async fn initiate(&self, peer: PeerId, protocol: Protocol) -> Result<()> {
+        let permit = self.permits.clone().acquire_owned().await?;
+        self.initiate_with(peer, protocol, permit).await
+    }
+    /// Run one attempt with a concurrency permit already held. Scheduled attempts wait for a
+    /// permit before their timeout starts, so peers beyond the limit queue instead of failing.
+    async fn initiate_with(
+        &self,
+        peer: PeerId,
+        protocol: Protocol,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<()> {
         ensure!(
             self.allowed(peer, protocol).await,
             "TCP punch denied by peer policy"
         );
-        let _permit = self.permits.clone().try_acquire_owned()?;
         let (_attempt, index) = self.take(peer, protocol)?;
         let ctx = self.peer_mgr.get_global_ctx();
         let (local_index, remote_index) = source_pair(index);
@@ -940,7 +955,7 @@ impl PeerTaskLauncher for Launcher {
                 .lock()
                 .unwrap()
                 .get(&(peer, protocol))
-                .map(|(time, _)| *time + RETRY);
+                .map(|(time, index)| *time + retry_after(*index));
             if let Some(next) = next {
                 tokio::time::sleep_until(next).await;
             }
@@ -953,7 +968,15 @@ impl PeerTaskLauncher for Launcher {
             {
                 return Ok(());
             }
-            tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate(peer, protocol)).await?
+            let permit = data.permits.clone().acquire_owned().await?;
+            if data
+                .peer_mgr
+                .has_live_peer_connection_for_protocol(peer, protocol.name())
+            {
+                return Ok(());
+            }
+            tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate_with(peer, protocol, permit))
+                .await?
         })
     }
     async fn all_task_done(&self, _: &Self::Data) {}

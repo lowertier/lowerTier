@@ -36,7 +36,7 @@ use crate::{
 };
 
 use super::{
-    COLD_RETRY_INTERVAL, create_connector_by_url, should_background_p2p_with_peer,
+    RetryBackoff, create_connector_by_url, should_background_p2p_with_peer,
     should_try_p2p_with_peer,
 };
 
@@ -206,9 +206,9 @@ struct DstListenerUrlBlackListItem(PeerId, String);
 struct DirectConnectorManagerData {
     global_ctx: ArcGlobalCtx,
     peer_manager: Arc<PeerManager>,
-    dst_listener_blacklist: timedmap::TimedMap<DstListenerUrlBlackListItem, ()>,
+    dst_listener_blacklist: RetryBackoff<DstListenerUrlBlackListItem>,
     peer_black_list: timedmap::TimedMap<PeerId, ()>,
-    next_scan: timedmap::TimedMap<PeerId, ()>,
+    next_scan: RetryBackoff<PeerId>,
     direct_handshake_locks: Mutex<HashMap<PeerId, Weak<Mutex<()>>>>,
 }
 
@@ -217,9 +217,9 @@ impl DirectConnectorManagerData {
         Self {
             global_ctx,
             peer_manager,
-            dst_listener_blacklist: timedmap::TimedMap::new(),
+            dst_listener_blacklist: RetryBackoff::default(),
             peer_black_list: timedmap::TimedMap::new(),
-            next_scan: timedmap::TimedMap::new(),
+            next_scan: RetryBackoff::default(),
             direct_handshake_locks: Mutex::new(HashMap::new()),
         }
     }
@@ -289,22 +289,16 @@ impl DirectConnectorManagerData {
     ) -> Result<(), Error> {
         tracing::debug!(?dst_peer_id, ?addr, "try_connect_to_ip start");
 
-        self.dst_listener_blacklist.cleanup();
-
-        if self
-            .dst_listener_blacklist
-            .contains(&DstListenerUrlBlackListItem(dst_peer_id, addr.clone()))
-        {
+        let key = DstListenerUrlBlackListItem(dst_peer_id, addr.clone());
+        if !self.dst_listener_blacklist.ready(&key) {
             return Err(Error::UrlInBlacklist);
         }
 
-        let ret = self.do_try_connect_to_ip(dst_peer_id, addr.clone()).await;
+        let ret = self.do_try_connect_to_ip(dst_peer_id, addr).await;
         if ret.is_err() {
-            self.dst_listener_blacklist.insert(
-                DstListenerUrlBlackListItem(dst_peer_id, addr),
-                (),
-                COLD_RETRY_INTERVAL,
-            );
+            self.dst_listener_blacklist.fail(key);
+        } else {
+            self.dst_listener_blacklist.succeed(&key);
         }
         ret
     }
@@ -593,7 +587,20 @@ impl DirectConnectorManagerData {
             ret
         }
         .await;
-        self.next_scan.insert(dst_peer_id, (), COLD_RETRY_INTERVAL);
+        // Back off while any enabled transport still lacks a direct connection.
+        let flags = self.global_ctx.flags_arc();
+        let missing = crate::common::config::TRANSPORT_PROTOCOLS.iter().any(|protocol| {
+            crate::common::config::transport_protocol_enabled(&flags, protocol)
+                && !self
+                    .peer_manager
+                    .has_live_peer_connection_for_protocol(dst_peer_id, protocol)
+        });
+        if missing {
+            let wait = self.next_scan.fail(dst_peer_id);
+            tracing::debug!(dst_peer_id, ?wait, "direct connect incomplete; retry later");
+        } else {
+            self.next_scan.succeed(&dst_peer_id);
+        }
         result
     }
 }
@@ -627,7 +634,6 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
 
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
         data.peer_black_list.cleanup();
-        data.next_scan.cleanup();
         let my_peer_id = data.peer_manager.my_peer_id();
         data.peer_manager
             .list_peers()
@@ -645,7 +651,7 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
                                 .peer_manager
                                 .has_live_peer_connection_for_protocol(*peer_id, protocol)
                         })
-                    && !data.next_scan.contains(peer_id)
+                    && data.next_scan.ready(peer_id)
                     && !data.peer_black_list.contains(peer_id)
             })
             .collect()

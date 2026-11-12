@@ -37,6 +37,8 @@ struct ConnectorManagerData {
     connectors: ConnectorMap,
     reconnecting: DashSet<url::Url>,
     cold_until: DashMap<url::Url, tokio::time::Instant>,
+    /// Consecutive failed reconnects per URL. The cold wait doubles from 15 s with each one.
+    failures: DashMap<url::Url, u32>,
     seeds: std::sync::Mutex<BTreeMap<url::Url, BTreeSet<url::Url>>>,
     peer_manager: Weak<PeerManager>,
     _alive_conn_urls: Arc<DashSet<url::Url>>,
@@ -61,6 +63,7 @@ impl ManualConnectorManager {
                 connectors,
                 reconnecting: DashSet::new(),
                 cold_until: DashMap::new(),
+                failures: DashMap::new(),
                 seeds: std::sync::Mutex::new(BTreeMap::new()),
                 peer_manager: Arc::downgrade(&peer_manager),
                 _alive_conn_urls: Arc::new(DashSet::new()),
@@ -339,12 +342,18 @@ impl ManualConnectorManager {
                         tasks.lock().unwrap().spawn(async move {
                             let reconn_ret = Self::conn_reconnect(data_clone.clone(), dead_url.clone() ).await;
                             if reconn_ret.is_err() {
+                                let failures = {
+                                    let mut entry = data_clone.failures.entry(dead_url.clone()).or_insert(0);
+                                    *entry = entry.saturating_add(1);
+                                    *entry
+                                };
                                 data_clone.cold_until.insert(
                                     dead_url.clone(),
-                                    tokio::time::Instant::now() + super::COLD_RETRY_INTERVAL,
+                                    tokio::time::Instant::now() + super::retry_backoff(failures),
                                 );
                             } else {
                                 data_clone.cold_until.remove(&dead_url);
+                                data_clone.failures.remove(&dead_url);
                             }
                             let _ = sender.send(reconn_ret).await;
 
@@ -368,6 +377,7 @@ impl ManualConnectorManager {
             let url = it.key();
             if data.connectors.remove(url).is_some() {
                 data.cold_until.remove(url);
+                data.failures.remove(url);
                 tracing::warn!("connector: {}, removed", url);
                 continue;
             } else if data.reconnecting.contains(url) {

@@ -118,7 +118,7 @@ impl MagicDnsServerInstanceData {
         self.dns_server
             .upsert(
                 LowerName::from_str(zone)
-                    .with_context(|| "Invalid zone name, expect format like \"et.net.\"")?,
+                    .with_context(|| "Invalid zone name, expect format like \"lt.net.\"")?,
                 Arc::new(authority),
             )
             .await;
@@ -557,7 +557,7 @@ impl MagicDnsServerInstance {
         peer_mgr
             .add_nic_packet_process_pipeline(Box::new(data.clone()))
             .await;
-        // Use configured tld_dns_zone or fall back to DEFAULT_ET_DNS_ZONE if empty
+        // Use configured tld_dns_zone or fall back to DEFAULT_DNS_ZONE if empty
         let flags = peer_mgr.get_global_ctx().config.get_flags();
         let tld_dns_zone_clone = flags.tld_dns_zone.clone();
 

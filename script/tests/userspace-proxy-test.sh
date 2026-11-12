@@ -156,7 +156,7 @@ shared_idle_rss_kib=$(median_values <"$shared_rss_samples")
 python3 "$probe" client \
     --proxy-port "$proxy_port" \
     --target-ip 10.77.0.2 \
-    --target-hostname userspace-proxy-server.et.net \
+    --target-hostname userspace-proxy-server.lt.net \
     --tcp-port "$tcp_port" \
     --udp-port "$udp_port" \
     --http-port "$http_port" \

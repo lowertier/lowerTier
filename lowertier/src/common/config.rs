@@ -19,7 +19,7 @@ use tokio::io::AsyncReadExt as _;
 
 use crate::{
     common::{stun::StunInfoCollector, underlay_policy::UnderlayPolicy},
-    instance::dns_server::DEFAULT_ET_DNS_ZONE,
+    instance::dns_server::DEFAULT_DNS_ZONE,
     peers::credential_manager::CredentialManager,
     proto::{
         acl::Acl,
@@ -57,7 +57,7 @@ pub fn gen_default_flags() -> Flags {
         multi_thread_count: 2,
         encryption_algorithm: EncryptionAlgorithm::default().to_string(),
         disable_sym_hole_punching: false,
-        tld_dns_zone: DEFAULT_ET_DNS_ZONE.to_string(),
+        tld_dns_zone: DEFAULT_DNS_ZONE.to_string(),
 
         need_p2p: false,
         enable_udp_broadcast_relay: false,

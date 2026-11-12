@@ -18,6 +18,95 @@ mod traversal;
 mod traversal_resources;
 
 pub(crate) const COLD_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+/// The first retry after a failed connection attempt. Each further failure doubles the wait up to
+/// [`COLD_RETRY_INTERVAL`]. A peer that restarts or a NAT mapping that opens late then costs
+/// seconds of relaying instead of the full cold interval.
+pub(crate) const FIRST_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Wait after `failures` consecutive failures: 15 s, 30 s, 60 s, ... capped at the cold interval.
+pub(crate) fn retry_backoff(failures: u32) -> std::time::Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    FIRST_RETRY_INTERVAL
+        .saturating_mul(1 << doublings)
+        .min(COLD_RETRY_INTERVAL)
+}
+
+/// Consecutive failures per key. A success clears the key; a key quiet for one cold interval
+/// after its retry time is forgotten, so the next failure starts from the first interval again.
+pub(crate) struct RetryBackoff<K> {
+    entries: std::sync::Mutex<std::collections::HashMap<K, (u32, tokio::time::Instant)>>,
+}
+
+impl<K: std::hash::Hash + Eq + Clone> Default for RetryBackoff<K> {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone> RetryBackoff<K> {
+    const MAX_ENTRIES: usize = 4096;
+
+    /// Whether the key may be tried now.
+    pub(crate) fn ready(&self, key: &K) -> bool {
+        let now = tokio::time::Instant::now();
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|_, (_, retry_at)| now < *retry_at + COLD_RETRY_INTERVAL);
+        entries.get(key).is_none_or(|(_, retry_at)| *retry_at <= now)
+    }
+
+    /// Record a failure and return the wait before the next attempt.
+    pub(crate) fn fail(&self, key: K) -> std::time::Duration {
+        let now = tokio::time::Instant::now();
+        let mut entries = self.entries.lock().unwrap();
+        if entries.len() >= Self::MAX_ENTRIES && !entries.contains_key(&key) {
+            entries.retain(|_, (_, retry_at)| now < *retry_at);
+        }
+        let failures = entries.get(&key).map_or(0, |(failures, _)| *failures) + 1;
+        let wait = retry_backoff(failures);
+        entries.insert(key, (failures, now + wait));
+        wait
+    }
+
+    pub(crate) fn succeed(&self, key: &K) {
+        self.entries.lock().unwrap().remove(key);
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn retry_backoff_doubles_to_the_cold_interval() {
+        let waits: Vec<u64> = (1..=8).map(|failures| retry_backoff(failures).as_secs()).collect();
+        assert_eq!(waits, vec![15, 30, 60, 120, 240, 480, 600, 600]);
+        assert_eq!(retry_backoff(u32::MAX), COLD_RETRY_INTERVAL);
+    }
+
+    #[test]
+    fn retry_backoff_clears_on_success_and_forgets_quiet_keys() {
+        let backoff = RetryBackoff::<u32>::default();
+        let move_retry = |by_past: std::time::Duration| {
+            let mut entries = backoff.entries.lock().unwrap();
+            let entry = entries.get_mut(&1).unwrap();
+            entry.1 = tokio::time::Instant::now() - by_past;
+        };
+        assert!(backoff.ready(&1));
+        assert_eq!(backoff.fail(1).as_secs(), 15);
+        assert!(!backoff.ready(&1));
+        move_retry(std::time::Duration::ZERO);
+        assert!(backoff.ready(&1));
+        assert_eq!(backoff.fail(1).as_secs(), 30);
+        backoff.succeed(&1);
+        assert!(backoff.ready(&1));
+        assert_eq!(backoff.fail(1).as_secs(), 15);
+        move_retry(COLD_RETRY_INTERVAL + std::time::Duration::from_secs(1));
+        assert!(backoff.ready(&1));
+        assert_eq!(backoff.fail(1).as_secs(), 15, "a quiet key starts over");
+    }
+}
 
 #[derive(Debug)]
 pub struct BackOff {

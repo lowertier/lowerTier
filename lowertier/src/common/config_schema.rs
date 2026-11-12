@@ -1009,7 +1009,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Str,
         To("flags.tld_dns_zone"),
         Restart,
-        "et.net.",
+        "lt.net.",
         "Magic DNS zone.",
     ),
     opt("acl", Table, Same, Live, "", "ACL chains and groups."),
