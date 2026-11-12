@@ -5,12 +5,15 @@ No TURN allocation, credentials, forwarding, or automatic lifetime expiry.
 Run under a supervised service. RFC 8489 XOR-MAPPED-ADDRESS is supported;
 CHANGE-PORT is supported over UDP. CHANGE-IP is deliberately unsupported.
 """
+from __future__ import annotations
+
 import argparse
 import asyncio
 import signal
 import socket
 import struct
 import time
+from typing import Any
 
 COOKIE = 0x2112A442
 MAX_BODY = 512
@@ -18,12 +21,12 @@ MAX_CLIENTS = 64
 
 
 class RateLimit:
-    def __init__(self):
+    def __init__(self) -> None:
         self.second = -1
-        self.counts = {}
+        self.counts: dict[str, int] = {}
         self.total = 0
 
-    def allow(self, source, now=None):
+    def allow(self, source: str, now: float | None = None) -> bool:
         second = int(time.monotonic() if now is None else now)
         if second != self.second:
             self.second, self.total = second, 0
@@ -38,7 +41,7 @@ class RateLimit:
         return True
 
 
-def binding_response(data, source):
+def binding_response(data: bytes, source: tuple[Any, Any]) -> tuple[bytes, bool] | None:
     """Return (response, change_port), or None for an unsupported/invalid request."""
     if len(data) < 20:
         return None
@@ -79,16 +82,17 @@ def binding_response(data, source):
     return struct.pack('!HH', 0x101, 12) + data[4:20] + struct.pack('!HH', 0x20, 8) + value, change_port
 
 
-async def serve(address, ports, stop):
+async def serve(address: str, ports: list[int], stop: asyncio.Event) -> None:
     limiter = RateLimit()
-    datagrams = {}
+    datagrams: dict[int, asyncio.DatagramTransport] = {}
     active = 0
 
     class UDP(asyncio.DatagramProtocol):
-        def __init__(self, port):
+        def __init__(self, port: int) -> None:
             self.port = port
 
-        def datagram_received(self, data, source):
+        def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
+            source = addr
             if not limiter.allow(source[0]):
                 return
             result = binding_response(data, source)
@@ -100,7 +104,7 @@ async def serve(address, ports, stop):
             if transport is not None:
                 transport.sendto(reply, source)
 
-    async def tcp(reader, writer):
+    async def tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal active
         if active >= MAX_CLIENTS:
             writer.close()
@@ -128,7 +132,7 @@ async def serve(address, ports, stop):
             writer.close()
 
     loop = asyncio.get_running_loop()
-    servers = []
+    servers: list[asyncio.Server] = []
     try:
         for port in ports:
             transport, _ = await loop.create_datagram_endpoint(lambda p=port: UDP(p), local_addr=(address, port))
@@ -144,7 +148,7 @@ async def serve(address, ports, stop):
             transport.close()
 
 
-async def main():
+async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bind', default='0.0.0.0')
     parser.add_argument('--ports', type=int, nargs=2, default=[16780, 16781])

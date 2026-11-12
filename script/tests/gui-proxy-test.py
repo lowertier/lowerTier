@@ -13,13 +13,13 @@ import time
 import tomllib
 
 
-def available_port():
+def available_port() -> int:
     with socket.socket() as stream:
         stream.bind(('127.0.0.1', 0))
         return stream.getsockname()[1]
 
 
-def receive(stream, length):
+def receive(stream: socket.socket, length: int) -> bytes:
     result = b''
     while len(result) < length:
         part = stream.recv(length - len(result))
@@ -29,7 +29,8 @@ def receive(stream, length):
     return result
 
 
-def request(proxy, port, path, key=None, host=None, body=None):
+def request(proxy: int, port: int, path: str, key: str | None = None, host: str | None = None,
+            body: str | None = None) -> tuple[int, bytes]:
     with socket.create_connection(('127.0.0.1', proxy), timeout=3) as stream:
         stream.sendall(b'\x05\x01\x00')
         assert receive(stream, 2) == b'\x05\x00'
@@ -39,6 +40,7 @@ def request(proxy, port, path, key=None, host=None, body=None):
         length = {1: 4, 4: 16}.get(reply[3])
         if reply[3] == 3:
             length = receive(stream, 1)[0]
+        assert length is not None, ('Unknown SOCKS address type', reply[3])
         receive(stream, length + 2)
         headers = {'Host': host or f'10.201.70.2:{port}', 'Connection': 'close'}
         if key:
@@ -56,7 +58,7 @@ def request(proxy, port, path, key=None, host=None, body=None):
         return response.status, response.read()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/release/lowertier'))
     parser.add_argument('--work-dir', type=Path)
@@ -64,9 +66,9 @@ def main():
     binary = args.binary.resolve()
     directory = args.work_dir or Path(tempfile.mkdtemp(prefix='lowertier-gui-proxy-'))
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    ports = set()
+    ports: set[int] = set()
 
-    def port():
+    def port() -> int:
         while True:
             value = available_port()
             if value not in ports:
@@ -74,7 +76,7 @@ def main():
                 return value
 
     proxy, link, gui_port, other_loopback, foreign_loopback = [port() for _ in range(5)]
-    children = []
+    children: list[subprocess.Popen[bytes]] = []
     try:
         for name, address in [('c', '10.201.70.3'), ('b', '10.201.70.2'), ('a', '10.201.70.1')]:
             node = directory / name
@@ -184,12 +186,12 @@ default_action = 1
         assert 'tcp_ports' not in cleared
         assert cleared['acl_v1'] == original['acl_v1']
         assert cleared['udp_ports'] == original['udp_ports']
-        for port, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
+        for loopback, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
             try:
-                status, _ = request(proxy, port, '/api/snapshot', key_file.read_text().strip(), host=f'127.0.0.1:{port}')
+                status, _ = request(proxy, loopback, '/api/snapshot', key_file.read_text().strip(), host=f'127.0.0.1:{loopback}')
             except (OSError, RuntimeError, AssertionError, http.client.HTTPException):
                 continue
-            assert status != 200, ('The overlay proxy reached a loopback GUI', port)
+            assert status != 200, ('The overlay proxy reached a loopback GUI', loopback)
         print(json.dumps(dict(result='passed', instance='gui-proxy-b', page=200, unauthorized_api=403, authorized_api=200, foreign_host=403, loopback_proxy='blocked', acl_rules_preserved=True, evidence=str(directory))))
     finally:
         for child in children:

@@ -5,11 +5,12 @@ import unittest
 
 PATH = pathlib.Path(__file__).resolve().parents[1] / 'mesh-stun.py'
 spec = importlib.util.spec_from_file_location('mesh_stun', PATH)
+assert spec is not None and spec.loader is not None
 stun = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stun)
 
 
-def request(body=b''):
+def request(body: bytes = b'') -> bytes:
     return struct.pack('!HHI', 1, len(body), stun.COOKIE) + b'0123456789ab' + body
 
 

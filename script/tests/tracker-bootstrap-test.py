@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from typing import IO, Any
 
 NETWORK = 'tracker-bootstrap-test'
 ADDRESSES = {'a': '10.203.0.1', 'b': '10.203.0.2'}
@@ -30,13 +31,13 @@ PAYLOAD_BYTES = 4 * 1024 * 1024
 CONNECT_DEADLINE = 60
 
 
-def available_port(kind=socket.SOCK_STREAM):
+def available_port(kind: socket.SocketKind = socket.SOCK_STREAM) -> int:
     with socket.socket(socket.AF_INET, kind) as sock:
         sock.bind(('127.0.0.1', 0))
         return sock.getsockname()[1]
 
 
-def receive(stream, length):
+def receive(stream: socket.socket, length: int) -> bytes:
     result = b''
     while len(result) < length:
         part = stream.recv(length - len(result))
@@ -46,7 +47,7 @@ def receive(stream, length):
     return result
 
 
-def fetch_through_socks(proxy, address, port, path):
+def fetch_through_socks(proxy: int, address: str, port: int, path: str) -> tuple[int, bytes]:
     """GET http://address:port/path through a SOCKS5 proxy and return status and body."""
     with socket.create_connection(('127.0.0.1', proxy), timeout=20) as stream:
         stream.sendall(b'\x05\x01\x00')
@@ -63,7 +64,7 @@ def fetch_through_socks(proxy, address, port, path):
         return response.status, response.read()
 
 
-def node_config(directory, name, ports, tracker_udp, tracker_http):
+def node_config(directory: Path, name: str, ports: dict[str, int], tracker_udp: int, tracker_http: int) -> str:
     node = directory / name
     node.mkdir(mode=0o700, exist_ok=True)
     return f'''[node]
@@ -103,17 +104,24 @@ token_file = "{node / 'control.token'}"
 '''
 
 
-def peers(binary, ports, token):
+def peers(binary: Path, ports: dict[str, int], token: Path) -> list[dict[str, Any]]:
     output = subprocess.run(
         [str(binary), '-p', f'127.0.0.1:{ports["portal"]}', '--token-file', str(token), '-o', 'json', 'peers'],
         capture_output=True, text=True, timeout=10,
     )
     if output.returncode != 0:
         return []
-    return json.loads(output.stdout).get('data', {}).get('peers', [])
+    data: dict[str, Any] = json.loads(output.stdout).get('data') or {}
+    return data.get('peers') or []
 
 
-def main():
+def is_direct_peer(peer: dict[str, Any], hostname: str) -> bool:
+    """A direct peer has the hostname and at least one live connection of its own."""
+    route: dict[str, Any] = peer.get('route') or {}
+    return route.get('hostname') == hostname and bool(peer.get('conns'))
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/release/lowertier'))
     parser.add_argument('--tracker-binary', type=Path, default=Path('target/release/lowertier-tracker'))
@@ -129,22 +137,22 @@ def main():
     digest = hashlib.sha256(payload).hexdigest()
 
     class Payload(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def do_GET(self) -> None:
             self.send_response(200)
             self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
-        def log_message(self, *_):
+        def log_message(self, format: str, *args: Any) -> None:
             pass
 
     # Node B's machine serves the payload on loopback. Node A reaches it at B's overlay address.
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Payload)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    payload_port = server.server_address[1]
+    payload_port = server.server_port
 
     tracker_udp, tracker_http = available_port(socket.SOCK_DGRAM), available_port()
-    ports = {}
+    ports: dict[str, dict[str, int]] = {}
     for name in ADDRESSES:
         quic = available_port(socket.SOCK_DGRAM)
         ports[name] = {
@@ -152,9 +160,9 @@ def main():
             'discovery': available_port(socket.SOCK_DGRAM),
             'socks': available_port(), 'portal': available_port(),
         }
-    children = []
+    children: list[subprocess.Popen[bytes]] = []
     try:
-        logs = {}
+        logs: dict[str, IO[str]] = {}
         log = open(directory / 'tracker.log', 'w')
         children.append(subprocess.Popen(
             [str(tracker_binary), '--udp-listen', f'127.0.0.1:{tracker_udp}',
@@ -175,14 +183,12 @@ def main():
 
         started = time.monotonic()
         token = directory / 'a' / 'control.token'
-        peer = None
+        peer: dict[str, Any] | None = None
         while time.monotonic() - started < CONNECT_DEADLINE:
             for child in children:
                 if child.poll() is not None:
                     raise RuntimeError(f'a process exited with {child.returncode}; see {directory}')
-            # A direct peer has at least one live connection of its own.
-            peer = next((p for p in peers(binary, ports['a'], token)
-                         if (p.get('route') or {}).get('hostname') == 'boot-b' and p.get('conns')), None)
+            peer = next((p for p in peers(binary, ports['a'], token) if is_direct_peer(p, 'boot-b')), None)
             if peer:
                 break
             time.sleep(1)
