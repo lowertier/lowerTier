@@ -26,9 +26,9 @@ const POLICY: Record<string, string> = {
 };
 
 const TRANSIT: Record<string, string> = {
-  allow: "Peers may route their traffic through this node.",
-  avoid: "Peers route through this node only when every other path has more avoided nodes.",
-  deny: "This node never carries traffic for other peers. It stays reachable.",
+  allow: "Peers may route their traffic through this machine.",
+  avoid: "Peers route through this machine only when every other path has more avoided nodes.",
+  deny: "This machine never carries traffic for other peers. It stays reachable.",
 };
 
 function Applies(props: { path: string }) {
@@ -352,7 +352,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
         <div class="row">
           <div class="label">
             <b>Use relays</b>
-            <p>Automatic routing may send this node's traffic through other peers when there is no direct link.</p>
+            <p>Automatic routing may send this machine's traffic through other peers when there is no direct link.</p>
           </div>
           <div class="control">
             <Switch label="Use relays" checked={configured("relay.use_relays") ?? true} disabled={busy()} onChange={(value) => apply({ "relay.use_relays": value })} />
@@ -372,7 +372,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
         <div class="row">
           <div class="label">
             <b>Serve as exit</b>
-            <p>Let peers send internet traffic out through this node.</p>
+            <p>Let peers send internet traffic out through this machine.</p>
           </div>
           <div class="control">
             <Switch label="Serve as exit" checked={configured("routes.serve_exit") ?? false} disabled={busy()} onChange={(value) => apply({ "routes.serve_exit": value })} />
@@ -391,7 +391,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
           </Show>
         </header>
         <p class="hint lead">
-          Steer this node's traffic through chosen peers or groups, in order. Groups balance flows across their members. Waypoints pass sealed packets on without opening
+          Steer this machine's traffic through chosen peers or groups, in order. Groups balance flows across their members. Waypoints pass sealed packets on without opening
           them.
         </p>
         <Show when={editingPath() === "new"}>
@@ -411,7 +411,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
                       <div class="path-summary">
                         <b>{targetLabel(path.to)}</b>
                         <span class="chain">
-                          <span class="hop self">this node</span>
+                          <span class="hop self">this machine</span>
                           <For each={[...(path.via ?? []), ...(path.gateway ? [path.gateway] : [])]}>
                             {(reference) => (
                               <>

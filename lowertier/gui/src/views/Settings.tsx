@@ -1,6 +1,6 @@
-import { For, Index, Match, Show, Switch as Pick, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
+import { For, Index, Match, Show, Switch as Pick, createEffect, createMemo, createResource, createSignal, on, onMount } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import { fromToml, toToml } from "../api";
+import { fromToml, rpc, toToml, type Doc } from "../api";
 import { Segmented, Switch } from "../components/controls";
 import { apply, busy, config, configured, loadSchema, lookup, restartPending, say, schema, type OptionSpec } from "../config";
 import { words } from "../format";
@@ -8,6 +8,71 @@ import { selection, snapshot } from "../store";
 import { credentialChanges, FLEET_GUI_CIDRS, guiChanges, guiRules, overlaySubnet, REDACTED, ROUTING_PATHS, secretChanges, secretSource, type Changes, type GuiRule, type SecretSource } from "../settingsModel";
 
 const ORDER = ["node", "network", "identity", "address", "tun", "transport", "peer", "nat", "underlay", "discovery", "relay", "routes", "export", "proxy", "forward", "dns", "acl", "camouflage", "limits", "l2", "log", "control", "gui"];
+export const PAGES = ["general", "keys", "access", "connectivity", "advanced"] as const;
+export type Page = (typeof PAGES)[number];
+export const PAGE_TITLES: Record<Page, string> = {
+  general: "General",
+  keys: "Keys",
+  access: "Access",
+  connectivity: "Connectivity",
+  advanced: "All options",
+};
+// Curated sections per page. "All options" lists the full registry.
+const LAYOUT: Record<Exclude<Page, "advanced">, [string, string[]][]> = {
+  general: [
+    ["This machine", ["node.hostname", "address.dhcp", "address.ipv4", "address.ipv6", "tun.mode", "tun.mtu"]],
+    ["Network", ["network.name", "dns.accept", "dns.zone"]],
+    ["Logs", ["log.console"]],
+  ],
+  keys: [
+    ["Network admission", ["network.secret"]],
+    ["Identity", ["identity.private_key", "identity.public_key"]],
+    ["Credential issuing", ["network.credential_file"]],
+    ["Remote control", ["control.secret", "control.grant"]],
+  ],
+  access: [
+    ["Management interface", ["gui.allow", "gui.enabled", "gui.port"]],
+    ["Firewall", ["acl"]],
+    ["Control channel", ["control.default", "control.allow", "control.token_group"]],
+  ],
+  connectivity: [
+    ["Listeners", ["transport.listen", "transport.advertise", "transport.protocols", "transport.prefer"]],
+    ["Bootstrap peers", ["peer"]],
+    ["NAT traversal", ["nat.p2p", "nat.udp_punch", "nat.tcp_punch", "nat.stun"]],
+    ["Discovery", ["discovery.trackers"]],
+  ],
+};
+
+const LABELS: Record<string, string> = {
+  "node.hostname": "Machine name",
+  "address.dhcp": "Automatic address",
+  "address.ipv4": "IPv4 address",
+  "address.ipv6": "IPv6 address",
+  "tun.mode": "Interface",
+  "tun.mtu": "MTU",
+  "network.name": "Network name",
+  "dns.accept": "Accept DNS",
+  "dns.zone": "DNS zone",
+  "log.console": "Console log level",
+  "network.credential_file": "Issued credential store",
+  "control.grant": "Remote control grants",
+  "gui.enabled": "Serve the interface",
+  "gui.port": "Overlay port",
+  "control.default": "Default remote access",
+  "control.allow": "Allowed remote peers",
+  "control.token_group": "Token group",
+  "transport.listen": "Listen on",
+  "transport.advertise": "Advertised addresses",
+  "transport.protocols": "Protocols",
+  "transport.prefer": "Preferred protocol",
+  peer: "Bootstrap peers",
+  "nat.p2p": "Direct connections",
+  "nat.udp_punch": "UDP hole punching",
+  "nat.tcp_punch": "TCP hole punching",
+  "nat.stun": "STUN servers",
+  "discovery.trackers": "Trackers",
+};
+
 const GROUPED = new Set(["network.secret_file", "network.credential", "identity.private_key_file", "identity.credential_root", "control.secret_file", "gui.open", "acl.tcp_ports", "acl.udp_ports"]);
 
 function text(option: OptionSpec, value: any): string {
@@ -52,7 +117,7 @@ function parsed(option: OptionSpec, input: string): unknown {
   }
 }
 
-export default function Settings(props: { onRouting: () => void }) {
+export default function Settings(props: { page: Page; onPage: (page: Page) => void; onRouting: () => void; onAddMachine: () => void }) {
   onMount(loadSchema);
   const [filter, setFilter] = createSignal("");
   const [raw, setRaw] = createSignal(false);
@@ -82,7 +147,12 @@ export default function Settings(props: { onRouting: () => void }) {
     const query = filter().trim().toLowerCase();
     return !query || `${extra} ${schema().filter((option) => paths.includes(option.path)).map((option) => `${option.path} ${option.doc}`).join(" ")}`.toLowerCase().includes(query);
   };
-  const sections = createMemo(() => {
+  const sections = createMemo((): [string, OptionSpec[]][] => {
+    if (props.page !== "advanced") {
+      return LAYOUT[props.page]
+        .map(([title, paths]): [string, OptionSpec[]] => [title, paths.flatMap((path) => schema().find((option) => option.path === path) ?? [])])
+        .filter(([, options]) => options.length);
+    }
     const groups = new Map<string, OptionSpec[]>();
     for (const option of schema()) {
       if (GROUPED.has(option.path) || ROUTING_PATHS.has(option.path)) continue;
@@ -96,10 +166,12 @@ export default function Settings(props: { onRouting: () => void }) {
       if (!groups.has(section)) groups.set(section, []);
       groups.get(section)!.push(option);
     }
-    return [...groups.entries()].sort(([a], [b]) => {
-      const rank = (name: string) => ORDER.indexOf(name) + 1 || ORDER.length + 1;
-      return rank(a) - rank(b);
-    });
+    return [...groups.entries()]
+      .sort(([a], [b]) => {
+        const rank = (name: string) => ORDER.indexOf(name) + 1 || ORDER.length + 1;
+        return rank(a) - rank(b);
+      })
+      .map(([name, options]): [string, OptionSpec[]] => [words(name), options]);
   });
 
   const save = async () => {
@@ -136,11 +208,11 @@ export default function Settings(props: { onRouting: () => void }) {
     const name = path.split(".").slice(1).join(".") || path;
     return (
       <div class="row" classList={{ edited: edited() }}>
-        <div class="label"><b>{props.label ?? words(name)}</b><code>{path}</code><p>{props.help ?? props.option.doc}</p></div>
+        <div class="label"><b>{props.label ?? LABELS[path] ?? words(name)}</b><code>{path}</code><p>{props.help ?? props.option.doc}</p></div>
         <div class="control" classList={{ column: ["list", "intlist", "tables", "table"].includes(props.option.kind) }}>
           <Pick fallback={
             <input type={props.option.secret ? "password" : "text"} autocomplete="off" spellcheck={false} aria-label={path}
-              placeholder={props.option.secret ? (value() === REDACTED ? "Set, unchanged" : props.resetLabel ?? "Not set") : props.option.default || props.option.type}
+              placeholder={props.option.secret ? (value() === REDACTED ? "Set, unchanged" : props.resetLabel ?? "Not set") : props.option.default || (props.option.type === "string" ? "Not set" : props.option.type)}
               value={props.option.secret ? (edited() ? draft(path) ?? "" : "") : edited() ? draft(path) ?? "" : text(props.option, value())}
               onInput={(event) => edit(path, event.currentTarget.value)} />
           }>
@@ -179,7 +251,7 @@ export default function Settings(props: { onRouting: () => void }) {
           </select>
           <Show when={source() !== "automatic"}>
             <input type={source() === "value" ? "password" : "text"} autocomplete="off" spellcheck={false} aria-label={selected()}
-              placeholder={source() === "file" ? "Path on this node" : configured(props.path) === REDACTED && !(props.path in pending) ? "Set, unchanged" : "Enter a value"}
+              placeholder={source() === "file" ? "Path on this machine" : configured(props.path) === REDACTED && !(props.path in pending) ? "Set, unchanged" : "Enter a value"}
               value={source() === "file" ? draft(selected()) ?? "" : selected() in pending ? draft(selected()) ?? "" : ""}
               onInput={(event) => editMany(secretChanges(props.path, source(), event.currentTarget.value))} />
             <code>{selected()}</code>
@@ -238,13 +310,13 @@ export default function Settings(props: { onRouting: () => void }) {
 
   const Option = (props: { option: OptionSpec }) => <Pick fallback={<Row option={props.option} />}>
     <Match when={props.option.path === "network.secret"}><Authentication /></Match>
-    <Match when={props.option.path === "network.credential_file"}><Row option={props.option} label="Issued credential store" help="Stores credentials issued by this node. This file does not supply a credential for joining the network." /></Match>
+    <Match when={props.option.path === "network.credential_file"}><Row option={props.option} label="Issued credential store" help="Stores credentials issued by this machine. This file does not supply a credential for joining the network." /></Match>
     <Match when={props.option.path === "identity.private_key"}>
       <Show when={!credentialMode()} fallback={<p class="hint credential-identity">The signed credential supplies the identity key.</p>}><Secret path="identity.private_key" label="Identity key" automatic="Generate automatically" /></Show>
       <Show when={credentialMode()}><details class="advanced-setting" open={filter().toLowerCase().includes("root")}><summary>Root trust pin</summary><Row option={schema().find((option) => option.path === "identity.credential_root")!} label="Root trust pin" help="Optional trusted root. A replacement credential must match this pin." /></details></Show>
     </Match>
     <Match when={props.option.path === "identity.public_key"}>
-      <div class="row"><div class="label"><b>Public key</b><p>Derived from the identity key. Use this value to pin this node on another peer.</p></div>
+      <div class="row"><div class="label"><b>Public key</b><p>Derived from the identity key. Use this value to pin this machine on another peer.</p></div>
         <div class="control column"><input type="text" aria-label="identity.public_key" readOnly value={configured("identity.public_key") ?? ""} /><Show when={"identity.public_key" in pending}><p class="hint">The value updates after the identity change takes effect.</p></Show></div>
       </div>
     </Match>
@@ -256,24 +328,100 @@ export default function Settings(props: { onRouting: () => void }) {
       resetLabel={credentialMode() ? "Remove override" : "Use network secret"} /></Match>
   </Pick>;
 
+  const advanced = () => props.page === "advanced";
   return (
-    <div class="stack settings" classList={{ dirty: changed() > 0 }}>
-      <div class="toolbar"><input type="search" placeholder="Find an option" aria-label="Find an option" value={filter()} onInput={(event) => setFilter(event.currentTarget.value)} />
-        <button type="button" class="quiet" aria-pressed={raw()} onClick={() => setRaw(!raw())}>{raw() ? "Show form" : "Show TOML"}</button>
-      </div>
-      <Show when={!raw()} fallback={<section class="panel"><pre class="toml">{config() ? toToml(config()!.desired ?? config()!.active ?? {}) : "Loading…"}</pre></section>}>
-        <Show when={config()} fallback={<p class="empty">Loading settings…</p>}>
-        <Show when={matches([...ROUTING_PATHS], "Routing paths groups exit")}><section class="panel routing-settings"><div><b>Routing</b><p class="hint">Manage paths, groups, route policy, relay use, transit, probe budget, and exit service on the Routing page.</p></div><button type="button" class="quiet" disabled={changed() > 0} onClick={props.onRouting}>Open Routing</button></section></Show>
-        <For each={sections()}>{([section, options]) => <details class="panel settings-group" open={filter().trim() !== "" || ["node", "network", "identity", "tun"].includes(section)}>
-          <summary><h2>{words(section)}</h2></summary><For each={options}>{(option) => <Option option={option} />}</For>
-        </details>}</For>
-        <Show when={schema().length && !sections().length && !matches([...ROUTING_PATHS], "Routing paths groups exit")}><p class="empty">No option matches.</p></Show>
+    <div class="settings-layout">
+      <nav class="subnav" aria-label="Settings pages">
+        <For each={PAGES}>
+          {(page) => (
+            <a
+              href={`/settings/${page}`}
+              aria-current={props.page === page ? "page" : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                if (changed() && page !== props.page && !confirm("Discard unsaved changes?")) return;
+                props.onPage(page);
+              }}
+            >
+              {PAGE_TITLES[page]}
+            </a>
+          )}
+        </For>
+      </nav>
+      <div class="stack settings" classList={{ dirty: changed() > 0, curated: !advanced() }}>
+        <Show when={advanced()}>
+          <div class="toolbar">
+            <input type="search" class="search" placeholder="Find an option" aria-label="Find an option" value={filter()} onInput={(event) => setFilter(event.currentTarget.value)} />
+            <button type="button" class="quiet" aria-pressed={raw()} onClick={() => setRaw(!raw())}>{raw() ? "Show form" : "Show TOML"}</button>
+          </div>
         </Show>
-      </Show>
-      <Show when={changed()}><div class="savebar" role="region" aria-label="Unsaved changes"><span>Unsaved changes</span>
-        <button type="button" class="link" onClick={discard} disabled={busy()}>Discard</button>
-        <button type="button" class="primary" onClick={save} disabled={busy() || !config()}>{busy() ? "Applying…" : "Apply"}</button>
-      </div></Show>
+        <Show when={props.page === "keys"}><JoinCodes onAddMachine={props.onAddMachine} /></Show>
+        <Show when={!(advanced() && raw())} fallback={<section class="panel"><pre class="toml">{config() ? toToml(config()!.desired ?? config()!.active ?? {}) : "Loading…"}</pre></section>}>
+          <Show when={config()} fallback={<p class="empty">Loading settings…</p>}>
+            <Show when={advanced() && matches([...ROUTING_PATHS], "Routing paths groups exit")}><section class="panel routing-settings"><div><b>Routing</b><p class="hint">Paths, groups, route policy, relay use, transit, probe budget, and exit service live on the Routes page.</p></div><button type="button" class="quiet" disabled={changed() > 0} onClick={props.onRouting}>Open Routes</button></section></Show>
+            <For each={sections()}>{([title, options]) => advanced()
+              ? <details class="panel settings-group" open={filter().trim() !== "" || ["node", "network", "identity", "tun"].includes(title)}><summary><h2>{title}</h2></summary><For each={options}>{(option) => <Option option={option} />}</For></details>
+              : <section class="panel settings-group"><h2>{title}</h2><For each={options}>{(option) => <Option option={option} />}</For></section>
+            }</For>
+            <Show when={advanced() && schema().length && !sections().length && !matches([...ROUTING_PATHS], "Routing paths groups exit")}><p class="empty">No option matches.</p></Show>
+          </Show>
+        </Show>
+        <Show when={changed()}><div class="savebar" role="region" aria-label="Unsaved changes"><span>{changed() === 1 ? "1 unsaved change" : `${changed()} unsaved changes`}</span>
+          <button type="button" class="link" onClick={discard} disabled={busy()}>Discard</button>
+          <button type="button" class="primary" onClick={save} disabled={busy() || !config()}>{busy() ? "Applying…" : "Apply"}</button>
+        </div></Show>
+      </div>
     </div>
+  );
+}
+
+/** Join codes and, on a credential issuer, the credentials it issued. */
+function JoinCodes(props: { onAddMachine: () => void }) {
+  const issuer = () => configured("network.credential_file") != null;
+  const [credentials, { refetch }] = createResource(
+    () => (issuer() ? JSON.stringify([selection(), snapshot()?.instance]) : false),
+    async () => ((await rpc("ListCredentials", { page: { limit: 256 } })).credentials ?? []) as Doc[],
+  );
+  const revoke = async (id: string) => {
+    if (!confirm(`Revoke credential ${id}? Machines using it lose admission.`)) return;
+    try {
+      const response = await rpc("RevokeCredential", { credential_id: id });
+      say(response.revoked ? "The credential is revoked." : "The credential was already gone.");
+    } catch (caught) {
+      say(caught instanceof Error ? caught.message : String(caught), true);
+    }
+    refetch();
+  };
+  return (
+    <section class="panel settings-group">
+      <h2>Join codes</h2>
+      <div class="row">
+        <div class="label"><b>Add a machine</b><p>A join code carries the network name, admission material, and bootstrap peers. Any member can create one.</p></div>
+        <div class="control"><button type="button" class="primary" onClick={props.onAddMachine}>Create join code</button></div>
+      </div>
+      <Show when={issuer()}>
+        <div class="row column-row">
+          <div class="label"><b>Issued credentials</b><p>Signed credentials issued by this machine. Revoking one removes the admission of machines that use it.</p></div>
+          <Show when={!credentials.error} fallback={<p class="hint bad">{String(credentials.error?.message ?? credentials.error)}</p>}>
+            <Show when={(credentials() ?? []).length} fallback={<p class="hint">{credentials.loading ? "Loading…" : "No credentials issued."}</p>}>
+              <div class="table-wrap">
+                <table class="credentials">
+                  <thead><tr><th scope="col">Credential</th><th scope="col">Groups</th><th scope="col">Expires</th><th scope="col">Use</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+                  <tbody>
+                    <For each={credentials()}>{(item) => <tr>
+                      <td class="mono">{item.credential_id}</td>
+                      <td>{(item.groups ?? []).join(", ") || "–"}</td>
+                      <td>{item.expiry_unix ? new Date(item.expiry_unix * 1000).toLocaleString() : "–"}</td>
+                      <td>{item.reusable === false ? "single machine" : "reusable"}</td>
+                      <td class="actions"><button type="button" class="link danger" onClick={() => revoke(item.credential_id)}>Revoke</button></td>
+                    </tr>}</For>
+                  </tbody>
+                </table>
+              </div>
+            </Show>
+          </Show>
+        </div>
+      </Show>
+    </section>
   );
 }

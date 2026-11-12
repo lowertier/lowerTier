@@ -13,13 +13,45 @@ lowertier gui --no-open         # print the address only
 lowertier gui --listen 127.0.0.1:18080
 ```
 
-The page shows peers placed by round-trip time, traffic rates, loss, and routes.
-The Overview attention list shows peers without a direct connection or with an older version than the node serving the page.
-Latency, loss, and missing round-trip measurements do not add peers to this list.
-It edits node settings, paths, and load-balance groups with live per-member traffic shares.
-It follows logs and switches between daemons on the machine.
+The page has four sections: Machines, Routes, Logs, and Settings.
+Machines lists this machine and every peer with its address, connection, round trip, traffic, and version.
+A filter shows direct peers, relayed peers, or peers that need attention: no direct connection, an older LowTier version, or loss of 1% or more.
+Each row has a menu to rename the peer, edit its note, copy its address or public key, and open its details.
+The details sheet shows live figures, the automatic route, the path editor, the link cost bias, and connections.
 Options that need a restart are staged; the page then offers an instance restart.
 Light and dark themes follow the system setting.
+
+Names and notes for peers are stored on the machine that serves the page, as `[[note]]` tables keyed by public key.
+They apply live and stay local: other machines keep their own names.
+Renaming this machine changes `node.hostname`, which peers see.
+
+```toml
+[[note]]
+peer = "N2BdrcGbQFyGOmutpWhewjc0ufbs1E80Xlk5BFIFLhg="
+name = "builder"
+text = "Build box in rack 2."
+```
+
+Settings has five pages: General, Keys, Access, Connectivity, and All options.
+The first four show the common options with plain labels. All options lists the full registry with search and a TOML view.
+
+## Join codes
+
+Add machine, or Create join code under Settings, Keys, produces a join code and install commands for Linux, macOS, and Windows.
+Any member can create one; there is no coordination server.
+The code names the network, carries its admission material, and lists bootstrap peers for the new machine to dial first.
+The page proposes this machine's public listeners, its advertised addresses, and its own bootstrap peers. Add any other reachable member.
+
+- A network secret code embeds the shared secret. It never expires. Share it the way you would share a password.
+- A signed credential code embeds a credential issued on the spot, with a lifetime, a reuse limit, and optional groups.
+  It needs `network.credential_file` on this machine and `camouflage.admission_secret` on every member,
+  because credential machines hold no network secret for transport admission.
+  Settings, Keys lists issued credentials and revokes them.
+- When `camouflage.admission_secret` is set, every code carries it.
+
+The new machine applies a code with `lowertier init FILE --join CODE` or `install.sh install --join CODE`.
+The `CreateJoinCode` control method produces codes. It requires a loopback or in-process control channel, or the `admin` grant for remote callers.
+A loopback caller with the control token may also list, issue, and revoke credentials without `--admin-token`, since that token can already replace the network secret.
 
 Settings groups each secret with its value or file source.
 Network authentication selects a shared secret or a signed credential.

@@ -2,6 +2,7 @@
 import { createSignal } from "solid-js";
 import { api, ApiError, setTarget, type Doc } from "./api";
 import { ipv4 } from "./format";
+import { aliasFor } from "./notes";
 
 export const HISTORY = 120;
 const INTERVAL = 1000;
@@ -10,7 +11,9 @@ const HIDDEN_INTERVAL = 5000;
 export interface PeerRow {
   id: number;
   key: string;
+  /** The local alias from [[note]], or the peer's own hostname. */
   name: string;
+  hostname: string;
   address: string;
   direct: boolean;
   transport: string;
@@ -99,7 +102,8 @@ function ingest(doc: Doc) {
     const row: PeerRow = {
       id: peer.peer_id,
       key: peer.peer_key ?? "",
-      name: route.hostname || `peer ${peer.peer_id}`,
+      name: aliasFor(peer.peer_key ?? "") || route.hostname || `peer ${peer.peer_id}`,
+      hostname: route.hostname || `peer ${peer.peer_id}`,
       address: ipv4(route.ipv4_addr),
       direct,
       transport: conns[0]?.tunnel?.tunnel_type ?? "",
