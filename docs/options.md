@@ -152,7 +152,7 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `camouflage.server_name` | string |  | new connections; QUIC: instance restart | User-selected TLS domain (SNI). Configure a decoy upstream or a website with a matching certificate. |
+| `camouflage.server_names` | list of strings |  | new connections; QUIC: instance restart | TLS server names (SNI). Clients use one name per destination; servers accept all. Configure a decoy upstream or a website with matching certificates. |
 | `camouflage.tls_cert` | path |  | new connections; QUIC: instance restart | TLS certificate file. Set together with tls_key. |
 | `camouflage.tls_key` | path |  | new connections; QUIC: instance restart | TLS private key file. |
 | `camouflage.admission_secret` | secret |  | new connections; QUIC: instance restart | Secret that separates VPN clients from website visitors (16+ bytes). |

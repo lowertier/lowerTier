@@ -149,6 +149,33 @@ impl CamouflageConfig {
         !self.tcp_decoy().is_empty() || !self.udp_decoy().is_empty()
     }
 
+    pub fn has_server_names(&self) -> bool {
+        !self.server_names.is_empty()
+    }
+
+    /// The server name a client presents to `remote`. One destination always gets the same
+    /// name, so its SNI, HTTP authority, and certificate agree across reconnects; different
+    /// destinations spread across the list.
+    pub fn server_name_for(&self, remote: std::net::IpAddr) -> Option<&str> {
+        use std::hash::{Hash as _, Hasher as _};
+        match self.server_names.len() {
+            0 => None,
+            1 => Some(&self.server_names[0]),
+            count => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                remote.hash(&mut hasher);
+                Some(&self.server_names[(hasher.finish() % count as u64) as usize])
+            }
+        }
+    }
+
+    /// Whether a TLS server name from a client is one of the configured names.
+    pub fn serves_name(&self, name: &str) -> bool {
+        self.server_names
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
+    }
+
     pub fn websocket_path(&self) -> &str {
         if self.wss_path.is_empty() {
             "/ws"
@@ -163,22 +190,41 @@ impl CamouflageConfig {
             "camouflage.tls_cert and camouflage.tls_key must be configured together"
         );
         anyhow::ensure!(
-            self.tls_cert.is_empty() || !self.server_name.is_empty(),
-            "camouflage.server_name is required with a TLS certificate"
+            self.tls_cert.is_empty() || self.has_server_names(),
+            "camouflage.server_names is required with a TLS certificate"
         );
         anyhow::ensure!(
             !self.sni_routing || self.has_decoy(),
             "camouflage.sni_routing requires camouflage.decoy_upstream"
         );
         anyhow::ensure!(
-            self.server_name.is_empty() || !self.website_root.is_empty() || self.has_decoy(),
-            "camouflage.website_root is required with camouflage.server_name"
+            !self.has_server_names() || !self.website_root.is_empty() || self.has_decoy(),
+            "camouflage.website_root is required with camouflage.server_names"
         );
         anyhow::ensure!(
-            self.server_name.is_empty()
-                || (self.server_name.parse::<std::net::IpAddr>().is_err()
-                    && !self.server_name.contains(['/', ':'])),
-            "camouflage.server_name must be a DNS name"
+            self.server_names.len() <= 64,
+            "camouflage.server_names permits 64 names"
+        );
+        for (index, name) in self.server_names.iter().enumerate() {
+            anyhow::ensure!(
+                rustls::pki_types::ServerName::try_from(name.as_str())
+                    .is_ok_and(|parsed| matches!(parsed, rustls::pki_types::ServerName::DnsName(_))),
+                "camouflage.server_names: {name:?} is not a DNS name"
+            );
+            anyhow::ensure!(
+                !self.server_names[..index]
+                    .iter()
+                    .any(|other| other.eq_ignore_ascii_case(name)),
+                "camouflage.server_names lists {name:?} twice"
+            );
+        }
+        let path = self.websocket_path();
+        anyhow::ensure!(
+            path.starts_with('/')
+                && path.len() <= 256
+                && !path.contains(['?', '#'])
+                && !path.chars().any(|c| c.is_whitespace() || c.is_control()),
+            "camouflage.wss_path must be an absolute URL path without a query, for example /assets/live"
         );
         anyhow::ensure!(
             self.admission_secret.is_empty() || self.admission_secret.len() >= 16,
@@ -186,8 +232,8 @@ impl CamouflageConfig {
         );
         if self.has_decoy() {
             anyhow::ensure!(
-                !self.server_name.is_empty(),
-                "camouflage.server_name is required with camouflage.decoy_upstream"
+                self.has_server_names(),
+                "camouflage.server_names is required with camouflage.decoy_upstream"
             );
             anyhow::ensure!(
                 self.admission_secret.len() >= 16,
@@ -212,11 +258,6 @@ impl CamouflageConfig {
         anyhow::ensure!(
             self.website_root.is_empty() || std::path::Path::new(&self.website_root).is_dir(),
             "camouflage.website_root must be an existing directory"
-        );
-        let path = self.websocket_path();
-        anyhow::ensure!(
-            path.starts_with('/') && !path.contains(['?', '#']),
-            "camouflage.wss_path must be an absolute HTTP path"
         );
         if !self.http_host.is_empty() {
             self.http_host.parse::<http::uri::Authority>()?;
@@ -271,7 +312,7 @@ impl std::fmt::Debug for CamouflageConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CamouflageConfig")
-            .field("server_name", &self.server_name)
+            .field("server_names", &self.server_names)
             .field("tls_cert", &self.tls_cert)
             .field("tls_key", &self.tls_key)
             .field("admission_secret", &"[REDACTED]")

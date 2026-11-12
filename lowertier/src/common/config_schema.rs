@@ -751,12 +751,12 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Reject foreign networks without authorized admission.",
     ),
     opt(
-        "camouflage.server_name",
-        Str,
+        "camouflage.server_names",
+        StrList,
         Same,
         QuicRestart,
         "",
-        "User-selected TLS domain (SNI). Configure a decoy upstream or a website with a matching certificate.",
+        "TLS server names (SNI). Clients use one name per destination; servers accept all. Configure a decoy upstream or a website with matching certificates.",
     ),
     opt(
         "camouflage.tls_cert",
@@ -1252,7 +1252,8 @@ const RETIRED: &[(&str, Option<&str>)] = &[
         "flags.speed_probe_budget_bps",
         Some("relay.probe_budget_bps"),
     ),
-    ("flags.quic_server_name", Some("camouflage.server_name")),
+    ("flags.quic_server_name", Some("camouflage.server_names")),
+    ("camouflage.server_name", Some("camouflage.server_names")),
     ("flags.quic_tls_cert", Some("camouflage.tls_cert")),
     ("flags.quic_tls_key", Some("camouflage.tls_key")),
     (
@@ -1947,12 +1948,15 @@ mod tests {
         apply_set(&mut public, "peer=quic://a.example:1,h2://b.example:2").unwrap();
         apply_set(
             &mut public,
-            "camouflage.server_name=user-selected.example.test",
+            "camouflage.server_names=user-selected.example.test,cdn.example.test",
         )
         .unwrap();
         assert_eq!(
-            get(&public, "camouflage.server_name").and_then(Value::as_str),
-            Some("user-selected.example.test")
+            get(&public, "camouflage.server_names"),
+            Some(&Value::Array(vec![
+                Value::String("user-selected.example.test".into()),
+                Value::String("cdn.example.test".into()),
+            ]))
         );
         apply_set(&mut public, "l2.vlans=0,10,0x14").unwrap();
         assert_eq!(

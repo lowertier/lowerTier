@@ -839,7 +839,7 @@ pub async fn connect(
         let marker = routing_cid_bytes(&secret, std::time::SystemTime::now());
         stream.write_all(&tcp_routing_record(&marker)).await?;
     }
-    let server_name = stealth_tls::client_server_name(flags, &url)?;
+    let server_name = stealth_tls::client_server_name(flags, &url, peer_addr.ip())?;
     let stream = super::tcp_socket::prepare(stream);
     let budget = stream.send_budget();
     let tls = super::browser_tls::connect(

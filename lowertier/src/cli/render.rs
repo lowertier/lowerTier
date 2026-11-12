@@ -846,7 +846,7 @@ fn camouflage(value: &GetCamouflageResponse) -> String {
         }
     };
     key_values(&[
-        ("server name", or_dash(&config.server_name)),
+        ("server names", or_dash(&config.server_names.join(", "))),
         ("http host", or_dash(&config.http_host)),
         ("wss path", clean(config.websocket_path())),
         ("sni routing", config.sni_routing.to_string()),

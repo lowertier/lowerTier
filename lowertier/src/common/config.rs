@@ -2162,7 +2162,7 @@ socket_mark = 66
 
     fn quic_decoy_requires_and_accepts_complete_routing_configuration() {
         let mut flags = gen_default_flags();
-        flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+        flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".to_owned()];
         flags
             .camouflage_config_mut()
             .set_decoy_upstream("challenges.cloudflare.com:443".to_owned());

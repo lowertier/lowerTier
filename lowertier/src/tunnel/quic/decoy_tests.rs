@@ -12,7 +12,7 @@ async fn listener(upstream: SocketAddr) -> QuicTunnelListener {
         "decoy-limits-test-network-secret".to_owned(),
     )));
     let mut flags = context.get_flags();
-    flags.camouflage_config_mut().server_name = HOST.to_owned();
+    flags.camouflage_config_mut().server_names = vec![HOST.to_owned()];
     flags
         .camouflage_config_mut()
         .set_decoy_upstream(upstream.to_string());
@@ -234,7 +234,7 @@ async fn http3_decoy_allows_two_small_pages_and_rejects_a_third_session() {
             std::fs::write(&cert_path, cert.serialize_pem().unwrap()).unwrap();
             std::fs::write(&key_path, cert.serialize_private_key_pem()).unwrap();
             let mut flags = gen_default_flags();
-            flags.camouflage_config_mut().server_name = HOST.to_owned();
+            flags.camouflage_config_mut().server_names = vec![HOST.to_owned()];
             flags.camouflage_config_mut().tls_cert = cert_path.to_str().unwrap().to_owned();
             flags.camouflage_config_mut().tls_key = key_path.to_str().unwrap().to_owned();
             let upstream = Endpoint::server(server_config(&flags).unwrap(), "127.0.0.1:0".parse().unwrap()).unwrap();

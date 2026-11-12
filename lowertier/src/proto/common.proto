@@ -174,7 +174,8 @@ message LimitsConfig {
   optional uint64 memory_bytes = 2;
 }
 message CamouflageConfig {
-  string server_name = 1;
+  // TLS server names (SNI). A client uses one name per destination; a server accepts all.
+  repeated string server_names = 1;
   string tls_cert = 2;
   string tls_key = 3;
   string admission_secret = 4;

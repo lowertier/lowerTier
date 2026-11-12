@@ -19,7 +19,7 @@ probe_interval_seconds = 30
 probe_budget_bps = 0
 
 [camouflage]
-# server_name = "challenges.cloudflare.com"
+# server_names = ["challenges.cloudflare.com"]
 wss_path = "/ws"
 trusted_proxy_cidrs = []
 

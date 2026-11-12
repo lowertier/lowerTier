@@ -111,7 +111,8 @@ Network secrets and identity keys may live in files: `network.secret_file` and `
 | `instance_recv_bps_limit` | `limits.receive_bps`; multiply old byte/s values by eight; omit the old maximum sentinel |
 | `speed_probe_interval_seconds` | `relay.probe_interval_seconds` |
 | `speed_probe_budget_bps` | `relay.probe_budget_bps`; retain bit/s units |
-| `quic_server_name` | `camouflage.server_name` |
+| `quic_server_name` | `camouflage.server_names` |
+| `camouflage.server_name` | `camouflage.server_names` |
 | `quic_tls_cert`, `quic_tls_key` | `camouflage.tls_cert`, `camouflage.tls_key` |
 | `quic_admission_secret` | `camouflage.admission_secret` |
 | `quic_fallback_root` | `camouflage.website_root` |

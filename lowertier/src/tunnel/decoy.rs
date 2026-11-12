@@ -1135,7 +1135,7 @@ mod tests {
             let tcp_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let udp_origin = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let mut flags = gen_default_flags();
-            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".into();
+            flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".into()];
             flags.camouflage_config_mut().admission_secret = "shared-probe-test-admission-key".into();
             flags.camouflage_config_mut().decoy_upstream = Some(DecoyUpstream {
                 tcp: tcp_origin.local_addr().unwrap().to_string(), udp: udp_origin.local_addr().unwrap().to_string(),

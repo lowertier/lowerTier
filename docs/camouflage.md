@@ -3,6 +3,22 @@
 Camouflage lets a node share port 443 with ordinary HTTPS.
 Peers that prove the admission secret reach lowertier. Every other visitor is passed to a real website: either an upstream host or static files the node serves itself.
 
+## How it works
+
+Every listener speaks real TLS: QUIC (HTTP/3), HTTP/2, and WSS each complete a TLS handshake that presents one of `camouflage.server_names` as the server name.
+A peer then proves it holds the admission secret before the node treats the connection as lowertier:
+
+- QUIC peers place an HMAC of the secret in the connection ID of their first packet.
+- HTTP/2 peers send the marker as a tiny TLS record before the ClientHello when a decoy upstream is set, then an admission token on the CONNECT request.
+- WSS peers send the token in the `Authorization` header of the upgrade request to `camouflage.wss_path`.
+
+The token is an HMAC of the secret over a five-minute window. A connection without a valid marker or token is a visitor:
+the node splices it to `decoy_upstream`, serves `website_root`, or answers like an ordinary web server, within the probe limits below.
+After admission, Noise authenticates both peers and binds the TLS exporter, so a TLS endpoint in the middle cannot impersonate either one.
+
+With several server names, a client picks one name per destination address and keeps it, so the SNI, HTTP authority, and certificate agree across reconnects.
+Different destinations spread across the list. A server accepts every listed name and selects the matching certificate by SNI.
+
 This changes what a casual probe sees. It does not make lowertier traffic indistinguishable from browser traffic,
 and using a domain name as the TLS server name does not mean you hold its certificate.
 Examples here use `challenges.cloudflare.com` because it is reachable; choose your own.
@@ -17,7 +33,7 @@ listen = ["h2://127.0.0.1:8443", "quic://127.0.0.1:8443"]
 advertise = ["h2://0.0.0.0:443", "quic://0.0.0.0:443"]
 
 [camouflage]
-server_name = "challenges.cloudflare.com"
+server_names = ["challenges.cloudflare.com"]
 admission_secret = "replace-with-a-random-shared-secret"
 
 [camouflage.decoy_upstream]
@@ -49,7 +65,7 @@ The upstream must serve HTTP/3 on UDP 443. This path supports IPv4 listeners and
 The CLI can set the name and upstreams in one change. Restart the instance afterwards, because QUIC caches these settings:
 
 ```bash
-lowertier set --stage camouflage.server_name=challenges.cloudflare.com \
+lowertier set --stage camouflage.server_names=challenges.cloudflare.com \
   camouflage.decoy_upstream.tcp=challenges.cloudflare.com:443 \
   camouflage.decoy_upstream.udp=challenges.cloudflare.com:443
 ```
@@ -73,12 +89,12 @@ The [decoy design note](design/decoy-passthrough.md) lists every limit and the U
 
 ## Serve your own site instead
 
-Set `website_root` and leave out `decoy_upstream`. The node terminates TLS for `server_name`, so it needs a certificate for that name.
-It loads `/etc/letsencrypt/live/<server_name>/fullchain.pem` and `privkey.pem` unless you set `camouflage.tls_cert` and `camouflage.tls_key`.
+Set `website_root` and leave out `decoy_upstream`. The node terminates TLS for each name in `server_names`, so it needs a certificate for each name.
+It loads `/etc/letsencrypt/live/<name>/fullchain.pem` and `privkey.pem` for every name unless you set `camouflage.tls_cert` and `camouflage.tls_key`, which then serve all names.
 
 ```toml
 [camouflage]
-server_name = "challenges.cloudflare.com"
+server_names = ["challenges.cloudflare.com"]
 admission_secret = "replace-with-a-random-shared-secret"
 website_root = "/var/www/lowertier"
 ```
@@ -114,7 +130,7 @@ Set `camouflage.trusted_proxy_cidrs` to the CDN's ranges so the origin sees real
 
 | Option | Use |
 | --- | --- |
-| `camouflage.wss_path` | WebSocket path, default `/ws`. A path in the URL overrides it. |
+| `camouflage.wss_path` | WebSocket path, default `/ws`. Choose an ordinary-looking path such as `/assets/live` so a web server or CDN can route it to lowertier and serve everything else itself. The server answers an upgrade only on this path with a valid token. A path in the peer URI overrides it. |
 | `camouflage.http_host` | HTTP authority sent on HTTP/2 and WSS. |
 | `camouflage.sni_routing` | Classify by server name instead of the admission marker. |
 

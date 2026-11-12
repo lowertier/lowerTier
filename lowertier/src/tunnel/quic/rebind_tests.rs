@@ -161,14 +161,14 @@ impl Peers {
                 .camouflage_config_mut()
                 .set_decoy_upstream(upstream.local_addr().unwrap().to_string());
             flags.camouflage_config_mut().admission_secret = "test-rebinding-routing-secret".into();
-            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".into();
+            flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".into()];
             server_ctx.set_flags(flags);
             let mut flags = client_ctx.get_flags();
             flags
                 .camouflage_config_mut()
                 .set_decoy_upstream(upstream.local_addr().unwrap().to_string());
             flags.camouflage_config_mut().admission_secret = "test-rebinding-routing-secret".into();
-            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".into();
+            flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".into()];
             client_ctx.set_flags(flags);
             Some(upstream)
         } else {

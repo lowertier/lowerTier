@@ -988,7 +988,7 @@ impl ControlPlaneService {
                 "configured_file"
             }
             .into(),
-            quic_h2_verification: if !config.server_name.is_empty() && !config.has_decoy() {
+            quic_h2_verification: if config.has_server_names() && !config.has_decoy() {
                 "pki"
             } else {
                 "noise_authenticated_certificate"

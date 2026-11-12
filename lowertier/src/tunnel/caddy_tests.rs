@@ -46,7 +46,7 @@ async fn caddy_multiplexes_camouflaged_transports() {
             let web_reservation = TcpListener::bind("127.0.0.1:0").unwrap();
             let web = web_reservation.local_addr().unwrap();
             let mut flags = gen_default_flags();
-            flags.camouflage_config_mut().server_name = HOST.to_owned();
+            flags.camouflage_config_mut().server_names = vec![HOST.to_owned()];
             flags.camouflage_config_mut().set_decoy_upstream(web.to_string());
             flags.camouflage_config_mut().admission_secret = "caddy-routing-test-secret".to_owned();
             flags.camouflage_config_mut().sni_routing = sni_passthrough;

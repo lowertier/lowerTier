@@ -665,11 +665,11 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
                         field_mask: vec![
                             "camouflage.tls_cert".into(),
                             "camouflage.tls_key".into(),
-                            "camouflage.server_name".into(),
+                            "camouflage.server_names".into(),
                             "camouflage.website_root".into(),
                         ],
                         values: values(&format!(
-                            "[camouflage]\ntls_cert = {:?}\ntls_key = {:?}\nserver_name = \"example.test\"\nwebsite_root = {:?}\n",
+                            "[camouflage]\ntls_cert = {:?}\ntls_key = {:?}\nserver_names = [\"example.test\"]\nwebsite_root = {:?}\n",
                             dir.path().join("missing.crt").display().to_string(),
                             dir.path().join("missing.key").display().to_string(),
                             dir.path().display().to_string(),

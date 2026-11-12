@@ -562,7 +562,7 @@ mod tests {
         use crate::tunnel::TransportBindingKind;
 
         let mut flags = crate::common::config::gen_default_flags();
-        flags.camouflage_config_mut().server_name = "user-selected.example.test".to_owned();
+        flags.camouflage_config_mut().server_names = vec!["user-selected.example.test".to_owned()];
         flags
             .camouflage_config_mut()
             .set_decoy_upstream("decoy.invalid:443".to_owned());
@@ -625,7 +625,7 @@ mod tests {
             });
 
             let mut flags = crate::common::config::gen_default_flags();
-            flags.camouflage_config_mut().server_name = "challenges.cloudflare.com".to_owned();
+            flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".to_owned()];
             flags
                 .camouflage_config_mut()
                 .set_decoy_upstream(decoy_addr.to_string());
@@ -827,7 +827,7 @@ mod tests {
             .expect("challenges.cloudflare.com has IPv4");
 
         let mut flags = crate::common::config::gen_default_flags();
-        flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+        flags.camouflage_config_mut().server_names = vec![CAMOUFLAGE_HOST.to_owned()];
         flags
             .camouflage_config_mut()
             .set_decoy_upstream(upstream.to_string());
@@ -848,7 +848,7 @@ mod tests {
         });
 
         let mut probe_flags = crate::common::config::gen_default_flags();
-        probe_flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+        probe_flags.camouflage_config_mut().server_names = vec![CAMOUFLAGE_HOST.to_owned()];
         let tls_config =
             crate::tunnel::stealth_tls::rustls_client_config(&probe_flags, &[b"h2", b"http/1.1"])
                 .unwrap();
@@ -890,7 +890,7 @@ mod tests {
             const PAYLOAD: usize = 1200;
             let decoy = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let mut flags = crate::common::config::gen_default_flags();
-            flags.camouflage_config_mut().server_name = CAMOUFLAGE_HOST.to_owned();
+            flags.camouflage_config_mut().server_names = vec![CAMOUFLAGE_HOST.to_owned()];
             flags
                 .camouflage_config_mut()
                 .set_decoy_upstream(decoy.local_addr().unwrap().to_string());

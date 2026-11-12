@@ -84,13 +84,12 @@ fn wss_server_config(
     flags: &crate::common::config::Flags,
 ) -> Result<rustls::ServerConfig, TunnelError> {
     let provider = super::stealth_tls::stealth_crypto_provider();
-    let (certs, key) = super::stealth_tls::server_identity(flags)?;
+    let resolver = super::stealth_tls::server_cert_resolver(flags)?;
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
         .context("configure WSS TLS versions")?
         .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .with_context(|| "Failed to create WSS server config")?;
+        .with_cert_resolver(resolver);
     config.alpn_protocols = vec![HTTP_1_1_ALPN.to_vec()];
     Ok(config)
 }
@@ -555,10 +554,9 @@ impl WsTunnelConnector {
         let stream = super::tcp_socket::prepare(stream);
         if is_wss {
             let via_cdn = ws_via_cdn(&addr);
-            let name = if !via_cdn && !flags.camouflage_config().server_name.is_empty() {
-                flags.camouflage_config().server_name.as_str()
-            } else {
-                addr.domain().unwrap_or("localhost")
+            let name = match flags.camouflage_config().server_name_for(socket_addr.ip()) {
+                Some(name) if !via_cdn => name,
+                _ => addr.domain().unwrap_or("localhost"),
             };
             let stream =
                 super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
