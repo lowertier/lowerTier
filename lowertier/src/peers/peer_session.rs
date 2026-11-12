@@ -587,6 +587,7 @@ struct ResponderRecoveryBackup {
 struct InitiatorReceiptRecord {
     identity: InitiatorTransitionIdentity,
     session: Arc<PeerSession>,
+    created_at: Instant,
     _quota: QuotaPermit,
 }
 
@@ -873,6 +874,7 @@ impl PeerSessionStore {
             return Err(anyhow!("initiator receipt requires a transition id"));
         }
         let _guard = self.creation_lock.lock().unwrap();
+        self.expire_stale_initiator_receipt_locked(&identity.session_key);
         if let Some(existing) = self.initiator_receipts.get(&identity.session_key) {
             if existing.identity.matches_authenticated_fields(&identity)
                 && Arc::ptr_eq(&existing.session, &session)
@@ -892,12 +894,29 @@ impl PeerSessionStore {
             InitiatorReceiptRecord {
                 identity,
                 session,
+                created_at: Instant::now(),
                 _quota: QuotaPermit {
                     counter: &INITIATOR_RECEIPT_RECORD_COUNT,
                 },
             },
         );
         Ok(())
+    }
+
+    /// Drop the receipt for `key` when its acknowledgement has not arrived within the recovery
+    /// lifetime. A responder that restarted or lost the ReadyReceiptAck never acknowledges it, and
+    /// a dial without a peer ID hint cannot name it for replacement, so a stale receipt would
+    /// otherwise block every later handshake to that peer.
+    fn expire_stale_initiator_receipt_locked(&self, key: &SessionKey) -> bool {
+        let stale = self
+            .initiator_receipts
+            .get(key)
+            .is_some_and(|entry| entry.created_at.elapsed() >= INITIATOR_RECOVERY_LIFETIME);
+        if stale {
+            tracing::info!(?key, "initiator receipt was not acknowledged in time; releasing it");
+            self.initiator_receipts.remove(key);
+        }
+        stale
     }
 
     pub fn initiator_receipt_id(&self, key: &SessionKey) -> Option<[u8; 16]> {
@@ -1539,6 +1558,7 @@ impl PeerSessionStore {
         }
 
         let _guard = self.creation_lock.lock().unwrap();
+        self.expire_stale_initiator_receipt_locked(&receipt_identity.session_key);
         let existing_identity = self
             .initiator_receipts
             .get(&receipt_identity.session_key)
@@ -1572,6 +1592,7 @@ impl PeerSessionStore {
                 InitiatorReceiptRecord {
                     identity: receipt_identity,
                     session: reservation.session.clone(),
+                    created_at: Instant::now(),
                     _quota: receipt_quota,
                 },
             );
@@ -1594,6 +1615,7 @@ impl PeerSessionStore {
                         InitiatorReceiptRecord {
                             identity: previous_receipt.identity,
                             session: previous_receipt.session,
+                            created_at: previous_receipt.created_at,
                             _quota: receipt_quota,
                         },
                     );
@@ -1605,6 +1627,7 @@ impl PeerSessionStore {
                     InitiatorReceiptRecord {
                         identity: receipt_identity,
                         session: reservation.session.clone(),
+                        created_at: Instant::now(),
                         _quota: receipt_quota,
                     },
                 );
@@ -1634,6 +1657,7 @@ impl PeerSessionStore {
                     InitiatorReceiptRecord {
                         identity: receipt_identity,
                         session: reservation.session.clone(),
+                        created_at: Instant::now(),
                         _quota: receipt_quota,
                     },
                 );
@@ -3700,6 +3724,62 @@ mod tests {
             Some(second_identity.clone())
         );
         assert!(store.acknowledge_initiator_receipt_exact(&second_identity));
+    }
+
+    #[test]
+    fn unacknowledged_initiator_receipt_expires_for_unhinted_handshakes() {
+        // The refused commit holds an in-doubt reservation until the store drops.
+        let _test_guard = RECEIPT_TEST_LOCK.lock().unwrap();
+        let _in_doubt_guard = IN_DOUBT_TEST_LOCK.lock().unwrap();
+        let store = PeerSessionStore::new();
+        let key = SessionKey::new("receipt-expiry".to_string(), 29);
+        let first = store
+            .prepare_initiator_action(
+                &key,
+                PeerSessionAction::Create,
+                1,
+                Some(PeerSession::new_root_key()),
+                0,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            )
+            .unwrap();
+        let first_identity = first.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+        let session = first.commit().unwrap();
+        store
+            .record_initiator_receipt(first_identity.clone(), session.clone())
+            .unwrap();
+        let next = |store: &PeerSessionStore| {
+            let reservation = store
+                .prepare_initiator_action(
+                    &key,
+                    PeerSessionAction::Sync,
+                    1,
+                    Some(PeerSession::new_root_key()),
+                    session.next_sync_epoch(),
+                    "aes-256-gcm".to_string(),
+                    "aes-256-gcm".to_string(),
+                    None,
+                )
+                .unwrap();
+            let identity = reservation.transition_identity_with_session_metadata(uuid::Uuid::new_v4());
+            (reservation, identity)
+        };
+
+        // A dial without a peer ID hint cannot name the pending receipt.
+        let (blocked, blocked_identity) = next(&store);
+        assert!(blocked.commit_with_receipt_replacing(blocked_identity, None).is_err());
+        assert_eq!(store.initiator_receipt_identity(&key), Some(first_identity));
+
+        store.initiator_receipts.get_mut(&key).unwrap().created_at =
+            Instant::now() - INITIATOR_RECOVERY_LIFETIME;
+        let (released, released_identity) = next(&store);
+        released
+            .commit_with_receipt_replacing(released_identity.clone(), None)
+            .unwrap();
+        assert_eq!(store.initiator_receipt_identity(&key), Some(released_identity.clone()));
+        assert!(store.acknowledge_initiator_receipt_exact(&released_identity));
     }
 
     #[test]
