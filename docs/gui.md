@@ -19,7 +19,7 @@ A filter shows direct peers, relayed peers, or peers that need attention: no dir
 Each row has a menu to rename the peer, edit its note, copy its address or public key, and open its details.
 The details sheet shows live figures, the automatic route, the path editor, the link cost bias, and connections.
 Options that need a restart are staged; the page then offers an instance restart.
-Light and dark themes follow the system setting.
+The header switch selects Auto, Light, or Night. Auto follows the system setting; the choice persists in the browser.
 
 Names and notes for peers are stored on the machine that serves the page, as `[[note]]` tables keyed by public key.
 They apply live and stay local: other machines keep their own names.

@@ -1,26 +1,26 @@
-/* lowertier console. Lichen white and moss ink by day, peat and pale moss by night.
-   Depth comes from tone: panels sit a step off the page, with no drawn outlines. */
+/* lowertier console. Clean white by day, near-black by night, one cobalt accent.
+   Depth comes from tone and hairline edges, not shadows. */
 :root {
-  color-scheme: light dark;
-  --page: #f3f5f0;
-  --surface: #fdfdfb;
-  --sunk: #ebeee7;
-  --hover: #eff2eb;
-  --ink: #141a16;
-  --ink-2: #323c35;
-  --muted: #59645c;
-  --faint: #747f76;
-  --edge: rgba(20, 26, 22, 0.08);
-  --edge-strong: rgba(20, 26, 22, 0.15);
-  --accent: #2e5c37;
-  --accent-soft: rgba(46, 92, 55, 0.09);
-  --accent-line: rgba(46, 92, 55, 0.35);
-  --fill: #1c2a20;
-  --fill-hover: #2c3f31;
-  --fill-ink: #f2f6f0;
-  --relay: #87611a;
-  --loss: #a03f29;
-  --shadow: 0 8px 22px -12px rgba(20, 34, 24, 0.32), 0 1px 2px rgba(20, 34, 24, 0.08);
+  color-scheme: light;
+  --page: #ffffff;
+  --surface: #ffffff;
+  --sunk: #f3f4f6;
+  --hover: #f7f8f9;
+  --ink: #111214;
+  --ink-2: #33363b;
+  --muted: #5d6067;
+  --faint: #73767d;
+  --edge: rgba(17, 18, 20, 0.09);
+  --edge-strong: rgba(17, 18, 20, 0.17);
+  --accent: #2456d3;
+  --accent-soft: rgba(36, 86, 211, 0.07);
+  --accent-line: rgba(36, 86, 211, 0.4);
+  --fill: #111214;
+  --fill-hover: #2c2e33;
+  --fill-ink: #ffffff;
+  --relay: #9a6500;
+  --loss: #c0361d;
+  --shadow: 0 8px 22px -12px rgba(17, 18, 20, 0.28), 0 1px 2px rgba(17, 18, 20, 0.07);
   --radius: 8px;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
@@ -29,27 +29,52 @@
   --gutter: 28px;
 }
 
+/* Night: chosen in the header, or Auto with a dark system setting. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0e0f11;
+  --surface: #16171a;
+  --sunk: #1f2125;
+  --hover: #1b1c20;
+  --ink: #ececee;
+  --ink-2: #c8cacf;
+  --muted: #9b9ea5;
+  --faint: #81848b;
+  --edge: rgba(236, 236, 238, 0.08);
+  --edge-strong: rgba(236, 236, 238, 0.16);
+  --accent: #8aa8ff;
+  --accent-soft: rgba(138, 168, 255, 0.1);
+  --accent-line: rgba(138, 168, 255, 0.45);
+  --fill: #ececee;
+  --fill-hover: #d2d3d7;
+  --fill-ink: #111214;
+  --relay: #e0b04a;
+  --loss: #ff8b72;
+  --shadow: 0 10px 26px -12px rgba(0, 0, 0, 0.75), 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
-    --page: #0c100d;
-    --surface: #131815;
-    --sunk: #1a201c;
-    --hover: #181e1a;
-    --ink: #e2e8df;
-    --ink-2: #c2cbc1;
-    --muted: #8e998f;
-    --faint: #74807a;
-    --edge: rgba(226, 232, 223, 0.07);
-    --edge-strong: rgba(226, 232, 223, 0.14);
-    --accent: #9fc69c;
-    --accent-soft: rgba(159, 198, 156, 0.1);
-    --accent-line: rgba(159, 198, 156, 0.4);
-    --fill: #dbe6d8;
-    --fill-hover: #c8d8c4;
-    --fill-ink: #101612;
-    --relay: #d6ae5f;
-    --loss: #e78c6c;
-    --shadow: 0 10px 26px -12px rgba(0, 0, 0, 0.7), 0 1px 2px rgba(0, 0, 0, 0.4);
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0e0f11;
+    --surface: #16171a;
+    --sunk: #1f2125;
+    --hover: #1b1c20;
+    --ink: #ececee;
+    --ink-2: #c8cacf;
+    --muted: #9b9ea5;
+    --faint: #81848b;
+    --edge: rgba(236, 236, 238, 0.08);
+    --edge-strong: rgba(236, 236, 238, 0.16);
+    --accent: #8aa8ff;
+    --accent-soft: rgba(138, 168, 255, 0.1);
+    --accent-line: rgba(138, 168, 255, 0.45);
+    --fill: #ececee;
+    --fill-hover: #d2d3d7;
+    --fill-ink: #111214;
+    --relay: #e0b04a;
+    --loss: #ff8b72;
+    --shadow: 0 10px 26px -12px rgba(0, 0, 0, 0.75), 0 1px 2px rgba(0, 0, 0, 0.45);
   }
 }
 
@@ -481,6 +506,16 @@ input[type="radio"] {
   padding: 0 var(--gutter);
 }
 
+.theme {
+  flex: none;
+}
+
+.theme button {
+  min-height: 22px;
+  padding: 1px 10px;
+  font-size: 12.5px;
+}
+
 .top-row {
   display: flex;
   align-items: center;
@@ -489,6 +524,7 @@ input[type="radio"] {
 }
 
 .brand {
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 9px;
@@ -515,6 +551,10 @@ input[type="radio"] {
 }
 
 .network {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 2px 8px;
   border-radius: 6px;
   background: var(--sunk);
@@ -742,6 +782,7 @@ input[type="radio"] {
 }
 
 .table-wrap {
+  position: relative;
   overflow-x: auto;
   border-radius: 10px;
   background: var(--surface);

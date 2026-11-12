@@ -3,6 +3,7 @@ import App from "./App";
 import { hasKey } from "./api";
 import { start } from "./store";
 import "./style.css";
+import "./theme";
 
 render(() => <App />, document.getElementById("app")!);
 if (hasKey) start();

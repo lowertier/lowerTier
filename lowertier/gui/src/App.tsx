@@ -1,6 +1,8 @@
 import { For, Match, Show, Switch, createEffect, createSignal, on } from "solid-js";
 import { hasKey, saveKey } from "./api";
+import { Segmented } from "./components/controls";
 import { Mark } from "./components/icons";
+import { THEMES, setTheme, theme, type Theme } from "./theme";
 import { busy, config, configured, loadConfig, loadSchema, notice, restartInstance } from "./config";
 import { ago } from "./format";
 import { error, nodes, now, sampledAt, select, selection, snapshot } from "./store";
@@ -113,6 +115,9 @@ export default function App() {
               </span>
             </Show>
             <span class="spacer" />
+            <div class="theme">
+              <Segmented label="Theme" values={[...THEMES]} value={theme()} onChange={(value) => setTheme(value as Theme)} />
+            </div>
             <div class="target">
               <Show when={nodes().length > 1}>
                 <select aria-label="Daemon" value={current()?.portal ?? ""} onChange={(event) => select(event.currentTarget.value, undefined)}>
