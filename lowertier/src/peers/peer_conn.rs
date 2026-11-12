@@ -5261,6 +5261,299 @@ pub mod tests {
         }
     }
 
+    /// A path packet is sealed for its final destination before it reaches this
+    /// link. When the first waypoint is a direct neighbor the sender only writes
+    /// the *next* hop into the header, so the sealed bytes pass through the link
+    /// without being opened or re-sealed.
+    #[test]
+    fn waypoint_packet_survives_the_link_filter() {
+        let root = crate::peers::peer_session::PeerSession::new_root_key();
+        fn session_with(
+            peer: u32,
+            root: [u8; 32],
+        ) -> std::sync::Arc<crate::peers::peer_session::PeerSession> {
+            std::sync::Arc::new(crate::peers::peer_session::PeerSession::new(
+                peer,
+                root,
+                1,
+                0,
+                "chacha20-poly1305".into(),
+                "chacha20-poly1305".into(),
+                Some([peer as u8; 32]),
+            ))
+        }
+        fn link(
+            me: u32,
+            peer: u32,
+            root: [u8; 32],
+            mode: PeerConnDataProtectionPb,
+        ) -> PeerSessionTunnelFilter {
+            let filter = PeerSessionTunnelFilter::new_with_peer(me, true);
+            filter.set_peer_id(peer);
+            filter.set_session(session_with(peer, root));
+            filter.set_data_protection_mode(mode);
+            filter
+        }
+
+        // Sealed for peer 99, as `send_batch_via_waypoints` does before wrapping.
+        let sender_session = session_with(99, root);
+        let mut packet = ZCPacket::new_with_payload(b"sealed payload");
+        packet.fill_peer_manager_hdr(1, 99, PacketType::Data as u8);
+        sender_session.encrypt_payload(1, 99, &mut packet).unwrap();
+
+        // Neighbor 22 is the link's other end, so the header moves to 33.
+        packet.encode_waypoints(&[33, 99]).unwrap();
+        let sealed = packet.payload().to_vec();
+        let header = packet.peer_manager_header().unwrap();
+        assert_eq!(header.packet_type, PacketType::Waypoint as u8);
+        assert_eq!(header.to_peer_id.get(), 33);
+        assert!(header.is_encrypted());
+
+        for mode in [
+            PeerConnDataProtectionPb::QuicExporter,
+            PeerConnDataProtectionPb::SessionAead,
+        ] {
+            // Sending side: peer 1 over the link whose far end is 22.
+            let sender = link(1, 22, root, mode);
+            let sent = sender
+                .before_send(packet.clone())
+                .unwrap_or_else(|| panic!("{mode:?}: sender dropped the waypoint packet"));
+            let sent_header = sent.peer_manager_header().unwrap();
+            assert!(
+                sent_header.is_encrypted(),
+                "{mode:?}: the packet must stay sealed for its destination"
+            );
+            assert_eq!(
+                sent_header.to_peer_id.get(),
+                33,
+                "{mode:?}: destination changed"
+            );
+            assert_eq!(
+                sent.payload(),
+                sealed.as_slice(),
+                "{mode:?}: payload changed"
+            );
+
+            // Waypoint 22 receives it. It is not the destination, so it forwards.
+            let waypoint = link(22, 1, root, mode);
+            let kept = waypoint
+                .after_received(Ok(packet.clone()))
+                .unwrap_or_else(|| panic!("{mode:?}: waypoint dropped the waypoint packet"))
+                .unwrap_or_else(|e| panic!("{mode:?}: waypoint reported an error: {e:?}"));
+            assert_eq!(
+                kept.payload(),
+                sealed.as_slice(),
+                "{mode:?}: payload changed"
+            );
+        }
+    }
+
+    /// End-to-end: a real handshake, then send a packet that is sealed for a
+    /// third peer and aimed at the waypoint across this link.
+    #[tokio::test]
+    async fn waypoint_packet_reaches_the_waypoint_over_a_real_link() {
+        let network = "waypoint-link";
+        let left_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            network.into(),
+            "waypoint-secret".into(),
+        )));
+        let right_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            network.into(),
+            "waypoint-secret".into(),
+        )));
+        set_secure_mode_cfg(&left_ctx, true);
+        set_secure_mode_cfg(&right_ctx, true);
+        let (lt, rt) = create_ring_tunnel_pair();
+        let mut left = PeerConn::new_with_peer_id_hint(
+            11,
+            left_ctx,
+            lt,
+            Some(22),
+            Arc::new(PeerSessionStore::new()),
+        );
+        let mut right = PeerConn::new_with_peer_id_hint(
+            22,
+            right_ctx,
+            rt,
+            Some(11),
+            Arc::new(PeerSessionStore::new()),
+        );
+        let (l, r) = tokio::join!(
+            left.do_handshake_as_client(),
+            right.do_handshake_as_server()
+        );
+        assert!(l.is_ok() && r.is_ok(), "handshake: {l:?} {r:?}");
+
+        let (right_tx, mut right_rx) = create_packet_recv_chan();
+        right.start_recv_loop(right_tx).await;
+
+        // Sealed for peer 99 with the 11->99 session, then aimed at the
+        // waypoint 22 across this link, exactly as a path send builds it.
+        let session_key = SessionKey::new(network.into(), 99);
+        let mut packet = ZCPacket::new_with_payload(b"waypoint payload");
+        packet.fill_peer_manager_hdr(11, 99, PacketType::Data as u8);
+        let to_99 = Arc::new(crate::peers::peer_session::PeerSession::new(
+            99,
+            crate::peers::peer_session::PeerSession::new_root_key(),
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([99u8; 32]),
+        ));
+        left.get_peer_session_store()
+            .insert_session(session_key, to_99.clone());
+        to_99.encrypt_payload(11, 99, &mut packet).unwrap();
+        packet.encode_waypoints(&[33, 99]).unwrap();
+        let sealed = packet.payload().to_vec();
+
+        left.send_msg(packet).await.unwrap();
+        let received =
+            tokio::time::timeout(Duration::from_secs(2), recv_packet_from_chan(&mut right_rx))
+                .await;
+        let received = received
+            .expect("waypoint packet must reach the waypoint")
+            .expect("waypoint receive must not error");
+        assert_eq!(
+            received.payload(),
+            sealed.as_slice(),
+            "sealed bytes must be untouched"
+        );
+        assert_eq!(
+            received.peer_manager_header().unwrap().to_peer_id.get(),
+            33,
+            "the waypoint must see the header aimed past itself"
+        );
+    }
+
+    /// The two link-filter invariants that keep an exporter link honest.
+    ///
+    /// On `QuicExporter` the transport already authenticates the bytes, so a
+    /// direct packet must arrive *unsealed*. A sealed direct packet means an
+    /// extra AEAD layer nobody will strip, and a plaintext packet on the
+    /// session-AEAD path means an unauthenticated payload.
+    #[test]
+    fn link_filter_rejects_double_sealed_and_plaintext_direct_packets() {
+        let root = crate::peers::peer_session::PeerSession::new_root_key();
+        fn link(
+            me: u32,
+            peer: u32,
+            root: [u8; 32],
+            mode: PeerConnDataProtectionPb,
+        ) -> PeerSessionTunnelFilter {
+            let filter = PeerSessionTunnelFilter::new_with_peer(me, true);
+            filter.set_peer_id(peer);
+            filter.set_session(std::sync::Arc::new(
+                crate::peers::peer_session::PeerSession::new(
+                    peer,
+                    root,
+                    1,
+                    0,
+                    "chacha20-poly1305".into(),
+                    "chacha20-poly1305".into(),
+                    Some([peer as u8; 32]),
+                ),
+            ));
+            filter.set_data_protection_mode(mode);
+            filter
+        }
+
+        // An already sealed direct packet (neighbor 22, from 1).
+        let sender_session = crate::peers::peer_session::PeerSession::new(
+            22,
+            root,
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([22u8; 32]),
+        );
+        let mut sealed = ZCPacket::new_with_payload(b"payload");
+        sealed.fill_peer_manager_hdr(1, 22, PacketType::Data as u8);
+        sender_session.encrypt_payload(1, 22, &mut sealed).unwrap();
+        assert!(sealed.peer_manager_header().unwrap().is_encrypted());
+
+        // Exporter link: sealed direct packet is refused on send and receive.
+        let exporter_sender = link(1, 22, root, PeerConnDataProtectionPb::QuicExporter);
+        assert!(exporter_sender.before_send(sealed.clone()).is_none());
+        let exporter_receiver = link(22, 1, root, PeerConnDataProtectionPb::QuicExporter);
+        assert!(
+            exporter_receiver
+                .after_received(Ok(sealed.clone()))
+                .is_none()
+        );
+
+        // Session-AEAD link: plaintext direct packet is refused on receive.
+        let mut plaintext = ZCPacket::new_with_payload(b"payload");
+        plaintext.fill_peer_manager_hdr(1, 22, PacketType::Data as u8);
+        let aead_receiver = link(22, 1, root, PeerConnDataProtectionPb::SessionAead);
+        assert!(
+            aead_receiver
+                .after_received(Ok(plaintext.clone()))
+                .is_none()
+        );
+        // ...and the sealed packet is accepted, then actually decryptable.
+        let accepted = aead_receiver
+            .after_received(Ok(sealed))
+            .expect("sealed packet must pass the session-AEAD path")
+            .expect("sealed packet must decrypt");
+        assert_eq!(accepted.payload(), b"payload");
+    }
+
+    /// An exporter link accepts a direct packet only once: the receiving side
+    /// never re-seals it, so a packet that is bounced back must be identified by
+    /// header direction and not silently accepted twice.
+    #[test]
+    fn exporter_direct_packet_is_direction_bound() {
+        let root = crate::peers::peer_session::PeerSession::new_root_key();
+        fn link(me: u32, peer: u32, root: [u8; 32]) -> PeerSessionTunnelFilter {
+            let filter = PeerSessionTunnelFilter::new_with_peer(me, true);
+            filter.set_peer_id(peer);
+            filter.set_session(std::sync::Arc::new(
+                crate::peers::peer_session::PeerSession::new(
+                    peer,
+                    root,
+                    1,
+                    0,
+                    "chacha20-poly1305".into(),
+                    "chacha20-poly1305".into(),
+                    Some([peer as u8; 32]),
+                ),
+            ));
+            filter.set_data_protection_mode(PeerConnDataProtectionPb::QuicExporter);
+            filter
+        }
+
+        let mut packet = ZCPacket::new_with_payload(b"outbound");
+        packet.fill_peer_manager_hdr(1, 22, PacketType::Data as u8);
+
+        // Normal path: 1 sends to 22, 22 receives. Neither side adds AEAD.
+        let sender = link(1, 22, root);
+        let sent = sender.before_send(packet.clone()).expect("send");
+        assert!(!sent.peer_manager_header().unwrap().is_encrypted());
+        let receiver = link(22, 1, root);
+        let received = receiver
+            .after_received(Ok(sent.clone()))
+            .expect("receive")
+            .expect("decrypt");
+        assert_eq!(received.payload(), b"outbound");
+
+        // The same bytes arrive at the sender again with the reversed header,
+        // which is what a reflected packet looks like.
+        let mut reflected = sent;
+        reflected
+            .mut_peer_manager_header()
+            .unwrap()
+            .to_peer_id
+            .set(1);
+        reflected
+            .mut_peer_manager_header()
+            .unwrap()
+            .from_peer_id
+            .set(22);
+        assert!(sender.after_received(Ok(reflected)).is_some());
+    }
+
     /// A waypoint can become a neighbor after the sender encoded the path.
     /// Its header then matches the link endpoints, but its ciphertext still
     /// belongs to the final destination rather than to the link session.
