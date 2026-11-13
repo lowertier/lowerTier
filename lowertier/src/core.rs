@@ -638,7 +638,17 @@ pub fn init(options: &InitOptions) -> anyhow::Result<Vec<PathBuf>> {
             quote(admission)
         ));
     }
+    let trackers: Vec<String> = match join {
+        Some(join) => join.trackers.clone(),
+        None => crate::common::join_code::DEFAULT_TRACKERS
+            .iter()
+            .map(|url| (*url).to_owned())
+            .collect(),
+    };
     text.push_str(&format!("[transport]\nlisten = {}\n", list(&listen)));
+    if !trackers.is_empty() {
+        text.push_str(&format!("\n[discovery]\ntrackers = {}\n", list(&trackers)));
+    }
     for peer in peers {
         text.push_str(&format!("\n[[peer]]\nuri = {}\n", quote(peer)));
     }
@@ -730,6 +740,7 @@ mod tests {
             credential: None,
             admission: Some("join-transport-admission".into()),
             peers: vec!["quic://198.51.100.4:11012".into()],
+            trackers: vec![],
         };
         init(&InitOptions {
             output: joined.clone(),

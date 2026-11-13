@@ -41,9 +41,7 @@ use std::{
     },
     task::{Context as TaskContext, Poll, ready},
 };
-#[cfg(test)]
-use tokio::io::{AsyncRead, ReadBuf};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::task::AbortOnDropHandle;
@@ -351,6 +349,24 @@ struct H2PacketReader {
     ended: bool,
 }
 
+fn is_h2_peer_close(error: &h2::Error) -> bool {
+    if (error.is_reset() || error.is_go_away()) && error.is_remote() {
+        return matches!(error.reason(), Some(h2::Reason::NO_ERROR | h2::Reason::CANCEL));
+    }
+    if error.is_io()
+        && let Some(io_err) = error.get_io()
+    {
+        return matches!(
+            io_err.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionAborted
+        );
+    }
+    false
+}
+
 impl H2PacketReader {
     fn new(recv: RecvStream) -> Self {
         Self {
@@ -395,6 +411,9 @@ impl Stream for H2PacketReader {
                 Some(Ok(data)) => this.decoder.load(data),
                 Some(Err(error)) => {
                     this.ended = true;
+                    if is_h2_peer_close(&error) && this.decoder.finish().is_ok() {
+                        return Poll::Ready(None);
+                    }
                     return Poll::Ready(Some(Err(TunnelError::IOError(io::Error::other(error)))));
                 }
                 None => {
@@ -632,6 +651,108 @@ fn wrap_http2_tunnel(
     Box::new(tunnel)
 }
 
+/// Stack buffer for the 5-byte TLS record header already read while inspecting
+/// whether an incoming HTTP/2 stream carries a routing marker prefix.
+struct PrefixedIo<S> {
+    prefix: [u8; 5],
+    offset: u8,
+    len: u8,
+    inner: S,
+}
+
+impl<S> PrefixedIo<S> {
+    fn empty(inner: S) -> Self {
+        Self {
+            prefix: [0; 5],
+            offset: 0,
+            len: 0,
+            inner,
+        }
+    }
+
+    fn new(prefix: [u8; 5], inner: S) -> Self {
+        Self {
+            prefix,
+            offset: 0,
+            len: 5,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedIo<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        dst: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if dst.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let this = &mut *self;
+        if this.offset < this.len {
+            let unread = &this.prefix[usize::from(this.offset)..usize::from(this.len)];
+            let take = unread.len().min(dst.remaining());
+            dst.put_slice(&unread[..take]);
+            this.offset += take as u8;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, dst)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn read_routing_probe(
+    stream: &mut TcpStream,
+) -> Result<([u8; 5], Option<[u8; QUIC_ROUTING_CID_BYTES]>), TunnelError> {
+    let mut header = [0_u8; 5];
+    tokio::time::timeout(
+        super::decoy::CONNECT_TIMEOUT,
+        stream.read_exact(&mut header),
+    )
+    .await??;
+    if is_tcp_routing_record(&header) {
+        let mut marker = [0_u8; QUIC_ROUTING_CID_BYTES];
+        tokio::time::timeout(
+            super::decoy::CONNECT_TIMEOUT,
+            stream.read_exact(&mut marker),
+        )
+        .await??;
+        Ok((header, Some(marker)))
+    } else {
+        Ok((header, None))
+    }
+}
+
 pub async fn accept(
     stream: TcpStream,
     acceptor: &TlsAcceptor,
@@ -649,6 +770,31 @@ pub async fn accept(
     .await
 }
 
+/// Accept an already hole-punched or tracker-discovered TCP stream as HTTP/2
+/// without splicing unmatched ClientHellos to `decoy_upstream`.
+pub(crate) async fn accept_punched(
+    stream: TcpStream,
+    acceptor: &TlsAcceptor,
+    local_url: url::Url,
+    flags: &Flags,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        accept_inner(
+            stream,
+            acceptor,
+            local_url,
+            flags,
+            &super::decoy::process_limiter(),
+            true,
+            false,
+        ),
+    )
+    .await
+    .map_err(|_| TunnelError::InternalError("HTTP/2 admission timed out".into()))??
+    .ok_or_else(|| TunnelError::InternalError("punched HTTP/2 connection was not admitted".into()))
+}
+
 pub(super) async fn accept_with_limiter(
     stream: TcpStream,
     acceptor: &TlsAcceptor,
@@ -660,7 +806,15 @@ pub(super) async fn accept_with_limiter(
     // One deadline covers routing inspection, TLS, and CONNECT admission.
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        accept_inner(stream, acceptor, local_url, flags, &limiter, limit_setup),
+        accept_inner(
+            stream,
+            acceptor,
+            local_url,
+            flags,
+            &limiter,
+            limit_setup,
+            true,
+        ),
     )
     .await
     .map_err(|_| TunnelError::InternalError("HTTP/2 admission timed out".into()))?
@@ -673,51 +827,66 @@ async fn accept_inner(
     flags: &Flags,
     limiter: &Arc<super::decoy::DecoyLimiter>,
     limit_setup: bool,
+    allow_decoy_passthrough: bool,
 ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
     if let Err(error) = stream.set_nodelay(true) {
         tracing::warn!(?error, "set_nodelay fail in HTTP/2 accept");
     }
     let peer_addr = stream.peer_addr()?;
-    if tcp_routing_prefix(flags) {
+    let prefix = if allow_decoy_passthrough && tcp_routing_prefix(flags) {
         let secret = routing_secret(flags).ok_or_else(|| {
             TunnelError::InternalError(
                 "HTTP/2 decoy passthrough requires quic_admission_secret".to_owned(),
             )
         })?;
-        let mut header = [0_u8; 5];
-        tokio::time::timeout(
-            super::decoy::CONNECT_TIMEOUT,
-            stream.read_exact(&mut header),
-        )
-        .await??;
-        let prefix = if is_tcp_routing_record(&header) {
-            let mut marker = [0_u8; QUIC_ROUTING_CID_BYTES];
-            tokio::time::timeout(
-                super::decoy::CONNECT_TIMEOUT,
-                stream.read_exact(&mut marker),
-            )
-            .await??;
-            if !valid_routing_cid_bytes(&marker, &secret, std::time::SystemTime::now()) {
+        let (header, marker) = read_routing_probe(&mut stream).await?;
+        let passthrough = match marker {
+            Some(marker)
+                if valid_routing_cid_bytes(&marker, &secret, std::time::SystemTime::now()) =>
+            {
+                None
+            }
+            Some(marker) => {
                 let mut prefix = [0_u8; TCP_ROUTING_RECORD_LEN];
                 prefix[..5].copy_from_slice(&header);
                 prefix[5..].copy_from_slice(&marker);
                 Some(prefix.to_vec())
-            } else {
-                None
             }
-        } else {
-            Some(header.to_vec())
+            None => Some(header.to_vec()),
         };
-        if let Some(prefix) = prefix {
+        if let Some(prefix) = passthrough {
             let upstream = decoy_upstream(flags).await.ok_or_else(|| {
                 TunnelError::InternalError("HTTP/2 decoy upstream resolution failed".to_owned())
             })?;
             spawn_passthrough_tcp(stream, prefix, upstream, limiter);
             return Ok(None);
         }
-    }
-    let stream = super::tcp_socket::prepare(stream);
-    let budget = stream.send_budget();
+        None
+    } else if (!allow_decoy_passthrough || (limit_setup && !flags.camouflage_config().sni_routing))
+        && let Some(secret) = routing_secret(flags)
+    {
+        // Strip an optional routing marker (e.g. from decoy_upstream clients) while
+        // replaying standard ClientHellos without splicing to decoy_upstream.
+        let (header, marker) = read_routing_probe(&mut stream).await?;
+        if let Some(marker) = marker {
+            if !valid_routing_cid_bytes(&marker, &secret, std::time::SystemTime::now()) {
+                return Err(TunnelError::InvalidProtocol(
+                    "invalid HTTP/2 routing marker".to_owned(),
+                ));
+            }
+            None
+        } else {
+            Some(header)
+        }
+    } else {
+        None
+    };
+    let underlay = super::tcp_socket::prepare(stream);
+    let budget = underlay.send_budget();
+    let stream = match prefix {
+        Some(header) => PrefixedIo::new(header, underlay),
+        None => PrefixedIo::empty(underlay),
+    };
     let tls = acceptor.accept(stream).await?;
     let binding = derive_http2_binding(|output| {
         tls.get_ref()
@@ -826,27 +995,47 @@ async fn accept_inner(
 }
 
 pub async fn connect(
+    stream: TcpStream,
+    url: url::Url,
+    flags: &Flags,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    connect_inner(stream, url, flags, false).await
+}
+
+/// Connect an already hole-punched or tracker-discovered TCP stream as HTTP/2
+/// without adding a decoy routing prefix or requiring CA-signed peer certificates.
+pub(crate) async fn connect_punched(
+    stream: TcpStream,
+    url: url::Url,
+    flags: &Flags,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    connect_inner(stream, url, flags, true).await
+}
+
+async fn connect_inner(
     mut stream: TcpStream,
     url: url::Url,
     flags: &Flags,
+    punched: bool,
 ) -> Result<Box<dyn Tunnel>, TunnelError> {
     if let Err(error) = stream.set_nodelay(true) {
         tracing::warn!(?error, "set_nodelay fail in HTTP/2 connect");
     }
     let local_addr = stream.local_addr()?;
     let peer_addr = stream.peer_addr()?;
-    if let Some(secret) = routing_secret(flags).filter(|_| tcp_routing_prefix(flags)) {
+    if !punched && let Some(secret) = routing_secret(flags).filter(|_| tcp_routing_prefix(flags)) {
         let marker = routing_cid_bytes(&secret, std::time::SystemTime::now());
         stream.write_all(&tcp_routing_record(&marker)).await?;
     }
     let server_name = stealth_tls::client_server_name(flags, &url, peer_addr.ip())?;
     let stream = super::tcp_socket::prepare(stream);
     let budget = stream.send_budget();
+    let verify_certificate = !punched && !stealth_tls::skip_server_verification(flags);
     let tls = super::browser_tls::connect(
         stream,
         &server_name.to_str(),
         &[HTTP2_ALPN, HTTP11_ALPN],
-        !stealth_tls::skip_server_verification(flags),
+        verify_certificate,
     )
     .await?;
     if tls.get_ref().1.alpn_protocol() != Some(HTTP2_ALPN) {
@@ -1206,5 +1395,153 @@ mod tests {
         send.send_data(framed(96, 1).slice(..50), true).unwrap();
         assert!(reader.next().await.unwrap().is_err());
         assert!(reader.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn h2_packet_reader_treats_clean_remote_reset_as_eof_only_at_frame_boundary() {
+        use futures::StreamExt;
+        {
+            let (reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
+            let mut reader = super::H2PacketReader::new(reader.recv);
+            send.send_data(framed(96, 5), false).unwrap();
+            let packet = reader.next().await.unwrap().unwrap();
+            assert_eq!(packet.tunnel_payload(), &[5; 96]);
+            send.send_reset(h2::Reason::CANCEL);
+            assert!(reader.next().await.is_none());
+        }
+        {
+            let (reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
+            let mut reader = super::H2PacketReader::new(reader.recv);
+            send.send_reset(h2::Reason::CANCEL);
+            assert!(reader.next().await.is_none());
+        }
+        {
+            let (reader, mut send, _server, _driver) = stream_pair::<bytes::Bytes>().await;
+            let mut reader = super::H2PacketReader::new(reader.recv);
+            send.send_data(framed(96, 9).slice(..50), false).unwrap();
+            tokio::select! {
+                _ = reader.next() => panic!("partial frame should not yield yet"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            send.send_reset(h2::Reason::CANCEL);
+            let mut saw_err = false;
+            while let Some(item) = reader.next().await {
+                if item.is_err() {
+                    saw_err = true;
+                    break;
+                }
+            }
+            assert!(saw_err);
+        }
+    }
+
+    fn decoy_flags(secret: &str) -> crate::common::config::Flags {
+        let mut flags = gen_default_flags();
+        flags.camouflage_config_mut().server_names = vec!["challenges.cloudflare.com".to_owned()];
+        flags
+            .camouflage_config_mut()
+            .set_decoy_upstream("127.0.0.1:9".to_owned());
+        flags.camouflage_config_mut().admission_secret = secret.to_owned();
+        flags
+    }
+
+    fn plain_flags(secret: &str) -> crate::common::config::Flags {
+        let mut flags = gen_default_flags();
+        flags.camouflage_config_mut().admission_secret = secret.to_owned();
+        flags
+    }
+
+    async fn round_trip_h2_tunnel_pair(
+        a: Box<dyn crate::tunnel::Tunnel>,
+        b: Box<dyn crate::tunnel::Tunnel>,
+    ) {
+        use crate::tunnel::{
+            TransportBindingKind,
+            batch::PacketBatch,
+            packet_def::{PacketType, ZCPacket},
+        };
+        use futures::{SinkExt, StreamExt};
+
+        let binding = a.transport_binding().unwrap();
+        assert_eq!(binding.kind, TransportBindingKind::Http2TlsExporterV1);
+        assert_eq!(Some(binding), b.transport_binding());
+        let (mut ar, mut aw) = a.split();
+        let (mut br, mut bw) = b.split();
+        let mut packet = ZCPacket::new_with_payload(b"mixed-decoy-h2-payload");
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        aw.send(PacketBatch::singleton(packet)).await.unwrap();
+        bw.send(br.next().await.unwrap().unwrap()).await.unwrap();
+        assert_eq!(
+            ar.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .pop_singleton()
+                .unwrap()
+                .payload(),
+            b"mixed-decoy-h2-payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn punched_h2_succeeds_across_mixed_decoy_camouflage() {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let secret = "mixed-camouflage-shared-secret";
+        for (client_flags, server_flags) in [
+            (decoy_flags(secret), plain_flags(secret)),
+            (plain_flags(secret), decoy_flags(secret)),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url: url::Url = format!("h2://{addr}").parse().unwrap();
+            let acceptor = super::tls_acceptor(&server_flags).unwrap();
+
+            let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let server_fut = async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    super::accept_punched(stream, &acceptor, url.clone(), &server_flags).await
+                };
+                let client_fut = async {
+                    let stream = TcpStream::connect(addr).await.unwrap();
+                    super::connect_punched(stream, url.clone(), &client_flags).await
+                };
+                tokio::join!(client_fut, server_fut)
+            })
+            .await
+            .unwrap();
+
+            round_trip_h2_tunnel_pair(client.unwrap(), server.unwrap()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn static_non_decoy_h2_listener_accepts_marked_and_unmarked_clients() {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let secret = "mixed-camouflage-shared-secret";
+        let server_flags = plain_flags(secret);
+        let acceptor = super::tls_acceptor(&server_flags).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url: url::Url = format!("h2://{addr}").parse().unwrap();
+
+        for client_flags in [decoy_flags(secret), plain_flags(secret)] {
+            let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let server_fut = async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    super::accept(stream, &acceptor, url.clone(), &server_flags).await
+                };
+                let client_fut = async {
+                    let stream = TcpStream::connect(addr).await.unwrap();
+                    super::connect(stream, url.clone(), &client_flags).await
+                };
+                tokio::join!(client_fut, server_fut)
+            })
+            .await
+            .unwrap();
+
+            round_trip_h2_tunnel_pair(client.unwrap(), server.unwrap().unwrap()).await;
+        }
     }
 }

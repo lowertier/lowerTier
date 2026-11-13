@@ -87,6 +87,10 @@ pub trait PeerTaskLauncher: Send + Sync + Clone + 'static {
 
     async fn all_task_done(&self, _data: &Self::Data) {}
 
+    fn task_name(&self) -> &'static str {
+        "peer task"
+    }
+
     fn loop_interval_ms(&self) -> u64 {
         5000
     }
@@ -166,14 +170,33 @@ where
 
             for key in to_remove {
                 if let Some(task) = peer_task_map.remove(&key) {
-                    task.abort();
+                    if !task.is_finished() {
+                        task.abort();
+                    }
                     match task.await {
                         Ok(Ok(_)) => {}
                         Ok(Err(task_ret)) => {
-                            tracing::error!(?task_ret, "hole punching task failed");
+                            tracing::debug!(
+                                task = launcher.task_name(),
+                                ?key,
+                                ?task_ret,
+                                "peer task attempt failed"
+                            );
+                        }
+                        Err(e) if e.is_cancelled() => {
+                            tracing::debug!(
+                                task = launcher.task_name(),
+                                ?key,
+                                "peer task cancelled"
+                            );
                         }
                         Err(e) => {
-                            tracing::error!(?e, "hole punching task aborted");
+                            tracing::error!(
+                                task = launcher.task_name(),
+                                ?key,
+                                ?e,
+                                "peer task panicked"
+                            );
                         }
                     }
                 }
@@ -185,7 +208,7 @@ where
                         continue;
                     }
 
-                    tracing::debug!(?item, "launch hole punching task");
+                    tracing::debug!(task = launcher.task_name(), ?item, "launch peer task");
                     peer_task_map.insert(
                         item.clone(),
                         AbortOnDropHandle::new(launcher.launch_task(&data, item).await),

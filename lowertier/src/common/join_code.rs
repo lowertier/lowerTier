@@ -11,6 +11,13 @@ use serde::{Deserialize, Serialize};
 const PREFIX: &str = "lt1.";
 const MAX_LEN: usize = 16 * 1024;
 const MAX_PEERS: usize = 16;
+const MAX_TRACKERS: usize = 16;
+
+pub const DEFAULT_TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "http://tracker.opentrackr.org:1337/announce",
+    "https://tracker.nekomi.cn:443/announce",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,8 +31,10 @@ pub struct JoinCode {
     /// admission needs this explicit secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trackers: Vec<String>,
 }
 
 impl JoinCode {
@@ -40,12 +49,20 @@ impl JoinCode {
             "a credential join code needs a transport admission secret"
         );
         ensure!(
-            !self.peers.is_empty(),
-            "the join code lists no bootstrap peer"
+            !self.peers.is_empty() || !self.trackers.is_empty(),
+            "the join code lists no bootstrap peer or tracker"
+        );
+        ensure!(
+            self.credential.is_none() || !self.peers.is_empty(),
+            "a credential join code needs at least one bootstrap peer"
         );
         ensure!(
             self.peers.len() <= MAX_PEERS,
             "a join code lists at most {MAX_PEERS} peers"
+        );
+        ensure!(
+            self.trackers.len() <= MAX_TRACKERS,
+            "a join code lists at most {MAX_TRACKERS} trackers"
         );
         for peer in &self.peers {
             let uri = url::Url::parse(peer).with_context(|| format!("bootstrap peer {peer:?}"))?;
@@ -57,6 +74,13 @@ impl JoinCode {
                 !uri.host_str()
                     .is_some_and(|host| host == "0.0.0.0" || host == "[::]"),
                 "bootstrap peer {peer:?} has an unspecified address"
+            );
+        }
+        for tracker in &self.trackers {
+            let uri = url::Url::parse(tracker).with_context(|| format!("tracker {tracker:?}"))?;
+            ensure!(
+                matches!(uri.scheme(), "udp" | "http" | "https" | "tcp") && uri.host().is_some(),
+                "tracker {tracker:?} must be a udp, http, https, or tcp URL with a host"
             );
         }
         Ok(())
@@ -95,6 +119,7 @@ mod tests {
             credential: None,
             admission: None,
             peers: vec!["quic://203.0.113.7:11012".into()],
+            trackers: Vec::new(),
         }
     }
 
@@ -103,6 +128,17 @@ mod tests {
         let code = sample().encode().unwrap();
         assert!(code.starts_with("lt1."));
         assert_eq!(JoinCode::decode(&format!(" {code}\n")).unwrap(), sample());
+
+        let tracker_only = JoinCode {
+            network: "office".into(),
+            secret: Some("c2VjcmV0".into()),
+            credential: None,
+            admission: None,
+            peers: Vec::new(),
+            trackers: DEFAULT_TRACKERS.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        let tracker_code = tracker_only.encode().unwrap();
+        assert_eq!(JoinCode::decode(&tracker_code).unwrap(), tracker_only);
 
         let mut both = sample();
         both.credential = Some("bundle".into());

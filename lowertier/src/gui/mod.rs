@@ -69,6 +69,8 @@ struct Server {
     defaults: Defaults,
     /// Open connections by `(portal, via_instance, remote, instance, remote_secret)`, with their last use.
     clients: Mutex<HashMap<(String, String, String, String, String), (Arc<Client>, Instant)>>,
+    /// Serialize portal cache misses so parallel browser loads reuse one connection.
+    dial_lock: Mutex<()>,
 }
 
 type Reply = Response<Full<Bytes>>;
@@ -252,6 +254,13 @@ impl Server {
                 String::new()
             },
         );
+        if let Some((client, used)) = self.clients.lock().await.get_mut(&key)
+            && used.elapsed() < REUSE_IDLE
+        {
+            *used = Instant::now();
+            return Ok(client.clone());
+        }
+        let _dial = self.dial_lock.lock().await;
         if let Some((client, used)) = self.clients.lock().await.get_mut(&key)
             && used.elapsed() < REUSE_IDLE
         {
@@ -754,6 +763,7 @@ pub async fn serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
             instance: args.instance.clone(),
         },
         clients: Mutex::new(HashMap::new()),
+        dial_lock: Mutex::new(()),
     });
     println!("LowTier GUI: {url}");
     println!("Press Ctrl-C to stop.");

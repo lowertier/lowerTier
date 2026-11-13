@@ -59,8 +59,8 @@ Authorization on the remote node is governed by its `[control]` policy (`control
 
 **Add machine**, or **Create join code** under Settings, Keys, makes a code and install commands for Linux, macOS, and Windows.
 Any member can make one; there is no coordination server.
-A code names the network, carries its admission material, and lists peers for the new machine to dial first.
-The page suggests this machine's public listeners and advertised addresses; add any other reachable member.
+A code names the network, carries its admission material, and defaults to tracker discovery (using this node's `discovery.trackers` or the built-in public trackers) so machines can join and maintain the mesh even when no node has a public IP.
+You can also select optional bootstrap peers for the new machine to dial first.
 
 - **Network secret code.** Embeds the shared secret and never expires. Share it like a password.
 - **Signed credential code.** Embeds a credential issued on the spot, with a lifetime, a reuse limit, and optional groups.

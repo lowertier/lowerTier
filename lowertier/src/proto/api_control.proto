@@ -251,6 +251,8 @@ message CreateJoinCodeRequest {
   int64 ttl_seconds = 4;
   bool reusable = 5;
   repeated string groups = 6;
+  // Tracker URLs written to [discovery].trackers on the new node.
+  repeated string trackers = 7;
 }
 message CreateJoinCodeResponse {
   ApiError error = 1;

@@ -519,11 +519,12 @@ async fn establish(
         protocol.name(),
     );
     match (protocol, client) {
-        (Protocol::H2, true) => Ok(http2::connect(stream, remote, &flags).await?),
+        (Protocol::H2, true) => Ok(http2::connect_punched(stream, remote, &flags).await?),
         (Protocol::H2, false) => {
-            http2::accept(stream, &http2::tls_acceptor(&flags)?, local, &flags)
-                .await?
-                .context("punched H2 connection was not admitted")
+            Ok(
+                http2::accept_punched(stream, &http2::tls_acceptor(&flags)?, local, &flags)
+                    .await?,
+            )
         }
         (Protocol::Wss, true) => Ok(WsTunnelConnector::connect_punched(
             stream,
@@ -926,6 +927,9 @@ impl PeerTaskLauncher for Launcher {
     type Data = Arc<Server>;
     type CollectPeerItem = (PeerId, Protocol);
     type TaskRet = ();
+    fn task_name(&self) -> &'static str {
+        "TCP hole punch"
+    }
     fn new_data(&self, _: Arc<PeerManager>) -> Self::Data {
         self.0.clone()
     }
@@ -949,32 +953,60 @@ impl PeerTaskLauncher for Launcher {
     ) -> tokio::task::JoinHandle<Result<()>> {
         let data = data.clone();
         tokio::spawn(async move {
-            let next = data
-                .state
-                .attempts
-                .lock()
-                .unwrap()
-                .get(&(peer, protocol))
-                .map(|(time, index)| *time + retry_after(*index));
-            if let Some(next) = next {
-                tokio::time::sleep_until(next).await;
-            }
-            if !crate::common::config::hole_punch_protocol_enabled(
-                &data.peer_mgr.get_global_ctx().flags_arc(),
-                protocol.name(),
-            ) || data
-                .peer_mgr
-                .has_live_peer_connection_for_protocol(peer, protocol.name())
-            {
-                return Ok(());
-            }
-            let permit = data.permits.clone().acquire_owned().await?;
-            if data
-                .peer_mgr
-                .has_live_peer_connection_for_protocol(peer, protocol.name())
-            {
-                return Ok(());
-            }
+            let permit = loop {
+                let next = data
+                    .state
+                    .attempts
+                    .lock()
+                    .unwrap()
+                    .get(&(peer, protocol))
+                    .map(|(time, index)| *time + retry_after(*index));
+                if let Some(next) = next
+                    && tokio::time::Instant::now() < next
+                {
+                    tokio::time::sleep_until(next).await;
+                }
+                if !crate::common::config::hole_punch_protocol_enabled(
+                    &data.peer_mgr.get_global_ctx().flags_arc(),
+                    protocol.name(),
+                ) || data
+                    .peer_mgr
+                    .has_live_peer_connection_for_protocol(peer, protocol.name())
+                    || data
+                        .state
+                        .active
+                        .lock()
+                        .unwrap()
+                        .contains(&(peer, protocol))
+                {
+                    return Ok(());
+                }
+                let permit = data.permits.clone().acquire_owned().await?;
+                let next_after = data
+                    .state
+                    .attempts
+                    .lock()
+                    .unwrap()
+                    .get(&(peer, protocol))
+                    .map(|(time, index)| *time + retry_after(*index));
+                if next_after.is_some_and(|next| tokio::time::Instant::now() < next) {
+                    drop(permit);
+                    continue;
+                }
+                if data
+                    .peer_mgr
+                    .has_live_peer_connection_for_protocol(peer, protocol.name())
+                    || data
+                        .state
+                        .active
+                        .lock()
+                        .unwrap()
+                        .contains(&(peer, protocol))
+                {
+                    return Ok(());
+                }
+                break permit;
+            };
             tokio::time::timeout(ATTEMPT_TIMEOUT, data.initiate_with(peer, protocol, permit))
                 .await?
         })
@@ -1397,6 +1429,77 @@ mod tests {
                         .unwrap()
                         .payload(),
                     b"punched TCP payload"
+                );
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn simultaneous_open_h2_succeeds_across_mixed_decoy_camouflage() {
+        for decoy_is_client in [true, false] {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let decoy_ctx = context();
+                let mut decoy_flags = decoy_ctx.get_flags();
+                decoy_flags.camouflage_config_mut().server_names =
+                    vec!["challenges.cloudflare.com".to_owned()];
+                decoy_flags
+                    .camouflage_config_mut()
+                    .set_decoy_upstream("127.0.0.1:9".to_owned());
+                decoy_ctx.set_flags(decoy_flags);
+
+                let plain_ctx = context();
+                let (client_ctx, server_ctx) = if decoy_is_client {
+                    (decoy_ctx, plain_ctx)
+                } else {
+                    (plain_ctx, decoy_ctx)
+                };
+                let client_res = reservation(&client_ctx);
+                let server_res = reservation(&server_ctx);
+                let client_addr = client_res.candidates[0];
+                let server_addr = server_res.candidates[0];
+                let token = rand::random::<[u8; 32]>();
+                let (client, server) = tokio::join!(
+                    punch(
+                        client_res,
+                        vec![server_addr],
+                        client_ctx,
+                        Protocol::H2,
+                        true,
+                        token,
+                        None
+                    ),
+                    punch(
+                        server_res,
+                        vec![client_addr],
+                        server_ctx,
+                        Protocol::H2,
+                        false,
+                        token,
+                        None
+                    )
+                );
+                let client = client.unwrap();
+                let server = server.unwrap();
+                let binding = client.transport_binding().unwrap();
+                assert_eq!(binding.kind, TransportBindingKind::Http2TlsExporterV1);
+                assert_eq!(Some(binding), server.transport_binding());
+                let (mut ar, mut aw) = client.split();
+                let (mut br, mut bw) = server.split();
+                let mut packet = ZCPacket::new_with_payload(b"mixed decoy punch payload");
+                packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+                aw.send(PacketBatch::singleton(packet)).await.unwrap();
+                bw.send(br.next().await.unwrap().unwrap()).await.unwrap();
+                assert_eq!(
+                    ar.next()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .pop_singleton()
+                        .unwrap()
+                        .payload(),
+                    b"mixed decoy punch payload"
                 );
             })
             .await

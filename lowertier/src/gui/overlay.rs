@@ -208,6 +208,7 @@ fn server(settings: &Settings, address: Ipv4Addr, qualified: &str) -> Arc<Server
             instance: Some(settings.name.clone()),
         },
         clients: Mutex::new(Default::default()),
+        dial_lock: Mutex::new(()),
     })
 }
 

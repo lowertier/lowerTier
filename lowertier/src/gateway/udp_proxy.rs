@@ -226,7 +226,7 @@ impl UdpNatEntry {
                         break;
                     }
                     Err(err) => {
-                        tracing::error!(?err, "udp nat recv timeout");
+                        tracing::debug!(?err, "udp nat entry idle timeout");
                         break;
                     }
                 };

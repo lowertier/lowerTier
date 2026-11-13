@@ -1017,12 +1017,37 @@ impl ControlPlaneService {
             .camouflage_config()
             .admission_secret
             .clone();
+        let trackers =
+            if !request.use_credential && request.trackers.is_empty() && request.peers.is_empty() {
+                let configured: Vec<String> = context
+                    .config
+                    .get_tracker_discovery()
+                    .map(|cfg| {
+                        cfg.trackers
+                            .into_iter()
+                            .chain(cfg.private_trackers)
+                            .map(|url| url.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if configured.is_empty() {
+                    crate::common::join_code::DEFAULT_TRACKERS
+                        .iter()
+                        .map(|url| (*url).to_owned())
+                        .collect()
+                } else {
+                    configured
+                }
+            } else {
+                request.trackers
+            };
         let mut join = crate::common::join_code::JoinCode {
             network: identity.network_name.clone(),
             secret: None,
             credential: None,
             admission: (!admission.is_empty()).then_some(admission),
             peers: request.peers,
+            trackers,
         };
         let mut response = CreateJoinCodeResponse {
             network_name: identity.network_name,

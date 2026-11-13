@@ -630,6 +630,10 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
     type CollectPeerItem = PeerId;
     type TaskRet = ();
 
+    fn task_name(&self) -> &'static str {
+        "direct connect"
+    }
+
     fn new_data(&self, _peer_mgr: Arc<PeerManager>) -> Self::Data {
         self.0.clone()
     }

@@ -11,6 +11,11 @@ const RAW = `https://raw.githubusercontent.com/${REPO}/main/script`;
 const SYSTEMS = ["Linux", "macOS", "Windows", "Installed"] as const;
 type System = (typeof SYSTEMS)[number];
 const LIFETIMES: Record<string, number> = { "1 hour": 3600, "1 day": 86_400, "7 days": 604_800, "30 days": 2_592_000 };
+const DEFAULT_TRACKERS = [
+  "udp://tracker.opentrackr.org:1337/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "https://tracker.nekomi.cn:443/announce",
+];
 
 interface Candidate {
   uri: string;
@@ -98,14 +103,31 @@ export default function AddMachine(props: { onClose: () => void }) {
   const [reusable, setReusable] = createSignal(false);
   const [groups, setGroups] = createSignal("");
   const offered = createMemo(candidates);
-  const [chosen, setChosen] = createSignal<Set<string>>(new Set(offered().slice(0, 4).map((item) => item.uri)));
+  const [chosen, setChosen] = createSignal<Set<string>>(new Set());
   const [extra, setExtra] = createSignal<string[]>([]);
   const [custom, setCustom] = createSignal("");
+  const configuredTrackers = [
+    ...((configured("discovery.trackers") ?? []) as string[]),
+    ...((configured("discovery.private_trackers") ?? []) as string[]),
+  ];
+  const [useTrackers, setUseTrackers] = createSignal(!credentialNode());
+  const [trackerText, setTrackerText] = createSignal(
+    (configuredTrackers.length ? configuredTrackers : DEFAULT_TRACKERS).join("\n"),
+  );
   const [system, setSystem] = createSignal<System>("Linux");
   const [result, setResult] = createSignal<Doc | null>(null);
   const [error, setError] = createSignal("");
   const [working, setWorking] = createSignal(false);
   const peersChosen = () => [...offered().map((item) => item.uri), ...extra()].filter((uri) => chosen().has(uri));
+  const trackersChosen = () =>
+    trackerText()
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  const canCreate = () =>
+    mode() === "credential"
+      ? peersChosen().length > 0
+      : (useTrackers() && trackersChosen().length > 0) || peersChosen().length > 0;
   const version = () => (snapshot()?.node?.node?.version as string | undefined) ?? "";
 
   const toggle = (uri: string, on: boolean) => {
@@ -135,6 +157,7 @@ export default function AddMachine(props: { onClose: () => void }) {
       const credential = mode() === "credential";
       const response = await rpc("CreateJoinCode", {
         peers: peersChosen(),
+        trackers: !credential && useTrackers() ? trackersChosen() : [],
         use_credential: credential,
         ...(credential
           ? {
@@ -168,7 +191,7 @@ export default function AddMachine(props: { onClose: () => void }) {
           >
             <p class="lead">
               A join code lets a new machine enter <b>{configured("network.name") ?? "default"}</b> without a coordination server. It
-              names the network, carries its admission secret, and lists peers to dial first.
+              carries the network&apos;s admission material, tracker discovery, and optional bootstrap peers.
             </p>
 
             <fieldset>
@@ -210,9 +233,35 @@ export default function AddMachine(props: { onClose: () => void }) {
               </Show>
             </fieldset>
 
+            <Show when={mode() === "secret"}>
+              <fieldset>
+                <legend>Tracker discovery</legend>
+                <label class="check">
+                  <input type="checkbox" checked={useTrackers()} onChange={(event) => setUseTrackers(event.currentTarget.checked)} /> Use
+                  trackers (recommended when no node has a public IP)
+                </label>
+                <Show when={useTrackers()}>
+                  <label class="field">
+                    <span>Trackers (one URL per line)</span>
+                    <textarea
+                      rows={3}
+                      spellcheck={false}
+                      value={trackerText()}
+                      onInput={(event) => setTrackerText(event.currentTarget.value)}
+                    />
+                  </label>
+                </Show>
+              </fieldset>
+            </Show>
+
             <fieldset>
-              <legend>Bootstrap peers</legend>
-              <Show when={offered().length || extra().length} fallback={<p class="hint">No public listener was detected. Add the URI of a reachable member.</p>}>
+              <legend>{mode() === "secret" && useTrackers() ? "Bootstrap peers (optional)" : "Bootstrap peers"}</legend>
+              <Show when={mode() === "secret" && useTrackers()}>
+                <p class="hint">
+                  Trackers and in-mesh peer gossip maintain the mesh automatically. Optionally select reachable peers to dial first.
+                </p>
+              </Show>
+              <Show when={offered().length || extra().length} fallback={<p class="hint">No public listener was detected. Add a reachable peer URI if needed.</p>}>
                 <ul class="choices">
                   <For each={[...offered(), ...extra().map((uri) => ({ uri, source: "added" }))]}>
                     {(item) => (
@@ -253,11 +302,15 @@ export default function AddMachine(props: { onClose: () => void }) {
               </p>
             </Show>
             <div class="dialog-actions">
-              <button type="submit" class="primary" disabled={working() || !peersChosen().length}>
+              <button type="submit" class="primary" disabled={working() || !canCreate()}>
                 {working() ? "Creating…" : "Create join code"}
               </button>
-              <Show when={!peersChosen().length}>
-                <span class="hint">Choose at least one bootstrap peer.</span>
+              <Show when={!canCreate()}>
+                <span class="hint">
+                  {mode() === "credential"
+                    ? "Choose at least one bootstrap peer for a credential code."
+                    : "Enable at least one tracker or choose a bootstrap peer."}
+                </span>
               </Show>
             </div>
           </form>

@@ -6,7 +6,9 @@ use tokio::{task::JoinSet, time::timeout};
 
 use crate::{
     proto::rpc_types::error::Error,
-    tunnel::{Tunnel, batch::PacketBatch, packet_def::PacketType, ring::create_ring_tunnel_pair},
+    tunnel::{
+        Tunnel, TunnelError, batch::PacketBatch, packet_def::PacketType, ring::create_ring_tunnel_pair,
+    },
 };
 
 use super::{client::Client, server::Server, service_registry::ServiceRegistry};
@@ -115,14 +117,15 @@ impl BidirectRpcManager {
                         packet
                     }
                     else => {
-                        tracing::warn!("rpc transport read aborted, exiting");
+                        tracing::debug!("rpc transport read closed, exiting");
                         break;
                     }
                 };
 
                 if let Err(e) = inner_tx.send(PacketBatch::singleton(packet)).await {
-                    tracing::error!(error = ?e, "send to peer failed");
+                    tracing::debug!(error = ?e, "send to peer rpc transport closed");
                     e_clone.lock().unwrap().replace(Error::from(e));
+                    break;
                 }
             }
         });
@@ -150,12 +153,19 @@ impl BidirectRpcManager {
                 let batch = match ret {
                     Some(Ok(o)) => o,
                     Some(Err(e)) => {
-                        tracing::error!(error = ?e, "recv from peer failed");
+                        match &e {
+                            TunnelError::Shutdown | TunnelError::IOError(_) => {
+                                tracing::debug!(error = ?e, "recv from peer rpc transport closed");
+                            }
+                            _ => {
+                                tracing::warn!(error = ?e, "recv from peer failed");
+                            }
+                        }
                         e_clone.lock().unwrap().replace(Error::from(e));
                         break;
                     }
                     None => {
-                        tracing::warn!("peer rpc transport read aborted, exiting");
+                        tracing::debug!("peer rpc transport closed, exiting");
                         e_clone.lock().unwrap().replace(Error::Shutdown);
                         break;
                     }
