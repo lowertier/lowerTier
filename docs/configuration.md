@@ -61,10 +61,12 @@ lowertier run --set network.name=office --set network.secret_file=office.secret 
 On a running node, `lowertier set`, `unset`, and `edit` save the change to the file and apply it.
 Each change reports whether it applied now, applies to new connections, or waits for a restart.
 Changes that need a restart require `--stage`; the node then restarts the affected instance.
+Add `--remote NODE` to apply the same commands to another node across the network (see [remote control](remote-control.md)), or edit them in the [web interface](web-interface.md).
 
 ```bash
 lowertier set relay.policy=latency relay.transit_bps_limit=50Mbit
 lowertier set tun.mtu=1280 --stage
+lowertier --remote node-a set relay.policy=latency
 lowertier get relay
 ```
 

@@ -1,18 +1,21 @@
 # Web interface
 
-Every node serves a management page. It lists machines, edits routes and settings, shows logs, and creates join codes.
+Every node serves a management page. It lists machines, edits routes and settings, shows logs, creates join codes, and can manage other nodes across the network.
 
 ## Open it
+
+There are two ways to open the page:
+
+1. **Built into every running node.** By default, each instance serves the page on loopback (`gui.loopback_port`, default `15880`) and on its overlay IPv4 address at TCP port `15880` (`gui.port`).
+   Other members of the network can open `http://<overlay address>:15880/` with the node's access key (see [access](#access)).
+   `[gui] enabled = false` turns both listeners off.
+2. **From the command line (`lowertier gui`).** Starts a local loopback proxy using your control token:
 
 ```bash
 sudo lowertier gui              # open the page with a temporary access key
 lowertier gui --no-open         # print the address only
 lowertier gui --listen 127.0.0.1:18080
 ```
-
-The running node also serves the page itself, on loopback and on its overlay address, TCP port 15880.
-Other members of the network can open `http://<overlay address>:15880/` with the node's access key (see [access](#access)).
-`[gui] enabled = false` turns both listeners off.
 
 To reach a node's loopback page from another machine without the overlay, forward a port over SSH:
 
@@ -41,6 +44,16 @@ peer = "N2BdrcGbQFyGOmutpWhewjc0ufbs1E80Xlk5BFIFLhg="
 name = "builder"
 text = "Build box in rack 2."
 ```
+
+## Manage other nodes
+
+You can switch the page to manage any other reachable node across the network, using the local node as a bridge over an end-to-end Noise control session:
+
+- Click **Manage node** in a peer's action menu (`...`) or detail sheet, or click **Remote…** in the top bar.
+- You can pick a connected peer, a pinned alias from `control.keys` (or `default` when `control.default` is set), or enter any peer's `pubkey:<base64>` and an optional control phrase (`control.secret`).
+- While managing a remote node, **Machines**, **Routes**, **Logs**, and **Settings** read and edit that remote node. Click **Return to this machine** in the banner to switch back.
+
+Authorization on the remote node is governed by its `[control]` policy (`control.allow`, `control.grant`, or `control.secret`), not by `[gui]` settings. See [remote control](remote-control.md).
 
 ## Join codes
 
@@ -75,7 +88,8 @@ open = ["10.44.0.10/32"]          # sources that may connect and control without
 - Changes need an instance restart. Settings, Access edits the same options.
 
 The page is plain HTTP inside the encrypted overlay. Sources outside `allow` and `open` get no response, and at most 32 connections are served at once.
-The page manages only the instance that serves it. With a userspace interface, the listener runs inside the userspace stack.
+The daemon-served `[gui]` listener is pinned to the local daemon and instance that serve it (it cannot switch to other local daemons on the same host), whereas `lowertier gui` can switch between local daemons and instances. Both can manage remote nodes across the network via [remote control](remote-control.md).
+With a userspace interface, the overlay listener runs inside the userspace stack.
 
 ## Security
 
@@ -99,7 +113,8 @@ Requests and responses are TOML in the same layout as the configuration file.
 | `POST /api/config` | Apply `[set]` values keyed by option path and a `clear` list. `stage = true` stores restart-class options. |
 | `POST /api/rpc/<Method>` | Any Control API method by protobuf name, for example `ReadLogs`. |
 
-Add `?node=<portal or name>` and `?instance=<name>` to address another node or instance on the same machine.
+Add `?node=<portal or name>` and `?instance=<name>` when using `lowertier gui` to address another daemon or instance on the same machine.
+Add `?remote=<alias, key, or default>` (and optionally `?via_instance=<local instance>`) to forward the request to another node over an end-to-end Noise control session. Pass the remote control phrase in the `x-lowertier-remote-secret` header when the remote node uses `control.secret`.
 
 ```bash
 curl -s -H "x-lowertier-key: $KEY" -X POST --data-binary @- \

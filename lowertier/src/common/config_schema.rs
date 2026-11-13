@@ -228,7 +228,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "",
-        "Pinned alias of the default controller.",
+        "Pinned alias or key of the default remote target (used by --remote default and the web interface).",
     ),
     opt(
         "control.allow",

@@ -30,7 +30,7 @@ def receive(stream: socket.socket, length: int) -> bytes:
 
 
 def request(proxy: int, port: int, path: str, key: str | None = None, host: str | None = None,
-            body: str | None = None) -> tuple[int, bytes]:
+            body: str | None = None, extra_headers: dict[str, str] | None = None) -> tuple[int, bytes]:
     with socket.create_connection(('127.0.0.1', proxy), timeout=3) as stream:
         stream.sendall(b'\x05\x01\x00')
         assert receive(stream, 2) == b'\x05\x00'
@@ -45,6 +45,8 @@ def request(proxy: int, port: int, path: str, key: str | None = None, host: str 
         headers = {'Host': host or f'10.201.70.2:{port}', 'Connection': 'close'}
         if key:
             headers['x-lowertier-key'] = key
+        if extra_headers:
+            headers.update(extra_headers)
         if body is not None:
             headers['Content-Type'] = 'application/toml'
             headers['Content-Length'] = str(len(body.encode()))
@@ -104,6 +106,7 @@ deny_cidrs = ["100.64.0.0/10"]
 [control]
 portal = "127.0.0.1:{port()}"
 token_file = {json.dumps(str(node / 'control.token'))}
+{'secret = "remote-test-secret"' if name == 'a' else ''}
 [log]
 console = "info"
 '''
@@ -186,6 +189,42 @@ default_action = 1
         assert 'tcp_ports' not in cleared
         assert cleared['acl_v1'] == original['acl_v1']
         assert cleared['udp_ports'] == original['udp_ports']
+
+        # Verify controlling another node (?remote=...) through the web API.
+        import urllib.parse
+        b_snap = tomllib.loads(request(proxy, gui_port, '/api/snapshot', key)[1].decode())
+        a_peers = [p for p in b_snap.get('peers', []) if p.get('route', {}).get('hostname') == 'gui-proxy-a']
+        assert a_peers and a_peers[0].get('peer_key'), ('Missing peer_key for gui-proxy-a', b_snap)
+        remote_q = urllib.parse.quote(a_peers[0]['peer_key'], safe='')
+        assert request(proxy, gui_port, f'/api/snapshot?remote={remote_q}', key)[0] == 403
+        r_status, r_body = request(
+            proxy,
+            gui_port,
+            f'/api/snapshot?remote={remote_q}',
+            key,
+            extra_headers={'x-lowertier-remote-secret': 'remote-test-secret'},
+        )
+        assert r_status == 200, (r_status, r_body)
+        assert tomllib.loads(r_body.decode())['node']['node']['hostname'] == 'gui-proxy-a'
+        r_cfg_status, r_cfg_body = request(
+            proxy,
+            gui_port,
+            f'/api/config?remote={remote_q}',
+            key,
+            body='[set]\n"relay.policy" = "latency"\n',
+            extra_headers={'x-lowertier-remote-secret': 'remote-test-secret'},
+        )
+        assert r_cfg_status == 200 and not tomllib.loads(r_cfg_body.decode()).get('result', {}).get('errors'), r_cfg_body
+        r_get_status, r_get_body = request(
+            proxy,
+            gui_port,
+            f'/api/config?remote={remote_q}',
+            key,
+            extra_headers={'x-lowertier-remote-secret': 'remote-test-secret'},
+        )
+        assert r_get_status == 200
+        assert tomllib.loads(r_get_body.decode())['active']['relay']['policy'] == 'latency'
+
         for loopback, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
             try:
                 status, _ = request(proxy, loopback, '/api/snapshot', key_file.read_text().strip(), host=f'127.0.0.1:{loopback}')

@@ -2,10 +2,13 @@
 
 Any node can manage another node across the network, and open an SSH session to it, without a public SSH port.
 Each node decides which public keys may control it. The caller proves its identity key through an end-to-end Noise session; host names are only labels.
+This works both from the command line (`--remote`) and from the [web interface](web-interface.md#manage-other-nodes).
 
 ## Allow a controller
 
-On the node to be managed, pin the controller's public key under a local alias and allow it:
+`[control]` has two sides: **who may manage this node** (`allow`, `grant`, `secret`) and **which remote nodes this node can address by alias** (`keys`, `default`).
+
+On the **managed node** (`node-a`), pin the controller's public key under a local alias and allow it:
 
 ```toml
 [control]
@@ -15,7 +18,7 @@ allow = ["laptop"]
 laptop = "<laptop's base64 X25519 public key>"
 ```
 
-On the controller, pin the managed nodes' keys the same way, and optionally set a default target:
+On the **controller** (`laptop`), pin the managed nodes' keys the same way, and optionally set `control.default` for `--remote default`:
 
 ```toml
 [control]
@@ -24,6 +27,8 @@ default = "node-a"
 [control.keys]
 node-a = "<node-a's public key>"
 ```
+
+You can also target a peer directly by key without adding it to `control.keys` (`--remote pubkey:<base64>`, or by clicking **Manage node** on a peer in the web interface).
 
 Then:
 

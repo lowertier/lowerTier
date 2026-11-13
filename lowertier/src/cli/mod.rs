@@ -2,7 +2,7 @@ pub mod args;
 pub(crate) mod client;
 pub(crate) mod commands;
 pub(crate) mod error;
-mod remote;
+pub(crate) mod remote;
 pub(crate) mod render;
 
 use args::{Arguments, Command, ConfigCommand, GuiArgs, Output, PageArgs};

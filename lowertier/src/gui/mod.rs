@@ -43,11 +43,13 @@ const SCRIPT: &[u8] = include_bytes!("../../gui/dist/app.js");
 const STYLE: &[u8] = include_bytes!("../../gui/dist/app.css");
 
 const KEY_HEADER: &str = "x-lowertier-key";
+const REMOTE_SECRET_HEADER: &str = "x-lowertier-remote-secret";
 const MAX_BODY: usize = 1 << 20;
 const TOML: &str = "application/toml; charset=utf-8";
 /// Both ends close a portal connection after 60 s without traffic. Dial again before that.
 const REUSE_IDLE: Duration = Duration::from_secs(20);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(5);
+const REMOTE_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Credentials and the daemon chosen on the command line.
 struct Defaults {
@@ -65,8 +67,8 @@ struct Server {
     /// reach the other daemons of the machine through their token files.
     pinned: bool,
     defaults: Defaults,
-    /// Open connections by portal and instance, with their last use.
-    clients: Mutex<HashMap<(String, String), (Arc<Client>, Instant)>>,
+    /// Open connections by `(portal, via_instance, remote, instance, remote_secret)`, with their last use.
+    clients: Mutex<HashMap<(String, String, String, String, String), (Arc<Client>, Instant)>>,
 }
 
 type Reply = Response<Full<Bytes>>;
@@ -210,14 +212,46 @@ impl Server {
             })
     }
 
-    async fn client(&self, params: &HashMap<String, String>) -> Result<Arc<Client>> {
+    async fn client(
+        &self,
+        params: &HashMap<String, String>,
+        remote_secret: &str,
+    ) -> Result<Arc<Client>> {
         let target = self.target(params.get("node").map(String::as_str))?;
-        let instance = params
+        let remote = params
+            .get("remote")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|remote| !remote.is_empty())
+            .map(str::to_owned);
+        let requested_instance = params
             .get("instance")
             .filter(|instance| !instance.is_empty())
-            .cloned()
-            .or_else(|| self.defaults.instance.clone());
-        let key = (target.portal.clone(), instance.clone().unwrap_or_default());
+            .cloned();
+        let (via_instance, instance) = if remote.is_some() {
+            let via = params
+                .get("via_instance")
+                .filter(|instance| !instance.is_empty())
+                .cloned()
+                .or_else(|| self.defaults.instance.clone());
+            (via, requested_instance)
+        } else {
+            (
+                None,
+                requested_instance.or_else(|| self.defaults.instance.clone()),
+            )
+        };
+        let key = (
+            target.portal.clone(),
+            via_instance.clone().unwrap_or_default(),
+            remote.clone().unwrap_or_default(),
+            instance.clone().unwrap_or_default(),
+            if remote.is_some() {
+                remote_secret.to_owned()
+            } else {
+                String::new()
+            },
+        );
         if let Some((client, used)) = self.clients.lock().await.get_mut(&key)
             && used.elapsed() < REUSE_IDLE
         {
@@ -239,6 +273,19 @@ impl Server {
             "gui".into(),
         )
         .await?;
+        if let Some(remote_target) = &remote {
+            let (via_id, _) = client.select_instance(via_instance.as_deref()).await?;
+            client.meta.instance_id = via_id;
+            let options = crate::cli::remote::Options {
+                target: remote_target.clone(),
+                secret: remote_secret.to_owned(),
+                meta: client.meta.clone(),
+            };
+            client.rpc = crate::cli::remote::wrap(client.rpc, options);
+            client.meta.instance_id.clear();
+            client.meta.control_token.clear();
+            client.meta.admin_token = "remote-policy".into();
+        }
         let (id, name) = client.select_instance(instance.as_deref()).await?;
         client.meta.instance_id = id;
         client.instance_name = Some(name);
@@ -453,6 +500,12 @@ impl Server {
     async fn api(&self, request: Request<Incoming>, path: &str) -> Result<Reply> {
         let method = request.method().clone();
         let params = query(&request);
+        let remote_secret = request
+            .headers()
+            .get(REMOTE_SECRET_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         match (&method, path) {
             (&Method::GET, "nodes") => return Ok(toml_reply(self.nodes())),
             (&Method::GET, "schema") => return Ok(toml_reply(schema())),
@@ -470,23 +523,33 @@ impl Server {
         } else {
             toml::Table::new()
         };
-        let client = self.client(&params).await?;
+        let client = self.client(&params, &remote_secret).await?;
+        let is_remote = params
+            .get("remote")
+            .is_some_and(|remote| !remote.trim().is_empty());
+        let deadline = if is_remote {
+            REMOTE_SNAPSHOT_DEADLINE
+        } else {
+            SNAPSHOT_DEADLINE
+        };
         let result = match (&method, path) {
-            (&Method::GET, "snapshot") => {
-                tokio::time::timeout(SNAPSHOT_DEADLINE, self.snapshot(&client))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(CliError::new(
-                            "deadline_exceeded",
-                            format!(
-                                "No answer from {} for {}s.",
-                                client.target.portal,
-                                SNAPSHOT_DEADLINE.as_secs()
-                            ),
-                            "",
-                        ))
-                    })
-            }
+            (&Method::GET, "snapshot") => tokio::time::timeout(deadline, self.snapshot(&client))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(CliError::new(
+                        "deadline_exceeded",
+                        format!(
+                            "No answer from {} for {}s.",
+                            params
+                                .get("remote")
+                                .map(String::as_str)
+                                .filter(|s| !s.trim().is_empty())
+                                .unwrap_or(&client.target.portal),
+                            deadline.as_secs()
+                        ),
+                        "",
+                    ))
+                }),
             (&Method::GET, "config") => self.config(&client).await,
             (&Method::POST, "config") => self.set(&client, body).await,
             (&Method::POST, rpc) if rpc.starts_with("rpc/") => {

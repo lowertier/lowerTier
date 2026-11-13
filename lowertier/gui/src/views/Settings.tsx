@@ -28,10 +28,10 @@ const LAYOUT: Record<Exclude<Page, "advanced">, [string, string[]][]> = {
     ["Network admission", ["network.secret"]],
     ["Identity", ["identity.private_key", "identity.public_key"]],
     ["Credential issuing", ["network.credential_file"]],
-    ["Remote control", ["control.secret", "control.grant"]],
+    ["Remote control", ["control.keys", "control.groups", "control.secret", "control.grant"]],
   ],
   access: [
-    ["Management interface", ["gui.allow", "gui.enabled", "gui.port"]],
+    ["Management interface", ["gui.allow", "gui.enabled", "gui.port", "gui.loopback_port"]],
     ["Firewall", ["acl"]],
     ["Control channel", ["control.default", "control.allow", "control.token_group"]],
   ],
@@ -55,10 +55,13 @@ const LABELS: Record<string, string> = {
   "dns.zone": "DNS zone",
   "log.console": "Console log level",
   "network.credential_file": "Issued credential store",
+  "control.keys": "Pinned remote keys",
+  "control.groups": "Remote control groups",
   "control.grant": "Remote control grants",
   "gui.enabled": "Serve the interface",
   "gui.port": "Overlay port",
-  "control.default": "Default remote access",
+  "gui.loopback_port": "Loopback port",
+  "control.default": "Default remote target",
   "control.allow": "Allowed remote peers",
   "control.token_group": "Token group",
   "transport.listen": "Listen on",
@@ -139,8 +142,8 @@ export default function Settings(props: { page: Page; onPage: (page: Page) => vo
     undo(Object.keys(pending));
     setAccess(null);
   };
-  // Drafts belong to the selected daemon and instance.
-  const target = createMemo(() => JSON.stringify([selection().node, selection().instance, snapshot()?.instance]));
+  // Drafts belong to the selected daemon, instance, and remote target.
+  const target = createMemo(() => JSON.stringify([selection().node, selection().instance, selection().remote, snapshot()?.instance]));
   createEffect(on(target, discard, { defer: true }));
 
   const matches = (paths: string[], extra = "") => {

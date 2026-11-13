@@ -25,7 +25,7 @@ Secrets are redacted in all output.
 | `control.portal_allow` | list of strings |  | process restart | Extra CIDRs admitted to the portal in addition to loopback. |
 | `control.token_file` | path |  | process restart | Control token file. Created with mode 0600 when absent. |
 | `control.token_group` | string |  | process restart | Unix group that may read the token file (mode 0640). |
-| `control.default` | string |  | live | Pinned alias of the default controller. |
+| `control.default` | string |  | live | Pinned alias or key of the default remote target (used by --remote default and the web interface). |
 | `control.allow` | list of strings |  | live | Callers with full control. Use pinned keys, aliases, local groups, or * for authenticated network members. |
 | `control.keys` | table |  | live | Local aliases bound to complete X25519 public keys. |
 | `control.groups` | table |  | live | Local groups of pinned key aliases. |

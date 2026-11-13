@@ -55,21 +55,33 @@ function dropKey() {
   location.reload();
 }
 
-let target: { node?: string; instance?: string } = {};
-export function setTarget(node?: string, instance?: string) {
-  target = { node, instance };
+let target: { node?: string; instance?: string; remote?: string; viaInstance?: string; remoteSecret?: string } = {};
+export function setTarget(
+  node?: string,
+  instance?: string,
+  remote?: string,
+  viaInstance?: string,
+  remoteSecret?: string,
+) {
+  target = { node, instance, remote, viaInstance, remoteSecret };
 }
 
 export async function api(path: string, body?: Doc): Promise<Doc> {
   const params = new URLSearchParams();
   if (target.node) params.set("node", target.node);
   if (target.instance) params.set("instance", target.instance);
+  if (target.remote) params.set("remote", target.remote);
+  if (target.viaInstance) params.set("via_instance", target.viaInstance);
   const query = params.size ? `?${params}` : "";
+  const headers: Record<string, string> = { "x-lowertier-key": key, "content-type": "application/toml" };
+  if (target.remote && target.remoteSecret) {
+    headers["x-lowertier-remote-secret"] = target.remoteSecret;
+  }
   let response: Response;
   try {
     response = await fetch(`/api/${path}${query}`, {
       method: body ? "POST" : "GET",
-      headers: { "x-lowertier-key": key, "content-type": "application/toml" },
+      headers,
       body: body ? stringify(body) : undefined,
       cache: "no-store",
     });

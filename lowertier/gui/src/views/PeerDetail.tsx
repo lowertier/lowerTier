@@ -4,7 +4,7 @@ import { PathStatusView, ViaEditor } from "../components/paths";
 import Chart from "../components/Chart";
 import { bytes, latency, loss, rate, NONE } from "../format";
 import { noteFor } from "../notes";
-import { history, peerName, peers, selfId, snapshot, tick, type PeerRow } from "../store";
+import { history, peerName, peers, selectRemote, selfId, snapshot, tick, type PeerRow } from "../store";
 import { Copy, Spark } from "../components/controls";
 import { Arrow, CloseGlyph } from "../components/icons";
 import { SELF, bareAddress } from "./Machines";
@@ -196,6 +196,18 @@ export default function PeerDetail(props: { id: number; onClose: () => void; onE
                 <button type="button" class="link" onClick={() => props.onEdit(peer().id, "name")}>
                   Rename
                 </button>
+                <Show when={peer().key}>
+                  <button
+                    type="button"
+                    class="link"
+                    onClick={() => {
+                      selectRemote(peer().key, peer().name);
+                      props.onClose();
+                    }}
+                  >
+                    Manage node
+                  </button>
+                </Show>
               </section>
 
               <dl class="figures">

@@ -42,14 +42,22 @@ export interface Series {
 
 const [snapshot, setSnapshot] = createSignal<Doc | null>(null);
 const [peers, setPeers] = createSignal<PeerRow[]>([]);
+const [localPeers, setLocalPeers] = createSignal<PeerRow[]>([]);
 const [error, setError] = createSignal<ApiError | null>(null);
 const [sampledAt, setSampledAt] = createSignal(0);
 const [tick, setTick] = createSignal(0);
 const [nodes, setNodes] = createSignal<Doc[]>([]);
-const [selection, setSelection] = createSignal<{ node?: string; instance?: string }>({});
+const [selection, setSelection] = createSignal<{
+  node?: string;
+  instance?: string;
+  remote?: string;
+  remoteLabel?: string;
+  viaInstance?: string;
+}>({});
+const [remoteSecret, setRemoteSecretSignal] = createSignal("");
 const [now, setNow] = createSignal(Date.now());
 
-export { snapshot, peers, error, sampledAt, tick, nodes, selection, now };
+export { snapshot, peers, localPeers, error, sampledAt, tick, nodes, selection, remoteSecret, now };
 
 export const history = new Map<number, Series>();
 export const totals: Series = { rtt: [], rx: [], tx: [] };
@@ -141,6 +149,7 @@ function ingest(doc: Doc) {
   previous = { at, counters };
   setSnapshot(doc);
   setPeers(rows);
+  if (!selection().remote) setLocalPeers(rows);
   setSampledAt(at);
   setTick((value) => value + 1);
 }
@@ -171,15 +180,53 @@ export function restart() {
   poll();
 }
 
-export function select(node?: string, instance?: string) {
-  setSelection({ node, instance });
-  setTarget(node, instance);
+function resetView() {
   history.clear();
   for (const ring of Object.values(totals)) ring.length = 0;
   previous = null;
   setSnapshot(null);
   setPeers([]);
+  setError(null);
   restart();
+}
+
+export function select(node?: string, instance?: string) {
+  setSelection({ node, instance });
+  setTarget(node, instance, undefined, undefined, undefined);
+  resetView();
+}
+
+export function selectRemote(remote?: string, label?: string, secret?: string) {
+  const current = selection();
+  const nextSecret = secret !== undefined ? secret : remoteSecret();
+  if (secret !== undefined) setRemoteSecretSignal(secret);
+  const trimmed = remote?.trim();
+  if (!trimmed) {
+    const localInstance = current.viaInstance ?? current.instance;
+    setSelection({ node: current.node, instance: localInstance });
+    setTarget(current.node, localInstance, undefined, undefined, undefined);
+    resetView();
+    return;
+  }
+  const via = current.remote ? current.viaInstance : (current.instance ?? snapshot()?.instance);
+  setSelection({
+    node: current.node,
+    instance: undefined,
+    remote: trimmed,
+    remoteLabel: label?.trim() || trimmed,
+    viaInstance: via,
+  });
+  setTarget(current.node, undefined, trimmed, via, nextSecret);
+  resetView();
+}
+
+export function updateRemoteSecret(secret: string) {
+  setRemoteSecretSignal(secret);
+  const current = selection();
+  if (current.remote) {
+    setTarget(current.node, current.instance, current.remote, current.viaInstance, secret);
+    resetView();
+  }
 }
 
 async function refreshNodes() {

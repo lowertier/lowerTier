@@ -5,7 +5,7 @@ import { configured, say } from "../config";
 import { latency, loss, rate, NONE } from "../format";
 import { noteFor } from "../notes";
 import { olderVersion } from "../peerIssues";
-import { history, peerName, peers, snapshot, tick, type PeerRow } from "../store";
+import { history, peerName, peers, selectRemote, snapshot, tick, type PeerRow } from "../store";
 
 export const SELF = -1;
 const LOSSY = 10_000;
@@ -243,6 +243,7 @@ export default function Machines(props: {
                       <Menu
                         label={`Actions for ${row().name}`}
                         items={[
+                          { label: "Manage node", onSelect: () => selectRemote(row().key, row().name), disabled: !row().key },
                           { label: "Rename…", onSelect: () => props.onEdit(row().id, "name") },
                           { label: note()?.text ? "Edit note…" : "Add note…", onSelect: () => props.onEdit(row().id, "text") },
                           { label: "Copy address", onSelect: () => copy(bareAddress(row().address), "the address"), disabled: !row().address },

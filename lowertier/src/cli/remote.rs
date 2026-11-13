@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod terminal;
 
 #[derive(Clone)]
-pub(super) struct Options {
+pub(crate) struct Options {
     pub target: String,
     pub secret: String,
     pub meta: RequestMeta,
@@ -47,7 +47,7 @@ struct Proxy {
     local: Rpc,
     options: Options,
 }
-pub(super) fn wrap(local: Rpc, options: Options) -> Rpc {
+pub(crate) fn wrap(local: Rpc, options: Options) -> Rpc {
     Box::new(Proxy { local, options })
 }
 
