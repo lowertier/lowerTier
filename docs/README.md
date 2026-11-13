@@ -26,4 +26,3 @@
 - [Option reference](options.md): every option, generated from the source.
 - [Security](security.md): who may join, what is encrypted, and what an observer sees.
 - [Design notes](design/README.md): protocol and implementation details.
-- [Performance records](performance/): measurements with their hosts, versions, and methods.

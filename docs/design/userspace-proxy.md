@@ -55,16 +55,10 @@ It does not create a TUN or TAP interface.
 It does not provide transparent `ping`, ARP, raw Ethernet, or complete L2 access to local applications.
 Use TAP mode when applications require a complete Ethernet interface.
 
-## Tailscale compatibility and measurements
+## Tailscale compatibility
 
 Tailscale documents the same application proxy model for `--tun=userspace-networking`.
 Tailscale also permits SOCKS5 and HTTP on one address.
 See the [Tailscale userspace networking guide](https://tailscale.com/docs/concepts/userspace-networking).
 See the [Tailscale daemon reference](https://tailscale.com/docs/reference/tailscaled).
 See the [Tailscale router comparison](https://tailscale.com/kb/1177/kernel-vs-userspace-routers).
-
-See the [measured LowTier results](../performance/userspace-networking-results.md)
-and the [matched HTTP/3 stream comparison](../performance/userspace-stream-results-20261026.md).
-The throughput probe caps each payload transfer at the time needed for 200 Mbps;
-for example, its default 64 MiB payload has a 2.684-second transfer budget.
-Proxy readiness has a separate 15-second deadline.

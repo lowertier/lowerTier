@@ -66,4 +66,3 @@ lowertier does not log request payloads or full request targets.
 ## More
 
 - [Userspace proxy internals](design/userspace-proxy.md): name resolution, dialing, buffers, and the QUIC stream path.
-- [Measured results](performance/userspace-networking-results.md).

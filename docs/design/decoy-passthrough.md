@@ -167,8 +167,7 @@ anti-amplification, wrong-CID probes, and source-port isolation. These are local
 debug demos, not release/WAN performance comparisons. TLS timing is not a TCP
 RTT measurement, and the H2 demo does not sample kernel retransmission counters.
 
-If macOS clang selects an inaccessible custom `/usr/local/include`, the local
-validation used the installed SDK headers without changing directory permissions:
+If macOS Clang cannot access `/usr/local/include`, configure the installed SDK header paths:
 
 ```sh
 export CFLAGS="-nostdinc -isystem $(xcrun clang -print-resource-dir)/include -isystem $(xcrun --show-sdk-path)/usr/include"

@@ -26,7 +26,6 @@ The governor bounds QUIC admission. It does not bound peak RSS under simultaneou
 Other consumers, including userspace TCP, retain their separate memory reservations.
 
 QUIC reserves a fixed 1 MiB per connection for admission.
-Idle loopback RSS grew by approximately 260 KiB per endpoint; the charge provides approximately four times that measured allowance.
 The charge does not reserve the worst-case sum of throughput windows.
 The DATAGRAM send and receive limits remain 1 MiB and 2 MiB.
 The stream receive, aggregate receive, and connection send windows remain 2 MiB, 4 MiB, and 2 MiB.

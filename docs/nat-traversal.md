@@ -14,7 +14,8 @@ trackers = [
 ]
 ```
 
-These three public trackers answered our nodes on 2026-11-13. Any working BitTorrent tracker will do; list more than one, and at least one HTTP(S) tracker for networks that block UDP.
+Use more than one tracker.
+Include at least one HTTP(S) tracker for networks that block UDP.
 
 Each node announces a 20-byte hash derived from the network name and secret, one for each transport, and receives the addresses of other nodes that announced the same hash.
 It then connects to those addresses. A tracker or an address grants nothing by itself: every connection must complete TLS and a Noise handshake with the network secret before it carries data.
@@ -27,6 +28,8 @@ HTTP/2 and WSS can bootstrap through HTTP(S) or TCP trackers with QUIC disabled.
 Tracker discovery needs a shared network secret; nodes that join with a signed credential cannot use it yet.
 
 ## How a connection forms
+
+Node A and Node B use the same network name, secret, and tracker list.
 
 1. **Announce.** Each node announces to every tracker and gets back the members that announced before it.
 2. **Dial.** It dials those addresses on QUIC, HTTP/2, and WSS, and authenticates each connection.
@@ -50,19 +53,6 @@ A node re-announces sooner when its own NAT mapping changes, but otherwise follo
 - **The earlier members learn of the newcomer only at their next announce.** That matters when the newcomer cannot reach any earlier member: say, a lone first node behind a NAT that drops unsolicited packets. Then the two connect at the first node's next announce, which on a public tracker can be up to an hour away.
 
 To make discovery fast in every case, keep one member reachable from the internet, or [run your own tracker](#run-your-own-tracker), whose clients announce every 30 seconds.
-
-### Measured
-
-On 2026-11-13, with release 0.01 and only the three public trackers above, no `[[peer]]` entries and no port forwarding:
-
-| Machines | Started | Result |
-| --- | --- | --- |
-| A server with a public address, a cloud VM behind NAT, a Mac behind a symmetric NAT | The server first, the others 4 minutes later | Full mesh of direct links within 30 s of the last start. A 2 MB file crossed with a matching SHA-256. |
-| The cloud VM and the Mac | VM first, Mac 52 s later | Mac connected directly to the VM 2 s after starting, on QUIC, HTTP/2, and WSS. |
-| The cloud VM and the Mac | Mac first, VM 78 s later | Connected directly 45 s after the VM started, when the Mac's next announce returned the VM's address. |
-
-`script/tests/tracker-bootstrap-test.py` repeats the first step on one machine: it starts `lowertier-tracker` and two nodes with no configured peers,
-and passes when they connect directly and a 4 MiB file crosses with a matching hash. With a tracker that does not answer, the same test fails.
 
 ## NAT settings
 

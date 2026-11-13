@@ -39,7 +39,7 @@ Connected members then share what they know, punch direct paths through NAT, and
 
 `lowertier init` writes a configuration file, a random network secret, and an identity key, with mode 0600.
 
-On the first machine:
+On Node A:
 
 ```bash
 lowertier init office.toml --network office --ipv4 10.44.0.1/24
@@ -55,28 +55,26 @@ EOF
 sudo lowertier run -c office.toml
 ```
 
-On the second machine, run the same commands with `--ipv4 10.44.0.2/24`.
-Before you start it, replace its `office.secret` with the first machine's. The secret is the network password; copy it over a channel you trust.
+On Node B, run the same commands with `--ipv4 10.44.0.2/24`.
+Before starting Node B, replace its `office.secret` with Node A's copy.
+The secret is the network password. Copy the secret over a trusted channel.
 
 Add a third machine, or a tenth, the same way. Each one needs only the network name, the secret, and the trackers.
 
 ## Check it
 
-On the second machine:
+On Node B:
 
 ```bash
 sudo lowertier peers
 ping 10.44.0.1
 ```
 
-```text
-PEER     ADDRESS        VIA      TRANSPORT       RTT   LOSS   RATE   SESSION     ID
-node-a   10.44.0.1/24   direct   h2+quic+wss   115 ms     -      -   key-bound   3024484495
-```
-
-`direct` means the machines punched through their NATs; `TRANSPORT` lists every link they hold.
+The peer list shows connected nodes and their available transports.
+A `direct` connection carries traffic between Node A and Node B without a relay.
 `sudo lowertier discovery` shows each tracker's status and the addresses it returned.
-If the first machine started long before the second, finding each other can take until its next announce; see [discovery and NAT traversal](nat-traversal.md#how-long-discovery-takes).
+If Node A started before Node B, discovery can depend on Node A's next announce.
+See [discovery and NAT traversal](nat-traversal.md#how-long-discovery-takes).
 
 ## Connect to a known address
 

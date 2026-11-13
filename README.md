@@ -24,7 +24,7 @@ To build from source, see [getting started](docs/getting-started.md#install).
 
 ## Connect two machines
 
-On the first machine, write a configuration and add the trackers:
+On Node A, write a configuration and add the trackers:
 
 ```bash
 lowertier init office.toml --network office --ipv4 10.44.0.1/24
@@ -40,11 +40,11 @@ EOF
 sudo lowertier run -c office.toml
 ```
 
-On the second machine, do the same with `--ipv4 10.44.0.2/24`, then replace its `office.secret` with the first machine's copy before starting it.
-The secret is the network password: move it over a channel you trust.
+On Node B, use `--ipv4 10.44.0.2/24`.
+Before starting Node B, replace its `office.secret` with Node A's copy.
+The secret is the network password. Copy the secret over a trusted channel.
 
 Neither machine needs to know the other's address. Once they find each other, `sudo lowertier status` lists the other machine and `ping 10.44.0.1` works.
-In our tests, machines behind different NATs connected directly 2 to 45 seconds after the second one started.
 Two NATs that both refuse direct paths need a third member that both can reach; it relays.
 
 A tracker learns the network's rendezvous hash and the members' public addresses, never the secret or the traffic. See [discovery and NAT traversal](docs/nat-traversal.md).
@@ -60,7 +60,7 @@ If you know an address, `--peer quic://192.0.2.10:11012` on `init` dials it dire
 | [Commands](docs/commands.md) | Every command, JSON output, exit codes |
 | [Ethernet](docs/ethernet.md) | Layer 2 between nodes, bridging a LAN |
 | [Proxy mode](docs/proxy-mode.md) | Joining without root |
-| [Discovery and NAT traversal](docs/nat-traversal.md) | Trackers, hole punching, your own tracker, measured results |
+| [Discovery and NAT traversal](docs/nat-traversal.md) | Trackers, hole punching, relays, and running your own tracker |
 | [Routing](docs/routing.md) and [paths](docs/paths.md) | Relays, exit nodes, subnets, chosen routes |
 | [Camouflage](docs/camouflage.md) | Port 443 with a website, CDNs |
 | [Web interface](docs/web-interface.md) | The management page and join codes |
