@@ -654,7 +654,12 @@ declares = [{ group_name = "admin", group_secret = "rpc-group-secret" }]
             .await
             .unwrap();
         assert!(camouflage.error.is_none(), "{:?}", camouflage.error);
-        assert_eq!(camouflage.config.unwrap().http_host, "example.test");
+        let camo_cfg = camouflage.config.unwrap();
+        assert_eq!(camo_cfg.http_host, "example.test");
+        assert_eq!(camo_cfg.server_names, vec!["challenges.cloudflare.com"]);
+        assert_eq!(camo_cfg.wss_path, "/ws");
+        assert_eq!(camo_cfg.tcp_decoy(), "challenges.cloudflare.com:443");
+        assert_eq!(camo_cfg.udp_decoy(), "challenges.cloudflare.com:443");
         let invalid = service
             .validate_config(
                 BaseController::default(),

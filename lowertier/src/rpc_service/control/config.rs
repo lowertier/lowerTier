@@ -984,9 +984,10 @@ impl ControlPlaneService {
         let mut config = flags.camouflage_config().clone();
         config.admission_secret.clear();
         let pki = config.has_server_names() && !config.has_decoy();
-        config.server_names = config.effective_server_names();
         let tcp_decoy = config.effective_tcp_decoy(has_secret).to_owned();
         let udp_decoy = config.effective_udp_decoy(has_secret).to_owned();
+        config.server_names = config.effective_server_names();
+        config.wss_path = config.websocket_path().to_owned();
         if !tcp_decoy.is_empty() || !udp_decoy.is_empty() {
             config.decoy_upstream = Some(crate::proto::common::DecoyUpstream {
                 tcp: tcp_decoy,
