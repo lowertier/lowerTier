@@ -1,0 +1,572 @@
+{
+  "verified_at": "2026-11-14T17:24:02.010349+00:00",
+  "application_commit": "c35b93b1",
+  "version": "0.03",
+  "instances": [
+    {
+      "host": "local",
+      "verified_at": "2026-11-14T17:14:02.570353+00:00",
+      "pid": 93873,
+      "version": "0.03",
+      "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
+      "address": "10.126.126.2",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 38,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "target": "native",
+      "transfer_sha256": "d8c173be8c9daf21a3a0097ee67cd426170d63502fe6e5cf97cea63a26d5ada9",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "862jp",
+      "verified_at": "2026-11-14T17:14:02.597173+00:00",
+      "pid": 2580117,
+      "version": "0.03",
+      "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
+      "address": "10.126.126.82",
+      "mode": "kernel",
+      "tun": {
+        "mtu": 1300,
+        "name": "lt-zero"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 39,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "jpali",
+      "verified_at": "2026-11-14T17:14:01.533722+00:00",
+      "pid": 1778853,
+      "version": "0.03",
+      "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
+      "address": "10.126.126.62",
+      "mode": "kernel",
+      "tun": {
+        "mtu": 1300,
+        "name": "lt-zero"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 40,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "s6916",
+      "verified_at": "2026-11-14T17:14:01.539479+00:00",
+      "pid": 755985,
+      "version": "0.03",
+      "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
+      "address": "10.126.126.60",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 36,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "yutoms-mcp",
+      "verified_at": "2026-11-14T17:14:04.314234+00:00",
+      "pid": 29751,
+      "version": "0.03",
+      "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
+      "address": "10.126.126.3",
+      "mode": "userspace",
+      "tun": {
+        "mode": "userspace",
+        "mtu": 1280
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 36,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "native",
+      "transfer_sha256": "d8c173be8c9daf21a3a0097ee67cd426170d63502fe6e5cf97cea63a26d5ada9",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "jpaws",
+      "verified_at": "2026-11-14T17:14:04.215316+00:00",
+      "pid": 2234807,
+      "version": "0.03",
+      "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
+      "address": "10.126.126.100",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 40,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "861jp",
+      "verified_at": "2026-11-14T17:14:05.251058+00:00",
+      "pid": 1826222,
+      "version": "0.03",
+      "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
+      "address": "10.126.126.81",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 34,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "alibj",
+      "verified_at": "2026-11-14T17:14:08.733938+00:00",
+      "pid": 260612,
+      "version": "0.03",
+      "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
+      "address": "10.126.126.110",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 22,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "hattori-opwrt",
+      "verified_at": "2026-11-14T17:14:06.734129+00:00",
+      "pid": 9496,
+      "version": "0.03",
+      "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
+      "address": "10.126.126.1",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 36,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "aarch64-unknown-linux-musl",
+      "transfer_sha256": "b67b7f69443b85ad921a11d6697c4644088d5b05166e91bfb0472833aa2eef8a",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "btrouter",
+      "verified_at": "2026-11-14T17:14:08.985724+00:00",
+      "pid": 26001,
+      "version": "0.03",
+      "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
+      "address": "10.126.126.40",
+      "mode": "kernel",
+      "tun": {
+        "ipv6": false,
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 52,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    },
+    {
+      "host": "la",
+      "verified_at": "2026-11-14T17:14:10.218669+00:00",
+      "pid": 259522,
+      "version": "0.03",
+      "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
+      "address": "10.126.126.87",
+      "mode": "kernel",
+      "tun": {
+        "mtu": 1300,
+        "name": "lowertier"
+      },
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "single_instance": true,
+      "authenticated_receiving_connections": 40,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "page_without_key": 200,
+      "api_without_key": 200,
+      "foreign_origin": 403,
+      "gui_policy_preserved": true,
+      "packets_sent": 3,
+      "packets_received": 3,
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "abb2c4e19d7eebdc7a886ea36838afc64af0616afdf971ca71e28d3d86cfda5d",
+      "running_transfer_integrity": true
+    }
+  ],
+  "pending": [
+    "tw2-ingress",
+    "btower",
+    "UTMOWRT"
+  ],
+  "checks": {
+    "core_passed": 545,
+    "core_ignored_then_passed_separately": 2,
+    "lane_tests_after_final_deadline_correction": 20,
+    "tracker_transfer_bytes": 4194304,
+    "builds": [
+      "native",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
+    ],
+    "controller_packets_sent": 30,
+    "controller_packets_received": 30,
+    "router_packets_sent": 20,
+    "router_packets_received": 20
+  },
+  "udp_restart": {
+    "attempts": 140,
+    "delivered": 139,
+    "loss_during_restart": 1,
+    "socket_ports": [
+      60649
+    ],
+    "payload_bytes_range": [
+      1559,
+      1561
+    ],
+    "received_bytes": 216870,
+    "rtt_median_ms": 5.077666137367487,
+    "rtt_p95_ms": 21.349665941670537,
+    "restart_started_at": "2026-11-14T17:12:46.243063+00:00",
+    "first_post_restart_delivery_at": "2026-11-14T17:12:48.016790+00:00",
+    "delivered_after_first_recovery": 119,
+    "attempts_after_first_recovery": 119,
+    "old_peer_id": 3907039432,
+    "new_peer_id": 663035031
+  },
+  "monitor": {
+    "started_at": "2026-11-14T17:21:59.775246+00:00",
+    "finished_at": "2026-11-14T17:24:02.010349+00:00",
+    "duration_seconds": 122.235103,
+    "target_errors": 0,
+    "sequence_continuity_verified": true,
+    "other_log_targets": {
+      "lowertier::peers::peer_conn": 2,
+      "lowertier::peers::peer_route": 6,
+      "lowertier::peer_center::instance": 1,
+      "lowertier::common::stun": 101,
+      "quinn_udp": 1
+    }
+  },
+  "throughput_smoke": {
+    "source": "10.126.126.2",
+    "destination": "10.126.126.60",
+    "effective_mtu": 1280,
+    "streams": 1,
+    "warmup_seconds": 1,
+    "measurement_seconds": 5,
+    "repetitions_per_stage_direction": 2,
+    "baseline": [
+      {
+        "direction": "down",
+        "repeat": 1,
+        "receiver_mbps": 414.16242175724153,
+        "retransmits": 0,
+        "cpu": {
+          "host_total": 6.235523848572898,
+          "host_user": 0.0945025532629449,
+          "host_system": 6.1410048486421385,
+          "remote_total": 0.004030602457692105,
+          "remote_user": 0.000337207346537918,
+          "remote_system": 0.003693880170719467
+        }
+      },
+      {
+        "direction": "down",
+        "repeat": 2,
+        "receiver_mbps": 411.6619633691986,
+        "retransmits": 0,
+        "cpu": {
+          "host_total": 5.822574433549312,
+          "host_user": 0.11650992521607903,
+          "host_system": 5.706064508333233,
+          "remote_total": 2.066334608933645,
+          "remote_user": 0.17299484479302427,
+          "remote_system": 1.8933561804287968
+        }
+      },
+      {
+        "direction": "up",
+        "repeat": 1,
+        "receiver_mbps": 456.67270557099863,
+        "retransmits": 0,
+        "cpu": {
+          "host_total": 4.739365468330837,
+          "host_user": 0.023992603932837232,
+          "host_system": 4.715438959725638,
+          "remote_total": 17.27881576469983,
+          "remote_user": 1.49414074821907,
+          "remote_system": 15.78467501648076
+        }
+      },
+      {
+        "direction": "up",
+        "repeat": 2,
+        "receiver_mbps": 401.13361979577274,
+        "retransmits": 0,
+        "cpu": {
+          "host_total": 4.831417964701134,
+          "host_user": 0.030223953210410465,
+          "host_system": 4.80122707927323,
+          "remote_total": 15.359308038047455,
+          "remote_user": 1.5661584091146648,
+          "remote_system": 13.793149628932792
+        }
+      }
+    ],
+    "early_candidate": [
+      {
+        "direction": "down",
+        "repeat": 1,
+        "receiver_mbps": 457.46193897067167,
+        "retransmits": 19329,
+        "cpu": {
+          "host_total": 3.5693390652424766,
+          "host_user": 0.0616941154550449,
+          "host_system": 3.5076779854583586,
+          "remote_total": 0.0090685476985541,
+          "remote_user": 0.00014716284958417983,
+          "remote_system": 0.00892144936578254
+        }
+      },
+      {
+        "direction": "down",
+        "repeat": 2,
+        "receiver_mbps": 460.9346201893935,
+        "retransmits": 20300,
+        "cpu": {
+          "host_total": 3.688666570765306,
+          "host_user": 0.062060937836122175,
+          "host_system": 3.6266056329291843,
+          "remote_total": 2.17934498561165,
+          "remote_user": 0,
+          "remote_system": 2.17934498561165
+        }
+      },
+      {
+        "direction": "up",
+        "repeat": 1,
+        "receiver_mbps": 250.82680149586292,
+        "retransmits": 0,
+        "cpu": {
+          "host_total": 3.147715672915284,
+          "host_user": 0.02229506009179289,
+          "host_system": 3.1254536425421455,
+          "remote_total": 12.163020860365862,
+          "remote_user": 1.7538608794829924,
+          "remote_system": 10.409159980882869
+        }
+      },
+      {
+        "direction": "up",
+        "repeat": 2,
+        "receiver_mbps": 186.50079627778854,
+        "retransmits": 0,
+        "cpu": {
+          "host_total": 3.115875121816478,
+          "host_user": 0.022137186789782465,
+          "host_system": 3.093737935026696,
+          "remote_total": 9.27831555244558,
+          "remote_user": 1.1609117231637263,
+          "remote_system": 8.11740382928185
+        }
+      }
+    ],
+    "settled_upload": [
+      {
+        "repeat": 1,
+        "receiver_mbps": 435.2630246082265,
+        "retransmits": 0
+      },
+      {
+        "repeat": 2,
+        "receiver_mbps": 444.219519167753,
+        "retransmits": 0
+      }
+    ],
+    "settled_download": [
+      {
+        "repeat": 1,
+        "receiver_mbps": 474.0568671719142,
+        "retransmits": 23616
+      },
+      {
+        "repeat": 2,
+        "receiver_mbps": 454.605040167448,
+        "retransmits": 11647
+      }
+    ],
+    "scope": "Automatic paths changed after restart. These checks do not establish a performance improvement. LowTier CPU per delivered Gbit and RSS were not sampled. Download retransmissions remain unresolved."
+  },
+  "recovery": [
+    "AliBJ direct upload timed out. Upload through JPaws passed.",
+    "The first router GUI read timed out during convergence. The repeated complete check passed.",
+    "The local registry was empty immediately after restart. Process inspection and repeated integrity checks passed.",
+    "The parallel suite hit a shared recovery quota. Isolated and serial checks passed."
+  ],
+  "limitations": [
+    "Long-term availability is not established.",
+    "STUN and route synchronization errors remain.",
+    "Download TCP retransmissions remain unresolved.",
+    "Taiwan SSH remains unavailable."
+  ],
+  "report": "docs/performance/handshake-relay-20261115.md",
+  "raw_evidence": "benchmark-results/.work/handshake-relay-20261115/",
+  "audit": "benchmark-results/.work/handshake-relay-20261115/audit.jsonl"
+}

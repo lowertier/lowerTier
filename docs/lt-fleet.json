@@ -1,15 +1,35 @@
 {
-  "verified_at": "2026-11-14T16:22:36.940984+00:00",
-  "connectivity_verified_at": "2026-11-14T16:22:36.940984+00:00",
+  "verified_at": "2026-11-14T17:24:02.010349+00:00",
+  "connectivity_verified_at": "2026-11-14T17:14:10.218669+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
   "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable hosts passed the MTU audit. Their kernel interfaces and userspace TCP device use MTU 1280. Taiwan remains pending. Earlier verification sections retain their historical observations.",
-  "application_commit": "d91b334a",
-  "repository_commit_at_verification": "4d59dd84",
-  "application_note": "Eleven active test instances retain version 0.03, build d91b334a. Ten use kernel mode. The remote Mac requires administrator access for kernel migration. Taiwan runs version 0.02 and lacks container network capabilities. Its binary update also awaits reliable SSH access.",
+  "application_commit": "c35b93b1",
+  "repository_commit_at_verification": "c35b93b1",
+  "application_note": "Eleven reachable test instances run the handshake and UDP ownership repair from c35b93b1. Ten use kernel mode. The remote Mac uses userspace mode. Taiwan retains version 0.02 and pending SSH access. Historical verification sections describe their original builds.",
+  "handshake_repair": {
+    "verified_at": "2026-11-14T17:24:02.010349+00:00",
+    "application_commit": "c35b93b1",
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "configuration_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols_per_instance": ["h2", "quic", "wss"],
+    "controller_packets_sent": 30,
+    "controller_packets_received": 30,
+    "router_packets_sent": 20,
+    "router_packets_received": 20,
+    "continuous_log_window_seconds": 122.235103,
+    "listed_errors_in_continuous_window": 0,
+    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "report": "docs/performance/handshake-relay-20261115.md",
+    "summary": "benchmark-results/handshake-relay-20261115/summary.json",
+    "audit": "benchmark-results/.work/handshake-relay-20261115/audit.jsonl",
+    "limitations": "The observation window does not establish long-term availability. STUN, route synchronization, and download retransmission issues remain unresolved."
+  },
   "mtu_policy": {
     "verified_at": "2026-11-14T16:22:36.940984+00:00",
     "effective_mtu": 1280,
@@ -96,7 +116,7 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -105,7 +125,7 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -114,7 +134,7 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -123,7 +143,7 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -132,7 +152,7 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -141,7 +161,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
@@ -173,7 +193,7 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -182,7 +202,7 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "userspace", "configured_mtu": 1280, "tcp_device_mtu": 1280},
       "kernel_migration_status": "blocked_administrator_access"
     },
@@ -192,7 +212,7 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -201,7 +221,7 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -210,7 +230,7 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "d91b334a",
+      "application_commit": "c35b93b1",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     }
   ],
