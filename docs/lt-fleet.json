@@ -1,15 +1,15 @@
 {
-  "verified_at": "2026-11-14T12:03:32.432099+00:00",
-  "connectivity_verified_at": "2026-11-14T12:02:25.121445+00:00",
+  "verified_at": "2026-11-14T13:06:59.659598+00:00",
+  "connectivity_verified_at": "2026-11-14T13:06:59.659598+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Twelve instances remain after the November 14 duplicate cleanup. Eleven hosts passed the shutdown repair rollout. Taiwan remains pending. Earlier verification sections retain their historical observations.",
+  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven current-build hosts passed the kernel endpoint audit. Taiwan remains pending. Earlier verification sections retain their historical observations.",
   "application_commit": "d91b334a",
-  "repository_commit_at_verification": "d91b334a",
-  "application_note": "Eleven active test instances run the shutdown repair. Signal and instance shutdown drain accepted packets and close peer transports. Network identities, configuration, and Web UI source networks are preserved. Taiwan retains its previous deployment record.",
+  "repository_commit_at_verification": "f573b69d",
+  "application_note": "Eleven active test instances retain version 0.03, build d91b334a. Ten use kernel mode. The remote Mac requires administrator access for kernel migration. Taiwan runs version 0.02 and lacks container network capabilities. Its binary update also awaits reliable SSH access.",
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -25,8 +25,8 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-14T12:03:32.432099+00:00",
-    "verification_scope": "Eleven instances passed keyless page and API reads from 10.126.126.2. All eleven rejected a foreign Origin. GUI configuration is unchanged. Earlier control-write, LAN, and outside-source checks remain historical evidence.",
+    "access_verified_at": "2026-11-14T13:06:57.506043+00:00",
+    "verification_scope": "Eleven instances passed keyless page and API reads from 10.126.126.2 during the kernel endpoint audit. All eleven rejected a foreign Origin. GUI configuration is unchanged. Earlier control-write, LAN, and outside-source checks remain historical evidence.",
     "schema_verified_at": "2026-11-08T13:54:38.072745+00:00",
     "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json",
     "bundle_verified_at": "2026-11-09T06:46:57.175222+00:00",
@@ -58,10 +58,23 @@
       "address": "10.126.126.80/24",
       "public_key": "XvlUi9g7B3LGdo00+VrOyRMGdhysAK/cWaoLuuc6/Ec=",
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
-      "version": "0.01",
-      "application_commit": "d211a9fc",
-      "deployment_status": "pending_overlay_connectivity",
-      "software_verification_note": "These software fields retain the previous deployment record. The November 14 duplicate cleanup observed runtime version 0.02. This repair did not update the host."
+      "version": "0.02",
+      "application_commit": null,
+      "previous_recorded_application_commit": "d211a9fc",
+      "deployment_status": "pending_ssh_and_overlay_connectivity",
+      "software_verification_note": "The kernel endpoint audit observed runtime version 0.02. Its source commit is unknown. The version 0.03 transfer remains pending after SSH timeouts.",
+      "runtime_observed_at": "2026-11-14T13:41:42.947137+00:00",
+      "observed_pid": 189214,
+      "pending_binary_transfer": {
+        "target_version": "0.03",
+        "target_application_commit": "d91b334a",
+        "candidate": "/opt/lowertier/.fleet-kernel-20261114/lowertier.new",
+        "observed_candidate_bytes": 412160,
+        "candidate_complete": false,
+        "installed": false
+      },
+      "tun": {"mode": "userspace", "configured_mtu": 1300},
+      "kernel_migration_status": "blocked_container_capabilities"
     },
     {
       "node": "alibj",
@@ -69,7 +82,8 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1360}
     },
     {
       "node": "jpaws",
@@ -77,7 +91,8 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel"}
     },
     {
       "node": "861jp",
@@ -85,7 +100,8 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1360}
     },
     {
       "node": "862jp-secondary",
@@ -93,7 +109,8 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1160}
     },
     {
       "node": "jpali-secondary",
@@ -101,7 +118,8 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1160}
     },
     {
       "node": "s6916",
@@ -141,7 +159,8 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1360}
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -149,7 +168,9 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "userspace", "configured_mtu": 1360},
+      "kernel_migration_status": "blocked_administrator_access"
     },
     {
       "node": "local-native",
@@ -157,7 +178,8 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1300}
     },
     {
       "node": "la",
@@ -165,7 +187,8 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel"}
     },
     {
       "node": "btrouter",
@@ -173,10 +196,42 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {"mode": "kernel", "configured_mtu": 1360}
     }
   ],
   "verification": {
+    "kernel_endpoint_rollout": {
+      "verified_at": "2026-11-14T13:06:59.659598+00:00",
+      "application_commit": "d91b334a",
+      "configuration_repair_commit": "f573b69d",
+      "retained_instances": 12,
+      "verified_instances": 11,
+      "kernel_instances": 10,
+      "userspace_instances": 2,
+      "new_kernel_migrations": 0,
+      "new_binary_installations": 0,
+      "identities_preserved": 11,
+      "configuration_snapshots_preserved": 11,
+      "keyless_webui_pages": 11,
+      "keyless_api_reads": 11,
+      "foreign_origin_rejections": 11,
+      "source": "10.126.126.2",
+      "packets_sent": 30,
+      "packets_received": 30,
+      "pending": [
+        "Remote Mac kernel migration requires administrator access.",
+        "Taiwan kernel migration requires container TUN and network capabilities.",
+        "Taiwan version 0.03 transfer requires reliable SSH access.",
+        "Taiwan overlay connectivity remains unverified.",
+        "btower remains offline.",
+        "UTMOWRT remains offline."
+      ],
+      "scope": "Ten nodes retain kernel mode. The other two retain userspace mode. Eleven current-build nodes passed identity, configuration, authentication, GUI, and delivery checks. The s6916 performance result applies only to its measured host pair.",
+      "evidence": "benchmark-results/.work/fleet-kernel-20261114/verification.json",
+      "audit": "benchmark-results/.work/fleet-kernel-20261114/audit.jsonl",
+      "report": "docs/performance/fleet-kernel-20261114.md"
+    },
     "transport_shutdown_repair": {
       "verified_at": "2026-11-14T12:03:32.432099+00:00",
       "application_commit": "d91b334a",

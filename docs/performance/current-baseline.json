@@ -190,6 +190,13 @@
       "application_verified_bytes_per_direction": 67108864,
       "evidence": "benchmark-results/.work/s6916-speed-20261114/result.json",
       "report": "docs/performance/s6916-userspace-tcp-20261114.md",
+      "fleet_audit": {
+        "verified_at": "2026-11-14T13:06:59.659598+00:00",
+        "baseline_unchanged": true,
+        "kernel_instances": 10,
+        "userspace_instances": 2,
+        "report": "docs/performance/fleet-kernel-20261114.md"
+      },
       "limitations": [
         "The endpoint modes do not have identical effective MTUs.",
         "Userspace iperf retransmission counters exclude its overlay TCP leg.",
