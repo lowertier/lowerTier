@@ -165,6 +165,39 @@
     "tcp": "quic8",
     "quic_previous": "quic8"
   },
+  "scenario_baselines": {
+    "local_native_to_s6916": {
+      "selected_at": "2026-11-14T12:39:34.476215+00:00",
+      "application_commit": "d91b334a",
+      "binary_changed": false,
+      "destination": "10.126.126.60",
+      "source": "10.126.126.2",
+      "destination_tun_mode": "kernel",
+      "destination_configured_mtu": 1280,
+      "destination_observed_mtu": 1260,
+      "source_observed_mtu": 1280,
+      "enabled_protocols": ["quic", "h2", "wss"],
+      "tcp_streams": 1,
+      "warmup_seconds": 2,
+      "measurement_seconds": 10,
+      "repetitions_per_direction": 2,
+      "download_receiver_mbps_range": [450.99659924142225, 451.34093803644714],
+      "upload_receiver_mbps_range": [393.56167484872014, 413.52587337735145],
+      "download_observed_protocols": ["wss", "quic"],
+      "upload_observed_protocols": ["quic"],
+      "enforced_quic_kernel_download_mbps_range": [457.233564630287, 459.043057629812],
+      "enforced_quic_userspace_download_mbps_range": [144.63043463257569, 244.07964160039438],
+      "application_verified_bytes_per_direction": 67108864,
+      "evidence": "benchmark-results/.work/s6916-speed-20261114/result.json",
+      "report": "docs/performance/s6916-userspace-tcp-20261114.md",
+      "limitations": [
+        "The endpoint modes do not have identical effective MTUs.",
+        "Userspace iperf retransmission counters exclude its overlay TCP leg.",
+        "The specific userspace TCP recovery defect is not isolated.",
+        "Results apply to this host pair and short TCP trials."
+      ]
+    }
+  },
   "memory_evidence": "benchmark-results/protocol-memory-20260923/final11/independent-validation.json",
   "limitations": [
     "No WireGuard memory-parity claim",

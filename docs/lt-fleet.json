@@ -109,7 +109,31 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "d91b334a"
+      "application_commit": "d91b334a",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1280,
+        "observed_interface": "tap0",
+        "observed_mtu": 1260
+      },
+      "performance_verification": {
+        "verified_at": "2026-11-14T12:39:34.476215+00:00",
+        "source": "10.126.126.2",
+        "tcp_streams": 1,
+        "warmup_seconds": 2,
+        "measurement_seconds": 10,
+        "repetitions_per_direction": 2,
+        "receiver_download_mbps": [450.99659924142225, 451.34093803644714],
+        "receiver_upload_mbps": [393.56167484872014, 413.52587337735145],
+        "application_pattern_verified_bytes_per_direction": 67108864,
+        "original_configuration_reference": "/opt/lowertier/config/lowertier-lt.toml.userspace-speed-reference",
+        "identity_and_other_configuration_preserved": true,
+        "binary_changed": false,
+        "protocols": ["quic", "h2", "wss"],
+        "evidence": "benchmark-results/.work/s6916-speed-20261114/result.json",
+        "report": "docs/performance/s6916-userspace-tcp-20261114.md",
+        "scope": "Local native Mac to s6916. Kernel mode replaces the userspace TCP endpoint. Effective MTUs differ between endpoint modes."
+      }
     },
     {
       "node": "hattori-wrt",
