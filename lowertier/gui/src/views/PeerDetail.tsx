@@ -5,23 +5,25 @@ import { Segmented } from "../components/controls";
 import Chart from "../components/Chart";
 import { bytes, latency, loss, rate, NONE } from "../format";
 import { noteFor } from "../notes";
+import { sanitizeHops } from "../routeLoops";
 import { history, peerName, peers, selectRemote, selfId, snapshot, tick, type PeerRow } from "../store";
 import { Copy, Spark } from "../components/controls";
 import { Arrow, CloseGlyph } from "../components/icons";
 import { SELF, bareAddress } from "./Machines";
 import type { Doc } from "../api";
 
-/** The route row for a peer, matched by key or by final gateway. */
+/** The route row for a peer, matched by final gateway or key, preferring host routes. */
 export function routeFor(row: PeerRow): Doc | undefined {
   const routes = (snapshot()?.routes ?? []) as Doc[];
-  return routes.find((route) => (route.peer_key && route.peer_key === row.key) || route.final_gateway_peer_id === row.id);
+  return (
+    routes.find((route) => route.final_gateway_peer_id === row.id && !String(route.destination ?? "").includes("/")) ??
+    routes.find((route) => route.final_gateway_peer_id === row.id) ??
+    routes.find((route) => Boolean(route.peer_key && route.peer_key === row.key))
+  );
 }
 
 export function PathChain(props: { ids: number[]; destination: number }) {
-  const hops = () => {
-    const ids = props.ids.filter((id) => id !== selfId());
-    return ids.length ? ids : [props.destination];
-  };
+  const hops = () => sanitizeHops(props.ids, selfId(), props.destination);
   return (
     <span class="chain">
       <span class="hop self">this machine</span>
@@ -86,7 +88,12 @@ export function PeerPath(props: { row: PeerRow }) {
   };
   return (
     <div class="peer-path">
-      <LayersEditor value={layers()} exclude={[props.row.key]} onChange={setDraft} disabled={busy() || !props.row.key} />
+      <LayersEditor
+        value={layers()}
+        exclude={[props.row.key, bareAddress(props.row.address)].filter(Boolean)}
+        onChange={setDraft}
+        disabled={busy() || !props.row.key}
+      />
       <Show when={layers().length}>
         <Segmented label="Path mode" values={["parallel", "flow", "failover"]} value={currentMode()} onChange={setMode} />
         <label class="check">

@@ -91,6 +91,7 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
   const initialGateway = props.initial?.gateway;
   const [gatewayRef, setGatewayRef] = createSignal(stageNodes(initialGateway)[0] ?? "");
   const [strict, setStrict] = createSignal(props.initial?.strict ?? false);
+  const singleLayerRefs = () => layers().flatMap(stageNodes).filter((ref) => !isGroup(ref));
   const target = () => (kind() === "internet" ? "internet" : kind() === "any" ? "*" : to().trim());
   const gatewayValue = (): PathStageConfig | undefined => {
     if (kind() === "peer" || kind() === "any") return undefined;
@@ -128,7 +129,14 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
         <div class="editor-control">
           <Segmented label="Destination kind" values={["peer", "any", "internet", "subnet"]} value={kind()} onChange={(value) => setKind(value as TargetKind)} />
           <Show when={kind() === "peer"}>
-            <RefSelect label="Destination peer" value={to()} placeholder="Choose a peer" groups={false} onChange={setTo} />
+            <RefSelect
+              label="Destination peer"
+              value={to()}
+              placeholder="Choose a peer"
+              exclude={singleLayerRefs()}
+              groups={false}
+              onChange={setTo}
+            />
           </Show>
           <Show when={kind() === "any"}>
             <p class="hint">Applies to every peer without its own explicit path rule.</p>
@@ -166,7 +174,14 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
       <div class="editor-row">
         <span class="editor-label">Layers</span>
         <div class="editor-control">
-          <LayersEditor value={layers()} exclude={kind() === "peer" && to() ? [to()] : []} onChange={setLayers} />
+          <LayersEditor
+            value={layers()}
+            exclude={[
+              ...(kind() === "peer" && to() ? [to()] : []),
+              ...(gatewayRef() && !isGroup(gatewayRef()) ? [gatewayRef()] : []),
+            ]}
+            onChange={setLayers}
+          />
         </div>
       </div>
       <Show when={kind() === "internet" || kind() === "subnet"}>
@@ -177,6 +192,7 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
               label="Gateway"
               value={gatewayRef()}
               placeholder={kind() === "internet" ? "Choose an exit or exit group" : "Automatic subnet gateway"}
+              exclude={singleLayerRefs()}
               onChange={setGatewayRef}
             />
             <p class="hint">

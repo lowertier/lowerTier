@@ -1266,13 +1266,17 @@ impl ZCPacket {
             return Err("too many relay layers");
         }
         let header = self.peer_manager_header().ok_or("packet without header")?;
+        let from_peer = header.from_peer_id.get();
         let final_dst = header.to_peer_id.get();
         let original_type = header.packet_type;
         if original_type == PacketType::Waypoint as u8 {
             return Err("packet is already source-routed");
         }
+        if from_peer == final_dst {
+            return Err("source route contains a loop");
+        }
         for (idx, hop) in hops.iter().enumerate() {
-            if *hop == final_dst || hops[idx + 1..].contains(hop) {
+            if *hop == from_peer || *hop == final_dst || hops[idx + 1..].contains(hop) {
                 return Err("source route contains a loop");
             }
         }
@@ -1359,6 +1363,7 @@ impl ZCPacket {
         };
         if header.packet_type != PacketType::Waypoint as u8
             || header.to_peer_id.get() != my_peer_id
+            || header.from_peer_id.get() == my_peer_id
             || !header.is_encrypted()
         {
             return false;
@@ -1376,20 +1381,33 @@ impl ZCPacket {
         &mut self,
         my_peer_id: PeerId,
     ) -> Result<SourceRouteStep, &'static str> {
+        let from_peer_id = self
+            .peer_manager_header()
+            .ok_or("packet without header")?
+            .from_peer_id
+            .get();
         let payload = self.payload();
         let length = payload.len();
         let (footer_len, final_dst, original_type, path_id, hop_index, hop_count) =
             Self::parse_source_route_footer(payload)?;
+        if final_dst == from_peer_id {
+            return Err("source route loops back to sender");
+        }
+        let hops_start = length - footer_len;
+        let hop_at = |idx: usize| -> PeerId {
+            let start = hops_start + idx * 4;
+            PeerId::from_le_bytes(
+                self.payload()[start..start + 4]
+                    .try_into()
+                    .expect("four bytes"),
+            )
+        };
+        for idx in 0..hop_count {
+            if hop_at(idx) == from_peer_id {
+                return Err("source route traverses sender");
+            }
+        }
         if hop_index < hop_count {
-            let hops_start = length - footer_len;
-            let hop_at = |idx: usize| -> PeerId {
-                let start = hops_start + idx * 4;
-                PeerId::from_le_bytes(
-                    self.payload()[start..start + 4]
-                        .try_into()
-                        .expect("four bytes"),
-                )
-            };
             if hop_at(hop_index) != my_peer_id {
                 return Err("unexpected waypoint hop");
             }
@@ -1399,7 +1417,7 @@ impl ZCPacket {
             } else {
                 final_dst
             };
-            if next == my_peer_id {
+            if next == my_peer_id || next == from_peer_id {
                 return Err("waypoint packet loops back to this node");
             }
             // Constant-length in-place hop_index update: zero resize, zero copy.
@@ -1992,6 +2010,22 @@ mod tests {
         );
         assert!(packet.encode_source_route(&[5, 5], 0).is_err());
         assert!(packet.encode_source_route(&[5, 9], 0).is_err());
+        assert!(packet.encode_source_route(&[1, 5], 0).is_err());
+
+        // Craft a footer whose hop equals from_peer_id to confirm advance_source_route rejects it.
+        let mut forged = ZCPacket::new_with_payload(b"sealed");
+        forged.fill_peer_manager_hdr(1, 9, PacketType::Data as u8);
+        forged.encode_source_route(&[5, 6], 0).unwrap();
+        forged
+            .mut_peer_manager_header()
+            .unwrap()
+            .from_peer_id
+            .set(6);
+        assert!(forged.advance_source_route(5).is_err());
+
+        let mut self_dst = ZCPacket::new_with_payload(b"sealed");
+        self_dst.fill_peer_manager_hdr(9, 9, PacketType::Data as u8);
+        assert!(self_dst.encode_source_route(&[5], 0).is_err());
     }
 
     #[test]

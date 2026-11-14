@@ -92,17 +92,19 @@ export default function MeshGraph(props: Props) {
           peerId: row.id,
         });
       }
-      if (row.via != null) {
-        const hop = nodes.get(row.via) ?? selfPos;
-        edges.push({
-          fromX: hop.x,
-          fromY: hop.y,
-          toX: target.x,
-          toY: target.y,
-          relayed: true,
-          label: row.rtt != null ? formatRtt(row.rtt) : "relayed",
-          peerId: row.id,
-        });
+      if (!row.direct && row.via != null) {
+        const hop = nodes.get(row.via);
+        if (hop) {
+          edges.push({
+            fromX: hop.x,
+            fromY: hop.y,
+            toX: target.x,
+            toY: target.y,
+            relayed: true,
+            label: row.rtt != null ? formatRtt(row.rtt) : "relayed",
+            peerId: row.id,
+          });
+        }
       }
     }
 

@@ -457,6 +457,46 @@ fn superseded_incarnations(
     stale
 }
 
+/// Prune stale incarnations and self-keyed ghost peers before building a route graph so a peer
+/// never routes via its own prior incarnation or a ghost carrying this node's static key.
+fn prune_stale_topology_peers(
+    my_peer_id: PeerId,
+    my_inst_id: uuid::Uuid,
+    peer_infos: &mut HashMap<PeerId, RoutePeerInfo>,
+) -> HashSet<PeerId> {
+    let mut stale: HashSet<PeerId> = superseded_incarnations(
+        my_peer_id,
+        my_inst_id,
+        peer_infos.iter().map(|(peer_id, info)| {
+            (
+                *peer_id,
+                route_peer_inst_id(info),
+                info.last_update
+                    .and_then(|timestamp| SystemTime::try_from(timestamp).ok()),
+            )
+        }),
+    )
+    .into_iter()
+    .collect();
+
+    if let Some(my_pubkey) = peer_infos
+        .get(&my_peer_id)
+        .map(|info| info.noise_static_pubkey.clone())
+        .filter(|key| !key.is_empty())
+    {
+        for (peer_id, info) in peer_infos.iter() {
+            if *peer_id != my_peer_id && info.noise_static_pubkey == my_pubkey {
+                stale.insert(*peer_id);
+            }
+        }
+    }
+
+    for peer_id in &stale {
+        peer_infos.remove(peer_id);
+    }
+    stale
+}
+
 #[derive(Debug, Clone)]
 struct AtomicVersion(Arc<AtomicU32>);
 
@@ -2673,12 +2713,16 @@ impl RouteBuildInput {
         }
         let mut path = vec![graph[destination]];
         let mut current = destination;
+        let mut visited = HashSet::from([self.start_node, destination]);
         while current != start {
             *budget = budget
                 .checked_sub(1)
                 .ok_or("The route work budget is exhausted.")?;
             current =
                 predecessors[current.index()].ok_or("The captured predecessor is unavailable.")?;
+            if !visited.insert(current) {
+                return Err("The captured predecessor path contains a loop.");
+            }
             path.push(graph[current]);
         }
         path.push(graph[self.start_node]);
@@ -2823,8 +2867,8 @@ impl TopologyBuildInput {
         );
     }
 
-    fn capture(my_peer_id: PeerId, synced_info: &SyncedRouteInfo) -> Self {
-        let (version, peer_infos, conn_map, suppressed_peer_ids) = {
+    fn capture(my_peer_id: PeerId, my_inst_id: uuid::Uuid, synced_info: &SyncedRouteInfo) -> Self {
+        let (version, mut peer_infos, conn_map, suppressed_peer_ids) = {
             let _topology_guard = synced_info.topology_state_lock();
             let version = synced_info.version.get();
             let peer_infos = synced_info
@@ -2854,6 +2898,8 @@ impl TopologyBuildInput {
                 .collect::<HashSet<_>>();
             (version, peer_infos, conn_map, suppressed_peer_ids)
         };
+
+        let _stale_peers = prune_stale_topology_peers(my_peer_id, my_inst_id, &mut peer_infos);
 
         let relay_credential_peers = peer_infos
             .iter()
@@ -5538,6 +5584,7 @@ impl PeerRouteServiceImpl {
         let topology = if domains.topology {
             Arc::new(TopologyBuildInput::capture(
                 self.my_peer_id,
+                self.global_ctx.get_id(),
                 &self.synced_route_info,
             ))
         } else {
@@ -5552,6 +5599,7 @@ impl PeerRouteServiceImpl {
                 domains = RouteRebuildDomains::topology();
                 let topology = Arc::new(TopologyBuildInput::capture(
                     self.my_peer_id,
+                    self.global_ctx.get_id(),
                     &self.synced_route_info,
                 ));
                 topology
@@ -9326,5 +9374,39 @@ mod incarnation_tests {
         );
         stale.sort_unstable();
         assert_eq!(stale, vec![11, 20, 22]);
+    }
+
+    #[test]
+    fn prune_stale_topology_peers_drops_self_ghosts_and_superseded_peers() {
+        let my_inst = uuid::Uuid::from_u128(10);
+        let peer_inst = uuid::Uuid::from_u128(20);
+        let at =
+            |seconds: u64| Some((SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)).into());
+        let make = |peer_id: PeerId, inst_id: uuid::Uuid, pubkey: &[u8], seconds: u64| {
+            let mut info = RoutePeerInfo::new();
+            info.peer_id = peer_id;
+            info.inst_id = Some(inst_id.into());
+            info.noise_static_pubkey = pubkey.to_vec();
+            info.last_update = at(seconds);
+            (peer_id, info)
+        };
+        let mut peer_infos: HashMap<PeerId, RoutePeerInfo> = [
+            make(1, my_inst, b"self-key", 100),
+            // Old incarnation of self with same inst_id.
+            make(2, my_inst, b"self-key", 50),
+            // Ghost carrying self's static key even with a different inst_id.
+            make(3, uuid::Uuid::from_u128(99), b"self-key", 90),
+            // Restarted remote peer: keep 21, drop 20.
+            make(20, peer_inst, b"peer-key", 100),
+            make(21, peer_inst, b"peer-key", 200),
+        ]
+        .into_iter()
+        .collect();
+
+        let pruned = prune_stale_topology_peers(1, my_inst, &mut peer_infos);
+        assert_eq!(pruned, [2, 3, 20].into_iter().collect());
+        assert!(peer_infos.contains_key(&1));
+        assert!(peer_infos.contains_key(&21));
+        assert_eq!(peer_infos.len(), 2);
     }
 }

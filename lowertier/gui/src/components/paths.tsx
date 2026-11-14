@@ -2,6 +2,7 @@
 import { For, Show, createMemo } from "solid-js";
 import type { Doc } from "../api";
 import {
+  configured,
   groupsConfigured,
   stageFromNodes,
   stageMode,
@@ -9,7 +10,7 @@ import {
   type PathStageConfig,
 } from "../config";
 import { latency } from "../format";
-import { peers } from "../store";
+import { peerName, peers, snapshot } from "../store";
 
 export const MAX_RELAY_LAYERS = 8;
 
@@ -34,7 +35,11 @@ export function RefSelect(props: {
   disabled?: boolean;
   onChange: (reference: string) => void;
 }) {
-  const excluded = () => new Set(props.exclude ?? []);
+  const excluded = () => {
+    const selfKey = String(configured("identity.public_key") ?? "");
+    const selfIp = (snapshot()?.node?.node?.ipv4_addr as string | undefined)?.split("/")[0] ?? "";
+    return new Set([...(props.exclude ?? []), selfKey, selfIp].filter(Boolean));
+  };
   return (
     <select
       aria-label={props.label}
@@ -59,7 +64,14 @@ export function RefSelect(props: {
         </optgroup>
       </Show>
       <optgroup label="Peers">
-        <For each={peers().filter((peer) => peer.key && !excluded().has(peer.key))}>
+        <For
+          each={peers().filter(
+            (peer) =>
+              peer.key &&
+              !excluded().has(peer.key) &&
+              !(peer.address && excluded().has(peer.address.split("/")[0])),
+          )}
+        >
           {(peer) => <option value={peer.key}>{peer.name}</option>}
         </For>
       </optgroup>
@@ -74,6 +86,7 @@ export function LayersEditor(props: {
   onChange: (layers: PathStageConfig[]) => void;
   disabled?: boolean;
 }) {
+  const usedSinglePeers = () => props.value.flatMap(stageNodes).filter((ref) => !isGroup(ref));
   const move = (index: number, step: number) => {
     const next = [...props.value];
     const [item] = next.splice(index, 1);
@@ -150,7 +163,7 @@ export function LayersEditor(props: {
                     <RefSelect
                       label={`Add parallel relay to Layer ${index() + 1}`}
                       placeholder="+ Parallel relay…"
-                      exclude={[...(props.exclude ?? []), ...nodes()]}
+                      exclude={[...(props.exclude ?? []), ...usedSinglePeers(), ...nodes()]}
                       disabled={props.disabled}
                       onChange={(reference) => updateStage(index(), [...nodes(), reference])}
                     />
@@ -165,7 +178,7 @@ export function LayersEditor(props: {
         <RefSelect
           label="Add a relay layer"
           placeholder={props.value.length ? "Add next layer…" : "Through…"}
-          exclude={props.exclude ?? []}
+          exclude={[...(props.exclude ?? []), ...usedSinglePeers()]}
           disabled={props.disabled}
           onChange={(reference) => props.onChange([...props.value, reference])}
         />
@@ -181,8 +194,7 @@ const STATE_TEXT: Record<string, string> = {
 };
 
 function hopLabel(peerId: number): string {
-  const row = peers().find((peer) => peer.id === peerId);
-  return row ? row.name : `#${peerId}`;
+  return peerName(peerId);
 }
 
 /** Live state of one path: each layer's members, active multipath chains, and traffic share. */

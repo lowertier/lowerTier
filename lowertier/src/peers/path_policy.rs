@@ -8,7 +8,7 @@
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -404,6 +404,37 @@ impl PathPolicy {
             ),
         }
 
+        for (index, layer) in layers.iter().enumerate() {
+            if let Target::Peer(destination) = &to
+                && layer.members.len() == 1
+                && layer.members[0].peer == *destination
+            {
+                bail!(
+                    "layer {} routes through the destination peer itself",
+                    index + 1
+                );
+            }
+            if let Some(gw) = &gateway
+                && gw.members.len() == 1
+                && layer.members.len() == 1
+                && layer.members[0].peer == gw.members[0].peer
+            {
+                bail!("layer {} routes through the gateway peer itself", index + 1);
+            }
+            for (later_index, later) in layers.iter().enumerate().skip(index + 1) {
+                if layer.members.len() == 1
+                    && later.members.len() == 1
+                    && layer.members[0].peer == later.members[0].peer
+                {
+                    bail!(
+                        "layers {} and {} route through the same peer",
+                        index + 1,
+                        later_index + 1
+                    );
+                }
+            }
+        }
+
         let effective_mode = rule_explicit_mode.unwrap_or_else(|| {
             if layers.iter().any(|layer| layer.mode == Mode::Parallel) {
                 Mode::Parallel
@@ -522,6 +553,8 @@ enum Role {
 
 pub struct PathRuntime {
     my_peer_id: PeerId,
+    local_public_key: Option<[u8; 32]>,
+    local_ipv4: AtomicU64,
     compiled: ArcSwapOption<Compiled>,
     resolved: ArcSwapOption<Resolved>,
     flags: ArcSwapOption<Flags>,
@@ -529,13 +562,31 @@ pub struct PathRuntime {
 }
 
 impl PathRuntime {
-    pub fn new(my_peer_id: PeerId) -> Self {
+    pub fn new(my_peer_id: PeerId, local_public_key: Option<[u8; 32]>) -> Self {
         Self {
             my_peer_id,
+            local_public_key,
+            local_ipv4: AtomicU64::new(0),
             compiled: ArcSwapOption::empty(),
             resolved: ArcSwapOption::empty(),
             flags: ArcSwapOption::empty(),
             rebuild: parking_lot::Mutex::new(()),
+        }
+    }
+
+    fn encode_ipv4(ipv4: Option<Ipv4Addr>) -> u64 {
+        ipv4.map_or(0, |ip| (1_u64 << 32) | u64::from(u32::from(ip)))
+    }
+
+    fn decode_ipv4(encoded: u64) -> Option<Ipv4Addr> {
+        (encoded != 0).then(|| Ipv4Addr::from((encoded & 0xffff_ffff) as u32))
+    }
+
+    /// Track the local overlay IPv4 so config refs pointing to this node resolve to `my_peer_id`.
+    pub fn set_local_ipv4(&self, ipv4: Option<Ipv4Addr>) {
+        let encoded = Self::encode_ipv4(ipv4);
+        if self.local_ipv4.swap(encoded, Ordering::AcqRel) != encoded {
+            self.resolved.store(None);
         }
     }
 
@@ -605,7 +656,13 @@ impl PathRuntime {
         {
             return Some((compiled, resolved));
         }
-        let resolved = Arc::new(Self::resolve(&compiled, snapshot, self.my_peer_id));
+        let resolved = Arc::new(Self::resolve(
+            &compiled,
+            snapshot,
+            self.my_peer_id,
+            self.local_public_key,
+            Self::decode_ipv4(self.local_ipv4.load(Ordering::Acquire)),
+        ));
         self.resolved.store(Some(resolved.clone()));
         Some((compiled, resolved))
     }
@@ -614,14 +671,23 @@ impl PathRuntime {
         compiled: &Compiled,
         snapshot: &ForwardingDecisionSnapshot,
         my_peer_id: PeerId,
+        local_public_key: Option<[u8; 32]>,
+        local_ipv4: Option<Ipv4Addr>,
     ) -> Resolved {
         let keys: HashMap<[u8; 32], PeerId> = snapshot
             .capabilities()
             .iter()
             .filter_map(|peer| Some((peer.static_pubkey?, peer.peer_id)))
             .collect();
+        let resolve_ref = |reference: &PeerRef| -> Option<PeerId> {
+            match reference {
+                PeerRef::Key(key) if Some(*key) == local_public_key => Some(my_peer_id),
+                PeerRef::Ip(IpAddr::V4(ip)) if Some(*ip) == local_ipv4 => Some(my_peer_id),
+                _ => reference.resolve(snapshot, &keys),
+            }
+        };
         let member = |reference: &PeerRef| {
-            let Some(peer_id) = reference.resolve(snapshot, &keys) else {
+            let Some(peer_id) = resolve_ref(reference) else {
                 return ResolvedMember::default();
             };
             let features = snapshot
@@ -671,8 +737,10 @@ impl PathRuntime {
             let mut rule_peer = None;
             match &rule.to {
                 Target::Peer(reference) => {
-                    rule_peer = reference.resolve(snapshot, &keys);
-                    if let Some(peer_id) = rule_peer {
+                    rule_peer = resolve_ref(reference);
+                    if let Some(peer_id) = rule_peer
+                        && peer_id != my_peer_id
+                    {
                         resolved.peer_rules.insert(peer_id, index);
                     }
                 }
@@ -752,7 +820,16 @@ impl PathRuntime {
         let gateway = rule.gateway.as_ref()?;
         let members = resolved.members[usize::from(rule_index)].last()?;
         let salt = u64::from(rule_index) << 8 | rule.layers.len() as u64;
-        let picked = Self::pick_one(gateway, members, flow, salt, Role::Gateway, &[], &exports);
+        let excluded = [self.my_peer_id];
+        let picked = Self::pick_one(
+            gateway,
+            members,
+            flow,
+            salt,
+            Role::Gateway,
+            &excluded,
+            &exports,
+        );
         let Some((member, peer_id)) = picked else {
             compiled.counters[usize::from(rule_index)]
                 .fallback_packets
@@ -853,10 +930,13 @@ impl PathRuntime {
             .flatten()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn expand_rule_chains(
+        my_peer_id: PeerId,
         rule: &Rule,
         rule_index: u16,
         resolved_layers: &[Vec<ResolvedMember>],
+        snapshot: Option<&ForwardingDecisionSnapshot>,
         destination: Option<PeerId>,
         flow: u64,
         parallel_for_status: bool,
@@ -868,9 +948,11 @@ impl PathRuntime {
 
         #[allow(clippy::too_many_arguments)]
         fn dfs(
+            my_peer_id: PeerId,
             rule: &Rule,
             rule_index: u16,
             resolved_layers: &[Vec<ResolvedMember>],
+            snapshot: Option<&ForwardingDecisionSnapshot>,
             destination: Option<PeerId>,
             flow: u64,
             parallel_for_status: bool,
@@ -894,9 +976,25 @@ impl PathRuntime {
             let segment = &rule.layers[position];
             let members = &resolved_layers[position];
             let no_exports = |_: PeerId| false;
-            let mut excluded = SmallVec::<[PeerId; MAX_LAYERS + 1]>::from_slice(&scratch.hops);
+            let mut excluded = SmallVec::<[PeerId; MAX_LAYERS + 2]>::from_slice(&scratch.hops);
+            excluded.push(my_peer_id);
             if let Some(dst) = destination {
                 excluded.push(dst);
+                // Skip first-hop relays whose underlay path loops through the destination itself.
+                if position == 0
+                    && let Some(snap) = snapshot
+                {
+                    for member in members {
+                        if let Some(peer_id) = member.peer
+                            && snap
+                                .next_hop(peer_id, NextHopPolicy::LeastCost)
+                                .is_some_and(|next| next.next_hop_peer_id == dst)
+                            && !excluded.contains(&peer_id)
+                        {
+                            excluded.push(peer_id);
+                        }
+                    }
+                }
             }
 
             let effective_mode = if parallel_for_status && segment.members.len() > 1 {
@@ -921,9 +1019,11 @@ impl PathRuntime {
                         scratch.hops.push(peer_id);
                         scratch.picks.push((position, member_idx));
                         dfs(
+                            my_peer_id,
                             rule,
                             rule_index,
                             resolved_layers,
+                            snapshot,
                             destination,
                             flow,
                             parallel_for_status,
@@ -950,9 +1050,11 @@ impl PathRuntime {
                         scratch.hops.push(peer_id);
                         scratch.picks.push((position, member_idx));
                         dfs(
+                            my_peer_id,
                             rule,
                             rule_index,
                             resolved_layers,
+                            snapshot,
                             destination,
                             flow,
                             parallel_for_status,
@@ -978,9 +1080,11 @@ impl PathRuntime {
                             .saturating_mul(segment.members[member_idx].weight)
                             .min(1_000_000);
                         dfs(
+                            my_peer_id,
                             rule,
                             rule_index,
                             resolved_layers,
+                            snapshot,
                             destination,
                             flow,
                             parallel_for_status,
@@ -1002,9 +1106,11 @@ impl PathRuntime {
             picks: SmallVec::new(),
         };
         dfs(
+            my_peer_id,
             rule,
             rule_index,
             resolved_layers,
+            snapshot,
             destination,
             flow,
             parallel_for_status,
@@ -1013,6 +1119,20 @@ impl PathRuntime {
             &mut scratch,
             &mut chains,
         );
+        if let Some(snap) = snapshot {
+            chains.retain(|chain| {
+                let Some(&first) = chain.hops.first() else {
+                    return false;
+                };
+                if let Some(next) = snap.next_hop(first, NextHopPolicy::LeastCost) {
+                    let nh = next.next_hop_peer_id;
+                    if destination == Some(nh) || chain.hops[1..].contains(&nh) {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
         if chains.len() > MAX_ACTIVE_CHAINS {
             chains.sort_by_key(|chain| Reverse(chain.weight));
             chains.truncate(MAX_ACTIVE_CHAINS);
@@ -1043,9 +1163,11 @@ impl PathRuntime {
         let counters = &compiled.counters[usize::from(rule_index)];
         let resolved_layers = &resolved.members[usize::from(rule_index)][..rule.layers.len()];
         let mut chains = Self::expand_rule_chains(
+            self.my_peer_id,
             rule,
             rule_index,
             resolved_layers,
+            Some(snapshot),
             Some(destination),
             flow,
             false,
@@ -1197,6 +1319,12 @@ impl PathRuntime {
                 let (state, reason) = if matches!(rule.to, Target::Peer(_)) && to_peer_id.is_none()
                 {
                     ("fallback", "The destination is not in the network.".to_owned())
+                } else if matches!(rule.to, Target::Peer(_)) && to_peer_id == Some(self.my_peer_id)
+                {
+                    (
+                        if rule.strict { "down" } else { "fallback" },
+                        "Destination is this node.".to_owned(),
+                    )
                 } else if missing.is_empty() {
                     ("ready", String::new())
                 } else {
@@ -1205,12 +1333,26 @@ impl PathRuntime {
                         format!("No usable member in {}.", missing.join(", ")),
                     )
                 };
+                let preview_destination = to_peer_id.or_else(|| {
+                    rule.gateway.as_ref().and_then(|_| {
+                        let gateway_peers: Vec<PeerId> = members[rule.layers.len()]
+                            .iter()
+                            .filter(|member| {
+                                member.reachable && member.peer != Some(self.my_peer_id)
+                            })
+                            .filter_map(|member| member.peer)
+                            .collect();
+                        (gateway_peers.len() == 1).then(|| gateway_peers[0])
+                    })
+                });
                 let chains = if !rule.layers.is_empty() {
                     let expanded = Self::expand_rule_chains(
+                        self.my_peer_id,
                         rule,
                         index as u16,
                         &members[..rule.layers.len()],
-                        to_peer_id,
+                        Some(snapshot),
+                        preview_destination,
                         0,
                         true,
                     );
@@ -1421,7 +1563,7 @@ mod tests {
             &[2, 3, 4, 9],
         );
 
-        let runtime = PathRuntime::new(1);
+        let runtime = PathRuntime::new(1, None);
         let cfg = config(
             "[[path]]\nto = \"10.0.0.9\"\nlayers = [[\"10.0.0.2\", \"10.0.0.3\"], [\"10.0.0.3\", \"10.0.0.4\"]]\n\
              [[path]]\nto = \"*\"\nlayers = [\"10.0.0.4\"]\n",
@@ -1504,5 +1646,136 @@ mod tests {
                 assert_eq!(index, before[flow as usize], "flow {flow} moved");
             }
         }
+    }
+
+    #[test]
+    fn compile_rejects_static_single_peer_loops() {
+        for (text, message) in [
+            (
+                "[[path]]\nto = \"10.0.0.9\"\nlayers = [\"10.0.0.9\"]\n",
+                "destination peer itself",
+            ),
+            (
+                "[[path]]\nto = \"10.8.0.0/16\"\nlayers = [\"10.0.0.5\"]\ngateway = \"10.0.0.5\"\n",
+                "gateway peer itself",
+            ),
+            (
+                "[[path]]\nto = \"10.0.0.9\"\nlayers = [\"10.0.0.2\", \"10.0.0.2\"]\n",
+                "route through the same peer",
+            ),
+            (
+                "[[path]]\nto = \"10.0.0.9\"\nlayers = [\"10.0.0.2\", \"10.0.0.3\", \"10.0.0.2\"]\n",
+                "route through the same peer",
+            ),
+        ] {
+            let error = format!("{:#}", PathPolicy::compile(&config(text)).unwrap_err());
+            assert!(error.contains(message), "{message}: {error}");
+        }
+    }
+
+    #[test]
+    fn runtime_marks_self_by_key_and_ipv4_and_skips_underlay_hairpin_loops() {
+        let local_ip = [10, 0, 0, 1];
+        let local_key = [1_u8; 32];
+        let peers = &[
+            (2, [10, 0, 0, 2], false),
+            (3, [10, 0, 0, 3], false),
+            (9, [10, 0, 0, 9], true),
+        ];
+        let mut peer_infos = Vec::new();
+        let mut ipv4_peer_ids = HashMap::new();
+        for &(peer_id, ip, exit_node) in peers {
+            ipv4_peer_ids.insert(std::net::Ipv4Addr::from(ip), peer_id);
+            peer_infos.push(ForwardingPeerInfo {
+                peer_id,
+                has_ipv4: true,
+                static_pubkey: Some([peer_id as u8; 32]),
+                feature_flag: Some(PeerFeatureFlag {
+                    multipath_relay_v1: true,
+                    relay_semantics_v1: true,
+                    exit_node,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        // Underlay reaches relay 2 only through destination 9, while relay 3 is reached directly.
+        let mut hops = HashMap::new();
+        hops.insert(
+            2,
+            ForwardingNextHop {
+                next_hop_peer_id: 9,
+                path_delivery_bps: 10_000,
+                path_latency: 10,
+                path_len: 2,
+                version: 1,
+            },
+        );
+        hops.insert(
+            3,
+            ForwardingNextHop {
+                next_hop_peer_id: 3,
+                path_delivery_bps: 10_000,
+                path_latency: 10,
+                path_len: 1,
+                version: 1,
+            },
+        );
+        hops.insert(
+            9,
+            ForwardingNextHop {
+                next_hop_peer_id: 9,
+                path_delivery_bps: 10_000,
+                path_latency: 5,
+                path_len: 1,
+                version: 1,
+            },
+        );
+        let hops = Arc::new(hops);
+        let snapshot = ForwardingDecisionSnapshot::from_parts(
+            11,
+            Arc::new(ForwardingPeerTable::new(peer_infos)),
+            Arc::new(HashSet::new()),
+            None,
+            hops.clone(),
+            hops.clone(),
+            hops,
+            Arc::new(ipv4_peer_ids),
+            Arc::new(HashMap::new()),
+            Arc::new(Default::default()),
+            Arc::new(Default::default()),
+        );
+
+        let runtime = PathRuntime::new(1, Some(local_key));
+        runtime.set_local_ipv4(Some(Ipv4Addr::from(local_ip)));
+        let cfg = config(&format!(
+            "[[path]]\nto = \"10.0.0.9\"\nlayers = [[\"{}\", \"10.0.0.1\", \"10.0.0.2\", \"10.0.0.3\"]]\n\
+             [[path]]\nto = \"10.0.0.1\"\nlayers = [\"10.0.0.3\"]\n",
+            BASE64_STANDARD.encode(local_key),
+        ));
+        runtime.refresh(&Arc::new(Flags {
+            path_policy: Some(cfg),
+            ..Flags::default()
+        }));
+
+        // Rule targeting this node itself must not steer traffic.
+        assert_eq!(runtime.rule_for_destination(&snapshot, 1), None);
+        let rule = runtime.rule_for_destination(&snapshot, 9).unwrap();
+        let MultipathPlan::Single { chain } = runtime.plan_for_destination(&snapshot, rule, 9, 42)
+        else {
+            panic!("expected single non-looping chain");
+        };
+        // Only relay 3 survives: self key, self IP, and underlay-hairpin relay 2 are excluded.
+        assert_eq!(chain.hops.as_slice(), &[3]);
+
+        let statuses = runtime.status(
+            &snapshot,
+            |id| format!("n{id}"),
+            |_, _, _| (0, 0, 0, true),
+            |_| 0,
+        );
+        assert_eq!(statuses[0].layers[0].members[0].reason, "This node.");
+        assert_eq!(statuses[0].layers[0].members[1].reason, "This node.");
+        assert_eq!(statuses[1].reason, "Destination is this node.");
     }
 }

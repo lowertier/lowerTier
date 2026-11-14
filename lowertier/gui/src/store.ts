@@ -1,9 +1,11 @@
 // Polls the selected daemon once a second and keeps short histories for charts.
 import { createSignal } from "solid-js";
 import { api, ApiError, setTarget, type Doc } from "./api";
+import { configured } from "./config";
 import { ipv4 } from "./format";
 import { currentIncarnations } from "./incarnations";
 import { aliasFor } from "./notes";
+import { disambiguatePeerNames, sanitizeHops, selectViaPeerId } from "./routeLoops";
 
 export const HISTORY = 120;
 const INTERVAL = 1000;
@@ -81,8 +83,19 @@ function ingest(doc: Doc) {
   const counters = new Map<string, { rx: number; tx: number }>();
   const elapsed = previous ? Math.max(0.2, (at - previous.at) / 1000) : 0;
   const rows: PeerRow[] = [];
-  const self = doc.node?.node ?? {};
-  for (const peer of currentIncarnations((doc.peers ?? []) as Doc[], self.inst_id, self.peer_id)) {
+  const selfNode = doc.node?.node ?? {};
+  const selfPeerId = selfNode.peer_id as number | undefined;
+  const selfInst = selfNode.inst_id as string | undefined;
+  const selfHostname = selfNode.hostname as string | undefined;
+  const selfKey = configured("identity.public_key") as string | undefined;
+  const rawPeers = (doc.peers ?? []) as Doc[];
+  const peersById = new Map<number, { key?: string; inst?: string }>(
+    rawPeers.map((peer) => [
+      peer.peer_id as number,
+      { key: peer.peer_key as string | undefined, inst: peer.route?.inst_id as string | undefined },
+    ]),
+  );
+  for (const peer of currentIncarnations(rawPeers, selfInst, selfPeerId)) {
     const route: Doc = peer.route ?? {};
     const conns = ((peer.conns ?? []) as Doc[]).filter((conn) => !conn.is_closed);
     let rx = 0;
@@ -106,20 +119,30 @@ function ingest(doc: Doc) {
       .map((conn) => conn.tx_loss_ppm ?? (conn.loss_rate != null ? conn.loss_rate * 1e6 : undefined))
       .filter((value): value is number => value != null);
     const direct = conns.length > 0;
-    // The route path starts at this node; a path with more than one further hop is relayed.
-    const self = doc.node?.node?.peer_id;
-    const path = ((peer.path_peer_ids ?? []) as number[]).filter((id) => id !== self);
-    const nextHop: number | undefined = path.length > 1 ? path[0] : route.next_hop_peer_id;
+    const hops = sanitizeHops((peer.path_peer_ids ?? []) as number[], selfPeerId, direct ? peer.peer_id : undefined);
+    const via = selectViaPeerId({
+      peerId: peer.peer_id,
+      peerKey: peer.peer_key,
+      peerInst: route.inst_id,
+      direct,
+      pathPeerIds: (peer.path_peer_ids ?? []) as number[],
+      routeNextHop: route.next_hop_peer_id,
+      selfId: selfPeerId,
+      selfInst,
+      selfKey,
+      peersById,
+    });
+    const hostname = route.hostname || `peer ${peer.peer_id}`;
     const row: PeerRow = {
       id: peer.peer_id,
       key: peer.peer_key ?? "",
-      name: aliasFor(peer.peer_key ?? "") || route.hostname || `peer ${peer.peer_id}`,
-      hostname: route.hostname || `peer ${peer.peer_id}`,
+      name: aliasFor(peer.peer_key ?? "") || hostname,
+      hostname,
       address: ipv4(route.ipv4_addr),
       direct,
       transport: conns[0]?.tunnel?.tunnel_type ?? "",
-      via: nextHop && nextHop !== peer.peer_id ? nextHop : undefined,
-      hops: peer.path_peer_ids ?? [],
+      via,
+      hops,
       rtt: peer.rtt_us ?? (direct ? conns[0]?.stats?.latency_us : undefined),
       loss: peer.loss_ppm ?? (lossFromConns.length ? Math.max(...lossFromConns) : undefined),
       delivery: peer.delivery_bps,
@@ -142,6 +165,16 @@ function ingest(doc: Doc) {
       push(series.tx, tx);
     }
   }
+  const names = disambiguatePeerNames(
+    rows.map((row) => ({
+      id: row.id,
+      alias: aliasFor(row.key),
+      hostname: row.hostname,
+      address: row.address,
+    })),
+    selfHostname,
+  );
+  for (const row of rows) row.name = names.get(row.id) ?? row.name;
   rows.sort((a, b) => a.name.localeCompare(b.name));
   if (previous) {
     push(totals.rx, rows.reduce((sum, row) => sum + row.rx, 0));
@@ -252,7 +285,7 @@ export function start() {
 export const selfId = () => snapshot()?.node?.node?.peer_id as number | undefined;
 
 export function peerName(id: number): string {
-  if (id === selfId()) return snapshot()?.node?.node?.hostname || "this node";
+  if (id === selfId()) return snapshot()?.node?.node?.hostname || "this machine";
   return peers().find((peer) => peer.id === id)?.name ?? `peer ${id}`;
 }
 
