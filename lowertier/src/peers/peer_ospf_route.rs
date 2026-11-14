@@ -95,6 +95,30 @@ static REMOVE_DEAD_PEER_INFO_AFTER: Duration = Duration::from_secs(3660);
 //    in another zone when two zone restore the conneciton.
 static REMOVE_UNREACHABLE_PEER_INFO_AFTER: Duration = Duration::from_secs(90);
 
+static LAST_INCARNATION_STARTED_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+
+fn next_incarnation_started_unix_ms() -> u64 {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let now_ms = u64::try_from(now_ms).unwrap_or(u64::MAX).max(1);
+    let previous = LAST_INCARNATION_STARTED_UNIX_MS
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
+            Some(if now_ms > prev {
+                now_ms
+            } else {
+                prev.saturating_add(1)
+            })
+        })
+        .unwrap_or(0);
+    if now_ms > previous {
+        now_ms
+    } else {
+        previous.saturating_add(1)
+    }
+}
+
 // Bound decoded route state before graph construction and bitmap scanning.
 const MAX_ROUTE_SYNC_PEERS: usize = 4096;
 // Keep dense topology rebuilds inside the process memory contract.
@@ -419,37 +443,83 @@ fn route_peer_inst_id(info: &RoutePeerInfo) -> Option<uuid::Uuid> {
     info.inst_id.map(Into::into)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IncarnationCandidate<'a> {
+    peer_id: PeerId,
+    inst_id: Option<uuid::Uuid>,
+    pubkey: &'a [u8],
+    is_direct_live: bool,
+    incarnation_started_unix_ms: u64,
+    last_update: Option<SystemTime>,
+}
+
 /// Route entries left behind by earlier runs of an instance. A restarted instance takes a new
 /// peer ID under the same instance ID, and its old entry can stay reachable through stale
-/// adjacency claims for up to [`REMOVE_DEAD_PEER_INFO_AFTER`]. Keep the newest entry per
-/// instance ID, and drop every other entry that carries this node's own instance ID.
-fn superseded_incarnations(
+/// adjacency claims for up to [`REMOVE_DEAD_PEER_INFO_AFTER`]. Group remote entries by
+/// `(inst_id, noise_static_pubkey)` so an unrelated key cannot spoof `inst_id` to evict a peer,
+/// keep the candidate ranked highest by `(is_direct_live, incarnation_started_unix_ms,
+/// last_update, peer_id)`, and drop every other entry that carries this node's own instance ID.
+fn superseded_incarnations<'a>(
     my_peer_id: PeerId,
     my_inst_id: uuid::Uuid,
-    entries: impl IntoIterator<Item = (PeerId, Option<uuid::Uuid>, Option<SystemTime>)>,
+    entries: impl IntoIterator<Item = IncarnationCandidate<'a>>,
 ) -> Vec<PeerId> {
-    let mut newest: HashMap<uuid::Uuid, (PeerId, Option<SystemTime>)> = HashMap::new();
+    #[derive(Clone, Copy)]
+    struct KeptCandidate {
+        peer_id: PeerId,
+        is_direct_live: bool,
+        incarnation_started_unix_ms: u64,
+        last_update: Option<SystemTime>,
+    }
+
+    let mut newest: HashMap<(uuid::Uuid, Vec<u8>), KeptCandidate> = HashMap::new();
     let mut stale = Vec::new();
-    for (peer_id, inst_id, last_update) in entries {
-        let Some(inst_id) = inst_id.filter(|id| !id.is_nil()) else {
+    for candidate in entries {
+        let Some(inst_id) = candidate.inst_id.filter(|id| !id.is_nil()) else {
             continue;
         };
         if inst_id == my_inst_id {
-            if peer_id != my_peer_id {
-                stale.push(peer_id);
+            if candidate.peer_id != my_peer_id {
+                stale.push(candidate.peer_id);
             }
             continue;
         }
-        match newest.get_mut(&inst_id) {
+        let key = (inst_id, candidate.pubkey.to_vec());
+        let rank = (
+            candidate.is_direct_live,
+            candidate.incarnation_started_unix_ms,
+            candidate.last_update,
+            candidate.peer_id,
+        );
+        match newest.get_mut(&key) {
             None => {
-                newest.insert(inst_id, (peer_id, last_update));
+                newest.insert(
+                    key,
+                    KeptCandidate {
+                        peer_id: candidate.peer_id,
+                        is_direct_live: candidate.is_direct_live,
+                        incarnation_started_unix_ms: candidate.incarnation_started_unix_ms,
+                        last_update: candidate.last_update,
+                    },
+                );
             }
             Some(kept) => {
-                if (last_update, peer_id) > (kept.1, kept.0) {
-                    stale.push(kept.0);
-                    *kept = (peer_id, last_update);
+                let kept_rank = (
+                    kept.is_direct_live,
+                    kept.incarnation_started_unix_ms,
+                    kept.last_update,
+                    kept.peer_id,
+                );
+                if rank > kept_rank {
+                    stale.push(kept.peer_id);
+                    *kept = KeptCandidate {
+                        peer_id: candidate.peer_id,
+                        is_direct_live: candidate.is_direct_live,
+                        incarnation_started_unix_ms: candidate.incarnation_started_unix_ms,
+                        last_update: candidate.last_update,
+                    };
                 } else {
-                    stale.push(peer_id);
+                    stale.push(candidate.peer_id);
                 }
             }
         }
@@ -462,19 +532,24 @@ fn superseded_incarnations(
 fn prune_stale_topology_peers(
     my_peer_id: PeerId,
     my_inst_id: uuid::Uuid,
+    direct_live_peers: &HashSet<PeerId>,
     peer_infos: &mut HashMap<PeerId, RoutePeerInfo>,
 ) -> HashSet<PeerId> {
     let mut stale: HashSet<PeerId> = superseded_incarnations(
         my_peer_id,
         my_inst_id,
-        peer_infos.iter().map(|(peer_id, info)| {
-            (
-                *peer_id,
-                route_peer_inst_id(info),
-                info.last_update
+        peer_infos
+            .iter()
+            .map(|(peer_id, info)| IncarnationCandidate {
+                peer_id: *peer_id,
+                inst_id: route_peer_inst_id(info),
+                pubkey: info.noise_static_pubkey.as_slice(),
+                is_direct_live: direct_live_peers.contains(peer_id),
+                incarnation_started_unix_ms: info.incarnation_started_unix_ms,
+                last_update: info
+                    .last_update
                     .and_then(|timestamp| SystemTime::try_from(timestamp).ok()),
-            )
-        }),
+            }),
     )
     .into_iter()
     .collect();
@@ -589,6 +664,7 @@ impl RoutePeerInfo {
             bridge_attestation_issued_unix_ms: 0,
             bridge_attestation_expiry_unix_ms: 0,
             relay_link_cost: Vec::new(),
+            incarnation_started_unix_ms: 0,
         }
     }
 
@@ -604,6 +680,7 @@ impl RoutePeerInfo {
     pub fn new_updated_self(
         my_peer_id: PeerId,
         peer_route_id: u64,
+        incarnation_started_unix_ms: u64,
         global_ctx: &ArcGlobalCtx,
         public_ipv6_addr_lease: Option<Ipv6Inet>,
     ) -> Self {
@@ -664,6 +741,7 @@ impl RoutePeerInfo {
             lowertier_version: LOWTIER_VERSION.to_string(),
             feature_flag: Some(feature_flag),
             peer_route_id,
+            incarnation_started_unix_ms,
             network_length: global_ctx
                 .get_ipv4()
                 .map(|x| x.network_length() as u32)
@@ -1419,6 +1497,18 @@ impl SyncedRouteInfo {
         self.topology_state_lock.lock().unwrap()
     }
 
+    fn direct_live_peers(&self, my_peer_id: PeerId) -> HashSet<PeerId> {
+        let mut live: HashSet<PeerId> = self
+            .locally_authenticated_peers
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        if let Some(my_conn) = self.conn_map.read().get(&my_peer_id) {
+            live.extend(my_conn.connected_peers.iter().copied());
+        }
+        live
+    }
+
     fn set_peer_groups(&self, peer_id: PeerId, groups: HashMap<String, Vec<u8>>) {
         if groups.is_empty() {
             self.group_trust_map.remove(&peer_id);
@@ -2042,6 +2132,8 @@ impl SyncedRouteInfo {
         if peer_infos.len() != raw_peer_infos.len() {
             return Err(Error::Stopped);
         }
+        let direct_live = self.direct_live_peers(my_peer_id);
+        let mut superseded_to_remove: HashSet<PeerId> = HashSet::new();
         let mut need_inc_version = false;
         for (idx, route_info) in peer_infos.iter().enumerate() {
             let Some(raw_route_info) = raw_peer_infos.get(idx) else {
@@ -2080,6 +2172,49 @@ impl SyncedRouteInfo {
             }
 
             let mut guard = self.peer_infos.write();
+            if route_info.peer_id != my_peer_id {
+                if let Some(me) = guard.get(&my_peer_id) {
+                    let same_pubkey = !me.noise_static_pubkey.is_empty()
+                        && route_info.noise_static_pubkey == me.noise_static_pubkey;
+                    let same_inst_id = route_peer_inst_id(me)
+                        .filter(|id| !id.is_nil())
+                        .is_some_and(|my_inst| route_peer_inst_id(&route_info) == Some(my_inst));
+                    if same_pubkey || same_inst_id {
+                        continue;
+                    }
+                }
+                if let Some(inst_id) = route_peer_inst_id(&route_info).filter(|id| !id.is_nil()) {
+                    let incoming_rank = (
+                        direct_live.contains(&route_info.peer_id),
+                        route_info.incarnation_started_unix_ms,
+                    );
+                    let mut rejected_as_superseded = false;
+                    for (existing_id, existing_info) in guard.iter() {
+                        if *existing_id != my_peer_id
+                            && *existing_id != route_info.peer_id
+                            && existing_info.version != 0
+                            && route_peer_inst_id(existing_info) == Some(inst_id)
+                            && existing_info.noise_static_pubkey == route_info.noise_static_pubkey
+                        {
+                            let existing_rank = (
+                                direct_live.contains(existing_id),
+                                existing_info.incarnation_started_unix_ms,
+                            );
+                            if incoming_rank < existing_rank {
+                                rejected_as_superseded = true;
+                                break;
+                            }
+                            if incoming_rank > existing_rank && !direct_live.contains(existing_id) {
+                                superseded_to_remove.insert(*existing_id);
+                            }
+                        }
+                    }
+                    if rejected_as_superseded {
+                        continue;
+                    }
+                    superseded_to_remove.remove(&route_info.peer_id);
+                }
+            }
             // time between peers may not be synchronized, so update last_update to local now.
             // note only last_update with larger version will be updated to local saved peer info.
             route_info.last_update = Some(Timestamp::now());
@@ -2117,6 +2252,10 @@ impl SyncedRouteInfo {
                 }
                 need_inc_version = true;
             }
+        }
+        if !superseded_to_remove.is_empty() {
+            self.remove_peers_locked(superseded_to_remove);
+            need_inc_version = true;
         }
         if need_inc_version {
             self.version.inc();
@@ -2262,6 +2401,7 @@ impl SyncedRouteInfo {
         &self,
         my_peer_id: PeerId,
         my_peer_route_id: u64,
+        my_incarnation_started_unix_ms: u64,
         global_ctx: &ArcGlobalCtx,
         public_ipv6_addr_lease: Option<Ipv6Inet>,
     ) -> bool {
@@ -2269,6 +2409,7 @@ impl SyncedRouteInfo {
         let mut new = RoutePeerInfo::new_updated_self(
             my_peer_id,
             my_peer_route_id,
+            my_incarnation_started_unix_ms,
             global_ctx,
             public_ipv6_addr_lease,
         );
@@ -2868,7 +3009,7 @@ impl TopologyBuildInput {
     }
 
     fn capture(my_peer_id: PeerId, my_inst_id: uuid::Uuid, synced_info: &SyncedRouteInfo) -> Self {
-        let (version, mut peer_infos, conn_map, suppressed_peer_ids) = {
+        let (version, mut peer_infos, conn_map, suppressed_peer_ids, direct_live_peers) = {
             let _topology_guard = synced_info.topology_state_lock();
             let version = synced_info.version.get();
             let peer_infos = synced_info
@@ -2896,10 +3037,25 @@ impl TopologyBuildInput {
                 .iter()
                 .map(|entry| *entry.key())
                 .collect::<HashSet<_>>();
-            (version, peer_infos, conn_map, suppressed_peer_ids)
+            let mut direct_live_peers: HashSet<PeerId> = synced_info
+                .locally_authenticated_peers
+                .iter()
+                .map(|entry| *entry.key())
+                .collect();
+            if let Some(my_conn) = conn_map.get(&my_peer_id) {
+                direct_live_peers.extend(my_conn.connected_peers.iter().copied());
+            }
+            (
+                version,
+                peer_infos,
+                conn_map,
+                suppressed_peer_ids,
+                direct_live_peers,
+            )
         };
 
-        let _stale_peers = prune_stale_topology_peers(my_peer_id, my_inst_id, &mut peer_infos);
+        let _stale_peers =
+            prune_stale_topology_peers(my_peer_id, my_inst_id, &direct_live_peers, &mut peer_infos);
 
         let relay_credential_peers = peer_infos
             .iter()
@@ -4862,6 +5018,7 @@ struct RouteRebuildWorkCounters {
 struct PeerRouteServiceImpl {
     my_peer_id: PeerId,
     my_peer_route_id: u64,
+    my_incarnation_started_unix_ms: u64,
     global_ctx: ArcGlobalCtx,
     sessions: DashMap<PeerId, Arc<SyncRouteSession>>,
 
@@ -4931,6 +5088,10 @@ impl Debug for PeerRouteServiceImpl {
         f.debug_struct("PeerRouteServiceImpl")
             .field("my_peer_id", &self.my_peer_id)
             .field("my_peer_route_id", &self.my_peer_route_id)
+            .field(
+                "my_incarnation_started_unix_ms",
+                &self.my_incarnation_started_unix_ms,
+            )
             .field("network", &self.global_ctx.get_network_identity())
             .field("sessions", &self.sessions)
             .field("route_table", &self.route_table)
@@ -4972,6 +5133,7 @@ impl PeerRouteServiceImpl {
         PeerRouteServiceImpl {
             my_peer_id,
             my_peer_route_id: rand::random(),
+            my_incarnation_started_unix_ms: next_incarnation_started_unix_ms(),
             global_ctx,
             sessions: DashMap::new(),
 
@@ -5114,6 +5276,12 @@ impl PeerRouteServiceImpl {
     fn remove_session(&self, dst_peer_id: PeerId) {
         self.sessions.remove(&dst_peer_id);
         shrink_dashmap(&self.sessions, None);
+    }
+
+    fn collect_direct_live_peers(&self) -> HashSet<PeerId> {
+        let mut live = self.synced_route_info.direct_live_peers(self.my_peer_id);
+        live.extend(self.sessions.iter().map(|entry| *entry.key()));
+        live
     }
 
     fn authenticated_peer_info(
@@ -5448,6 +5616,7 @@ impl PeerRouteServiceImpl {
         self.synced_route_info.update_my_peer_info(
             self.my_peer_id,
             self.my_peer_route_id,
+            self.my_incarnation_started_unix_ms,
             &self.global_ctx,
             *self.self_public_ipv6_addr_lease.lock().unwrap(),
         )
@@ -7167,9 +7336,13 @@ impl PeerRouteServiceImpl {
 
     async fn clear_expired_peer(&self) {
         let now = SystemTime::now();
+        let direct_live_peers = self.collect_direct_live_peers();
         let route_snapshot = self.forwarding_snapshot();
         let mut to_remove = Vec::new();
         for (peer_id, peer_info) in self.synced_route_info.peer_infos.read().iter() {
+            if *peer_id == self.my_peer_id || direct_live_peers.contains(peer_id) {
+                continue;
+            }
             let Some(last_update) = peer_info
                 .last_update
                 .and_then(|timestamp| SystemTime::try_from(timestamp).ok())
@@ -7191,23 +7364,29 @@ impl PeerRouteServiceImpl {
             }
         }
 
-        to_remove.extend(superseded_incarnations(
-            self.my_peer_id,
-            self.global_ctx.get_id(),
-            self.synced_route_info
-                .peer_infos
-                .read()
-                .iter()
-                .filter(|(peer_id, _)| !to_remove.contains(*peer_id))
-                .map(|(peer_id, info)| {
-                    (
-                        *peer_id,
-                        route_peer_inst_id(info),
-                        info.last_update
+        to_remove.extend(
+            superseded_incarnations(
+                self.my_peer_id,
+                self.global_ctx.get_id(),
+                self.synced_route_info
+                    .peer_infos
+                    .read()
+                    .iter()
+                    .filter(|(peer_id, _)| !to_remove.contains(*peer_id))
+                    .map(|(peer_id, info)| IncarnationCandidate {
+                        peer_id: *peer_id,
+                        inst_id: route_peer_inst_id(info),
+                        pubkey: info.noise_static_pubkey.as_slice(),
+                        is_direct_live: direct_live_peers.contains(peer_id),
+                        incarnation_started_unix_ms: info.incarnation_started_unix_ms,
+                        last_update: info
+                            .last_update
                             .and_then(|timestamp| SystemTime::try_from(timestamp).ok()),
-                    )
-                }),
-        ));
+                    }),
+            )
+            .into_iter()
+            .filter(|peer_id| *peer_id != self.my_peer_id && !direct_live_peers.contains(peer_id)),
+        );
         self.synced_route_info
             .remove_peers(to_remove.iter().copied());
 
@@ -9353,6 +9532,24 @@ impl Route for PeerRoute {
 mod incarnation_tests {
     use super::*;
 
+    fn candidate<'a>(
+        peer_id: PeerId,
+        inst_id: Option<uuid::Uuid>,
+        pubkey: &'a [u8],
+        is_direct_live: bool,
+        incarnation_started_unix_ms: u64,
+        last_update: Option<SystemTime>,
+    ) -> IncarnationCandidate<'a> {
+        IncarnationCandidate {
+            peer_id,
+            inst_id,
+            pubkey,
+            is_direct_live,
+            incarnation_started_unix_ms,
+            last_update,
+        }
+    }
+
     #[test]
     fn superseded_incarnations_keep_the_newest_and_drop_own_ghosts() {
         let me = uuid::Uuid::from_u128(1);
@@ -9362,14 +9559,14 @@ mod incarnation_tests {
             10,
             me,
             [
-                (10, Some(me), at(50)),
-                (11, Some(me), at(60)),
-                (20, Some(other), at(100)),
-                (21, Some(other), at(200)),
-                (22, Some(other), at(150)),
-                (30, Some(uuid::Uuid::nil()), at(1)),
-                (31, Some(uuid::Uuid::nil()), at(2)),
-                (40, None, at(1)),
+                candidate(10, Some(me), b"self-key", false, 0, at(50)),
+                candidate(11, Some(me), b"self-key", false, 0, at(60)),
+                candidate(20, Some(other), b"other-key", false, 0, at(100)),
+                candidate(21, Some(other), b"other-key", false, 0, at(200)),
+                candidate(22, Some(other), b"other-key", false, 0, at(150)),
+                candidate(30, Some(uuid::Uuid::nil()), b"nil", false, 0, at(1)),
+                candidate(31, Some(uuid::Uuid::nil()), b"nil", false, 0, at(2)),
+                candidate(40, None, b"none", false, 0, at(1)),
             ],
         );
         stale.sort_unstable();
@@ -9403,10 +9600,135 @@ mod incarnation_tests {
         .into_iter()
         .collect();
 
-        let pruned = prune_stale_topology_peers(1, my_inst, &mut peer_infos);
+        let pruned = prune_stale_topology_peers(1, my_inst, &HashSet::new(), &mut peer_infos);
         assert_eq!(pruned, [2, 3, 20].into_iter().collect());
         assert!(peer_infos.contains_key(&1));
         assert!(peer_infos.contains_key(&21));
         assert_eq!(peer_infos.len(), 2);
+    }
+
+    #[test]
+    fn direct_live_and_newer_incarnation_beat_late_gossip_ghost() {
+        let me = uuid::Uuid::from_u128(1);
+        let inst_a = uuid::Uuid::from_u128(10);
+        let inst_b = uuid::Uuid::from_u128(11);
+        let at = |seconds| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        // Case (a): direct-live peer (peer 100) with older last_update and 0 incarnation_started
+        // must beat a non-direct late gossip ghost (peer 101) with newer receipt last_update.
+        // Case (b): between non-direct candidates for inst_b, higher incarnation_started_unix_ms
+        // (peer 201) beats an older incarnation (peer 200) whose gossip arrived later.
+        let mut stale = superseded_incarnations(
+            1,
+            me,
+            [
+                candidate(100, Some(inst_a), b"key-a", true, 0, at(100)),
+                candidate(101, Some(inst_a), b"key-a", false, 500, at(999)),
+                candidate(200, Some(inst_b), b"key-b", false, 1_000, at(999)),
+                candidate(201, Some(inst_b), b"key-b", false, 2_000, at(200)),
+            ],
+        );
+        stale.sort_unstable();
+        assert_eq!(stale, vec![101, 200]);
+    }
+
+    #[test]
+    fn different_pubkey_cannot_spoof_inst_id_to_evict_peer() {
+        let me = uuid::Uuid::from_u128(1);
+        let shared_inst = uuid::Uuid::from_u128(20);
+        let at = |seconds| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        let stale = superseded_incarnations(
+            1,
+            me,
+            [
+                candidate(200, Some(shared_inst), b"victim-key", false, 100, at(10)),
+                candidate(
+                    201,
+                    Some(shared_inst),
+                    b"spoofer-key",
+                    false,
+                    9_999,
+                    at(999),
+                ),
+            ],
+        );
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn update_peer_infos_evicts_superseded_ghost_and_rejects_late_zombie_gossip() {
+        let my_peer_id = 1;
+        let global_ctx = crate::common::global_ctx::tests::get_mock_global_ctx();
+        let service_impl = PeerRouteServiceImpl::new(my_peer_id, global_ctx);
+        assert!(service_impl.update_my_peer_info());
+
+        let synced = &service_impl.synced_route_info;
+        let other_inst = uuid::Uuid::from_u128(0xdead_beef);
+        let make_raw = |peer_id: PeerId, incarnation_started_unix_ms: u64, version: u32| {
+            let mut info = RoutePeerInfo::new();
+            info.peer_id = peer_id;
+            info.inst_id = Some(other_inst.into());
+            info.noise_static_pubkey = vec![7u8; 32];
+            info.incarnation_started_unix_ms = incarnation_started_unix_ms;
+            info.version = version;
+            let mut raw = DynamicMessage::new(RoutePeerInfo::default().descriptor());
+            raw.transcode_from(&info).unwrap();
+            (info, raw)
+        };
+
+        let (p1, raw_p1) = make_raw(20, 1_000, 1);
+        assert!(
+            synced
+                .update_peer_infos_and_conn_info_with_authority(
+                    my_peer_id,
+                    service_impl.my_peer_route_id,
+                    99,
+                    &[p1],
+                    &[raw_p1],
+                    None,
+                    true,
+                )
+                .unwrap()
+        );
+        assert!(synced.peer_infos.read().contains_key(&20));
+
+        let (p2, raw_p2) = make_raw(21, 2_000, 1);
+        assert!(
+            synced
+                .update_peer_infos_and_conn_info_with_authority(
+                    my_peer_id,
+                    service_impl.my_peer_route_id,
+                    98,
+                    &[p2],
+                    &[raw_p2],
+                    None,
+                    true,
+                )
+                .unwrap()
+        );
+        {
+            let infos = synced.peer_infos.read();
+            assert!(!infos.contains_key(&20));
+            assert!(infos.contains_key(&21));
+        }
+
+        // Late zombie gossip of P1 must be rejected without re-inserting P1 or evicting P2.
+        let (late_p1, raw_late_p1) = make_raw(20, 1_000, 2);
+        let changed = synced
+            .update_peer_infos_and_conn_info_with_authority(
+                my_peer_id,
+                service_impl.my_peer_route_id,
+                97,
+                &[late_p1],
+                &[raw_late_p1],
+                None,
+                true,
+            )
+            .unwrap();
+        assert!(!changed);
+        {
+            let infos = synced.peer_infos.read();
+            assert!(!infos.contains_key(&20));
+            assert!(infos.contains_key(&21));
+        }
     }
 }

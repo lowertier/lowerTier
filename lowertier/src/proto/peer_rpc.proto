@@ -152,6 +152,7 @@ message RoutePeerInfo {
   repeated common.RelayLinkCost relay_link_cost = 30;
   reserved 31;
   reserved "relay_prefer";
+  uint64 incarnation_started_unix_ms = 32;
 }
 
 message PeerIdVersion {
