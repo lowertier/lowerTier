@@ -114,6 +114,13 @@ pub fn ensure_transport_protocol_enabled(flags: &Flags, protocol: &str) -> anyho
 }
 
 pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
+    validate_flags_with_network_secret(flags, false)
+}
+
+pub fn validate_flags_with_network_secret(
+    flags: &Flags,
+    has_network_secret: bool,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         flags
             .memory_bytes()
@@ -146,7 +153,9 @@ pub fn validate_flags(flags: &Flags) -> anyhow::Result<()> {
             )
         })?;
     flags.relay_config().validate()?;
-    flags.camouflage_config().validate()?;
+    flags
+        .camouflage_config()
+        .validate_with_network_secret(has_network_secret)?;
     if let Some(policy) = &flags.path_policy {
         crate::peers::path_policy::PathPolicy::compile(policy)?;
     }
@@ -1209,7 +1218,13 @@ impl TomlConfigLoader {
                 path: config.path.clone().unwrap_or_default(),
             }
         });
-        validate_flags(&flags).map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
+        let has_network_secret = config
+            .network_identity
+            .as_ref()
+            .and_then(|identity| identity.network_secret.as_deref())
+            .is_some_and(|secret| !secret.is_empty());
+        validate_flags_with_network_secret(&flags, has_network_secret)
+            .map_err(|err| anyhow::anyhow!("invalid flags: {err:#}"))?;
         validate_notes(config.note.as_deref().unwrap_or_default())?;
         crate::common::control_config::validate_camouflage_listeners(
             &flags,

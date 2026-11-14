@@ -152,14 +152,14 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `camouflage.server_names` | list of strings |  | new connections; QUIC: instance restart | TLS server names (SNI). Clients use one name per destination; servers accept all. Configure a decoy upstream or a website with matching certificates. |
+| `camouflage.server_names` | list of strings |  | new connections; QUIC: instance restart | TLS server names (SNI). Defaults to challenges.cloudflare.com when unset; custom names require a website or decoy upstream. |
 | `camouflage.tls_cert` | path |  | new connections; QUIC: instance restart | TLS certificate file. Set together with tls_key. |
 | `camouflage.tls_key` | path |  | new connections; QUIC: instance restart | TLS private key file. |
-| `camouflage.admission_secret` | secret |  | new connections; QUIC: instance restart | Secret that separates VPN clients from website visitors (16+ bytes). |
+| `camouflage.admission_secret` | secret |  | new connections; QUIC: instance restart | Secret that separates VPN clients from website visitors (reuses network.secret when unset; 16+ bytes). |
 | `camouflage.website_root` | path |  | new connections; QUIC: instance restart | Static website served to unauthenticated visitors. |
 | `camouflage.sni_routing` | bool | `false` | new connections; QUIC: instance restart | Classify connections by SNI instead of the admission marker. |
-| `camouflage.decoy_upstream.tcp` | string |  | new connections; QUIC: instance restart | TCP decoy upstream for unauthenticated connections. |
-| `camouflage.decoy_upstream.udp` | string |  | new connections; QUIC: instance restart | UDP decoy upstream for unauthenticated connections. |
+| `camouflage.decoy_upstream.tcp` | string |  | new connections; QUIC: instance restart | TCP decoy upstream for unauthenticated connections (defaults to challenges.cloudflare.com:443 unless website_root or TLS certs are set). |
+| `camouflage.decoy_upstream.udp` | string |  | new connections; QUIC: instance restart | UDP decoy upstream for unauthenticated connections (defaults to challenges.cloudflare.com:443 unless website_root or TLS certs are set). |
 | `camouflage.wss_path` | string | `/ws` | new connections | WebSocket path. |
 | `camouflage.http_host` | string |  | new connections | HTTP authority for H2 and WSS. |
 | `camouflage.trusted_proxy_cidrs` | list of strings |  | new connections | Reverse proxies trusted for client addresses. |

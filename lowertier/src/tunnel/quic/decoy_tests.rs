@@ -44,10 +44,14 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
     let secret = b"decoy-route-capacity-test-secret";
     let decoy = QuicDecoySocket::new(
         public,
-        upstream.local_addr().unwrap(),
+        QuicDecoyUpstreams {
+            v4: Some(upstream.local_addr().unwrap()),
+            v6: None,
+        },
         Arc::from(secret.as_slice()),
         None,
-        None,
+        false,
+        Arc::from(vec![HOST.to_owned()]),
     );
     let initial = packet(0, b"original", b"clientid", 1200);
     for port in 10000..15000 {
@@ -91,7 +95,7 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
     );
     assert_eq!(local_len, 1200);
     assert!(mixed[..local_len].iter().all(|byte| *byte == 0x40));
-    assert_eq!(decoy.decoy_tx.capacity(), 63);
+    assert_eq!(decoy.decoy_tx.as_ref().unwrap().capacity(), 63);
     assert_eq!(decoy.routes.len(), 1);
     let original = mixed.clone();
     assert_eq!(
@@ -124,6 +128,8 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
         .collect();
     decoy
         .decoy_tx
+        .as_ref()
+        .unwrap()
         .send(QuicDecoyPacket {
             client,
             server_ip: None,
@@ -132,7 +138,7 @@ async fn unadmitted_decoy_routes_cannot_exhaust_authenticated_route_capacity() {
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while decoy.decoy_tx.capacity() != 64 {
+        while decoy.decoy_tx.as_ref().unwrap().capacity() != 64 {
             tokio::task::yield_now().await;
         }
     })

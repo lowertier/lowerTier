@@ -136,11 +136,12 @@ fn load_identity(
     }
 }
 
-/// Picks the certificate for the server name a client sends. Unknown or absent names get the
-/// first configured certificate, so a probe still completes a normal-looking handshake.
+/// Picks the certificate for the server name a client sends. Connections without an allowed
+/// server name are rejected before completing TLS.
 #[derive(Debug)]
 struct ServerNameCertificates {
     by_name: std::collections::HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+    allowed_names: std::collections::HashSet<String>,
     default: Arc<rustls::sign::CertifiedKey>,
 }
 
@@ -149,10 +150,11 @@ impl rustls::server::ResolvesServerCert for ServerNameCertificates {
         &self,
         hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        let chosen = hello
-            .server_name()
-            .and_then(|name| self.by_name.get(&name.to_ascii_lowercase()));
-        Some(chosen.unwrap_or(&self.default).clone())
+        let sni = hello.server_name()?.to_ascii_lowercase();
+        if !self.allowed_names.contains(&sni) {
+            return None;
+        }
+        Some(self.by_name.get(&sni).unwrap_or(&self.default).clone())
     }
 }
 
@@ -166,6 +168,12 @@ pub fn server_cert_resolver(
             .map(Arc::new)
             .context("load stealth TLS server identity")
     };
+    let allowed_names: std::collections::HashSet<String> = flags
+        .camouflage_config()
+        .effective_server_names()
+        .into_iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
     let mut by_name = std::collections::HashMap::new();
     let mut default = None;
     for (name, cert_path, key_path) in server_identity_paths(flags) {
@@ -183,7 +191,11 @@ pub fn server_cert_resolver(
             certified(certs, key)?
         }
     };
-    Ok(Arc::new(ServerNameCertificates { by_name, default }))
+    Ok(Arc::new(ServerNameCertificates {
+        by_name,
+        allowed_names,
+        default,
+    }))
 }
 
 /// One process-wide self-signed identity for QUIC/H2/WSS when no cert files
@@ -306,6 +318,13 @@ pub fn rustls_server_config(
     Ok(config)
 }
 
+/// Extract a DNS hostname from `url`, ignoring IPv4/IPv6 literals even on non-special schemes
+/// (`h2://`, `quic://`, `tcp://`) where `url::Url::domain()` returns opaque IPv4 strings.
+pub(crate) fn url_dns_host(url: &url::Url) -> Option<&str> {
+    url.domain()
+        .filter(|host| !host.is_empty() && host.parse::<std::net::IpAddr>().is_err())
+}
+
 /// The TLS server name for a connection to `remote`: one of the configured names, chosen per
 /// destination, or the host of the peer URI.
 pub fn client_server_name(
@@ -313,12 +332,12 @@ pub fn client_server_name(
     url: &url::Url,
     remote: std::net::IpAddr,
 ) -> Result<ServerName<'static>, TunnelError> {
-    let name = match flags.camouflage_config().server_name_for(remote) {
+    let config = flags.camouflage_config();
+    let name = match config.server_name_for(remote) {
         Some(name) => name.to_owned(),
-        None => url
-            .domain()
+        None => url_dns_host(url)
             .map(str::to_string)
-            .unwrap_or_else(|| "localhost".to_string()),
+            .unwrap_or_else(|| crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME.to_string()),
     };
     ServerName::try_from(name).map_err(|_| TunnelError::InvalidProtocol("Invalid SNI".to_string()))
 }
@@ -556,5 +575,73 @@ mod tests {
                 .map(|suite| suite.suite()),
             Some(rustls::CipherSuite::TLS13_AES_128_GCM_SHA256)
         );
+    }
+
+    #[test]
+    fn client_server_name_defaults_to_cloudflare_for_ip_targets() {
+        let mut flags = crate::common::config::gen_default_flags();
+        let ip_url: url::Url = "https://127.0.0.1:443".parse().unwrap();
+        let h2_ip_url: url::Url = "h2://127.0.0.1:443".parse().unwrap();
+        let quic_ip_url: url::Url = "quic://127.0.0.1:443".parse().unwrap();
+        let host_url: url::Url = "wss://edge.example.test:443".parse().unwrap();
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+
+        for target in [&ip_url, &h2_ip_url, &quic_ip_url] {
+            assert_eq!(
+                super::client_server_name(&flags, target, ip).unwrap(),
+                rustls::pki_types::ServerName::try_from("challenges.cloudflare.com").unwrap()
+            );
+        }
+        assert_eq!(
+            super::client_server_name(&flags, &host_url, ip).unwrap(),
+            rustls::pki_types::ServerName::try_from("edge.example.test").unwrap()
+        );
+
+        flags.camouflage_config_mut().server_names = vec!["custom.example.test".to_owned()];
+        assert_eq!(
+            super::client_server_name(&flags, &ip_url, ip).unwrap(),
+            rustls::pki_types::ServerName::try_from("custom.example.test").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn server_cert_resolver_rejects_missing_or_unmatched_sni() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+        let flags = crate::common::config::gen_default_flags();
+        let acceptor = TlsAcceptor::from(Arc::new(
+            super::rustls_server_config(&flags, &[b"h2"]).unwrap(),
+        ));
+        let client_cfg = Arc::new(super::rustls_client_config_for(&[b"h2"], false).unwrap());
+        let connector = TlsConnector::from(client_cfg);
+
+        // No SNI (IP literal) and wrong SNI ("localhost") must both abort TLS before certificate exchange.
+        for bad_sni in [
+            rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(),
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+        ] {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+            let acceptor = acceptor.clone();
+            let server_task = tokio::spawn(async move { acceptor.accept(server_io).await });
+            let client_res = connector.connect(bad_sni, client_io).await;
+            assert!(client_res.is_err(), "expected missing/wrong SNI to fail handshake");
+            assert!(server_task.await.unwrap().is_err());
+        }
+
+        // Default SNI ("challenges.cloudflare.com") succeeds cleanly.
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let mut tls = acceptor.accept(server_io).await.unwrap();
+            let mut buf = [0_u8; 4];
+            tls.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+        });
+        let good_sni = rustls::pki_types::ServerName::try_from("challenges.cloudflare.com").unwrap();
+        let mut tls = connector.connect(good_sni, client_io).await.unwrap();
+        tls.write_all(b"ping").await.unwrap();
+        tls.flush().await.unwrap();
+        server_task.await.unwrap();
     }
 }

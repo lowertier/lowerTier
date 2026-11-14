@@ -5,15 +5,16 @@ Peers that prove the admission secret reach lowertier. Every other visitor is pa
 
 ## How it works
 
-Every listener speaks real TLS: QUIC (HTTP/3), HTTP/2, and WSS each complete a TLS handshake that presents one of `camouflage.server_names` as the server name.
-A peer then proves it holds the admission secret before the node treats the connection as lowertier:
+Every listener speaks real TLS: QUIC (HTTP/3), HTTP/2, and WSS require matching TLS SNI and enable camouflage across all three transports without falling back to un-camouflaged listeners or built-in pages.
+When `[camouflage]` leaves `server_names`, `website_root`, `tls_cert`/`tls_key`, and `decoy_upstream` unset, peers send `challenges.cloudflare.com` as the SNI and HTTP authority, WSS requires a non-root `camouflage.wss_path` (default `/ws`), nodes reuse `network.secret` for admission and routing markers, and non-loopback listeners forward unauthenticated probes to `challenges.cloudflare.com:443` (or silently reject and drop them if no decoy or `website_root` is available).
+A peer proves it holds the admission secret before the node treats the connection as lowertier:
 
 - QUIC peers place an HMAC of the secret in the connection ID of their first packet.
-- HTTP/2 peers send the marker as a tiny TLS record before the ClientHello when a decoy upstream is set, then an admission token on the CONNECT request.
+- HTTP/2 peers send the marker as a tiny TLS record before the ClientHello (unless `camouflage.sni_routing = true`), then an admission token on the CONNECT request.
 - WSS peers send the token in the `Authorization` header of the upgrade request to `camouflage.wss_path`.
 
-The token is an HMAC of the secret over a five-minute window. A connection without a valid marker or token is a visitor:
-the node splices it to `decoy_upstream`, serves `website_root`, or answers like an ordinary web server, within the probe limits below.
+The token is an HMAC of the secret over a five-minute window. A connection without a matching SNI, valid marker/path, or valid token is treated as a probe:
+the node splices it to `decoy_upstream`, serves `website_root`, or silently rejects and drops it before exposing LowTier, within the probe limits below.
 After admission, Noise authenticates both peers and binds the TLS exporter, so a TLS endpoint in the middle cannot impersonate either one.
 
 With several server names, a client picks one name per destination address and keeps it, so the SNI, HTTP authority, and certificate agree across reconnects.
@@ -72,9 +73,9 @@ lowertier set --stage camouflage.server_names=challenges.cloudflare.com \
 
 ## Admission secret
 
-Every peer needs the same `camouflage.admission_secret`, at least 16 bytes. Decoy forwarding requires it.
-Networks that use a shared `network.secret` fall back to that secret when the admission secret is empty;
-nodes that join with a signed credential hold no network secret, so they need the explicit one.
+Every peer needs the same `camouflage.admission_secret`, at least 16 bytes, or a shared `network.secret`.
+Networks that use a shared `network.secret` fall back to that secret automatically for admission tokens, routing markers, and default or explicit decoy forwarding when the admission secret is empty;
+nodes that join with a signed credential hold no network secret, so they need an explicit `camouflage.admission_secret` of at least 16 bytes to enable decoy forwarding.
 The encrypted admission token rotates every five minutes.
 
 ## Limits on probes

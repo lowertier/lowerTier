@@ -76,7 +76,10 @@ fn websocket_origin(addr: &url::Url) -> String {
     match (addr.host_str(), addr.port()) {
         (Some(host), Some(port)) => format!("{scheme}://{host}:{port}"),
         (Some(host), None) => format!("{scheme}://{host}"),
-        _ => format!("{scheme}://localhost"),
+        _ => format!(
+            "{scheme}://{}",
+            crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME
+        ),
     }
 }
 
@@ -556,7 +559,8 @@ impl WsTunnelConnector {
             let via_cdn = ws_via_cdn(&addr);
             let name = match flags.camouflage_config().server_name_for(socket_addr.ip()) {
                 Some(name) if !via_cdn => name,
-                _ => addr.domain().unwrap_or("localhost"),
+                _ => super::stealth_tls::url_dns_host(&addr)
+                    .unwrap_or(crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME),
             };
             let stream =
                 super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
@@ -597,10 +601,29 @@ impl WsTunnelConnector {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let mut request_addr = effective_wss_url(addr.clone(), flags);
-        if !flags.camouflage_config().http_host.is_empty() {
-            let authority = flags
-                .camouflage_config()
-                .http_host
+        let default_host = if flags.camouflage_config().http_host.is_empty()
+            && !ws_via_cdn(addr)
+            && super::stealth_tls::url_dns_host(&request_addr).is_none()
+        {
+            Some(
+                addr.host_str()
+                    .and_then(|host| {
+                        host.trim_matches(['[', ']'])
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                    })
+                    .map(|ip| flags.camouflage_config().effective_server_name_for(ip))
+                    .unwrap_or(crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME)
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        if let Some(host) = default_host.as_deref().or_else(|| {
+            (!flags.camouflage_config().http_host.is_empty())
+                .then_some(flags.camouflage_config().http_host.as_str())
+        }) {
+            let authority = host
                 .parse::<http::uri::Authority>()
                 .map_err(|error| TunnelError::InvalidAddr(error.to_string()))?;
             request_addr
@@ -965,7 +988,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let tls =
-                super::super::browser_tls::connect(stream, "localhost", &[HTTP_1_1_ALPN], false)
+                super::super::browser_tls::connect(stream, "challenges.cloudflare.com", &[HTTP_1_1_ALPN], false)
                     .await
                     .unwrap();
             let (mut client, _) =
@@ -1062,5 +1085,101 @@ pub mod tests {
                 .unwrap()
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn default_wss_uses_cloudflare_host_and_origin_without_mutating_remote_url() {
+        use base64::Engine as _;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let raw_url: url::Url = "wss://127.0.0.1:15888".parse().unwrap();
+        let connector = WsTunnelConnector::new(raw_url.clone());
+        assert_eq!(
+            connector.remote_url(),
+            "wss://127.0.0.1:15888/ws".parse::<url::Url>().unwrap()
+        );
+
+        let flags = crate::common::config::gen_default_flags();
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(server_io);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                lines.push(line);
+            }
+            let headers: Vec<String> = lines.iter().map(|l| l.to_ascii_lowercase()).collect();
+            assert!(
+                headers
+                    .iter()
+                    .any(|h| h == "host: challenges.cloudflare.com\r\n"),
+                "expected default Host header, got {lines:?}"
+            );
+            assert!(
+                headers
+                    .iter()
+                    .any(|h| h == "origin: https://challenges.cloudflare.com\r\n"),
+                "expected default Origin header, got {lines:?}"
+            );
+            let key_line = lines
+                .iter()
+                .find(|l| l.to_ascii_lowercase().starts_with("sec-websocket-key:"))
+                .unwrap();
+            let key = key_line.split_once(':').unwrap().1.trim();
+            let digest = ring::digest::digest(
+                &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+                format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+            );
+            let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+            let response = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+            );
+            reader
+                .into_inner()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let info = TunnelInfo {
+            tunnel_type: "wss".into(),
+            local_addr: None,
+            remote_addr: Some(raw_url.clone().into()),
+            resolved_remote_addr: Some(raw_url.clone().into()),
+        };
+        let _tunnel = timeout(
+            Duration::from_secs(3),
+            WsTunnelConnector::connect_stream(&raw_url, client_io, info, None, &flags),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server_task.await.unwrap();
+
+        // Wrong SNI ("localhost") must be rejected by WsTunnelListener at TLS while matching SNI + /ws succeeds.
+        timeout(Duration::from_secs(3), async {
+            let mut listener = WsTunnelListener::new("wss://127.0.0.1:0".parse().unwrap());
+            listener.listen().await.unwrap();
+            let url = listener.local_url();
+            let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+            let bad_stream = TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+                .await
+                .unwrap();
+            assert!(
+                super::super::browser_tls::connect(bad_stream, "localhost", &[HTTP_1_1_ALPN], false)
+                    .await
+                    .is_err(),
+                "WSS must reject mismatched SNI before HTTP upgrade"
+            );
+            let mut connector = WsTunnelConnector::new(url);
+            let _client = connector.connect().await.unwrap();
+            let _accepted = server.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

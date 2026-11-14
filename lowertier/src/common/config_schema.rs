@@ -756,7 +756,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         QuicRestart,
         "",
-        "TLS server names (SNI). Clients use one name per destination; servers accept all. Configure a decoy upstream or a website with matching certificates.",
+        "TLS server names (SNI). Defaults to challenges.cloudflare.com when unset; custom names require a website or decoy upstream.",
     ),
     opt(
         "camouflage.tls_cert",
@@ -778,7 +778,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         "camouflage.admission_secret",
         Same,
         QuicRestart,
-        "Secret that separates VPN clients from website visitors (16+ bytes).",
+        "Secret that separates VPN clients from website visitors (reuses network.secret when unset; 16+ bytes).",
     ),
     opt(
         "camouflage.website_root",
@@ -802,7 +802,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         QuicRestart,
         "",
-        "TCP decoy upstream for unauthenticated connections.",
+        "TCP decoy upstream for unauthenticated connections (defaults to challenges.cloudflare.com:443 unless website_root or TLS certs are set).",
     ),
     opt(
         "camouflage.decoy_upstream.udp",
@@ -810,7 +810,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         QuicRestart,
         "",
-        "UDP decoy upstream for unauthenticated connections.",
+        "UDP decoy upstream for unauthenticated connections (defaults to challenges.cloudflare.com:443 unless website_root or TLS certs are set).",
     ),
     opt(
         "camouflage.wss_path",

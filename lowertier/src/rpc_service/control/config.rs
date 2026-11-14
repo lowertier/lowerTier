@@ -977,9 +977,22 @@ impl ControlPlaneService {
         request: GetCamouflageRequest,
     ) -> anyhow::Result<GetCamouflageResponse> {
         let (_, instance) = self.resolve(request.meta.as_ref())?;
-        let flags = instance.context()?.get_flags();
+        let context = instance.context()?;
+        let flags = context.get_flags();
+        let stream_flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&context);
+        let has_secret = !stream_flags.camouflage_config().admission_secret.is_empty();
         let mut config = flags.camouflage_config().clone();
         config.admission_secret.clear();
+        let pki = config.has_server_names() && !config.has_decoy();
+        config.server_names = config.effective_server_names();
+        let tcp_decoy = config.effective_tcp_decoy(has_secret).to_owned();
+        let udp_decoy = config.effective_udp_decoy(has_secret).to_owned();
+        if !tcp_decoy.is_empty() || !udp_decoy.is_empty() {
+            config.decoy_upstream = Some(crate::proto::common::DecoyUpstream {
+                tcp: tcp_decoy,
+                udp: udp_decoy,
+            });
+        }
         Ok(GetCamouflageResponse {
             snapshot: Some(self.snapshot(&instance).await?),
             certificate_source: if config.tls_cert.is_empty() {
@@ -988,7 +1001,7 @@ impl ControlPlaneService {
                 "configured_file"
             }
             .into(),
-            quic_h2_verification: if config.has_server_names() && !config.has_decoy() {
+            quic_h2_verification: if pki {
                 "pki"
             } else {
                 "noise_authenticated_certificate"

@@ -79,33 +79,67 @@ pub fn tls_acceptor(flags: &Flags) -> Result<TlsAcceptor, TunnelError> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-async fn decoy_upstream(flags: &Flags) -> Option<std::net::SocketAddr> {
-    let upstream = flags.camouflage_config().tcp_decoy();
+async fn decoy_upstream(
+    flags: &Flags,
+    allow_default: bool,
+) -> Result<Option<std::net::SocketAddr>, TunnelError> {
+    let configured = flags.camouflage_config().tcp_decoy();
+    let explicit = !configured.is_empty();
+    let upstream = flags.camouflage_config().effective_tcp_decoy(allow_default);
     if upstream.is_empty() {
-        return None;
+        return Ok(None);
     }
     if let Ok(address) = upstream.parse() {
-        return Some(address);
+        return Ok(Some(address));
     }
-    tokio::net::lookup_host(upstream).await.ok()?.next()
+    if explicit {
+        let addr = tokio::net::lookup_host(upstream)
+            .await
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .ok_or_else(|| {
+                TunnelError::InternalError("HTTP/2 decoy upstream resolution failed".to_owned())
+            })?;
+        Ok(Some(addr))
+    } else {
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::lookup_host(upstream),
+        )
+        .await
+        .ok()
+        .and_then(|res| res.ok())
+        .and_then(|mut addrs| addrs.next());
+        if resolved.is_none() {
+            tracing::warn!(
+                decoy_upstream = upstream,
+                "default HTTP/2 decoy upstream unavailable; falling back to local TLS handler"
+            );
+        }
+        Ok(resolved)
+    }
 }
 
 fn routing_secret(flags: &Flags) -> Option<Vec<u8>> {
-    if flags.camouflage_config().admission_secret.len() >= 16 {
-        Some(
-            flags
-                .camouflage_config()
-                .admission_secret
-                .as_bytes()
-                .to_vec(),
-        )
+    let secret = &flags.camouflage_config().admission_secret;
+    if !secret.is_empty() {
+        Some(secret.as_bytes().to_vec())
     } else {
         None
     }
 }
 
+#[cfg(test)]
 fn tcp_routing_prefix(flags: &Flags) -> bool {
-    !flags.camouflage_config().sni_routing && !flags.camouflage_config().tcp_decoy().is_empty()
+    tcp_routing_prefix_for(flags, false)
+}
+
+fn tcp_routing_prefix_for(flags: &Flags, allow_default: bool) -> bool {
+    !flags.camouflage_config().sni_routing
+        && !flags
+            .camouflage_config()
+            .effective_tcp_decoy(allow_default)
+            .is_empty()
 }
 
 fn tcp_routing_record(cid: &[u8; QUIC_ROUTING_CID_BYTES]) -> [u8; TCP_ROUTING_RECORD_LEN] {
@@ -200,7 +234,7 @@ fn http2_authority(url: &url::Url) -> String {
     match (url.host_str(), url.port()) {
         (Some(host), Some(port)) => format!("{host}:{port}"),
         (Some(host), None) => host.to_string(),
-        _ => "localhost".to_string(),
+        _ => crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME.to_string(),
     }
 }
 
@@ -833,39 +867,59 @@ async fn accept_inner(
         tracing::warn!(?error, "set_nodelay fail in HTTP/2 accept");
     }
     let peer_addr = stream.peer_addr()?;
-    let prefix = if allow_decoy_passthrough && tcp_routing_prefix(flags) {
+    let allow_default_decoy = limit_setup
+        && !stream
+            .local_addr()
+            .is_ok_and(|addr| addr.ip().is_loopback())
+        && routing_secret(flags).is_some();
+    let passthrough_enforced = allow_decoy_passthrough
+        && limit_setup
+        && flags.camouflage_config().website_root.is_empty()
+        && !flags.camouflage_config().sni_routing
+        && (routing_secret(flags).is_some() || !flags.camouflage_config().tcp_decoy().is_empty());
+    let prefix = if passthrough_enforced {
         let secret = routing_secret(flags).ok_or_else(|| {
             TunnelError::InternalError(
                 "HTTP/2 decoy passthrough requires quic_admission_secret".to_owned(),
             )
         })?;
         let (header, marker) = read_routing_probe(&mut stream).await?;
-        let passthrough = match marker {
+        match marker {
             Some(marker)
                 if valid_routing_cid_bytes(&marker, &secret, std::time::SystemTime::now()) =>
             {
                 None
             }
-            Some(marker) => {
-                let mut prefix = [0_u8; TCP_ROUTING_RECORD_LEN];
-                prefix[..5].copy_from_slice(&header);
-                prefix[5..].copy_from_slice(&marker);
-                Some(prefix.to_vec())
-            }
-            None => Some(header.to_vec()),
-        };
-        if let Some(prefix) = passthrough {
-            let upstream = decoy_upstream(flags).await.ok_or_else(|| {
-                TunnelError::InternalError("HTTP/2 decoy upstream resolution failed".to_owned())
-            })?;
-            spawn_passthrough_tcp(stream, prefix, upstream, limiter);
-            return Ok(None);
+            Some(marker) => match decoy_upstream(flags, allow_default_decoy).await? {
+                Some(upstream) => {
+                    let mut prefix = Vec::with_capacity(TCP_ROUTING_RECORD_LEN);
+                    prefix.extend_from_slice(&header);
+                    prefix.extend_from_slice(&marker);
+                    spawn_passthrough_tcp(stream, prefix, upstream, limiter);
+                    return Ok(None);
+                }
+                None => {
+                    return Err(TunnelError::InvalidProtocol(
+                        "unauthenticated HTTP/2 probe dropped".to_owned(),
+                    ));
+                }
+            },
+            None => match decoy_upstream(flags, allow_default_decoy).await? {
+                Some(upstream) => {
+                    spawn_passthrough_tcp(stream, header.to_vec(), upstream, limiter);
+                    return Ok(None);
+                }
+                None => {
+                    return Err(TunnelError::InvalidProtocol(
+                        "unauthenticated HTTP/2 probe dropped".to_owned(),
+                    ));
+                }
+            },
         }
-        None
-    } else if (!allow_decoy_passthrough || (limit_setup && !flags.camouflage_config().sni_routing))
+    } else if (!allow_decoy_passthrough || limit_setup)
         && let Some(secret) = routing_secret(flags)
     {
-        // Strip an optional routing marker (e.g. from decoy_upstream clients) while
+        // Strip an optional routing marker (e.g. from peers using default or explicit decoy) while
         // replaying standard ClientHellos without splicing to decoy_upstream.
         let (header, marker) = read_routing_probe(&mut stream).await?;
         if let Some(marker) = marker {
@@ -940,6 +994,11 @@ async fn accept_inner(
         None => true,
     };
     if !is_connect_ip || !authorized {
+        if flags.camouflage_config().website_root.is_empty() {
+            return Err(TunnelError::InvalidProtocol(
+                "HTTP/2 request was not CONNECT-IP".to_owned(),
+            ));
+        }
         if !guard.allow_response() {
             return Err(TunnelError::Shutdown);
         }
@@ -1023,7 +1082,10 @@ async fn connect_inner(
     }
     let local_addr = stream.local_addr()?;
     let peer_addr = stream.peer_addr()?;
-    if !punched && let Some(secret) = routing_secret(flags).filter(|_| tcp_routing_prefix(flags)) {
+    if !punched
+        && !flags.camouflage_config().sni_routing
+        && let Some(secret) = routing_secret(flags)
+    {
         let marker = routing_cid_bytes(&secret, std::time::SystemTime::now());
         stream.write_all(&tcp_routing_record(&marker)).await?;
     }
@@ -1079,11 +1141,18 @@ async fn connect_inner(
         .await
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 client ready: {error}")))?;
     let bearer = ConnectIpAdmission::from_flags(flags).map(|admission| admission.current_token());
-    let request = connect_ip_request(
-        &url,
-        bearer.as_deref(),
-        &flags.camouflage_config().http_host,
-    )?;
+    let default_host;
+    let http_host = if !flags.camouflage_config().http_host.is_empty() {
+        flags.camouflage_config().http_host.as_str()
+    } else if stealth_tls::url_dns_host(&url).is_none() {
+        default_host = flags
+            .camouflage_config()
+            .effective_server_name_for(peer_addr.ip());
+        default_host
+    } else {
+        ""
+    };
+    let request = connect_ip_request(&url, bearer.as_deref(), http_host)?;
     let (response, send) = h2
         .send_request(request, false)
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 CONNECT: {error}")))?;
@@ -1543,5 +1612,132 @@ mod tests {
 
             round_trip_h2_tunnel_pair(client.unwrap(), server.unwrap().unwrap()).await;
         }
+    }
+
+    #[tokio::test]
+    async fn default_camouflage_http2_cross_mode_and_authority() {
+        use crate::common::config::NetworkIdentity;
+        use crate::common::global_ctx::tests::get_mock_global_ctx_with_network;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "mesh".to_owned(),
+            "shared-network-secret-material".to_owned(),
+        )));
+        let default_flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&ctx);
+
+        let ip_url: url::Url = "https://127.0.0.1:15888".parse().unwrap();
+        let authority = default_flags
+            .camouflage_config()
+            .effective_server_name_for("127.0.0.1".parse().unwrap());
+        let request = super::connect_ip_request(&ip_url, None, authority).unwrap();
+        assert_eq!(
+            request.uri().authority().map(|a| a.as_str()),
+            Some("challenges.cloudflare.com")
+        );
+
+        let mut sni_flags = default_flags.clone();
+        sni_flags.camouflage_config_mut().server_names =
+            vec!["challenges.cloudflare.com".to_owned()];
+        sni_flags
+            .camouflage_config_mut()
+            .set_decoy_upstream("127.0.0.1:9".to_owned());
+        sni_flags.camouflage_config_mut().sni_routing = true;
+
+        let decoy_server_flags = decoy_flags("shared-network-secret-material");
+        for (client_flags, server_flags) in [
+            (&default_flags, &default_flags),
+            (&default_flags, &sni_flags),
+            (&default_flags, &decoy_server_flags),
+            (&sni_flags, &sni_flags),
+        ] {
+            let acceptor = super::tls_acceptor(server_flags).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url: url::Url = format!("h2://{addr}").parse().unwrap();
+            let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let server_fut = async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    super::accept(stream, &acceptor, url.clone(), server_flags).await
+                };
+                let client_fut = async {
+                    let stream = TcpStream::connect(addr).await.unwrap();
+                    super::connect(stream, url.clone(), client_flags).await
+                };
+                tokio::join!(client_fut, server_fut)
+            })
+            .await
+            .unwrap();
+            round_trip_h2_tunnel_pair(client.unwrap(), server.unwrap().unwrap()).await;
+        }
+
+        for (client_flags, server_flags) in [
+            (&sni_flags, &decoy_server_flags),
+            (&default_flags, &sni_flags),
+        ] {
+            let acceptor = super::tls_acceptor(server_flags).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url: url::Url = format!("h2://{addr}").parse().unwrap();
+            let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let server_fut = async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    super::accept_punched(stream, &acceptor, url.clone(), server_flags).await
+                };
+                let client_fut = async {
+                    let stream = TcpStream::connect(addr).await.unwrap();
+                    super::connect_punched(stream, url.clone(), client_flags).await
+                };
+                tokio::join!(client_fut, server_fut)
+            })
+            .await
+            .unwrap();
+            round_trip_h2_tunnel_pair(client.unwrap(), server.unwrap()).await;
+        }
+
+        // Unauthenticated probes (missing routing marker or wrong SNI) without decoy_upstream
+        // must be rejected and dropped cleanly without completing TLS.
+        let acceptor = super::tls_acceptor(&default_flags).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url: url::Url = format!("h2://{addr}").parse().unwrap();
+
+        let accept_task = tokio::spawn({
+            let acceptor = acceptor.clone();
+            let flags = default_flags.clone();
+            let url = url.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                super::accept(stream, &acceptor, url, &flags).await
+            }
+        });
+        let probe = TcpStream::connect(addr).await.unwrap();
+        assert!(
+            super::super::browser_tls::connect(probe, "challenges.cloudflare.com", &[b"h2"], false)
+                .await
+                .is_err(),
+            "unmarked H2 probe should be dropped before TLS completes"
+        );
+        assert!(accept_task.await.unwrap().is_err());
+
+        // Even with sni_routing = true and no decoy_upstream, wrong SNI ("localhost") must fail TLS.
+        let mut sni_no_decoy = default_flags.clone();
+        sni_no_decoy.camouflage_config_mut().sni_routing = true;
+        let acceptor = super::tls_acceptor(&sni_no_decoy).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url: url::Url = format!("h2://{addr}").parse().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            super::accept(stream, &acceptor, url, &sni_no_decoy).await
+        });
+        let probe = TcpStream::connect(addr).await.unwrap();
+        assert!(
+            super::super::browser_tls::connect(probe, "localhost", &[b"h2"], false)
+                .await
+                .is_err(),
+            "wrong SNI probe must be rejected at TLS"
+        );
+        assert!(accept_task.await.unwrap().is_err());
     }
 }

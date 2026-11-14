@@ -125,6 +125,9 @@ impl RelayConfig {
     }
 }
 
+pub const DEFAULT_CAMOUFLAGE_SERVER_NAME: &str = "challenges.cloudflare.com";
+pub const DEFAULT_CAMOUFLAGE_DECOY_UPSTREAM: &str = "challenges.cloudflare.com:443";
+
 impl CamouflageConfig {
     pub fn set_decoy_upstream(&mut self, address: String) {
         self.decoy_upstream = Some(DecoyUpstream {
@@ -151,6 +154,54 @@ impl CamouflageConfig {
 
     pub fn has_server_names(&self) -> bool {
         !self.server_names.is_empty()
+    }
+
+    /// Return whether default decoy forwarding applies when no decoy or TLS site is configured.
+    pub fn uses_default_decoy(&self) -> bool {
+        self.website_root.is_empty()
+            && self.tls_cert.is_empty()
+            && self.tls_key.is_empty()
+            && !self.has_decoy()
+            && !self.has_server_names()
+    }
+
+    /// Return configured SNI names, defaulting to `challenges.cloudflare.com` so TLS SNI is always required.
+    pub fn effective_server_names(&self) -> Vec<String> {
+        if self.has_server_names() {
+            self.server_names.clone()
+        } else {
+            vec![DEFAULT_CAMOUFLAGE_SERVER_NAME.to_owned()]
+        }
+    }
+
+    /// Return the configured peer SNI or the default camouflage SNI (`challenges.cloudflare.com`).
+    pub fn effective_server_name_for(&self, remote: std::net::IpAddr) -> &str {
+        self.server_name_for(remote)
+            .unwrap_or(DEFAULT_CAMOUFLAGE_SERVER_NAME)
+    }
+
+    /// Return the configured TCP decoy upstream or the default upstream when permitted.
+    pub fn effective_tcp_decoy(&self, allow_default: bool) -> &str {
+        let configured = self.tcp_decoy();
+        if !configured.is_empty() {
+            configured
+        } else if allow_default && self.uses_default_decoy() {
+            DEFAULT_CAMOUFLAGE_DECOY_UPSTREAM
+        } else {
+            ""
+        }
+    }
+
+    /// Return the configured UDP decoy upstream or the default upstream when permitted.
+    pub fn effective_udp_decoy(&self, allow_default: bool) -> &str {
+        let configured = self.udp_decoy();
+        if !configured.is_empty() {
+            configured
+        } else if allow_default && self.uses_default_decoy() {
+            DEFAULT_CAMOUFLAGE_DECOY_UPSTREAM
+        } else {
+            ""
+        }
     }
 
     /// The server name a client presents to `remote`. One destination always gets the same
@@ -185,6 +236,11 @@ impl CamouflageConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_with_network_secret(false)
+    }
+
+    /// Validate camouflage configuration, allowing decoy forwarding to reuse `network.secret`.
+    pub fn validate_with_network_secret(&self, has_network_secret: bool) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.tls_cert.is_empty() == self.tls_key.is_empty(),
             "camouflage.tls_cert and camouflage.tls_key must be configured together"
@@ -222,22 +278,21 @@ impl CamouflageConfig {
         let path = self.websocket_path();
         anyhow::ensure!(
             path.starts_with('/')
+                && path != "/"
                 && path.len() <= 256
                 && !path.contains(['?', '#'])
                 && !path.chars().any(|c| c.is_whitespace() || c.is_control()),
-            "camouflage.wss_path must be an absolute URL path without a query, for example /assets/live"
+            "camouflage.wss_path must be a non-root absolute URL path without a query, for example /ws or /assets/live"
         );
         anyhow::ensure!(
             self.admission_secret.is_empty() || self.admission_secret.len() >= 16,
             "camouflage.admission_secret must contain at least 16 bytes"
         );
         if self.has_decoy() {
+            let valid_secret = self.admission_secret.len() >= 16
+                || (self.admission_secret.is_empty() && has_network_secret);
             anyhow::ensure!(
-                self.has_server_names(),
-                "camouflage.server_names is required with camouflage.decoy_upstream"
-            );
-            anyhow::ensure!(
-                self.admission_secret.len() >= 16,
+                valid_secret,
                 "camouflage.decoy_upstream requires camouflage.admission_secret"
             );
             for address in [self.tcp_decoy(), self.udp_decoy()]
@@ -364,5 +419,75 @@ trusted_proxy_cidrs = ["127.0.0.1/32"]
         let reloaded =
             crate::common::config::TomlConfigLoader::new_from_str(&config.dump()).unwrap();
         assert_eq!(reloaded.get_flags(), flags);
+    }
+
+    #[test]
+    fn default_camouflage_and_network_secret_validation() {
+        use crate::common::config::{ConfigLoader, TomlConfigLoader};
+
+        let plain = super::CamouflageConfig::default();
+        assert!(plain.uses_default_decoy());
+        assert_eq!(
+            plain.effective_server_names(),
+            vec![super::DEFAULT_CAMOUFLAGE_SERVER_NAME.to_owned()]
+        );
+        assert_eq!(
+            plain.effective_server_name_for("10.0.0.1".parse().unwrap()),
+            super::DEFAULT_CAMOUFLAGE_SERVER_NAME
+        );
+        assert_eq!(
+            plain.effective_tcp_decoy(true),
+            super::DEFAULT_CAMOUFLAGE_DECOY_UPSTREAM
+        );
+        assert_eq!(
+            plain.effective_udp_decoy(true),
+            super::DEFAULT_CAMOUFLAGE_DECOY_UPSTREAM
+        );
+        assert_eq!(plain.effective_tcp_decoy(false), "");
+        assert_eq!(plain.effective_udp_decoy(false), "");
+
+        let website = super::CamouflageConfig {
+            website_root: "/var/www/lowertier".to_owned(),
+            ..Default::default()
+        };
+        assert!(!website.uses_default_decoy());
+        assert_eq!(
+            website.effective_server_names(),
+            vec![super::DEFAULT_CAMOUFLAGE_SERVER_NAME.to_owned()]
+        );
+        assert_eq!(website.effective_tcp_decoy(true), "");
+        assert_eq!(website.effective_udp_decoy(true), "");
+
+        let root_ws_path = super::CamouflageConfig {
+            wss_path: "/".to_owned(),
+            ..Default::default()
+        };
+        assert!(root_ws_path.validate_with_network_secret(true).is_err());
+        assert_eq!(
+            website.effective_server_name_for("10.0.0.1".parse().unwrap()),
+            super::DEFAULT_CAMOUFLAGE_SERVER_NAME
+        );
+
+        let mut decoy_only = super::CamouflageConfig::default();
+        decoy_only.set_decoy_upstream(super::DEFAULT_CAMOUFLAGE_DECOY_UPSTREAM.to_owned());
+        assert!(decoy_only.validate_with_network_secret(true).is_ok());
+        assert!(decoy_only.validate_with_network_secret(false).is_err());
+
+        let loaded = TomlConfigLoader::new_from_str(
+            r#"
+[network]
+name = "mesh"
+secret = "0123456789abcdef"
+
+[camouflage.decoy_upstream]
+tcp = "127.0.0.1:443"
+udp = "127.0.0.1:443"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.get_flags().camouflage_config().tcp_decoy(),
+            "127.0.0.1:443"
+        );
     }
 }

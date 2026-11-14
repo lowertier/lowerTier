@@ -928,7 +928,7 @@ pub fn server_config(flags: &Flags) -> Result<ServerConfig, TunnelError> {
 pub fn client_config(flags: &Flags) -> Result<ClientConfig, TunnelError> {
     let mut config = ClientConfig::new(Arc::new(tls::client_crypto(flags)?));
     config.transport_config(transport_config(flags)?);
-    if !flags.camouflage_config().udp_decoy().is_empty() {
+    if !flags.camouflage_config().admission_secret.is_empty() {
         let secret: Arc<[u8]> = Arc::from(
             flags
                 .camouflage_config()
@@ -1301,18 +1301,14 @@ impl QuicEndpointManager {
     fn server_with_decoy(
         mgr: &Arc<Self>,
         addr: SocketAddr,
-        upstream: SocketAddr,
+        upstreams: QuicDecoyUpstreams,
         secret: Arc<[u8]>,
-        server_names: Option<Arc<[String]>>,
+        sni_routing: bool,
+        server_names: Arc<[String]>,
     ) -> Result<Endpoint, TunnelError> {
-        if !addr.is_ipv4() || !upstream.is_ipv4() {
-            return Err(TunnelError::InternalError(
-                "QUIC decoy mode currently requires IPv4 addresses".to_owned(),
-            ));
-        }
         let socket = bind::<std::net::UdpSocket>()
             .addr(addr)
-            .only_v6(false)
+            .only_v6(addr.is_ipv6() && !addr.ip().is_unspecified())
             .maybe_socket_mark(mgr.flags.socket_mark)
             .call()?;
         configure_quic_socket_buffers(&socket2::SockRef::from(&socket));
@@ -1323,17 +1319,18 @@ impl QuicEndpointManager {
         let socket = runtime.wrap_udp_socket(std_socket)?;
         let socket = QuicDecoySocket::new(
             socket,
-            upstream,
+            upstreams,
             secret,
             mgr.flags.socket_mark,
+            sni_routing,
             server_names,
         );
         let mut endpoint =
             Endpoint::new_with_abstract_socket(endpoint_config(), None, socket, runtime)?;
-        endpoint.set_default_client_config(client_config(&gen_default_flags())?);
+        endpoint.set_default_client_config(client_config(&mgr.flags)?);
         endpoint.set_server_config(Some(server_config(&mgr.flags)?));
         let local_addr = endpoint.local_addr()?;
-        if local_addr == upstream {
+        if Some(local_addr) == upstreams.v4 || Some(local_addr) == upstreams.v6 {
             endpoint.close(VarInt::from_u32(1), b"invalid decoy upstream");
             return Err(TunnelError::InternalError(
                 "QUIC decoy upstream equals the listen address".to_owned(),
@@ -1480,7 +1477,15 @@ impl QuicEndpointManager {
         } else {
             IpVersion::V6
         };
-        let flags = manager.flags.clone();
+        let mut flags = manager.flags.clone();
+        if flags.camouflage_config().admission_secret.is_empty() {
+            let stream_flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(_global_ctx);
+            if !stream_flags.camouflage_config().admission_secret.is_empty() {
+                Arc::make_mut(&mut flags)
+                    .camouflage_config_mut()
+                    .admission_secret = stream_flags.camouflage_config().admission_secret.clone();
+            }
+        }
         let security = QuicConnectSecurity {
             flags: flags.as_ref(),
         };
@@ -1530,8 +1535,8 @@ impl QuicEndpointManager {
             let server_name = security
                 .flags
                 .camouflage_config()
-                .server_name_for(addr.ip())
-                .map_or_else(|| addr.ip().to_string(), str::to_owned);
+                .effective_server_name_for(addr.ip())
+                .to_owned();
             let connecting =
                 match endpoint.connect_with(client_config(security.flags)?, addr, &server_name) {
                     Ok(connecting) => connecting,
@@ -1576,8 +1581,8 @@ impl QuicEndpointManager {
             let server_name = security
                 .flags
                 .camouflage_config()
-                .server_name_for(addr.ip())
-                .map_or_else(|| addr.ip().to_string(), str::to_owned);
+                .effective_server_name_for(addr.ip())
+                .to_owned();
             let connecting =
                 match endpoint.connect_with(client_config(security.flags)?, addr, &server_name) {
                     Ok(connecting) => connecting,
@@ -2919,40 +2924,68 @@ struct QuicDecoyPacket {
     bytes: Bytes,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct QuicDecoyUpstreams {
+    pub(crate) v4: Option<SocketAddr>,
+    pub(crate) v6: Option<SocketAddr>,
+}
+
+impl QuicDecoyUpstreams {
+    fn any(self) -> bool {
+        self.v4.is_some() || self.v6.is_some()
+    }
+
+    fn for_client(self, client: SocketAddr) -> Option<SocketAddr> {
+        if client.ip().to_canonical().is_ipv4() {
+            self.v4
+        } else {
+            self.v6
+        }
+    }
+}
+
 #[derive(Debug)]
 struct QuicDecoySocket {
     inner: Arc<dyn AsyncUdpSocket>,
     routes: Arc<dashmap::DashMap<SocketAddr, QuicSocketRouteEntry>>,
+    upstreams: QuicDecoyUpstreams,
     secret: Arc<[u8]>,
-    server_names: Option<Arc<[String]>>,
+    sni_routing: bool,
+    server_names: Arc<[String]>,
     replay: ParkingMutex<QuicRoutingReplayState>,
-    decoy_tx: mpsc::Sender<QuicDecoyPacket>,
+    decoy_tx: Option<mpsc::Sender<QuicDecoyPacket>>,
     last_route_cleanup_seconds: AtomicU64,
 }
 
 impl QuicDecoySocket {
     fn new(
         inner: Arc<dyn AsyncUdpSocket>,
-        upstream: SocketAddr,
+        upstreams: QuicDecoyUpstreams,
         secret: Arc<[u8]>,
         socket_mark: Option<u32>,
-        server_names: Option<Arc<[String]>>,
+        sni_routing: bool,
+        server_names: Arc<[String]>,
     ) -> Arc<Self> {
         let routes = Arc::new(dashmap::DashMap::new());
         // Keep unauthenticated ingress bounded independently of VPN routing.
-        let (decoy_tx, decoy_rx) = mpsc::channel(64);
-        tokio::spawn(run_quic_decoy_relays(
-            inner.clone(),
-            upstream,
-            socket_mark,
-            routes.clone(),
-            decoy_rx,
-            super::decoy::process_limiter(),
-        ));
+        let decoy_tx = upstreams.any().then(|| {
+            let (decoy_tx, decoy_rx) = mpsc::channel(64);
+            tokio::spawn(run_quic_decoy_relays(
+                inner.clone(),
+                upstreams,
+                socket_mark,
+                routes.clone(),
+                decoy_rx,
+                super::decoy::process_limiter(),
+            ));
+            decoy_tx
+        });
         Arc::new(Self {
             inner,
             routes,
+            upstreams,
             secret,
+            sni_routing,
             server_names,
             replay: ParkingMutex::new(QuicRoutingReplayState {
                 markers: HashMap::new(),
@@ -3005,19 +3038,23 @@ impl QuicDecoySocket {
             return None;
         }
 
-        let marker = valid_quic_routing_marker(packet, &self.secret, SystemTime::now());
-        let route = if marker.is_some_and(|marker| self.admit_marker(marker)) {
-            QuicSocketRoute::Local
-        } else if self
+        let has_marker = !self.secret.is_empty()
+            && valid_quic_routing_marker(packet, &self.secret, SystemTime::now())
+                .is_some_and(|marker| self.admit_marker(marker));
+        let matches_sni = self
             .server_names
-            .as_deref()
-            .is_some_and(|names| names.iter().any(|name| quic_initial_sni_eq(packet, name)))
+            .iter()
+            .any(|name| quic_initial_sni_eq(packet, name));
+        let route = if has_marker || ((self.sni_routing || self.secret.is_empty()) && matches_sni)
         {
             QuicSocketRoute::Local
-        } else if super::decoy::is_quic_initial(packet) {
+        } else if super::decoy::is_quic_initial(packet)
+            && self.decoy_tx.is_some()
+            && self.upstreams.for_client(client).is_some()
+        {
             QuicSocketRoute::Decoy
         } else {
-            // Only QUIC Initial packets can allocate a new upstream socket.
+            // Unauthenticated probes without a valid decoy target are dropped silently.
             return None;
         };
         if route == QuicSocketRoute::Local {
@@ -3051,6 +3088,9 @@ impl QuicDecoySocket {
     }
 
     fn forward_decoy(&self, meta: quinn::udp::RecvMeta, bytes: &[u8]) {
+        let Some(decoy_tx) = &self.decoy_tx else {
+            return;
+        };
         let stride = meta.stride.max(1);
         for offset in (0..meta.len).step_by(stride) {
             let end = (offset + stride).min(meta.len);
@@ -3059,7 +3099,7 @@ impl QuicDecoySocket {
                 server_ip: meta.dst_ip,
                 bytes: Bytes::copy_from_slice(&bytes[offset..end]),
             };
-            if self.decoy_tx.try_send(packet).is_err() {
+            if decoy_tx.try_send(packet).is_err() {
                 break;
             }
         }
@@ -3208,8 +3248,14 @@ async fn run_quic_decoy_flow(
     mut permit: super::decoy::DecoyPermit,
 ) {
     let relay = async {
+        let bind_addr: SocketAddr = if upstream.is_ipv4() {
+            (Ipv4Addr::UNSPECIFIED, 0).into()
+        } else {
+            (Ipv6Addr::UNSPECIFIED, 0).into()
+        };
         let socket = bind::<UdpSocket>()
-            .addr((Ipv4Addr::UNSPECIFIED, 0).into())
+            .addr(bind_addr)
+            .only_v6(upstream.is_ipv6())
             .maybe_socket_mark(socket_mark)
             .call();
         let Ok(socket) = socket else {
@@ -3277,7 +3323,7 @@ async fn run_quic_decoy_flow(
 
 async fn run_quic_decoy_relays(
     public: Arc<dyn AsyncUdpSocket>,
-    upstream: SocketAddr,
+    upstreams: QuicDecoyUpstreams,
     socket_mark: Option<u32>,
     routes: Arc<dashmap::DashMap<SocketAddr, QuicSocketRouteEntry>>,
     mut packets: mpsc::Receiver<QuicDecoyPacket>,
@@ -3295,6 +3341,9 @@ async fn run_quic_decoy_relays(
                     let _ = flow.try_send(packet.bytes);
                     continue;
                 }
+                let Some(upstream) = upstreams.for_client(packet.client) else {
+                    continue;
+                };
                 // Check process-wide/source-IP admission before allocating a
                 // socket or task. Rejected sources cannot fill the route table.
                 let Some(permit) = limiter.admit(packet.client.ip()) else {
@@ -3527,12 +3576,11 @@ impl QuicTunnelListener {
             Ok(ConnectIpAccept::Tunnel(stream, id, proxy)) => (stream, id, proxy),
             Ok(ConnectIpAccept::Website(website)) => {
                 drop(source_permit);
-                let local_website = fallback_root.is_some();
-                let Some(website_permit) = (if local_website {
-                    probe_limiter.admit_website(remote_addr.ip())
-                } else {
-                    probe_limiter.admit(remote_addr.ip())
-                }) else {
+                if fallback_root.is_none() {
+                    conn.close(VarInt::from_u32(0), b"");
+                    return Ok(None);
+                }
+                let Some(website_permit) = probe_limiter.admit_website(remote_addr.ip()) else {
                     conn.close(VarInt::from_u32(1), b"website capacity full");
                     return Ok(None);
                 };
@@ -3545,7 +3593,6 @@ impl QuicTunnelListener {
                 };
                 tokio::spawn(async move {
                     let website_permit = Arc::new(website_permit);
-                    let probe = (!local_website).then(|| website_permit.clone());
                     let _owners = (
                         memory_permit,
                         response_memory,
@@ -3554,17 +3601,13 @@ impl QuicTunnelListener {
                         endpoint_owner,
                     );
                     let _ = tokio::time::timeout(
-                        if local_website {
-                            super::decoy::WEBSITE_FLOW_LIFETIME
-                        } else {
-                            super::decoy::FLOW_LIFETIME
-                        },
+                        super::decoy::WEBSITE_FLOW_LIFETIME,
                         serve_http3_requests(
                             website.connection,
                             fallback_root,
                             Some(website.first),
                             None,
-                            probe,
+                            None,
                         ),
                     )
                     .await;
@@ -3706,38 +3749,80 @@ impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
         let endpoint_manager = QuicEndpointManager::load(&self.global_ctx);
-        let flags = self.global_ctx.config.get_flags();
-        let endpoint = if flags.camouflage_config().udp_decoy().is_empty() {
+        let flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&self.global_ctx);
+        let decoy_cfg = flags.camouflage_config();
+        let server_names: Arc<[String]> = Arc::from(decoy_cfg.effective_server_names());
+        let endpoint = if !decoy_cfg.website_root.is_empty() && !decoy_cfg.has_decoy() {
             QuicEndpointManager::server(&self.global_ctx, &endpoint_manager, addr)?
         } else {
-            let upstream = tokio::net::lookup_host(&flags.camouflage_config().udp_decoy())
+            let allows_v4 = addr.is_ipv4() || (addr.is_ipv6() && addr.ip().is_unspecified());
+            let allows_v6 = addr.is_ipv6();
+            let explicit_decoy = !decoy_cfg.udp_decoy().is_empty();
+            let allow_default = !addr.ip().is_loopback() && !decoy_cfg.admission_secret.is_empty();
+            let udp_decoy = decoy_cfg.effective_udp_decoy(allow_default);
+            let policy = self.global_ctx.get_underlay_policy();
+            let upstreams = if udp_decoy.is_empty() {
+                QuicDecoyUpstreams::default()
+            } else if explicit_decoy {
+                let mut picked = QuicDecoyUpstreams::default();
+                for candidate in tokio::net::lookup_host(udp_decoy)
+                    .await
+                    .with_context(|| format!("resolve QUIC decoy upstream {udp_decoy}"))?
+                {
+                    if candidate.is_ipv4() && allows_v4 && picked.v4.is_none() {
+                        ensure_remote_allowed(&policy, candidate)?;
+                        picked.v4 = Some(candidate);
+                    } else if candidate.is_ipv6() && allows_v6 && picked.v6.is_none() {
+                        ensure_remote_allowed(&policy, candidate)?;
+                        picked.v6 = Some(candidate);
+                    }
+                }
+                if !picked.any() {
+                    return Err(TunnelError::InternalError(
+                        "QUIC decoy upstream has no compatible address".to_owned(),
+                    ));
+                }
+                picked
+            } else {
+                let mut picked = QuicDecoyUpstreams::default();
+                if let Ok(Ok(addrs)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::lookup_host(udp_decoy),
+                )
                 .await
-                .with_context(|| {
-                    format!(
-                        "resolve QUIC decoy upstream {}",
-                        flags.camouflage_config().udp_decoy()
-                    )
-                })?
-                .find(SocketAddr::is_ipv4)
-                .ok_or_else(|| {
-                    TunnelError::InternalError("QUIC decoy upstream has no IPv4 address".to_owned())
-                })?;
-            ensure_remote_allowed(&self.global_ctx.get_underlay_policy(), upstream)?;
+                {
+                    for candidate in addrs {
+                        if candidate.is_ipv4()
+                            && allows_v4
+                            && picked.v4.is_none()
+                            && ensure_remote_allowed(&policy, candidate).is_ok()
+                        {
+                            picked.v4 = Some(candidate);
+                        } else if candidate.is_ipv6()
+                            && allows_v6
+                            && picked.v6.is_none()
+                            && ensure_remote_allowed(&policy, candidate).is_ok()
+                        {
+                            picked.v6 = Some(candidate);
+                        }
+                    }
+                }
+                if !picked.any() {
+                    tracing::warn!(
+                        decoy_upstream = udp_decoy,
+                        %addr,
+                        "default QUIC decoy upstream unavailable; unauthenticated QUIC probes will be dropped"
+                    );
+                }
+                picked
+            };
             QuicEndpointManager::server_with_decoy(
                 &endpoint_manager,
                 addr,
-                upstream,
-                Arc::from(
-                    flags
-                        .camouflage_config()
-                        .admission_secret
-                        .clone()
-                        .into_bytes(),
-                ),
-                flags
-                    .camouflage_config()
-                    .sni_routing
-                    .then(|| Arc::from(flags.camouflage_config().server_names.clone())),
+                upstreams,
+                Arc::from(decoy_cfg.admission_secret.clone().into_bytes()),
+                decoy_cfg.sni_routing,
+                server_names,
             )?
         };
         self.addr
@@ -3854,9 +3939,10 @@ pub(crate) fn discovery_endpoint(
     let mut config = endpoint_config();
     // BEP 15 action words occupy the fixed-bit-zero namespace on this shared socket.
     config.grease_quic_bit(false);
+    let stream_flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(global_ctx);
     let endpoint = Endpoint::new_with_abstract_socket(
         config,
-        Some(server_config(&global_ctx.get_flags())?),
+        Some(server_config(&stream_flags)?),
         socket,
         runtime,
     )?;
@@ -3876,7 +3962,8 @@ fn punched_endpoint(
         .ok_or_else(|| TunnelError::InternalError("no async runtime found".to_owned()))?;
     let socket = runtime.wrap_udp_socket(prepare_quic_udp_socket(socket)?)?;
     let config = if server {
-        Some(server_config(&global_ctx.get_flags())?)
+        let stream_flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(global_ctx);
+        Some(server_config(&stream_flags)?)
     } else {
         None
     };
@@ -3979,11 +4066,13 @@ impl TunnelConnector for QuicTunnelConnector {
                         false,
                     )?,
                 };
-                let flags = self.global_ctx.get_flags();
+                let flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(
+                    &self.global_ctx,
+                );
                 let name = flags
                     .camouflage_config()
-                    .server_name_for(addr.ip())
-                    .map_or_else(|| addr.ip().to_string(), str::to_owned);
+                    .effective_server_name_for(addr.ip())
+                    .to_owned();
                 let connection = endpoint
                     .connect_with(client_config(&flags)?, addr, &name)
                     .context("start punched QUIC connection")?
@@ -4004,19 +4093,17 @@ impl TunnelConnector for QuicTunnelConnector {
         self.endpoint_manager = Some(endpoint_manager);
 
         // The authority matches the server name chosen for this destination.
-        let authority = match self
-            .global_ctx
-            .config
-            .get_flags()
-            .camouflage_config()
-            .server_name_for(addr.ip())
-        {
-            Some(name) => name.to_owned(),
-            None => self
-                .addr
-                .host_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| addr.ip().to_string()),
+        let authority = {
+            let flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(
+                &self.global_ctx,
+            );
+            let camo = flags.camouflage_config();
+            match camo.server_name_for(addr.ip()) {
+                Some(name) => name.to_owned(),
+                None => crate::tunnel::stealth_tls::url_dns_host(&self.addr)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| camo.effective_server_name_for(addr.ip()).to_owned()),
+            }
         };
         let http_host = self
             .global_ctx
@@ -4349,8 +4436,14 @@ mod tests {
                     .unwrap();
                 let server = tokio::spawn(async move { listener.accept().await.unwrap() });
                 let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-                endpoint.set_default_client_config(client_config(&context.get_flags()).unwrap());
-                let stalled = endpoint.connect(addr, "localhost").unwrap().await.unwrap();
+                let stream_flags =
+                    crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&context);
+                endpoint.set_default_client_config(client_config(&stream_flags).unwrap());
+                let stalled = endpoint
+                    .connect(addr, CAMOUFLAGE_HOST)
+                    .unwrap()
+                    .await
+                    .unwrap();
                 // QUIC remains active, but this client never sends CONNECT-IP.
                 let closed = tokio::time::timeout(Duration::from_secs(9), stalled.closed())
                     .await
@@ -4466,7 +4559,7 @@ mod tests {
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let connection = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
+                .connect(server_addr, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -4524,7 +4617,6 @@ mod tests {
             drop(requests);
             driver.abort();
 
-            // The default page has no local-root exception.
             let mut listener =
                 QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
             listener.listen().await.unwrap();
@@ -4534,35 +4626,14 @@ mod tests {
             let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
                 let _ = listener.accept().await;
             }));
-            for attempt in 0..3 {
-                let connection = client_endpoint
-                    .connect(address, "localhost")
-                    .unwrap()
-                    .await
-                    .unwrap();
-                let (mut driver, mut requests) =
-                    h3::client::new(h3_quinn::Connection::new(connection.clone()))
+            for sni in ["localhost", CAMOUFLAGE_HOST] {
+                let probe = client_endpoint.connect(address, sni).unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(400), probe)
                         .await
-                        .unwrap();
-                let driver = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                    driver.wait_idle().await
-                }));
-                let request = http::Request::get("https://localhost/").body(()).unwrap();
-                let mut stream = requests.send_request(request).await.unwrap();
-                let response = tokio::time::timeout(Duration::from_secs(2), stream.recv_response())
-                    .await
-                    .unwrap();
-                if attempt < 2 {
-                    assert_eq!(response.unwrap().status(), http::StatusCode::OK);
-                    assert!(stream.recv_data().await.unwrap().is_some());
-                } else {
-                    assert!(
-                        response.is_err(),
-                        "third default website session received a page"
-                    );
-                }
-                connection.close(VarInt::from_u32(0), b"probe complete");
-                drop(driver);
+                        .map_or(true, |res| res.is_err()),
+                    "unauthenticated probe with SNI {sni:?} should be rejected/dropped without a built-in page"
+                );
             }
             drop(server);
         });
@@ -5194,7 +5265,7 @@ mod tests {
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let client = client_endpoint
-                .connect(proxy_addr, "127.0.0.1")
+                .connect(proxy_addr, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -5247,7 +5318,7 @@ mod tests {
             let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             endpoint.set_default_client_config(client_config);
             let client = endpoint
-                .connect(address, "127.0.0.1")
+                .connect(address, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -5277,14 +5348,25 @@ mod tests {
             )
             .unwrap();
             let server_addr = server_endpoint.local_addr().unwrap();
-            let server =
-                tokio::spawn(async move { server_endpoint.accept().await.unwrap().await.unwrap() });
+            let server = tokio::spawn(async move {
+                assert!(server_endpoint.accept().await.unwrap().await.is_err());
+                server_endpoint.accept().await.unwrap().await.unwrap()
+            });
 
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
-            let server_name = server_addr.ip().to_string();
+            assert!(
+                client_endpoint
+                    .connect(server_addr, &server_addr.ip().to_string())
+                    .unwrap()
+                    .await
+                    .is_err()
+            );
             let client = client_endpoint
-                .connect(server_addr, &server_name)
+                .connect(
+                    server_addr,
+                    crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME,
+                )
                 .unwrap()
                 .await
                 .unwrap();
@@ -5300,7 +5382,10 @@ mod tests {
             let server_handshake = server_handshake
                 .downcast_ref::<quinn::crypto::rustls::HandshakeData>()
                 .expect("QUIC must use rustls TLS 1.3");
-            assert_eq!(server_handshake.server_name, None);
+            assert_eq!(
+                server_handshake.server_name.as_deref(),
+                Some(crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME)
+            );
 
             client.force_key_update();
             client
@@ -5420,7 +5505,7 @@ mod tests {
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let client = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
+                .connect(server_addr, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -5483,7 +5568,7 @@ mod tests {
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let client = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
+                .connect(server_addr, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -5549,7 +5634,7 @@ mod tests {
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let client = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
+                .connect(server_addr, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -5646,7 +5731,7 @@ mod tests {
             let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             client_endpoint.set_default_client_config(client_config(&flags).unwrap());
             let client = client_endpoint
-                .connect(server_addr, &server_addr.ip().to_string())
+                .connect(server_addr, "challenges.cloudflare.com")
                 .unwrap()
                 .await
                 .unwrap();
@@ -5786,5 +5871,92 @@ mod idle_observer_tests {
             quic_observer_delay(false, delay, Some(Duration::from_millis(250))),
             Duration::from_millis(250)
         );
+    }
+
+    #[test]
+    fn default_network_secret_sets_quic_routing_cid_across_decoy_and_sni_modes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use crate::common::config::NetworkIdentity;
+            use crate::common::global_ctx::tests::get_mock_global_ctx_with_network;
+            use crate::tunnel::{TunnelConnector, TunnelListener};
+
+            let make_ctx = || {
+                get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+                    "quic-default-mesh".to_owned(),
+                    "quic-shared-network-secret".to_owned(),
+                )))
+            };
+            let client_ctx = make_ctx();
+            let client_flags =
+                crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&client_ctx);
+            assert_eq!(
+                client_flags
+                    .camouflage_config()
+                    .effective_server_name_for("127.0.0.1".parse().unwrap()),
+                "challenges.cloudflare.com"
+            );
+            assert_eq!(
+                client_flags.camouflage_config().admission_secret,
+                "quic-shared-network-secret"
+            );
+
+            for sni_routing in [false, true] {
+                let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let upstream_addr = upstream.local_addr().unwrap();
+                let server_ctx = make_ctx();
+                let mut server_flags = server_ctx.get_flags();
+                server_flags.camouflage_config_mut().server_names =
+                    vec!["challenges.cloudflare.com".to_owned()];
+                server_flags
+                    .camouflage_config_mut()
+                    .set_decoy_upstream(upstream_addr.to_string());
+                server_flags.camouflage_config_mut().sni_routing = sni_routing;
+                server_ctx.set_flags(server_flags);
+
+                let mut listener =
+                    QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), server_ctx);
+                listener.listen().await.unwrap();
+                let server_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+                let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+
+                let url: url::Url = format!("quic://{server_addr}").parse().unwrap();
+                let mut connector = QuicTunnelConnector::new(url, client_ctx.clone());
+                let (client_res, server_res) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    async { tokio::join!(connector.connect(), accept) },
+                )
+                .await
+                .unwrap();
+                let _client = client_res.unwrap();
+                let _server = server_res.unwrap();
+            }
+
+            // Without decoy_upstream, an unmarked probe (empty secret / no routing CID) on loopback
+            // must be dropped silently even if it presents default SNI.
+            let mut default_listener =
+                QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), make_ctx());
+            default_listener.listen().await.unwrap();
+            let default_addr = default_listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let drop_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let _ = default_listener.accept().await;
+            }));
+            let bare_flags = crate::common::global_ctx::tests::get_mock_global_ctx().get_flags();
+            let mut bare_client = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            bare_client.set_default_client_config(client_config(&bare_flags).unwrap());
+            let unmarked_probe = bare_client
+                .connect(default_addr, "challenges.cloudflare.com")
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(350), unmarked_probe)
+                    .await
+                    .map_or(true, |res| res.is_err()),
+                "unmarked QUIC probe without decoy should be dropped cleanly"
+            );
+            drop(drop_task);
+        });
     }
 }
