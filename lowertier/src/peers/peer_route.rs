@@ -52,12 +52,12 @@ use crate::{
         acl::GroupIdentity,
         common::{Ipv4Inet, NatType, StunInfo},
         peer_rpc::{
-            ForeignNetworkRouteInfoEntry, ForeignNetworkRouteInfoKey, OspfRouteRpc,
-            OspfRouteRpcClientFactory, OspfRouteRpcServer, PeerGroupInfo, PeerIdVersion,
-            PeerIdentityType, PublicIpv6AddrRpcServer, RouteForeignNetworkInfos,
-            RouteForeignNetworkSummary, RoutePeerInfo, RoutePeerInfos, SecureAuthLevel,
-            SyncRouteInfoError, SyncRouteInfoRequest, SyncRouteInfoResponse,
-            TrustedCredentialPubkey, TrustedCredentialPubkeyProof, route_foreign_network_infos,
+            ForeignNetworkRouteInfoEntry, ForeignNetworkRouteInfoKey, PeerGroupInfo, PeerIdVersion,
+            PeerIdentityType, PeerRouteRpc, PeerRouteRpcClientFactory, PeerRouteRpcServer,
+            PublicIpv6AddrRpcServer, RouteForeignNetworkInfos, RouteForeignNetworkSummary,
+            RoutePeerInfo, RoutePeerInfos, SecureAuthLevel, SyncRouteInfoError,
+            SyncRouteInfoRequest, SyncRouteInfoResponse, TrustedCredentialPubkey,
+            TrustedCredentialPubkeyProof, route_foreign_network_infos,
             route_foreign_network_summary, sync_route_info_request::ConnInfo,
         },
         rpc_types::{
@@ -90,7 +90,7 @@ static UPDATE_PEER_INFO_PERIOD: Duration = Duration::from_secs(3600);
 static REMOVE_DEAD_PEER_INFO_AFTER: Duration = Duration::from_secs(3660);
 
 // if a peer is unreachable for `REMOVE_UNREACHABLE_PEER_INFO_AFTER` time, we can remove it because
-// 1. all the ospf sessions between two zone are already destroy, new created session will resend the peer info.
+// 1. all the route-sync sessions between two zone are already destroy, new created session will resend the peer info.
 // 2. all the dst_saved_peer_info_version in all sessions already remove the peer info, the peer info will be propagated
 //    in another zone when two zone restore the conneciton.
 static REMOVE_UNREACHABLE_PEER_INFO_AFTER: Duration = Duration::from_secs(90);
@@ -1471,7 +1471,7 @@ struct SyncedRouteInfo {
     // Tracks the currently accepted peer for non-reusable credentials.
     // Maps credential pubkey bytes -> peer_id.
     non_reusable_credential_owners: DashMap<Vec<u8>, PeerId>,
-    // Duplicate non-reusable credential peers are kept for OSPF sync and topology
+    // Duplicate non-reusable credential peers are kept for route sync and topology
     // reachability, but excluded from forwarding until owner election selects them.
     suppressed_non_reusable_credential_peers: DashMap<PeerId, ()>,
     // Local authentication evidence is the only source for propagated Admin keys.
@@ -1691,7 +1691,7 @@ impl SyncedRouteInfo {
                 global_trusted_keys.insert(
                     info.noise_static_pubkey.clone(),
                     TrustedKeyMetadata {
-                        source: TrustedKeySource::OspfNode,
+                        source: TrustedKeySource::RouteSyncNode,
                         expiry_unix: None,
                     },
                 );
@@ -1746,7 +1746,7 @@ impl SyncedRouteInfo {
             global_trusted_keys.insert(
                 pubkey.clone(),
                 TrustedKeyMetadata {
-                    source: TrustedKeySource::OspfCredential,
+                    source: TrustedKeySource::RouteSyncCredential,
                     expiry_unix: Some(expiry_unix),
                 },
             );
@@ -5657,7 +5657,7 @@ impl PeerRouteServiceImpl {
         let last_time = self.last_update_my_foreign_network.load();
         if last_time.is_some()
             && last_time.unwrap().elapsed().as_secs()
-                < use_global_var!(OSPF_UPDATE_MY_GLOBAL_FOREIGN_NETWORK_INTERVAL_SEC)
+                < use_global_var!(ROUTE_UPDATE_MY_GLOBAL_FOREIGN_NETWORK_INTERVAL_SEC)
         {
             return false;
         }
@@ -6339,9 +6339,9 @@ impl PeerRouteServiceImpl {
 
         if topology_is_current {
             // A virtual foreign relay is authenticated by the parent overlay before
-            // it can participate in this foreign OSPF topology. Publish that local
+            // it can participate in this foreign route-sync topology. Publish that local
             // PeerVerified identity so RelayPeerMap can run Noise IK and bootstrap
-            // the first OSPF exchange. Other unreachable identities remain absent.
+            // the first route-sync exchange. Other unreachable identities remain absent.
             for (peer_id, evidence) in &authenticated {
                 if *peer_id == self.my_peer_id
                     || evidence.identity_type != PeerIdentityType::ForeignRelay
@@ -7498,7 +7498,7 @@ impl PeerRouteServiceImpl {
 
         let rpc_stub = peer_rpc
             .rpc_client()
-            .scoped_client::<OspfRouteRpcClientFactory<BaseController>>(
+            .scoped_client::<PeerRouteRpcClientFactory<BaseController>>(
                 self.my_peer_id,
                 dst_peer_id,
                 self.global_ctx.get_network_name(),
@@ -7823,7 +7823,7 @@ struct RouteSyncValidationProof {
 }
 
 #[async_trait::async_trait]
-impl OspfRouteRpc for RouteSessionManager {
+impl PeerRouteRpc for RouteSessionManager {
     type Controller = BaseController;
     async fn sync_route_info(
         &self,
@@ -8028,7 +8028,7 @@ impl RouteSessionManager {
             select! {
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 ret = sync_now.recv() => if let Err(e) = ret {
-                    tracing::debug!(?e, "session_task sync_now recv failed, ospf route may exit");
+                    tracing::debug!(?e, "session_task sync_now recv failed, peer route may exit");
                     break;
                 }
             }
@@ -8036,7 +8036,7 @@ impl RouteSessionManager {
     }
 
     fn stop_session(&self, peer_id: PeerId) -> Result<(), Error> {
-        tracing::warn!(?peer_id, "stop ospf sync session");
+        tracing::warn!(?peer_id, "stop route sync session");
         let Some(service_impl) = self.service_impl.upgrade() else {
             return Err(Error::Stopped);
         };
@@ -8060,7 +8060,7 @@ impl RouteSessionManager {
             return Err(Error::Stopped);
         };
 
-        tracing::info!(?service_impl.my_peer_id, ?peer_id, "start ospf sync session");
+        tracing::info!(?service_impl.my_peer_id, ?peer_id, "start route sync session");
 
         let session = service_impl.get_or_create_session(peer_id);
         self.start_session_task(&session);
@@ -8109,7 +8109,7 @@ impl RouteSessionManager {
             // find peer_ids that are not initiators.
             let mut initiator_candidates = Vec::new();
             for peer_id in peers.iter().copied() {
-                // Step 9a: Filter OSPF session candidates based on direct auth level.
+                // Step 9a: Filter route sync session candidates based on direct auth level.
                 // - Credential nodes only initiate sessions to admin nodes (not other credential nodes)
                 // - Admin nodes don't initiate sessions to credential nodes
                 let Some(evidence) = interface_snapshot.authenticated.get(&peer_id) else {
@@ -8615,11 +8615,11 @@ impl RouteSessionManager {
     }
 }
 
-struct OspfPublicIpv6RouteHandle {
+struct PeerRoutePublicIpv6Handle {
     service_impl: Weak<PeerRouteServiceImpl>,
 }
 
-impl PublicIpv6RouteControl for OspfPublicIpv6RouteHandle {
+impl PublicIpv6RouteControl for PeerRoutePublicIpv6Handle {
     fn my_peer_id(&self) -> PeerId {
         self.service_impl
             .upgrade()
@@ -8678,11 +8678,11 @@ impl PublicIpv6RouteControl for OspfPublicIpv6RouteHandle {
 }
 
 #[derive(Clone)]
-struct OspfPublicIpv6SyncTrigger {
+struct PeerRoutePublicIpv6SyncTrigger {
     session_mgr: RouteSessionManager,
 }
 
-impl PublicIpv6SyncTrigger for OspfPublicIpv6SyncTrigger {
+impl PublicIpv6SyncTrigger for PeerRoutePublicIpv6SyncTrigger {
     fn sync_now(&self, reason: &str) {
         self.session_mgr.sync_now(reason);
     }
@@ -8721,10 +8721,10 @@ impl PeerRoute {
         let public_ipv6_service = Arc::new(PublicIpv6Service::new(
             global_ctx.clone(),
             Arc::downgrade(&peer_rpc),
-            Arc::new(OspfPublicIpv6RouteHandle {
+            Arc::new(PeerRoutePublicIpv6Handle {
                 service_impl: Arc::downgrade(&service_impl),
             }),
-            Arc::new(OspfPublicIpv6SyncTrigger {
+            Arc::new(PeerRoutePublicIpv6SyncTrigger {
                 session_mgr: session_mgr.clone(),
             }),
         ));
@@ -8815,7 +8815,7 @@ impl PeerRoute {
         self.public_ipv6_service.handle_route_change();
 
         peer_rpc.rpc_server().registry().register(
-            OspfRouteRpcServer::new(self.session_mgr.clone()),
+            PeerRouteRpcServer::new(self.session_mgr.clone()),
             &self.global_ctx.get_network_name(),
         );
         peer_rpc.rpc_server().registry().register(
@@ -8875,7 +8875,7 @@ impl Drop for PeerRoute {
         };
 
         peer_rpc.rpc_server().registry().unregister(
-            OspfRouteRpcServer::new(self.session_mgr.clone()),
+            PeerRouteRpcServer::new(self.session_mgr.clone()),
             &self.global_ctx.get_network_name(),
         );
         peer_rpc.rpc_server().registry().unregister(
@@ -8995,7 +8995,7 @@ impl Route for PeerRoute {
 
         if let Some(peer_rpc) = self.peer_rpc.upgrade() {
             peer_rpc.rpc_server().registry().unregister(
-                OspfRouteRpcServer::new(self.session_mgr.clone()),
+                PeerRouteRpcServer::new(self.session_mgr.clone()),
                 &self.global_ctx.get_network_name(),
             );
             peer_rpc.rpc_server().registry().unregister(
@@ -9450,9 +9450,9 @@ impl Route for PeerRoute {
             return Some(info);
         }
         let source = match identity_type {
-            PeerIdentityType::Admin => crate::common::global_ctx::TrustedKeySource::OspfNode,
+            PeerIdentityType::Admin => crate::common::global_ctx::TrustedKeySource::RouteSyncNode,
             PeerIdentityType::Credential => {
-                crate::common::global_ctx::TrustedKeySource::OspfCredential
+                crate::common::global_ctx::TrustedKeySource::RouteSyncCredential
             }
             PeerIdentityType::SharedNode => return None,
             PeerIdentityType::ForeignRelay => return None,
@@ -9498,9 +9498,9 @@ impl Route for PeerRoute {
             return Some(evidence.secure_auth_level);
         }
         let source = match identity_type {
-            PeerIdentityType::Admin => crate::common::global_ctx::TrustedKeySource::OspfNode,
+            PeerIdentityType::Admin => crate::common::global_ctx::TrustedKeySource::RouteSyncNode,
             PeerIdentityType::Credential => {
-                crate::common::global_ctx::TrustedKeySource::OspfCredential
+                crate::common::global_ctx::TrustedKeySource::RouteSyncCredential
             }
             PeerIdentityType::SharedNode | PeerIdentityType::ForeignRelay => {
                 return Some(SecureAuthLevel::EncryptedUnauthenticated);

@@ -103,7 +103,7 @@
 
 背景：直连 Peer 的 Noise 握手在 `PeerConn` 内完成；Relay Peer 没有 `PeerConn`，因此无法复用该握手逻辑。Relay 会话需要通过 **数据面握手消息** 完成握手与密钥派生，并把结果落到 `PeerSessionStore`（或等价的会话存储）中供数据面复用。
 
-关键假设：Relay Peer 握手前即可拿到对端静态公钥（通过 OSPF 等控制面传播），因此可选用 **1-RTT 的 Noise 握手模式**（例如 IK/KK 一类的两报文握手），并将“两报文”映射为 **RelayHandshake / RelayHandshakeAck** 两种数据面消息。
+关键假设：Relay Peer 握手前即可拿到对端静态公钥（通过路由同步控制面传播），因此可选用 **1-RTT 的 Noise 握手模式**（例如 IK/KK 一类的两报文握手），并将“两报文”映射为 **RelayHandshake / RelayHandshakeAck** 两种数据面消息。
 
 建议流程（以本端作为 initiator 为例）：
 

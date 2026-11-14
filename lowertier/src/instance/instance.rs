@@ -652,7 +652,7 @@ impl Instance {
         let id = global_ctx.get_id();
 
         let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
+            RouteAlgoType::LinkState,
             global_ctx.clone(),
             peer_packet_sender,
         ));

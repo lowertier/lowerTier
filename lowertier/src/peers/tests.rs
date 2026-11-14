@@ -46,7 +46,7 @@ pub async fn create_mock_peer_manager_with_mock_stun(
 pub async fn create_mock_peer_manager() -> Arc<PeerManager> {
     let (s, _r) = create_packet_recv_chan();
     let peer_mgr = Arc::new(PeerManager::new(
-        RouteAlgoType::Ospf,
+        RouteAlgoType::LinkState,
         get_mock_global_ctx(),
         s,
     ));
@@ -58,7 +58,7 @@ pub async fn create_mock_peer_manager_with_name(network_name: String) -> Arc<Pee
     let (s, _r) = create_packet_recv_chan();
     let g =
         get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name, "".to_string())));
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -71,7 +71,7 @@ pub async fn create_mock_peer_manager_secure(
     let g =
         get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name, network_secret)));
     set_secure_mode_cfg(&g, true);
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -154,7 +154,7 @@ pub async fn create_mock_peer_manager_credential(
             .unwrap_or_default(),
     }));
 
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -164,7 +164,7 @@ pub async fn create_mock_peer_manager_credential(
 pub async fn create_mock_peer_manager_unknown_credential(network_name: String) -> Arc<PeerManager> {
     let (s, _r) = create_packet_recv_chan();
     let g = crate::common::global_ctx::tests::get_mock_credential_global_ctx(network_name);
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }

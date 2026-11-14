@@ -54,7 +54,7 @@ use super::{
     PUBLIC_SERVER_HOSTNAME_PREFIX, PacketRecvChan, PacketRecvChanReceiver,
     peer_conn::PeerConn,
     peer_map::PeerMap,
-    peer_ospf_route::PeerRoute,
+    peer_route::PeerRoute,
     peer_rpc::{PeerRpcManager, PeerRpcManagerTransport},
     peer_rpc_service::DirectConnectorManagerRpcServer,
     peer_session::PeerSessionStore,
@@ -108,7 +108,7 @@ struct ForeignNetworkEntry {
 impl ForeignNetworkEntry {
     fn new(
         network: NetworkIdentity,
-        // NOTICE: ospf route need my_peer_id be changed after restart.
+        // NOTICE: peer route requires `my_peer_id` to change after restart.
         my_peer_id: PeerId,
         global_ctx: ArcGlobalCtx,
         relay_data: bool,
@@ -940,7 +940,7 @@ impl ForeignNetworkManager {
             && global_ctx.is_pubkey_trusted_with_source(
                 remote_static_pubkey,
                 network_name,
-                TrustedKeySource::OspfCredential,
+                TrustedKeySource::RouteSyncCredential,
             )
     }
 
@@ -963,8 +963,10 @@ impl ForeignNetworkManager {
             .map(|(pubkey, metadata)| TrustedKeyInfoPb {
                 pubkey,
                 source: match metadata.source {
-                    TrustedKeySource::OspfNode => TrustedKeySourcePb::OspfNode.into(),
-                    TrustedKeySource::OspfCredential => TrustedKeySourcePb::OspfCredential.into(),
+                    TrustedKeySource::RouteSyncNode => TrustedKeySourcePb::RouteSyncNode.into(),
+                    TrustedKeySource::RouteSyncCredential => {
+                        TrustedKeySourcePb::RouteSyncCredential.into()
+                    }
                 },
                 expiry_unix: metadata.expiry_unix,
             })

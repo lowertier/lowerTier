@@ -321,13 +321,13 @@ pub enum GlobalCtxEvent {
 pub type EventBus = tokio::sync::broadcast::Sender<GlobalCtxEvent>;
 pub type EventBusSubscriber = tokio::sync::broadcast::Receiver<GlobalCtxEvent>;
 
-/// Source of a trusted public key from OSPF route propagation
+/// Source of a trusted public key from route-sync propagation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustedKeySource {
     /// Peer node's noise static pubkey
-    OspfNode,
+    RouteSyncNode,
     /// Admin-declared trusted credential pubkey
-    OspfCredential,
+    RouteSyncCredential,
 }
 
 /// Metadata for a trusted public key
@@ -487,7 +487,7 @@ pub struct GlobalCtx {
 
     credential_manager: Arc<CredentialManager>,
 
-    /// OSPF propagated trusted keys (peer pubkeys and admin credentials)
+    /// Route-sync propagated trusted keys (peer pubkeys and admin credentials)
     /// Stored in ArcSwap for lock-free reads and atomic batch updates
     trusted_keys: Arc<TrustedKeyMapManager>,
 
@@ -1566,10 +1566,10 @@ impl GlobalCtx {
     }
 
     /// Check if a public key is trusted using two-level lookup:
-    /// 1. OSPF propagated trusted_keys (lock-free)
+    /// 1. Route-sync propagated trusted_keys (lock-free)
     /// 2. Local credential_manager
     pub fn is_pubkey_trusted(&self, pubkey: &[u8], network_name: &str) -> bool {
-        // First level: check OSPF propagated keys (lock-free)
+        // First level: check route-sync propagated keys (lock-free)
         if self.trusted_keys.verify_trusted_key(pubkey, network_name) {
             return true;
         }
@@ -1592,8 +1592,8 @@ impl GlobalCtx {
             .verify_trusted_key_with_source(pubkey, network_name, Some(source))
     }
 
-    /// Atomically replace all OSPF trusted keys with a new set
-    /// Called by OSPF route layer after each route update
+    /// Atomically replace all route-sync trusted keys with a new set
+    /// Called by peer route layer after each route update
     pub fn update_trusted_keys(&self, keys: TrustedKeyMap, network_name: &str) {
         self.trusted_keys.update_trusted_keys(network_name, keys);
     }

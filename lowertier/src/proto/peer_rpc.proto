@@ -235,8 +235,8 @@ message SyncRouteInfoResponse {
   optional SyncRouteInfoError error = 3;
 }
 
-service OspfRouteRpc {
-  // Generates a "hello" greeting based on the supplied info.
+service PeerRouteRpc {
+  // Synchronizes peer route and adjacency state across a direct link.
   rpc SyncRouteInfo(SyncRouteInfoRequest) returns (SyncRouteInfoResponse);
 }
 

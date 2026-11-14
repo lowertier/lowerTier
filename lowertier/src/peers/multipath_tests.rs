@@ -76,7 +76,7 @@ impl TestNode {
 
         let (packet_send, nic_rx) = create_packet_recv_chan();
         let mgr = Arc::new(PeerManager::new(
-            RouteAlgoType::Ospf,
+            RouteAlgoType::LinkState,
             global_ctx,
             packet_send,
         ));
@@ -588,7 +588,7 @@ async fn asymmetric_paths_cover_data_ethernet_overlay_stream_and_socks5_guard() 
         assert_eq!(r_fwd.forwarded_packets(), fwd1);
         assert!(r_rev.forwarded_packets() >= rev1 + 16);
 
-        // Wait for OSPF FullEthernetBridge grants and dataplane descriptors before testing relayed L2 Ethernet.
+        // Wait for route-sync FullEthernetBridge grants and dataplane descriptors before testing relayed L2 Ethernet.
         let mut bridge_ready = false;
         for _ in 0..100 {
             let evidence_ready = a

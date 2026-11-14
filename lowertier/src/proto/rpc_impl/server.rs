@@ -36,7 +36,7 @@ fn foreign_relay_rpc_allowed(desc: &common::RpcDescriptor) -> bool {
     // Match generated service descriptors. Do not authorize by method labels.
     matches!(
         (desc.proto_name.as_str(), desc.service_name.as_str()),
-        ("OspfRouteRpc", "OspfRouteRpc") | ("DirectConnectorRpc", "DirectConnectorRpc")
+        ("PeerRouteRpc", "PeerRouteRpc") | ("DirectConnectorRpc", "DirectConnectorRpc")
     )
 }
 
