@@ -100,13 +100,13 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `peer` | array of tables |  | instance restart | Peers to connect to: uri and optional pinned public_key. |
+| `peer` | array of tables |  | live | Peers to connect to: uri and optional pinned public_key. |
 
 ## `[nat]`
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `nat.p2p` | `on` \| `lazy` \| `required` \| `off` | `on` | instance restart | Direct connections: on, lazy (only when traffic needs it), required (never relay), off. |
+| `nat.p2p` | `on` \| `lazy` \| `required` \| `off` | `on` | live | Direct connections: on, lazy (only when traffic needs it), required (never relay), off. |
 | `nat.udp_punch` | bool | `true` | instance restart | UDP hole punching. |
 | `nat.tcp_punch` | bool | `true` | instance restart | TCP hole punching. |
 | `nat.symmetric_punch` | bool | `true` | instance restart | Hole punching toward symmetric NATs. |
@@ -170,6 +170,7 @@ Secrets are redacted in all output.
 | --- | --- | --- | --- | --- |
 | `limits.memory_bytes` | size |  | process restart | Process memory budget. Default: RAM/16, 64MiB to 1GiB. |
 | `limits.receive_bps` | bit/s |  | live | Instance receive limit. Unlimited when absent. |
+| `limits.max_direct_peers` | integer | `32` | live | Maximum direct mesh peers kept open before relying on on-demand/relay links (0 for unlimited). |
 
 ## `[l2]`
 
@@ -188,8 +189,8 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `routes.manual` | list of strings |  | instance restart | Routes installed instead of the automatic routes. |
-| `routes.serve_exit` | bool | `false` | instance restart | Act as an exit node for peers. |
+| `routes.manual` | list of strings |  | live | Routes installed instead of the automatic routes. |
+| `routes.serve_exit` | bool | `false` | live | Act as an exit node for peers. |
 
 ## `[[group]]`
 
@@ -213,7 +214,7 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `export` | array of tables |  | instance restart | Local subnets exported to peers: cidr, optional mapped_cidr and allow. |
+| `export` | array of tables |  | live | Local subnets exported to peers: cidr, optional mapped_cidr and allow. |
 
 ## `[proxy]`
 

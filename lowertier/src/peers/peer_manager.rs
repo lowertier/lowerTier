@@ -1526,6 +1526,87 @@ impl PeerManager {
         self.p2p_demand_notify.clone()
     }
 
+    pub fn direct_mesh_peer_count(&self) -> usize {
+        let my_peer_id = self.my_peer_id();
+        self.peers
+            .list_peers()
+            .into_iter()
+            .filter(|peer_id| *peer_id != my_peer_id && self.has_directly_connected_conn(*peer_id))
+            .count()
+    }
+
+    pub async fn direct_mesh_peer_budget_reached(&self, peer_id: PeerId) -> bool {
+        let Some(limit) = self
+            .get_global_ctx()
+            .get_flags()
+            .effective_max_direct_peers()
+        else {
+            return false;
+        };
+
+        if self.has_directly_connected_conn(peer_id)
+            || self.has_recent_traffic(peer_id, quanta::Instant::now())
+        {
+            return false;
+        }
+
+        if self.direct_mesh_peer_count() < limit as usize {
+            return false;
+        }
+
+        !self
+            .list_routes()
+            .await
+            .into_iter()
+            .any(|route| route.next_hop_peer_id == peer_id)
+    }
+
+    pub async fn prune_idle_direct_peers(&self) {
+        let Some(limit) = self
+            .get_global_ctx()
+            .get_flags()
+            .effective_max_direct_peers()
+        else {
+            return;
+        };
+
+        let my_peer_id = self.my_peer_id();
+        let direct_peers: Vec<PeerId> = self
+            .peers
+            .list_peers()
+            .into_iter()
+            .filter(|peer_id| *peer_id != my_peer_id && self.has_directly_connected_conn(*peer_id))
+            .collect();
+
+        if direct_peers.len() <= limit as usize {
+            return;
+        }
+
+        let now = quanta::Instant::now();
+        let protected_next_hops: std::collections::HashSet<PeerId> = self
+            .list_routes()
+            .await
+            .into_iter()
+            .map(|route| route.next_hop_peer_id)
+            .collect();
+
+        let mut excess = direct_peers.len() - limit as usize;
+        for peer_id in direct_peers {
+            if excess == 0 {
+                break;
+            }
+            if protected_next_hops.contains(&peer_id) || self.has_recent_traffic(peer_id, now) {
+                continue;
+            }
+            if let Err(e) = self.peers.close_peer(peer_id).await {
+                tracing::debug!(?e, ?peer_id, "failed to prune idle direct peer");
+            } else {
+                tracing::info!(?peer_id, limit, "pruned idle direct peer above mesh budget");
+                excess -= 1;
+            }
+        }
+    }
+
     async fn close_untrusted_credential_peers(peer_map: &Arc<PeerMap>, global_ctx: &ArcGlobalCtx) {
         let network_name = global_ctx.get_network_name();
         for peer_id in peer_map.list_peers() {

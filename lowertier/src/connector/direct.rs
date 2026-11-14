@@ -641,26 +641,30 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
         data.peer_black_list.cleanup();
         let my_peer_id = data.peer_manager.my_peer_id();
-        data.peer_manager
-            .list_peers()
-            .await
-            .into_iter()
-            .filter(|peer_id| {
-                *peer_id != my_peer_id
-                    && crate::common::config::TRANSPORT_PROTOCOLS
-                        .iter()
-                        .any(|protocol| {
-                            crate::common::config::transport_protocol_enabled(
-                                &data.global_ctx.flags_arc(),
-                                protocol,
-                            ) && !data
-                                .peer_manager
-                                .has_live_peer_connection_for_protocol(*peer_id, protocol)
-                        })
-                    && data.next_scan.ready(peer_id)
-                    && !data.peer_black_list.contains(peer_id)
-            })
-            .collect()
+        let mut peers = Vec::new();
+        for peer_id in data.peer_manager.list_peers().await {
+            if peer_id != my_peer_id
+                && crate::common::config::TRANSPORT_PROTOCOLS
+                    .iter()
+                    .any(|protocol| {
+                        crate::common::config::transport_protocol_enabled(
+                            &data.global_ctx.flags_arc(),
+                            protocol,
+                        ) && !data
+                            .peer_manager
+                            .has_live_peer_connection_for_protocol(peer_id, protocol)
+                    })
+                && data.next_scan.ready(&peer_id)
+                && !data.peer_black_list.contains(&peer_id)
+                && !data
+                    .peer_manager
+                    .direct_mesh_peer_budget_reached(peer_id)
+                    .await
+            {
+                peers.push(peer_id);
+            }
+        }
+        peers
     }
 
     async fn launch_task(
@@ -672,7 +676,9 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
         tokio::spawn(async move { data.do_try_direct_connect(item).await.map_err(Into::into) })
     }
 
-    async fn all_task_done(&self, _data: &Self::Data) {}
+    async fn all_task_done(&self, data: &Self::Data) {
+        data.peer_manager.prune_idle_direct_peers().await;
+    }
 
     fn loop_interval_ms(&self) -> u64 {
         5000

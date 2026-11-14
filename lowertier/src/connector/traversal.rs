@@ -168,39 +168,39 @@ pub(super) async fn hole_punch_peers(peer_mgr: &PeerManager, protocol: &str) -> 
     }
     let my_peer_id = peer_mgr.my_peer_id();
     let now = quanta::Instant::now();
-    peer_mgr
-        .list_routes()
-        .await
-        .into_iter()
-        .filter(|route| {
-            // One stable initiator role prevents duplicate rendezvous sessions.
-            route.peer_id > my_peer_id
-                && route
-                    .feature_flag
-                    .as_ref()
-                    .is_some_and(|feature| match protocol {
-                        "quic" => feature.quic_hole_punch,
-                        "h2" => feature.tcp_hole_punch,
-                        "wss" => feature.wss_hole_punch,
-                        _ => false,
-                    })
-                && !peer_mgr.has_live_peer_connection_for_protocol(route.peer_id, protocol)
-                && (should_background_p2p_with_peer(
-                    route.feature_flag.as_ref(),
-                    false,
-                    flags.lazy_p2p,
-                    flags.disable_p2p,
-                    flags.need_p2p,
-                ) || (should_try_p2p_with_peer(
-                    route.feature_flag.as_ref(),
-                    false,
-                    flags.disable_p2p,
-                    flags.need_p2p,
-                ) && (peer_mgr.has_live_peer_connection(route.peer_id)
-                    || peer_mgr.has_recent_traffic(route.peer_id, now))))
-        })
-        .map(|route| route.peer_id)
-        .collect()
+    let mut peers = Vec::new();
+    for route in peer_mgr.list_routes().await {
+        // One stable initiator role prevents duplicate rendezvous sessions.
+        if route.peer_id > my_peer_id
+            && route
+                .feature_flag
+                .as_ref()
+                .is_some_and(|feature| match protocol {
+                    "quic" => feature.quic_hole_punch,
+                    "h2" => feature.tcp_hole_punch,
+                    "wss" => feature.wss_hole_punch,
+                    _ => false,
+                })
+            && !peer_mgr.has_live_peer_connection_for_protocol(route.peer_id, protocol)
+            && !peer_mgr.direct_mesh_peer_budget_reached(route.peer_id).await
+            && (should_background_p2p_with_peer(
+                route.feature_flag.as_ref(),
+                false,
+                flags.lazy_p2p,
+                flags.disable_p2p,
+                flags.need_p2p,
+            ) || (should_try_p2p_with_peer(
+                route.feature_flag.as_ref(),
+                false,
+                flags.disable_p2p,
+                flags.need_p2p,
+            ) && (peer_mgr.has_live_peer_connection(route.peer_id)
+                || peer_mgr.has_recent_traffic(route.peer_id, now))))
+        {
+            peers.push(route.peer_id);
+        }
+    }
+    peers
 }
 
 #[cfg(test)]

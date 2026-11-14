@@ -172,6 +172,7 @@ message DecoyUpstream { string tcp = 1; string udp = 2; }
 message LimitsConfig {
   optional uint64 receive_bps = 1;
   optional uint64 memory_bytes = 2;
+  optional uint32 max_direct_peers = 3;
 }
 message CamouflageConfig {
   // TLS server names (SNI). A client uses one name per destination; a server accepts all.

@@ -2,7 +2,7 @@ import { For, Index, Match, Show, Switch as Pick, createEffect, createMemo, crea
 import { createStore, produce } from "solid-js/store";
 import { fromToml, rpc, toToml, type Doc } from "../api";
 import { Segmented, Switch } from "../components/controls";
-import { apply, busy, config, configured, loadSchema, lookup, restartPending, say, schema, type OptionSpec } from "../config";
+import { apply, busy, config, configured, loadSchema, lookup, readDefaultBootstrapPeers, restartPending, say, schema, writeDefaultBootstrapPeers, type OptionSpec } from "../config";
 import { words } from "../format";
 import { selection, snapshot } from "../store";
 import { credentialChanges, FLEET_GUI_CIDRS, guiChanges, guiRules, overlaySubnet, REDACTED, ROUTING_PATHS, secretChanges, secretSource, type Changes, type GuiRule, type SecretSource } from "../settingsModel";
@@ -311,7 +311,51 @@ export default function Settings(props: { page: Page; onPage: (page: Page) => vo
     </div>;
   };
 
+  const BootstrapPeers = (optionProps: { option: OptionSpec }) => {
+    const netName = () => String(draft("network.name") ?? "default").trim() || "default";
+    const [savedDefaults, setSavedDefaults] = createSignal<string[]>(readDefaultBootstrapPeers(netName()));
+    createEffect(() => {
+      setSavedDefaults(readDefaultBootstrapPeers(netName()));
+    });
+    const currentUris = () =>
+      ((draft("peer") ?? []) as Doc[])
+        .map((item) => (typeof item?.uri === "string" ? item.uri.trim() : ""))
+        .filter(Boolean);
+    const saveDefaults = () => {
+      const next = writeDefaultBootstrapPeers(netName(), currentUris());
+      setSavedDefaults(next);
+      say(next.length ? `Saved ${next.length} default bootstrap peer(s) for ${netName()}.` : `Cleared default bootstrap peers for ${netName()}.`);
+    };
+    const applyDefaults = () => {
+      const defaults = savedDefaults();
+      if (!defaults.length) return;
+      edit("peer", defaults.map((uri) => ({ uri })));
+    };
+    return <div class="bootstrap-settings">
+      <details class="advanced-setting" open={currentUris().length <= 3 || filter().trim() !== ""}>
+        <summary>Bootstrap peers ({currentUris().length} configured)</summary>
+        <Row option={optionProps.option} />
+      </details>
+      <div class="row">
+        <div class="label">
+          <b>Default for network “{netName()}”</b>
+          <p>Pre-select these peers when creating join codes or apply them to this node.</p>
+        </div>
+        <div class="control column">
+          <div class="row-meta">
+            <span class="hint">{savedDefaults().length ? `${savedDefaults().length} saved (${savedDefaults().slice(0, 2).join(", ")}${savedDefaults().length > 2 ? ", …" : ""})` : "No default saved"}</span>
+            <button type="button" class="link" onClick={saveDefaults}>Save current as default</button>
+            <Show when={savedDefaults().length > 0}>
+              <button type="button" class="link" onClick={applyDefaults}>Apply saved default</button>
+            </Show>
+          </div>
+        </div>
+      </div>
+    </div>;
+  };
+
   const Option = (props: { option: OptionSpec }) => <Pick fallback={<Row option={props.option} />}>
+    <Match when={props.option.path === "peer"}><BootstrapPeers option={props.option} /></Match>
     <Match when={props.option.path === "network.secret"}><Authentication /></Match>
     <Match when={props.option.path === "network.credential_file"}><Row option={props.option} label="Issued credential store" help="Stores credentials issued by this machine. This file does not supply a credential for joining the network." /></Match>
     <Match when={props.option.path === "identity.private_key"}>

@@ -11,6 +11,8 @@ pub use crate::proto::common::{
 // WSS accepts one serialized overlay packet up to this existing receive bound.
 pub(crate) const MAX_TRANSIT_PACKET_BYTES: u64 = crate::tunnel::tcp_lanes::MAX_PENDING_BYTES as u64;
 
+pub const DEFAULT_MAX_DIRECT_PEERS: u32 = 32;
+
 impl Flags {
     pub(crate) fn memory_bytes(&self) -> Option<u64> {
         self.limits.as_ref().and_then(|limits| limits.memory_bytes)
@@ -18,6 +20,18 @@ impl Flags {
 
     pub fn receive_bps(&self) -> Option<u64> {
         self.limits.as_ref().and_then(|limits| limits.receive_bps)
+    }
+
+    pub fn max_direct_peers(&self) -> Option<u32> {
+        self.limits.as_ref().and_then(|limits| limits.max_direct_peers)
+    }
+
+    pub fn effective_max_direct_peers(&self) -> Option<u32> {
+        match self.max_direct_peers() {
+            Some(0) => None,
+            Some(limit) => Some(limit),
+            None => Some(DEFAULT_MAX_DIRECT_PEERS),
+        }
     }
     pub fn relay_config(&self) -> &RelayConfig {
         static DEFAULT: LazyLock<RelayConfig> = LazyLock::new(RelayConfig::default);
@@ -402,6 +416,7 @@ transit_bps_limit = 1
 transit_burst_bytes = 262144
 [limits]
 receive_bps = 7
+max_direct_peers = 16
 [camouflage]
 wss_path = "/vpn"
 http_host = "example.test"
@@ -415,6 +430,17 @@ trusted_proxy_cidrs = ["127.0.0.1/32"]
         assert_eq!(flags.relay_config().transit(), super::TransitPolicy::Deny);
         assert_eq!(flags.relay_config().transit_bps_limit, Some(1));
         assert_eq!(flags.receive_bps(), Some(7));
+        assert_eq!(flags.max_direct_peers(), Some(16));
+        assert_eq!(flags.effective_max_direct_peers(), Some(16));
+        let mut unlimited = flags.clone();
+        unlimited.limits.as_mut().unwrap().max_direct_peers = Some(0);
+        assert_eq!(unlimited.effective_max_direct_peers(), None);
+        let mut defaulted = flags.clone();
+        defaulted.limits.as_mut().unwrap().max_direct_peers = None;
+        assert_eq!(
+            defaulted.effective_max_direct_peers(),
+            Some(super::DEFAULT_MAX_DIRECT_PEERS)
+        );
         assert_eq!(flags.camouflage_config().websocket_path(), "/vpn");
         let reloaded =
             crate::common::config::TomlConfigLoader::new_from_str(&config.dump()).unwrap();

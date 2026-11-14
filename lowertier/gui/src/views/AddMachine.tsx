@@ -3,7 +3,7 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { rpc, type Doc } from "../api";
 import { Copy, Dialog, Segmented } from "../components/controls";
-import { configured } from "../config";
+import { configured, readDefaultBootstrapPeers, writeDefaultBootstrapPeers } from "../config";
 import { snapshot } from "../store";
 
 const REPO = "lowertier/lowerTier";
@@ -102,9 +102,13 @@ export default function AddMachine(props: { onClose: () => void }) {
   const [lifetime, setLifetime] = createSignal("1 day");
   const [reusable, setReusable] = createSignal(false);
   const [groups, setGroups] = createSignal("");
+  const networkName = () => String(configured("network.name") ?? "default").trim() || "default";
+  const initialDefaults = readDefaultBootstrapPeers(networkName());
   const offered = createMemo(candidates);
-  const [chosen, setChosen] = createSignal<Set<string>>(new Set());
-  const [extra, setExtra] = createSignal<string[]>([]);
+  const offeredSet = new Set(offered().map((item) => item.uri));
+  const [chosen, setChosen] = createSignal<Set<string>>(new Set(initialDefaults));
+  const [extra, setExtra] = createSignal<string[]>(initialDefaults.filter((uri) => !offeredSet.has(uri)));
+  const [defaultSaved, setDefaultSaved] = createSignal("");
   const [custom, setCustom] = createSignal("");
   const configuredTrackers = [
     ...((configured("discovery.trackers") ?? []) as string[]),
@@ -261,39 +265,55 @@ export default function AddMachine(props: { onClose: () => void }) {
                   Trackers and in-mesh peer gossip maintain the mesh automatically. Optionally select reachable peers to dial first.
                 </p>
               </Show>
-              <Show when={offered().length || extra().length} fallback={<p class="hint">No public listener was detected. Add a reachable peer URI if needed.</p>}>
-                <ul class="choices">
-                  <For each={[...offered(), ...extra().map((uri) => ({ uri, source: "added" }))]}>
-                    {(item) => (
-                      <li>
-                        <label class="check">
-                          <input type="checkbox" checked={chosen().has(item.uri)} onChange={(event) => toggle(item.uri, event.currentTarget.checked)} />
-                          <span class="mono">{item.uri}</span>
-                          <span class="sub">{item.source}</span>
-                        </label>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </Show>
-              <div class="inline-add">
-                <input
-                  type="text"
-                  placeholder="quic://203.0.113.7:11012"
-                  aria-label="Add a bootstrap peer URI"
-                  value={custom()}
-                  onInput={(event) => setCustom(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      addCustom();
-                    }
-                  }}
-                />
-                <button type="button" onClick={addCustom}>
-                  Add peer
-                </button>
-              </div>
+              <details class="advanced-setting" open={!useTrackers() && offered().length <= 3}>
+                <summary>
+                  Bootstrap peers ({peersChosen().length} selected / {offered().length + extra().length} available)
+                </summary>
+                <Show when={offered().length || extra().length} fallback={<p class="hint">No public listener was detected. Add a reachable peer URI if needed.</p>}>
+                  <ul class="choices">
+                    <For each={[...offered(), ...extra().map((uri) => ({ uri, source: "added" }))]}>
+                      {(item) => (
+                        <li>
+                          <label class="check">
+                            <input type="checkbox" checked={chosen().has(item.uri)} onChange={(event) => toggle(item.uri, event.currentTarget.checked)} />
+                            <span class="mono">{item.uri}</span>
+                            <span class="sub">{item.source}</span>
+                          </label>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+                <div class="inline-add">
+                  <input
+                    type="text"
+                    placeholder="quic://203.0.113.7:11012"
+                    aria-label="Add a bootstrap peer URI"
+                    value={custom()}
+                    onInput={(event) => setCustom(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addCustom();
+                      }
+                    }}
+                  />
+                  <button type="button" onClick={addCustom}>
+                    Add peer
+                  </button>
+                  <button
+                    type="button"
+                    class="quiet"
+                    onClick={() => {
+                      const saved = writeDefaultBootstrapPeers(networkName(), peersChosen());
+                      setDefaultSaved(saved.length ? `Saved ${saved.length} default peer(s) for ${networkName()}.` : `Cleared defaults for ${networkName()}.`);
+                    }}
+                  >
+                    Save as default for {networkName()}
+                  </button>
+                </div>
+                <Show when={defaultSaved()}><p class="hint">{defaultSaved()}</p></Show>
+              </details>
             </fieldset>
 
             <Show when={error()}>

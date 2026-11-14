@@ -31,6 +31,7 @@ export interface PeerRow {
   nat: string;
   version: string;
   secure: boolean;
+  subnets: string[];
   raw: Doc;
 }
 
@@ -129,6 +130,7 @@ function ingest(doc: Doc) {
       nat: peer.udp_nat ?? "",
       version: route.version ?? "",
       secure: peer.end_to_end_session_ready === true,
+      subnets: ((route.proxy_cidrs ?? []) as string[]).filter(Boolean),
       raw: peer,
     };
     rows.push(row);

@@ -579,6 +579,39 @@ impl InstanceConfigPatcher {
         }
         Ok(())
     }
+
+    pub async fn sync_live_config(
+        &self,
+        old_peers: &[crate::common::config::PeerConfig],
+        candidate: &crate::common::config::TomlConfigLoader,
+    ) -> Result<(), anyhow::Error> {
+        use std::collections::HashSet;
+
+        let global_ctx = weak_upgrade(&self.global_ctx)?;
+        let conn_manager = weak_upgrade(&self.conn_manager)?;
+        let flags = candidate.get_flags();
+        let new_peers = candidate.get_peers();
+        let old_urls: HashSet<url::Url> = old_peers.iter().map(|p| p.uri.clone()).collect();
+        let new_urls: HashSet<url::Url> = new_peers.iter().map(|p| p.uri.clone()).collect();
+
+        for url in old_urls.difference(&new_urls) {
+            tracing::info!(%url, "hot-removing bootstrap peer");
+            if let Err(e) = conn_manager.remove_connector(url.clone()).await {
+                tracing::warn!(%url, ?e, "failed to remove connector during live config sync");
+            }
+        }
+        for url in new_urls.difference(&old_urls) {
+            tracing::info!(%url, "hot-adding bootstrap peer");
+            conn_manager.add_connector_by_url_with_flags(url.clone(), &flags);
+        }
+
+        global_ctx.config.set_peers(new_peers);
+        global_ctx
+            .config
+            .set_proxy_cidrs(candidate.get_proxy_cidrs());
+        global_ctx.config.set_routes(candidate.get_routes());
+        Ok(())
+    }
 }
 
 pub struct Instance {

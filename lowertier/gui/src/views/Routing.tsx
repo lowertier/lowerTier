@@ -1,16 +1,20 @@
 import { For, Index, Show, createMemo, createSignal } from "solid-js";
 import { Segmented, Switch } from "../components/controls";
+import MeshGraph from "../components/MeshGraph";
 import { PathStatusView, RefSelect, ViaEditor, isGroup, refLabel } from "../components/paths";
 import {
   apply,
   busy,
   configured,
+  exportsConfigured,
   groupsConfigured,
   pathsConfigured,
   restartPending,
+  saveExports,
   saveRouting,
   say,
   spec,
+  type ExportConfig,
   type GroupConfig,
   type PathConfig,
 } from "../config";
@@ -98,7 +102,19 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
             <RefSelect label="Destination peer" value={to()} placeholder="Choose a peer" groups={false} onChange={setTo} />
           </Show>
           <Show when={kind() === "subnet"}>
-            <input type="text" placeholder="10.8.0.0/16" aria-label="Destination subnet" value={to()} onInput={(event) => setTo(event.currentTarget.value)} />
+            <input
+              type="text"
+              list="discovered-subnets"
+              placeholder="10.8.0.0/16 or 192.168.1.0/24"
+              aria-label="Destination subnet"
+              value={to()}
+              onInput={(event) => setTo(event.currentTarget.value)}
+            />
+            <datalist id="discovered-subnets">
+              <For each={[...new Set(peers().flatMap((row) => row.subnets))]}>
+                {(cidr) => <option value={cidr} />}
+              </For>
+            </datalist>
           </Show>
         </div>
       </div>
@@ -252,15 +268,98 @@ function GroupEditor(props: { initial?: GroupConfig; onSave: (group: GroupConfig
   );
 }
 
+function ExportEditor(props: { initial?: ExportConfig; onSave: (entry: ExportConfig) => void; onCancel: () => void }) {
+  const [cidr, setCidr] = createSignal(props.initial?.cidr ?? "");
+  const [mapped, setMapped] = createSignal(props.initial?.mapped_cidr ?? "");
+  const [allow, setAllow] = createSignal((props.initial?.allow ?? []).join(", "));
+  const validCidr = (value: string) => /^(\d+\.){3}\d+\/\d+$/.test(value.trim());
+  const problem = () => {
+    if (!validCidr(cidr())) return "Enter a local subnet CIDR, e.g. 192.168.1.0/24.";
+    if (mapped().trim() && !validCidr(mapped())) return "Mapped CIDR must be a valid IPv4 CIDR.";
+    return "";
+  };
+  return (
+    <form
+      class="path-editor"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (problem()) return;
+        const allowList = allow().split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+        props.onSave({
+          cidr: cidr().trim(),
+          mapped_cidr: mapped().trim() || undefined,
+          allow: allowList.length ? allowList : undefined,
+        });
+      }}
+    >
+      <div class="editor-row">
+        <span class="editor-label">Local subnet</span>
+        <div class="editor-control">
+          <input type="text" placeholder="192.168.1.0/24" aria-label="Local subnet CIDR" value={cidr()} onInput={(e) => setCidr(e.currentTarget.value)} />
+        </div>
+      </div>
+      <div class="editor-row">
+        <span class="editor-label">Mapped CIDR</span>
+        <div class="editor-control">
+          <input type="text" placeholder="Optional (e.g. 10.201.0.0/24 if overlapping)" aria-label="Mapped subnet CIDR" value={mapped()} onInput={(e) => setMapped(e.currentTarget.value)} />
+          <p class="hint">Remap overlapping LAN subnets (for example two sites both using 192.168.1.0/24).</p>
+        </div>
+      </div>
+      <div class="editor-row">
+        <span class="editor-label">Allow from</span>
+        <div class="editor-control">
+          <input type="text" placeholder="Optional comma-separated source CIDRs" aria-label="Allowed source CIDRs" value={allow()} onInput={(e) => setAllow(e.currentTarget.value)} />
+        </div>
+      </div>
+      <div class="row-actions">
+        <button type="submit" class="primary" disabled={busy() || problem() !== ""}>Save subnet</button>
+        <button type="button" class="link" onClick={props.onCancel}>Cancel</button>
+        <Show when={problem()}><span class="hint">{problem()}</span></Show>
+      </div>
+    </form>
+  );
+}
+
 export default function Routing(props: { onOpenPeer: (id: number) => void }) {
   const policy = () => configured("relay.policy") ?? "hop";
   const transit = () => configured("relay.transit") ?? "allow";
+  const p2pMode = () => String(configured("nat.p2p") ?? "on");
+  const maxDirect = () => configured("limits.max_direct_peers");
+  const [maxDirectText, setMaxDirectText] = createSignal("");
   const budget = () => configured("relay.probe_budget_bps");
   const probeEvery = () => configured("relay.probe_interval_seconds") ?? 30;
   const [budgetText, setBudgetText] = createSignal("");
-  // The open path or group editor: an index, "new", or none.
+  // The open path, group, or export editor: an index, "new", or none.
   const [editingPath, setEditingPath] = createSignal<number | "new" | null>(null);
+  const [newPathDraft, setNewPathDraft] = createSignal<PathConfig | undefined>(undefined);
   const [editingGroup, setEditingGroup] = createSignal<number | "new" | null>(null);
+  const [editingExport, setEditingExport] = createSignal<number | "new" | null>(null);
+
+  const discoveredSubnets = createMemo(() => {
+    const out: { cidr: string; peer: string; peerId: number; via?: number; direct: boolean }[] = [];
+    for (const row of peers()) {
+      for (const cidr of row.subnets) {
+        out.push({ cidr, peer: row.name, peerId: row.id, via: row.via, direct: row.direct });
+      }
+    }
+    return out;
+  });
+
+  const saveExport = async (index: number | "new", entry: ExportConfig) => {
+    const list = exportsConfigured();
+    if (index === "new") list.push(entry);
+    else list[index] = entry;
+    if (await saveExports(list)) setEditingExport(null);
+  };
+  const deleteExport = (index: number) => {
+    const list = exportsConfigured();
+    list.splice(index, 1);
+    saveExports(list);
+  };
+  const steerSubnet = (cidr: string) => {
+    setNewPathDraft({ to: cidr });
+    setEditingPath("new");
+  };
 
   const routed = createMemo(() => peers().map((row) => ({ row, route: routeFor(row) })));
   const extraRoutes = createMemo(() =>
@@ -310,8 +409,16 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
 
   return (
     <div class="stack">
+      <section class="panel">
+        <header class="panel-head">
+          <h2>Mesh topology</h2>
+          <span class="sub">{peers().filter((p) => p.direct).length} direct · {peers().filter((p) => !p.direct).length} relayed</span>
+        </header>
+        <MeshGraph peers={peers()} onOpenPeer={props.onOpenPeer} />
+      </section>
+
       <section class="panel settings-group">
-        <h2>Path selection</h2>
+        <h2>Path selection & mesh scaling</h2>
         <div class="row">
           <div class="label">
             <b>Route by</b>
@@ -385,13 +492,125 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
             <Applies path="routes.serve_exit" />
           </div>
         </div>
+        <div class="row">
+          <div class="label">
+            <b>Direct peer mode</b>
+            <p>Lazy only dials direct P2P on traffic demand; on maintains direct mesh up to the connection budget.</p>
+          </div>
+          <div class="control">
+            <Segmented label="Direct peer mode" values={["lazy", "on", "required", "off"]} value={p2pMode()} disabled={busy()} onChange={(value) => apply({ "nat.p2p": value })} />
+            <Applies path="nat.p2p" />
+          </div>
+        </div>
+        <form
+          class="row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const parsed = Number.parseInt(maxDirectText().trim(), 10);
+            if (!Number.isNaN(parsed) && parsed >= 0) {
+              apply({ "limits.max_direct_peers": parsed }).then((ok) => ok && setMaxDirectText(""));
+            }
+          }}
+        >
+          <div class="label">
+            <b>Max direct peers</b>
+            <p>Cap steady-state direct connections (0 = unlimited, default 32). Active relays and recent traffic stay connected.</p>
+          </div>
+          <div class="control inline">
+            <input
+              type="number"
+              min="0"
+              placeholder={String(maxDirect() ?? 32)}
+              aria-label="Max direct peers"
+              value={maxDirectText()}
+              onInput={(event) => setMaxDirectText(event.currentTarget.value)}
+            />
+            <button type="submit" class="quiet" disabled={busy() || maxDirectText().trim() === ""}>Set</button>
+            <Applies path="limits.max_direct_peers" />
+          </div>
+        </form>
+      </section>
+
+      <section class="panel settings-group">
+        <header class="panel-head">
+          <h2>Subnets & router forwarding</h2>
+          <Show when={editingExport() === null}>
+            <button type="button" class="quiet" onClick={() => setEditingExport("new")}>Export subnet</button>
+          </Show>
+        </header>
+        <p class="hint lead">
+          Export local LAN subnets (for example 192.168.1.0/24 on a router) to the mesh, or steer discovered remote subnets via relays or direct mesh.
+        </p>
+        <div class="row">
+          <div class="label">
+            <b>System router forwarding</b>
+            <p>Use kernel IP forwarding instead of userspace NAT proxy so LAN devices behind a router reach remote subnets two-way.</p>
+          </div>
+          <div class="control">
+            <Switch label="System router forwarding" checked={configured("proxy.system_forward") ?? false} disabled={busy()} onChange={(value) => apply({ "proxy.system_forward": value })} />
+            <Applies path="proxy.system_forward" />
+          </div>
+        </div>
+        <Show when={editingExport() === "new"}>
+          <ExportEditor onSave={(entry) => saveExport("new", entry)} onCancel={() => setEditingExport(null)} />
+        </Show>
+        <Show when={exportsConfigured().length > 0}>
+          <ol class="path-list">
+            <For each={exportsConfigured()}>
+              {(entry, index) => (
+                <li>
+                  <Show
+                    when={editingExport() === index()}
+                    fallback={
+                      <div class="path-row">
+                        <div class="path-summary">
+                          <span class="mono">{entry.cidr}</span>
+                          <Show when={entry.mapped_cidr}><span class="sub">→ mapped as {entry.mapped_cidr}</span></Show>
+                          <Show when={entry.allow?.length}><span class="sub">allow: {entry.allow!.join(", ")}</span></Show>
+                        </div>
+                        <div class="row-actions">
+                          <button type="button" class="quiet" onClick={() => setEditingExport(index())}>Edit</button>
+                          <button type="button" class="link danger" disabled={busy()} onClick={() => deleteExport(index())}>Remove</button>
+                        </div>
+                      </div>
+                    }
+                  >
+                    <ExportEditor initial={entry} onSave={(next) => saveExport(index(), next)} onCancel={() => setEditingExport(null)} />
+                  </Show>
+                </li>
+              )}
+            </For>
+          </ol>
+        </Show>
+        <Show when={discoveredSubnets().length > 0}>
+          <div class="discovered-subnets">
+            <h3>Discovered mesh subnets</h3>
+            <ul class="path-list">
+              <For each={discoveredSubnets()}>
+                {(item) => (
+                  <li>
+                    <div class="path-row">
+                      <div class="path-summary">
+                        <span class="mono">{item.cidr}</span>
+                        <span class="sub">via {item.peer} ({item.direct ? "direct" : "relayed"})</span>
+                      </div>
+                      <div class="row-actions">
+                        <button type="button" class="quiet" onClick={() => steerSubnet(item.cidr)}>Steer / Relay</button>
+                      </div>
+                    </div>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </div>
+        </Show>
       </section>
 
       <section class="panel">
         <header class="panel-head">
           <h2>Paths</h2>
           <Show when={editingPath() === null}>
-            <button type="button" class="quiet" onClick={() => setEditingPath("new")}>
+            <button type="button" class="quiet" onClick={() => { setNewPathDraft(undefined); setEditingPath("new"); }}>
               New path
             </button>
           </Show>
@@ -401,7 +620,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
           them.
         </p>
         <Show when={editingPath() === "new"}>
-          <PathEditor onSave={(path) => savePath("new", path)} onCancel={() => setEditingPath(null)} />
+          <PathEditor initial={newPathDraft()} onSave={(path) => { setNewPathDraft(undefined); savePath("new", path); }} onCancel={() => { setNewPathDraft(undefined); setEditingPath(null); }} />
         </Show>
         <Show when={!pathsConfigured().length && editingPath() !== "new"}>
           <p class="empty">No paths. All traffic routes automatically.</p>

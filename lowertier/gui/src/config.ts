@@ -171,3 +171,55 @@ export function setLinkCost(peer: string, bias?: number) {
   if (bias) next.push({ peer, bias_ms: bias });
   return apply({ "relay.link_cost": next.length ? next : null });
 }
+
+export interface ExportConfig {
+  cidr: string;
+  mapped_cidr?: string;
+  allow?: string[];
+}
+
+export const exportsConfigured = (): ExportConfig[] =>
+  ((configured("export") ?? []) as ExportConfig[]).map((entry) => ({
+    cidr: entry.cidr,
+    mapped_cidr: entry.mapped_cidr,
+    allow: entry.allow ? [...entry.allow] : undefined,
+  }));
+
+function tidyExport(entry: ExportConfig): ExportConfig {
+  const out: ExportConfig = { cidr: entry.cidr.trim() };
+  if (entry.mapped_cidr?.trim()) out.mapped_cidr = entry.mapped_cidr.trim();
+  const allow = (entry.allow ?? []).map((item) => item.trim()).filter(Boolean);
+  if (allow.length) out.allow = allow;
+  return out;
+}
+
+export function saveExports(exports: ExportConfig[]) {
+  const cleaned = exports.map(tidyExport).filter((entry) => entry.cidr);
+  return apply({ export: cleaned.length ? cleaned : null });
+}
+
+function defaultBootstrapKey(network?: string): string {
+  const normalized = (network ?? "default").trim() || "default";
+  return `lowertier.defaultBootstrapPeers.${normalized}`;
+}
+
+export function readDefaultBootstrapPeers(network?: string): string[] {
+  try {
+    const raw = localStorage.getItem(defaultBootstrapKey(network));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.map((item) => String(item).trim()).filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
+export function writeDefaultBootstrapPeers(network: string | undefined, uris: string[]): string[] {
+  const cleaned = [...new Set(uris.map((item) => item.trim()).filter(Boolean))];
+  try {
+    if (cleaned.length) localStorage.setItem(defaultBootstrapKey(network), JSON.stringify(cleaned));
+    else localStorage.removeItem(defaultBootstrapKey(network));
+  } catch {}
+  return cleaned;
+}
