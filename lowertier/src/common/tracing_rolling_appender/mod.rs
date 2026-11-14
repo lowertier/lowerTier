@@ -249,6 +249,25 @@ where
         self.open_writer_if_needed()
     }
 
+    /// Discards all rotated log files and truncates the active log file.
+    pub fn clear(&mut self) -> io::Result<()> {
+        let _ = self.flush();
+        self.writer_opt.take();
+        for (index, _) in self.scan_rotated_files() {
+            let _ = fs::remove_file(self.filename_for(index));
+        }
+        self.rotated_filesize = 0;
+        let active_path = Path::new(&self.filename);
+        if active_path.exists() {
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(active_path)?;
+        }
+        self.current_filesize = 0;
+        Ok(())
+    }
+
     /// Opens a writer for the current file.
     fn open_writer_if_needed(&mut self) -> io::Result<()> {
         if self.writer_opt.is_none() {
@@ -350,6 +369,10 @@ impl FileAppenderWrapper {
             appender: std::sync::Arc::new(parking_lot::Mutex::new(appender)),
         }
     }
+
+    pub fn clear(&self) -> io::Result<()> {
+        self.appender.lock().clear()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -444,5 +467,31 @@ mod tests {
 
         assert!(!dir.path().join("lowertier.log.4").exists());
         assert!(total_log_bytes(dir.path()) <= 1024);
+    }
+
+    #[test]
+    fn clear_removes_rotated_and_truncates_active_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lowertier.log");
+        let mut appender = RollingFileAppenderBase::builder()
+            .filename(path.to_string_lossy().into_owned())
+            .condition_daily()
+            .max_filecount(3)
+            .condition_max_file_size(128)
+            .max_total_size(1024)
+            .build()
+            .unwrap();
+
+        for i in 0..20 {
+            appender
+                .write_all(format!("entry-{i:02}-0123456789\n").as_bytes())
+                .unwrap();
+        }
+        appender.flush().unwrap();
+        assert!(total_log_bytes(dir.path()) > 0);
+
+        appender.clear().unwrap();
+        assert_eq!(total_log_bytes(dir.path()), 0);
+        assert!(!dir.path().join("lowertier.log.1").exists());
     }
 }

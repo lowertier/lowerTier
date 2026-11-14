@@ -79,3 +79,17 @@ pub async fn level(client: &Client, level: Option<&str>) -> Result<Response> {
         ),
     }
 }
+
+pub async fn clear(client: &Client) -> Result<Response> {
+    checked(
+        client
+            .rpc
+            .clear_logs(
+                client.controller(),
+                ClearLogsRequest {
+                    meta: client.meta(),
+                },
+            )
+            .await?,
+    )
+}

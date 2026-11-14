@@ -81,6 +81,18 @@ pub type NewFilterSender = std::sync::mpsc::Sender<String>;
 
 // Keep filter changes and their global callsite cache rebuilds in the same order.
 pub(crate) static LOG_FILTER_UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static FILE_APPENDERS: std::sync::LazyLock<std::sync::Mutex<Vec<FileAppenderWrapper>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+pub(crate) fn clear_file_logs() -> anyhow::Result<()> {
+    let appenders = FILE_APPENDERS.lock().unwrap().clone();
+    for appender in appenders {
+        appender
+            .clear()
+            .with_context(|| "failed to clear log file")?;
+    }
+    Ok(())
+}
 
 macro_rules! tracing_layer {
     ($layer:expr) => {
@@ -263,6 +275,7 @@ fn file_layers(
 
         FileAppenderWrapper::new(file_appender)
     };
+    FILE_APPENDERS.lock().unwrap().push(wrapper.clone());
 
     layers.push(
         vec![

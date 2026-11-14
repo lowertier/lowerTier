@@ -111,6 +111,7 @@ proxy_methods! {
     read_logs, "ReadLogs", ReadLogsRequest, ReadLogsResponse;
     get_log_config, "GetLogConfig", GetLogConfigRequest, GetLogConfigResponse;
     set_log_config, "SetLogConfig", SetLogConfigRequest, SetLogConfigResponse;
+    clear_logs, "ClearLogs", ClearLogsRequest, ClearLogsResponse;
     get_acl, "GetAcl", GetAclRequest, GetAclResponse;
     get_acl_stats, "GetAclStats", GetAclStatsRequest, GetAclStatsResponse;
     list_credentials, "ListCredentials", ListCredentialsRequest, ListCredentialsResponse;

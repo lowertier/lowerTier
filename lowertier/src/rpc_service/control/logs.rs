@@ -123,6 +123,32 @@ mod tests {
         assert_eq!(events.load(Ordering::Relaxed), 1);
         set_level(previous);
     }
+
+    #[test]
+    fn clear_empties_ring_without_breaking_sequence_cursors() {
+        {
+            let mut ring = RING.lock().unwrap();
+            ring.sequence = ring.sequence.saturating_add(1);
+            let sequence = ring.sequence;
+            ring.entries.push_back(LogEntry {
+                sequence,
+                sampled_at_unix_ms: 1,
+                level: "INFO".into(),
+                target: "test".into(),
+                message: "hello".into(),
+            });
+            ring.truncated = 5;
+        }
+        let cursor = read(None).unwrap().next_page_token;
+        clear().unwrap();
+        let after = read(Some(Page {
+            limit: 100,
+            page_token: cursor,
+        }))
+        .unwrap();
+        assert!(after.logs.is_empty());
+        assert_eq!(after.truncated, 0);
+    }
 }
 
 #[derive(Default)]
@@ -253,4 +279,14 @@ pub(super) fn read(request: Option<Page>) -> anyhow::Result<ReadLogsResponse> {
         truncated: ring.truncated,
         ..Default::default()
     })
+}
+
+pub(super) fn clear() -> anyhow::Result<()> {
+    {
+        let mut ring = RING.lock().unwrap();
+        ring.entries.clear();
+        ring.truncated = 0;
+        ring.memory = None;
+    }
+    crate::common::log::clear_file_logs()
 }

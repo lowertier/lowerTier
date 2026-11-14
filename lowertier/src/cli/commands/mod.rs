@@ -54,6 +54,7 @@ pub async fn execute(client: &Client, command: &Command) -> Result<Response> {
         Command::Forward { command } => forward::execute(client, command.as_ref()).await,
         Command::Instance { command } => instance::execute(client, command).await,
         Command::Stats { prometheus, .. } => stats::execute(client, *prometheus).await,
+        Command::Logs { clear: true, .. } => log::clear(client).await,
         Command::Logs { page, .. } if page.page_token.is_empty() => {
             super::client::checked(log::tail(client, page.limit).await?)
         }

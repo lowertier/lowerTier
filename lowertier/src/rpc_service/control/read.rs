@@ -26,6 +26,7 @@ pub(super) const METHODS: &[&str] = &[
     "ReadLogs",
     "GetLogConfig",
     "SetLogConfig",
+    "ClearLogs",
     "GetAcl",
     "GetAclStats",
     "ListCredentials",
@@ -792,6 +793,15 @@ impl ControlPlaneService {
         }
         apply_log_level(&request.level)?;
         Ok(SetLogConfigResponse::default())
+    }
+
+    pub(super) async fn clear_logs_inner(
+        &self,
+        _: BaseController,
+        _: ClearLogsRequest,
+    ) -> anyhow::Result<ClearLogsResponse> {
+        logs::clear()?;
+        Ok(ClearLogsResponse::default())
     }
 
     pub(super) async fn get_acl_inner(

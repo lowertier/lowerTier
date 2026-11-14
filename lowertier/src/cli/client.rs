@@ -67,6 +67,7 @@ responses!(
     ReadLogsResponse,
     GetLogConfigResponse,
     SetLogConfigResponse,
+    ClearLogsResponse,
     GetAclResponse,
     SetAclResponse,
     GetAclStatsResponse,

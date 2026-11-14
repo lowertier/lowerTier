@@ -14,6 +14,7 @@ export default function Logs() {
   const [daemonLevel, setDaemonLevel] = createSignal<string>();
   const [filter, setFilter] = createSignal("");
   const [follow, setFollow] = createSignal(true);
+  const [clearing, setClearing] = createSignal(false);
   const [failure, setFailure] = createSignal("");
   let cursor = "";
   let timer: number | undefined;
@@ -85,6 +86,21 @@ export default function Logs() {
     }
   };
 
+  const clearLogs = async () => {
+    setClearing(true);
+    try {
+      await rpc("ClearLogs");
+      cursor = "";
+      setLines([]);
+      setFailure("");
+      say("Logs cleared.");
+    } catch (caught) {
+      say(caught instanceof Error ? caught.message : String(caught), true);
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div class="stack logs-view">
       <div class="toolbar">
@@ -102,6 +118,9 @@ export default function Logs() {
             <For each={["off", ...LEVELS]}>{(value) => <option value={value}>{value}</option>}</For>
           </select>
         </label>
+        <button type="button" class="quiet" disabled={clearing()} onClick={clearLogs}>
+          {clearing() ? "Clearing…" : "Clear logs"}
+        </button>
       </div>
       <Show when={failure()}>
         <p class="hint bad">{failure()}</p>

@@ -177,8 +177,11 @@ pub enum Command {
     /// Show recent log lines.
     Logs {
         /// Keep printing new lines.
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "clear")]
         follow: bool,
+        /// Clear buffered and file logs on the daemon.
+        #[arg(long)]
+        clear: bool,
         #[command(flatten)]
         page: PageArgs,
     },

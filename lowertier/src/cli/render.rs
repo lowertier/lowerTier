@@ -1044,6 +1044,7 @@ fn table_output(response: &Response, data: &Value) -> String {
         Response::GetStatsResponse(_) => metrics(data, "metrics"),
         Response::GetPrometheusResponse(value) => value.text.clone(),
         Response::ReadLogsResponse(value) => logs(value),
+        Response::ClearLogsResponse(_) => "logs cleared\n".into(),
         Response::GetRelayResponse(value) => {
             let config = value.config.clone().unwrap_or_default();
             let mut drops = std::collections::BTreeMap::<String, u64>::new();

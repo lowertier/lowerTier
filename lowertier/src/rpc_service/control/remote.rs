@@ -657,7 +657,7 @@ fn authorize(
             "config.write"
         }
         "ReadLogs" | "GetLogConfig" => "logs.read",
-        "SetLogConfig" => "logs.write",
+        "SetLogConfig" | "ClearLogs" => "logs.write",
         "ListCredentials" => "credentials.read",
         "IssueCredential" | "RevokeCredential" => "credentials.write",
         "CreateInstance" | "CreateJoinCode" => "admin",

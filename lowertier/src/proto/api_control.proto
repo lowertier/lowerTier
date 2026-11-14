@@ -221,6 +221,8 @@ message GetLogConfigRequest { RequestMeta meta = 1; }
 message GetLogConfigResponse { ApiError error = 1; string level = 2; }
 message SetLogConfigRequest { RequestMeta meta = 1; string level = 2; }
 message SetLogConfigResponse { ApiError error = 1; }
+message ClearLogsRequest { RequestMeta meta = 1; }
+message ClearLogsResponse { ApiError error = 1; }
 
 message GetAclRequest { RequestMeta meta = 1; }
 message GetAclResponse { ApiError error = 1; SnapshotMeta snapshot = 2; acl.Acl acl = 3; repeated string tcp_whitelist = 4; repeated string udp_whitelist = 5; }
@@ -368,6 +370,7 @@ service ControlPlaneV1Rpc {
   rpc ReadLogs(ReadLogsRequest) returns (ReadLogsResponse);
   rpc GetLogConfig(GetLogConfigRequest) returns (GetLogConfigResponse);
   rpc SetLogConfig(SetLogConfigRequest) returns (SetLogConfigResponse);
+  rpc ClearLogs(ClearLogsRequest) returns (ClearLogsResponse);
   rpc GetAcl(GetAclRequest) returns (GetAclResponse);
   rpc GetAclStats(GetAclStatsRequest) returns (GetAclStatsResponse);
   rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);

@@ -230,6 +230,7 @@ control_service! {
     read_logs, ReadLogsRequest, ReadLogsResponse, read_logs_inner;
     get_log_config, GetLogConfigRequest, GetLogConfigResponse, get_log_config_inner;
     set_log_config, SetLogConfigRequest, SetLogConfigResponse, set_log_config_inner;
+    clear_logs, ClearLogsRequest, ClearLogsResponse, clear_logs_inner;
     get_acl, GetAclRequest, GetAclResponse, get_acl_inner;
     get_acl_stats, GetAclStatsRequest, GetAclStatsResponse, get_acl_stats_inner;
     list_credentials, ListCredentialsRequest, ListCredentialsResponse, list_credentials_inner;
