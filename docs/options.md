@@ -251,5 +251,5 @@ Secrets are redacted in all output.
 | `log.console` | string |  | live | Console log level: off, error, warn, info, debug, trace. |
 | `log.file` | string |  | process restart | File log level. |
 | `log.dir` | path |  | process restart | File log directory. |
-| `log.max_size_mb` | integer |  | process restart | File size before rotation, in MiB. |
-| `log.max_files` | integer |  | process restart | Rotated files to keep. |
+| `log.max_size_mb` | integer |  | process restart | Total log size cap across active and rotated files, in MiB (default 2). |
+| `log.max_files` | integer |  | process restart | Rotated files to keep (default 3). |

@@ -78,6 +78,7 @@ pub struct RollingFileAppenderBaseBuilder {
     condition: RollingConditionBase,
     filename: String,
     max_filecount: usize,
+    max_total_size: Option<u64>,
     current_filesize: u64,
     writer_opt: Option<BufWriter<File>>,
 }
@@ -88,6 +89,7 @@ impl Default for RollingFileAppenderBaseBuilder {
             condition: RollingConditionBase::default(),
             filename: String::new(),
             max_filecount: 10,
+            max_total_size: None,
             current_filesize: 0,
             writer_opt: None,
         }
@@ -133,6 +135,12 @@ impl RollingFileAppenderBaseBuilder {
         self
     }
 
+    /// Sets a total size cap across active and rotated log files, discarding oldest files first.
+    pub fn max_total_size(mut self, max_total_size: u64) -> Self {
+        self.max_total_size = Some(max_total_size);
+        self
+    }
+
     /// Builds a RollingFileAppenderBase instance from the current settings.
     ///
     /// Returns an error if the filename is empty.
@@ -142,13 +150,17 @@ impl RollingFileAppenderBaseBuilder {
                 "A filename is required to be set and can not be blank"
             ));
         }
-        Ok(RollingFileAppenderBase {
+        let mut appender = RollingFileAppenderBase {
             condition: self.condition,
             filename: self.filename,
             max_filecount: self.max_filecount,
+            max_total_size: self.max_total_size,
             current_filesize: self.current_filesize,
+            rotated_filesize: 0,
             writer_opt: self.writer_opt,
-        })
+        };
+        appender.enforce_startup_cap()?;
+        Ok(appender)
     }
 }
 

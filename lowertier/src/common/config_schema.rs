@@ -1045,7 +1045,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Process,
         "",
-        "File size before rotation, in MiB.",
+        "Total log size cap across active and rotated files, in MiB (default 2).",
     ),
     opt(
         "log.max_files",
@@ -1053,7 +1053,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Process,
         "",
-        "Rotated files to keep.",
+        "Rotated files to keep (default 3).",
     ),
 ];
 

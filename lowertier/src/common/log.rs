@@ -195,6 +195,27 @@ fn console_layers(default_level: Option<LevelFilter>) -> anyhow::Result<Vec<BoxL
     Ok(layers)
 }
 
+const DEFAULT_LOG_CAP_MB: u64 = 2;
+const DEFAULT_LOG_MAX_FILES: usize = 3;
+const MIN_ROTATED_FILE_SIZE_BYTES: u64 = 64 * 1024;
+
+fn file_rotation_limits(config: &FileLoggerConfig) -> (u64, usize, u64) {
+    let total_cap_bytes = config
+        .size_mb
+        .unwrap_or(DEFAULT_LOG_CAP_MB)
+        .saturating_mul(1024 * 1024);
+    let max_files = config.count.unwrap_or(DEFAULT_LOG_MAX_FILES);
+    let per_file_bytes = if total_cap_bytes == 0 {
+        0
+    } else if max_files == 0 {
+        total_cap_bytes
+    } else {
+        (total_cap_bytes / (max_files as u64 + 1))
+            .max(MIN_ROTATED_FILE_SIZE_BYTES.min(total_cap_bytes))
+    };
+    (total_cap_bytes, max_files, per_file_bytes)
+}
+
 fn file_layers(
     config: FileLoggerConfig,
     reload: bool,
@@ -203,6 +224,7 @@ fn file_layers(
 
     let level = config
         .level
+        .as_deref()
         .map(|s| s.parse().unwrap())
         .unwrap_or(LevelFilter::OFF);
 
@@ -228,12 +250,14 @@ fn file_layers(
             path.to_string_lossy().into_owned()
         };
 
+        let (total_cap_bytes, max_files, per_file_bytes) = file_rotation_limits(&config);
         let builder = RollingFileAppenderBase::builder();
         let file_appender = builder
             .filename(path)
             .condition_daily()
-            .max_filecount(config.count.unwrap_or(10))
-            .condition_max_file_size(config.size_mb.unwrap_or(100) * 1024 * 1024)
+            .max_filecount(max_files)
+            .condition_max_file_size(per_file_bytes)
+            .max_total_size(total_cap_bytes)
             .build()
             .with_context(|| "failed to initialize rolling file appender")?;
 
@@ -298,4 +322,30 @@ fn file_layers(
     });
 
     Ok((layers, Some(tx)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_file_rotation_limits_cap_logs_at_two_mib() {
+        let (total_cap, max_files, per_file) = file_rotation_limits(&FileLoggerConfig::default());
+        assert_eq!(total_cap, 2 * 1024 * 1024);
+        assert_eq!(max_files, 3);
+        assert_eq!(per_file, 512 * 1024);
+    }
+
+    #[test]
+    fn zero_max_files_uses_single_capped_file() {
+        let cfg = FileLoggerConfig {
+            size_mb: Some(2),
+            count: Some(0),
+            ..Default::default()
+        };
+        let (total_cap, max_files, per_file) = file_rotation_limits(&cfg);
+        assert_eq!(total_cap, 2 * 1024 * 1024);
+        assert_eq!(max_files, 0);
+        assert_eq!(per_file, 2 * 1024 * 1024);
+    }
 }
