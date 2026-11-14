@@ -196,13 +196,13 @@ Secrets are redacted in all output.
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `group` | array of tables |  | live | Load-balance groups: name, members (peer keys or virtual IPs), balance (flow or failover), weights. |
+| `group` | array of tables |  | live | Relay groups: name, nodes (peer keys or virtual IPs), mode (parallel, flow, or failover), weights. |
 
 ## `[[path]]`
 
 | Option | Type | Default | Applies | What it does |
 | --- | --- | --- | --- | --- |
-| `path` | array of tables |  | live | Paths: to (peer, CIDR, or internet), via (peers or groups in order), gateway (peer or group), strict. |
+| `path` | array of tables |  | live | Paths: to (peer, *, CIDR, or internet), mode, layers (ordered relay layers of peers/groups or inline lists), gateway, strict. |
 
 ## `[[note]]`
 

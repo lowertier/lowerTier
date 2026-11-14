@@ -1479,7 +1479,8 @@ impl QuicEndpointManager {
         };
         let mut flags = manager.flags.clone();
         if flags.camouflage_config().admission_secret.is_empty() {
-            let stream_flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(_global_ctx);
+            let stream_flags =
+                crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(_global_ctx);
             if !stream_flags.camouflage_config().admission_secret.is_empty() {
                 Arc::make_mut(&mut flags)
                     .camouflage_config_mut()
@@ -3045,8 +3046,7 @@ impl QuicDecoySocket {
             .server_names
             .iter()
             .any(|name| quic_initial_sni_eq(packet, name));
-        let route = if has_marker || ((self.sni_routing || self.secret.is_empty()) && matches_sni)
-        {
+        let route = if has_marker || ((self.sni_routing || self.secret.is_empty()) && matches_sni) {
             QuicSocketRoute::Local
         } else if super::decoy::is_quic_initial(packet)
             && self.decoy_tx.is_some()
@@ -4066,9 +4066,8 @@ impl TunnelConnector for QuicTunnelConnector {
                         false,
                     )?,
                 };
-                let flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(
-                    &self.global_ctx,
-                );
+                let flags =
+                    crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&self.global_ctx);
                 let name = flags
                     .camouflage_config()
                     .effective_server_name_for(addr.ip())
@@ -4094,9 +4093,8 @@ impl TunnelConnector for QuicTunnelConnector {
 
         // The authority matches the server name chosen for this destination.
         let authority = {
-            let flags = crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(
-                &self.global_ctx,
-            );
+            let flags =
+                crate::tunnel::stealth_tls::ConnectIpAdmission::stream_flags(&self.global_ctx);
             let camo = flags.camouflage_config();
             match camo.server_name_for(addr.ip()) {
                 Some(name) => name.to_owned(),
@@ -5925,12 +5923,12 @@ mod idle_observer_tests {
 
                 let url: url::Url = format!("quic://{server_addr}").parse().unwrap();
                 let mut connector = QuicTunnelConnector::new(url, client_ctx.clone());
-                let (client_res, server_res) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    async { tokio::join!(connector.connect(), accept) },
-                )
-                .await
-                .unwrap();
+                let (client_res, server_res) =
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        tokio::join!(connector.connect(), accept)
+                    })
+                    .await
+                    .unwrap();
                 let _client = client_res.unwrap();
                 let _server = server_res.unwrap();
             }
@@ -5940,7 +5938,12 @@ mod idle_observer_tests {
             let mut default_listener =
                 QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), make_ctx());
             default_listener.listen().await.unwrap();
-            let default_addr = default_listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+            let default_addr = default_listener
+                .endpoint
+                .as_ref()
+                .unwrap()
+                .local_addr()
+                .unwrap();
             let drop_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
                 let _ = default_listener.accept().await;
             }));

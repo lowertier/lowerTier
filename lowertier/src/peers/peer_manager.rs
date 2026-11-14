@@ -832,6 +832,8 @@ pub struct PeerManager {
 
     /// `[[group]]` and `[[path]]` selection for traffic this node sends.
     paths: Arc<super::path_policy::PathRuntime>,
+    multipath_sender: Arc<super::multipath::MultipathSender>,
+    multipath_reorder: Arc<super::multipath::MultipathReorderBuffer>,
 
     reserved_my_peer_id_map: DashMap<String, PeerId>,
     recent_have_traffic: Arc<DashMap<PeerId, Instant>>,
@@ -1459,6 +1461,8 @@ impl PeerManager {
             topology_service_route_generation: AtomicU64::new(0),
 
             paths: Arc::new(super::path_policy::PathRuntime::new(my_peer_id)),
+            multipath_sender: Arc::new(super::multipath::MultipathSender::new(my_peer_id)),
+            multipath_reorder: Arc::new(super::multipath::MultipathReorderBuffer::new()),
 
             reserved_my_peer_id_map: DashMap::new(),
             recent_have_traffic: Arc::new(DashMap::new()),
@@ -2294,17 +2298,23 @@ impl PeerManager {
         if from_peer_id == my_peer_id {
             return Err("waypoint packet from this node");
         }
-        if global_ctx.get_flags().relay_config().transit()
-            == crate::proto::common::TransitPolicy::Deny
-        {
-            return Err("relay.transit is deny");
+        match packet.advance_source_route(my_peer_id)? {
+            crate::tunnel::packet_def::SourceRouteStep::Forward(next) => {
+                if global_ctx.get_flags().relay_config().transit()
+                    == crate::proto::common::TransitPolicy::Deny
+                {
+                    return Err("relay.transit is deny");
+                }
+                if next == my_peer_id {
+                    return Err("waypoint packet loops back to this node");
+                }
+                packet.transit_data = true;
+                Ok(next)
+            }
+            crate::tunnel::packet_def::SourceRouteStep::Delivered { final_dst, .. } => {
+                Ok(final_dst)
+            }
         }
-        let next = packet.advance_waypoint()?;
-        if next == my_peer_id {
-            return Err("waypoint packet loops back to this node");
-        }
-        packet.transit_data = true;
-        Ok(next)
     }
 
     fn relay_batch_should_decrypt(batch: &PacketBatch, my_peer_id: PeerId) -> bool {
@@ -2340,6 +2350,29 @@ impl PeerManager {
             || peers.has_route_to_peer(peer_id).await
     }
 
+    async fn deliver_batch_to_pipelines(
+        pipe_line: &Arc<RwLock<Vec<BoxPeerPacketFilter>>>,
+        mut local_batch: PacketBatch,
+    ) {
+        if local_batch.is_empty() {
+            return;
+        }
+        tracing::trace!(packets = local_batch.len(), "process peer packet batch");
+        let pipelines = pipe_line.read().await;
+        for pipeline in pipelines.iter().rev() {
+            if !pipeline.is_interested_in_batch_from_peer(&local_batch) {
+                continue;
+            }
+            local_batch = pipeline.try_process_batch_from_peer(local_batch).await;
+            if local_batch.is_empty() {
+                break;
+            }
+        }
+        if !local_batch.is_empty() {
+            tracing::error!(packets = local_batch.len(), "unhandled packet batch");
+        }
+    }
+
     async fn start_peer_recv(&self) {
         let mut recv = self.packet_recv.lock().await.take().unwrap();
         let my_peer_id = self.my_peer_id;
@@ -2352,6 +2385,8 @@ impl PeerManager {
         let global_ctx = self.global_ctx.clone();
         let stats_mgr = self.global_ctx.stats_manager().clone();
         let route = self.get_route();
+        let multipath_sender = self.multipath_sender.clone();
+        let multipath_reorder = self.multipath_reorder.clone();
         let is_credential_node = self
             .global_ctx
             .get_network_identity()
@@ -2380,7 +2415,19 @@ impl PeerManager {
 
         let traffic_metrics = self.traffic_metrics.clone();
 
-        self.tasks.lock().await.spawn(async move {
+        let reorder_flush = multipath_reorder.clone();
+        let reorder_pipeline = pipe_line.clone();
+        let mut tasks = self.tasks.lock().await;
+        tasks.spawn(async move {
+            loop {
+                reorder_flush.wait_for_buffered().await;
+                tokio::time::sleep(super::multipath::REORDER_FLUSH_TICK).await;
+                for expired_batch in reorder_flush.flush_expired(Instant::now()) {
+                    Self::deliver_batch_to_pipelines(&reorder_pipeline, expired_batch).await;
+                }
+            }
+        });
+        tasks.spawn(async move {
             tracing::trace!("start_peer_recv");
             while let Ok(mut batch) = recv_packet_batch_from_chan(&mut recv).await {
                 let mut local_batch = if let Some((from_peer_id, packet_type)) =
@@ -2425,6 +2472,17 @@ impl PeerManager {
                         .await;
                     batch
                 } else {
+                    // Unwrap terminal source routes in-place so the inner encrypted packets can be
+                    // decrypted together in one vectorized batch pass.
+                    for packet in batch.iter_mut() {
+                        if packet.peek_terminal_source_route(my_peer_id)
+                            && packet
+                                .peer_manager_header()
+                                .is_some_and(|h| h.from_peer_id.get() != my_peer_id)
+                        {
+                            let _ = packet.advance_source_route(my_peer_id);
+                        }
+                    }
                     let relay_decrypt_outcomes =
                         if Self::relay_batch_should_decrypt(&batch, my_peer_id) {
                             relay_peer_map.decrypt_batch_if_needed(&mut batch)
@@ -2615,7 +2673,7 @@ impl PeerManager {
                                 continue;
                             };
 
-                            if header.forward_counter > 7 {
+                            if header.forward_counter > 15 {
                                 tracing::warn!(?header, "forward counter exceed, drop packet");
                                 continue;
                             }
@@ -2735,6 +2793,28 @@ impl PeerManager {
                                 }
                                 continue;
                             }
+                            if packet_type == PacketType::PathProbe as u8 {
+                                if let Some(ack) = super::multipath::build_path_probe_ack(
+                                    my_peer_id,
+                                    from_peer_id,
+                                    ret.payload(),
+                                ) {
+                                    let _ = Self::send_msg_internal(
+                                        &peers,
+                                        &foreign_client,
+                                        &relay_peer_map,
+                                        None,
+                                        ack,
+                                        from_peer_id,
+                                    )
+                                    .await;
+                                }
+                                continue;
+                            }
+                            if packet_type == PacketType::PathProbeAck as u8 {
+                                multipath_sender.record_probe_ack(from_peer_id, ret.payload());
+                                continue;
+                            }
 
                             let logical_origin_authenticated =
                                 ret.logical_authenticated_peer_id() == Some(from_peer_id);
@@ -2815,19 +2895,8 @@ impl PeerManager {
                 if local_batch.is_empty() {
                     continue;
                 }
-                tracing::trace!(packets = local_batch.len(), "process peer packet batch");
-                let pipelines = pipe_line.read().await;
-                for pipeline in pipelines.iter().rev() {
-                    if !pipeline.is_interested_in_batch_from_peer(&local_batch) {
-                        continue;
-                    }
-                    local_batch = pipeline.try_process_batch_from_peer(local_batch).await;
-                    if local_batch.is_empty() {
-                        break;
-                    }
-                }
-                if !local_batch.is_empty() {
-                    tracing::error!(packets = local_batch.len(), "unhandled packet batch");
+                for ready_batch in multipath_reorder.ingest_batch(local_batch, Instant::now()) {
+                    Self::deliver_batch_to_pipelines(&pipe_line, ready_batch).await;
                 }
             }
             panic!("done_peer_recv");
@@ -3614,7 +3683,7 @@ impl PeerManager {
             self.paths.refresh(&self.global_ctx.flags_arc());
             let mut errors = Vec::new();
             let mut rest = self
-                .send_path_packets(dst_peer_id, PacketBatch::singleton(msg), &mut errors)
+                .send_path_packets(dst_peer_id, PacketBatch::singleton(msg), &mut errors, None)
                 .await
                 .into_iter();
             if let Some(error) = errors.pop() {
@@ -3677,19 +3746,33 @@ impl PeerManager {
         };
         let routes = self.get_route().list_routes().await;
         let my_hostname = self.global_ctx.get_hostname();
-        self.paths.status(&snapshot, |peer_id| {
-            if peer_id == self.my_peer_id {
-                return my_hostname.clone();
-            }
-            routes
-                .iter()
-                .find(|route| route.peer_id == peer_id)
-                .map(|route| route.hostname.clone())
-                .unwrap_or_default()
-        })
+        self.paths.status(
+            &snapshot,
+            |peer_id| {
+                if peer_id == self.my_peer_id {
+                    return my_hostname.clone();
+                }
+                routes
+                    .iter()
+                    .find(|route| route.peer_id == peer_id)
+                    .map(|route| route.hostname.clone())
+                    .unwrap_or_default()
+            },
+            |dst, path_id, hops| self.multipath_sender.chain_telemetry(dst, path_id, hops),
+            |peer| self.multipath_reorder.reordered_count_for_peer(peer),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reordered_packets_from(&self, peer_id: PeerId) -> u64 {
+        self.multipath_reorder
+            .reordered_count_for_peer(Some(peer_id))
     }
 
     pub(crate) fn only_direct_proxy_conn(&self, dst_peer_id: PeerId) -> Option<Arc<PeerConn>> {
+        if self.path_applies_to(dst_peer_id) {
+            return None;
+        }
         self.peers.only_direct_conn(dst_peer_id)
     }
 
@@ -3983,27 +4066,62 @@ impl PeerManager {
         }
     }
 
-    /// Send the packets of `batch` that follow a [[path]] through their waypoints. Returns the
-    /// packets that route automatically: no path applies, or the path falls back.
+    fn push_chain_packet(
+        chains: &mut SmallVec<
+            [super::relay_peer_map::MultipathChainBatch; super::path_policy::MAX_ACTIVE_CHAINS],
+        >,
+        hops: &[PeerId],
+        path_id: u8,
+        packet: ZCPacket,
+    ) {
+        if let Some(existing) = chains.iter_mut().find(|entry| {
+            entry.hops.as_slice() == hops
+                && entry.path_id == path_id
+                && entry.batch.len() < MAX_PACKET_BATCH_SIZE
+        }) {
+            let _ = existing.batch.try_push(packet);
+        } else {
+            chains.push(super::relay_peer_map::MultipathChainBatch {
+                hops: SmallVec::from_slice(hops),
+                path_id,
+                batch: PacketBatch::singleton(packet),
+            });
+        }
+    }
+
+    /// Send the packets of `batch` that follow a `[[path]]` through their relay chains. Returns
+    /// the packets that route automatically: no path applies, or the path falls back.
     async fn send_path_packets(
         &self,
         peer_id: PeerId,
         batch: PacketBatch,
         errors: &mut Vec<Error>,
+        full_ethernet_descriptor: Option<&PeerMapDataPlaneDescriptor>,
     ) -> PacketBatch {
-        use super::path_policy::WaypointPlan;
+        use super::path_policy::{CandidateChain, MAX_ACTIVE_CHAINS, MultipathPlan};
+        use super::relay_peer_map::MultipathChainBatch;
+
         let descriptor = self.peers.dataplane_descriptor();
         let Some(snapshot) = descriptor.forwarding_snapshot.as_ref() else {
             return batch;
         };
         let destination_rule = self.paths.rule_for_destination(snapshot, peer_id);
         let mut automatic = PacketBatch::with_capacity(batch.len());
-        let mut routed = SmallVec::<[(SmallVec<[PeerId; 4]>, u16, PacketBatch); 2]>::new();
-        for packet in batch {
+
+        struct RulePolicyGroup {
+            rule: u16,
+            policy: NextHopPolicy,
+            user_packets: u64,
+            chains: SmallVec<[MultipathChainBatch; MAX_ACTIVE_CHAINS]>,
+        }
+        let mut groups = SmallVec::<[RulePolicyGroup; 2]>::new();
+
+        for mut packet in batch {
             let rule = packet.peer_manager_header().and_then(|header| {
                 (header.from_peer_id.get() == self.my_peer_id
                     && !header.is_encrypted()
                     && (header.packet_type == PacketType::Data as u8
+                        || header.packet_type == PacketType::Ethernet as u8
                         || header.packet_type == PacketType::OverlayStream as u8))
                     .then(|| packet.path_rule.or(destination_rule))
                     .flatten()
@@ -4012,52 +4130,110 @@ impl PeerManager {
                 let _ = automatic.try_push(packet);
                 continue;
             };
+            let policy = packet
+                .peer_manager_header()
+                .map_or(NextHopPolicy::LeastCost, Self::get_next_hop_policy);
             let flow = packet
                 .flow_hash()
                 .unwrap_or_else(|| super::flow::classify_packet_flow(&packet).hash);
-            match self.paths.waypoints(snapshot, rule, peer_id, flow) {
-                WaypointPlan::Automatic | WaypointPlan::Fallback => {
+
+            let single_storage: [CandidateChain; 1];
+            let multi_storage: SmallVec<[CandidateChain; MAX_ACTIVE_CHAINS]>;
+            let candidates: &[CandidateChain] = match self
+                .paths
+                .plan_for_destination(snapshot, rule, peer_id, flow)
+            {
+                MultipathPlan::Automatic | MultipathPlan::Fallback => {
                     let _ = automatic.try_push(packet);
+                    continue;
                 }
-                WaypointPlan::Drop => {}
-                WaypointPlan::Via(chain) => {
-                    match routed.iter_mut().find(|(current, current_rule, _)| {
-                        *current == chain && *current_rule == rule
-                    }) {
-                        Some((_, _, packets)) => {
-                            let _ = packets.try_push(packet);
-                        }
-                        None => routed.push((chain, rule, PacketBatch::singleton(packet))),
-                    }
+                MultipathPlan::Drop => continue,
+                MultipathPlan::Single { chain } => {
+                    single_storage = [chain];
+                    &single_storage
                 }
+                MultipathPlan::Parallel { chains } => {
+                    multi_storage = chains;
+                    &multi_storage
+                }
+            };
+
+            let mut probes = SmallVec::new();
+            let chosen_idx = self.multipath_sender.assign_packet(
+                &self.peers,
+                peer_id,
+                policy.clone(),
+                candidates,
+                &mut packet,
+                flow,
+                &mut probes,
+            );
+            let chosen = &candidates[chosen_idx];
+            self.paths.record_chain_pick(rule, chosen);
+
+            let group = match groups
+                .iter_mut()
+                .find(|g| g.rule == rule && g.policy == policy)
+            {
+                Some(group) => group,
+                None => {
+                    groups.push(RulePolicyGroup {
+                        rule,
+                        policy,
+                        user_packets: 0,
+                        chains: SmallVec::new(),
+                    });
+                    groups.last_mut().expect("just pushed")
+                }
+            };
+            group.user_packets += 1;
+            Self::push_chain_packet(&mut group.chains, &chosen.hops, chosen.path_id, packet);
+            for (probe_chain, probe_pkt) in probes {
+                Self::push_chain_packet(
+                    &mut group.chains,
+                    &probe_chain.hops,
+                    probe_chain.path_id,
+                    probe_pkt,
+                );
             }
         }
-        for (chain, rule, packets) in routed {
-            let policy = packets
-                .first()
-                .and_then(ZCPacket::peer_manager_header)
-                .map_or(NextHopPolicy::LeastCost, Self::get_next_hop_policy);
-            let count = packets.len() as u64;
-            let bytes = packets.buffer_byte_len() as u64;
+
+        let provided_authorization = full_ethernet_descriptor
+            .map(|descriptor| FullEthernetAuthorizationToken::from_descriptor(descriptor, peer_id));
+        for group in groups {
+            let strict = self.paths.is_strict(group.rule);
             match self
                 .relay_peer_map
-                .send_batch_via_waypoints(packets, peer_id, &chain, policy)
+                .send_multipath_batches(
+                    peer_id,
+                    group.chains,
+                    group.policy,
+                    provided_authorization.clone(),
+                )
                 .await
             {
-                Ok(()) => {
-                    self.self_tx_counters.self_tx_bytes.add(bytes);
-                    self.self_tx_counters.self_tx_packets.add(count);
-                }
-                Err(super::relay_peer_map::WaypointSendError::NotReady(packets)) => {
-                    let strict = self.paths.is_strict(rule);
-                    for packet in packets {
-                        self.paths.record_send_fallback(rule, strict);
-                        if !strict {
-                            let _ = automatic.try_push(packet);
+                Ok(report) => {
+                    if report.sent_packets > 0 {
+                        self.self_tx_counters.self_tx_bytes.add(report.sent_bytes);
+                        self.self_tx_counters
+                            .self_tx_packets
+                            .add(report.sent_packets);
+                    }
+                    if report.failed_packets > 0 {
+                        for _ in 0..report.failed_packets {
+                            self.paths.record_send_fallback(group.rule, strict, true);
+                        }
+                        if let Some(error) = report.first_error {
+                            errors.push(error);
                         }
                     }
                 }
-                Err(super::relay_peer_map::WaypointSendError::Failed(error)) => errors.push(error),
+                Err(error) => {
+                    for _ in 0..group.user_packets {
+                        self.paths.record_send_fallback(group.rule, strict, true);
+                    }
+                    errors.push(error);
+                }
             }
         }
         automatic
@@ -4069,6 +4245,8 @@ impl PeerManager {
         errors: &mut Vec<Error>,
         full_ethernet_descriptor: Option<&PeerMapDataPlaneDescriptor>,
     ) -> Result<(), Error> {
+        self.paths.refresh(&self.global_ctx.flags_arc());
+        let paths_active = self.paths.is_active();
         let single_peer_batch = peer_batches.batches.len() == 1;
         let mut pending: FuturesUnordered<
             Pin<Box<dyn Future<Output = OrderedSendCompletion> + Send>>,
@@ -4137,9 +4315,9 @@ impl PeerManager {
             let first_packet_type = prepared.first_packet_type;
             let first_is_hybrid_ip_ethernet = prepared.first_is_hybrid_ip_ethernet;
             let uniform_direct_priority = prepared.uniform_direct_priority;
-            let peer_batch = if self.paths.is_active() {
+            let peer_batch = if paths_active {
                 let rest = self
-                    .send_path_packets(peer_id, prepared.batch, errors)
+                    .send_path_packets(peer_id, prepared.batch, errors, full_ethernet_descriptor)
                     .await;
                 if rest.is_empty() {
                     continue;
@@ -7093,7 +7271,10 @@ mod tests {
             flags.path_policy = Some(crate::proto::common::PathPolicy {
                 path: vec![crate::proto::common::PathRule {
                     to: "internet".into(),
-                    gateway: "10.42.0.3".into(),
+                    gateway: Some(crate::proto::common::PathStage {
+                        nodes: vec!["10.42.0.3".into()],
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }],
                 ..Default::default()

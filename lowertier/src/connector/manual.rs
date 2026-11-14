@@ -702,7 +702,7 @@ mod tests {
                 ("", "", "/ws"),
                 ("/vpn", "", "/vpn"),
                 ("/vpn", "/custom", "/custom"),
-                ("/", "", "/"),
+                ("/vpn", "/", "/vpn"),
             ] {
                 let client =
                     create_mock_peer_manager_secure("wss-path".into(), "secret".into()).await;

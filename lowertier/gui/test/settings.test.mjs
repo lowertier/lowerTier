@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse, stringify } from "smol-toml";
-import { credentialChanges, FLEET_GUI_CIDRS, guiChanges, guiRules, optionPatch, overlaySubnet, secretChanges } from "../src/settingsModel.ts";
+import {
+  credentialChanges,
+  FLEET_GUI_CIDRS,
+  guiChanges,
+  guiRules,
+  optionPatch,
+  overlaySubnet,
+  pathUsesGroup,
+  renameGroupInPath,
+  secretChanges,
+  stageFromNodes,
+  stageNodes,
+  tidyGroup,
+  tidyPath,
+} from "../src/settingsModel.ts";
 
 test("ACL child updates retain the exact path through TOML serialization", () => {
   const body = parse(stringify(optionPatch({ "acl.tcp_ports": ["22"], "acl.udp_ports": null })));
@@ -50,4 +64,52 @@ test("fleet source networks remain in both arrays without a key", () => {
   assert.deepEqual(changes["gui.open"], FLEET_GUI_CIDRS);
   for (const cidr of FLEET_GUI_CIDRS) assert.equal(changes["gui.allow"].includes(cidr), true);
   assert.equal(changes["gui.open"].includes("192.0.2.0/24"), false);
+});
+
+test("group and multipath path helpers round-trip cleanly through TOML", () => {
+  const group = tidyGroup({
+    name: "relays",
+    nodes: ["10.0.0.2", "10.0.0.3"],
+    mode: "parallel",
+    weights: [2, 1],
+  });
+  assert.equal("mode" in group, false);
+  assert.deepEqual(group.weights, [2, 1]);
+
+  const failoverGroup = tidyGroup({
+    name: "backup",
+    nodes: ["10.0.0.4", "10.0.0.5"],
+    mode: "failover",
+    weights: [3, 1],
+  });
+  assert.equal(failoverGroup.mode, "failover");
+  assert.equal("weights" in failoverGroup, false);
+
+  const stage2 = stageFromNodes(["r1", "r2"], undefined);
+  assert.deepEqual(stage2, ["r1", "r2"]);
+  assert.deepEqual(stageNodes(stage2), ["r1", "r2"]);
+
+  const path = tidyPath({
+    to: "*",
+    mode: "parallel",
+    layers: [
+      stage2,
+      "relays",
+      { nodes: ["r4", "r5"], mode: "flow", weights: [3, 1] },
+    ],
+    strict: true,
+  });
+  const doc = parse(stringify({ group: [group, failoverGroup], path: [path] }));
+  assert.deepEqual(doc.group[0].nodes, ["10.0.0.2", "10.0.0.3"]);
+  assert.equal(doc.path[0].to, "*");
+  assert.deepEqual(doc.path[0].layers[0], ["r1", "r2"]);
+  assert.equal(doc.path[0].layers[1], "relays");
+  assert.deepEqual({ ...doc.path[0].layers[2] }, { nodes: ["r4", "r5"], mode: "flow", weights: [3, 1] });
+  assert.equal(doc.path[0].strict, true);
+
+  assert.equal(pathUsesGroup(path, "relays"), true);
+  assert.equal(pathUsesGroup(path, "other"), false);
+  const renamed = renameGroupInPath(path, "relays", "edge-relays");
+  assert.equal(pathUsesGroup(renamed, "relays"), false);
+  assert.equal(pathUsesGroup(renamed, "edge-relays"), true);
 });

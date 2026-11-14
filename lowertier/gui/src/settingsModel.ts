@@ -94,3 +94,144 @@ export function guiChanges(rules: GuiRule[], subnet?: string, fleet = false): Ch
     "gui.open": [...normalized].filter(([, requireKey]) => !requireKey).map(([cidr]) => cidr),
   };
 }
+
+export type PathMode = "parallel" | "flow" | "failover";
+
+export interface DetailedStageConfig {
+  nodes: string[];
+  mode?: string;
+  weights?: number[];
+}
+
+export type PathStageConfig = string | string[] | DetailedStageConfig;
+
+export interface GroupConfig {
+  name: string;
+  nodes: string[];
+  mode?: string;
+  weights?: number[];
+}
+
+export interface PathConfig {
+  to: string;
+  mode?: string;
+  layers?: PathStageConfig[];
+  gateway?: PathStageConfig;
+  strict?: boolean;
+}
+
+export function stageNodes(stage?: PathStageConfig): string[] {
+  if (!stage) return [];
+  if (typeof stage === "string") return stage ? [stage] : [];
+  if (Array.isArray(stage)) return stage.filter(Boolean);
+  return (stage.nodes ?? []).filter(Boolean);
+}
+
+export function stageMode(stage?: PathStageConfig): string | undefined {
+  if (!stage || typeof stage === "string" || Array.isArray(stage)) return undefined;
+  return stage.mode || undefined;
+}
+
+export function cloneStage(stage: PathStageConfig): PathStageConfig {
+  if (typeof stage === "string") return stage;
+  if (Array.isArray(stage)) return [...stage];
+  return {
+    nodes: [...(stage.nodes ?? [])],
+    ...(stage.mode ? { mode: stage.mode } : {}),
+    ...(stage.weights ? { weights: [...stage.weights] } : {}),
+  };
+}
+
+export function stageFromNodes(nodes: string[], preserve?: PathStageConfig): PathStageConfig | undefined {
+  const cleaned = nodes.map((item) => item.trim()).filter(Boolean);
+  if (!cleaned.length) return undefined;
+  if (preserve && typeof preserve === "object" && !Array.isArray(preserve)) {
+    const oldNodes = preserve.nodes ?? [];
+    const weights = preserve.weights?.length
+      ? cleaned.map((node) => {
+          const oldIdx = oldNodes.indexOf(node);
+          return oldIdx >= 0 ? (preserve.weights![oldIdx] ?? 1) : 1;
+        })
+      : undefined;
+    const hasCustomMode = Boolean(preserve.mode && preserve.mode !== "parallel");
+    const hasCustomWeights = Boolean(weights?.some((w) => w !== 1));
+    if (hasCustomMode || hasCustomWeights) {
+      return {
+        nodes: cleaned,
+        ...(preserve.mode ? { mode: preserve.mode } : {}),
+        ...(hasCustomWeights && weights ? { weights } : {}),
+      };
+    }
+  }
+  return cleaned.length === 1 ? cleaned[0] : cleaned;
+}
+
+export function tidyStage(stage?: PathStageConfig): PathStageConfig | undefined {
+  if (!stage) return undefined;
+  if (typeof stage === "string") return stage.trim() || undefined;
+  if (Array.isArray(stage)) {
+    const nodes = stage.map((item) => item.trim()).filter(Boolean);
+    if (!nodes.length) return undefined;
+    return nodes.length === 1 ? nodes[0] : nodes;
+  }
+  const nodes = (stage.nodes ?? []).map((item) => item.trim()).filter(Boolean);
+  if (!nodes.length) return undefined;
+  const mode = stage.mode && stage.mode !== "parallel" ? stage.mode : undefined;
+  const weights =
+    (stage.mode ?? "parallel") !== "failover" &&
+    stage.weights?.length === nodes.length &&
+    stage.weights.some((weight) => weight !== 1)
+      ? [...stage.weights]
+      : undefined;
+  if (!mode && !weights) return nodes.length === 1 ? nodes[0] : nodes;
+  return { nodes, ...(mode ? { mode } : {}), ...(weights ? { weights } : {}) };
+}
+
+export function tidyGroup(group: GroupConfig): GroupConfig {
+  const nodes = (group.nodes ?? []).map((item) => item.trim()).filter(Boolean);
+  const out: GroupConfig = { name: group.name, nodes };
+  if (group.mode && group.mode !== "parallel") out.mode = group.mode;
+  if (
+    (group.mode ?? "parallel") !== "failover" &&
+    group.weights?.length === nodes.length &&
+    group.weights.some((weight) => weight !== 1)
+  ) {
+    out.weights = [...group.weights];
+  }
+  return out;
+}
+
+export function tidyPath(path: PathConfig): PathConfig {
+  const out: PathConfig = { to: path.to };
+  if (path.mode && path.mode !== "parallel") out.mode = path.mode;
+  const layers = (path.layers ?? []).map(tidyStage).filter((stage): stage is PathStageConfig => stage !== undefined);
+  if (layers.length) out.layers = layers;
+  const gateway = tidyStage(path.gateway);
+  if (gateway !== undefined) out.gateway = gateway;
+  if (path.strict) out.strict = true;
+  return out;
+}
+
+function renameInStage(stage: PathStageConfig, previous: string, next: string): PathStageConfig {
+  const rename = (reference: string) => (reference === previous ? next : reference);
+  if (typeof stage === "string") return rename(stage);
+  if (Array.isArray(stage)) return stage.map(rename);
+  return {
+    ...stage,
+    nodes: stage.nodes.map(rename),
+    ...(stage.weights ? { weights: [...stage.weights] } : {}),
+  };
+}
+
+export function renameGroupInPath(path: PathConfig, previous: string, next: string): PathConfig {
+  return {
+    ...path,
+    layers: path.layers?.map((stage) => renameInStage(stage, previous, next)),
+    gateway: path.gateway ? renameInStage(path.gateway, previous, next) : undefined,
+  };
+}
+
+export function pathUsesGroup(path: PathConfig, groupName: string): boolean {
+  const inLayers = (path.layers ?? []).some((stage) => stageNodes(stage).includes(groupName));
+  return inLayers || stageNodes(path.gateway).includes(groupName);
+}

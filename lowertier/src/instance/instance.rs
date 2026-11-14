@@ -587,7 +587,6 @@ impl InstanceConfigPatcher {
     ) -> Result<(), anyhow::Error> {
         use std::collections::HashSet;
 
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
         let conn_manager = weak_upgrade(&self.conn_manager)?;
         let flags = candidate.get_flags();
         let new_peers = candidate.get_peers();
@@ -605,11 +604,6 @@ impl InstanceConfigPatcher {
             conn_manager.add_connector_by_url_with_flags(url.clone(), &flags);
         }
 
-        global_ctx.config.set_peers(new_peers);
-        global_ctx
-            .config
-            .set_proxy_cidrs(candidate.get_proxy_cidrs());
-        global_ctx.config.set_routes(candidate.get_routes());
         Ok(())
     }
 }

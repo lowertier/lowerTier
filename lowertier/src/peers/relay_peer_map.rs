@@ -7,6 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use futures::{StreamExt, stream::FuturesUnordered};
 use prost::Message;
 use quanta::Instant;
 use smallvec::SmallVec;
@@ -19,6 +20,7 @@ use crate::{
     common::error::Error,
     common::{PeerId, global_ctx::ArcGlobalCtx, shrink_dashmap},
     peers::flow::{classify_packet_flow, stamp_critical_l2_control, stamp_packet_flow},
+    peers::path_policy::MAX_ACTIVE_CHAINS,
     peers::peer_manager::PeerManager,
     peers::peer_map::{
         OriginAuthCapability, OriginAuthEntry, OriginAuthGrant, OriginAuthSnapshot, PeerMap,
@@ -36,7 +38,7 @@ use crate::{
     },
     tunnel::{
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
-        packet_def::{PEER_MANAGER_STABLE_AUTH_DATA_SIZE, PacketType, ZCPacket},
+        packet_def::{MAX_RELAY_LAYERS, PEER_MANAGER_STABLE_AUTH_DATA_SIZE, PacketType, ZCPacket},
     },
 };
 
@@ -165,9 +167,11 @@ const RELAY_CONFIRMATION_PAYLOAD_SIZE: usize = RELAY_HANDSHAKE_ID_SIZE + RELAY_T
 const RELAY_READY_RECEIPT_PAYLOAD_SIZE: usize =
     RELAY_HANDSHAKE_ID_SIZE + RELAY_HANDSHAKE_ID_SIZE + RELAY_TRANSITION_ID_SIZE + 1 + 4 + 4;
 const RELAY_ORIGIN_PROOF_MAGIC: [u8; 4] = *b"LRP1";
+const RELAY_ORIGIN_PROOF_MP_MAGIC: [u8; 4] = *b"ETMP";
 const RELAY_ORIGIN_PROOF_AUTH_DATA_SIZE: usize = PEER_MANAGER_STABLE_AUTH_DATA_SIZE - 4;
 const RELAY_ORIGIN_PROOF_SIZE: usize =
     RELAY_ORIGIN_PROOF_MAGIC.len() + RELAY_ORIGIN_PROOF_AUTH_DATA_SIZE;
+const MULTIPATH_SEQ_SUFFIX_SIZE: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RelayReadyReceiptIdentity {
@@ -276,12 +280,23 @@ pub(crate) fn attach_relay_origin_proof(packet: &mut ZCPacket) -> anyhow::Result
         .peer_manager_header()
         .ok_or_else(|| anyhow::anyhow!("relay packet has no peer header"))?;
     let stable_auth_data = header.stable_auth_data();
-    let mut proof = [0_u8; RELAY_ORIGIN_PROOF_SIZE];
-    proof[..4].copy_from_slice(&RELAY_ORIGIN_PROOF_MAGIC);
-    proof[4..].copy_from_slice(&stable_auth_data[4..]);
-    packet
-        .append_payload_preserving_flow_hash(&proof)
-        .map_err(|error| anyhow::anyhow!(error))
+    if let Some((flow_tag, seq)) = packet.multipath_seq {
+        let mut proof = [0_u8; MULTIPATH_SEQ_SUFFIX_SIZE + RELAY_ORIGIN_PROOF_SIZE];
+        proof[..4].copy_from_slice(&flow_tag.to_le_bytes());
+        proof[4..8].copy_from_slice(&seq.to_le_bytes());
+        proof[8..12].copy_from_slice(&RELAY_ORIGIN_PROOF_MP_MAGIC);
+        proof[12..].copy_from_slice(&stable_auth_data[4..]);
+        packet
+            .append_payload_preserving_flow_hash(&proof)
+            .map_err(|error| anyhow::anyhow!(error))
+    } else {
+        let mut proof = [0_u8; RELAY_ORIGIN_PROOF_SIZE];
+        proof[..4].copy_from_slice(&RELAY_ORIGIN_PROOF_MAGIC);
+        proof[4..].copy_from_slice(&stable_auth_data[4..]);
+        packet
+            .append_payload_preserving_flow_hash(&proof)
+            .map_err(|error| anyhow::anyhow!(error))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,7 +306,7 @@ pub(crate) enum RelayBatchDecryptOutcome {
     Failed,
 }
 
-fn verify_and_remove_relay_origin_proof(packet: &mut ZCPacket) -> anyhow::Result<()> {
+pub(crate) fn verify_and_remove_relay_origin_proof(packet: &mut ZCPacket) -> anyhow::Result<()> {
     let payload = packet.payload();
     anyhow::ensure!(
         payload.len() >= RELAY_ORIGIN_PROOF_SIZE,
@@ -300,22 +315,44 @@ fn verify_and_remove_relay_origin_proof(packet: &mut ZCPacket) -> anyhow::Result
     let proof: [u8; RELAY_ORIGIN_PROOF_SIZE] = payload[payload.len() - RELAY_ORIGIN_PROOF_SIZE..]
         .try_into()
         .expect("the relay proof length was checked");
-    anyhow::ensure!(
-        proof[..4] == RELAY_ORIGIN_PROOF_MAGIC,
-        "invalid relay proof"
-    );
+    let magic: [u8; 4] = proof[..4].try_into().expect("four bytes");
+    if magic == RELAY_ORIGIN_PROOF_MP_MAGIC {
+        let total_suffix = RELAY_ORIGIN_PROOF_SIZE + MULTIPATH_SEQ_SUFFIX_SIZE;
+        anyhow::ensure!(
+            payload.len() >= total_suffix,
+            "multipath relay origin proof is truncated"
+        );
+        let seq_start = payload.len() - total_suffix;
+        let flow_tag = u32::from_le_bytes(
+            payload[seq_start..seq_start + 4]
+                .try_into()
+                .expect("four bytes"),
+        );
+        let seq = u32::from_le_bytes(
+            payload[seq_start + 4..seq_start + 8]
+                .try_into()
+                .expect("four bytes"),
+        );
+        packet
+            .remove_payload_suffix_preserving_flow_hash(total_suffix)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        packet.multipath_seq = Some((flow_tag, seq));
+    } else if magic == RELAY_ORIGIN_PROOF_MAGIC {
+        packet
+            .remove_payload_suffix_preserving_flow_hash(RELAY_ORIGIN_PROOF_SIZE)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        packet.multipath_seq = None;
+    } else {
+        anyhow::bail!("invalid relay proof");
+    }
     let header = packet
         .peer_manager_header()
-        .ok_or_else(|| anyhow::anyhow!("relay packet has no peer header"))?
-        .clone();
+        .ok_or_else(|| anyhow::anyhow!("relay packet has no peer header"))?;
     let stable_auth_data = header.stable_auth_data();
     anyhow::ensure!(
         proof[4..] == stable_auth_data[4..],
         "relay origin proof does not match the packet header"
     );
-    packet
-        .remove_payload_suffix_preserving_flow_hash(RELAY_ORIGIN_PROOF_SIZE)
-        .map_err(|error| anyhow::anyhow!(error))?;
     Ok(())
 }
 
@@ -391,16 +428,38 @@ impl FullEthernetAuthorizationToken {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueuedSourceRoute {
+    pub hops: SmallVec<[PeerId; MAX_RELAY_LAYERS]>,
+    pub path_id: u8,
+}
+
+pub(crate) struct MultipathChainBatch {
+    pub hops: SmallVec<[PeerId; MAX_RELAY_LAYERS]>,
+    pub path_id: u8,
+    pub batch: PacketBatch,
+}
+
+#[derive(Default)]
+pub(crate) struct MultipathSendReport {
+    pub sent_packets: u64,
+    pub sent_bytes: u64,
+    pub failed_packets: u64,
+    pub first_error: Option<Error>,
+}
+
 type RelayQueuedPacket = (
     ZCPacket,
     NextHopPolicy,
     usize,
     Option<FullEthernetAuthorizationToken>,
+    Option<QueuedSourceRoute>,
 );
 type RelayReadyPacket = (
     ZCPacket,
     NextHopPolicy,
     Option<FullEthernetAuthorizationToken>,
+    Option<QueuedSourceRoute>,
 );
 
 struct RelaySendState {
@@ -569,7 +628,7 @@ impl RelaySendState {
         let released_bytes = queue
             .packets
             .iter()
-            .map(|(_, _, bytes, _)| *bytes)
+            .map(|(_, _, bytes, _, _)| *bytes)
             .sum::<usize>();
         let released_packets = queue.packets.len();
         queue.packets.clear();
@@ -619,6 +678,7 @@ impl RelaySendState {
         packet: ZCPacket,
         policy: NextHopPolicy,
         authorization: Option<FullEthernetAuthorizationToken>,
+        source_route: Option<QueuedSourceRoute>,
     ) -> Result<EnqueueResult, Error> {
         let mut queue = self.queue.lock().unwrap();
         if self.closed.load(Ordering::Acquire) {
@@ -642,7 +702,7 @@ impl RelaySendState {
         }
         queue
             .packets
-            .push_back((packet, policy, charge, authorization));
+            .push_back((packet, policy, charge, authorization, source_route));
         Ok(EnqueueResult::Queued)
     }
 
@@ -667,12 +727,15 @@ impl RelaySendState {
         }
         let packets = packets
             .into_iter()
-            .map(|(packet, policy, authorization)| {
+            .map(|(packet, policy, authorization, source_route)| {
                 let charge = packet.buf_len().saturating_add(RELAY_QUEUE_PACKET_OVERHEAD);
-                (packet, policy, charge, authorization)
+                (packet, policy, charge, authorization, source_route)
             })
             .collect::<Vec<_>>();
-        let bytes = packets.iter().map(|(_, _, bytes, _)| *bytes).sum::<usize>();
+        let bytes = packets
+            .iter()
+            .map(|(_, _, bytes, _, _)| *bytes)
+            .sum::<usize>();
         if !self.charge(bytes, packets.len()) {
             return Err(Error::RouteError(Some(
                 "secure relay queue byte budget is full".to_string(),
@@ -687,13 +750,16 @@ impl RelaySendState {
         if self.phase() != RelaySendPhase::Draining {
             return None;
         }
-        let first_policy = queue.packets.front()?.1.clone();
+        let (first_policy, first_route) = {
+            let front = queue.packets.front()?;
+            (front.1.clone(), front.4.clone())
+        };
         let mut packets = Vec::with_capacity(max_packets);
         while packets.len() < max_packets {
-            let Some((_, policy, _, _)) = queue.packets.front() else {
+            let Some((_, policy, _, _, route)) = queue.packets.front() else {
                 break;
             };
-            if *policy != first_policy {
+            if *policy != first_policy || *route != first_route {
                 break;
             }
             let packet = queue
@@ -725,7 +791,7 @@ impl RelaySendState {
         let bytes = packets
             .iter()
             .take(count)
-            .map(|(_, _, bytes, _)| *bytes)
+            .map(|(_, _, bytes, _, _)| *bytes)
             .sum::<usize>();
         queue.in_flight = queue.in_flight.saturating_sub(count);
         queue.in_flight_bytes = queue.in_flight_bytes.saturating_sub(bytes);
@@ -793,13 +859,6 @@ impl Default for RelayPeerState {
     }
 }
 
-/// Why a batch did not go through its waypoints.
-pub(crate) enum WaypointSendError {
-    /// The end-to-end session with the destination is not ready. The batch is returned unsent.
-    NotReady(PacketBatch),
-    Failed(Error),
-}
-
 pub struct RelayPeerMap {
     peer_map: Arc<PeerMap>,
     foreign_network_client: Option<Arc<ForeignNetworkClient>>,
@@ -821,6 +880,7 @@ pub struct RelayPeerMap {
     pending_ready_receipts: DashMap<PeerId, PendingReadyReceipt>,
     completed_ready_receipts: DashMap<PeerId, VecDeque<CompletedReadyReceipt>>,
     relay_session_auth: DashMap<PeerId, RelaySessionAuthBinding>,
+    preferred_first_hop: DashMap<PeerId, PeerId>,
 
     control_metrics: AggregateTrafficMetrics,
 }
@@ -941,6 +1001,7 @@ impl RelayPeerMap {
             pending_ready_receipts: DashMap::new(),
             completed_ready_receipts: DashMap::new(),
             relay_session_auth: DashMap::new(),
+            preferred_first_hop: DashMap::new(),
         })
     }
 
@@ -1056,7 +1117,20 @@ impl RelayPeerMap {
         peer_id: PeerId,
         session: &PeerSession,
     ) -> Result<(), Error> {
-        if self.relay_session_auth.contains_key(&peer_id) {
+        let up_to_date = self
+            .relay_session_auth
+            .get(&peer_id)
+            .is_some_and(|binding| {
+                let session_matches = binding.metadata_session_id == session.metadata_session_id();
+                let bridge_upgrade_available = binding.bridge_revision.is_none()
+                    && self
+                        .peer_map
+                        .origin_auth_snapshot()
+                        .lookup_grant(peer_id, OriginAuthCapability::FullEthernetBridge)
+                        .is_some_and(|grant| grant.is_live(Instant::now()));
+                session_matches && !bridge_upgrade_available
+            });
+        if up_to_date {
             return Ok(());
         }
         self.bind_relay_session_auth(peer_id, session).map(|_| ())
@@ -2023,6 +2097,12 @@ impl RelayPeerMap {
                             && self.foreign_relay_transport.is_some()))
                     .then_some(dst_peer_id)
                 })
+                .or_else(|| {
+                    self.preferred_first_hop
+                        .get(&dst_peer_id)
+                        .map(|entry| *entry.value())
+                        .filter(|hop| self.peer_map.has_peer(*hop))
+                })
         };
         let Some(next_hop) = next_hop else {
             return Err(Error::RouteUnavailable(dst_peer_id));
@@ -2075,6 +2155,12 @@ impl RelayPeerMap {
                         || (policy == NextHopPolicy::ControlHop
                             && self.foreign_relay_transport.is_some()))
                     .then_some(dst_peer_id)
+                })
+                .or_else(|| {
+                    self.preferred_first_hop
+                        .get(&dst_peer_id)
+                        .map(|entry| *entry.value())
+                        .filter(|hop| self.peer_map.has_peer(*hop))
                 })
         };
         let Some(next_hop) = next_hop else {
@@ -2200,7 +2286,7 @@ impl RelayPeerMap {
                 let _ = self.ensure_session(dst_peer_id, policy.clone()).await;
             }
             if matches!(
-                state.enqueue(msg.clone(), policy.clone(), authorization.clone())?,
+                state.enqueue(msg.clone(), policy.clone(), authorization.clone(), None)?,
                 EnqueueResult::Queued
             ) {
                 self.flush_pending_if_ready(dst_peer_id).await;
@@ -2212,7 +2298,7 @@ impl RelayPeerMap {
             Ok(session) => session,
             Err(_) => {
                 let state = self.ensure_send_state(dst_peer_id, RelaySendPhase::AwaitingSession);
-                match state.enqueue(msg, policy, authorization.clone())? {
+                match state.enqueue(msg, policy, authorization.clone(), None)? {
                     EnqueueResult::Queued => {
                         self.flush_pending_if_ready(dst_peer_id).await;
                         return Ok(());
@@ -2229,7 +2315,7 @@ impl RelayPeerMap {
         if let Some(state) = self.send_state(dst_peer_id)
             && state.phase() != RelaySendPhase::Ready
         {
-            match state.enqueue(msg.clone(), policy.clone(), authorization.clone())? {
+            match state.enqueue(msg.clone(), policy.clone(), authorization.clone(), None)? {
                 EnqueueResult::Queued => return Ok(()),
                 EnqueueResult::Ready => {}
             }
@@ -2357,7 +2443,7 @@ impl RelayPeerMap {
                     .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
                     .then(|| authorization.clone())
                     .flatten();
-                (packet, policy.clone(), token)
+                (packet, policy.clone(), token, None)
             });
             match state.enqueue_batch(items)? {
                 EnqueueBatchResult::Queued => {
@@ -2366,7 +2452,7 @@ impl RelayPeerMap {
                 }
                 EnqueueBatchResult::Ready(items) => {
                     let mut ready_batch = PacketBatch::new();
-                    for (packet, _, _) in items {
+                    for (packet, _, _, _) in items {
                         ready_batch
                             .try_push(packet)
                             .expect("a relay batch cannot exceed the batch limit");
@@ -2387,7 +2473,7 @@ impl RelayPeerMap {
                         .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
                         .then(|| authorization.clone())
                         .flatten();
-                    (packet, policy.clone(), token)
+                    (packet, policy.clone(), token, None)
                 });
                 match state.enqueue_batch(items)? {
                     EnqueueBatchResult::Queued => {
@@ -2412,13 +2498,13 @@ impl RelayPeerMap {
                     .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
                     .then(|| authorization.clone())
                     .flatten();
-                (packet, policy.clone(), token)
+                (packet, policy.clone(), token, None)
             });
             match state.enqueue_batch(items)? {
                 EnqueueBatchResult::Queued => return Ok(()),
                 EnqueueBatchResult::Ready(items) => {
                     let mut ready_batch = PacketBatch::new();
-                    for (packet, _, _) in items {
+                    for (packet, _, _, _) in items {
                         ready_batch
                             .try_push(packet)
                             .expect("a relay batch cannot exceed the batch limit");
@@ -2452,57 +2538,342 @@ impl RelayPeerMap {
             .await
     }
 
-    /// Seal `batch` for `dst_peer_id` and send it through `waypoints` in order.
-    ///
-    /// Waypoints forward the sealed bytes without opening them. A first waypoint that is a direct
-    /// neighbor needs no trailer: the packet goes over that link with its own destination.
-    /// Returns the batch unsent while the session with the destination is not ready, so the
-    /// caller can route it automatically or drop it.
-    pub(crate) async fn send_batch_via_waypoints(
-        self: &Arc<Self>,
-        mut batch: PacketBatch,
+    fn wrap_encrypted_source_route_batch(
+        &self,
+        batch: &mut PacketBatch,
         dst_peer_id: PeerId,
-        waypoints: &[PeerId],
-        policy: NextHopPolicy,
-    ) -> Result<(), WaypointSendError> {
-        let failed = |error: String| WaypointSendError::Failed(Error::RouteError(Some(error)));
-        let Some((first, rest)) = waypoints.split_first() else {
-            return Err(failed("no waypoints".into()));
+        hops: &[PeerId],
+        path_id: u8,
+    ) -> Result<(PeerId, Option<PeerId>), Error> {
+        let Some((first, rest)) = hops.split_first() else {
+            return Err(Error::RouteError(Some("no relay hops".to_string())));
         };
-        let network = self.global_ctx.get_network_identity();
-        let key = SessionKey::new(network.network_name.clone(), dst_peer_id);
-        let ready = self.current_session(dst_peer_id, &key).filter(|_| {
-            self.send_state(dst_peer_id)
-                .is_none_or(|state| state.phase() == RelaySendPhase::Ready)
-        });
-        let Some(session) = ready else {
-            // Start the handshake. Meanwhile the caller decides what to do with the batch.
-            let _ = self.ensure_session(dst_peer_id, policy).await;
-            return Err(WaypointSendError::NotReady(batch));
-        };
-        self.states.entry(dst_peer_id).or_default().last_active_at = Instant::now();
-        for packet in batch.iter_mut() {
-            attach_relay_origin_proof(packet).map_err(|error| failed(error.to_string()))?;
-        }
-        session
-            .encrypt_payload_batch(self.my_peer_id, dst_peer_id, &mut batch)
-            .map_err(|error| failed(format!("{error:?}")))?;
         let first_is_neighbor = self.peer_map.has_peer(*first);
-        let encoded = if first_is_neighbor { rest } else { waypoints };
+        let encoded = if first_is_neighbor { rest } else { hops };
         let target = match encoded.first() {
             Some(next) => {
                 for packet in batch.iter_mut() {
                     packet
-                        .encode_waypoints(encoded)
-                        .map_err(|error| failed(error.into()))?;
+                        .encode_source_route(encoded, path_id)
+                        .map_err(|error| Error::RouteError(Some(error.to_string())))?;
                 }
                 *next
             }
             None => dst_peer_id,
         };
-        self.send_via_next_hop_batch_at(batch, target, policy, first_is_neighbor.then_some(*first))
+        Ok((target, first_is_neighbor.then_some(*first)))
+    }
+
+    async fn send_sealed_source_route_batch(
+        &self,
+        session: &PeerSession,
+        mut batch: PacketBatch,
+        dst_peer_id: PeerId,
+        route: &QueuedSourceRoute,
+        policy: NextHopPolicy,
+        authorization: Option<&FullEthernetAuthorizationToken>,
+    ) -> Result<(), Error> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let has_ethernet = batch.iter().any(|packet| {
+            packet
+                .peer_manager_header()
+                .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
+        });
+        if has_ethernet && !self.full_ethernet_authorization_is_current(dst_peer_id, authorization)
+        {
+            return Err(Error::RouteError(Some(
+                "complete Ethernet authority changed before relay encryption".to_string(),
+            )));
+        }
+        session
+            .encrypt_payload_batch(self.my_peer_id, dst_peer_id, &mut batch)
+            .map_err(|error| Error::RouteError(Some(format!("{error:?}"))))?;
+        if has_ethernet && !self.full_ethernet_authorization_is_current(dst_peer_id, authorization)
+        {
+            return Err(Error::RouteError(Some(
+                "complete Ethernet authority changed before relay send".to_string(),
+            )));
+        }
+        let (target, selected_next_hop) = self.wrap_encrypted_source_route_batch(
+            &mut batch,
+            dst_peer_id,
+            &route.hops,
+            route.path_id,
+        )?;
+        self.send_via_next_hop_batch_at(batch, target, policy, selected_next_hop)
             .await
-            .map_err(WaypointSendError::Failed)
+    }
+
+    fn collect_multipath_ready_items(
+        chains: SmallVec<[MultipathChainBatch; MAX_ACTIVE_CHAINS]>,
+        policy: &NextHopPolicy,
+        authorization: Option<&FullEthernetAuthorizationToken>,
+    ) -> Vec<RelayReadyPacket> {
+        let mut items = Vec::new();
+        for chain in chains {
+            let route = QueuedSourceRoute {
+                hops: chain.hops,
+                path_id: chain.path_id,
+            };
+            for packet in chain.batch {
+                let token = packet
+                    .peer_manager_header()
+                    .is_some_and(|header| header.packet_type == PacketType::Ethernet as u8)
+                    .then(|| authorization.cloned())
+                    .flatten();
+                items.push((packet, policy.clone(), token, Some(route.clone())));
+            }
+        }
+        items
+    }
+
+    fn rebuild_multipath_chains_from_ready(
+        items: Vec<RelayReadyPacket>,
+    ) -> (
+        SmallVec<[MultipathChainBatch; MAX_ACTIVE_CHAINS]>,
+        SmallVec<[(u64, u64); MAX_ACTIVE_CHAINS]>,
+    ) {
+        let mut rebuilt = SmallVec::<[MultipathChainBatch; MAX_ACTIVE_CHAINS]>::new();
+        let mut counts = SmallVec::<[(u64, u64); MAX_ACTIVE_CHAINS]>::new();
+        for (packet, _, _, source_route) in items {
+            let Some(route) = source_route else {
+                continue;
+            };
+            let is_user = packet
+                .peer_manager_header()
+                .is_some_and(|header| header.packet_type != PacketType::PathProbe as u8);
+            let u_pkts = u64::from(is_user);
+            let u_bytes = if is_user { packet.buf_len() as u64 } else { 0 };
+            if let Some(pos) = rebuilt.iter().position(|existing| {
+                existing.hops == route.hops
+                    && existing.path_id == route.path_id
+                    && existing.batch.len() < MAX_PACKET_BATCH_SIZE
+            }) {
+                let _ = rebuilt[pos].batch.try_push(packet);
+                counts[pos].0 += u_pkts;
+                counts[pos].1 += u_bytes;
+            } else {
+                rebuilt.push(MultipathChainBatch {
+                    hops: route.hops,
+                    path_id: route.path_id,
+                    batch: PacketBatch::singleton(packet),
+                });
+                counts.push((u_pkts, u_bytes));
+            }
+        }
+        (rebuilt, counts)
+    }
+
+    /// Seal and concurrently transmit source-routed batches across one or more relay chains.
+    ///
+    /// On cold start (before the end-to-end session is ready), packets are queued with their
+    /// selected `QueuedSourceRoute` instead of being dropped or leaked onto automatic routing.
+    pub(crate) async fn send_multipath_batches(
+        self: &Arc<Self>,
+        dst_peer_id: PeerId,
+        mut chains: SmallVec<[MultipathChainBatch; MAX_ACTIVE_CHAINS]>,
+        policy: NextHopPolicy,
+        provided_authorization: Option<FullEthernetAuthorizationToken>,
+    ) -> Result<MultipathSendReport, Error> {
+        chains.retain(|chain| !chain.batch.is_empty());
+        if chains.is_empty() {
+            return Ok(MultipathSendReport::default());
+        }
+
+        if let Some(first_neighbor) = chains
+            .iter()
+            .filter_map(|chain| chain.hops.first().copied())
+            .find(|hop| self.peer_map.has_peer(*hop))
+        {
+            self.preferred_first_hop.insert(dst_peer_id, first_neighbor);
+        }
+
+        let mut total_user_packets = 0_u64;
+        let mut total_user_bytes = 0_u64;
+        let mut has_ethernet = false;
+        let mut chain_user_counts =
+            SmallVec::<[(u64, u64); MAX_ACTIVE_CHAINS]>::with_capacity(chains.len());
+        for chain in &chains {
+            let mut c_pkts = 0_u64;
+            let mut c_bytes = 0_u64;
+            for packet in &chain.batch {
+                if let Some(header) = packet.peer_manager_header() {
+                    if header.packet_type == PacketType::Ethernet as u8 {
+                        has_ethernet = true;
+                    }
+                    if header.packet_type != PacketType::PathProbe as u8 {
+                        c_pkts += 1;
+                        c_bytes += packet.buf_len() as u64;
+                    }
+                }
+            }
+            total_user_packets += c_pkts;
+            total_user_bytes += c_bytes;
+            chain_user_counts.push((c_pkts, c_bytes));
+        }
+
+        let authorization = has_ethernet
+            .then(|| self.full_ethernet_authorization_token(dst_peer_id, provided_authorization));
+        if has_ethernet
+            && !self.full_ethernet_authorization_is_current(dst_peer_id, authorization.as_ref())
+        {
+            return Err(Error::RouteError(Some(
+                "complete Ethernet authority changed before relay encryption".to_string(),
+            )));
+        }
+
+        self.states.entry(dst_peer_id).or_default().last_active_at = Instant::now();
+        for chain in &mut chains {
+            for packet in chain.batch.iter_mut() {
+                attach_relay_origin_proof(packet)
+                    .map_err(|error| Error::RouteError(Some(error.to_string())))?;
+            }
+        }
+
+        if let Some(state) = self.send_state(dst_peer_id)
+            && state.phase() != RelaySendPhase::Ready
+        {
+            if state.phase() == RelaySendPhase::AwaitingSession {
+                let _ = self.ensure_session(dst_peer_id, policy.clone()).await;
+            }
+            let items =
+                Self::collect_multipath_ready_items(chains, &policy, authorization.as_ref());
+            match state.enqueue_batch(items)? {
+                EnqueueBatchResult::Queued => {
+                    self.flush_pending_if_ready(dst_peer_id).await;
+                    return Ok(MultipathSendReport {
+                        sent_packets: total_user_packets,
+                        sent_bytes: total_user_bytes,
+                        failed_packets: 0,
+                        first_error: None,
+                    });
+                }
+                EnqueueBatchResult::Ready(items) => {
+                    (chains, chain_user_counts) = Self::rebuild_multipath_chains_from_ready(items);
+                }
+            }
+        }
+
+        let session = match self.ensure_session(dst_peer_id, policy.clone()).await {
+            Ok(session) => session,
+            Err(_) => {
+                let state = self.ensure_send_state(dst_peer_id, RelaySendPhase::AwaitingSession);
+                state.set_phase(RelaySendPhase::AwaitingSession);
+                let items =
+                    Self::collect_multipath_ready_items(chains, &policy, authorization.as_ref());
+                match state.enqueue_batch(items)? {
+                    EnqueueBatchResult::Queued => {
+                        self.flush_pending_if_ready(dst_peer_id).await;
+                        return Ok(MultipathSendReport {
+                            sent_packets: total_user_packets,
+                            sent_bytes: total_user_bytes,
+                            failed_packets: 0,
+                            first_error: None,
+                        });
+                    }
+                    EnqueueBatchResult::Ready(_) => {
+                        return Err(Error::RouteError(Some(
+                            "relay state became ready without a session".to_string(),
+                        )));
+                    }
+                }
+            }
+        };
+
+        if let Some(state) = self.send_state(dst_peer_id)
+            && state.phase() != RelaySendPhase::Ready
+        {
+            let items =
+                Self::collect_multipath_ready_items(chains, &policy, authorization.as_ref());
+            match state.enqueue_batch(items)? {
+                EnqueueBatchResult::Queued => {
+                    return Ok(MultipathSendReport {
+                        sent_packets: total_user_packets,
+                        sent_bytes: total_user_bytes,
+                        failed_packets: 0,
+                        first_error: None,
+                    });
+                }
+                EnqueueBatchResult::Ready(items) => {
+                    (chains, chain_user_counts) = Self::rebuild_multipath_chains_from_ready(items);
+                }
+            }
+        }
+
+        if chains.len() == 1 {
+            let chain = chains.into_iter().next().expect("checked len == 1");
+            let (u_pkts, u_bytes) = chain_user_counts[0];
+            let route = QueuedSourceRoute {
+                hops: chain.hops,
+                path_id: chain.path_id,
+            };
+            return match self
+                .send_sealed_source_route_batch(
+                    &session,
+                    chain.batch,
+                    dst_peer_id,
+                    &route,
+                    policy,
+                    authorization.as_ref(),
+                )
+                .await
+            {
+                Ok(()) => Ok(MultipathSendReport {
+                    sent_packets: u_pkts,
+                    sent_bytes: u_bytes,
+                    failed_packets: 0,
+                    first_error: None,
+                }),
+                Err(err) => Ok(MultipathSendReport {
+                    sent_packets: 0,
+                    sent_bytes: 0,
+                    failed_packets: u_pkts,
+                    first_error: Some(err),
+                }),
+            };
+        }
+
+        let mut pending = FuturesUnordered::new();
+        for (chain, (u_pkts, u_bytes)) in chains.into_iter().zip(chain_user_counts) {
+            let route = QueuedSourceRoute {
+                hops: chain.hops,
+                path_id: chain.path_id,
+            };
+            let policy = policy.clone();
+            let session = &session;
+            let authorization = authorization.as_ref();
+            pending.push(async move {
+                let res = self
+                    .send_sealed_source_route_batch(
+                        session,
+                        chain.batch,
+                        dst_peer_id,
+                        &route,
+                        policy,
+                        authorization,
+                    )
+                    .await;
+                (res, u_pkts, u_bytes)
+            });
+        }
+        let mut report = MultipathSendReport::default();
+        while let Some((res, u_pkts, u_bytes)) = pending.next().await {
+            match res {
+                Ok(()) => {
+                    report.sent_packets += u_pkts;
+                    report.sent_bytes += u_bytes;
+                }
+                Err(err) => {
+                    report.failed_packets += u_pkts;
+                    if report.first_error.is_none() {
+                        report.first_error = Some(err);
+                    }
+                }
+            }
+        }
+        Ok(report)
     }
 
     pub(crate) async fn flush_pending_packets(
@@ -2557,15 +2928,17 @@ impl RelayPeerMap {
                 continue;
             };
             let policy = pending[0].1.clone();
-            let ethernet_authority_valid = pending.iter().all(|(packet, _, _, authorization)| {
-                packet.peer_manager_header().is_none_or(|header| {
-                    header.packet_type != PacketType::Ethernet as u8
-                        || self.full_ethernet_authorization_is_current(
-                            dst_peer_id,
-                            authorization.as_ref(),
-                        )
-                })
-            });
+            let source_route = pending[0].4.clone();
+            let ethernet_authority_valid =
+                pending.iter().all(|(packet, _, _, authorization, _)| {
+                    packet.peer_manager_header().is_none_or(|header| {
+                        header.packet_type != PacketType::Ethernet as u8
+                            || self.full_ethernet_authorization_is_current(
+                                dst_peer_id,
+                                authorization.as_ref(),
+                            )
+                    })
+                });
             if !ethernet_authority_valid {
                 pending.complete();
                 tracing::debug!(
@@ -2575,21 +2948,22 @@ impl RelayPeerMap {
                 continue;
             }
             let mut encrypted = PacketBatch::new();
-            for (packet, _, _, _) in pending.iter() {
+            for (packet, _, _, _, _) in pending.iter() {
                 encrypted
                     .try_push(packet.clone())
                     .expect("the pending relay group is bounded");
             }
             // Revalidate after packet cloning and immediately before encryption.
-            let ethernet_authority_valid = pending.iter().all(|(packet, _, _, authorization)| {
-                packet.peer_manager_header().is_none_or(|header| {
-                    header.packet_type != PacketType::Ethernet as u8
-                        || self.full_ethernet_authorization_is_current(
-                            dst_peer_id,
-                            authorization.as_ref(),
-                        )
-                })
-            });
+            let ethernet_authority_valid =
+                pending.iter().all(|(packet, _, _, authorization, _)| {
+                    packet.peer_manager_header().is_none_or(|header| {
+                        header.packet_type != PacketType::Ethernet as u8
+                            || self.full_ethernet_authorization_is_current(
+                                dst_peer_id,
+                                authorization.as_ref(),
+                            )
+                    })
+                });
             if !ethernet_authority_valid {
                 pending.complete();
                 continue;
@@ -2606,23 +2980,43 @@ impl RelayPeerMap {
                 return Ok(());
             }
             // Revalidate after encryption and immediately before the actual send.
-            let ethernet_authority_valid = pending.iter().all(|(packet, _, _, authorization)| {
-                packet.peer_manager_header().is_none_or(|header| {
-                    header.packet_type != PacketType::Ethernet as u8
-                        || self.full_ethernet_authorization_is_current(
-                            dst_peer_id,
-                            authorization.as_ref(),
-                        )
-                })
-            });
+            let ethernet_authority_valid =
+                pending.iter().all(|(packet, _, _, authorization, _)| {
+                    packet.peer_manager_header().is_none_or(|header| {
+                        header.packet_type != PacketType::Ethernet as u8
+                            || self.full_ethernet_authorization_is_current(
+                                dst_peer_id,
+                                authorization.as_ref(),
+                            )
+                    })
+                });
             if !ethernet_authority_valid {
                 pending.complete();
                 continue;
             }
-            if let Err(error) = self
-                .send_via_next_hop_batch_at(encrypted, dst_peer_id, policy, None)
-                .await
-            {
+            let send_result = if let Some(route) = &source_route {
+                match self.wrap_encrypted_source_route_batch(
+                    &mut encrypted,
+                    dst_peer_id,
+                    &route.hops,
+                    route.path_id,
+                ) {
+                    Ok((target, selected_next_hop)) => {
+                        self.send_via_next_hop_batch_at(
+                            encrypted,
+                            target,
+                            policy,
+                            selected_next_hop,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.send_via_next_hop_batch_at(encrypted, dst_peer_id, policy, None)
+                    .await
+            };
+            if let Err(error) = send_result {
                 tracing::debug!(?error, ?dst_peer_id, "pending relay send failed");
                 drop(pending);
                 self.schedule_flush_retry(dst_peer_id, session.clone());
@@ -4741,6 +5135,7 @@ impl RelayPeerMap {
             self.cancel_pending_responder_reset(peer_id, None);
             self.states.remove(&peer_id);
             self.relay_session_auth.remove(&peer_id);
+            self.preferred_first_hop.remove(&peer_id);
             self.pending_handshakes.remove(&peer_id);
             self.deferred_handshakes.remove(&peer_id);
             self.handshake_locks.remove(&peer_id);
@@ -4753,6 +5148,7 @@ impl RelayPeerMap {
             self.completed_ready_receipts.remove(&peer_id);
         }
         shrink_dashmap(&self.states, None);
+        shrink_dashmap(&self.preferred_first_hop, None);
         shrink_dashmap(&self.pending_handshakes, None);
         shrink_dashmap(&self.deferred_handshakes, None);
         shrink_dashmap(&self.handshake_locks, None);
@@ -4806,6 +5202,7 @@ impl RelayPeerMap {
         self.cancel_pending_responder_reset(peer_id, None);
         self.states.remove(&peer_id);
         self.relay_session_auth.remove(&peer_id);
+        self.preferred_first_hop.remove(&peer_id);
         self.pending_handshakes.remove(&peer_id);
         self.deferred_handshakes.remove(&peer_id);
         self.handshake_locks.remove(&peer_id);
@@ -4820,6 +5217,7 @@ impl RelayPeerMap {
         }
         self.completed_ready_receipts.remove(&peer_id);
         shrink_dashmap(&self.states, None);
+        shrink_dashmap(&self.preferred_first_hop, None);
         shrink_dashmap(&self.pending_handshakes, None);
         shrink_dashmap(&self.deferred_handshakes, None);
         shrink_dashmap(&self.handshake_locks, None);
@@ -4869,7 +5267,7 @@ mod relay_origin_proof_tests {
         for failed_send in [false, true] {
             let state = RelaySendState::new(RelaySendPhase::Draining);
             state
-                .enqueue(queue_packet(64), NextHopPolicy::LeastHop, None)
+                .enqueue(queue_packet(64), NextHopPolicy::LeastHop, None, None)
                 .unwrap();
             let pending = state.pop_batch_for_send(1).unwrap();
             let bytes = pending[0].2;
@@ -4889,7 +5287,7 @@ mod relay_origin_proof_tests {
     fn canceled_relay_batch_can_drain_again() {
         let state = RelaySendState::new(RelaySendPhase::Draining);
         state
-            .enqueue(queue_packet(64), NextHopPolicy::LeastHop, None)
+            .enqueue(queue_packet(64), NextHopPolicy::LeastHop, None, None)
             .unwrap();
         let pending = state.pop_batch_for_send(1).unwrap();
         let bytes = pending[0].2;
@@ -5057,7 +5455,7 @@ mod relay_origin_proof_tests {
                 let mut queued = packet();
                 attach_relay_origin_proof(&mut queued).unwrap();
                 state
-                    .enqueue(queued, NextHopPolicy::LeastHop, None)
+                    .enqueue(queued, NextHopPolicy::LeastHop, None, None)
                     .unwrap();
             }
             let result = if batch_send {
@@ -5091,5 +5489,83 @@ mod relay_origin_proof_tests {
                 "queued traffic did not restart authentication; batch={batch_send}"
             );
         }
+    }
+
+    #[test]
+    fn multipath_seq_origin_proof_roundtrips_and_detects_tampering() {
+        use super::verify_and_remove_relay_origin_proof;
+
+        let root = PeerSession::new_root_key();
+        let sender = PeerSession::new(
+            7,
+            root,
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([1; 32]),
+        );
+        let receiver = PeerSession::new(
+            9,
+            root,
+            1,
+            0,
+            "chacha20-poly1305".into(),
+            "chacha20-poly1305".into(),
+            Some([1; 32]),
+        );
+
+        let mut plain = ZCPacket::new_with_payload(b"single-path payload");
+        plain.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
+        let plain_len = plain.payload_len();
+        attach_relay_origin_proof(&mut plain).unwrap();
+        assert_eq!(
+            plain.payload_len(),
+            plain_len + super::RELAY_ORIGIN_PROOF_SIZE
+        );
+        sender.encrypt_payload(7, 9, &mut plain).unwrap();
+        receiver.decrypt_payload(7, 9, &mut plain).unwrap();
+        verify_and_remove_relay_origin_proof(&mut plain).unwrap();
+        assert_eq!(plain.payload(), b"single-path payload");
+        assert_eq!(plain.multipath_seq, None);
+
+        let mut mp = ZCPacket::new_with_payload(b"multipath payload");
+        mp.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
+        mp.multipath_seq = Some((0xdead_beef, 42));
+        let mp_len = mp.payload_len();
+        attach_relay_origin_proof(&mut mp).unwrap();
+        assert_eq!(
+            mp.payload_len(),
+            mp_len + super::RELAY_ORIGIN_PROOF_SIZE + super::MULTIPATH_SEQ_SUFFIX_SIZE
+        );
+        sender.encrypt_payload(7, 9, &mut mp).unwrap();
+        mp.multipath_seq = None;
+        receiver.decrypt_payload(7, 9, &mut mp).unwrap();
+        verify_and_remove_relay_origin_proof(&mut mp).unwrap();
+        assert_eq!(mp.payload(), b"multipath payload");
+        assert_eq!(mp.multipath_seq, Some((0xdead_beef, 42)));
+
+        let mut tampered = ZCPacket::new_with_payload(b"tampered payload");
+        tampered.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
+        tampered.multipath_seq = Some((0x1234_5678, 99));
+        attach_relay_origin_proof(&mut tampered).unwrap();
+        tampered
+            .mut_peer_manager_header()
+            .unwrap()
+            .from_peer_id
+            .set(123);
+        assert!(verify_and_remove_relay_origin_proof(&mut tampered).is_err());
+
+        let mut tampered_cipher = ZCPacket::new_with_payload(b"tampered ciphertext");
+        tampered_cipher.fill_peer_manager_hdr(7, 9, PacketType::Data as u8);
+        tampered_cipher.multipath_seq = Some((0x1234_5678, 99));
+        attach_relay_origin_proof(&mut tampered_cipher).unwrap();
+        sender.encrypt_payload(7, 9, &mut tampered_cipher).unwrap();
+        tampered_cipher.mut_payload()[0] ^= 0xff;
+        assert!(
+            receiver
+                .decrypt_payload(7, 9, &mut tampered_cipher)
+                .is_err()
+        );
     }
 }

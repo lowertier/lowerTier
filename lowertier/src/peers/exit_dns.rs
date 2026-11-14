@@ -192,7 +192,7 @@ mod tests {
     use crate::{
         peers::tests::{connect_peer_manager, create_mock_peer_manager_secure, wait_route_appear},
         proto::{
-            common::{PathGroup, PathPolicy, PathRule},
+            common::{PathGroup, PathPolicy, PathRule, PathStage},
             peer_rpc::ExitDnsRpcServer,
         },
     };
@@ -228,7 +228,7 @@ mod tests {
         context.set_flags(flags);
         let response = server.resolve(controller.clone(), request).await.unwrap();
         assert!(response.addresses.iter().all(|address| {
-            let address: SocketAddr = address.clone().into();
+            let address: SocketAddr = (*address).into();
             address.is_ipv4() && address.ip().is_loopback() && address.port() == 80
         }));
         for name in ["", "bad name", "-bad.test", "bad..test"] {
@@ -314,9 +314,12 @@ mod tests {
                 group: Vec::new(),
                 path: vec![PathRule {
                     to: "internet".into(),
-                    gateway: "10.42.0.2".into(),
-                    via: Vec::new(),
+                    gateway: Some(PathStage {
+                        nodes: vec!["10.42.0.2".into()],
+                        ..Default::default()
+                    }),
                     strict: true,
+                    ..Default::default()
                 }],
             });
             a.get_global_ctx().set_flags(flags);
@@ -333,7 +336,10 @@ mod tests {
                     .is_err()
             );
             let mut flags = a.get_global_ctx().get_flags();
-            flags.path_policy.as_mut().unwrap().path[0].gateway = "10.42.0.99".into();
+            flags.path_policy.as_mut().unwrap().path[0].gateway = Some(PathStage {
+                nodes: vec!["10.42.0.99".into()],
+                ..Default::default()
+            });
             a.get_global_ctx().set_flags(flags);
             assert!(
                 a.resolve_proxy_domain("exit-only.invalid".into(), 443, 7)
@@ -354,8 +360,21 @@ mod tests {
             connect_peer_manager(a.clone(), c.clone()).await;
             wait_route_appear(a.clone(), c.clone()).await.unwrap();
             flags.path_policy = Some(PathPolicy {
-                group: vec![PathGroup { name: "exits".into(), members: vec!["10.42.0.2".into(), "10.42.0.3".into()], balance: "flow".into(), weights: Vec::new() }],
-                path: vec![PathRule { to: "internet".into(), gateway: "exits".into(), via: Vec::new(), strict: true }],
+                group: vec![PathGroup {
+                    name: "exits".into(),
+                    nodes: vec!["10.42.0.2".into(), "10.42.0.3".into()],
+                    mode: "flow".into(),
+                    weights: Vec::new(),
+                }],
+                path: vec![PathRule {
+                    to: "internet".into(),
+                    gateway: Some(PathStage {
+                        nodes: vec!["exits".into()],
+                        ..Default::default()
+                    }),
+                    strict: true,
+                    ..Default::default()
+                }],
             });
             a.get_global_ctx().set_flags(flags.clone());
             for flow in 0..16 {

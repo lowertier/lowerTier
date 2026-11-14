@@ -889,6 +889,133 @@ pub(crate) fn normalize_verified_credential_bundle_cfg(
     Ok(user_cfg)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct TomlPathGroup {
+    pub name: String,
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weights: Vec<u32>,
+}
+
+impl From<&TomlPathGroup> for crate::proto::common::PathGroup {
+    fn from(group: &TomlPathGroup) -> Self {
+        Self {
+            name: group.name.clone(),
+            nodes: group.nodes.clone(),
+            mode: group.mode.clone(),
+            weights: group.weights.clone(),
+        }
+    }
+}
+
+impl From<crate::proto::common::PathGroup> for TomlPathGroup {
+    fn from(group: crate::proto::common::PathGroup) -> Self {
+        Self {
+            name: group.name,
+            nodes: group.nodes,
+            mode: group.mode,
+            weights: group.weights,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum TomlStage {
+    Single(String),
+    Inline(Vec<String>),
+    Detailed {
+        #[serde(default)]
+        nodes: Vec<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        mode: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        weights: Vec<u32>,
+    },
+}
+
+impl From<&TomlStage> for crate::proto::common::PathStage {
+    fn from(stage: &TomlStage) -> Self {
+        match stage {
+            TomlStage::Single(node) => Self {
+                nodes: vec![node.clone()],
+                mode: String::new(),
+                weights: Vec::new(),
+            },
+            TomlStage::Inline(nodes) => Self {
+                nodes: nodes.clone(),
+                mode: String::new(),
+                weights: Vec::new(),
+            },
+            TomlStage::Detailed {
+                nodes,
+                mode,
+                weights,
+            } => Self {
+                nodes: nodes.clone(),
+                mode: mode.clone(),
+                weights: weights.clone(),
+            },
+        }
+    }
+}
+
+impl From<crate::proto::common::PathStage> for TomlStage {
+    fn from(stage: crate::proto::common::PathStage) -> Self {
+        if stage.mode.is_empty() && stage.weights.is_empty() {
+            if stage.nodes.len() == 1 {
+                return Self::Single(stage.nodes.into_iter().next().unwrap());
+            }
+            return Self::Inline(stage.nodes);
+        }
+        Self::Detailed {
+            nodes: stage.nodes,
+            mode: stage.mode,
+            weights: stage.weights,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct TomlPathRule {
+    pub to: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<TomlStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<TomlStage>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
+}
+
+impl From<&TomlPathRule> for crate::proto::common::PathRule {
+    fn from(rule: &TomlPathRule) -> Self {
+        Self {
+            to: rule.to.clone(),
+            mode: rule.mode.clone(),
+            layers: rule.layers.iter().map(Into::into).collect(),
+            gateway: rule.gateway.as_ref().map(Into::into),
+            strict: rule.strict,
+        }
+    }
+}
+
+impl From<crate::proto::common::PathRule> for TomlPathRule {
+    fn from(rule: crate::proto::common::PathRule) -> Self {
+        Self {
+            to: rule.to,
+            mode: rule.mode,
+            layers: rule.layers.into_iter().map(Into::into).collect(),
+            gateway: rule.gateway.map(Into::into),
+            strict: rule.strict,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
     enabled: Option<bool>,
@@ -911,9 +1038,9 @@ struct Config {
     network_identity: Option<NetworkIdentity>,
     listeners: Option<Vec<url::Url>>,
     mapped_listeners: Option<Vec<url::Url>>,
-    /// Load-balance groups and paths. The runtime copy lives in `Flags::path_policy`.
-    group: Option<Vec<crate::proto::common::PathGroup>>,
-    path: Option<Vec<crate::proto::common::PathRule>>,
+    /// Multipath groups and paths. The runtime copy lives in `Flags::path_policy`.
+    group: Option<Vec<TomlPathGroup>>,
+    path: Option<Vec<TomlPathRule>>,
     /// Local names and notes for peers. Only the management interface reads them.
     note: Option<Vec<PeerNote>>,
 
@@ -1215,8 +1342,16 @@ impl TomlConfigLoader {
         flags.limits = config.limits.clone();
         flags.path_policy = (config.group.is_some() || config.path.is_some()).then(|| {
             crate::proto::common::PathPolicy {
-                group: config.group.clone().unwrap_or_default(),
-                path: config.path.clone().unwrap_or_default(),
+                group: config
+                    .group
+                    .as_ref()
+                    .map(|groups| groups.iter().map(Into::into).collect())
+                    .unwrap_or_default(),
+                path: config
+                    .path
+                    .as_ref()
+                    .map(|paths| paths.iter().map(Into::into).collect())
+                    .unwrap_or_default(),
             }
         });
         let has_network_secret = config
@@ -1618,7 +1753,7 @@ impl ConfigLoader for TomlConfigLoader {
     }
 
     fn set_peers(&self, peers: Vec<PeerConfig>) {
-        self.config.lock().unwrap().peer = Some(peers);
+        self.config.lock().unwrap().peer = (!peers.is_empty()).then_some(peers);
     }
 
     fn get_listeners(&self) -> Option<Vec<url::Url>> {
@@ -1774,8 +1909,10 @@ impl ConfigLoader for TomlConfigLoader {
         config.camouflage = flags.camouflage.clone();
         config.limits = flags.limits.clone();
         let policy = flags.path_policy.clone().unwrap_or_default();
-        config.group = (!policy.group.is_empty()).then_some(policy.group);
-        config.path = (!policy.path.is_empty()).then_some(policy.path);
+        config.group =
+            (!policy.group.is_empty()).then(|| policy.group.into_iter().map(Into::into).collect());
+        config.path =
+            (!policy.path.is_empty()).then(|| policy.path.into_iter().map(Into::into).collect());
         if config.network_identity.as_ref().is_some_and(|identity| {
             identity.network_secret.is_none()
                 && identity.credential_root_fingerprint().is_none()

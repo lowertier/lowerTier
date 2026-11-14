@@ -27,7 +27,7 @@ use crate::{
         api::instance::{self, PeerConnInfo},
         peer_rpc::{PeerIdentityType, RoutePeerInfo, SecureAuthLevel},
     },
-    tunnel::{TunnelError, batch::PacketBatch, packet_def::ZCPacket},
+    tunnel::{TunnelError, batch::PacketBatch, direct::DirectQueueSnapshot, packet_def::ZCPacket},
 };
 
 use super::{
@@ -1494,6 +1494,25 @@ impl PeerMap {
     ) -> Option<ArcPeerConn> {
         self.get_peer_by_id(dst_peer_id)
             .and_then(|peer| peer.select_conn_for_flow(policy, flow_hash))
+    }
+
+    pub(crate) fn first_hop_link_state(
+        &self,
+        peer_id: PeerId,
+        flow_hash: u64,
+        policy: NextHopPolicy,
+    ) -> Option<(DirectQueueSnapshot, u32)> {
+        if let Some(conn) = self.select_direct_conn_for_flow(peer_id, policy.clone(), flow_hash) {
+            return Some(conn.queue_and_latency_snapshot());
+        }
+        let adj_peer_id = self
+            .load_dataplane_descriptor()
+            .forwarding_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.next_hop(peer_id, policy.clone()))
+            .map(|hop| hop.next_hop_peer_id)?;
+        self.select_direct_conn_for_flow(adj_peer_id, policy, flow_hash)
+            .map(|conn| conn.queue_and_latency_snapshot())
     }
 
     pub(crate) fn only_direct_conn(&self, dst_peer_id: PeerId) -> Option<ArcPeerConn> {

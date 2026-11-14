@@ -335,9 +335,9 @@ pub fn client_server_name(
     let config = flags.camouflage_config();
     let name = match config.server_name_for(remote) {
         Some(name) => name.to_owned(),
-        None => url_dns_host(url)
-            .map(str::to_string)
-            .unwrap_or_else(|| crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME.to_string()),
+        None => url_dns_host(url).map(str::to_string).unwrap_or_else(|| {
+            crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME.to_string()
+        }),
     };
     ServerName::try_from(name).map_err(|_| TunnelError::InvalidProtocol("Invalid SNI".to_string()))
 }
@@ -626,7 +626,10 @@ mod tests {
             let acceptor = acceptor.clone();
             let server_task = tokio::spawn(async move { acceptor.accept(server_io).await });
             let client_res = connector.connect(bad_sni, client_io).await;
-            assert!(client_res.is_err(), "expected missing/wrong SNI to fail handshake");
+            assert!(
+                client_res.is_err(),
+                "expected missing/wrong SNI to fail handshake"
+            );
             assert!(server_task.await.unwrap().is_err());
         }
 
@@ -638,7 +641,8 @@ mod tests {
             tls.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf, b"ping");
         });
-        let good_sni = rustls::pki_types::ServerName::try_from("challenges.cloudflare.com").unwrap();
+        let good_sni =
+            rustls::pki_types::ServerName::try_from("challenges.cloudflare.com").unwrap();
         let mut tls = connector.connect(good_sni, client_io).await.unwrap();
         tls.write_all(b"ping").await.unwrap();
         tls.flush().await.unwrap();

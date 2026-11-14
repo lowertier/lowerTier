@@ -946,7 +946,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "",
-        "Load-balance groups: name, members (peer keys or virtual IPs), balance (flow or failover), weights.",
+        "Relay groups: name, nodes (peer keys or virtual IPs), mode (parallel, flow, or failover), weights.",
     ),
     opt(
         "path",
@@ -954,7 +954,7 @@ pub static OPTIONS: &[OptionSpec] = &[
         Same,
         Live,
         "",
-        "Paths: to (peer, CIDR, or internet), via (peers or groups in order), gateway (peer or group), strict.",
+        "Paths: to (peer, *, CIDR, or internet), mode, layers (ordered relay layers of peers/groups or inline lists), gateway, strict.",
     ),
     opt(
         "note",
@@ -1088,8 +1088,8 @@ const TABLE_FIELDS: &[(&str, &[(&str, &str)])] = &[
         "group",
         &[
             ("name", "name"),
-            ("members", "members"),
-            ("balance", "balance"),
+            ("nodes", "nodes"),
+            ("mode", "mode"),
             ("weights", "weights"),
         ],
     ),
@@ -1097,7 +1097,8 @@ const TABLE_FIELDS: &[(&str, &[(&str, &str)])] = &[
         "path",
         &[
             ("to", "to"),
-            ("via", "via"),
+            ("mode", "mode"),
+            ("layers", "layers"),
             ("gateway", "gateway"),
             ("strict", "strict"),
         ],
@@ -2012,7 +2013,7 @@ mod tests {
     #[test]
     fn custom_options_round_trip() {
         let public = table(
-            "[node]\nthreads = 4\n[tun]\nmode = \"userspace\"\nmtu = 1200\n[nat]\np2p = \"lazy\"\nudp_punch = false\n[relay]\npolicy = \"latency\"\nforeign_rpc = true\n[[path]]\nto = \"internet\"\nvia = [\"relays\"]\ngateway = \"10.0.0.9\"\n[[group]]\nname = \"relays\"\nmembers = [\"10.0.0.2\", \"10.0.0.3\"]\nweights = [2, 1]\n[[forward]]\nproto = \"tcp\"\nbind = \"0.0.0.0:80\"\ndest = \"10.0.0.1:80\"\n[acl]\ntcp_ports = [\"22\"]\n[acl.acl_v1]\nchains = []\n",
+            "[node]\nthreads = 4\n[tun]\nmode = \"userspace\"\nmtu = 1200\n[nat]\np2p = \"lazy\"\nudp_punch = false\n[relay]\npolicy = \"latency\"\nforeign_rpc = true\n[[path]]\nto = \"internet\"\nlayers = [\"relays\", [\"10.0.0.4\", \"10.0.0.5\"]]\ngateway = \"10.0.0.9\"\n[[group]]\nname = \"relays\"\nnodes = [\"10.0.0.2\", \"10.0.0.3\"]\nweights = [2, 1]\n[[forward]]\nproto = \"tcp\"\nbind = \"0.0.0.0:80\"\ndest = \"10.0.0.1:80\"\n[acl]\ntcp_ports = [\"22\"]\n[acl.acl_v1]\nchains = []\n",
         );
         let internal = to_internal(&public).unwrap();
         assert_eq!(

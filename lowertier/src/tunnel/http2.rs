@@ -385,7 +385,10 @@ struct H2PacketReader {
 
 fn is_h2_peer_close(error: &h2::Error) -> bool {
     if (error.is_reset() || error.is_go_away()) && error.is_remote() {
-        return matches!(error.reason(), Some(h2::Reason::NO_ERROR | h2::Reason::CANCEL));
+        return matches!(
+            error.reason(),
+            Some(h2::Reason::NO_ERROR | h2::Reason::CANCEL)
+        );
     }
     if error.is_io()
         && let Some(io_err) = error.get_io()

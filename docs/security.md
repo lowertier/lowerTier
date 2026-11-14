@@ -19,7 +19,7 @@ Every link is TLS 1.3: QUIC, HTTP/2, or WebSocket. The Noise handshake is bound 
 - **Between neighbors**, packets ride inside that TLS session. lowertier adds no second layer of encryption there.
 - **Across relays**, the sender seals each packet for the destination with the session key: ChaCha20-Poly1305 by default (`network.cipher` also offers AES-GCM),
   a 16-byte tag, a 12-byte nonce, and the packet header's stable fields as associated data.
-  Relays and [waypoints](paths.md) forward the sealed packet without opening it.
+  Relays along automatic routes or user [paths](paths.md) forward the sealed packet without opening it.
 
 Session keys are per direction, rotate in epochs, and use sequence nonces with replay windows.
 

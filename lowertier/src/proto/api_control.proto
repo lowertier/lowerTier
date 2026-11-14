@@ -162,25 +162,36 @@ message PathMember {
   uint64 picks = 7;
 }
 message PathSegment {
-  // A group name, or the peer reference for a single peer.
+  // A group name, inline summary, or peer reference for a single peer.
   string name = 1;
-  string balance = 2;
+  string mode = 2;
   repeated PathMember members = 3;
+}
+message PathChainStatus {
+  uint32 path_id = 1;
+  repeated uint32 hop_peer_ids = 2;
+  uint32 rtt_us = 3;
+  uint64 queued_bytes = 4;
+  uint64 packets = 5;
+  bool healthy = 6;
 }
 message PathStatus {
   uint32 index = 1;
   string to = 2;
   optional uint32 to_peer_id = 3;
-  repeated PathSegment via = 4;
-  PathSegment gateway = 5;
-  bool strict = 6;
-  // "ready": every segment has a usable member. "fallback": automatic routing is used.
+  string mode = 4;
+  repeated PathSegment layers = 5;
+  PathSegment gateway = 6;
+  bool strict = 7;
+  // "ready": every stage has a usable member. "fallback": automatic routing is used.
   // "down": strict and unusable, so traffic is dropped.
-  string state = 7;
-  string reason = 8;
-  uint64 waypoint_packets = 9;
-  uint64 fallback_packets = 10;
-  uint64 dropped_packets = 11;
+  string state = 8;
+  string reason = 9;
+  uint64 relayed_packets = 10;
+  uint64 fallback_packets = 11;
+  uint64 dropped_packets = 12;
+  uint64 reordered_packets = 13;
+  repeated PathChainStatus chains = 14;
 }
 message ListPathsRequest { RequestMeta meta = 1; }
 message ListPathsResponse { ApiError error = 1; SnapshotMeta snapshot = 2; repeated PathStatus paths = 3; }

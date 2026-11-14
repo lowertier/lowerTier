@@ -76,7 +76,7 @@ use crate::{
         BatchStreamItem, PacketBatchStream, TransportBinding, TransportBindingKind, Tunnel,
         TunnelError,
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch, RECEIVE_PREFETCH_BATCHES},
-        direct::{DirectTunnel, DirectTunnelSender},
+        direct::{DirectQueueSnapshot, DirectTunnel, DirectTunnelSender},
         filter::{
             StatsRecorderTunnelFilter, TunnelFilter, TunnelFilterChain, TunnelWithFilter,
             scalar_after_received_batch,
@@ -4879,6 +4879,13 @@ impl PeerConn {
             .map(|info| info.tunnel_type.as_str())
     }
 
+    pub(crate) fn queue_and_latency_snapshot(&self) -> (DirectQueueSnapshot, u32) {
+        (
+            self.sink.queue_snapshot(),
+            self.latency_stats.get_latency_us(),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_pending_recv_for_test(&self, packet: ZCPacket) {
         self.pending_recv.lock().push_back(packet);
@@ -5302,7 +5309,7 @@ pub mod tests {
         sender_session.encrypt_payload(1, 99, &mut packet).unwrap();
 
         // Neighbor 22 is the link's other end, so the header moves to 33.
-        packet.encode_waypoints(&[33, 99]).unwrap();
+        packet.encode_source_route(&[33], 0).unwrap();
         let sealed = packet.payload().to_vec();
         let header = packet.peer_manager_header().unwrap();
         assert_eq!(header.packet_type, PacketType::Waypoint as u8);
@@ -5404,7 +5411,7 @@ pub mod tests {
         left.get_peer_session_store()
             .insert_session(session_key, to_99.clone());
         to_99.encrypt_payload(11, 99, &mut packet).unwrap();
-        packet.encode_waypoints(&[33, 99]).unwrap();
+        packet.encode_source_route(&[33], 0).unwrap();
         let sealed = packet.payload().to_vec();
 
         left.send_msg(packet).await.unwrap();
@@ -5574,7 +5581,7 @@ pub mod tests {
         destination_session
             .encrypt_payload(1, 99, &mut packet)
             .unwrap();
-        packet.encode_waypoints(&[22, 33]).unwrap();
+        packet.encode_source_route(&[22, 33], 0).unwrap();
         let sealed = packet.payload().to_vec();
 
         for mode in [
@@ -5656,8 +5663,23 @@ pub mod tests {
             );
 
             let mut restored = received[0].clone();
-            assert_eq!(restored.advance_waypoint(), Ok(33));
-            assert_eq!(restored.advance_waypoint(), Ok(99));
+            use crate::tunnel::packet_def::SourceRouteStep;
+            assert_eq!(
+                restored.advance_source_route(22),
+                Ok(SourceRouteStep::Forward(33))
+            );
+            assert_eq!(
+                restored.advance_source_route(33),
+                Ok(SourceRouteStep::Forward(99))
+            );
+            assert_eq!(
+                restored.advance_source_route(99),
+                Ok(SourceRouteStep::Delivered {
+                    final_dst: 99,
+                    original_type: PacketType::Data as u8,
+                    path_id: 0,
+                })
+            );
             let destination = PeerSession::new(
                 1,
                 destination_root,

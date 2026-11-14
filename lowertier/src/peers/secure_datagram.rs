@@ -85,30 +85,31 @@ impl EpochRxSlot {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct SyncRxGrace {
-    slots: [[EpochRxSlot; 2]; 2],
+    slots: Option<Box<[[EpochRxSlot; 2]; 2]>>,
     expires_at_ms: u64,
-    valid: bool,
 }
 
 impl SyncRxGrace {
     fn clear(&mut self) {
-        self.slots = [[EpochRxSlot::default(), EpochRxSlot::default()]; 2];
+        self.slots = None;
         self.expires_at_ms = 0;
-        self.valid = false;
     }
 
-    fn refresh(&mut self, slots: [[EpochRxSlot; 2]; 2], expires_at_ms: u64) {
-        self.slots = slots;
+    fn refresh(&mut self, slots: Box<[[EpochRxSlot; 2]; 2]>, expires_at_ms: u64) {
+        self.slots = Some(slots);
         self.expires_at_ms = expires_at_ms;
-        self.valid = true;
     }
 
     fn maybe_expire(&mut self, now_ms: u64) {
-        if self.valid && now_ms >= self.expires_at_ms {
+        if self.slots.is_some() && now_ms >= self.expires_at_ms {
             self.clear();
         }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.slots.is_some()
     }
 }
 
@@ -123,7 +124,7 @@ pub struct SecureDatagramSession {
     send_packets_since_epoch: AtomicU64,
     rotation_lock: Mutex<()>,
 
-    rx_slots: Mutex<[[EpochRxSlot; 2]; 2]>,
+    rx_slots: Mutex<Box<[[EpochRxSlot; 2]; 2]>>,
     key_cache: Mutex<[[EpochKeySlot; 2]; 2]>,
     sync_rx_grace: Mutex<SyncRxGrace>,
     sync_rx_grace_expires_at_ms: AtomicU64,
@@ -179,10 +180,10 @@ impl SecureDatagramSession {
         send_cipher_algorithm: String,
         recv_cipher_algorithm: String,
     ) -> Self {
-        let rx_slots = [
+        let rx_slots = Box::new([
             [EpochRxSlot::default(), EpochRxSlot::default()],
             [EpochRxSlot::default(), EpochRxSlot::default()],
-        ];
+        ]);
         let key_cache = [
             [EpochKeySlot::default(), EpochKeySlot::default()],
             [EpochKeySlot::default(), EpochKeySlot::default()],
@@ -308,7 +309,7 @@ impl SecureDatagramSession {
             let mut sync_rx_grace = self.sync_rx_grace.lock().unwrap();
             if can_preserve_rx_grace {
                 let expires_at_ms = now_ms().saturating_add(Self::SYNC_RX_GRACE_AFTER_MS);
-                let mut previous_slots = *rx;
+                let mut previous_slots = rx.clone();
                 for direction in 0..2 {
                     let mut current = [EpochRxSlot::default(), EpochRxSlot::default()];
                     for slot in rx[direction].iter().copied() {
@@ -542,18 +543,6 @@ impl SecureDatagramSession {
         false
     }
 
-    fn replay_state_snapshot(&self, now_ms: u64) -> ([[EpochRxSlot; 2]; 2], SyncRxGrace) {
-        let rx = *self.rx_slots.lock().unwrap();
-        let mut grace = *self.sync_rx_grace.lock().unwrap();
-        if grace.valid {
-            grace.maybe_expire(now_ms);
-            if !grace.valid {
-                self.sync_rx_grace_expires_at_ms.store(0, Ordering::Relaxed);
-            }
-        }
-        (rx, grace)
-    }
-
     fn precheck_replay_state(
         rx: &[[EpochRxSlot; 2]; 2],
         sync_rx_grace: Option<&SyncRxGrace>,
@@ -562,11 +551,10 @@ impl SecureDatagramSession {
         seq: u64,
         dir_idx: usize,
     ) -> bool {
-        if sync_rx_grace
-            .as_ref()
-            .is_some_and(|g| Self::epoch_in_slots(&g.slots[dir_idx], epoch))
+        if let Some(grace_slots) = sync_rx_grace.and_then(|g| g.slots.as_deref())
+            && Self::epoch_in_slots(&grace_slots[dir_idx], epoch)
         {
-            for slot in sync_rx_grace.unwrap().slots[dir_idx].iter() {
+            for slot in grace_slots[dir_idx].iter() {
                 if slot.valid && slot.epoch == epoch {
                     return slot.window.can_accept(seq);
                 }
@@ -599,21 +587,17 @@ impl SecureDatagramSession {
 
     fn commit_replay_state(
         rx: &mut [[EpochRxSlot; 2]; 2],
-        sync_rx_grace: &mut Option<SyncRxGrace>,
+        sync_rx_grace: Option<&mut SyncRxGrace>,
         send_epoch: u32,
         epoch: u32,
         seq: u64,
         dir_idx: usize,
         now_ms: u64,
     ) -> bool {
-        if sync_rx_grace
-            .as_ref()
-            .is_some_and(|g| Self::epoch_in_slots(&g.slots[dir_idx], epoch))
+        if let Some(grace_slots) = sync_rx_grace.and_then(|g| g.slots.as_deref_mut())
+            && Self::epoch_in_slots(&grace_slots[dir_idx], epoch)
         {
-            let grace = sync_rx_grace
-                .as_mut()
-                .expect("grace state was checked before mutation");
-            for slot in grace.slots[dir_idx].iter_mut() {
+            for slot in grace_slots[dir_idx].iter_mut() {
                 if slot.valid && slot.epoch == epoch {
                     slot.last_rx_ms = now_ms;
                     return slot.window.accept(seq);
@@ -666,6 +650,7 @@ impl SecureDatagramSession {
 
     fn prune_key_cache(&self, rx: &[[EpochRxSlot; 2]; 2], sync_rx_grace: Option<&SyncRxGrace>) {
         let send_epoch = self.send_epoch.load(Ordering::Relaxed);
+        let grace_slots = sync_rx_grace.and_then(|g| g.slots.as_deref());
         let mut key_cache = self.key_cache.lock().unwrap();
         for d in 0..2 {
             for s in 0..2 {
@@ -676,7 +661,7 @@ impl SecureDatagramSession {
                 let allowed = e == send_epoch
                     || rx[d][0].valid && rx[d][0].epoch == e
                     || rx[d][1].valid && rx[d][1].epoch == e
-                    || sync_rx_grace.is_some_and(|g| Self::epoch_in_slots(&g.slots[d], e));
+                    || grace_slots.is_some_and(|slots| Self::epoch_in_slots(&slots[d], e));
                 if !allowed {
                     key_cache[d][s].valid = false;
                 }
@@ -696,7 +681,7 @@ impl SecureDatagramSession {
         let sync_rx_grace = if self.sync_rx_grace_active(now_ms) {
             let mut sync_rx_grace = self.sync_rx_grace.lock().unwrap();
             sync_rx_grace.maybe_expire(now_ms);
-            if sync_rx_grace.valid {
+            if sync_rx_grace.is_valid() {
                 Some(sync_rx_grace)
             } else {
                 self.sync_rx_grace_expires_at_ms.store(0, Ordering::Relaxed);
@@ -705,50 +690,15 @@ impl SecureDatagramSession {
         } else {
             None
         };
-
-        if sync_rx_grace
-            .as_ref()
-            .is_some_and(|g| Self::epoch_in_slots(&g.slots[dir_idx], epoch))
-        {
-            for slot in sync_rx_grace.as_ref().unwrap().slots[dir_idx].iter() {
-                if slot.valid && slot.epoch == epoch {
-                    return slot.window.can_accept(seq);
-                }
-            }
-        }
-
-        if !rx[dir_idx][0].valid {
-            let send_epoch = self.send_epoch.load(Ordering::Relaxed);
-            let baseline_epoch = send_epoch;
-            return epoch <= baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD);
-        }
-
-        if rx[dir_idx][0].valid && epoch == rx[dir_idx][0].epoch {
-            return rx[dir_idx][0].window.can_accept(seq);
-        }
-
-        if rx[dir_idx][1].valid && epoch == rx[dir_idx][1].epoch {
-            return rx[dir_idx][1].window.can_accept(seq);
-        }
-
-        if rx[dir_idx][0].valid && epoch > rx[dir_idx][0].epoch {
-            let mut baseline_epoch = self.send_epoch.load(Ordering::Relaxed);
-            if rx[dir_idx][0].valid {
-                baseline_epoch = baseline_epoch.max(rx[dir_idx][0].epoch);
-            }
-            if rx[dir_idx][1].valid {
-                baseline_epoch = baseline_epoch.max(rx[dir_idx][1].epoch);
-            }
-            let max_allowed_epoch =
-                baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD);
-            if epoch > max_allowed_epoch {
-                return false;
-            }
-
-            return true;
-        }
-
-        false
+        let send_epoch = self.send_epoch.load(Ordering::Relaxed);
+        Self::precheck_replay_state(
+            &rx,
+            sync_rx_grace.as_deref(),
+            send_epoch,
+            epoch,
+            seq,
+            dir_idx,
+        )
     }
 
     fn commit_replay(
@@ -763,7 +713,7 @@ impl SecureDatagramSession {
         let mut sync_rx_grace = if self.sync_rx_grace_active(now_ms) {
             let mut sync_rx_grace = self.sync_rx_grace.lock().unwrap();
             sync_rx_grace.maybe_expire(now_ms);
-            if sync_rx_grace.valid {
+            if sync_rx_grace.is_valid() {
                 Some(sync_rx_grace)
             } else {
                 self.sync_rx_grace_expires_at_ms.store(0, Ordering::Relaxed);
@@ -772,68 +722,16 @@ impl SecureDatagramSession {
         } else {
             None
         };
-
-        let accepted = if sync_rx_grace
-            .as_ref()
-            .is_some_and(|g| Self::epoch_in_slots(&g.slots[dir_idx], epoch))
-        {
-            let mut accepted = false;
-            for slot in sync_rx_grace.as_mut().unwrap().slots[dir_idx].iter_mut() {
-                if slot.valid && slot.epoch == epoch {
-                    slot.last_rx_ms = now_ms;
-                    accepted = slot.window.accept(seq);
-                    break;
-                }
-            }
-            accepted
-        } else {
-            if !rx[dir_idx][0].valid {
-                let send_epoch = self.send_epoch.load(Ordering::Relaxed);
-                let baseline_epoch = send_epoch;
-                if epoch > baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD) {
-                    false
-                } else {
-                    rx[dir_idx][0] = EpochRxSlot {
-                        epoch,
-                        window: ReplayWindow::default(),
-                        last_rx_ms: now_ms,
-                        valid: true,
-                    };
-                    rx[dir_idx][0].window.accept(seq)
-                }
-            } else if epoch == rx[dir_idx][0].epoch {
-                rx[dir_idx][0].last_rx_ms = now_ms;
-                rx[dir_idx][0].window.accept(seq)
-            } else if rx[dir_idx][1].valid && epoch == rx[dir_idx][1].epoch {
-                rx[dir_idx][1].last_rx_ms = now_ms;
-                rx[dir_idx][1].window.accept(seq)
-            } else if rx[dir_idx][0].valid && epoch > rx[dir_idx][0].epoch {
-                let mut baseline_epoch = self.send_epoch.load(Ordering::Relaxed);
-                if rx[dir_idx][0].valid {
-                    baseline_epoch = baseline_epoch.max(rx[dir_idx][0].epoch);
-                }
-                if rx[dir_idx][1].valid {
-                    baseline_epoch = baseline_epoch.max(rx[dir_idx][1].epoch);
-                }
-                let max_allowed_epoch =
-                    baseline_epoch.saturating_add(Self::MAX_ACCEPTED_RX_EPOCH_AHEAD);
-                if epoch > max_allowed_epoch {
-                    false
-                } else {
-                    rx[dir_idx][1] = rx[dir_idx][0];
-                    rx[dir_idx][0] = EpochRxSlot {
-                        epoch,
-                        window: ReplayWindow::default(),
-                        last_rx_ms: now_ms,
-                        valid: true,
-                    };
-                    rx[dir_idx][0].window.accept(seq)
-                }
-            } else {
-                false
-            }
-        };
-
+        let send_epoch = self.send_epoch.load(Ordering::Relaxed);
+        let accepted = Self::commit_replay_state(
+            &mut rx,
+            sync_rx_grace.as_deref_mut(),
+            send_epoch,
+            epoch,
+            seq,
+            dir_idx,
+            now_ms,
+        );
         self.prune_key_cache(&rx, sync_rx_grace.as_deref());
         accepted
     }
@@ -1027,25 +925,45 @@ impl SecureDatagramSession {
         }
 
         let now_ms = now_ms();
-        let (rx_snapshot, grace_snapshot) = self.replay_state_snapshot(now_ms);
-        let send_epoch = self.send_epoch.load(Ordering::Relaxed);
-        let grace = grace_snapshot.valid.then_some(&grace_snapshot);
         let mut candidates = SmallVec::<[usize; 64]>::new();
         let mut saw_decrypt_failure = false;
-        for (index, nonce) in nonces.iter().enumerate() {
-            let Some((epoch, seq)) = nonce else {
-                continue;
+        {
+            let rx_guard = self.rx_slots.lock().unwrap();
+            let grace_guard = if self.sync_rx_grace_active(now_ms) {
+                let mut grace_guard = self.sync_rx_grace.lock().unwrap();
+                grace_guard.maybe_expire(now_ms);
+                if grace_guard.is_valid() {
+                    Some(grace_guard)
+                } else {
+                    self.sync_rx_grace_expires_at_ms.store(0, Ordering::Relaxed);
+                    None
+                }
+            } else {
+                None
             };
-            if duplicate[index] {
-                outcomes[index] = Some(Err(anyhow!("duplicate nonce in secure datagram batch")));
-                continue;
+            let send_epoch = self.send_epoch.load(Ordering::Relaxed);
+            for (index, nonce) in nonces.iter().enumerate() {
+                let Some((epoch, seq)) = nonce else {
+                    continue;
+                };
+                if duplicate[index] {
+                    outcomes[index] =
+                        Some(Err(anyhow!("duplicate nonce in secure datagram batch")));
+                    continue;
+                }
+                if !Self::precheck_replay_state(
+                    &rx_guard,
+                    grace_guard.as_deref(),
+                    send_epoch,
+                    *epoch,
+                    *seq,
+                    dir_idx,
+                ) {
+                    outcomes[index] = Some(Err(anyhow!("replay rejected")));
+                    continue;
+                }
+                candidates.push(index);
             }
-            if !Self::precheck_replay_state(&rx_snapshot, grace, send_epoch, *epoch, *seq, dir_idx)
-            {
-                outcomes[index] = Some(Err(anyhow!("replay rejected")));
-                continue;
-            }
-            candidates.push(index);
         }
 
         // Cache one decryptor per epoch. Most batches use one epoch.
@@ -1083,18 +1001,23 @@ impl SecureDatagramSession {
             (epoch, seq, *index)
         });
         let mut rx_guard = self.rx_slots.lock().unwrap();
-        let mut grace_guard = self.sync_rx_grace.lock().unwrap();
-        grace_guard.maybe_expire(now_ms);
-        if !grace_guard.valid {
-            self.sync_rx_grace_expires_at_ms.store(0, Ordering::Relaxed);
-        }
-        let mut rx_work = *rx_guard;
-        let mut grace_work = grace_guard.valid.then_some(*grace_guard);
+        let mut grace_guard = if self.sync_rx_grace_active(now_ms) {
+            let mut grace_guard = self.sync_rx_grace.lock().unwrap();
+            grace_guard.maybe_expire(now_ms);
+            if grace_guard.is_valid() {
+                Some(grace_guard)
+            } else {
+                self.sync_rx_grace_expires_at_ms.store(0, Ordering::Relaxed);
+                None
+            }
+        } else {
+            None
+        };
         for index in commit_order {
             let (epoch, seq) = nonces[index].expect("commit candidate has a nonce");
             if !Self::commit_replay_state(
-                &mut rx_work,
-                &mut grace_work,
+                &mut rx_guard,
+                grace_guard.as_deref_mut(),
                 self.send_epoch.load(Ordering::Relaxed),
                 epoch,
                 seq,
@@ -1104,10 +1027,7 @@ impl SecureDatagramSession {
                 outcomes[index] = Some(Err(anyhow!("replay rejected")));
             }
         }
-        *rx_guard = rx_work;
-        *grace_guard = grace_work.unwrap_or_default();
-        let grace_for_cache = grace_guard.valid.then_some(&*grace_guard);
-        self.prune_key_cache(&rx_work, grace_for_cache);
+        self.prune_key_cache(&rx_guard, grace_guard.as_deref());
         drop(grace_guard);
         drop(rx_guard);
 

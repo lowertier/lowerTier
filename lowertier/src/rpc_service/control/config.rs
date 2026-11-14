@@ -1500,10 +1500,12 @@ impl ControlPlaneService {
             adopted.expected_exists = true;
             self.manager.set_instance_file_control(id, adopted)?;
         }
+        let old_peers = runtime
+            .as_ref()
+            .map(|(context, _)| context.config.get_peers())
+            .unwrap_or_default();
         active.replace_active(&candidate);
-        let mut old_peers = Vec::new();
         if let Some((context, _)) = runtime {
-            old_peers = context.config.get_peers();
             context.set_hostname(candidate.get_hostname());
             context.set_flags(candidate.get_flags());
             context.get_acl_filter().reload_rules(rules.as_ref());
@@ -1523,7 +1525,7 @@ impl ControlPlaneService {
         if let Some(instance) = running {
             let route = instance.peers()?.get_route();
             let patcher = instance.patcher.clone();
-            let candidate_clone = candidate.clone();
+            let candidate_clone = candidate.snapshot();
             tokio::spawn(async move {
                 if let Err(e) = patcher.sync_live_config(&old_peers, &candidate_clone).await {
                     tracing::warn!(?e, "failed to sync live config changes");

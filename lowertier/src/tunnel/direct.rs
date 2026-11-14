@@ -319,6 +319,14 @@ impl Drop for AdmissionPermit {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DirectQueueSnapshot {
+    pub queued_bytes: usize,
+    pub queued_packets: usize,
+    pub drain_rate_bps: f64,
+    pub saturated: bool,
+}
+
 #[derive(Clone)]
 pub struct DirectTunnelSender {
     state: Arc<DirectSinkState>,
@@ -331,6 +339,29 @@ impl DirectTunnelSender {
     }
     pub(crate) fn is_closed(&self) -> bool {
         self.state.terminal_error.get().is_some() || self.state.control_tx.is_closed()
+    }
+
+    pub fn queue_snapshot(&self) -> DirectQueueSnapshot {
+        let usage = self.state.ownership_budget.usage.lock();
+        let queued_bytes = usage.bytes;
+        let queued_packets = usage.packets;
+        let drain_rate_bps = usage.byte_rate * 8.0;
+        let saturated = self.state.terminal_error.get().is_some()
+            || self.state.control_tx.is_closed()
+            || queued_bytes.saturating_mul(4)
+                >= self.state.ownership_budget.byte_capacity.saturating_mul(3)
+            || queued_packets.saturating_mul(4)
+                >= self
+                    .state
+                    .ownership_budget
+                    .packet_capacity
+                    .saturating_mul(3);
+        DirectQueueSnapshot {
+            queued_bytes,
+            queued_packets,
+            drain_rate_bps,
+            saturated,
+        }
     }
 
     pub fn send(&self, packet: ZCPacket) -> impl Future<Output = Result<(), TunnelError>> + '_ {

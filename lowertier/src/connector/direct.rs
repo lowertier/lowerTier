@@ -757,8 +757,16 @@ mod tests {
                 let url = format!("{protocol}://127.0.0.1:0").parse().unwrap();
                 let mut listener: Box<dyn TunnelListener> = match protocol {
                     "quic" => Box::new(QuicTunnelListener::new(url, b.get_global_ctx())),
-                    "h2" => Box::new(TcpTunnelListener::new(url)),
-                    "wss" => Box::new(WsTunnelListener::new(url)),
+                    "h2" => {
+                        let mut listener = TcpTunnelListener::new(url);
+                        listener.set_global_ctx(&b.get_global_ctx());
+                        Box::new(listener)
+                    }
+                    "wss" => {
+                        let mut listener = WsTunnelListener::new(url);
+                        listener.set_global_ctx(&b.get_global_ctx());
+                        Box::new(listener)
+                    }
                     _ => unreachable!(),
                 };
                 listener.listen().await.unwrap();

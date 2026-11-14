@@ -987,10 +987,14 @@ pub mod tests {
             let stream = TcpStream::connect(("127.0.0.1", url.port().unwrap()))
                 .await
                 .unwrap();
-            let tls =
-                super::super::browser_tls::connect(stream, "challenges.cloudflare.com", &[HTTP_1_1_ALPN], false)
-                    .await
-                    .unwrap();
+            let tls = super::super::browser_tls::connect(
+                stream,
+                "challenges.cloudflare.com",
+                &[HTTP_1_1_ALPN],
+                false,
+            )
+            .await
+            .unwrap();
             let (mut client, _) =
                 browser_ws_client(&url, &crate::common::config::gen_default_flags())
                     .unwrap()
@@ -1170,9 +1174,14 @@ pub mod tests {
                 .await
                 .unwrap();
             assert!(
-                super::super::browser_tls::connect(bad_stream, "localhost", &[HTTP_1_1_ALPN], false)
-                    .await
-                    .is_err(),
+                super::super::browser_tls::connect(
+                    bad_stream,
+                    "localhost",
+                    &[HTTP_1_1_ALPN],
+                    false
+                )
+                .await
+                .is_err(),
                 "WSS must reject mismatched SNI before HTTP upgrade"
             );
             let mut connector = WsTunnelConnector::new(url);

@@ -1,6 +1,7 @@
 import { For, Show, createSignal } from "solid-js";
-import { busy, configured, linkCosts, pathsConfigured, savePaths, setLinkCost, type PathConfig } from "../config";
-import { PathStatusView, ViaEditor } from "../components/paths";
+import { busy, configured, linkCosts, pathsConfigured, savePaths, setLinkCost, type PathConfig, type PathStageConfig } from "../config";
+import { LayersEditor, PathStatusView } from "../components/paths";
+import { Segmented } from "../components/controls";
 import Chart from "../components/Chart";
 import { bytes, latency, loss, rate, NONE } from "../format";
 import { noteFor } from "../notes";
@@ -42,37 +43,52 @@ export function pathIndexFor(row: PeerRow): number {
   return pathsConfigured().findIndex((path) => path.to === row.key || (address !== "" && path.to === address));
 }
 
+/** Index of the wildcard `to = "*"` default peer [[path]], or -1. */
+export function wildcardPathIndex(): number {
+  return pathsConfigured().findIndex((path) => path.to === "*");
+}
+
 export function pathStatusFor(index: number): Doc | undefined {
   return ((snapshot()?.paths ?? []) as Doc[]).find((status) => status.index === index);
 }
 
-/** Edit the waypoints that traffic from this machine to `row` passes through. */
+/** Edit the relay layers that traffic from this machine to `row` passes through. */
 export function PeerPath(props: { row: PeerRow }) {
   const index = () => pathIndexFor(props.row);
+  const wildcardIndex = () => (index() >= 0 ? -1 : wildcardPathIndex());
   const configuredPath = () => (index() >= 0 ? pathsConfigured()[index()] : undefined);
-  const [draft, setDraft] = createSignal<string[] | null>(null);
+  const [draft, setDraft] = createSignal<PathStageConfig[] | null>(null);
+  const [mode, setMode] = createSignal<string | null>(null);
   const [strict, setStrict] = createSignal<boolean | null>(null);
-  const via = () => draft() ?? configuredPath()?.via ?? [];
+  const layers = () => draft() ?? configuredPath()?.layers ?? [];
+  const currentMode = () => mode() ?? configuredPath()?.mode ?? "parallel";
   const isStrict = () => strict() ?? configuredPath()?.strict ?? false;
-  const dirty = () => draft() !== null || strict() !== null;
+  const dirty = () => draft() !== null || mode() !== null || strict() !== null;
   const save = async () => {
     const paths = pathsConfigured();
-    const entry: PathConfig = { to: configuredPath()?.to ?? props.row.key, via: via(), strict: isStrict() };
+    const entry: PathConfig = {
+      to: configuredPath()?.to ?? props.row.key,
+      mode: currentMode(),
+      layers: layers(),
+      strict: isStrict(),
+    };
     if (index() >= 0) {
-      if (via().length) paths[index()] = entry;
+      if (layers().length) paths[index()] = entry;
       else paths.splice(index(), 1);
-    } else if (via().length) {
+    } else if (layers().length) {
       paths.push(entry);
     }
     if (await savePaths(paths)) {
       setDraft(null);
+      setMode(null);
       setStrict(null);
     }
   };
   return (
     <div class="peer-path">
-      <ViaEditor value={via()} exclude={[props.row.key]} onChange={setDraft} disabled={busy() || !props.row.key} />
-      <Show when={via().length}>
+      <LayersEditor value={layers()} exclude={[props.row.key]} onChange={setDraft} disabled={busy() || !props.row.key} />
+      <Show when={layers().length}>
+        <Segmented label="Path mode" values={["parallel", "flow", "failover"]} value={currentMode()} onChange={setMode} />
         <label class="check">
           <input type="checkbox" checked={isStrict()} onChange={(event) => setStrict(event.currentTarget.checked)} /> Strict: drop traffic instead of falling back
         </label>
@@ -87,6 +103,7 @@ export function PeerPath(props: { row: PeerRow }) {
             class="link"
             onClick={() => {
               setDraft(null);
+              setMode(null);
               setStrict(null);
             }}
           >
@@ -95,12 +112,14 @@ export function PeerPath(props: { row: PeerRow }) {
         </div>
       </Show>
       <p class="hint">
-        {via().length
-          ? "Waypoints are visited in order. A group sends each flow to one member."
-          : "Automatic routing. Add waypoints to steer this machine's traffic through chosen peers or groups."}{" "}
+        {layers().length
+          ? "Layers are visited in order. Parallel layers stripe traffic across relays; flow pins each connection; failover uses the first usable path."
+          : wildcardIndex() >= 0
+            ? "Using the default wildcard (*) path unless you add an explicit path for this machine."
+            : "Automatic routing (single relay). Add relay layers to steer this machine's traffic through chosen peers or groups."}{" "}
         Saved as <code>[[path]]</code>, applies live.
       </p>
-      <PathStatusView status={index() >= 0 && !dirty() ? pathStatusFor(index()) : undefined} />
+      <PathStatusView status={!dirty() ? pathStatusFor(index() >= 0 ? index() : wildcardIndex()) : undefined} />
     </div>
   );
 }

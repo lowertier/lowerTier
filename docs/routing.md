@@ -1,7 +1,9 @@
 # Routing and relays
 
 Every node routes on its own. Traffic to a peer uses a direct connection when one exists.
-When none does, it goes through other members, which relay it without being able to read it.
+When none does, automatic routing picks **one best relay path** through other members, which carry it without being able to read it.
+
+To aggregate multiple relays (`mode = "parallel"`) or chain multiple relay layers (`layers`), configure explicit `[[path]]` and `[[group]]` rules (see [paths and relay groups](paths.md)).
 
 ## Relay fallback
 

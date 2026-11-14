@@ -43,9 +43,9 @@ format rather than reusing the LowTier framing under a WireGuard name.
 
 Direct QUIC, HTTP/2, and WSS links bind the Noise handshake to the TLS exporter. Packets between
 directly connected peers then rely on that TLS 1.3 protection and skip the inner session AEAD
-(`PeerConn::encrypt_packet_if_needed`). Packets that cross a relay or a waypoint carry the inner
+(`PeerConn::encrypt_packet_if_needed`). Packets that cross a relay or a source-routed [path](paths.md) carry the inner
 session AEAD, sealed by the source for the final destination, with the stable peer-header fields
-as associated data.
+and any inner `ETMP` multipath sequence proof authenticated together.
 
 ## Verification
 

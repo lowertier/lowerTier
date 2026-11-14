@@ -440,9 +440,14 @@ mod tests {
             });
             let mut idle = TcpStream::connect(addr).await.unwrap();
             let stream = TcpStream::connect(addr).await.unwrap();
-            let tls = super::super::browser_tls::connect(stream, "challenges.cloudflare.com", &[b"h2"], false)
-                .await
-                .unwrap();
+            let tls = super::super::browser_tls::connect(
+                stream,
+                "challenges.cloudflare.com",
+                &[b"h2"],
+                false,
+            )
+            .await
+            .unwrap();
             let (_requests, connection) = h2::client::handshake(tls).await.unwrap();
             let connection = tokio::spawn(connection);
             let mut byte = [0; 1];

@@ -372,9 +372,12 @@ impl TunnelFilter for StatsRecorderTunnelFilter {
     fn before_send_batch(&self, data: PacketBatch) -> Option<PacketBatch> {
         self.throughput
             .record_tx_batch(data.buffer_byte_len() as u64, data.len() as u64);
-        if data.first().is_some_and(super::direct::is_data_packet) {
-            debug_assert!(data.iter().all(super::direct::is_data_packet));
-            self.throughput.record_tx_data_packets(data.len() as u64);
+        let data_packets = data
+            .iter()
+            .filter(|packet| super::direct::is_data_packet(packet))
+            .count() as u64;
+        if data_packets > 0 {
+            self.throughput.record_tx_data_packets(data_packets);
         }
         Some(data)
     }

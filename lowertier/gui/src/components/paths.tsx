@@ -1,8 +1,17 @@
 // Shared pieces for [[path]] and [[group]] editing and status.
 import { For, Show, createMemo } from "solid-js";
 import type { Doc } from "../api";
-import { groupsConfigured } from "../config";
+import {
+  groupsConfigured,
+  stageFromNodes,
+  stageMode,
+  stageNodes,
+  type PathStageConfig,
+} from "../config";
+import { latency } from "../format";
 import { peers } from "../store";
+
+export const MAX_RELAY_LAYERS = 8;
 
 /** A readable name for a peer key, a virtual IP, or a group name. */
 export function refLabel(reference: string): string {
@@ -43,7 +52,7 @@ export function RefSelect(props: {
           <For each={groupsConfigured().filter((group) => !excluded().has(group.name))}>
             {(group) => (
               <option value={group.name}>
-                {group.name} ({group.members.length})
+                {group.name} ({group.nodes.length})
               </option>
             )}
           </For>
@@ -58,43 +67,105 @@ export function RefSelect(props: {
   );
 }
 
-/** An ordered list of waypoints. */
-export function ViaEditor(props: { value: string[]; exclude?: string[]; onChange: (via: string[]) => void; disabled?: boolean }) {
+/** An ordered sequence of up to 8 relay stages; each stage holds 1 or more parallel peers/groups. */
+export function LayersEditor(props: {
+  value: PathStageConfig[];
+  exclude?: string[];
+  onChange: (layers: PathStageConfig[]) => void;
+  disabled?: boolean;
+}) {
   const move = (index: number, step: number) => {
     const next = [...props.value];
     const [item] = next.splice(index, 1);
     next.splice(index + step, 0, item);
     props.onChange(next);
   };
+  const updateStage = (index: number, nextNodes: string[]) => {
+    const updated = stageFromNodes(nextNodes, props.value[index]);
+    const next = [...props.value];
+    if (updated === undefined) next.splice(index, 1);
+    else next[index] = updated;
+    props.onChange(next);
+  };
   return (
     <div class="via-editor">
       <ol class="via-list">
         <For each={props.value}>
-          {(reference, index) => (
-            <li>
-              <span>
-                {refLabel(reference)}
-                <Show when={isGroup(reference)}>
-                  <span class="sub inline">group</span>
-                </Show>
-              </span>
-              <span class="actions">
-                <button type="button" class="quiet small" disabled={props.disabled || index() === 0} onClick={() => move(index(), -1)} aria-label={`Move ${refLabel(reference)} earlier`}>
-                  Earlier
-                </button>
-                <button type="button" class="quiet small" disabled={props.disabled} onClick={() => props.onChange(props.value.filter((_, at) => at !== index()))} aria-label={`Remove ${refLabel(reference)}`}>
-                  Remove
-                </button>
-              </span>
-            </li>
-          )}
+          {(stage, index) => {
+            const nodes = () => stageNodes(stage);
+            const customMode = () => stageMode(stage);
+            return (
+              <li class="layer-row">
+                <div class="layer-head">
+                  <span>
+                    <b>Layer {index() + 1}</b>
+                    <Show when={nodes().length > 1}>
+                      <span class="sub inline">{customMode() ?? "parallel"}</span>
+                    </Show>
+                  </span>
+                  <span class="actions">
+                    <button
+                      type="button"
+                      class="quiet small"
+                      disabled={props.disabled || index() === 0}
+                      onClick={() => move(index(), -1)}
+                      aria-label={`Move Layer ${index() + 1} earlier`}
+                    >
+                      Earlier
+                    </button>
+                    <button
+                      type="button"
+                      class="quiet small"
+                      disabled={props.disabled}
+                      onClick={() => props.onChange(props.value.filter((_, at) => at !== index()))}
+                      aria-label={`Remove Layer ${index() + 1}`}
+                    >
+                      Remove layer
+                    </button>
+                  </span>
+                </div>
+                <div class="layer-chips">
+                  <For each={nodes()}>
+                    {(reference, nodeIndex) => (
+                      <span class="layer-chip">
+                        <span>
+                          {refLabel(reference)}
+                          <Show when={isGroup(reference)}>
+                            <span class="sub inline">group</span>
+                          </Show>
+                        </span>
+                        <button
+                          type="button"
+                          class="quiet small"
+                          disabled={props.disabled}
+                          onClick={() => updateStage(index(), nodes().filter((_, at) => at !== nodeIndex()))}
+                          aria-label={`Remove ${refLabel(reference)} from Layer ${index() + 1}`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </For>
+                  <Show when={nodes().length < 32}>
+                    <RefSelect
+                      label={`Add parallel relay to Layer ${index() + 1}`}
+                      placeholder="+ Parallel relay…"
+                      exclude={[...(props.exclude ?? []), ...nodes()]}
+                      disabled={props.disabled}
+                      onChange={(reference) => updateStage(index(), [...nodes(), reference])}
+                    />
+                  </Show>
+                </div>
+              </li>
+            );
+          }}
         </For>
       </ol>
-      <Show when={props.value.length < 4}>
+      <Show when={props.value.length < MAX_RELAY_LAYERS}>
         <RefSelect
-          label="Add a waypoint"
-          placeholder={props.value.length ? "Then through…" : "Through…"}
-          exclude={[...(props.exclude ?? []), ...props.value]}
+          label="Add a relay layer"
+          placeholder={props.value.length ? "Add next layer…" : "Through…"}
+          exclude={props.exclude ?? []}
           disabled={props.disabled}
           onChange={(reference) => props.onChange([...props.value, reference])}
         />
@@ -109,14 +180,20 @@ const STATE_TEXT: Record<string, string> = {
   down: "Blocked (strict)",
 };
 
-/** Live state of one path: each segment's members and their share of the traffic. */
+function hopLabel(peerId: number): string {
+  const row = peers().find((peer) => peer.id === peerId);
+  return row ? row.name : `#${peerId}`;
+}
+
+/** Live state of one path: each layer's members, active multipath chains, and traffic share. */
 export function PathStatusView(props: { status?: Doc }) {
   const segments = createMemo(() => {
     const status = props.status;
     if (!status) return [];
-    const via = ((status.via ?? []) as Doc[]).map((segment, index) => ({ role: `Waypoint ${index + 1}`, segment }));
-    return status.gateway ? [...via, { role: "Gateway", segment: status.gateway as Doc }] : via;
+    const layers = ((status.layers ?? []) as Doc[]).map((segment, index) => ({ role: `Layer ${index + 1}`, segment }));
+    return status.gateway ? [...layers, { role: "Gateway", segment: status.gateway as Doc }] : layers;
   });
+  const chains = () => ((props.status?.chains ?? []) as Doc[]);
   return (
     <Show when={props.status}>
       {(status) => (
@@ -133,8 +210,8 @@ export function PathStatusView(props: { status?: Doc }) {
                 <div class="segment">
                   <span class="segment-name">
                     {role}: {isGroup(segment.name) ? segment.name : refLabel(segment.name)}
-                    <Show when={members().length > 1}>
-                      <span class="sub inline">{segment.balance}</span>
+                    <Show when={members().length > 1 || segment.mode}>
+                      <span class="sub inline">{segment.mode || "parallel"}</span>
                     </Show>
                   </span>
                   <For each={members()}>
@@ -155,6 +232,27 @@ export function PathStatusView(props: { status?: Doc }) {
               );
             }}
           </For>
+          <Show when={chains().length}>
+            <div class="segment">
+              <span class="segment-name">Active chains</span>
+              <ul class="chain-list">
+                <For each={chains()}>
+                  {(chain) => (
+                    <li class="chain-item" classList={{ unusable: chain.healthy === false }}>
+                      <span>
+                        {((chain.hops ?? []) as number[]).map(hopLabel).join(" → ")}
+                      </span>
+                      <span class="sub">
+                        {chain.rtt_us ? `${latency(chain.rtt_us)} · ` : ""}
+                        {chain.packets ?? 0} pkts
+                        {chain.healthy === false ? " · down" : ""}
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
         </div>
       )}
     </Show>

@@ -176,7 +176,7 @@ async fn trace(client: &Client, destination: &str) -> Result<Response> {
             .find(|path| path.index == index)
             .map(|path| {
                 let segments = path
-                    .via
+                    .layers
                     .iter()
                     .map(|segment| segment.name.clone())
                     .chain(

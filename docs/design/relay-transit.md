@@ -48,9 +48,9 @@ An explicit burst must hold at least one maximum packet.
 Every direction, foreign network, and same-network transit flow shares the instance transit budget.
 Each egress copy consumes its serialized overlay size once. Transport retransmissions do not consume this budget.
 The final sink checks permission and credit after queued data becomes ready for framing.
-Avoided transit nodes remain available. Routing minimizes their count before the selected policy metric.
+Avoided transit nodes remain available. Automatic routing picks a single best relay path and minimizes avoided nodes before the selected policy metric.
 
-Use [[path]] and [[group]] to send this node's traffic through chosen peers. See [paths](../paths.md).
+Use `[[path]]` and `[[group]]` for user-assigned multipath aggregation (`mode = "parallel"`), flow pinning, failover, or multilayer relay chains (up to 8 stages, `multipath_relay_v1`). See [paths](../paths.md).
 Use `[[relay.link_cost]]` with `peer` and nonnegative `bias_ms` for an adjacent link cost bias.
 Keys use standard base64 and contain 32 bytes. Invalid or unavailable paths use automatic routing.
 Authenticated routing and handshake control use the hop table.

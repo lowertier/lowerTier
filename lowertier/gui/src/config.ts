@@ -1,6 +1,7 @@
 // Configuration in the public TOML layout, the option registry, and change results.
 import { createSignal } from "solid-js";
 import { api, ApiError, rpc, setOptions, type Doc } from "./api";
+import { cloneStage, tidyGroup, tidyPath, type GroupConfig, type PathConfig } from "./settingsModel";
 
 export interface OptionSpec {
   path: string;
@@ -112,38 +113,35 @@ export async function restartInstance(): Promise<void> {
   }
 }
 
-export interface GroupConfig {
-  name: string;
-  members: string[];
-  balance?: string;
-  weights?: number[];
-}
+export {
+  pathUsesGroup,
+  renameGroupInPath,
+  stageFromNodes,
+  stageMode,
+  stageNodes,
+  tidyGroup,
+  tidyPath,
+  tidyStage,
+  type DetailedStageConfig,
+  type GroupConfig,
+  type PathConfig,
+  type PathMode,
+  type PathStageConfig,
+} from "./settingsModel";
 
-export interface PathConfig {
-  to: string;
-  via?: string[];
-  gateway?: string;
-  strict?: boolean;
-}
+export const groupsConfigured = (): GroupConfig[] =>
+  ((configured("group") ?? []) as GroupConfig[]).map((group) => ({
+    ...group,
+    nodes: [...(group.nodes ?? [])],
+    weights: group.weights ? [...group.weights] : undefined,
+  }));
 
-export const groupsConfigured = () => ((configured("group") ?? []) as GroupConfig[]).map((group) => ({ ...group }));
-export const pathsConfigured = () => ((configured("path") ?? []) as PathConfig[]).map((path) => ({ ...path }));
-
-// Leave out empty fields so the TOML stays as short as a hand-written file.
-function tidyPath(path: PathConfig): PathConfig {
-  const out: PathConfig = { to: path.to };
-  if (path.via?.length) out.via = path.via;
-  if (path.gateway) out.gateway = path.gateway;
-  if (path.strict) out.strict = true;
-  return out;
-}
-
-function tidyGroup(group: GroupConfig): GroupConfig {
-  const out: GroupConfig = { name: group.name, members: group.members };
-  if (group.balance && group.balance !== "flow") out.balance = group.balance;
-  if (group.weights?.length && group.weights.some((weight) => weight !== 1)) out.weights = group.weights;
-  return out;
-}
+export const pathsConfigured = (): PathConfig[] =>
+  ((configured("path") ?? []) as PathConfig[]).map((path) => ({
+    ...path,
+    layers: path.layers ? path.layers.map(cloneStage) : undefined,
+    gateway: path.gateway ? cloneStage(path.gateway) : undefined,
+  }));
 
 export function savePaths(paths: PathConfig[]) {
   return apply({ path: paths.length ? paths.map(tidyPath) : null });

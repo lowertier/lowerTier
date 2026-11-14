@@ -1,63 +1,81 @@
-# Paths and load-balance groups
+# Paths and relay groups
 
-A path sends this node's traffic through chosen peers instead of the automatic route.
-A group is a set of peers that share one position in a path. Each flow uses one member.
+A `[[path]]` steers this node's outbound traffic through chosen relays or relay layers instead of taking automatic single-relay routing.
+
+- Automatic routing (`hop`, `latency`, `goodput`) always picks **1 best relay path**.
+- User `[[path]]` and `[[group]]` rules unlock **multipath aggregation** (`mode = "parallel"`) and **multilayer relay chains** (`layers` up to `8` stages) across `quic`, `h2`, `wss`, and mixed-transport links.
 
 ```toml
 [[group]]
 name = "relays"
-members = ["<peer public key>", "10.144.0.7"]   # keys or virtual IPs, up to 32
-balance = "flow"        # flow: spread flows by weight; failover: first usable member
-weights = [2, 1]        # optional, flow only
+nodes = ["<peer public key>", "10.144.0.7"]   # keys or virtual IPs, up to 32
+mode = "parallel"       # parallel (default) | flow | failover
+weights = [2, 1]        # optional weights (1..=1000) for parallel or flow
 
 [[group]]
 name = "exits"
-members = ["10.144.0.21", "10.144.0.22"]
+nodes = ["10.144.0.21", "10.144.0.22"]
+mode = "flow"
 
-# Traffic to one peer passes beta, then one member of relays.
+# Traffic to one peer stripes across r1 and r2 in layer 1, then crosses layer 2.
 [[path]]
 to = "<peer key or virtual IP>"
-via = ["<beta key>", "relays"]
+layers = [["<r1 key>", "<r2 key>"], "relays"]
 
-# Internet traffic leaves through the exits group, balanced per flow.
+# Default rule for any peer without a specific [[path]] entry.
+[[path]]
+to = "*"
+layers = ["relays"]
+
+# Internet traffic strips across relays toward a flow-pinned exit gateway.
 [[path]]
 to = "internet"
+layers = [["<r1 key>", "<r2 key>"]]
 gateway = "exits"
+strict = true
 
-# A subnet behind several gateways, through a relay tier, never routed automatically.
+# Per-layer inline options: parallel layer 1, then flow-pinned layer 2.
 [[path]]
 to = "10.8.0.0/16"
-via = ["relays"]
+layers = [
+  "relays",
+  { nodes = ["10.144.0.8", "10.144.0.9"], mode = "flow", weights = [3, 1] },
+]
 gateway = "exits"
 strict = true
 ```
 
 Changes apply live: `lowertier set`, `lowertier edit`, the configuration file, or the Routes page of the [web interface](web-interface.md).
 
-## Choosing members
+## Modes and chain expansion
 
-- A flow is a connection: the same addresses, ports, and protocol. All its packets use the same members, so TCP stays in order and an exit keeps one public address per connection.
-- `flow` groups use weighted rendezvous hashing. With weights 2:1 a member carries about two thirds of the flows. When a member disappears, only its flows move; the others stay where they are.
-- `failover` groups use the first usable member in the listed order.
-- A waypoint member is usable when it is reachable, runs a version with `waypoint_v1`, and does not deny transit (`relay.transit = "deny"`).
-- An internet gateway member needs `routes.serve_exit = true`. A subnet gateway member must export the subnet or serve as an exit.
-- When a segment has no usable member, the path falls back to automatic routing. With `strict = true` the traffic is dropped instead.
+- **`parallel` (default)**: Expands usable relays across `layers` into up to `16` loop-free relay chains and stripes traffic at packet/burstlet granularity across all transports (`quic`, `h2`, `wss`, or mixed).
+  - The scheduler tracks live queue pressure and drain rate on each first hop alongside active encrypted `PathProbe` / `PathProbeAck` RTT measurements (`ΔOWD`-invariant for asymmetric forward/reverse paths).
+  - A BLEST arrival guard keeps slow or saturated chains outside the 15 ms reorder budget from blocking fast ones, while 8-packet / 12 KiB burstlet weighted deficit round-robin preserves intra-burst locality.
+  - The sender attaches an authenticated `ETMP` sequence proof inside each packet's AEAD envelope, and the destination restores strict per-flow packet order in a lock-sharded reorder buffer guarded by a 16,384-bit anti-replay window.
+- **`flow`**: Pins each connection (5-tuple flow) deterministically using weighted rendezvous hashing so packets stay on one chain; when one node goes down, only its flows move.
+- **`failover`**: Uses the first usable node in listed order.
+- **`gateway` coercion**: When a `gateway` stage is configured for `"internet"` or a CIDR in `mode = "parallel"`, the final `gateway` stage automatically coerces to `flow` per connection so SNAT exit flows keep one public source IP, while any preceding `layers` still stripe in `parallel`.
 
-## Precedence for IP traffic
+## Usable nodes and fallback
 
-1. Addresses of overlay peers route to that peer. A path with `to` set to that peer adds waypoints.
-2. A CIDR path with a gateway wins over automatic subnet routes.
-3. Automatic subnet routes.
-4. The internet path, for everything else outside the overlay network.
+- A relay node in `layers` is usable when it is reachable, advertises `multipath_relay_v1` and `relay_semantics_v1`, and does not deny transit (`relay.transit = "deny"`).
+- An internet `gateway` node needs `routes.serve_exit = true`. A subnet `gateway` node must export the subnet or serve as an exit.
+- When no usable chain or gateway exists, `[[path]]` falls back to automatic single-relay routing unless `strict = true`, which drops traffic instead.
 
-Paths apply to traffic this node sends. Replies follow the other node's own paths and routes.
+## Targets, precedence, and asymmetric paths
 
-## Waypoints forward without opening packets
+1. Addresses of overlay peers: an explicit peer `[[path]]` (`to = "<key or IP>"`) wins over a wildcard `to = "*"` default `[[path]]`, which wins over automatic routing.
+2. A CIDR `[[path]]` (`gateway` or `layers`) wins over automatic `[[export]]` subnet routes.
+3. Automatic `[[export]]` subnet routes.
+4. `to = "internet"` for destinations outside the overlay network.
 
-The sender seals each packet for its final destination, exactly as for any relayed packet. It then rewrites only the header and appends a small trailer: the remaining waypoints, the final destination, and the original packet type: 7 bytes plus 4 bytes per further waypoint. Each waypoint reads the trailer, sets the next destination, and forwards the packet. It does not decrypt, re-encrypt, or copy the payload. The last waypoint restores the original header and removes the trailer, so the destination receives the bytes the sender sealed.
+Paths govern traffic this node **sends** across L3 IP payloads, L2 bridged Ethernet frames, and `OverlayStream` connections (including SOCKS5/HTTP `tcp_proxy` destinations). Return traffic follows the remote peer's own `[[path]]` and routes, so forward and reverse directions can be completely asymmetric.
 
-Nodes between waypoints see an ordinary encrypted transit packet and forward it by its destination, so they need no upgrade. A first waypoint that is a direct neighbor is not written into the trailer: the packet is sent over that link, and a path with only that waypoint carries no trailer at all.
+## Source-routed transit without decryption
+
+The sender seals every packet end-to-end for its final destination (`from_peer_id -> dst_peer_id` with encrypted `ETMP` tag), writes an outer source-route header targeting the first relay in the selected chain, and appends a constant-length 36-byte trailer (`[hop_index, hop_count, hops[0..8], dst_peer_id, original_type]`). Intermediate relays advance `hop_index` in place and forward opaquely over their existing `quic`, `h2`, or `wss` links without decrypting payloads or holding per-flow endpoint sessions. When the final relay forwards to the destination, the destination unwraps the source route before AEAD decryption and per-flow reordering.
 
 ## Status
 
-`lowertier paths` lists each path's state, every member with whether it is usable and why not, and how many packets each member carried. `lowertier routes` marks destinations that follow a path, and `lowertier routes trace` names the path. The GUI shows the same with a traffic share bar per member.
+`lowertier paths` shows each path's mode, usable nodes per layer, active end-to-end chains with probe RTT and packet counts, reordered packet counts, fallbacks, and drops. `lowertier routes` marks destinations routed via a `[[path]]`, and `lowertier routes trace` names the matching path. The web interface displays the same layers, active chains, and traffic shares live.

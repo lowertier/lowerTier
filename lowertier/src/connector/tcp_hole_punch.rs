@@ -521,10 +521,7 @@ async fn establish(
     match (protocol, client) {
         (Protocol::H2, true) => Ok(http2::connect_punched(stream, remote, &flags).await?),
         (Protocol::H2, false) => {
-            Ok(
-                http2::accept_punched(stream, &http2::tls_acceptor(&flags)?, local, &flags)
-                    .await?,
-            )
+            Ok(http2::accept_punched(stream, &http2::tls_acceptor(&flags)?, local, &flags).await?)
         }
         (Protocol::Wss, true) => Ok(WsTunnelConnector::connect_punched(
             stream,

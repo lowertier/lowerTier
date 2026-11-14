@@ -88,7 +88,7 @@ impl SocksUdpSocket {
 #[cfg(test)]
 mod exit_dns_tests {
     use super::*;
-    use crate::proto::common::{PathPolicy, PathRule};
+    use crate::proto::common::{PathPolicy, PathRule, PathStage};
     use pnet::packet::ipv4::{Ipv4Flags, MutableIpv4Packet};
 
     #[tokio::test]
@@ -163,9 +163,12 @@ mod exit_dns_tests {
                 group: Vec::new(),
                 path: vec![PathRule {
                     to: "internet".into(),
-                    gateway: "10.42.0.99".into(),
+                    gateway: Some(PathStage {
+                        nodes: vec!["10.42.0.99".into()],
+                        ..Default::default()
+                    }),
                     strict: true,
-                    via: Vec::new(),
+                    ..Default::default()
                 }],
             });
             context.set_flags(flags);
@@ -860,6 +863,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             && !peer_mgr_arc.get_global_ctx().get_acl_filter().is_enabled()
             && let IpAddr::V4(ip) = addr.ip()
             && let Some(peer_id) = peer_mgr_arc.get_peer_map().get_peer_id_by_ipv4(&ip).await
+            && !peer_mgr_arc.path_applies_to(peer_id)
             && dst_peers.is_some_and(|peers| peers.as_slice() == [peer_id])
             && let Some(connection) = peer_mgr_arc.get_peer_map().only_direct_conn(peer_id)
             && let Some(proxy) = connection.tcp_proxy()

@@ -133,21 +133,28 @@ message FlagsInConfig {
 enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }
 enum TransitPolicy { allow = 0; avoid = 1; deny = 2; }
 
-// A set of peers that share one role in a path. Members are peer public keys or virtual IPs.
+// A set of peers that share one role in a path. Nodes are peer public keys or virtual IPs.
 message PathGroup {
   string name = 1;
-  repeated string members = 2;
-  // "flow" spreads flows by weight; "failover" uses the first usable member.
-  string balance = 3;
+  repeated string nodes = 2;
+  // "parallel", "flow", or "failover". Empty defaults to parallel for multi-node relay stages.
+  string mode = 3;
   repeated uint32 weights = 4;
 }
-// Traffic to `to` (a peer, a CIDR, or "internet") passes the waypoints in `via` in order and,
-// for a CIDR or the internet, leaves the overlay at `gateway`. Entries name peers or groups.
+// One relay layer or gateway selector in a path. Each node entry names a peer or a group.
+message PathStage {
+  repeated string nodes = 1;
+  string mode = 2;
+  repeated uint32 weights = 3;
+}
+// Traffic to `to` (a peer, "*", a CIDR, or "internet") traverses `layers` in order and, for a
+// CIDR or the internet, leaves the overlay at `gateway`.
 message PathRule {
   string to = 1;
-  repeated string via = 2;
-  string gateway = 3;
-  bool strict = 4;
+  string mode = 2;
+  repeated PathStage layers = 3;
+  PathStage gateway = 4;
+  bool strict = 5;
 }
 message PathPolicy {
   repeated PathGroup group = 1;
@@ -343,8 +350,8 @@ message PeerFeatureFlag {
   bool relay_origin_proof = 17;
   bool deny_transit_data = 18;
   bool relay_semantics_v1 = 19;
-  // Forwards waypoint packets (type 44) without opening them.
-  bool waypoint_v1 = 20;
+  // Forwards constant-length source-routed waypoint packets (type 44) without opening them.
+  bool multipath_relay_v1 = 20;
   // Serves as an internet exit (routes.serve_exit).
   bool exit_node = 21;
   // Each flag permits an independent authenticated rendezvous for this transport.

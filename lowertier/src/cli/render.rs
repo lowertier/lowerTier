@@ -646,14 +646,21 @@ fn paths(value: &ListPathsResponse) -> String {
     }
     let mut text = String::new();
     for path in &value.paths {
+        let mode_str = if path.mode.is_empty() {
+            "parallel".to_owned()
+        } else {
+            clean(&path.mode)
+        };
         let _ = writeln!(
             text,
-            "path {} · to {} · {}{} · {} via waypoints · {} fallback · {} dropped",
+            "path {} · to {} · {}{} ({}) · {} relayed · {} reordered · {} fallback · {} dropped",
             path.index + 1,
             clean(&path.to),
             clean(&path.state),
             if path.strict { " (strict)" } else { "" },
-            path.waypoint_packets,
+            mode_str,
+            path.relayed_packets,
+            path.reordered_packets,
             path.fallback_packets,
             path.dropped_packets,
         );
@@ -661,10 +668,10 @@ fn paths(value: &ListPathsResponse) -> String {
             let _ = writeln!(text, "  {}", clean(&path.reason));
         }
         let segments = path
-            .via
+            .layers
             .iter()
             .enumerate()
-            .map(|(index, segment)| (format!("via {}", index + 1), segment))
+            .map(|(index, segment)| (format!("layer {}", index + 1), segment))
             .chain(
                 path.gateway
                     .iter()
@@ -684,7 +691,7 @@ fn paths(value: &ListPathsResponse) -> String {
                                 String::new()
                             },
                             if index == 0 {
-                                format!("{} ({})", clean(&segment.name), clean(&segment.balance))
+                                format!("{} ({})", clean(&segment.name), clean(&segment.mode))
                             } else {
                                 String::new()
                             },
@@ -709,6 +716,38 @@ fn paths(value: &ListPathsResponse) -> String {
             rows,
             &[3, 5],
         );
+        if !path.chains.is_empty() {
+            let chain_rows = path
+                .chains
+                .iter()
+                .map(|chain| {
+                    let hops = chain
+                        .hop_peer_ids
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    let rtt = if chain.rtt_us > 0 {
+                        format!("{:.1}ms", chain.rtt_us as f64 / 1000.0)
+                    } else {
+                        "-".into()
+                    };
+                    let state = if chain.healthy { "healthy" } else { "down" };
+                    vec![
+                        chain.path_id.to_string(),
+                        hops,
+                        rtt,
+                        chain.packets.to_string(),
+                        state.into(),
+                    ]
+                })
+                .collect();
+            text += &table(
+                &["Chain", "Hops", "RTT", "Packets", "State"],
+                chain_rows,
+                &[0, 3],
+            );
+        }
         text.push('\n');
     }
     text

@@ -182,7 +182,9 @@ pub(super) async fn hole_punch_peers(peer_mgr: &PeerManager, protocol: &str) -> 
                     _ => false,
                 })
             && !peer_mgr.has_live_peer_connection_for_protocol(route.peer_id, protocol)
-            && !peer_mgr.direct_mesh_peer_budget_reached(route.peer_id).await
+            && !peer_mgr
+                .direct_mesh_peer_budget_reached(route.peer_id)
+                .await
             && (should_background_p2p_with_peer(
                 route.feature_flag.as_ref(),
                 false,

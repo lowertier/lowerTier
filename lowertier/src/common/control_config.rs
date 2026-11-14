@@ -23,7 +23,9 @@ impl Flags {
     }
 
     pub fn max_direct_peers(&self) -> Option<u32> {
-        self.limits.as_ref().and_then(|limits| limits.max_direct_peers)
+        self.limits
+            .as_ref()
+            .and_then(|limits| limits.max_direct_peers)
     }
 
     pub fn effective_max_direct_peers(&self) -> Option<u32> {

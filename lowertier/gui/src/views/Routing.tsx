@@ -1,26 +1,30 @@
 import { For, Index, Show, createMemo, createSignal } from "solid-js";
 import { Segmented, Switch } from "../components/controls";
 import MeshGraph from "../components/MeshGraph";
-import { PathStatusView, RefSelect, ViaEditor, isGroup, refLabel } from "../components/paths";
+import { LayersEditor, PathStatusView, RefSelect, isGroup, refLabel } from "../components/paths";
 import {
   apply,
   busy,
   configured,
   exportsConfigured,
   groupsConfigured,
+  pathUsesGroup,
   pathsConfigured,
+  renameGroupInPath,
   restartPending,
   saveExports,
   saveRouting,
   say,
   spec,
+  stageNodes,
   type ExportConfig,
   type GroupConfig,
   type PathConfig,
+  type PathStageConfig,
 } from "../config";
 import { latency, rate } from "../format";
 import { peers, snapshot } from "../store";
-import { PathChain, pathIndexFor, routeFor } from "./PeerDetail";
+import { PathChain, pathIndexFor, routeFor, wildcardPathIndex } from "./PeerDetail";
 import type { Doc } from "../api";
 
 const POLICY: Record<string, string> = {
@@ -47,9 +51,14 @@ function Applies(props: { path: string }) {
 const isSubnet = (to: string) => /^[0-9a-fA-F:.]+\/\d{1,3}$/.test(to);
 
 function targetLabel(to: string): string {
+  if (to === "*") return "All peers (*)";
   if (to === "internet") return "Internet";
   if (isSubnet(to)) return to;
   return refLabel(to);
+}
+
+function stageLabel(stage: PathStageConfig): string {
+  return stageNodes(stage).map(refLabel).join(" + ");
 }
 
 const pathStatus = (index: number) => ((snapshot()?.paths ?? []) as Doc[]).find((status) => status.index === index);
@@ -64,25 +73,39 @@ function Arrow() {
   );
 }
 
-type TargetKind = "peer" | "internet" | "subnet";
+type TargetKind = "peer" | "any" | "internet" | "subnet";
 
 function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) => void; onCancel: () => void }) {
   const initialKind = (): TargetKind => {
     const to = props.initial?.to;
     if (!to) return "peer";
+    if (to === "*") return "any";
     return to === "internet" ? "internet" : isSubnet(to) ? "subnet" : "peer";
   };
   const [kind, setKind] = createSignal<TargetKind>(initialKind());
-  const [to, setTo] = createSignal(props.initial?.to && initialKind() !== "internet" ? props.initial.to : "");
-  const [via, setVia] = createSignal<string[]>(props.initial?.via ?? []);
-  const [gateway, setGateway] = createSignal(props.initial?.gateway ?? "");
+  const [to, setTo] = createSignal(
+    props.initial?.to && initialKind() !== "internet" && initialKind() !== "any" ? props.initial.to : "",
+  );
+  const [mode, setMode] = createSignal(props.initial?.mode || "parallel");
+  const [layers, setLayers] = createSignal<PathStageConfig[]>(props.initial?.layers ?? []);
+  const initialGateway = props.initial?.gateway;
+  const [gatewayRef, setGatewayRef] = createSignal(stageNodes(initialGateway)[0] ?? "");
   const [strict, setStrict] = createSignal(props.initial?.strict ?? false);
-  const target = () => (kind() === "internet" ? "internet" : to().trim());
+  const target = () => (kind() === "internet" ? "internet" : kind() === "any" ? "*" : to().trim());
+  const gatewayValue = (): PathStageConfig | undefined => {
+    if (kind() === "peer" || kind() === "any") return undefined;
+    const chosen = gatewayRef().trim();
+    if (!chosen) return undefined;
+    if (initialGateway && stageNodes(initialGateway)[0] === chosen && stageNodes(initialGateway).length > 1) {
+      return initialGateway;
+    }
+    return chosen;
+  };
   const problem = () => {
-    if (kind() === "internet" && !gateway()) return "Choose the exit gateway.";
+    if (kind() === "internet" && !gatewayValue()) return "Choose the exit gateway.";
     if (!target()) return kind() === "subnet" ? "Enter a CIDR such as 10.8.0.0/16." : "Choose a destination peer.";
     if (kind() === "subnet" && !isSubnet(target())) return "Enter a CIDR such as 10.8.0.0/16.";
-    if (kind() !== "internet" && !via().length && !gateway()) return "Add at least one waypoint.";
+    if (kind() !== "internet" && !layers().length && !gatewayValue()) return "Add at least one relay layer.";
     return "";
   };
   return (
@@ -91,15 +114,24 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
       onSubmit={(event) => {
         event.preventDefault();
         if (problem()) return;
-        props.onSave({ to: target(), via: via(), gateway: kind() === "peer" ? undefined : gateway() || undefined, strict: strict() });
+        props.onSave({
+          to: target(),
+          mode: mode(),
+          layers: layers(),
+          gateway: gatewayValue(),
+          strict: strict(),
+        });
       }}
     >
       <div class="editor-row">
         <span class="editor-label">Traffic to</span>
         <div class="editor-control">
-          <Segmented label="Destination kind" values={["peer", "internet", "subnet"]} value={kind()} onChange={(value) => setKind(value as TargetKind)} />
+          <Segmented label="Destination kind" values={["peer", "any", "internet", "subnet"]} value={kind()} onChange={(value) => setKind(value as TargetKind)} />
           <Show when={kind() === "peer"}>
             <RefSelect label="Destination peer" value={to()} placeholder="Choose a peer" groups={false} onChange={setTo} />
+          </Show>
+          <Show when={kind() === "any"}>
+            <p class="hint">Applies to every peer without its own explicit path rule.</p>
           </Show>
           <Show when={kind() === "subnet"}>
             <input
@@ -119,22 +151,39 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
         </div>
       </div>
       <div class="editor-row">
-        <span class="editor-label">Through</span>
+        <span class="editor-label">Mode</span>
         <div class="editor-control">
-          <ViaEditor value={via()} exclude={kind() === "peer" && to() ? [to()] : []} onChange={setVia} />
+          <Segmented label="Relay mode" values={["parallel", "flow", "failover"]} value={mode()} onChange={setMode} />
+          <p class="hint">
+            {mode() === "parallel"
+              ? "Stripes bursts across relays using live RTT and queue estimates, then reorders at the destination."
+              : mode() === "flow"
+                ? "Pins each connection to one relay by weighted hash."
+                : "Uses the first usable relay chain in order."}
+          </p>
         </div>
       </div>
-      <Show when={kind() !== "peer"}>
+      <div class="editor-row">
+        <span class="editor-label">Layers</span>
+        <div class="editor-control">
+          <LayersEditor value={layers()} exclude={kind() === "peer" && to() ? [to()] : []} onChange={setLayers} />
+        </div>
+      </div>
+      <Show when={kind() === "internet" || kind() === "subnet"}>
         <div class="editor-row">
           <span class="editor-label">{kind() === "internet" ? "Exit at" : "Leave at"}</span>
           <div class="editor-control">
             <RefSelect
               label="Gateway"
-              value={gateway()}
+              value={gatewayRef()}
               placeholder={kind() === "internet" ? "Choose an exit or exit group" : "Automatic subnet gateway"}
-              onChange={setGateway}
+              onChange={setGatewayRef}
             />
-            <p class="hint">{kind() === "internet" ? "Members need routes.serve_exit." : "Members must export the subnet or serve as exits."}</p>
+            <p class="hint">
+              {kind() === "internet"
+                ? "Members need routes.serve_exit. Gateways keep per-flow affinity to preserve NAT."
+                : "Members must export the subnet or serve as exits."}
+            </p>
           </div>
         </div>
       </Show>
@@ -159,13 +208,13 @@ function PathEditor(props: { initial?: PathConfig; onSave: (path: PathConfig) =>
 
 function GroupEditor(props: { initial?: GroupConfig; onSave: (group: GroupConfig) => void; onCancel: () => void; onDelete?: () => void }) {
   const [name, setName] = createSignal(props.initial?.name ?? "");
-  const [members, setMembers] = createSignal<string[]>(props.initial?.members ?? []);
-  const [weights, setWeights] = createSignal<number[]>(props.initial?.weights ?? (props.initial?.members ?? []).map(() => 1));
-  const [balance, setBalance] = createSignal(props.initial?.balance || "flow");
+  const [nodes, setNodes] = createSignal<string[]>(props.initial?.nodes ?? []);
+  const [weights, setWeights] = createSignal<number[]>(props.initial?.weights ?? (props.initial?.nodes ?? []).map(() => 1));
+  const [mode, setMode] = createSignal(props.initial?.mode || "parallel");
   const problem = () => {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name())) return "Name: 1 to 32 letters, digits, - or _.";
-    if (name() === "internet") return "The name internet is reserved.";
-    if (!members().length) return "Add at least one member.";
+    if (name() === "internet" || name() === "*") return "This name is reserved.";
+    if (!nodes().length) return "Add at least one node.";
     return "";
   };
   return (
@@ -174,7 +223,7 @@ function GroupEditor(props: { initial?: GroupConfig; onSave: (group: GroupConfig
       onSubmit={(event) => {
         event.preventDefault();
         if (problem()) return;
-        props.onSave({ name: name(), members: members(), balance: balance(), weights: balance() === "flow" ? weights() : undefined });
+        props.onSave({ name: name(), nodes: nodes(), mode: mode(), weights: mode() !== "failover" ? weights() : undefined });
       }}
     >
       <div class="editor-row">
@@ -184,26 +233,28 @@ function GroupEditor(props: { initial?: GroupConfig; onSave: (group: GroupConfig
         </div>
       </div>
       <div class="editor-row">
-        <span class="editor-label">Balance</span>
+        <span class="editor-label">Mode</span>
         <div class="editor-control">
-          <Segmented label="Balance" values={["flow", "failover"]} value={balance()} onChange={setBalance} />
+          <Segmented label="Mode" values={["parallel", "flow", "failover"]} value={mode()} onChange={setMode} />
           <p class="hint">
-            {balance() === "flow"
-              ? "Each flow goes to one member, spread by weight. A lost member moves only its own flows."
-              : "Everything goes to the first usable member, in this order."}
+            {mode() === "parallel"
+              ? "Aggregates bandwidth across all usable nodes by weight."
+              : mode() === "flow"
+                ? "Each flow goes to one node, spread by weight. A lost node moves only its own flows."
+                : "Everything goes to the first usable node, in this order."}
           </p>
         </div>
       </div>
       <div class="editor-row">
-        <span class="editor-label">Members</span>
+        <span class="editor-label">Nodes</span>
         <div class="editor-control">
           <ol class="via-list">
-            <For each={members()}>
+            <For each={nodes()}>
               {(member, index) => (
                 <li>
                   <span>{refLabel(member)}</span>
                   <span class="actions">
-                    <Show when={balance() === "flow"}>
+                    <Show when={mode() !== "failover"}>
                       <label class="weight">
                         weight
                         <input
@@ -225,7 +276,7 @@ function GroupEditor(props: { initial?: GroupConfig; onSave: (group: GroupConfig
                       class="quiet small"
                       aria-label={`Remove ${refLabel(member)}`}
                       onClick={() => {
-                        setMembers(members().filter((_, at) => at !== index()));
+                        setNodes(nodes().filter((_, at) => at !== index()));
                         setWeights(weights().filter((_, at) => at !== index()));
                       }}
                     >
@@ -237,12 +288,12 @@ function GroupEditor(props: { initial?: GroupConfig; onSave: (group: GroupConfig
             </For>
           </ol>
           <RefSelect
-            label="Add a member"
+            label="Add a node"
             placeholder="Add a peer"
             groups={false}
-            exclude={members()}
+            exclude={nodes()}
             onChange={(reference) => {
-              setMembers([...members(), reference]);
+              setNodes([...nodes(), reference]);
               setWeights([...weights(), 1]);
             }}
           />
@@ -389,8 +440,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
       const previous = groups[index].name;
       groups[index] = group;
       if (previous !== group.name) {
-        const rename = (reference: string) => (reference === previous ? group.name : reference);
-        paths = paths.map((path) => ({ ...path, via: path.via?.map(rename), gateway: path.gateway && rename(path.gateway) }));
+        paths = paths.map((path) => renameGroupInPath(path, previous, group.name));
       }
     }
     if (await saveRouting(groups, paths)) setEditingGroup(null);
@@ -398,7 +448,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
   const deleteGroup = (index: number) => {
     const groups = groupsConfigured();
     const name = groups[index].name;
-    const users = pathsConfigured().filter((path) => path.gateway === name || path.via?.includes(name));
+    const users = pathsConfigured().filter((path) => pathUsesGroup(path, name));
     if (users.length) {
       say(`${name} is used by ${users.length === 1 ? "a path" : `${users.length} paths`}. Change those paths first.`, true);
       return;
@@ -616,8 +666,8 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
           </Show>
         </header>
         <p class="hint lead">
-          Steer this machine's traffic through chosen peers or groups, in order. Groups balance flows across their members. Waypoints pass sealed packets on without opening
-          them.
+          Steer this machine's traffic through chosen relay layers or groups, in order. Parallel layers stripe across usable nodes; relay hops forward sealed packets without
+          opening them.
         </p>
         <Show when={editingPath() === "new"}>
           <PathEditor initial={newPathDraft()} onSave={(path) => { setNewPathDraft(undefined); savePath("new", path); }} onCancel={() => { setNewPathDraft(undefined); setEditingPath(null); }} />
@@ -637,15 +687,19 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
                         <b>{targetLabel(path.to)}</b>
                         <span class="chain">
                           <span class="hop self">this machine</span>
-                          <For each={[...(path.via ?? []), ...(path.gateway ? [path.gateway] : [])]}>
-                            {(reference) => (
-                              <>
-                                <Arrow />
-                                <span class="hop" classList={{ group: isGroup(reference) }}>
-                                  {refLabel(reference)}
-                                </span>
-                              </>
-                            )}
+                          <For each={[...(path.layers ?? []), ...(path.gateway ? [path.gateway] : [])]}>
+                            {(stage) => {
+                              const nodes = stageNodes(stage);
+                              const singleGroup = nodes.length === 1 && isGroup(nodes[0]);
+                              return (
+                                <>
+                                  <Arrow />
+                                  <span class="hop" classList={{ group: singleGroup || nodes.length > 1 }}>
+                                    {stageLabel(stage)}
+                                  </span>
+                                </>
+                              );
+                            }}
                           </For>
                           <Show when={path.to !== "internet"}>
                             <Arrow />
@@ -653,9 +707,10 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
                           </Show>
                         </span>
                         <span class="sub">
-                          {path.strict ? "strict · " : ""}
-                          {pathStatus(index()) && path.via?.length
-                            ? `${pathStatus(index())!.waypoint_packets ?? 0} packets through waypoints · ${pathStatus(index())!.fallback_packets ?? 0} fallback · ${pathStatus(index())!.dropped_packets ?? 0} dropped`
+                          {path.mode || "parallel"}
+                          {path.strict ? " · strict" : ""}
+                          {pathStatus(index()) && path.layers?.length
+                            ? ` · ${pathStatus(index())!.relayed_packets ?? 0} relayed · ${pathStatus(index())!.reordered_packets ?? 0} reordered · ${pathStatus(index())!.fallback_packets ?? 0} fallback · ${pathStatus(index())!.dropped_packets ?? 0} dropped`
                             : ""}
                         </span>
                       </div>
@@ -688,7 +743,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
             </button>
           </Show>
         </header>
-        <p class="hint lead">A group is a set of peers sharing one role in a path: a load-balanced relay tier, or a pool of exits.</p>
+        <p class="hint lead">A group is a named set of peers for a relay layer or exit gateway pool.</p>
         <Show when={editingGroup() === "new"}>
           <GroupEditor onSave={(group) => saveGroup("new", group)} onCancel={() => setEditingGroup(null)} />
         </Show>
@@ -706,11 +761,17 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
                       <div class="path-summary">
                         <b>{group.name}</b>
                         <span>
-                          {group.members
+                          {group.nodes
                             .map((member, at) => `${refLabel(member)}${group.weights?.[at] && group.weights[at] !== 1 ? ` ×${group.weights[at]}` : ""}`)
                             .join(", ")}
                         </span>
-                        <span class="sub">{group.balance === "failover" ? "failover, in order" : "balanced per flow"}</span>
+                        <span class="sub">
+                          {group.mode === "failover"
+                            ? "failover, in order"
+                            : group.mode === "flow"
+                              ? "balanced per flow"
+                              : "parallel across nodes"}
+                        </span>
                       </div>
                       <div class="row-actions">
                         <button type="button" class="quiet" onClick={() => setEditingGroup(index())}>
@@ -747,7 +808,8 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
             <tbody>
               <Index each={routed()}>
                 {(item) => {
-                  const index = () => pathIndexFor(item().row);
+                  const explicit = () => pathIndexFor(item().row);
+                  const index = () => (explicit() >= 0 ? explicit() : wildcardPathIndex());
                   return (
                     <tr>
                       <td>
@@ -779,7 +841,7 @@ export default function Routing(props: { onOpenPeer: (id: number) => void }) {
                           }
                         >
                           <span classList={{ status: true, [pathStatus(index())?.state ?? ""]: true }}>
-                            through {(pathsConfigured()[index()]?.via ?? []).map(refLabel).join(", ")}
+                            through {(pathsConfigured()[index()]?.layers ?? []).map(stageLabel).join(" → ")}
                           </span>
                         </Show>
                       </td>

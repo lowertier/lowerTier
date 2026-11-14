@@ -6,6 +6,7 @@ pub mod l2_fabric;
 
 pub mod acl_filter;
 pub mod credential_manager;
+pub mod multipath;
 pub mod path_policy;
 pub mod peer;
 pub mod peer_conn;
@@ -39,6 +40,8 @@ pub(crate) mod secure_datagram;
 
 pub mod peer_task;
 
+#[cfg(test)]
+mod multipath_tests;
 #[cfg(test)]
 pub mod tests;
 

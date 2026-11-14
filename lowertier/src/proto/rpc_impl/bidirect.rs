@@ -7,7 +7,8 @@ use tokio::{task::JoinSet, time::timeout};
 use crate::{
     proto::rpc_types::error::Error,
     tunnel::{
-        Tunnel, TunnelError, batch::PacketBatch, packet_def::PacketType, ring::create_ring_tunnel_pair,
+        Tunnel, TunnelError, batch::PacketBatch, packet_def::PacketType,
+        ring::create_ring_tunnel_pair,
     },
 };
 

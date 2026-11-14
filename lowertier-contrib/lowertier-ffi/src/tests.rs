@@ -17,24 +17,58 @@ use uuid::Uuid;
 #[test]
 fn test_parse_config() {
     let cfg_str = r#"
-            inst_name = "test"
-            network = "test_network"
-        "#;
+[node]
+instance_name = "test"
+[network]
+name = "test_network"
+secret = "test_secret"
+"#;
     let cstr = std::ffi::CString::new(cfg_str).unwrap();
-    unsafe {
-        assert_eq!(parse_config(cstr.as_ptr()), 0);
-    }
+    let res = unsafe { parse_config(cstr.as_ptr()) };
+    assert_eq!(res, 0, "{:?}", take_last_error());
 }
 
 #[test]
 fn test_run_network_instance() {
-    let cfg_str = r#"
-            inst_name = "test"
-            network = "test_network"
-        "#;
-    let cstr = std::ffi::CString::new(cfg_str).unwrap();
+    let inst_name = format!("ffi-run-{}", Uuid::new_v4());
+    let cfg_str = format!(
+        r#"
+[node]
+threads = 1
+instance_name = "{inst_name}"
+[network]
+name = "test_network"
+secret = "test_secret"
+[transport]
+listen = []
+[tun]
+mode = "none"
+ipv6 = false
+[nat]
+p2p = "off"
+udp_punch = false
+tcp_punch = false
+stun = []
+stun_v6 = []
+stun_tcp = []
+"#
+    );
+    let cstr = CString::new(cfg_str).unwrap();
+    let name_cstr = CString::new(inst_name).unwrap();
+    let names = [name_cstr.as_ptr()];
     unsafe {
-        assert_eq!(run_network_instance(cstr.as_ptr()), 0);
+        assert_eq!(
+            run_network_instance(cstr.as_ptr()),
+            0,
+            "{:?}",
+            take_last_error()
+        );
+        assert_eq!(
+            delete_network_instance(names.as_ptr(), names.len()),
+            0,
+            "{:?}",
+            take_last_error()
+        );
     }
 }
 
