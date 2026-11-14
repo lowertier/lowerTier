@@ -9,6 +9,33 @@ Sources in `10.126.126.0/24`, `192.168.51.0/24`, and `192.168.40.0/24` may contr
 Keep this setting in the configuration when a node joins the fleet.
 The [fleet inventory](lt-fleet.json) lists verified instances and pending migrations.
 
+Run one joined instance per physical host.
+Keep retired services and watchdogs disabled.
+Consult the active inventory before restarting or deploying instances.
+Preserve retired configuration, identity keys, and logs.
+
+The November 14, 2026 cleanup stopped five duplicate instances:
+
+| Host | Retired address | Retained address |
+| --- | --- | --- |
+| Local Mac Studio | `10.126.126.202` | `10.126.126.2` |
+| 862jp | `10.126.126.182` | `10.126.126.82` |
+| JPali | `10.126.126.162` | `10.126.126.62` |
+| s6916 | `10.126.126.61` | `10.126.126.60` |
+| yutoms-mcp | `10.126.126.70` | `10.126.126.3` |
+
+The retained 862jp and JPali kernel instances provide exit-node service.
+The active inventory keeps their existing `862jp-secondary` and `jpali-secondary` aliases.
+These aliases refer to the only joined instance on each host.
+Twelve hosts retain one running instance each.
+Eleven instances passed identity, peer removal, authenticated traffic, GUI policy, and Web UI checks.
+Packet tests delivered all 30 packets to ten remote nodes.
+Taiwan at `10.126.126.80` still runs version `0.02`.
+Its SSH access works, but local overlay delivery and Web UI checks failed.
+The cause remains unconfirmed.
+The cleanup did not change its configuration or software.
+The inventory records this pending connectivity check separately from the historical offline hosts.
+
 ```toml
 [gui]
 enabled = true                    # default; false disables the listener

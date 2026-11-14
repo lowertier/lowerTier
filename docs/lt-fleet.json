@@ -4,6 +4,9 @@
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
+  "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
+  "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
+  "inventory_scope": "Membership reflects the November 14 duplicate cleanup. Software fields retain the previous deployment metadata. See duplicate_cleanup for current runtime observations.",
   "application_commit": "d211a9fc",
   "repository_commit_at_verification": "d211a9fc",
   "application_note": "All 17 joined instances run the simplified Settings interface from committed source. The configuration format and peer protocol remain unchanged. Network identities, configuration, and the required Web UI source networks are preserved.",
@@ -83,26 +86,10 @@
       "application_commit": "d211a9fc"
     },
     {
-      "node": "862jp",
-      "address": "10.126.126.182/24",
-      "public_key": "PKG7C+O5UVoGs4hA44gHjeFSO1ggJ4dBqzDI4vt02z8=",
-      "instance_id": "063d4675-4de9-47cc-923d-1ef6170b6243",
-      "version": "0.01",
-      "application_commit": "d211a9fc"
-    },
-    {
       "node": "862jp-secondary",
       "address": "10.126.126.82/24",
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
-      "version": "0.01",
-      "application_commit": "d211a9fc"
-    },
-    {
-      "node": "jpali",
-      "address": "10.126.126.162/24",
-      "public_key": "QT4xpDjbEzdYu+tnJf42hxy7q0NnFljSiKUlwQpINBg=",
-      "instance_id": "a68c5a14-cc32-4027-b183-80ecfe7a73b5",
       "version": "0.01",
       "application_commit": "d211a9fc"
     },
@@ -123,14 +110,6 @@
       "application_commit": "d211a9fc"
     },
     {
-      "node": "s6916-secondary",
-      "address": "10.126.126.61/24",
-      "public_key": "Ah4xt1Ttek4cuFQg/pd5Jq5S6D7SDZhF+elKNzKRwH0=",
-      "instance_id": "e9a2a583-8b9d-44a9-9e79-7ba3b1ed323a",
-      "version": "0.01",
-      "application_commit": "d211a9fc"
-    },
-    {
       "node": "hattori-wrt",
       "address": "10.126.126.1/24",
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
@@ -147,26 +126,10 @@
       "application_commit": "d211a9fc"
     },
     {
-      "node": "yutoms-mcp-legacy",
-      "address": "10.126.126.70/24",
-      "public_key": "sPpLOcYhUvKT7PWkUGHo+aTDB2tipI1pFZABc8cpQS4=",
-      "instance_id": "96bbc508-766a-474f-9494-3ff7b4907f06",
-      "version": "0.01",
-      "application_commit": "d211a9fc"
-    },
-    {
       "node": "local-native",
       "address": "10.126.126.2/24",
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
-      "version": "0.01",
-      "application_commit": "d211a9fc"
-    },
-    {
-      "node": "local-userspace",
-      "address": "10.126.126.202/24",
-      "public_key": "dIA/yFah6zGKA6HVm6SmH2eRlJUuSz4nkueWMTiMrQA=",
-      "instance_id": "33890c62-ac32-4e7a-9f81-0e8faa2771c7",
       "version": "0.01",
       "application_commit": "d211a9fc"
     },
@@ -495,6 +458,95 @@
     "privacy_limit": "Trackers can observe addresses, timing, and stable network rendezvous identifiers.",
     "verification_scope": "All instances saved the seven URLs. Fleet snapshots contain successful UDP, TCP, HTTP, and HTTPS peer responses. Each endpoint can fail on some source networks.",
     "evidence": "benchmark-results/.work/bootstrap-privacy-20261108/fleet-verification.json"
+  },
+  "duplicate_cleanup": {
+    "verified_at": "2026-11-14T10:59:06.536802+00:00",
+    "retained_instances": 12,
+    "retained_hosts": 12,
+    "retired_instances": [
+      {
+        "node": "local-userspace",
+        "host": "local",
+        "address": "10.126.126.202/24",
+        "public_key": "dIA/yFah6zGKA6HVm6SmH2eRlJUuSz4nkueWMTiMrQA=",
+        "instance_id": "33890c62-ac32-4e7a-9f81-0e8faa2771c7",
+        "retained_address": "10.126.126.2/24",
+        "startup": "Disabled both local userspace launchd jobs and unloaded the active job."
+      },
+      {
+        "node": "862jp",
+        "host": "862jp",
+        "address": "10.126.126.182/24",
+        "public_key": "PKG7C+O5UVoGs4hA44gHjeFSO1ggJ4dBqzDI4vt02z8=",
+        "instance_id": "063d4675-4de9-47cc-923d-1ef6170b6243",
+        "retained_address": "10.126.126.82/24",
+        "startup": "Stopped and disabled lowertier.service. Kept lowertier-et-zero.service active.",
+        "selection_reason": "The retained kernel instance provides exit-node service."
+      },
+      {
+        "node": "jpali",
+        "host": "jpali",
+        "address": "10.126.126.162/24",
+        "public_key": "QT4xpDjbEzdYu+tnJf42hxy7q0NnFljSiKUlwQpINBg=",
+        "instance_id": "a68c5a14-cc32-4027-b183-80ecfe7a73b5",
+        "retained_address": "10.126.126.62/24",
+        "startup": "Stopped and disabled lowertier.service. Kept lowertier-et-zero.service active.",
+        "selection_reason": "The retained kernel instance provides exit-node service."
+      },
+      {
+        "node": "s6916-secondary",
+        "host": "s6916",
+        "address": "10.126.126.61/24",
+        "public_key": "Ah4xt1Ttek4cuFQg/pd5Jq5S6D7SDZhF+elKNzKRwH0=",
+        "instance_id": "e9a2a583-8b9d-44a9-9e79-7ba3b1ed323a",
+        "retained_address": "10.126.126.60/24",
+        "startup": "Stopped and disabled lowertier-et-zero.service. Kept lowertier.service active."
+      },
+      {
+        "node": "yutoms-mcp-legacy",
+        "host": "yutoms-mcp",
+        "address": "10.126.126.70/24",
+        "public_key": "sPpLOcYhUvKT7PWkUGHo+aTDB2tipI1pFZABc8cpQS4=",
+        "instance_id": "96bbc508-766a-474f-9494-3ff7b4907f06",
+        "retained_address": "10.126.126.3/24",
+        "startup": "Removed the legacy cron watchdog and stopped its process. Kept the userspace watchdog.",
+        "unused_binary_removed": "/Users/wu/et/lowertier"
+      }
+    ],
+    "configuration_and_keys_preserved": true,
+    "retained_identities_preserved": true,
+    "retired_peers_absent_in_verified_snapshots": 11,
+    "keyless_webui_checks_passed": 11,
+    "delivery": {
+      "source": "10.126.126.2",
+      "remote_destinations": 11,
+      "packets_per_destination": 3,
+      "packets_sent": 33,
+      "packets_received": 30,
+      "destinations_with_full_delivery": 10,
+      "failed_destination": "10.126.126.80"
+    },
+    "runtime_versions": {
+      "0.03": 11,
+      "0.02": 1
+    },
+    "pending_connectivity": [
+      {
+        "node": "tw2-ingress",
+        "address": "10.126.126.80/24",
+        "version": "0.02",
+        "process_id": 189214,
+        "ssh_verified": true,
+        "overlay_delivery_verified": false,
+        "webui_access_verified": false,
+        "configuration_and_software_changed": false,
+        "observation": "The node had two authenticated connections before cleanup. Its peer entries had no routes. Local overlay checks failed after cleanup.",
+        "cause": "Not established. The older software version may contribute."
+      }
+    ],
+    "evidence": "benchmark-results/.work/deduplicate-20261114/result.json",
+    "audit": "benchmark-results/.work/deduplicate-20261114/audit.jsonl",
+    "scope": "Stopped five confirmed duplicate instances. Verified one running instance on each of twelve hosts. Eleven retained instances passed identity, authenticated traffic, peer removal, GUI policy, and Web UI checks. Taiwan remains pending for overlay connectivity."
   },
   "software_version": "0.01",
   "peer_protocol_version": 0,
