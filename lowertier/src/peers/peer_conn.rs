@@ -1985,6 +1985,26 @@ impl PeerConn {
         let recovery_key = self
             .peer_id_hint
             .map(|peer_id| SessionKey::new(network.network_name.clone(), peer_id));
+        let store = self.get_peer_session_store();
+        // The lower peer ID serializes both directions. Locking both endpoints
+        // before Msg1 would deadlock simultaneous outgoing connections.
+        let mut handshake_gate = if self
+            .peer_id_hint
+            .is_some_and(|peer_id| self.my_peer_id < peer_id)
+        {
+            Some(
+                timeout(
+                    Duration::from_secs(10),
+                    store
+                        .responder_handshake_gate(recovery_key.as_ref().unwrap())
+                        .lock_owned(),
+                )
+                .await
+                .map_err(|_| Error::WaitRespError("session admission queue timed out".into()))?,
+            )
+        } else {
+            None
+        };
         let recovery_identity = recovery_key
             .as_ref()
             .and_then(|key| self.get_peer_session_store().in_doubt_identity(key));
@@ -2249,6 +2269,23 @@ impl PeerConn {
         }
         let remote_sent_secret_proof = msg2_pb.secret_proof_32.is_some();
         let session_key = SessionKey::new(network.network_name.clone(), remote_peer_id);
+        if recovery_key.as_ref() != Some(&session_key) {
+            handshake_gate = None;
+        }
+        if self.my_peer_id < remote_peer_id && handshake_gate.is_none() {
+            // An unknown destination can already have an incoming transition.
+            // Retry this connection instead of waiting while its peer holds
+            // the opposite reservation.
+            handshake_gate = Some(
+                store
+                    .responder_handshake_gate(&session_key)
+                    .try_lock_owned()
+                    .map_err(|_| {
+                        Error::WaitRespError("simultaneous session handshake deferred".into())
+                    })?,
+            );
+        }
+        let _handshake_gate = handshake_gate;
         let server_recovery_identity = msg2_pb
             .recovery
             .clone()
@@ -2662,18 +2699,36 @@ impl PeerConn {
                     Error::WaitRespError(format!("resume recovery reservation failed: {error}"))
                 })?
         } else {
-            self.get_peer_session_store()
-                .prepare_initiator_action_with_transition_id(
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let prepared = store.prepare_initiator_action_with_transition_id(
                     &session_key,
                     session_action,
                     msg2_pb.b_session_generation,
                     root_key,
                     msg2_pb.initial_epoch,
-                    algo,
+                    algo.clone(),
                     msg2_pb.server_encryption_algorithm.clone(),
                     remote_static_key,
                     transition_id,
-                )?
+                );
+                match prepared {
+                    Ok(reservation) => break reservation,
+                    Err(error) if error.is::<super::peer_session::SessionTransitionBusy>() => {
+                        // The losing responder can still own its reservation
+                        // while its canceled transport finishes shutdown.
+                        tokio::time::timeout_at(
+                            deadline,
+                            tokio::time::sleep(Duration::from_millis(10)),
+                        )
+                        .await
+                        .map_err(|_| {
+                            Error::WaitRespError("session transition stayed busy".into())
+                        })?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         };
         if recovering && reservation.transition_id() != transition_id {
             return Err(Error::WaitRespError(
@@ -5024,6 +5079,124 @@ pub mod tests {
     use crate::peers::recv_packet_from_chan;
 
     use crate::tunnel::ring::create_ring_tunnel_pair;
+
+    async fn simultaneous_opposite_handshakes(known_lower: bool, known_higher: bool) {
+        async fn connect(mut connection: PeerConn, client: bool) -> Result<PeerConn, Error> {
+            let result = if client {
+                connection.do_handshake_as_client().await
+            } else {
+                connection.do_handshake_as_server().await
+            };
+            if result.is_err() {
+                // Keep the losing transport open while the other initiator
+                // reaches its local reservation. Cleanup must not win this race.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            result?;
+            Ok(connection)
+        }
+        let network = NetworkIdentity::new("simultaneous".into(), "test-secret".into());
+        let left_ctx = get_mock_global_ctx_with_network(Some(network.clone()));
+        let right_ctx = get_mock_global_ctx_with_network(Some(network));
+        set_secure_mode_cfg(&left_ctx, true);
+        set_secure_mode_cfg(&right_ctx, true);
+        let left_store = Arc::new(PeerSessionStore::new());
+        let right_store = Arc::new(PeerSessionStore::new());
+        let (lc, rs) = create_ring_tunnel_pair();
+        let (rc, ls) = create_ring_tunnel_pair();
+        let left_client = PeerConn::new_with_peer_id_hint(
+            101,
+            left_ctx.clone(),
+            lc,
+            known_lower.then_some(202),
+            left_store.clone(),
+        );
+        let left_server = PeerConn::new(101, left_ctx, ls, left_store.clone());
+        let right_client = PeerConn::new_with_peer_id_hint(
+            202,
+            right_ctx.clone(),
+            rc,
+            known_higher.then_some(101),
+            right_store.clone(),
+        );
+        let right_server = PeerConn::new(202, right_ctx, rs, right_store.clone());
+        let (lc, rs, rc, ls) = timeout(Duration::from_secs(12), async {
+            tokio::join!(
+                connect(left_client, true),
+                connect(right_server, false),
+                connect(right_client, true),
+                connect(left_server, false),
+            )
+        })
+        .await
+        .expect("simultaneous handshakes must finish");
+        assert!(
+            (lc.is_ok() && rs.is_ok()) || (rc.is_ok() && ls.is_ok()),
+            "neither direction connected: {lc:?}, {rs:?}, {rc:?}, {ls:?}",
+        );
+        let left = left_store
+            .get(&SessionKey::new("simultaneous".into(), 202))
+            .unwrap();
+        let right = right_store
+            .get(&SessionKey::new("simultaneous".into(), 101))
+            .unwrap();
+        assert_eq!(left.root_key(), right.root_key());
+        assert!(left.is_valid() && right.is_valid());
+        for (client, server) in [(lc, rs), (rc, ls)] {
+            if known_lower && known_higher {
+                assert!(client.is_ok() && server.is_ok());
+            }
+            if let (Ok(client), Ok(mut server)) = (client, server) {
+                let (sender, mut receiver) = create_packet_recv_chan();
+                server.start_recv_loop(sender).await;
+                client
+                    .send_msg(test_packet(PacketType::Data as u8))
+                    .await
+                    .unwrap();
+                let received =
+                    timeout(Duration::from_secs(1), recv_packet_from_chan(&mut receiver))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(
+                    received.payload(),
+                    test_packet(PacketType::Data as u8).payload()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn simultaneous_opposite_handshakes_converge() {
+        for (known_lower, known_higher) in [(true, true), (false, false), (false, true)] {
+            simultaneous_opposite_handshakes(known_lower, known_higher).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_outgoing_handshake_releases_session_gate() {
+        let context = get_mock_global_ctx();
+        let store = Arc::new(PeerSessionStore::new());
+        let (tunnel, _remote) = create_ring_tunnel_pair();
+        let connection =
+            PeerConn::new_with_peer_id_hint(101, context.clone(), tunnel, Some(202), store.clone());
+        let gate =
+            store.responder_handshake_gate(&SessionKey::new(context.get_network_name(), 202));
+        let task = tokio::spawn(async move { connection.do_noise_handshake_as_client().await });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if gate.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("outgoing handshake must own the session gate");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(gate.try_lock().is_ok());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authenticated_transport_shutdown_finishes_both_receive_loops() {

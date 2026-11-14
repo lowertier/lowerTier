@@ -10,9 +10,14 @@ use crate::tunnel::common::{
 use crate::{common::underlay_policy::UnderlayPolicy, proto::common::TunnelInfo};
 use anyhow::Context;
 use forwarded_header_value::ForwardedHeaderValue;
-use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
+use futures::{SinkExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use pnet::ipnetwork::IpNetwork;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     net::{TcpListener, TcpSocket, TcpStream},
     time::timeout,
@@ -23,6 +28,13 @@ use tokio_websockets::{ClientBuilder, Config as WebSocketConfig, Limits, Message
 mod cdn;
 
 const HTTP_1_1_ALPN: &[u8] = b"http/1.1";
+const MAX_PENDING_ACCEPTS: usize = 32;
+const MAX_PENDING_ACCEPTS_PER_IP: usize = 4;
+enum AcceptedWebSocket {
+    Tunnel(Box<dyn Tunnel>),
+    Lane(super::tcp_lanes::PreparedLane),
+}
+type PendingAccept = BoxFuture<'static, (IpAddr, Result<AcceptedWebSocket, TunnelError>)>;
 // Match the bounded lane receive budget, including control packets.
 const MAX_WS_MESSAGE_BYTES: usize = super::tcp_lanes::MAX_PENDING_BYTES;
 const WSS_TRANSPORT_BINDING_LABEL: &[u8] = b"EXPORTER-LowTier-Wss-PeerConn-v1";
@@ -202,6 +214,8 @@ pub struct WsTunnelListener {
     tls_acceptor: Option<TlsAcceptor>,
     lanes: tokio::sync::Mutex<super::tcp_lanes::LaneListener>,
     probe_limiter: Arc<super::decoy::DecoyLimiter>,
+    pending: Mutex<FuturesUnordered<PendingAccept>>,
+    pending_by_ip: HashMap<IpAddr, usize>,
 }
 
 impl std::fmt::Debug for WsTunnelListener {
@@ -230,6 +244,8 @@ impl WsTunnelListener {
             tls_acceptor: None,
             lanes: tokio::sync::Mutex::default(),
             probe_limiter: super::decoy::process_limiter(),
+            pending: Mutex::new(FuturesUnordered::new()),
+            pending_by_ip: HashMap::new(),
         }
     }
 
@@ -250,6 +266,51 @@ impl WsTunnelListener {
         self.set_flags(super::stealth_tls::ConnectIpAdmission::stream_flags(
             context,
         ));
+    }
+
+    fn start_accept(&mut self, stream: TcpStream, remote: SocketAddr) -> Result<(), TunnelError> {
+        let ip = remote.ip();
+        if self.pending.get_mut().unwrap().len() >= MAX_PENDING_ACCEPTS
+            || self.pending_by_ip.get(&ip).copied().unwrap_or(0) >= MAX_PENDING_ACCEPTS_PER_IP
+        {
+            return Ok(());
+        }
+        if let Some(context) = self.global_ctx.upgrade() {
+            let flags = super::stealth_tls::ConnectIpAdmission::stream_flags(&context);
+            if flags.camouflage_config() != self.flags.camouflage_config() {
+                self.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config(&flags)?)));
+                self.set_flags(flags);
+            }
+        }
+        stream.set_nodelay(true)?;
+        // Each accepted socket retains its configuration until setup finishes.
+        let mut handshake = Self::new(self.addr.clone());
+        handshake.set_flags(self.flags.clone());
+        handshake.tls_acceptor = self.tls_acceptor.clone();
+        handshake.probe_limiter = self.probe_limiter.clone();
+        let lane_count = super::tcp_lanes::requested(&self.addr)?;
+        *self.pending_by_ip.entry(ip).or_default() += 1;
+        self.pending.get_mut().unwrap().push(Box::pin(async move {
+            let result = timeout(Duration::from_secs(3), async {
+                let tunnel = handshake.try_accept(stream).await?;
+                if lane_count > 1 {
+                    Ok(AcceptedWebSocket::Lane(
+                        super::tcp_lanes::LaneListener::prepare(tunnel).await?,
+                    ))
+                } else {
+                    Ok(AcceptedWebSocket::Tunnel(tunnel))
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(TunnelError::IOError(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "WebSocket setup timed out",
+                )))
+            });
+            (ip, result)
+        }));
+        Ok(())
     }
 
     pub(crate) async fn accept_punched(
@@ -406,6 +467,8 @@ impl TunnelListener for WsTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         self.listener = None;
         self.tls_acceptor = None;
+        *self.pending.get_mut().unwrap() = FuturesUnordered::new();
+        self.pending_by_ip.clear();
         super::tcp_lanes::requested(&self.addr)?;
         *self.lanes.get_mut() = Default::default();
 
@@ -433,32 +496,32 @@ impl TunnelListener for WsTunnelListener {
         let lane_count = super::tcp_lanes::requested(&self.addr)?;
         loop {
             self.lanes.get_mut().expire();
-            let listener = self.listener.as_ref().unwrap();
-            // Expire incomplete pairs even when no further connection arrives.
-            let accepted = if lane_count > 1 {
-                match timeout(super::tcp_lanes::JOIN_TIMEOUT, listener.accept()).await {
-                    Ok(result) => result,
-                    Err(_) => continue,
+            let pending = self.pending.get_mut().unwrap();
+            let completed = tokio::select! {
+                biased;
+                completed = pending.next(), if !pending.is_empty() => completed,
+                accepted = self.listener.as_ref().unwrap().accept() => {
+                    let (stream, remote) = accepted?;
+                    if let Err(error) = self.start_accept(stream, remote) {
+                        tracing::debug!(?error, ?remote, "WebSocket admission rejected");
+                    }
+                    continue;
                 }
-            } else {
-                listener.accept().await
+                _ = tokio::time::sleep(super::tcp_lanes::JOIN_TIMEOUT), if lane_count > 1 => continue,
             };
-            let (stream, _) = accepted?;
-            if let Some(context) = self.global_ctx.upgrade() {
-                let flags = super::stealth_tls::ConnectIpAdmission::stream_flags(&context);
-                if flags.camouflage_config() != self.flags.camouflage_config() {
-                    self.tls_acceptor =
-                        Some(TlsAcceptor::from(Arc::new(wss_server_config(&flags)?)));
-                    self.set_flags(flags);
+            let Some((ip, result)) = completed else {
+                continue;
+            };
+            if let Some(count) = self.pending_by_ip.get_mut(&ip) {
+                *count -= 1;
+                if *count == 0 {
+                    self.pending_by_ip.remove(&ip);
                 }
             }
-            stream.set_nodelay(true).unwrap();
-            match timeout(Duration::from_secs(3), self.try_accept(stream)).await {
-                Ok(Ok(tunnel)) => {
-                    if lane_count == 1 {
-                        return Ok(tunnel);
-                    }
-                    match self.lanes.get_mut().accept(tunnel, lane_count).await {
+            match result {
+                Ok(AcceptedWebSocket::Tunnel(tunnel)) => return Ok(tunnel),
+                Ok(AcceptedWebSocket::Lane(lane)) => {
+                    match self.lanes.get_mut().accept_prepared(lane, lane_count).await {
                         Ok(Some(tunnel)) => return Ok(tunnel),
                         Ok(None) => continue,
                         Err(error) => {
@@ -467,9 +530,8 @@ impl TunnelListener for WsTunnelListener {
                         }
                     }
                 }
-                e => {
-                    tracing::error!(?e, ?self, "Failed to accept ws/wss tunnel");
-                    continue;
+                Err(error) => {
+                    tracing::debug!(?error, ?ip, "WebSocket admission failed");
                 }
             }
         }
@@ -766,6 +828,48 @@ impl TunnelConnector for WsTunnelConnector {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_tls_client_does_not_block_wss_acceptance() {
+        for lanes in [1, 2] {
+            stalled_client_does_not_block_wss(lanes).await;
+        }
+    }
+
+    async fn stalled_client_does_not_block_wss(lanes: usize) {
+        let mut listener =
+            WsTunnelListener::new(format!("wss://127.0.0.1:0?lanes={lanes}").parse().unwrap());
+        let mut flags = crate::common::config::gen_default_flags();
+        flags.camouflage_config_mut().admission_secret = "stalled-wss-test-secret".into();
+        listener.set_flags(flags.clone());
+        listener.listen().await.unwrap();
+        let address = listener.local_url();
+        let stalled = TcpStream::connect(("127.0.0.1", address.port().unwrap()))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move { listener.accept().await });
+        let incomplete_lane = if lanes > 1 {
+            let mut single = address.clone();
+            single.set_query(None);
+            let mut connector = WsTunnelConnector::new(single);
+            connector.set_flags(flags.clone());
+            Some(connector.connect().await.unwrap())
+        } else {
+            None
+        };
+        let mut connector = WsTunnelConnector::new(address);
+        connector.set_flags(flags);
+        timeout(Duration::from_secs(2), async {
+            let client = connector.connect().await.unwrap();
+            let accepted = server.await.unwrap().unwrap();
+            assert_eq!(client.transport_binding(), accepted.transport_binding());
+            assert!(client.transport_binding().is_some());
+            drop(incomplete_lane);
+            drop(stalled);
+        })
+        .await
+        .expect("a stalled TLS socket must not delay another client");
+    }
 
     #[tokio::test]
     async fn configured_wss_path_rejects_other_paths_before_upgrade() {

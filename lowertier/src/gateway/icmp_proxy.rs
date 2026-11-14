@@ -446,9 +446,12 @@ impl IcmpProxy {
 
         let resembled_buf: Option<Vec<u8>>;
         let icmp_packet = if IpReassembler::is_packet_fragmented(&ipv4) {
-            resembled_buf =
-                self.ip_resemmbler
-                    .add_fragment(ipv4.get_source(), ipv4.get_destination(), &ipv4);
+            resembled_buf = self.ip_resemmbler.add_fragment(
+                (hdr.from_peer_id.get(), hdr.to_peer_id.get()),
+                ipv4.get_source(),
+                ipv4.get_destination(),
+                &ipv4,
+            );
             resembled_buf.as_ref()?;
             icmp::echo_request::EchoRequestPacket::new(resembled_buf.as_ref().unwrap())?
         } else {

@@ -1275,7 +1275,7 @@ impl PeerSessionStore {
             ));
         }
         if self.pending_creates.contains_key(key) {
-            return Err(anyhow!("session creation is pending"));
+            return Err(SessionTransitionBusy::Create.into());
         }
         // Reserve the recovery slot before any handshake message can make
         // the responder commit this transition. The permit moves into an
@@ -1332,7 +1332,7 @@ impl PeerSessionStore {
                 }
                 PeerSessionAction::Sync => {
                     if self.pending_creates.contains_key(key) {
-                        return Err(anyhow!("session creation is pending"));
+                        return Err(SessionTransitionBusy::Create.into());
                     }
                     let session = self
                         .peek(key)
@@ -1412,7 +1412,7 @@ impl PeerSessionStore {
                 }
                 let transition = session.transition.lock().unwrap();
                 if transition.pending_epoch.is_some() {
-                    return Err(anyhow!("session synchronization is already pending"));
+                    return Err(SessionTransitionBusy::Sync.into());
                 }
                 let revision = transition.revision;
                 drop(transition);
@@ -1433,7 +1433,7 @@ impl PeerSessionStore {
             Entry::Vacant(entry) => {
                 entry.insert(session.clone());
             }
-            Entry::Occupied(_) => return Err(anyhow!("session creation is pending")),
+            Entry::Occupied(_) => return Err(SessionTransitionBusy::Create.into()),
         }
         Ok(InitiatorSessionReservation {
             store: self.clone(),

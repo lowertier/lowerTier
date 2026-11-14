@@ -180,6 +180,11 @@ struct PendingJoin {
     deadline: Instant,
 }
 
+pub(super) struct PreparedLane {
+    lane: Lane,
+    record: [u8; RECORD_BYTES],
+}
+
 #[derive(Default)]
 pub(super) struct LaneListener {
     pending: HashMap<JoinId, PendingJoin>,
@@ -196,10 +201,30 @@ impl LaneListener {
         tunnel: Box<dyn Tunnel>,
         count: usize,
     ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
-        self.expire();
+        timeout(JOIN_TIMEOUT, async {
+            let prepared = Self::prepare(tunnel).await?;
+            self.accept_prepared(prepared, count).await
+        })
+        .await?
+    }
+
+    pub(super) async fn prepare(tunnel: Box<dyn Tunnel>) -> Result<PreparedLane, TunnelError> {
         timeout(JOIN_TIMEOUT, async {
             let mut lane = Lane::new(tunnel)?;
             let record = lane.read_record().await?;
+            Ok(PreparedLane { lane, record })
+        })
+        .await?
+    }
+
+    pub(super) async fn accept_prepared(
+        &mut self,
+        prepared: PreparedLane,
+        count: usize,
+    ) -> Result<Option<Box<dyn Tunnel>>, TunnelError> {
+        self.expire();
+        timeout(JOIN_TIMEOUT, async {
+            let PreparedLane { mut lane, record } = prepared;
             if usize::from(record[5]) != count || record[4] & 0x80 != 0 {
                 return Err(TunnelError::InvalidProtocol(
                     "TCP lane count or role mismatch".into(),

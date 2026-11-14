@@ -41,6 +41,10 @@ Use `socks5h` so peer names resolve inside the network, for example `curl http:/
 
 ## What works
 
+UDP NAT entries include both overlay peer IDs and the source and destination sockets.
+A restarted peer can reuse a UDP socket tuple without sending replies to the previous peer ID.
+Fragment reassembly also separates peers, including fragments with identical IPv4 addresses and packet IDs.
+
 - SOCKS5 TCP connections and UDP association, up to 256 targets per association.
 - HTTP `CONNECT` tunnels and ordinary HTTP proxy requests.
 - Peer names, peer addresses, exported subnets, and the internet through an exit node.

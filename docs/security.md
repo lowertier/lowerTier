@@ -16,6 +16,12 @@ The admission secret in [camouflage](camouflage.md) adds a further check before 
 
 Every link is TLS 1.3: QUIC, HTTP/2, or WebSocket. The Noise handshake is bound to that TLS session through its exporter, so a proxy in the middle cannot splice two TLS sessions together.
 
+The endpoint with the lower peer ID serializes incoming and outgoing direct session handshakes.
+This ordering prevents simultaneous connections from reserving conflicting session transitions.
+An outgoing connection to an unknown peer retries if an incoming transition already owns that endpoint.
+Cancellation releases the handshake gate.
+Authentication and final session confirmation remain required.
+
 - **Between neighbors**, packets ride inside that TLS session. lowertier adds no second layer of encryption there.
 - **Across relays**, the sender seals each packet for the destination with the session key: ChaCha20-Poly1305 by default (`network.cipher` also offers AES-GCM),
   a 16-byte tag, a 12-byte nonce, and the packet header's stable fields as associated data.

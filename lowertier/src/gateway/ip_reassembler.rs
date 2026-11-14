@@ -102,6 +102,7 @@ impl IpPacket {
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct IpResemblerKey {
+    peer_ids: (crate::common::PeerId, crate::common::PeerId),
     source: Ipv4Addr,
     destination: Ipv4Addr,
     id: u16,
@@ -137,6 +138,7 @@ impl IpReassembler {
 
     pub fn add_fragment(
         &self,
+        peer_ids: (crate::common::PeerId, crate::common::PeerId),
         source: Ipv4Addr,
         destination: Ipv4Addr,
         packet: &Ipv4Packet,
@@ -155,6 +157,7 @@ impl IpReassembler {
         let fragment: IpFragment = packet.into();
         let id = packet.get_identification();
         let key = IpResemblerKey {
+            peer_ids,
             source,
             destination,
             id,

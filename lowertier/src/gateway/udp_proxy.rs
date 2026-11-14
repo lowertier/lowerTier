@@ -48,13 +48,22 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct UdpNatKey {
+    src_peer_id: PeerId,
+    dst_peer_id: PeerId,
     src_socket: SocketAddr,
     dst_socket: SocketAddr,
 }
 
 impl UdpNatKey {
-    fn new(src_socket: SocketAddr, dst_socket: SocketAddr) -> Self {
+    fn new(
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+        src_socket: SocketAddr,
+        dst_socket: SocketAddr,
+    ) -> Self {
         Self {
+            src_peer_id,
+            dst_peer_id,
             src_socket,
             dst_socket,
         }
@@ -359,9 +368,12 @@ impl UdpProxy {
 
         let resembled_buf: Option<Vec<u8>>;
         let udp_packet = if IpReassembler::is_packet_fragmented(&ipv4) {
-            resembled_buf =
-                self.ip_resemmbler
-                    .add_fragment(ipv4.get_source(), ipv4.get_destination(), &ipv4);
+            resembled_buf = self.ip_resemmbler.add_fragment(
+                (hdr.from_peer_id.get(), hdr.to_peer_id.get()),
+                ipv4.get_source(),
+                ipv4.get_destination(),
+                &ipv4,
+            );
             resembled_buf.as_ref()?;
             udp::UdpPacket::new(resembled_buf.as_ref().unwrap())?
         } else {
@@ -385,6 +397,8 @@ impl UdpProxy {
         );
 
         let nat_key = UdpNatKey::new(
+            hdr.from_peer_id.get(),
+            hdr.to_peer_id.get(),
             SocketAddr::new(ipv4.get_source().into(), udp_packet.get_source()),
             SocketAddr::new(ipv4.get_destination().into(), udp_packet.get_destination()),
         );
@@ -416,12 +430,10 @@ impl UdpProxy {
             return Some(());
         }
 
-        if nat_entry.forward_task.lock().await.is_none() {
-            nat_entry
-                .forward_task
-                .lock()
-                .await
-                .replace(tokio::spawn(UdpNatEntry::forward_task(
+        {
+            let mut forward_task = nat_entry.forward_task.lock().await;
+            if forward_task.is_none() {
+                forward_task.replace(tokio::spawn(UdpNatEntry::forward_task(
                     nat_entry.clone(),
                     self.sender.clone(),
                     self.global_ctx.get_ipv4().map(|x| x.address())?,
@@ -429,6 +441,7 @@ impl UdpProxy {
                     ipv4.get_destination(),
                     self.global_ctx.stats_manager().clone(),
                 )));
+            }
         }
 
         nat_entry.mark_active();
@@ -603,6 +616,126 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn reused_udp_flow_replies_to_the_current_peer() {
+        use crate::{
+            common::{config::TomlConfigLoader, global_ctx::GlobalCtx},
+            peers::{create_packet_recv_chan, peer_manager::RouteAlgoType},
+        };
+        timeout(Duration::from_secs(3), async {
+            let config = TomlConfigLoader::new_from_str("[tun]\nmode = \"userspace\"\n").unwrap();
+            let context = Arc::new(GlobalCtx::new(config));
+            context.set_ipv4(Some("10.201.70.2/24".parse().unwrap()));
+            let (sender, _receiver) = create_packet_recv_chan();
+            let manager = Arc::new(PeerManager::new(
+                RouteAlgoType::None,
+                context.clone(),
+                sender,
+            ));
+            let proxy = UdpProxy::new(context, manager.clone()).unwrap();
+            // Read replies before the routing stage to check their peer ownership.
+            proxy.runtime_started.store(true, Ordering::Release);
+            let mut replies = proxy.receiver.lock().await.take().unwrap();
+            let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let echo_port = echo.local_addr().unwrap().port();
+            for peer_id in [7, 8] {
+                let mut bytes = [0u8; 29];
+                let mut ip = pnet::packet::ipv4::MutableIpv4Packet::new(&mut bytes).unwrap();
+                ip.set_version(4);
+                ip.set_header_length(5);
+                ip.set_total_length(29);
+                ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
+                ip.set_source("10.201.70.1".parse().unwrap());
+                ip.set_destination("10.201.70.2".parse().unwrap());
+                let mut udp = MutableUdpPacket::new(&mut bytes[20..]).unwrap();
+                udp.set_source(40000);
+                udp.set_destination(echo_port);
+                udp.set_length(9);
+                udp.set_payload(&[peer_id as u8]);
+                let mut request = ZCPacket::new_with_payload(&bytes);
+                request.fill_peer_manager_hdr(peer_id, 9, PacketType::Data as u8);
+                assert_eq!(proxy.try_handle_packet(&request).await, Some(()));
+                let mut payload = [0u8; 1];
+                let (_, source) = echo.recv_from(&mut payload).await.unwrap();
+                echo.send_to(&payload, source).await.unwrap();
+                let reply = replies.recv().await.unwrap();
+                assert_eq!(reply.get_dst_peer_id(), Some(peer_id));
+                assert_eq!(
+                    udp::UdpPacket::new(&reply.payload()[20..])
+                        .unwrap()
+                        .payload(),
+                    payload
+                );
+            }
+            let mut fragments = Vec::new();
+            for peer_id in [11, 12] {
+                let mut bytes = vec![peer_id as u8; 2028];
+                let mut udp = MutableUdpPacket::new(&mut bytes[20..]).unwrap();
+                udp.set_source(40000);
+                udp.set_destination(echo_port);
+                udp.set_length(2008);
+                let mut packets = Vec::new();
+                compose_ipv4_packet(
+                    ComposeIpv4PacketArgs {
+                        buf: &mut bytes,
+                        src_v4: &"10.201.70.1".parse().unwrap(),
+                        dst_v4: &"10.201.70.2".parse().unwrap(),
+                        next_protocol: IpNextHeaderProtocols::Udp,
+                        payload_len: 2008,
+                        payload_mtu: 1024,
+                        ip_id: 33,
+                    },
+                    |bytes| {
+                        let mut packet = ZCPacket::new_with_payload(bytes);
+                        packet.fill_peer_manager_hdr(peer_id, 9, PacketType::Data as u8);
+                        packets.push(packet);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(packets.len(), 2);
+                fragments.push(packets);
+            }
+            for packet in [&fragments[0][0], &fragments[1][1]] {
+                assert_eq!(proxy.try_handle_packet(packet).await, None);
+            }
+            let mut payload = vec![0u8; 2000];
+            assert_eq!(
+                echo.try_recv_from(&mut payload).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            for (packet, peer_id) in [(&fragments[1][0], 12), (&fragments[0][1], 11)] {
+                assert_eq!(proxy.try_handle_packet(packet).await, Some(()));
+                let (length, source) = echo.recv_from(&mut payload).await.unwrap();
+                assert_eq!(length, 2000);
+                assert!(payload.iter().all(|byte| *byte == peer_id as u8));
+                echo.send_to(&payload, source).await.unwrap();
+                let mut assembled = None;
+                let reassembler = IpReassembler::new(Duration::from_secs(1));
+                for _ in 0..2 {
+                    let reply = replies.recv().await.unwrap();
+                    assert_eq!(reply.get_dst_peer_id(), Some(peer_id));
+                    let ip = Ipv4Packet::new(reply.payload()).unwrap();
+                    assembled = reassembler.add_fragment(
+                        (9, peer_id),
+                        ip.get_source(),
+                        ip.get_destination(),
+                        &ip,
+                    );
+                }
+                let bytes = assembled.unwrap();
+                assert_eq!(udp::UdpPacket::new(&bytes).unwrap().payload(), payload);
+            }
+            for entry in proxy.nat_table.iter() {
+                if let Some(task) = entry.forward_task.lock().await.take() {
+                    task.abort();
+                }
+            }
+        })
+        .await
+        .expect("UDP peer replacement must deliver both replies");
+    }
+
+    #[tokio::test]
     async fn reply_waits_for_all_fragment_capacity_and_counts_closed_queue() {
         let stats = Arc::new(StatsManager::new());
         let (sender, mut receiver) = channel(2);
@@ -654,7 +787,8 @@ mod tests {
             assert!(packet.peer_manager_header().unwrap().is_no_proxy());
             let ip = Ipv4Packet::new(packet.payload()).unwrap();
             assert_eq!(ip.get_identification(), 17);
-            assembled = reassembler.add_fragment(ip.get_source(), ip.get_destination(), &ip);
+            assembled =
+                reassembler.add_fragment((7, 9), ip.get_source(), ip.get_destination(), &ip);
         }
         let assembled = assembled.unwrap();
         let udp = udp::UdpPacket::new(&assembled).unwrap();

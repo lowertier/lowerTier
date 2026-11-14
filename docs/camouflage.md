@@ -80,6 +80,14 @@ The encrypted admission token rotates every five minutes.
 
 ## Limits on probes
 
+WSS runs TLS and WebSocket setup concurrently.
+Each listener permits at most 32 pending setups, with at most four per source IP.
+Each setup has a three-second deadline.
+A stalled setup does not block other admitted connections.
+For multiple lanes, the setup queue also reads the initial lane record.
+TLS EOF and reset errors during setup appear in debug logs.
+Errors on an authenticated connection remain visible.
+
 Visitors that fail admission get a small, bounded share of the upstream:
 
 - two probe sessions per source address in any 60 seconds, shared across QUIC, HTTP/2, and WSS;
