@@ -1,0 +1,5668 @@
+{
+  "verified_at": "2026-11-14T16:22:36.940984+00:00",
+  "application_version": "0.03",
+  "application_commit": "d91b334a",
+  "binary_changed": false,
+  "effective_mtu_bytes": 1280,
+  "kernel_configured_mtu_bytes": 1300,
+  "userspace_configured_mtu_bytes": 1280,
+  "userspace_tcp_device_mtu_bytes": 1280,
+  "userspace_socks_device_mtu_bytes": 1284,
+  "mtu_scope": "Kernel overlay interfaces and the userspace TCP proxy device.",
+  "retained_instances": 12,
+  "verified_instances": 11,
+  "configuration_changes": 10,
+  "source": "10.126.126.2",
+  "warmup_seconds": 2,
+  "measurement_seconds": 10,
+  "resource_sample_interval_seconds": 0.5,
+  "resource_sample_window_seconds": 15,
+  "cpu_scope": "LowTier process user and system time during the full sample window.",
+  "cpu_exclusions": [
+    "iperf",
+    "uncharged kernel work"
+  ],
+  "rss_scope": "LowTier process resident memory. Kernel buffers are excluded.",
+  "connection_counter_scope": "LowTier connection counters include warmup and peer control traffic. They exclude outer IP, UDP, and TLS framing.",
+  "throughput_scope": "Receiver payload bits divided by receiver measurement seconds.",
+  "tcp_retransmission_scope": "The iperf sender counter. Platform semantics differ.",
+  "benchmarks": [
+    {
+      "label": "baseline-quic-down-p1-r1",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 443.03018266481297,
+      "receiver_bytes": 553779200,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 3919,
+      "local_cpu_seconds_per_gbit": 2.3587920962000584,
+      "remote_cpu_seconds_per_gbit": 2.39490757327108,
+      "local_rss_mib": [
+        85.9375,
+        86.1875
+      ],
+      "remote_rss_mib": [
+        37.58984375,
+        41.29296875
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.366,
+        "mean": 12.593,
+        "maximum": 18.465,
+        "standard_deviation": 1.679
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:57:10.179694012Z",
+        "last_sample": "2026-11-14T14:57:21.192580049Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          19620,
+          37563
+        ],
+        "reported_lost_packets_increase": 5871,
+        "reported_sent_packets_increase": 517546,
+        "server_udp_datagrams_sent_increase": 517546,
+        "server_udp_payload_bytes_sent_increase": 673102304,
+        "server_datagram_frames_sent_increase": 514445
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 7184,
+          "tx_bytes": 7870,
+          "rx_packets": 44,
+          "tx_packets": 45
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 705955484,
+          "tx_bytes": 11029083,
+          "rx_packets": 553288,
+          "tx_packets": 106436
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-up-p1-r1",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 453.3261803350363,
+      "receiver_bytes": 567803904,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 1.1645745922874025,
+      "remote_cpu_seconds_per_gbit": 3.8723756291749623,
+      "local_rss_mib": [
+        86.390625,
+        88.578125
+      ],
+      "remote_rss_mib": [
+        40.19921875,
+        45.6015625
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.554,
+        "mean": 20.241,
+        "maximum": 30.486,
+        "standard_deviation": 5.342
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:57:25.527483999Z",
+        "last_sample": "2026-11-14T14:57:37.538602769Z",
+        "samples": 13,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11455,
+          31271
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 89505,
+        "server_udp_datagrams_sent_increase": 89505,
+        "server_udp_payload_bytes_sent_increase": 10100388,
+        "server_datagram_frames_sent_increase": 97011
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6681867,
+          "tx_bytes": 702072577,
+          "rx_packets": 97760,
+          "tx_packets": 542842
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-down-p1-r2",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 441.64869773638674,
+      "receiver_bytes": 551682048,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 17660,
+      "local_cpu_seconds_per_gbit": 1.6449692414134869,
+      "remote_cpu_seconds_per_gbit": 3.5301130552647604,
+      "local_rss_mib": [
+        88.59375,
+        88.625
+      ],
+      "remote_rss_mib": [
+        43.32421875,
+        45.60546875
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.763,
+        "mean": 14.121,
+        "maximum": 23.023,
+        "standard_deviation": 2.716
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:57:42.543710902Z",
+        "last_sample": "2026-11-14T14:57:53.55599794Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11347,
+          14084
+        ],
+        "reported_lost_packets_increase": 20272,
+        "reported_sent_packets_increase": 529406,
+        "server_udp_datagrams_sent_increase": 529406,
+        "server_udp_payload_bytes_sent_increase": 689376743,
+        "server_datagram_frames_sent_increase": 526617
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 703811163,
+          "tx_bytes": 22980688,
+          "rx_packets": 551648,
+          "tx_packets": 212062
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-up-p1-r2",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 442.2185374314248,
+      "receiver_bytes": 554041344,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 1.1483800024858866,
+      "remote_cpu_seconds_per_gbit": 3.801611599584886,
+      "local_rss_mib": [
+        88.609375,
+        88.640625
+      ],
+      "remote_rss_mib": [
+        42.7890625,
+        45.5859375
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.721,
+        "mean": 20.405,
+        "maximum": 25.646,
+        "standard_deviation": 4.382
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:57:58.560614991Z",
+        "last_sample": "2026-11-14T14:58:09.5717027Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          16635,
+          25476
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 84365,
+        "server_udp_datagrams_sent_increase": 84365,
+        "server_udp_payload_bytes_sent_increase": 8787529,
+        "server_datagram_frames_sent_increase": 81645
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6036854,
+          "tx_bytes": 705979337,
+          "rx_packets": 88321,
+          "tx_packets": 545625
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-down-p4-r1",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 441.490531993949,
+      "receiver_bytes": 551550976,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 1411,
+      "local_cpu_seconds_per_gbit": 1.674822528099376,
+      "remote_cpu_seconds_per_gbit": 3.5082885974260343,
+      "local_rss_mib": [
+        88.609375,
+        88.625
+      ],
+      "remote_rss_mib": [
+        44.19140625,
+        49.52734375
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.682,
+        "mean": 17.748,
+        "maximum": 24.945,
+        "standard_deviation": 3.692
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:58:14.576580854Z",
+        "last_sample": "2026-11-14T14:58:25.589727913Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11391,
+          12364
+        ],
+        "reported_lost_packets_increase": 681,
+        "reported_sent_packets_increase": 501821,
+        "server_udp_datagrams_sent_increase": 501821,
+        "server_udp_payload_bytes_sent_increase": 656633844,
+        "server_datagram_frames_sent_increase": 501411
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 693244618,
+          "tx_bytes": 20817704,
+          "rx_packets": 543346,
+          "tx_packets": 205241
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-up-p4-r1",
+      "reverse": false,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 430.92254736346246,
+      "receiver_bytes": 539492352,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 71,
+      "local_cpu_seconds_per_gbit": 1.475924537295388,
+      "remote_cpu_seconds_per_gbit": 4.126564522642204,
+      "local_rss_mib": [
+        88.609375,
+        88.765625
+      ],
+      "remote_rss_mib": [
+        48.171875,
+        54.984375
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.609,
+        "mean": 21.767,
+        "maximum": 30.718,
+        "standard_deviation": 6.384
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:58:30.596180019Z",
+        "last_sample": "2026-11-14T14:58:41.606635373Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          15602,
+          29738
+        ],
+        "reported_lost_packets_increase": 2,
+        "reported_sent_packets_increase": 61414,
+        "server_udp_datagrams_sent_increase": 61414,
+        "server_udp_payload_bytes_sent_increase": 4567240,
+        "server_datagram_frames_sent_increase": 30839
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2348129,
+          "tx_bytes": 721879946,
+          "rx_packets": 34032,
+          "tx_packets": 557930
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-down-p4-r2",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 461.4728302746796,
+      "receiver_bytes": 576585728,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 1500,
+      "local_cpu_seconds_per_gbit": 1.7126681290314512,
+      "remote_cpu_seconds_per_gbit": 3.4231683237223676,
+      "local_rss_mib": [
+        88.75,
+        88.765625
+      ],
+      "remote_rss_mib": [
+        54.6328125,
+        60.953125
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.72,
+        "mean": 16.448,
+        "maximum": 19.041,
+        "standard_deviation": 2.382
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:58:46.612645834Z",
+        "last_sample": "2026-11-14T14:58:57.62371759Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11343,
+          12752
+        ],
+        "reported_lost_packets_increase": 277,
+        "reported_sent_packets_increase": 526810,
+        "server_udp_datagrams_sent_increase": 526810,
+        "server_udp_payload_bytes_sent_increase": 689540126,
+        "server_datagram_frames_sent_increase": 526486
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 728142883,
+          "tx_bytes": 26519020,
+          "rx_packets": 570692,
+          "tx_packets": 254895
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 20,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        }
+      ]
+    },
+    {
+      "label": "baseline-quic-up-p4-r2",
+      "reverse": false,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 429.70021416784533,
+      "receiver_bytes": 537657344,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 3017,
+      "local_cpu_seconds_per_gbit": 1.5786076568499277,
+      "remote_cpu_seconds_per_gbit": 4.112749550762204,
+      "local_rss_mib": [
+        88.765625,
+        88.765625
+      ],
+      "remote_rss_mib": [
+        59.22265625,
+        61.41015625
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.459,
+        "mean": 23.048,
+        "maximum": 41.372,
+        "standard_deviation": 10.012
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T14:59:02.628604815Z",
+        "last_sample": "2026-11-14T14:59:13.639625642Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          14175,
+          27356
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 62989,
+        "server_udp_datagrams_sent_increase": 62989,
+        "server_udp_payload_bytes_sent_increase": 5147003,
+        "server_datagram_frames_sent_increase": 38475
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2858077,
+          "tx_bytes": 710911795,
+          "rx_packets": 41418,
+          "tx_packets": 549455
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 20,
+          "tx_bytes": 20,
+          "rx_packets": 1,
+          "tx_packets": 1
+        }
+      ]
+    },
+    {
+      "label": "baseline-wss-down-p1-r1",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 447.0090663226659,
+      "receiver_bytes": 558759936,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 570,
+      "local_cpu_seconds_per_gbit": 0.9619515741371879,
+      "remote_cpu_seconds_per_gbit": 1.7337499301309962,
+      "local_rss_mib": [
+        89.046875,
+        89.0625
+      ],
+      "remote_rss_mib": [
+        31.28515625,
+        36.62890625
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.371,
+        "mean": 27.416,
+        "maximum": 62.603,
+        "standard_deviation": 14.871
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 713307609,
+          "tx_bytes": 6046489,
+          "rx_packets": 559078,
+          "tx_packets": 68135
+        }
+      ]
+    },
+    {
+      "label": "baseline-wss-up-p1-r1",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 428.7111489964898,
+      "receiver_bytes": 537133056,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 0.6748793356705961,
+      "remote_cpu_seconds_per_gbit": 3.386032528968018,
+      "local_rss_mib": [
+        89.09375,
+        89.109375
+      ],
+      "remote_rss_mib": [
+        34.32421875,
+        36.16796875
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.207,
+        "mean": 18.399,
+        "maximum": 25.579,
+        "standard_deviation": 4.345
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 4390762,
+          "tx_bytes": 622860045,
+          "rx_packets": 64491,
+          "tx_packets": 481392
+        }
+      ]
+    },
+    {
+      "label": "baseline-wss-down-p1-r2",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 462.1553170494078,
+      "receiver_bytes": 577765376,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 154,
+      "local_cpu_seconds_per_gbit": 1.0103582254122387,
+      "remote_cpu_seconds_per_gbit": 1.590178363336193,
+      "local_rss_mib": [
+        89.34375,
+        89.359375
+      ],
+      "remote_rss_mib": [
+        38.921875,
+        48.17578125
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.682,
+        "mean": 27.635,
+        "maximum": 58.154,
+        "standard_deviation": 13.168
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 722859159,
+          "tx_bytes": 9000112,
+          "rx_packets": 566553,
+          "tx_packets": 97867
+        }
+      ]
+    },
+    {
+      "label": "baseline-wss-up-p1-r2",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 457.80340862985224,
+      "receiver_bytes": 574750720,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 93,
+      "local_cpu_seconds_per_gbit": 0.6198339342663247,
+      "remote_cpu_seconds_per_gbit": 3.39929978687108,
+      "local_rss_mib": [
+        89.375,
+        89.75
+      ],
+      "remote_rss_mib": [
+        45.6015625,
+        50.22265625
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.42,
+        "mean": 40.789,
+        "maximum": 63.092,
+        "standard_deviation": 16.018
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 4955811,
+          "tx_bytes": 727006300,
+          "rx_packets": 72735,
+          "tx_packets": 561907
+        }
+      ]
+    },
+    {
+      "label": "baseline-recovered-h2-down-p1-r1",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 452.9457854706382,
+      "receiver_bytes": 565706752,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 2,
+      "local_cpu_seconds_per_gbit": 1.0694586866094256,
+      "remote_cpu_seconds_per_gbit": 1.683734543794167,
+      "local_rss_mib": [
+        89.734375,
+        89.75
+      ],
+      "remote_rss_mib": [
+        33.7109375,
+        53.5546875
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.732,
+        "mean": 39.965,
+        "maximum": 207.158,
+        "standard_deviation": 46.837
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 715124968,
+          "tx_bytes": 8227632,
+          "rx_packets": 558732,
+          "tx_packets": 95082
+        }
+      ]
+    },
+    {
+      "label": "baseline-recovered-h2-up-p1-r1",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 462.5391306151255,
+      "receiver_bytes": 579862528,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 0.5928129227208832,
+      "remote_cpu_seconds_per_gbit": 3.328375100658341,
+      "local_rss_mib": [
+        89.71875,
+        89.75
+      ],
+      "remote_rss_mib": [
+        48.95703125,
+        51.4296875
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.716,
+        "mean": 30.169,
+        "maximum": 68.367,
+        "standard_deviation": 13.218
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 3932823,
+          "tx_bytes": 730938410,
+          "rx_packets": 54526,
+          "tx_packets": 564930
+        }
+      ]
+    },
+    {
+      "label": "baseline-recovered-h2-down-p1-r2",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 451.3949926346989,
+      "receiver_bytes": 564527104,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 3,
+      "local_cpu_seconds_per_gbit": 1.0739076931902332,
+      "remote_cpu_seconds_per_gbit": 1.6695389704441905,
+      "local_rss_mib": [
+        89.734375,
+        89.734375
+      ],
+      "remote_rss_mib": [
+        49.00390625,
+        51.47265625
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.732,
+        "mean": 25.916,
+        "maximum": 43.783,
+        "standard_deviation": 8.78
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 723735803,
+          "tx_bytes": 8705302,
+          "rx_packets": 565451,
+          "tx_packets": 99953
+        }
+      ]
+    },
+    {
+      "label": "baseline-recovered-h2-up-p1-r2",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 463.16270096219415,
+      "receiver_bytes": 580780032,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 0.5445262966616535,
+      "remote_cpu_seconds_per_gbit": 3.295137392051385,
+      "local_rss_mib": [
+        89.734375,
+        89.765625
+      ],
+      "remote_rss_mib": [
+        49.7578125,
+        51.16015625
+      ],
+      "host": "s6916",
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.439,
+        "mean": 27.485,
+        "maximum": 36.348,
+        "standard_deviation": 7.162
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 3583915,
+          "tx_bytes": 739210603,
+          "rx_packets": 49689,
+          "tx_packets": 571328
+        }
+      ]
+    },
+    {
+      "label": "candidate-h2-down-p1-r1",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 437.61851738671515,
+      "receiver_bytes": 547225600,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 3,
+      "local_cpu_seconds_per_gbit": 1.2631901723895957,
+      "remote_cpu_seconds_per_gbit": 1.6766393969872755,
+      "local_rss_mib": [
+        58.25,
+        62.640625
+      ],
+      "remote_rss_mib": [
+        43.796875,
+        54.00390625
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.369,
+        "mean": 40.212,
+        "maximum": 214.79,
+        "standard_deviation": 49.298
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 696995552,
+          "tx_bytes": 6152456,
+          "rx_packets": 505114,
+          "tx_packets": 70458
+        }
+      ]
+    },
+    {
+      "label": "candidate-h2-up-p1-r1",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 460.1873496774538,
+      "receiver_bytes": 577372160,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 0.6365045380781784,
+      "remote_cpu_seconds_per_gbit": 3.305926631446864,
+      "local_rss_mib": [
+        63.359375,
+        67.1875
+      ],
+      "remote_rss_mib": [
+        50.56640625,
+        51.96484375
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.469,
+        "mean": 28.741,
+        "maximum": 37.994,
+        "standard_deviation": 7.835
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 4034384,
+          "tx_bytes": 729774322,
+          "rx_packets": 55980,
+          "tx_packets": 523563
+        }
+      ]
+    },
+    {
+      "label": "candidate-h2-down-p1-r2",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 459.0077280092692,
+      "receiver_bytes": 573833216,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 1.3723499756417026,
+      "remote_cpu_seconds_per_gbit": 1.601074971581986,
+      "local_rss_mib": [
+        67.25,
+        67.578125
+      ],
+      "remote_rss_mib": [
+        50.0859375,
+        51.7890625
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.595,
+        "mean": 17.821,
+        "maximum": 30.689,
+        "standard_deviation": 6.947
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 727672660,
+          "tx_bytes": 4685133,
+          "rx_packets": 527315,
+          "tx_packets": 54344
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 5376,
+          "tx_bytes": 3547,
+          "rx_packets": 29,
+          "tx_packets": 29
+        }
+      ]
+    },
+    {
+      "label": "candidate-h2-up-p1-r2",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 453.7371955679841,
+      "receiver_bytes": 569114624,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 5,
+      "local_cpu_seconds_per_gbit": 0.6589182287468333,
+      "remote_cpu_seconds_per_gbit": 3.2177173503803695,
+      "local_rss_mib": [
+        67.625,
+        67.796875
+      ],
+      "remote_rss_mib": [
+        50.6015625,
+        51.59765625
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.607,
+        "mean": 26.546,
+        "maximum": 31.903,
+        "standard_deviation": 6.34
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 24,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 3828353,
+          "tx_bytes": 720140246,
+          "rx_packets": 53060,
+          "tx_packets": 516670
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-down-p1-r1",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 310.8918219417673,
+      "receiver_bytes": 388366336,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 9179,
+      "local_cpu_seconds_per_gbit": 2.362460169565263,
+      "remote_cpu_seconds_per_gbit": 4.602613136891454,
+      "local_rss_mib": [
+        68.046875,
+        68.15625
+      ],
+      "remote_rss_mib": [
+        39.99609375,
+        41.234375
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.596,
+        "mean": 19.978,
+        "maximum": 29.264,
+        "standard_deviation": 7.122
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:10:00.20736947Z",
+        "last_sample": "2026-11-14T15:10:11.218381922Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1200,
+          1452
+        ],
+        "rtt_us_range": [
+          11484,
+          28667
+        ],
+        "reported_lost_packets_increase": 15291,
+        "reported_sent_packets_increase": 597437,
+        "server_udp_datagrams_sent_increase": 597437,
+        "server_udp_payload_bytes_sent_increase": 517165326,
+        "server_datagram_frames_sent_increase": 590387
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2208,
+          "tx_bytes": 1332,
+          "rx_packets": 14,
+          "tx_packets": 9
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 532212635,
+          "tx_bytes": 12694439,
+          "rx_packets": 386819,
+          "tx_packets": 118017
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-up-p1-r1",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 456.38847283533465,
+      "receiver_bytes": 571867136,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 1.167229165622135,
+      "remote_cpu_seconds_per_gbit": 3.7661720081777874,
+      "local_rss_mib": [
+        68.234375,
+        68.390625
+      ],
+      "remote_rss_mib": [
+        44.703125,
+        47.13671875
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.823,
+        "mean": 19.295,
+        "maximum": 25.244,
+        "standard_deviation": 3.662
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:10:15.789289333Z",
+        "last_sample": "2026-11-14T15:10:26.800315748Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11851,
+          31989
+        ],
+        "reported_lost_packets_increase": 3,
+        "reported_sent_packets_increase": 84930,
+        "server_udp_datagrams_sent_increase": 84930,
+        "server_udp_payload_bytes_sent_increase": 8910524,
+        "server_datagram_frames_sent_increase": 83000
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6157780,
+          "tx_bytes": 723162481,
+          "rx_packets": 90426,
+          "tx_packets": 518807
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-down-p1-r2",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 462.24118362395603,
+      "receiver_bytes": 578289664,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 43755,
+      "local_cpu_seconds_per_gbit": 1.7119448290882806,
+      "remote_cpu_seconds_per_gbit": 3.14721170600068,
+      "local_rss_mib": [
+        68.375,
+        68.390625
+      ],
+      "remote_rss_mib": [
+        43.12109375,
+        45.578125
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.594,
+        "mean": 12.942,
+        "maximum": 15.23,
+        "standard_deviation": 0.99
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:10:31.805413615Z",
+        "last_sample": "2026-11-14T15:10:43.820755103Z",
+        "samples": 13,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11031,
+          12552
+        ],
+        "reported_lost_packets_increase": 47257,
+        "reported_sent_packets_increase": 575975,
+        "server_udp_datagrams_sent_increase": 575975,
+        "server_udp_payload_bytes_sent_increase": 802787797,
+        "server_datagram_frames_sent_increase": 569852
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 719042002,
+          "tx_bytes": 29111207,
+          "rx_packets": 522612,
+          "tx_packets": 259948
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-up-p1-r2",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 459.96281757294355,
+      "receiver_bytes": 575930368,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 1.128608658468934,
+      "remote_cpu_seconds_per_gbit": 3.7439421843440632,
+      "local_rss_mib": [
+        68.390625,
+        69.046875
+      ],
+      "remote_rss_mib": [
+        43.0859375,
+        45.40234375
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.38,
+        "mean": 21.769,
+        "maximum": 32.746,
+        "standard_deviation": 6.484
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:10:47.824957213Z",
+        "last_sample": "2026-11-14T15:10:59.837384983Z",
+        "samples": 13,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11090,
+          31131
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 95759,
+        "server_udp_datagrams_sent_increase": 95759,
+        "server_udp_payload_bytes_sent_increase": 10023918,
+        "server_datagram_frames_sent_increase": 93617
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6405268,
+          "tx_bytes": 724127759,
+          "rx_packets": 93987,
+          "tx_packets": 519498
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-down-p4-r1",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 475.19281439568215,
+      "receiver_bytes": 594149376,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 70535,
+      "local_cpu_seconds_per_gbit": 1.7377784808108605,
+      "remote_cpu_seconds_per_gbit": 3.641760956759804,
+      "local_rss_mib": [
+        69.046875,
+        69.078125
+      ],
+      "remote_rss_mib": [
+        44.66015625,
+        46.125
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.779,
+        "mean": 12.352,
+        "maximum": 13.891,
+        "standard_deviation": 0.583
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:11:04.84229618Z",
+        "last_sample": "2026-11-14T15:11:15.853317005Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11371,
+          14471
+        ],
+        "reported_lost_packets_increase": 78876,
+        "reported_sent_packets_increase": 585309,
+        "server_udp_datagrams_sent_increase": 585309,
+        "server_udp_payload_bytes_sent_increase": 816316201,
+        "server_datagram_frames_sent_increase": 579488
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 746729842,
+          "tx_bytes": 34314511,
+          "rx_packets": 542729,
+          "tx_packets": 305577
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-up-p4-r1",
+      "reverse": false,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 452.0516518306171,
+      "receiver_bytes": 566624256,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 47,
+      "local_cpu_seconds_per_gbit": 1.6501234991253189,
+      "remote_cpu_seconds_per_gbit": 3.9973579952073193,
+      "local_rss_mib": [
+        69.140625,
+        71.09375
+      ],
+      "remote_rss_mib": [
+        43.734375,
+        45.67578125
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.8,
+        "mean": 28.292,
+        "maximum": 35.552,
+        "standard_deviation": 7.04
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:11:20.858251813Z",
+        "last_sample": "2026-11-14T15:11:31.869285651Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          15500,
+          31251
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 56879,
+        "server_udp_datagrams_sent_increase": 56879,
+        "server_udp_payload_bytes_sent_increase": 4154481,
+        "server_datagram_frames_sent_increase": 27583
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2246730,
+          "tx_bytes": 719688838,
+          "rx_packets": 32721,
+          "tx_packets": 516327
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-down-p4-r2",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 466.88191688691853,
+      "receiver_bytes": 583663616,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 65357,
+      "local_cpu_seconds_per_gbit": 1.7325904378456243,
+      "remote_cpu_seconds_per_gbit": 3.655787240299726,
+      "local_rss_mib": [
+        71.09375,
+        71.109375
+      ],
+      "remote_rss_mib": [
+        43.96484375,
+        45.3984375
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.619,
+        "mean": 13.713,
+        "maximum": 19.169,
+        "standard_deviation": 2.15
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:11:36.874545868Z",
+        "last_sample": "2026-11-14T15:11:47.886257911Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11342,
+          13412
+        ],
+        "reported_lost_packets_increase": 74812,
+        "reported_sent_packets_increase": 573530,
+        "server_udp_datagrams_sent_increase": 573530,
+        "server_udp_payload_bytes_sent_increase": 799204885,
+        "server_datagram_frames_sent_increase": 567337
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 738635248,
+          "tx_bytes": 33164333,
+          "rx_packets": 536837,
+          "tx_packets": 295327
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-up-p4-r2",
+      "reverse": false,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 440.3167760454686,
+      "receiver_bytes": 551550976,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 73,
+      "local_cpu_seconds_per_gbit": 1.661224510279898,
+      "remote_cpu_seconds_per_gbit": 4.034078619779288,
+      "local_rss_mib": [
+        71.09375,
+        71.25
+      ],
+      "remote_rss_mib": [
+        44.61328125,
+        52.57421875
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.692,
+        "mean": 25.524,
+        "maximum": 45.384,
+        "standard_deviation": 9.909
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:11:52.892243359Z",
+        "last_sample": "2026-11-14T15:12:03.904296863Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          15689,
+          30654
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 56052,
+        "server_udp_datagrams_sent_increase": 56052,
+        "server_udp_payload_bytes_sent_increase": 4046990,
+        "server_datagram_frames_sent_increase": 26576
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2055846,
+          "tx_bytes": 722382241,
+          "rx_packets": 29997,
+          "tx_packets": 518260
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-down-p1-r1",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 431.3268040429366,
+      "receiver_bytes": 539492352,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 7,
+      "local_cpu_seconds_per_gbit": 1.0310618824120057,
+      "remote_cpu_seconds_per_gbit": 1.6357970538941025,
+      "local_rss_mib": [
+        71.265625,
+        71.28125
+      ],
+      "remote_rss_mib": [
+        30.8203125,
+        44.5703125
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.443,
+        "mean": 24.492,
+        "maximum": 44.368,
+        "standard_deviation": 8.913
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 286702654,
+          "tx_bytes": 5730550,
+          "rx_packets": 208392,
+          "tx_packets": 64544
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 386699204,
+          "tx_bytes": 2681,
+          "rx_packets": 281059,
+          "tx_packets": 21
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-up-p1-r1",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 410.87025471359664,
+      "receiver_bytes": 515375104,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 13,
+      "local_cpu_seconds_per_gbit": 1.5304386918930417,
+      "remote_cpu_seconds_per_gbit": 3.76424857340412,
+      "local_rss_mib": [
+        71.28125,
+        71.640625
+      ],
+      "remote_rss_mib": [
+        48.34375,
+        49.57421875
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.518,
+        "mean": 20.06,
+        "maximum": 34.352,
+        "standard_deviation": 7.75
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 5106988,
+          "tx_bytes": 652206375,
+          "rx_packets": 74976,
+          "tx_packets": 467904
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 1440,
+          "tx_bytes": 1710,
+          "rx_packets": 16,
+          "tx_packets": 16
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-down-p1-r2",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 411.63226704701844,
+      "receiver_bytes": 514064384,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 1.1088105259593326,
+      "remote_cpu_seconds_per_gbit": 1.7823642884390143,
+      "local_rss_mib": [
+        71.609375,
+        71.625
+      ],
+      "remote_rss_mib": [
+        48.109375,
+        48.546875
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.294,
+        "mean": 12.159,
+        "maximum": 12.705,
+        "standard_deviation": 0.438
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 649728946,
+          "tx_bytes": 4552557,
+          "rx_packets": 472219,
+          "tx_packets": 52924
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 1460,
+          "tx_bytes": 3995,
+          "rx_packets": 17,
+          "tx_packets": 30
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-up-p1-r2",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 458.442955666987,
+      "receiver_bytes": 575406080,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 0.5409223343625416,
+      "remote_cpu_seconds_per_gbit": 3.225982596499501,
+      "local_rss_mib": [
+        71.75,
+        72.640625
+      ],
+      "remote_rss_mib": [
+        48.52734375,
+        49.71875
+      ],
+      "host": "s6916",
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.423,
+        "mean": 30.413,
+        "maximum": 43.794,
+        "standard_deviation": 11.955
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 4938953,
+          "tx_bytes": 1246,
+          "rx_packets": 72559,
+          "tx_packets": 11
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 2468,
+          "tx_bytes": 699937242,
+          "rx_packets": 23,
+          "tx_packets": 502288
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-control-down-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 463.3747320735387,
+      "receiver_bytes": 578945024,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 11,
+      "local_cpu_seconds_per_gbit": 1.001822238651803,
+      "remote_cpu_seconds_per_gbit": 1.5545517496321037,
+      "local_rss_mib": [
+        72.765625,
+        72.8125
+      ],
+      "remote_rss_mib": [
+        48.50390625,
+        50.7421875
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.514,
+        "mean": 26.88,
+        "maximum": 43.362,
+        "standard_deviation": 9.118
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 734390943,
+          "tx_bytes": 6776292,
+          "rx_packets": 533755,
+          "tx_packets": 74561
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-control-up-r1",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 461.20669925449243,
+      "receiver_bytes": 578551808,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 0.5617474450965696,
+      "remote_cpu_seconds_per_gbit": 3.430980549282116,
+      "local_rss_mib": [
+        72.84375,
+        72.859375
+      ],
+      "remote_rss_mib": [
+        49.0078125,
+        50.00390625
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.611,
+        "mean": 36.649,
+        "maximum": 43.267,
+        "standard_deviation": 10.302
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 5018177,
+          "tx_bytes": 726822567,
+          "rx_packets": 73755,
+          "tx_packets": 521549
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-control-down-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 452.2559845182235,
+      "receiver_bytes": 565313536,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 11,
+      "local_cpu_seconds_per_gbit": 0.9883895651138271,
+      "remote_cpu_seconds_per_gbit": 1.5345466626152067,
+      "local_rss_mib": [
+        72.921875,
+        72.953125
+      ],
+      "remote_rss_mib": [
+        48.84375,
+        50.9609375
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.693,
+        "mean": 33.354,
+        "maximum": 160.174,
+        "standard_deviation": 36.277
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 720188740,
+          "tx_bytes": 6934789,
+          "rx_packets": 523434,
+          "tx_packets": 76984
+        }
+      ]
+    },
+    {
+      "label": "candidate-wss-control-up-r2",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 457.9531608277344,
+      "receiver_bytes": 574619648,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 2,
+      "local_cpu_seconds_per_gbit": 0.5547147597709705,
+      "remote_cpu_seconds_per_gbit": 3.4196533425881044,
+      "local_rss_mib": [
+        72.921875,
+        72.953125
+      ],
+      "remote_rss_mib": [
+        48.9375,
+        50.1875
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.62,
+        "mean": 31.708,
+        "maximum": 41.407,
+        "standard_deviation": 9.151
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 4984838,
+          "tx_bytes": 722311995,
+          "rx_packets": 73242,
+          "tx_packets": 518306
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-confirm-down-p1-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 454.5479819120413,
+      "receiver_bytes": 567934976,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 38235,
+      "local_cpu_seconds_per_gbit": 1.6903343526425125,
+      "remote_cpu_seconds_per_gbit": 2.920668861922672,
+      "local_rss_mib": [
+        73.078125,
+        73.109375
+      ],
+      "remote_rss_mib": [
+        37.6015625,
+        39.19140625
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.902,
+        "mean": 13.509,
+        "maximum": 18.479,
+        "standard_deviation": 2.055
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:19:00.396033084Z",
+        "last_sample": "2026-11-14T15:19:11.406954372Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11516,
+          19878
+        ],
+        "reported_lost_packets_increase": 41724,
+        "reported_sent_packets_increase": 528163,
+        "server_udp_datagrams_sent_increase": 528163,
+        "server_udp_payload_bytes_sent_increase": 736197060,
+        "server_datagram_frames_sent_increase": 522576
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 723274977,
+          "tx_bytes": 31685408,
+          "rx_packets": 525675,
+          "tx_packets": 281905
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-confirm-up-p1-r1",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 464.2250411645338,
+      "receiver_bytes": 581697536,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 1.3559452313031637,
+      "remote_cpu_seconds_per_gbit": 3.6788878541854437,
+      "local_rss_mib": [
+        73.078125,
+        73.40625
+      ],
+      "remote_rss_mib": [
+        39.0546875,
+        41.046875
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.655,
+        "mean": 18.974,
+        "maximum": 33.326,
+        "standard_deviation": 5.776
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:19:16.421547269Z",
+        "last_sample": "2026-11-14T15:19:27.432997755Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          12096,
+          25760
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 95311,
+        "server_udp_datagrams_sent_increase": 95311,
+        "server_udp_payload_bytes_sent_increase": 9952389,
+        "server_datagram_frames_sent_increase": 93351
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6827128,
+          "tx_bytes": 729356116,
+          "rx_packets": 100295,
+          "tx_packets": 523257
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-confirm-down-p1-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 464.70104760724837,
+      "receiver_bytes": 580911104,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 42263,
+      "local_cpu_seconds_per_gbit": 1.7300409530474374,
+      "remote_cpu_seconds_per_gbit": 2.9242856407854108,
+      "local_rss_mib": [
+        73.390625,
+        73.421875
+      ],
+      "remote_rss_mib": [
+        39.0234375,
+        40.4375
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.641,
+        "mean": 13.288,
+        "maximum": 19.27,
+        "standard_deviation": 1.928
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:19:32.439106009Z",
+        "last_sample": "2026-11-14T15:19:43.450145711Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11360,
+          12195
+        ],
+        "reported_lost_packets_increase": 46464,
+        "reported_sent_packets_increase": 542174,
+        "server_udp_datagrams_sent_increase": 542174,
+        "server_udp_payload_bytes_sent_increase": 755949105,
+        "server_datagram_frames_sent_increase": 536622
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 732860720,
+          "tx_bytes": 33507694,
+          "rx_packets": 532630,
+          "tx_packets": 297312
+        }
+      ]
+    },
+    {
+      "label": "candidate-quic-confirm-up-p1-r2",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 461.882404070464,
+      "receiver_bytes": 578682880,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 23,
+      "local_cpu_seconds_per_gbit": 1.3651691233720258,
+      "remote_cpu_seconds_per_gbit": 3.7563751669999292,
+      "local_rss_mib": [
+        73.421875,
+        73.46875
+      ],
+      "remote_rss_mib": [
+        39.41015625,
+        42.71484375
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.559,
+        "mean": 23.956,
+        "maximum": 44.84,
+        "standard_deviation": 10.128
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:19:48.455061483Z",
+        "last_sample": "2026-11-14T15:19:59.465892973Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          14487,
+          27033
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 92990,
+        "server_udp_datagrams_sent_increase": 92990,
+        "server_udp_payload_bytes_sent_increase": 9752850,
+        "server_datagram_frames_sent_increase": 91434
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6716457,
+          "tx_bytes": 733346942,
+          "rx_packets": 98573,
+          "tx_packets": 526132
+        }
+      ]
+    },
+    {
+      "label": "baseline-exit-862jp-down-r1",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 46.53885694007807,
+      "receiver_bytes": 58195968,
+      "tcp_mss": 1088,
+      "tcp_retransmits": 1274,
+      "local_cpu_seconds_per_gbit": 7.474744642103038,
+      "remote_cpu_seconds_per_gbit": 6.314870473500839,
+      "local_rss_mib": [
+        58.59375,
+        58.6875
+      ],
+      "remote_rss_mib": [
+        48.00390625,
+        49.9453125
+      ],
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1140,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.783,
+        "mean": 19.634,
+        "maximum": 75.15,
+        "standard_deviation": 17.358
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 120,
+          "tx_bytes": 314,
+          "rx_packets": 5,
+          "tx_packets": 6
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 68763022,
+          "tx_bytes": 898193,
+          "rx_packets": 59510,
+          "tx_packets": 10063
+        }
+      ]
+    },
+    {
+      "label": "baseline-exit-862jp-up-r1",
+      "host": "862jp",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 45.52110791412426,
+      "receiver_bytes": 57016320,
+      "tcp_mss": 1088,
+      "tcp_retransmits": 664,
+      "local_cpu_seconds_per_gbit": 9.536743164062498,
+      "remote_cpu_seconds_per_gbit": 7.3005413186960855,
+      "local_rss_mib": [
+        59.328125,
+        60.6875
+      ],
+      "remote_rss_mib": [
+        50.5625,
+        56.23828125
+      ],
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1140,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.899,
+        "mean": 23.472,
+        "maximum": 61.045,
+        "standard_deviation": 17.055
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 168,
+          "tx_bytes": 1218,
+          "rx_packets": 7,
+          "tx_packets": 14
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 251,
+          "tx_bytes": 60,
+          "rx_packets": 4,
+          "tx_packets": 3
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 604105,
+          "tx_bytes": 70730250,
+          "rx_packets": 8697,
+          "tx_packets": 60288
+        }
+      ]
+    },
+    {
+      "label": "baseline-exit-862jp-down-r2",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 12.792514625871293,
+      "receiver_bytes": 15990784,
+      "tcp_mss": 1088,
+      "tcp_retransmits": 4,
+      "local_cpu_seconds_per_gbit": 29.07924964779712,
+      "remote_cpu_seconds_per_gbit": 18.83897625032038,
+      "local_rss_mib": [
+        61.125,
+        61.15625
+      ],
+      "remote_rss_mib": [
+        56.046875,
+        57.20703125
+      ],
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1140,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.906,
+        "mean": 56.819,
+        "maximum": 137.587,
+        "standard_deviation": 34.79
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 96,
+          "tx_bytes": 290,
+          "rx_packets": 4,
+          "tx_packets": 5
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 20712683,
+          "tx_bytes": 653369,
+          "rx_packets": 17946,
+          "tx_packets": 7528
+        }
+      ]
+    },
+    {
+      "label": "baseline-exit-862jp-up-r2",
+      "host": "862jp",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 43.75612202184828,
+      "receiver_bytes": 54788096,
+      "tcp_mss": 1088,
+      "tcp_retransmits": 411,
+      "local_cpu_seconds_per_gbit": 9.787710089432572,
+      "remote_cpu_seconds_per_gbit": 7.141149785530043,
+      "local_rss_mib": [
+        61.203125,
+        61.40625
+      ],
+      "remote_rss_mib": [
+        56.17578125,
+        56.8828125
+      ],
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1140,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.853,
+        "mean": 15.105,
+        "maximum": 35.225,
+        "standard_deviation": 5.898
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 24,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 20,
+          "tx_bytes": 20,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "quic",
+          "rx_bytes": 556028,
+          "tx_bytes": 73535887,
+          "rx_packets": 8058,
+          "tx_packets": 62682
+        }
+      ]
+    },
+    {
+      "label": "candidate-exit-862jp-down-r1",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 10.59663012793459,
+      "receiver_bytes": 13238272,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 5,
+      "local_cpu_seconds_per_gbit": 23.32253031211323,
+      "remote_cpu_seconds_per_gbit": 15.013288743425123,
+      "local_rss_mib": [
+        61.640625,
+        61.671875
+      ],
+      "remote_rss_mib": [
+        48.875,
+        50.6796875
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.886,
+        "mean": 98.336,
+        "maximum": 251.162,
+        "standard_deviation": 68.414
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 19297943,
+          "tx_bytes": 537555,
+          "rx_packets": 14064,
+          "tx_packets": 5716
+        }
+      ]
+    },
+    {
+      "label": "candidate-exit-862jp-up-r1",
+      "host": "862jp",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 42.957344166420306,
+      "receiver_bytes": 53346304,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 174,
+      "local_cpu_seconds_per_gbit": 8.341721293381438,
+      "remote_cpu_seconds_per_gbit": 4.803519284110104,
+      "local_rss_mib": [
+        61.8125,
+        61.890625
+      ],
+      "remote_rss_mib": [
+        48.89453125,
+        52.12890625
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.574,
+        "mean": 33.613,
+        "maximum": 149.68,
+        "standard_deviation": 37.249
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 358998,
+          "tx_bytes": 66540939,
+          "rx_packets": 5194,
+          "tx_packets": 47780
+        }
+      ]
+    },
+    {
+      "label": "candidate-exit-862jp-down-r2",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 11.015717789946487,
+      "receiver_bytes": 13762560,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 3,
+      "local_cpu_seconds_per_gbit": 29.064360119047645,
+      "remote_cpu_seconds_per_gbit": 20.163399832589285,
+      "local_rss_mib": [
+        61.859375,
+        61.890625
+      ],
+      "remote_rss_mib": [
+        48.72265625,
+        49.3828125
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.764,
+        "mean": 56.107,
+        "maximum": 126.063,
+        "standard_deviation": 41.514
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 18104393,
+          "tx_bytes": 556101,
+          "rx_packets": 13185,
+          "tx_packets": 6388
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 1244,
+          "tx_bytes": 2308,
+          "rx_packets": 9,
+          "tx_packets": 14
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 1303,
+          "tx_bytes": 2173,
+          "rx_packets": 10,
+          "tx_packets": 13
+        }
+      ]
+    },
+    {
+      "label": "candidate-exit-862jp-up-r2",
+      "host": "862jp",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 47.19701597687288,
+      "receiver_bytes": 59506688,
+      "tcp_mss": 1308,
+      "tcp_retransmits": 22,
+      "local_cpu_seconds_per_gbit": 4.264226568953059,
+      "remote_cpu_seconds_per_gbit": 3.9071238513560007,
+      "local_rss_mib": [
+        61.890625,
+        65.03125
+      ],
+      "remote_rss_mib": [
+        50.50390625,
+        52.6484375
+      ],
+      "phase": "native_mtu_1360_candidate",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1360,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.696,
+        "mean": 128.314,
+        "maximum": 385.728,
+        "standard_deviation": 83.046
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 20,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 240,
+          "tx_bytes": 75050436,
+          "rx_packets": 10,
+          "tx_packets": 53885
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 369282,
+          "tx_bytes": 236,
+          "rx_packets": 5287,
+          "tx_packets": 10
+        }
+      ]
+    },
+    {
+      "label": "baseline-exit-control-down-r1",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 44.97571132782493,
+      "receiver_bytes": 56229888,
+      "tcp_mss": 1088,
+      "tcp_retransmits": 3,
+      "local_cpu_seconds_per_gbit": 7.55825798550408,
+      "remote_cpu_seconds_per_gbit": 3.3789859229312347,
+      "local_rss_mib": [
+        57.265625,
+        57.828125
+      ],
+      "remote_rss_mib": [
+        46.89453125,
+        49.01171875
+      ],
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1140,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.848,
+        "mean": 79.966,
+        "maximum": 118.3,
+        "standard_deviation": 32.557
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 160,
+          "tx_bytes": 2192,
+          "rx_packets": 8,
+          "tx_packets": 23
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 74701775,
+          "tx_bytes": 192,
+          "rx_packets": 64433,
+          "tx_packets": 8
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 220,
+          "tx_bytes": 733769,
+          "rx_packets": 11,
+          "tx_packets": 8312
+        }
+      ]
+    },
+    {
+      "label": "baseline-exit-control-down-r2",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 13.728104618797335,
+      "receiver_bytes": 17170432,
+      "tcp_mss": 1088,
+      "tcp_retransmits": 2,
+      "local_cpu_seconds_per_gbit": 24.315055090052482,
+      "remote_cpu_seconds_per_gbit": 12.23032711116412,
+      "local_rss_mib": [
+        58.703125,
+        58.734375
+      ],
+      "remote_rss_mib": [
+        48.94140625,
+        49.19921875
+      ],
+      "phase": "original_configuration",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1360,
+      "remote_interface_mtu_bytes": 1140,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.839,
+        "mean": 15.476,
+        "maximum": 31.037,
+        "standard_deviation": 6.356
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 26149288,
+          "tx_bytes": 1824,
+          "rx_packets": 22638,
+          "tx_packets": 19
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 1672,
+          "tx_bytes": 230,
+          "rx_packets": 23,
+          "tx_packets": 9
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 160,
+          "tx_bytes": 420866,
+          "rx_packets": 8,
+          "tx_packets": 4818
+        }
+      ]
+    },
+    {
+      "label": "common1280-exit-862jp-down-r1",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 12.370214341322306,
+      "receiver_bytes": 15466496,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 3,
+      "local_cpu_seconds_per_gbit": 19.962504758673205,
+      "remote_cpu_seconds_per_gbit": 18.02282818293167,
+      "local_rss_mib": [
+        56.90625,
+        56.984375
+      ],
+      "remote_rss_mib": [
+        50.10546875,
+        50.48046875
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.89,
+        "mean": 68.107,
+        "maximum": 174.11,
+        "standard_deviation": 41.197
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 20079313,
+          "tx_bytes": 597295,
+          "rx_packets": 15520,
+          "tx_packets": 6869
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 20,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 48,
+          "tx_bytes": 62,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 48,
+          "tx_bytes": 62,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "common1280-exit-862jp-up-r1",
+      "host": "862jp",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 45.065031679237045,
+      "receiver_bytes": 56098816,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 472,
+      "local_cpu_seconds_per_gbit": 7.263967924028909,
+      "remote_cpu_seconds_per_gbit": 6.706915169118724,
+      "local_rss_mib": [
+        57.421875,
+        57.640625
+      ],
+      "remote_rss_mib": [
+        50.8515625,
+        51.83984375
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.456,
+        "mean": 19.767,
+        "maximum": 56.312,
+        "standard_deviation": 13.274
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 571548,
+          "tx_bytes": 76948441,
+          "rx_packets": 8230,
+          "tx_packets": 58599
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 20,
+          "tx_bytes": 20,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 24,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "common1280-exit-862jp-down-r2",
+      "host": "862jp",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 10.7998889245652,
+      "receiver_bytes": 13500416,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 5,
+      "local_cpu_seconds_per_gbit": 23.332614343143202,
+      "remote_cpu_seconds_per_gbit": 20.462332419978754,
+      "local_rss_mib": [
+        57.6875,
+        57.71875
+      ],
+      "remote_rss_mib": [
+        49.5859375,
+        51.5078125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.884,
+        "mean": 58.83,
+        "maximum": 99.898,
+        "standard_deviation": 30.016
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 17426327,
+          "tx_bytes": 566978,
+          "rx_packets": 13473,
+          "tx_packets": 6501
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 60,
+          "tx_bytes": 78,
+          "rx_packets": 3,
+          "tx_packets": 3
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 20,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 24,
+          "tx_bytes": 24,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 48,
+          "tx_bytes": 62,
+          "rx_packets": 2,
+          "tx_packets": 2
+        }
+      ]
+    },
+    {
+      "label": "common1280-exit-862jp-up-r2",
+      "host": "862jp",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 44.11487407031363,
+      "receiver_bytes": 55050240,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 331,
+      "local_cpu_seconds_per_gbit": 4.677545456659224,
+      "remote_cpu_seconds_per_gbit": 5.563100179036456,
+      "local_rss_mib": [
+        57.78125,
+        57.8125
+      ],
+      "remote_rss_mib": [
+        49.1875,
+        50.109375
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.61,
+        "mean": 12.087,
+        "maximum": 15.023,
+        "standard_deviation": 0.836
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 1924,
+          "tx_bytes": 75171904,
+          "rx_packets": 18,
+          "tx_packets": 57245
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 20,
+          "tx_bytes": 38,
+          "rx_packets": 1,
+          "tx_packets": 1
+        },
+        {
+          "transport": "wss",
+          "rx_bytes": 40,
+          "tx_bytes": 58,
+          "rx_packets": 2,
+          "tx_packets": 2
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 401464,
+          "tx_bytes": 168,
+          "rx_packets": 5454,
+          "tx_packets": 7
+        },
+        {
+          "transport": "h2",
+          "rx_bytes": 0,
+          "tx_bytes": 0,
+          "rx_packets": 0,
+          "tx_packets": 0
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-down-p1-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 464.57138582376666,
+      "receiver_bytes": 580648960,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 37328,
+      "local_cpu_seconds_per_gbit": 1.6081144793577171,
+      "remote_cpu_seconds_per_gbit": 2.8136621479525257,
+      "local_rss_mib": [
+        60.609375,
+        63.328125
+      ],
+      "remote_rss_mib": [
+        40.28125,
+        41.11328125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.621,
+        "mean": 12.242,
+        "maximum": 13.748,
+        "standard_deviation": 0.565
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:44:27.349974831Z",
+        "last_sample": "2026-11-14T15:44:38.360903325Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11358,
+          13484
+        ],
+        "reported_lost_packets_increase": 41408,
+        "reported_sent_packets_increase": 571957,
+        "server_udp_datagrams_sent_increase": 571957,
+        "server_udp_payload_bytes_sent_increase": 748668135,
+        "server_datagram_frames_sent_increase": 563462
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 738369663,
+          "tx_bytes": 27938541,
+          "rx_packets": 569770,
+          "tx_packets": 248837
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-up-p1-r1",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 445.9107613915991,
+      "receiver_bytes": 558628864,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 2,
+      "local_cpu_seconds_per_gbit": 1.644651859593134,
+      "remote_cpu_seconds_per_gbit": 3.792768574163758,
+      "local_rss_mib": [
+        63.109375,
+        67.09375
+      ],
+      "remote_rss_mib": [
+        40.96484375,
+        43.7890625
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.635,
+        "mean": 16.7,
+        "maximum": 20.723,
+        "standard_deviation": 2.478
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:44:43.365907829Z",
+        "last_sample": "2026-11-14T15:44:54.37692931Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11939,
+          16911
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 97278,
+        "server_udp_datagrams_sent_increase": 97278,
+        "server_udp_payload_bytes_sent_increase": 10129897,
+        "server_datagram_frames_sent_increase": 94795
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6971841,
+          "tx_bytes": 701353781,
+          "rx_packets": 102265,
+          "tx_packets": 533796
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-down-p1-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 437.0073646408647,
+      "receiver_bytes": 546308096,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 38460,
+      "local_cpu_seconds_per_gbit": 1.6657267330704177,
+      "remote_cpu_seconds_per_gbit": 3.223913416066234,
+      "local_rss_mib": [
+        67.578125,
+        72.59375
+      ],
+      "remote_rss_mib": [
+        41.8203125,
+        43.64453125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.504,
+        "mean": 13.199,
+        "maximum": 16.942,
+        "standard_deviation": 1.504
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:44:59.382143979Z",
+        "last_sample": "2026-11-14T15:45:10.39294474Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11539,
+          13714
+        ],
+        "reported_lost_packets_increase": 43245,
+        "reported_sent_packets_increase": 555407,
+        "server_udp_datagrams_sent_increase": 555407,
+        "server_udp_payload_bytes_sent_increase": 730242690,
+        "server_datagram_frames_sent_increase": 549577
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 699750982,
+          "tx_bytes": 27591259,
+          "rx_packets": 539995,
+          "tx_packets": 246956
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-up-p1-r2",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "quic",
+      "receiver_mbps": 457.389391264484,
+      "receiver_bytes": 573440000,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 1.4321463448660707,
+      "remote_cpu_seconds_per_gbit": 3.7645612444196437,
+      "local_rss_mib": [
+        72.875,
+        73.328125
+      ],
+      "remote_rss_mib": [
+        42.09765625,
+        43.98828125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.516,
+        "mean": 21.572,
+        "maximum": 29.763,
+        "standard_deviation": 5.354
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:45:15.39994408Z",
+        "last_sample": "2026-11-14T15:45:26.411026941Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1200
+        ],
+        "rtt_us_range": [
+          11621,
+          29281
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 96997,
+        "server_udp_datagrams_sent_increase": 96997,
+        "server_udp_payload_bytes_sent_increase": 10092510,
+        "server_datagram_frames_sent_increase": 93848
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 6912201,
+          "tx_bytes": 728877868,
+          "rx_packets": 101360,
+          "tx_packets": 554744
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-down-p4-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 271.03429730923335,
+      "receiver_bytes": 338690048,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 12874,
+      "local_cpu_seconds_per_gbit": 2.7680175592286664,
+      "remote_cpu_seconds_per_gbit": 6.2114314029091275,
+      "local_rss_mib": [
+        73.328125,
+        73.359375
+      ],
+      "remote_rss_mib": [
+        41.9296875,
+        43.70703125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.701,
+        "mean": 30.031,
+        "maximum": 58.582,
+        "standard_deviation": 12.572
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:45:31.416040388Z",
+        "last_sample": "2026-11-14T15:45:42.432206218Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1200
+        ],
+        "rtt_us_range": [
+          11183,
+          29238
+        ],
+        "reported_lost_packets_increase": 29999,
+        "reported_sent_packets_increase": 649156,
+        "server_udp_datagrams_sent_increase": 649156,
+        "server_udp_payload_bytes_sent_increase": 440933661,
+        "server_datagram_frames_sent_increase": 642331
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 432552919,
+          "tx_bytes": 15998625,
+          "rx_packets": 333793,
+          "tx_packets": 148222
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-up-p4-r1",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 450.385060938182,
+      "receiver_bytes": 564527104,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 24,
+      "local_cpu_seconds_per_gbit": 1.24219013583447,
+      "remote_cpu_seconds_per_gbit": 4.009993468798975,
+      "local_rss_mib": [
+        73.359375,
+        73.453125
+      ],
+      "remote_rss_mib": [
+        42.25390625,
+        43.48828125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.566,
+        "mean": 25.335,
+        "maximum": 32.155,
+        "standard_deviation": 5.843
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:45:47.437972823Z",
+        "last_sample": "2026-11-14T15:45:58.450137901Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1200
+        ],
+        "rtt_us_range": [
+          11853,
+          28224
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 65207,
+        "server_udp_datagrams_sent_increase": 65207,
+        "server_udp_payload_bytes_sent_increase": 4763325,
+        "server_datagram_frames_sent_increase": 31533
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2362420,
+          "tx_bytes": 729447079,
+          "rx_packets": 34377,
+          "tx_packets": 555193
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-down-p4-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 368.34167232536726,
+      "receiver_bytes": 460193792,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 11055,
+      "local_cpu_seconds_per_gbit": 1.9828602989933435,
+      "remote_cpu_seconds_per_gbit": 4.5904574045188316,
+      "local_rss_mib": [
+        73.4375,
+        73.453125
+      ],
+      "remote_rss_mib": [
+        42.66796875,
+        55.0390625
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.696,
+        "mean": 22.462,
+        "maximum": 30.138,
+        "standard_deviation": 7.149
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:46:03.455157312Z",
+        "last_sample": "2026-11-14T15:46:14.467976173Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1200,
+          1326,
+          1452
+        ],
+        "rtt_us_range": [
+          11425,
+          28607
+        ],
+        "reported_lost_packets_increase": 23215,
+        "reported_sent_packets_increase": 614049,
+        "server_udp_datagrams_sent_increase": 614049,
+        "server_udp_payload_bytes_sent_increase": 540996208,
+        "server_datagram_frames_sent_increase": 609395
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 564624316,
+          "tx_bytes": 18026801,
+          "rx_packets": 435725,
+          "tx_packets": 169518
+        }
+      ]
+    },
+    {
+      "label": "common1280-quic-up-p4-r2",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 435.51201620771303,
+      "receiver_bytes": 545259520,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 877,
+      "local_cpu_seconds_per_gbit": 1.3135946713961097,
+      "remote_cpu_seconds_per_gbit": 4.094380598801833,
+      "local_rss_mib": [
+        73.5,
+        73.71875
+      ],
+      "remote_rss_mib": [
+        53.765625,
+        60.59765625
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.626,
+        "mean": 21.604,
+        "maximum": 33.164,
+        "standard_deviation": 7.103
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:46:19.474356474Z",
+        "last_sample": "2026-11-14T15:46:31.485901977Z",
+        "samples": 13,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11253,
+          25816
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 69181,
+        "server_udp_datagrams_sent_increase": 69181,
+        "server_udp_payload_bytes_sent_increase": 5423209,
+        "server_datagram_frames_sent_increase": 38073
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 2685855,
+          "tx_bytes": 726905667,
+          "rx_packets": 38376,
+          "tx_packets": 553259
+        }
+      ]
+    },
+    {
+      "label": "common1280-h2-down-p1-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 462.48923935652675,
+      "receiver_bytes": 577765376,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 5,
+      "local_cpu_seconds_per_gbit": 1.226709023145063,
+      "remote_cpu_seconds_per_gbit": 1.4820029644697852,
+      "local_rss_mib": [
+        60.046875,
+        65.171875
+      ],
+      "remote_rss_mib": [
+        34.41015625,
+        36.57421875
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 12.122,
+        "mean": 29.058,
+        "maximum": 50.008,
+        "standard_deviation": 10.851
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 730148630,
+          "tx_bytes": 5747787,
+          "rx_packets": 561710,
+          "tx_packets": 65406
+        }
+      ]
+    },
+    {
+      "label": "common1280-h2-up-p1-r1",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 464.5424733997551,
+      "receiver_bytes": 583401472,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 0.5913594952328127,
+      "remote_cpu_seconds_per_gbit": 3.1817711971765474,
+      "local_rss_mib": [
+        65.046875,
+        67.640625
+      ],
+      "remote_rss_mib": [
+        34.96484375,
+        36.99609375
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.466,
+        "mean": 27.187,
+        "maximum": 33.705,
+        "standard_deviation": 6.827
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 3689058,
+          "tx_bytes": 736543717,
+          "rx_packets": 51171,
+          "tx_packets": 560590
+        }
+      ]
+    },
+    {
+      "label": "common1280-h2-down-p1-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 453.9307280729402,
+      "receiver_bytes": 567803904,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 5,
+      "local_cpu_seconds_per_gbit": 1.0677101649515957,
+      "remote_cpu_seconds_per_gbit": 1.4639737313253833,
+      "local_rss_mib": [
+        67.75,
+        70.296875
+      ],
+      "remote_rss_mib": [
+        35.87109375,
+        38.8125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.542,
+        "mean": 37.875,
+        "maximum": 233.819,
+        "standard_deviation": 54.679
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 727508225,
+          "tx_bytes": 5402801,
+          "rx_packets": 559655,
+          "tx_packets": 61594
+        }
+      ]
+    },
+    {
+      "label": "common1280-h2-up-p1-r2",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "h2",
+      "receiver_mbps": 462.95576825212174,
+      "receiver_bytes": 580517888,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 1,
+      "local_cpu_seconds_per_gbit": 0.6244424288954904,
+      "remote_cpu_seconds_per_gbit": 3.178196638102562,
+      "local_rss_mib": [
+        70.296875,
+        70.484375
+      ],
+      "remote_rss_mib": [
+        36.19140625,
+        38.3125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.621,
+        "mean": 28.513,
+        "maximum": 37.695,
+        "standard_deviation": 7.402
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "h2",
+          "rx_bytes": 3680225,
+          "tx_bytes": 730301475,
+          "rx_packets": 51002,
+          "tx_packets": 555884
+        }
+      ]
+    },
+    {
+      "label": "common1280-wss-down-p1-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 460.66304743352504,
+      "receiver_bytes": 575537152,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 11,
+      "local_cpu_seconds_per_gbit": 1.268380325167957,
+      "remote_cpu_seconds_per_gbit": 1.520318882906798,
+      "local_rss_mib": [
+        54.78125,
+        58.6875
+      ],
+      "remote_rss_mib": [
+        30.5,
+        34.33203125
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.401,
+        "mean": 27.558,
+        "maximum": 43.871,
+        "standard_deviation": 10.797
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 722450532,
+          "tx_bytes": 6475830,
+          "rx_packets": 557497,
+          "tx_packets": 71515
+        }
+      ]
+    },
+    {
+      "label": "common1280-wss-up-p1-r1",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 463.9914259286925,
+      "receiver_bytes": 581959680,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 0,
+      "local_cpu_seconds_per_gbit": 0.7839890213700029,
+      "remote_cpu_seconds_per_gbit": 3.458143354536177,
+      "local_rss_mib": [
+        59.09375,
+        61.703125
+      ],
+      "remote_rss_mib": [
+        33.125,
+        34.46484375
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.542,
+        "mean": 23.82,
+        "maximum": 33.186,
+        "standard_deviation": 6.235
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 5247443,
+          "tx_bytes": 735727749,
+          "rx_packets": 77031,
+          "tx_packets": 559964
+        }
+      ]
+    },
+    {
+      "label": "common1280-wss-down-p1-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 454.2452305288544,
+      "receiver_bytes": 567934976,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 10,
+      "local_cpu_seconds_per_gbit": 1.1202866998633312,
+      "remote_cpu_seconds_per_gbit": 1.4504301281138212,
+      "local_rss_mib": [
+        62.109375,
+        62.25
+      ],
+      "remote_rss_mib": [
+        33.53515625,
+        36.24609375
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.478,
+        "mean": 41.035,
+        "maximum": 230.694,
+        "standard_deviation": 53.25
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 726239913,
+          "tx_bytes": 5881608,
+          "rx_packets": 560413,
+          "tx_packets": 65192
+        }
+      ]
+    },
+    {
+      "label": "common1280-wss-up-p1-r2",
+      "host": "s6916",
+      "reverse": false,
+      "streams": 1,
+      "protocol": "wss",
+      "receiver_mbps": 405.580273155024,
+      "receiver_bytes": 508035072,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 2,
+      "local_cpu_seconds_per_gbit": 0.7307566356363678,
+      "remote_cpu_seconds_per_gbit": 3.370830272127354,
+      "local_rss_mib": [
+        62.21875,
+        62.640625
+      ],
+      "remote_rss_mib": [
+        33.4609375,
+        34.58984375
+      ],
+      "phase": "common_mtu_1280",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.541,
+        "mean": 17.039,
+        "maximum": 28.653,
+        "standard_deviation": 4.515
+      },
+      "outer_quic_samples": null,
+      "connection_counter_deltas": [
+        {
+          "transport": "wss",
+          "rx_bytes": 4082937,
+          "tx_bytes": 567227643,
+          "rx_packets": 59917,
+          "tx_packets": 431723
+        }
+      ]
+    },
+    {
+      "label": "boundary-mtu1260-quic-down-p4-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 437.81327353517617,
+      "receiver_bytes": 547356672,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 2344,
+      "local_cpu_seconds_per_gbit": 1.6808053086087165,
+      "remote_cpu_seconds_per_gbit": 3.752123807125164,
+      "local_rss_mib": [
+        57.265625,
+        57.484375
+      ],
+      "remote_rss_mib": [
+        43.453125,
+        46.30078125
+      ],
+      "phase": "same_connection_mtu_control",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.692,
+        "mean": 22.064,
+        "maximum": 64.256,
+        "standard_deviation": 12.101
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:52:39.504439076Z",
+        "last_sample": "2026-11-14T15:52:50.517532308Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11193,
+          14650
+        ],
+        "reported_lost_packets_increase": 6511,
+        "reported_sent_packets_increase": 509268,
+        "server_udp_datagrams_sent_increase": 509268,
+        "server_udp_payload_bytes_sent_increase": 665980648,
+        "server_datagram_frames_sent_increase": 508906
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 705563857,
+          "tx_bytes": 21119556,
+          "rx_packets": 553037,
+          "tx_packets": 204992
+        }
+      ]
+    },
+    {
+      "label": "boundary-mtu1260-quic-down-p4-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 426.81955214037885,
+      "receiver_bytes": 533069824,
+      "tcp_mss": 1208,
+      "tcp_retransmits": 2302,
+      "local_cpu_seconds_per_gbit": 1.7633712464654538,
+      "remote_cpu_seconds_per_gbit": 3.7565435330287977,
+      "local_rss_mib": [
+        57.640625,
+        58.390625
+      ],
+      "remote_rss_mib": [
+        47.1171875,
+        57.19140625
+      ],
+      "phase": "same_connection_mtu_control",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1260,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.714,
+        "mean": 17.724,
+        "maximum": 28.83,
+        "standard_deviation": 4.11
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:52:55.522538537Z",
+        "last_sample": "2026-11-14T15:53:06.533415372Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11258,
+          13655
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 490434,
+        "server_udp_datagrams_sent_increase": 490434,
+        "server_udp_payload_bytes_sent_increase": 641425209,
+        "server_datagram_frames_sent_increase": 490099
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 681939173,
+          "tx_bytes": 21291720,
+          "rx_packets": 534480,
+          "tx_packets": 207912
+        }
+      ]
+    },
+    {
+      "label": "boundary-mtu1280-quic-down-p4-r1",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 446.57364538954596,
+      "receiver_bytes": 558104576,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 908,
+      "local_cpu_seconds_per_gbit": 1.7469844217869308,
+      "remote_cpu_seconds_per_gbit": 3.6216330897813664,
+      "local_rss_mib": [
+        58.578125,
+        59.515625
+      ],
+      "remote_rss_mib": [
+        55.515625,
+        60.9140625
+      ],
+      "phase": "same_connection_mtu_control",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.352,
+        "mean": 17.034,
+        "maximum": 21.023,
+        "standard_deviation": 2.75
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:53:12.540313755Z",
+        "last_sample": "2026-11-14T15:53:23.55115268Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11276,
+          14959
+        ],
+        "reported_lost_packets_increase": 0,
+        "reported_sent_packets_increase": 499451,
+        "server_udp_datagrams_sent_increase": 499451,
+        "server_udp_payload_bytes_sent_increase": 663259512,
+        "server_datagram_frames_sent_increase": 499173
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 710842860,
+          "tx_bytes": 21390624,
+          "rx_packets": 548528,
+          "tx_packets": 210165
+        }
+      ]
+    },
+    {
+      "label": "boundary-mtu1280-quic-down-p4-r2",
+      "host": "s6916",
+      "reverse": true,
+      "streams": 4,
+      "protocol": "quic",
+      "receiver_mbps": 447.56039414914113,
+      "receiver_bytes": 559284224,
+      "tcp_mss": 1228,
+      "tcp_retransmits": 867,
+      "local_cpu_seconds_per_gbit": 1.763414660521517,
+      "remote_cpu_seconds_per_gbit": 3.6184643034021997,
+      "local_rss_mib": [
+        60.015625,
+        60.5625
+      ],
+      "remote_rss_mib": [
+        58.91015625,
+        60.62890625
+      ],
+      "phase": "same_connection_mtu_control",
+      "endpoint_modes": [
+        "kernel",
+        "kernel"
+      ],
+      "local_interface_mtu_bytes": 1280,
+      "remote_interface_mtu_bytes": 1280,
+      "concurrent_icmp_sent": 14,
+      "concurrent_icmp_received": 14,
+      "concurrent_icmp_rtt_ms": {
+        "minimum": 11.67,
+        "mean": 17.11,
+        "maximum": 20.297,
+        "standard_deviation": 2.681
+      },
+      "outer_quic_samples": {
+        "scope": "Server connection with the largest sampled bulk-data byte increase.",
+        "first_sample": "2026-11-14T15:53:28.556264351Z",
+        "last_sample": "2026-11-14T15:53:39.56717312Z",
+        "samples": 12,
+        "udp_mtu_bytes_observed": [
+          1452
+        ],
+        "rtt_us_range": [
+          11152,
+          13237
+        ],
+        "reported_lost_packets_increase": 11,
+        "reported_sent_packets_increase": 505524,
+        "server_udp_datagrams_sent_increase": 505524,
+        "server_udp_payload_bytes_sent_increase": 671261270,
+        "server_datagram_frames_sent_increase": 505252
+      },
+      "connection_counter_deltas": [
+        {
+          "transport": "quic",
+          "rx_bytes": 711830818,
+          "tx_bytes": 20360413,
+          "rx_packets": 549312,
+          "tx_packets": 202390
+        }
+      ]
+    }
+  ],
+  "concurrent_icmp_sent": 1036,
+  "concurrent_icmp_received": 1036,
+  "fleet_verification": [
+    {
+      "host": "local",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 35,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ]
+    },
+    {
+      "host": "862jp",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 37,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.82",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.82",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 112
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    },
+    {
+      "host": "jpali",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 29,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.62",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.62",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 112
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ]
+    },
+    {
+      "host": "s6916",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 43,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.60",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.60",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    },
+    {
+      "host": "yutoms-mcp",
+      "configured_mtu": 1280,
+      "effective_mtu": 1280,
+      "mode": "userspace",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 39,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.3",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.3",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 114
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    },
+    {
+      "host": "jpaws",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 44,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.100",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.100",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    },
+    {
+      "host": "861jp",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 36,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.81",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.81",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    },
+    {
+      "host": "alibj",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 36,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.110",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.110",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.100",
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ]
+    },
+    {
+      "host": "hattori-opwrt",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 43,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.1",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.1",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    },
+    {
+      "host": "btrouter",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 55,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.40",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.40",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.100",
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 104
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ]
+    },
+    {
+      "host": "la",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "mode": "kernel",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "runtime_version": "0.03",
+      "authenticated_connections": 40,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.87",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.87",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "gui": [
+        {
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 797
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 97
+        },
+        {
+          "path": "/api/nodes",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25
+        }
+      ],
+      "application_source": "10.126.126.2"
+    }
+  ],
+  "focused_tests": [
+    {
+      "label": "focused-tests-compile",
+      "exit_code": 0,
+      "timeout": false,
+      "timestamp": "2026-11-14T15:56:31.284596+00:00",
+      "finished_at": "2026-11-14T15:56:42.805225+00:00"
+    },
+    {
+      "label": "focused-test-automatic_adapter_and_bridge_mtu_preserve_lan_frames",
+      "exit_code": 0,
+      "timeout": false,
+      "timestamp": "2026-11-14T15:56:42.805636+00:00",
+      "finished_at": "2026-11-14T15:56:44.957658+00:00"
+    },
+    {
+      "label": "focused-test-caddy_multiplexes_camouflaged_transports",
+      "exit_code": 0,
+      "timeout": false,
+      "timestamp": "2026-11-14T15:56:44.958479+00:00",
+      "finished_at": "2026-11-14T15:56:49.837128+00:00"
+    },
+    {
+      "label": "focused-test-caddy_multiplexes_tcp_transports",
+      "exit_code": 0,
+      "timeout": false,
+      "timestamp": "2026-11-14T15:56:49.837565+00:00",
+      "finished_at": "2026-11-14T15:56:50.372353+00:00"
+    }
+  ],
+  "cleanup": {
+    "verified_at": "2026-11-14T16:22:36.940984+00:00",
+    "task_byte_fixture_processes_stopped": 10,
+    "task_iperf_process_stopped": true,
+    "temporary_transport_and_statistics_overrides_removed": true,
+    "original_iperf_5201_preserved": true,
+    "configurations_and_raw_logs_preserved": true,
+    "final_health": [
+      {
+        "host": "local",
+        "full_size_icmp_received": 0,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "862jp",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "jpali",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "s6916",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "yutoms-mcp",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "jpaws",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "861jp",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "alibj",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "hattori-opwrt",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "btrouter",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      },
+      {
+        "host": "la",
+        "full_size_icmp_received": 3,
+        "gui_checks_passed": true
+      }
+    ],
+    "fixture_listeners_closed": 10,
+    "listener_check_at": "2026-11-14T16:30:12.217147+00:00"
+  },
+  "pending": {
+    "tw2-ingress": "SSH sessions fail. No configuration change was made.",
+    "btower": "Historical host remains offline.",
+    "UTMOWRT": "Historical host remains offline."
+  },
+  "failed_command_records": [
+    {
+      "label": "tw2-ingress-inspect",
+      "exit_code": 255,
+      "timeout": false
+    },
+    {
+      "label": "tw2-ingress-inspect-recovery",
+      "exit_code": 255,
+      "timeout": false
+    },
+    {
+      "label": "mtu-exit-history",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "transport-quic-ready-ping-0",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "transport-quic-ready-ping-1",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpaws-taiwan-ts-ping",
+      "exit_code": 1,
+      "timeout": false
+    },
+    {
+      "label": "taiwan-hattori-ssh-state",
+      "exit_code": 255,
+      "timeout": false
+    },
+    {
+      "label": "jpaws-taiwan-ipv6-ssh",
+      "exit_code": 255,
+      "timeout": false
+    },
+    {
+      "label": "taiwan-netstack-ssh",
+      "exit_code": -15,
+      "timeout": true
+    },
+    {
+      "label": "candidate-wss-pattern-s6916-bytes",
+      "exit_code": 1,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-11",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-12",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-13",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-14",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-15",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-16",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-17",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-18",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-19",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-20",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-21",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-22",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-23",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-24",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-25",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-26",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-27",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-28",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-29",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-30",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-31",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-32",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-33",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-34",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-35",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-36",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-37",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-38",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-39",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-40",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-41",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-42",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-43",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-44",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-45",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-46",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "candidate-h2-pattern-mode-ready-ping-47",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "baseline-exit-control-pattern-862jp-bytes",
+      "exit_code": 1,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-0",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-1",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-2",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-3",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-4",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-5",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-6",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-7",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-8",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-9",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-10",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-11",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-12",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-13",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-14",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-15",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-16",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-17",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-exit-ready-18",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "common1280-transport-quic-ready-status-0",
+      "exit_code": 4,
+      "timeout": false
+    },
+    {
+      "label": "common1280-transport-h2-ready-status-0",
+      "exit_code": 4,
+      "timeout": false
+    },
+    {
+      "label": "common1280-transport-wss-ready-status-0",
+      "exit_code": 4,
+      "timeout": false
+    },
+    {
+      "label": "common1280-restore-all-transports-ready-status-0",
+      "exit_code": 4,
+      "timeout": false
+    },
+    {
+      "label": "mtu-boundary-control-quic-ready-status-0",
+      "exit_code": 4,
+      "timeout": false
+    },
+    {
+      "label": "boundary-control-restore-all-ready-status-0",
+      "exit_code": 4,
+      "timeout": false
+    },
+    {
+      "label": "btrouter-apply-mtu",
+      "exit_code": 255,
+      "timeout": false
+    },
+    {
+      "label": "862jp-stop-exit-iperf",
+      "exit_code": 1,
+      "timeout": false
+    },
+    {
+      "label": "hattori-opwrt-byte-fixture-ready",
+      "exit_code": 1,
+      "timeout": false
+    },
+    {
+      "label": "btrouter-byte-fixture-ready",
+      "exit_code": 1,
+      "timeout": false
+    },
+    {
+      "label": "jpali-full-size-ping",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "fleet-alibj-bytes",
+      "exit_code": -15,
+      "timeout": true
+    },
+    {
+      "label": "fleet-btrouter-bytes",
+      "exit_code": -15,
+      "timeout": true
+    },
+    {
+      "label": "jpali-full-size-ping",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-small-ping-recovery",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-small-http-recovery",
+      "exit_code": 28,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-0",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-1",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-2",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-3",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-4",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-5",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-6",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-7",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-8",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-9",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-10",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-11",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-12",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-13",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "jpali-pair-recovered-ready-14",
+      "exit_code": 2,
+      "timeout": false
+    },
+    {
+      "label": "tw2-ingress-final-ssh-recheck",
+      "exit_code": -15,
+      "timeout": true
+    }
+  ],
+  "evidence": "benchmark-results/.work/fleet-mtu-20261114",
+  "early_source_read_evidence": "Tool transcript only. Local process IDs are unavailable."
+}

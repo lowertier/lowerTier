@@ -1,15 +1,28 @@
 {
-  "verified_at": "2026-11-14T13:06:59.659598+00:00",
-  "connectivity_verified_at": "2026-11-14T13:06:59.659598+00:00",
+  "verified_at": "2026-11-14T16:22:36.940984+00:00",
+  "connectivity_verified_at": "2026-11-14T16:22:36.940984+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven current-build hosts passed the kernel endpoint audit. Taiwan remains pending. Earlier verification sections retain their historical observations.",
+  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable hosts passed the MTU audit. Their kernel interfaces and userspace TCP device use MTU 1280. Taiwan remains pending. Earlier verification sections retain their historical observations.",
   "application_commit": "d91b334a",
-  "repository_commit_at_verification": "f573b69d",
+  "repository_commit_at_verification": "4d59dd84",
   "application_note": "Eleven active test instances retain version 0.03, build d91b334a. Ten use kernel mode. The remote Mac requires administrator access for kernel migration. Taiwan runs version 0.02 and lacks container network capabilities. Its binary update also awaits reliable SSH access.",
+  "mtu_policy": {
+    "verified_at": "2026-11-14T16:22:36.940984+00:00",
+    "effective_mtu": 1280,
+    "kernel_configured_mtu": 1300,
+    "userspace_configured_mtu": 1280,
+    "userspace_tcp_device_mtu": 1280,
+    "userspace_socks_device_mtu": 1284,
+    "scope": "Ten kernel overlay interfaces use MTU 1280. The verified userspace TCP device has a fixed MTU of 1280. Its separate SOCKS device retains MTU 1284. No retained instance enables native Ethernet bridging.",
+    "verified_instances": 11,
+    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "report": "docs/performance/fleet-mtu-20261114.md",
+    "summary": "benchmark-results/fleet-mtu-20261114/summary.json"
+  },
   "webui": {
     "enabled": true,
     "port": 15880,
@@ -25,8 +38,8 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-14T13:06:57.506043+00:00",
-    "verification_scope": "Eleven instances passed keyless page and API reads from 10.126.126.2 during the kernel endpoint audit. All eleven rejected a foreign Origin. GUI configuration is unchanged. Earlier control-write, LAN, and outside-source checks remain historical evidence.",
+    "access_verified_at": "2026-11-14T16:22:36.940984+00:00",
+    "verification_scope": "Eleven instances passed keyless page and API reads from 10.126.126.2 after the MTU deployment. All eleven rejected a foreign Origin. GUI configuration is unchanged. Earlier control-write, LAN, and outside-source checks remain historical evidence.",
     "schema_verified_at": "2026-11-08T13:54:38.072745+00:00",
     "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json",
     "bundle_verified_at": "2026-11-09T06:46:57.175222+00:00",
@@ -74,6 +87,7 @@
         "installed": false
       },
       "tun": {"mode": "userspace", "configured_mtu": 1300},
+      "mtu_status": "pending_ssh",
       "kernel_migration_status": "blocked_container_capabilities"
     },
     {
@@ -83,7 +97,7 @@
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1360}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "jpaws",
@@ -92,7 +106,7 @@
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel"}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "861jp",
@@ -101,7 +115,7 @@
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1360}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "862jp-secondary",
@@ -110,7 +124,7 @@
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1160}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "jpali-secondary",
@@ -119,7 +133,7 @@
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1160}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "s6916",
@@ -130,9 +144,9 @@
       "application_commit": "d91b334a",
       "tun": {
         "mode": "kernel",
-        "configured_mtu": 1280,
+        "configured_mtu": 1300,
         "observed_interface": "tap0",
-        "observed_mtu": 1260
+        "observed_mtu": 1280
       },
       "performance_verification": {
         "verified_at": "2026-11-14T12:39:34.476215+00:00",
@@ -160,7 +174,7 @@
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1360}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -169,7 +183,7 @@
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "userspace", "configured_mtu": 1360},
+      "tun": {"mode": "userspace", "configured_mtu": 1280, "tcp_device_mtu": 1280},
       "kernel_migration_status": "blocked_administrator_access"
     },
     {
@@ -179,7 +193,7 @@
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1300}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "la",
@@ -188,7 +202,7 @@
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel"}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
       "node": "btrouter",
@@ -197,10 +211,57 @@
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
       "application_commit": "d91b334a",
-      "tun": {"mode": "kernel", "configured_mtu": 1360}
+      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     }
   ],
   "verification": {
+    "fleet_mtu_unification": {
+      "verified_at": "2026-11-14T16:22:36.940984+00:00",
+      "application_commit": "d91b334a",
+      "retained_instances": 12,
+      "verified_instances": 11,
+      "kernel_interfaces": 10,
+      "userspace_tcp_devices": 1,
+      "effective_mtu": 1280,
+      "configuration_files_changed": 10,
+      "kernel_interface_mtus_changed": 9,
+      "identities_preserved": 11,
+      "other_configuration_preserved": 11,
+      "authenticated_connection_entries": 437,
+      "instances_with_all_three_authenticated_protocols": 11,
+      "keyless_webui_pages": 11,
+      "keyless_api_reads": 11,
+      "foreign_origin_rejections": 11,
+      "full_size_icmp_source": "10.126.126.2",
+      "full_size_ip_bytes": 1280,
+      "full_size_icmp_final_verification_sent": 50,
+      "full_size_icmp_final_verification_received": 50,
+      "full_size_icmp_after_last_restart_sent": 30,
+      "full_size_icmp_after_last_restart_received": 30,
+      "application_bytes_per_host_per_direction": 8388608,
+      "application_hosts": 10,
+      "application_source": "10.126.126.2",
+      "application_source_overrides": {
+        "alibj": "10.126.126.100",
+        "btrouter": "10.126.126.100"
+      },
+      "udp_echo_replies": 150,
+      "udp_full_size_payload_bytes": 1252,
+      "throughput_trials": 74,
+      "throughput_concurrent_icmp_received": 1036,
+      "focused_tests_passed": 3,
+      "caddy_tests_in_separate_processes": 2,
+      "binary_changed": false,
+      "temporary_test_processes_stopped": true,
+      "temporary_runtime_overrides_removed": true,
+      "local_bulk_transfer_limit": "The Mac checks to AliBJ and BTROUTER timed out. Exact transfers and UDP echoes passed from JPaws. The local bulk failures remain unresolved.",
+      "quic_limit": "Outer MTU fell from 1452 to 1200 during slow four-stream trials. This deployment does not repair that fallback.",
+      "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+      "evidence": "benchmark-results/.work/fleet-mtu-20261114/verification.json",
+      "audit": "benchmark-results/.work/fleet-mtu-20261114/audit.jsonl",
+      "summary": "benchmark-results/fleet-mtu-20261114/summary.json",
+      "report": "docs/performance/fleet-mtu-20261114.md"
+    },
     "kernel_endpoint_rollout": {
       "verified_at": "2026-11-14T13:06:59.659598+00:00",
       "application_commit": "d91b334a",

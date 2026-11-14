@@ -18,3 +18,7 @@ Preserve source references, deployment records, and raw measurements for baselin
 Recover a prior baseline from its source or the build service when required.
 
 Evidence and deployment manifests live under benchmark-results/throughput-repair-20260922 and benchmark-results/.work/baseline-deploy-20260922. Raw private configuration files stay outside version control.
+
+The current `lt-` fleet MTU policy is in [the fleet MTU report](fleet-mtu-20261114.md).
+Keep configured and effective MTUs separate when reproducing that baseline.
+Its measurements do not establish the correct MTU for another deployment.

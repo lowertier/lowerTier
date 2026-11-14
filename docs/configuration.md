@@ -65,7 +65,7 @@ Add `--remote NODE` to apply the same commands to another node across the networ
 
 ```bash
 lowertier set relay.policy=latency relay.transit_bps_limit=50Mbit
-lowertier set tun.mtu=1280 --stage
+lowertier set tun.mtu=1300 --stage
 lowertier --remote node-a set relay.policy=latency
 lowertier get relay
 ```
@@ -75,6 +75,35 @@ It checks them every second and applies valid edits.
 An invalid edit keeps the running configuration, and `lowertier get` shows the error.
 A node started with `--set` overrides does not reload its file; restart it instead.
 Run services with explicit files so changes survive a service restart.
+
+## Interface MTU
+
+The configured `tun.mtu` and the effective IP MTU can differ.
+The retained fleet kernel adapters subtract 20 bytes when `l2.bridge = false`.
+The userspace TCP proxy has a fixed MTU of 1280 bytes.
+Its device MTU does not follow `tun.mtu`.
+
+The `lt-` test fleet uses these values on native Linux and macOS:
+
+| Endpoint mode | `tun.mtu`, bytes | Effective IP MTU, bytes |
+| --- | ---: | ---: |
+| Kernel, without Ethernet bridging | 1300 | 1280 |
+| Userspace TCP proxy | 1280 | 1280 |
+
+Verify the kernel interface MTU after the restart.
+Default values can be absent from `lowertier get tun` JSON output.
+An absent `mtu` field means the configured default of 1380 bytes.
+
+The fleet measurements and pending hosts are in the
+[fleet MTU report](performance/fleet-mtu-20261114.md).
+This value does not establish the correct MTU for every network.
+QUIC discovers its outer path MTU independently.
+It splits an overlay packet when that packet exceeds the current DATAGRAM limit.
+Delivery checks must include full-size packets on the actual paths.
+
+Native Ethernet bridging has a separate MTU contract.
+With `l2.bridge = true`, the TAP MTU is at least 1516 bytes.
+See [Ethernet](ethernet.md).
 
 ## Values
 
