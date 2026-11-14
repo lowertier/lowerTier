@@ -2,6 +2,131 @@ use super::*;
 use futures::{FutureExt, Sink, SinkExt};
 
 #[tokio::test]
+async fn explicit_close_drains_admitted_work_and_bounds_a_stalled_flush() {
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+    use tracing_subscriber::layer::SubscriberExt;
+
+    struct FailureLog(Arc<AtomicUsize>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for FailureLog {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().fields().field("error").is_some() {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    let failures = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::Registry::default().with(FailureLog(failures.clone()));
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let sink = futures::sink::unfold(
+        delivered.clone(),
+        |delivered, batch: PacketBatch| async move {
+            delivered.fetch_add(batch.len(), Ordering::Relaxed);
+            Ok::<_, TunnelError>(delivered)
+        },
+    );
+    let sender = DirectTunnelSender {
+        state: DirectSinkState::new(Box::pin(sink), Some(Duration::from_secs(30)), None),
+        send_timeout: Some(Duration::from_secs(30)),
+    };
+    sender
+        .send(ZCPacket::new_with_payload(b"accepted"))
+        .await
+        .unwrap();
+    let mut data = ZCPacket::new_with_payload(b"accepted data");
+    data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+    sender.send(data).await.unwrap();
+    sender.close().await;
+    assert_eq!(delivered.load(Ordering::Acquire), 2);
+
+    struct StalledSink {
+        flushing: Arc<Notify>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Sink<PacketBatch> for StalledSink {
+        type Error = TunnelError;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: PacketBatch) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.flushing.notify_one();
+            Poll::Pending
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.closed.store(true, Ordering::Release);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let flushing = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let state = DirectSinkState::new(
+        Box::pin(StalledSink {
+            flushing: flushing.clone(),
+            closed: closed.clone(),
+        }),
+        Some(Duration::from_secs(30)),
+        None,
+    );
+    let sender = DirectTunnelSender {
+        state,
+        send_timeout: Some(Duration::from_secs(30)),
+    };
+    sender
+        .send(ZCPacket::new_with_payload(b"queued"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), flushing.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        DIRECT_CLOSE_TIMEOUT + Duration::from_secs(1),
+        sender.close(),
+    )
+    .await
+    .expect("shutdown must bound the stalled data flush");
+    assert!(closed.load(Ordering::Acquire));
+    assert!(sender.is_closed());
+    assert_eq!(sender.queue_snapshot().queued_packets, 0);
+    assert!(matches!(
+        sender
+            .send(ZCPacket::new_with_payload(b"after close"))
+            .await,
+        Err(TunnelError::Shutdown)
+    ));
+
+    let failed = futures::sink::unfold((), |(), _: PacketBatch| async {
+        Err::<(), _>(TunnelError::InternalError("test drain failure".into()))
+    });
+    let sender = DirectTunnelSender {
+        state: DirectSinkState::new(Box::pin(failed), Some(Duration::from_secs(30)), None),
+        send_timeout: Some(Duration::from_secs(30)),
+    };
+    sender
+        .send(ZCPacket::new_with_payload(b"drain failure"))
+        .await
+        .unwrap();
+    sender.close().await;
+    assert_eq!(failures.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
 async fn sink_owner_drains_closed_lanes_and_exits() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -25,12 +150,14 @@ async fn sink_owner_drains_closed_lanes_and_exits() {
             sent.fetch_add(batch.len(), Ordering::Relaxed);
             Ok::<_, TunnelError>(sent)
         });
+        let mut sink: BoxedPacketBatchSink = Box::pin(sink);
         let owner = run_direct_sink_owner(
             std::sync::Weak::new(),
-            Box::pin(sink),
+            &mut sink,
             control_rx,
             data_rx,
             Some(Duration::from_secs(1)),
+            CancellationToken::new(),
         );
         tokio::pin!(owner);
         // The closed control lane must drain while the data lane remains open.

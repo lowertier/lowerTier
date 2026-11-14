@@ -1298,6 +1298,16 @@ impl ForeignNetworkManager {
         }
         Err(Error::NotFound)
     }
+
+    pub(crate) async fn close(&self) {
+        let networks: Vec<_> = self
+            .data
+            .network_peer_maps
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        futures::future::join_all(networks.iter().map(|entry| entry.peer_map.close())).await;
+    }
 }
 
 impl Drop for ForeignNetworkManager {

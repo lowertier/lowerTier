@@ -2125,6 +2125,9 @@ impl QuicHybridReader {
                     }
                 }
                 Poll::Ready(Err(error)) => {
+                    if is_clean_quic_close(&error) {
+                        return Poll::Ready(None);
+                    }
                     return Poll::Ready(Some(Err(TunnelError::Anyhow(
                         anyhow::Error::new(error).context("read QUIC DATAGRAM batch failed"),
                     ))));
@@ -2241,6 +2244,14 @@ fn connection_closed_error(error: quinn::ConnectionError, context: &'static str)
     anyhow::Error::new(error).context(context).into()
 }
 
+fn is_clean_quic_close(error: &quinn::ConnectionError) -> bool {
+    matches!(error, quinn::ConnectionError::LocallyClosed)
+        || matches!(
+            error,
+            quinn::ConnectionError::ApplicationClosed(close) if close.error_code == VarInt::from_u32(0)
+        )
+}
+
 const LOWTIER_PACKET_CAPSULE_TYPE: u64 = 0x4554;
 
 fn encode_packet_capsule(packet: ZCPacket) -> Result<Bytes, TunnelError> {
@@ -2303,15 +2314,27 @@ async fn run_http3_reliable_lane(
     connection: Connection,
     mut stream: Box<dyn ConnectIpRequestStream>,
     mut outgoing: mpsc::Receiver<ReliableWriteRequest>,
-    incoming: mpsc::Sender<BatchStreamItem>,
+    incoming: &mut Option<mpsc::Sender<BatchStreamItem>>,
     writer_done: oneshot::Sender<Result<(), TunnelError>>,
 ) -> Result<(), TunnelError> {
     let mut receive_buffer = BytesMut::with_capacity(QUIC_RELIABLE_INITIAL_BUFFER_SIZE);
     let mut outgoing_open = true;
-    let mut incoming_open = true;
     let mut writer_done = Some(writer_done);
     loop {
         tokio::select! {
+            error = connection.closed() => {
+                return if is_clean_quic_close(&error) {
+                    if let Some(done) = writer_done.take() {
+                        let _ = done.send(Ok(()));
+                    }
+                    Ok(())
+                } else {
+                    Err(connection_closed_error(
+                        error,
+                        "QUIC connection closed during CONNECT-IP operation",
+                    ))
+                };
+            }
             request = outgoing.recv(), if outgoing_open => {
                 let Some(request) = request else {
                     outgoing_open = false;
@@ -2320,7 +2343,7 @@ async fn run_http3_reliable_lane(
                         let _ = done.send(result.as_ref().map(|_| ()).map_err(clone_reliable_error));
                     }
                     result?;
-                    if !incoming_open {
+                    if incoming.is_none() {
                         return Ok(());
                     }
                     continue;
@@ -2346,9 +2369,24 @@ async fn run_http3_reliable_lane(
                     return Err(error);
                 }
             }
-            data = stream.recv_data(), if incoming_open => {
-                let Some(data) = data? else {
-                    incoming_open = false;
+            data = stream.recv_data(), if incoming.is_some() => {
+                let data = match data {
+                    Ok(data) => data,
+                    Err(_) if connection.close_reason().as_ref().is_some_and(is_clean_quic_close) => {
+                        if let Some(done) = writer_done.take() {
+                            let _ = done.send(Ok(()));
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let Some(data) = data else {
+                    if !receive_buffer.is_empty() {
+                        return Err(TunnelError::InvalidPacket(
+                            "CONNECT-IP stream ended inside a packet capsule".to_owned(),
+                        ));
+                    }
+                    incoming.take();
                     if !outgoing_open {
                         return Ok(());
                     }
@@ -2363,15 +2401,11 @@ async fn run_http3_reliable_lane(
                 }
                 receive_buffer.extend_from_slice(&data);
                 let batch = decode_packet_capsules(&mut receive_buffer)?;
-                if !batch.is_empty() && incoming.send(Ok(batch)).await.is_err() {
+                if !batch.is_empty()
+                    && incoming.as_ref().unwrap().send(Ok(batch)).await.is_err()
+                {
                     return Ok(());
                 }
-            }
-            error = connection.closed() => {
-                return Err(connection_closed_error(
-                    error,
-                    "QUIC connection closed during CONNECT-IP operation",
-                ));
             }
         }
     }
@@ -2853,15 +2887,18 @@ fn build_connect_ip_tunnel(
     let (writer_done_tx, writer_done_rx) = oneshot::channel();
     let supervisor_connection = connection.conn.clone();
     tokio::spawn(async move {
+        let mut reliable_incoming = Some(reliable_incoming);
         let result = run_http3_reliable_lane(
             supervisor_connection,
             stream,
             reliable_outgoing,
-            reliable_incoming.clone(),
+            &mut reliable_incoming,
             writer_done_tx,
         )
         .await;
-        if let Err(error) = result {
+        if let Err(error) = result
+            && let Some(reliable_incoming) = reliable_incoming
+        {
             send_reliable_lane_error(reliable_incoming, error).await;
         }
     });
@@ -4478,6 +4515,11 @@ mod tests {
                     send.send(packet).await.unwrap();
                     send.flush().await.unwrap();
                 }
+                assert!(recv.next().await.is_none());
+                let mut tail = ZCPacket::new_with_payload(b"reliable reverse tail");
+                tail.fill_peer_manager_hdr(2, 1, PacketType::Ping as u8);
+                send.send(PacketBatch::singleton(tail)).await.unwrap();
+                send.flush().await.unwrap();
                 received_rx.await.unwrap();
                 send.close().await.unwrap();
             });
@@ -4527,6 +4569,14 @@ mod tests {
             }
 
             send.close().await.unwrap();
+            let tail = tokio::time::timeout(Duration::from_secs(2), recv.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .pop_singleton()
+                .unwrap();
+            assert_eq!(tail.payload(), b"reliable reverse tail");
             received_tx.send(()).unwrap();
             server.await.unwrap();
         });

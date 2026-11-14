@@ -12,6 +12,13 @@ One binary does everything: `lowertier run` runs a node, and the other commands 
 | `check -c FILE` | Validate files without starting, reporting every problem at once. |
 | `service install -- ARGS` | Register `lowertier run ARGS` with the system service manager. Also `uninstall`, `status`, `start`, `stop`. |
 
+An interrupt, termination signal, or instance stop closes the peer transports before the daemon releases the instance.
+Connection closure has a three-second deadline.
+WSS sends its close frame and TLS shutdown.
+QUIC ends both CONNECT-IP stream directions.
+An abrupt peer exit or network failure can still produce a receive error.
+The receive error includes the peer ID and connection ID.
+
 ## Look
 
 | Command | Shows |

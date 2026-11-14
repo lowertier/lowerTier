@@ -4163,6 +4163,12 @@ impl PeerConn {
         } else {
             Box::pin(futures::stream::iter(pending_batches).chain(stream))
         };
+        let close_waiter = self.close_event_notifier.get_waiter().await;
+        stream = Box::pin(stream.take_until(async move {
+            if let Some(mut waiter) = close_waiter {
+                let _ = waiter.recv().await;
+            }
+        }));
         let sink = self.sink.clone();
         let sender = packet_recv_chan.clone();
         let close_event_notifier = self.close_event_notifier.clone();
@@ -4266,7 +4272,12 @@ impl PeerConn {
                     let mut incoming = match result {
                         Ok(batch) => batch,
                         Err(error) => {
-                            tracing::error!(?error, "peer conn recv error");
+                            tracing::error!(
+                                ?error,
+                                conn_id = %authenticated_session_id,
+                                peer_id = probe_peer_id,
+                                "peer conn recv error"
+                            );
                             task_ret = Err(error);
                             break;
                         }
@@ -4544,6 +4555,7 @@ impl PeerConn {
                     "end recving peer conn packet"
                 );
 
+                sink.close().await;
                 drop(sink);
                 close_event_notifier.notify_close();
 
@@ -4861,6 +4873,21 @@ impl PeerConn {
         self.close_event_notifier.clone()
     }
 
+    pub(crate) async fn close(&self) {
+        let mut waiter = self.close_event_notifier.get_waiter().await;
+        let _ = timeout(crate::tunnel::direct::DIRECT_CLOSE_TIMEOUT, async {
+            self.sink.close().await;
+            // Stream transports can finish each direction independently.
+            if matches!(self.tunnel_type(), Some("quic" | "h2"))
+                && let Some(waiter) = waiter.as_mut()
+            {
+                let _ = waiter.recv().await;
+            }
+        })
+        .await;
+        self.close_event_notifier.notify_close();
+    }
+
     pub fn get_stats(&self) -> PeerConnStats {
         PeerConnStats {
             latency_us: self.latency_stats.get_latency_us(),
@@ -4997,6 +5024,111 @@ pub mod tests {
     use crate::peers::recv_packet_from_chan;
 
     use crate::tunnel::ring::create_ring_tunnel_pair;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_transport_shutdown_finishes_both_receive_loops() {
+        use crate::tunnel::{
+            TunnelConnector, TunnelListener,
+            quic::{QuicTunnelConnector, QuicTunnelListener},
+            tcp::{TcpTunnelConnector, TcpTunnelListener},
+            websocket::{WsTunnelConnector, WsTunnelListener},
+        };
+
+        for protocol in ["wss", "quic", "h2"] {
+            timeout(Duration::from_secs(8), async {
+                let network = NetworkIdentity::new(
+                    "transport-shutdown".into(),
+                    "transport-shutdown-test-secret".into(),
+                );
+                let client_ctx = get_mock_global_ctx_with_network(Some(network.clone()));
+                let server_ctx = get_mock_global_ctx_with_network(Some(network));
+                set_secure_mode_cfg(&client_ctx, true);
+                set_secure_mode_cfg(&server_ctx, true);
+                let mut flags = client_ctx.get_flags();
+                flags.camouflage_config_mut().admission_secret =
+                    "transport-shutdown-test-secret".into();
+                client_ctx.set_flags(flags.clone());
+                server_ctx.set_flags(flags.clone());
+                let url = format!("{protocol}://127.0.0.1:0").parse().unwrap();
+                let mut listener: Box<dyn TunnelListener> = match protocol {
+                    "quic" => Box::new(QuicTunnelListener::new(url, server_ctx.clone())),
+                    "h2" => {
+                        let mut listener = TcpTunnelListener::new(url);
+                        listener.set_flags(flags.clone());
+                        Box::new(listener)
+                    }
+                    _ => {
+                        let mut listener = WsTunnelListener::new(url);
+                        listener.set_flags(flags.clone());
+                        Box::new(listener)
+                    }
+                };
+                listener.listen().await.unwrap();
+                let url = listener.local_url();
+                let mut connector: Box<dyn TunnelConnector> = match protocol {
+                    "quic" => Box::new(QuicTunnelConnector::new(url, client_ctx.clone())),
+                    "h2" => {
+                        let mut connector = TcpTunnelConnector::new(url);
+                        connector.set_flags(flags);
+                        Box::new(connector)
+                    }
+                    _ => {
+                        let mut connector = WsTunnelConnector::new(url);
+                        connector.set_flags(flags);
+                        Box::new(connector)
+                    }
+                };
+                let (client_tunnel, server_tunnel) =
+                    tokio::join!(connector.connect(), listener.accept());
+                let mut client = PeerConn::new(
+                    1,
+                    client_ctx,
+                    client_tunnel.unwrap(),
+                    Arc::new(PeerSessionStore::new()),
+                );
+                let mut server = PeerConn::new(
+                    2,
+                    server_ctx,
+                    server_tunnel.unwrap(),
+                    Arc::new(PeerSessionStore::new()),
+                );
+                let (client_handshake, server_handshake) = tokio::join!(
+                    client.do_handshake_as_client(),
+                    server.do_handshake_as_server(),
+                );
+                client_handshake.unwrap();
+                server_handshake.unwrap();
+                let (client_tx, _client_rx) = create_packet_recv_chan();
+                let (server_tx, mut server_rx) = create_packet_recv_chan();
+                client.start_recv_loop(client_tx).await;
+                server.start_recv_loop(server_tx).await;
+                client
+                    .send_msg(test_packet(PacketType::Data as u8))
+                    .await
+                    .unwrap();
+                recv_packet_from_chan(&mut server_rx).await.unwrap();
+                let mut remote_closed = server.close_event_notifier.get_waiter().await.unwrap();
+                timeout(Duration::from_secs(2), async {
+                    client.close().await;
+                    let _ = remote_closed.recv().await;
+                    for connection in [&mut client, &mut server] {
+                        while let Some(result) = connection.tasks.join_next().await {
+                            assert!(
+                                result.unwrap().is_ok(),
+                                "{protocol}: receive failed on shutdown"
+                            );
+                        }
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{protocol}: shutdown did not finish before the fallback deadline")
+                });
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{protocol}: transport setup or shutdown timed out"));
+        }
+    }
 
     async fn asymmetric_session_expiry_handshake(retained_by_client: bool) {
         let client_id = 1001;

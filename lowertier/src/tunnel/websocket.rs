@@ -168,13 +168,12 @@ async fn map_from_ws_message(
     msg: Result<Message, tokio_websockets::Error>,
 ) -> Option<Result<ZCPacket, TunnelError>> {
     if let Err(e) = msg {
-        tracing::error!(?e, "recv from websocket error");
         return Some(Err(TunnelError::WebSocketError(e)));
     }
 
     let msg = msg.unwrap();
     if msg.is_close() {
-        tracing::warn!("recv close message from websocket");
+        tracing::debug!("received WebSocket close frame");
         return None;
     }
     if msg.is_ping() || msg.is_pong() {

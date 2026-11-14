@@ -5,11 +5,12 @@ use std::{
     time::Duration,
 };
 
-use futures::future::poll_fn;
+use futures::{FutureExt, future::poll_fn};
 use tokio::{
     sync::{Notify, mpsc, watch},
     time::{Instant, timeout_at},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{
     PacketBatchSink, PacketBatchStream, Tunnel, TunnelError,
@@ -28,6 +29,7 @@ const DIRECT_PACKET_OVERHEAD: usize = std::mem::size_of::<ZCPacket>();
 const MAX_CONSECUTIVE_CONTROL_SENDS: usize = 8;
 // A scalar producer can fill every packet position in the stable job window.
 const DIRECT_INFLIGHT_RUN_CAPACITY: usize = DIRECT_DATA_PACKET_BUDGET;
+pub(crate) const DIRECT_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[cfg(test)]
 mod admission_tests;
@@ -103,10 +105,17 @@ struct DirectSinkState {
     transit_context: OnceLock<std::sync::Weak<crate::common::global_ctx::GlobalCtx>>,
     ownership_budget: Arc<AdmissionBudget>,
     control_budget: Arc<AdmissionBudget>,
-    terminal_error: OnceLock<String>,
+    terminal_error: OnceLock<DirectTerminal>,
     terminal_tx: watch::Sender<()>,
+    shutdown: CancellationToken,
+    closed: CancellationToken,
     control_tx: mpsc::Sender<DirectSendWork>,
     data_tx: mpsc::Sender<DirectSendWork>,
+}
+
+enum DirectTerminal {
+    Shutdown,
+    Failure(String),
 }
 
 struct DirectSendWork {
@@ -174,19 +183,36 @@ impl DirectSinkState {
             )),
             terminal_error: OnceLock::new(),
             terminal_tx,
+            shutdown: CancellationToken::new(),
+            closed: CancellationToken::new(),
             control_tx,
             data_tx,
         });
-        tokio::spawn(run_direct_sink_owner(
-            Arc::downgrade(&state),
-            Box::pin(TransitSink {
+        let owner_state = Arc::downgrade(&state);
+        let shutdown = state.shutdown.clone();
+        let closed = state.closed.clone();
+        tokio::spawn(async move {
+            let mut sink: BoxedPacketBatchSink = Box::pin(TransitSink {
                 inner: sink,
-                state: Arc::downgrade(&state),
-            }),
-            control_rx,
-            data_rx,
-            close_timeout,
-        ));
+                state: owner_state.clone(),
+            });
+            tokio::select! {
+                biased;
+                _ = run_direct_sink_owner(
+                    owner_state, &mut sink, control_rx, data_rx, close_timeout,
+                    shutdown.clone(),
+                ) => {}
+                _ = async {
+                    shutdown.cancelled().await;
+                    tokio::time::sleep(DIRECT_CLOSE_TIMEOUT).await;
+                } => {
+                    tracing::warn!(target: "CORE", "peer transport close timed out");
+                    let _ = poll_fn(|cx| sink.as_mut().poll_close(cx)).now_or_never();
+                }
+            }
+            drop(sink);
+            closed.cancel();
+        });
         state
     }
 }
@@ -341,6 +367,13 @@ impl DirectTunnelSender {
         self.state.terminal_error.get().is_some() || self.state.control_tx.is_closed()
     }
 
+    pub(crate) async fn close(&self) {
+        let _ = self.state.terminal_error.set(DirectTerminal::Shutdown);
+        self.state.shutdown.cancel();
+        self.state.terminal_tx.send_replace(());
+        self.state.closed.cancelled().await;
+    }
+
     pub fn queue_snapshot(&self) -> DirectQueueSnapshot {
         let usage = self.state.ownership_budget.usage.lock();
         let queued_bytes = usage.bytes;
@@ -394,7 +427,7 @@ impl DirectTunnelSender {
         debug_assert!(!batch.is_empty());
 
         let mut terminal = self.state.terminal_tx.subscribe();
-        if self.state.terminal_error.get().is_some() {
+        if self.is_closed() {
             return Err(self.terminal_error());
         }
         let work = DirectSendWork {
@@ -420,13 +453,7 @@ impl DirectTunnelSender {
     }
 
     fn terminal_error(&self) -> TunnelError {
-        TunnelError::InternalError(
-            self.state
-                .terminal_error
-                .get()
-                .cloned()
-                .unwrap_or_else(|| "direct tunnel sink owner stopped".to_owned()),
-        )
+        self.state.terminal_error_value()
     }
 }
 
@@ -504,10 +531,11 @@ async fn accumulate_direct_data_batch(
 
 async fn run_direct_sink_owner(
     state: std::sync::Weak<DirectSinkState>,
-    mut sink: BoxedPacketBatchSink,
+    sink: &mut BoxedPacketBatchSink,
     mut control_rx: mpsc::Receiver<DirectSendWork>,
     mut data_rx: mpsc::Receiver<DirectSendWork>,
     close_timeout: Option<Duration>,
+    shutdown: CancellationToken,
 ) {
     let mut consecutive_control = 0_usize;
     let mut pending_work: Option<(DirectSendWork, bool)> = None;
@@ -515,11 +543,17 @@ async fn run_direct_sink_owner(
     // Only recv() returning None proves that a closed channel has drained.
     let mut control_open = true;
     let mut data_open = true;
+    let mut closing = false;
 
     loop {
+        if !closing && shutdown.is_cancelled() {
+            control_rx.close();
+            data_rx.close();
+            closing = true;
+        }
         debug_assert!(started_ownerships.is_empty());
         if pending_work.is_none() && !control_open && !data_open {
-            close_sink(&mut sink, close_timeout).await;
+            close_sink(sink, close_timeout).await;
             break;
         }
 
@@ -539,6 +573,7 @@ async fn run_direct_sink_owner(
         } else if consecutive_control >= MAX_CONSECUTIVE_CONTROL_SENDS {
             tokio::select! {
                 biased;
+                _ = shutdown.cancelled(), if !closing => continue,
                 work = data_rx.recv(), if data_open => {
                     data_open = work.is_some();
                     work.map(|work| (work, false))
@@ -551,6 +586,7 @@ async fn run_direct_sink_owner(
         } else {
             tokio::select! {
                 biased;
+                _ = shutdown.cancelled(), if !closing => continue,
                 work = control_rx.recv(), if control_open => {
                     control_open = work.is_some();
                     work.map(|work| (work, true))
@@ -564,7 +600,7 @@ async fn run_direct_sink_owner(
 
         let Some((work, control_lane)) = next else {
             if !control_open && !data_open {
-                close_sink(&mut sink, close_timeout).await;
+                close_sink(sink, close_timeout).await;
                 break;
             }
             continue;
@@ -585,7 +621,7 @@ async fn run_direct_sink_owner(
             } = work;
             flush_deadline = deadline;
             started_ownerships.push(ownership);
-            start_direct_batch(&mut sink, batch, deadline).await
+            start_direct_batch(sink, batch, deadline).await
         } else {
             let mut started_packets = 0_usize;
             let mut current = Some(work);
@@ -610,7 +646,7 @@ async fn run_direct_sink_owner(
                     flush_deadline = earliest_deadline(flush_deadline, deadline);
                     started_ownerships.push(ownership);
                     if let Err(message) = accumulate_direct_data_batch(
-                        &mut sink,
+                        sink,
                         &mut pending_batch,
                         &mut pending_batch_deadline,
                         batch,
@@ -649,7 +685,7 @@ async fn run_direct_sink_owner(
 
             if result.is_ok()
                 && let Err(message) = start_pending_direct_batch(
-                    &mut sink,
+                    sink,
                     &mut pending_batch,
                     &mut pending_batch_deadline,
                 )
@@ -665,7 +701,7 @@ async fn run_direct_sink_owner(
             if let Some(state) = state.upgrade() {
                 set_terminal_error(&state, message);
             }
-            close_sink(&mut sink, close_timeout).await;
+            close_sink(sink, close_timeout).await;
             return;
         }
 
@@ -691,7 +727,7 @@ async fn run_direct_sink_owner(
                 if let Some(state) = state.upgrade() {
                     set_terminal_error(&state, message);
                 }
-                close_sink(&mut sink, close_timeout).await;
+                close_sink(sink, close_timeout).await;
                 break;
             }
         }
@@ -865,12 +901,11 @@ fn enable_admission_waiter(waiter: Pin<&mut tokio::sync::futures::Notified<'_>>)
 
 impl DirectSinkState {
     fn terminal_error_value(&self) -> TunnelError {
-        TunnelError::InternalError(
-            self.terminal_error
-                .get()
-                .cloned()
-                .unwrap_or_else(|| "direct tunnel sink owner stopped".to_owned()),
-        )
+        match self.terminal_error.get() {
+            Some(DirectTerminal::Shutdown) => TunnelError::Shutdown,
+            Some(DirectTerminal::Failure(message)) => TunnelError::InternalError(message.clone()),
+            None => TunnelError::InternalError("direct tunnel sink owner stopped".to_owned()),
+        }
     }
 }
 
@@ -887,7 +922,11 @@ where
 }
 
 fn set_terminal_error(state: &DirectSinkState, terminal: String) {
-    if state.terminal_error.set(terminal.clone()).is_ok() {
+    let recorded = state
+        .terminal_error
+        .set(DirectTerminal::Failure(terminal.clone()))
+        .is_ok();
+    if recorded || matches!(state.terminal_error.get(), Some(DirectTerminal::Shutdown)) {
         tracing::warn!(
             target: "CORE",
             error = %terminal,

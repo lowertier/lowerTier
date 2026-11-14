@@ -6688,6 +6688,12 @@ impl PeerManager {
     }
 
     pub async fn clear_resources(&self) {
+        let foreign_peers = self.foreign_network_client.get_peer_map();
+        tokio::join!(
+            self.peers.close(),
+            foreign_peers.close(),
+            self.foreign_network_manager.close(),
+        );
         let mut peer_pipeline = self.peer_packet_process_pipeline.write().await;
         peer_pipeline.clear();
         let mut nic_pipeline = self.nic_packet_process_pipeline.write().await;

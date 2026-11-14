@@ -406,12 +406,23 @@ impl Peer {
     }
 
     pub async fn close_peer_conn(&self, conn_id: &PeerConnId) -> Result<(), Error> {
-        let has_key = self.conns.contains_key(conn_id);
-        if !has_key {
-            return Err(Error::NotFound);
-        }
+        let conn = self
+            .conns
+            .get(conn_id)
+            .map(|entry| entry.value().clone())
+            .ok_or(Error::NotFound)?;
+        conn.close().await;
         self.close_event_sender.send(*conn_id).await.unwrap();
         Ok(())
+    }
+
+    pub(crate) async fn close(&self) {
+        let conns: Vec<_> = self
+            .conns
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        futures::future::join_all(conns.iter().map(|conn| conn.close())).await;
     }
 
     pub async fn list_peer_conns(&self) -> Vec<PeerConnInfo> {

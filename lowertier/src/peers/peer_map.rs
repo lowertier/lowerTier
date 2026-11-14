@@ -1876,6 +1876,15 @@ impl PeerMap {
         self.peer_map.is_empty()
     }
 
+    pub(crate) async fn close(&self) {
+        let peers: Vec<_> = self
+            .peer_map
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        futures::future::join_all(peers.iter().map(|peer| peer.close())).await;
+    }
+
     pub fn list_peers(&self) -> Vec<PeerId> {
         let mut ret = Vec::new();
         for item in self.peer_map.iter() {

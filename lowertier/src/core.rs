@@ -251,7 +251,6 @@ async fn run_main(options: RunOptions) -> anyhow::Result<()> {
 
     tokio::select! {
         _ = manager.process_restart.notified() => {
-            for id in manager.list_network_instance_ids() { manager.stop_network_instance(id).await?; }
             log::info!("Restarting the process to apply persisted configuration");
         }
         _ = manager.wait() => {
@@ -269,6 +268,9 @@ async fn run_main(options: RunOptions) -> anyhow::Result<()> {
         _ = sigterm, if cfg!(unix) => {
             log::warn!("terminate signal received, exiting...");
         }
+    }
+    for id in manager.list_network_instance_ids() {
+        manager.stop_network_instance(id).await?;
     }
     Ok(())
 }
