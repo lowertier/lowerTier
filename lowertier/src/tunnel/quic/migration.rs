@@ -473,7 +473,7 @@ pub(super) fn observe_network_changes(manager: &Arc<QuicEndpointManager>, ctx: &
                 _ = retry.tick() => {}
                 event = events.recv() => {
                     match event {
-                        Ok(crate::common::global_ctx::GlobalCtxEvent::ConfigPatched(_))
+                        Ok(crate::common::global_ctx::GlobalCtxEvent::ConfigPatched)
                         | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Ok(_) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

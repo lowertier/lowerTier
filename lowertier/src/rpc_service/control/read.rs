@@ -75,7 +75,14 @@ pub(super) fn apply_log_level(value: &str) -> anyhow::Result<()> {
                     "log.console",
                 )
             })?
-            .send(value.to_owned())?;
+            .send(value.to_owned())
+            .map_err(|_| {
+                failure(
+                    "UNAVAILABLE",
+                    "The log reloader is not available.",
+                    "log.console",
+                )
+            })?;
     }
     logs::set_level(value.parse()?);
     *crate::rpc_service::logger::CURRENT_LOG_LEVEL

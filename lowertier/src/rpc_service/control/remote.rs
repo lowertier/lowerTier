@@ -614,7 +614,8 @@ impl Endpoint {
         service.externally_locked = true;
         let mut response = service
             .json_call_method(BaseController::default(), &operation.method, payload)
-            .await?;
+            .await
+            .map_err(|error| super::Failure(ApiError::from(error)))?;
         if operation.method == "ListInstances"
             && !target_policy.full_access(&key, network_member, target_secret)
             && !target_policy.permits(
@@ -1147,6 +1148,17 @@ stun_tcp = []
         let stale: Value = serde_json::from_slice(&stale.payload).unwrap();
         assert_eq!(stale["error"]["code"], "conflict");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), stored);
+
+        let malformed = service
+            .call_remote_inner(
+                BaseController::default(),
+                request("ListPeers", json!({"page": 7}), ""),
+            )
+            .await
+            .unwrap();
+        let malformed: Value = serde_json::from_slice(&malformed.payload).unwrap();
+        assert_eq!(malformed["error"]["code"], "invalid_argument");
+        assert_eq!(malformed["error"]["field_path"], "body");
 
         #[cfg(unix)]
         {

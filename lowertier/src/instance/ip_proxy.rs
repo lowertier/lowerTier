@@ -104,7 +104,11 @@ mod protocol_memory_tests {
     fn fixture(no_tun: bool) -> (Arc<PeerManager>, IpProxy) {
         let config = TomlConfigLoader::default();
         let mut flags = config.get_flags();
-        flags.no_tun = no_tun;
+        flags.tun_mode = if no_tun {
+            crate::common::config::TunMode::None
+        } else {
+            crate::common::config::TunMode::Kernel
+        } as i32;
         config.set_flags(flags);
         let ctx = Arc::new(GlobalCtx::new(config));
         let (sender, _receiver) = create_packet_recv_chan();

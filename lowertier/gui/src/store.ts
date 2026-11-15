@@ -2,7 +2,7 @@
 import { createSignal } from "solid-js";
 import { api, ApiError, setTarget, type Doc } from "./api";
 import { configured } from "./config";
-import { ipv4 } from "./format";
+import { ipv4, numeric } from "./format";
 import { currentIncarnations } from "./incarnations";
 import { aliasFor } from "./notes";
 import { disambiguatePeerNames, sanitizeHops, selectViaPeerId } from "./routeLoops";
@@ -70,7 +70,7 @@ function push(ring: number[], value: number) {
   ring.push(value);
 }
 
-let previous: { at: number; counters: Map<string, { rx: number; tx: number }> } | null = null;
+let previous: { at: number; counters: Map<string, { rx: bigint; tx: bigint }> } | null = null;
 
 function median(values: number[]): number | undefined {
   if (!values.length) return undefined;
@@ -80,7 +80,7 @@ function median(values: number[]): number | undefined {
 
 function ingest(doc: Doc) {
   const at = doc.sampled_at_unix_ms ?? Date.now();
-  const counters = new Map<string, { rx: number; tx: number }>();
+  const counters = new Map<string, { rx: bigint; tx: bigint }>();
   const elapsed = previous ? Math.max(0.2, (at - previous.at) / 1000) : 0;
   const rows: PeerRow[] = [];
   const selfNode = doc.node?.node ?? {};
@@ -105,14 +105,15 @@ function ingest(doc: Doc) {
     for (const conn of conns) {
       const stats = conn.stats ?? {};
       const id = `${peer.peer_id}/${conn.conn_id}`;
-      const current = { rx: stats.rx_bytes ?? 0, tx: stats.tx_bytes ?? 0 };
+      // Subtract exact counters before display conversion. A reset contributes no transferred bytes.
+      const current = { rx: BigInt(stats.rx_bytes ?? 0), tx: BigInt(stats.tx_bytes ?? 0) };
       counters.set(id, current);
-      rxTotal += current.rx;
-      txTotal += current.tx;
+      rxTotal += Number(current.rx);
+      txTotal += Number(current.tx);
       const before = previous?.counters.get(id);
       if (before && elapsed) {
-        rx += (Math.max(0, current.rx - before.rx) * 8) / elapsed;
-        tx += (Math.max(0, current.tx - before.tx) * 8) / elapsed;
+        rx += (Number(current.rx > before.rx ? current.rx - before.rx : 0n) * 8) / elapsed;
+        tx += (Number(current.tx > before.tx ? current.tx - before.tx : 0n) * 8) / elapsed;
       }
     }
     const lossFromConns = conns
@@ -143,9 +144,9 @@ function ingest(doc: Doc) {
       transport: conns[0]?.tunnel?.tunnel_type ?? "",
       via,
       hops,
-      rtt: peer.rtt_us ?? (direct ? conns[0]?.stats?.latency_us : undefined),
+      rtt: numeric(peer.rtt_us ?? (direct ? conns[0]?.stats?.latency_us : undefined)),
       loss: peer.loss_ppm ?? (lossFromConns.length ? Math.max(...lossFromConns) : undefined),
-      delivery: peer.delivery_bps,
+      delivery: numeric(peer.delivery_bps),
       rx,
       tx,
       rxTotal,

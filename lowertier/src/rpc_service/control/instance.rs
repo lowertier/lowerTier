@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
 use crate::{
-    common::global_ctx::GlobalCtx, instance::instance::InstanceConfigPatcher,
+    common::global_ctx::GlobalCtx, connector::manual::ManualConnectorManager,
     peers::peer_manager::PeerManager, proto::api::instance::PeerInfo,
 };
 
@@ -9,7 +9,7 @@ use crate::{
 pub struct ControlInstance {
     pub peer_manager: Weak<PeerManager>,
     pub global_ctx: Weak<GlobalCtx>,
-    pub patcher: InstanceConfigPatcher,
+    pub(crate) conn_manager: Weak<ManualConnectorManager>,
 }
 
 impl ControlInstance {
@@ -58,6 +58,11 @@ impl ControlInstance {
 
     pub fn peers(&self) -> anyhow::Result<Arc<PeerManager>> {
         crate::utils::weak_upgrade(&self.peer_manager)
+    }
+
+    /// Return the live connector manager, or fail if the instance has stopped.
+    pub(crate) fn connectors(&self) -> anyhow::Result<Arc<ManualConnectorManager>> {
+        crate::utils::weak_upgrade(&self.conn_manager)
     }
 
     pub fn context(&self) -> anyhow::Result<Arc<GlobalCtx>> {

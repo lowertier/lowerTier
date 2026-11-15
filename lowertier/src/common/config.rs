@@ -33,6 +33,7 @@ use super::control_config::{CamouflageConfig, RelayConfig};
 use super::env_parser;
 
 pub type Flags = crate::proto::common::FlagsInConfig;
+pub use crate::proto::common::flags_in_config::{P2pMode, TunMode};
 
 pub fn gen_default_flags() -> Flags {
     Flags {
@@ -43,23 +44,19 @@ pub fn gen_default_flags() -> Flags {
         mtu: 1380,
         enable_exit_node: false,
         proxy_forward_by_system: false,
-        no_tun: false,
-        use_smoltcp: false,
-        disable_p2p: false,
-        lazy_p2p: false,
+        tun_mode: TunMode::Kernel as i32,
+        p2p_mode: P2pMode::On as i32,
         relay_all_peer_rpc: false,
         disable_tcp_hole_punching: false,
         disable_udp_hole_punching: false,
-        multi_thread: true,
+        threads: 2,
         bind_device: true,
         accept_dns: false,
         private_mode: false,
-        multi_thread_count: 2,
         encryption_algorithm: EncryptionAlgorithm::default().to_string(),
         disable_sym_hole_punching: false,
         tld_dns_zone: DEFAULT_DNS_ZONE.to_string(),
 
-        need_p2p: false,
         enable_udp_broadcast_relay: false,
         socket_mark: None,
         underlay_deny_interfaces: Vec::new(),
@@ -121,6 +118,9 @@ pub fn validate_flags_with_network_secret(
     flags: &Flags,
     has_network_secret: bool,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(flags.threads >= 1, "node.threads must be at least 1");
+    TunMode::try_from(flags.tun_mode).map_err(|_| anyhow::anyhow!("tun.mode is invalid"))?;
+    P2pMode::try_from(flags.p2p_mode).map_err(|_| anyhow::anyhow!("nat.p2p is invalid"))?;
     anyhow::ensure!(
         flags
             .memory_bytes()
@@ -1016,6 +1016,26 @@ impl From<crate::proto::common::PathRule> for TomlPathRule {
     }
 }
 
+/// Read supplied flag fields over application defaults without retaining a second flag map.
+///
+/// Explicit zero and false values replace defaults. Missing fields keep application defaults.
+/// Generated protobuf flag serializers always produce a JSON object.
+fn deserialize_flags<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Flags, D::Error> {
+    let supplied = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+    let mut defaults =
+        serde_json::to_value(gen_default_flags()).map_err(serde::de::Error::custom)?;
+    defaults
+        .as_object_mut()
+        .expect("protobuf flags serialize as an object")
+        .extend(supplied);
+    serde_json::from_value(defaults).map_err(serde::de::Error::custom)
+}
+
+/// Serialize only values that differ from application defaults.
+fn serialize_flags<S: serde::Serializer>(flags: &Flags, serializer: S) -> Result<S::Ok, S::Error> {
+    flags_diff_from_default(flags).serialize(serializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
     enabled: Option<bool>,
@@ -1057,10 +1077,12 @@ struct Config {
 
     secure_mode: Option<SecureModeConfig>,
 
-    flags: Option<serde_json::Map<String, serde_json::Value>>,
-
-    #[serde(skip)]
-    flags_struct: Option<Flags>,
+    #[serde(
+        default = "gen_default_flags",
+        deserialize_with = "deserialize_flags",
+        serialize_with = "serialize_flags"
+    )]
+    flags: Flags,
 
     acl: Option<Acl>,
 
@@ -1335,8 +1357,7 @@ impl TomlConfigLoader {
             secure_mode.enabled = true;
             secure_mode.local_private_key = Some(key);
         }
-        let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
-            .map_err(|error| anyhow::anyhow!("failed to parse flags: {error}"))?;
+        let mut flags = config.flags.clone();
         flags.relay = config.relay.clone();
         flags.camouflage = config.camouflage.clone();
         flags.limits = config.limits.clone();
@@ -1378,23 +1399,18 @@ impl TomlConfigLoader {
         for peer in config.peer.iter().flatten() {
             ensure_transport_protocol_enabled(&flags, peer.uri.scheme())?;
         }
-        config.flags_struct = Some(flags);
+        config.flags = flags;
         config.secure_mode = config
             .secure_mode
             .map(process_secure_mode_cfg)
             .transpose()
             .context("failed to configure secure mode")?;
-        config
-            .flags_struct
-            .as_ref()
-            .unwrap()
-            .relay_config()
-            .validate_local_key(
-                config
-                    .secure_mode
-                    .as_ref()
-                    .and_then(|mode| mode.local_public_key.as_deref()),
-            )?;
+        config.flags.relay_config().validate_local_key(
+            config
+                .secure_mode
+                .as_ref()
+                .and_then(|mode| mode.local_public_key.as_deref()),
+        )?;
         let has_network_identity = config.network_identity.is_some();
 
         if config
@@ -1469,17 +1485,6 @@ impl TomlConfigLoader {
         }
 
         Ok(config)
-    }
-
-    fn gen_flags(
-        flags_hashmap: serde_json::Map<String, serde_json::Value>,
-    ) -> serde_json::Result<Flags> {
-        let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
-            Ok(serde_json::Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
-        };
-        merged_hashmap.extend(flags_hashmap);
-        serde_json::from_value(serde_json::Value::Object(merged_hashmap))
     }
 }
 
@@ -1778,16 +1783,11 @@ impl ConfigLoader for TomlConfigLoader {
     }
 
     fn get_flags(&self) -> Flags {
-        self.config
-            .lock()
-            .unwrap()
-            .flags_struct
-            .clone()
-            .unwrap_or_default()
+        self.config.lock().unwrap().flags.clone()
     }
 
     fn set_flags(&self, flags: Flags) {
-        self.config.lock().unwrap().flags_struct = Some(flags);
+        self.config.lock().unwrap().flags = flags;
     }
 
     fn get_routes(&self) -> Option<Vec<cidr::Ipv4Cidr>> {
@@ -1903,8 +1903,7 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn dump(&self) -> String {
         let mut config = self.config.lock().unwrap().clone();
-        let flags = self.get_flags();
-        config.flags = Some(flags_diff_from_default(&flags));
+        let flags = &config.flags;
         config.relay = flags.relay.clone();
         config.camouflage = flags.camouflage.clone();
         config.limits = flags.limits.clone();
@@ -2313,7 +2312,7 @@ socket_mark = 66
         assert_eq!(cfg.get_flags().socket_mark, Some(66));
 
         // set_flags(None) must serialize back through gen_config without
-        // resurrecting a value (guards the gen_flags merge against dropping
+        // resurrecting a value (guards the flag default merge against dropping
         // the key when the serialized default is null).
         cfg.set_flags(Flags {
             socket_mark: None,
@@ -2475,7 +2474,7 @@ receive_window = 33554432
         flags.dev_name = "lt_test".to_string();
         flags.disable_tcp_hole_punching = true;
         flags.disable_sym_hole_punching = true;
-        flags.multi_thread = false;
+        flags.threads = 1;
         flags.bind_device = false;
         flags.enable_ipv6 = false;
         flags.relay_config_mut().transit_networks = ("".to_string())
@@ -2502,7 +2501,7 @@ receive_window = 33554432
         assert_eq!(reloaded_flags.dev_name, "lt_test");
         assert!(reloaded_flags.disable_tcp_hole_punching);
         assert!(reloaded_flags.disable_sym_hole_punching);
-        assert!(!reloaded_flags.multi_thread);
+        assert_eq!(reloaded_flags.threads, 1);
         assert!(!reloaded_flags.bind_device);
         assert!(!reloaded_flags.enable_ipv6);
         assert!(reloaded_flags.relay_config().transit_networks.is_empty());
@@ -3331,10 +3330,7 @@ mtu = ${MTU_VALUE}
         // 验证数字值被正确解析
         let flags = config.get_flags();
         assert_eq!(flags.mtu, 1400, "mtu should be 1400");
-        assert_eq!(
-            flags.multi_thread_count, 4,
-            "multi_thread_count should be 4"
-        );
+        assert_eq!(flags.threads, 4, "threads should be 4");
 
         // 验证使用环境变量的配置被标记为只读
         assert!(control.is_read_only());

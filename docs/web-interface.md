@@ -102,7 +102,11 @@ The overlay's SOCKS5 and HTTP proxies cannot connect to loopback listeners, so p
 
 ## API
 
-Requests and responses are TOML in the same layout as the configuration file.
+Requests and responses use JSON with `Content-Type: application/json`.
+RPC messages use generated protobuf JSON.
+Protobuf 64-bit integers are decimal strings. Default fields can be absent.
+HTTP envelope fields, including sample times and the top-level configuration revision, remain JSON numbers.
+Configuration editor documents retain TOML syntax.
 
 | Request | Returns or does |
 | --- | --- |
@@ -110,22 +114,21 @@ Requests and responses are TOML in the same layout as the configuration file.
 | `GET /api/schema` | The option registry: path, type, values, default, and when a change applies. |
 | `GET /api/snapshot` | Node, peers, routes, relay, discovery, and listeners in one sample. |
 | `GET /api/config` | Active and staged configuration and options waiting for a restart. |
-| `POST /api/config` | Apply `[set]` values keyed by option path and a `clear` list. `stage = true` stores restart-class options. |
+| `POST /api/config` | Apply `set` values keyed by option path and a `clear` list. `stage: true` stores restart-class options. |
 | `POST /api/rpc/<Method>` | Any Control API method by protobuf name, for example `ReadLogs`. |
 
 Add `?node=<portal or name>` and `?instance=<name>` when using `lowertier gui` to address another daemon or instance on the same machine.
 Add `?remote=<alias, key, or default>` (and optionally `?via_instance=<local instance>`) to forward the request to another node over an end-to-end Noise control session. Pass the remote control phrase in the `x-lowertier-remote-secret` header when the remote node uses `control.secret`.
 
 ```bash
-curl -s -H "x-lowertier-key: $KEY" -X POST --data-binary @- \
-  http://127.0.0.1:15880/api/config <<'TOML'
-stage = true
-[set]
-"relay.policy" = "latency"
-TOML
+curl -s -H "x-lowertier-key: $KEY" -H "Content-Type: application/json" \
+  -X POST --data-binary @- http://127.0.0.1:15880/api/config <<'JSON'
+{"stage": true, "set": {"relay.policy": "latency"}}
+JSON
 ```
 
-Quote dotted keys in `[set]` to keep the exact path. `"acl.tcp_ports" = ["22"]` changes only that list; setting `acl` replaces the whole table.
+Use dotted keys in `set` to keep the exact path.
+`"acl.tcp_ports": ["22"]` changes only that list. Setting `acl` replaces the whole table.
 
 `CreateJoinCode` needs a loopback or in-process control channel, or the `admin` grant for remote callers.
 A loopback caller with the control token may also list, issue, and revoke credentials without `--admin-token`.

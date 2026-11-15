@@ -1,12 +1,10 @@
 use super::{
     FromUrl, IpVersion, TransportBinding, TransportBindingKind, Tunnel, TunnelConnector,
     TunnelError, TunnelListener,
-    common::{TunnelWrapper, wait_for_connect_futures},
+    common::TunnelWrapper,
     packet_def::{ZCPacket, ZCPacketType},
 };
-use crate::tunnel::common::{
-    bind, eligible_bind_addrs, ensure_local_allowed, ensure_remote_allowed,
-};
+use crate::tunnel::common::{bind, ensure_local_allowed, ensure_remote_allowed};
 use crate::{common::underlay_policy::UnderlayPolicy, proto::common::TunnelInfo};
 use anyhow::Context;
 use forwarded_header_value::ForwardedHeaderValue;
@@ -41,9 +39,9 @@ const WSS_TRANSPORT_BINDING_LABEL: &[u8] = b"EXPORTER-LowTier-Wss-PeerConn-v1";
 const WSS_TRANSPORT_BINDING_CONTEXT: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256|peerconn-v3|wss";
 const WS_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 
-fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
+fn ensure_wss(addr: &url::Url) -> Result<(), TunnelError> {
     match addr.scheme() {
-        "wss" => Ok(true),
+        "wss" => Ok(()),
         _ => Err(TunnelError::InvalidProtocol(addr.scheme().to_string())),
     }
 }
@@ -327,31 +325,36 @@ impl WsTunnelListener {
         listener.try_accept(stream).await
     }
 
+    /// Accept TLS before WebSocket admission and retain its exporter binding.
+    ///
+    /// Unsupported schemes and missing TLS configuration fail before WebSocket setup.
     async fn try_accept(&self, stream: TcpStream) -> Result<Box<dyn Tunnel>, TunnelError> {
         let peer_addr = stream.peer_addr()?;
         let stream = super::tcp_socket::prepare(stream);
-        if is_wss(&self.addr)? {
-            let acceptor = self.tls_acceptor.as_ref().ok_or_else(|| {
-                TunnelError::InternalError("WSS listener has no TLS acceptor".to_string())
-            })?;
-            let stream = acceptor.accept(stream).await?;
-            let binding = derive_wss_binding(|output| {
-                stream
-                    .get_ref()
-                    .1
-                    .export_keying_material(
-                        output,
-                        WSS_TRANSPORT_BINDING_LABEL,
-                        Some(WSS_TRANSPORT_BINDING_CONTEXT),
-                    )
-                    .map(|_| ())
-            })?;
-            self.accept_stream(stream, Some(binding), peer_addr).await
-        } else {
-            self.accept_stream(stream, None, peer_addr).await
-        }
+        ensure_wss(&self.addr)?;
+        let acceptor = self.tls_acceptor.as_ref().ok_or_else(|| {
+            TunnelError::InternalError("WSS listener has no TLS acceptor".to_string())
+        })?;
+        let stream = acceptor.accept(stream).await?;
+        let binding = derive_wss_binding(|output| {
+            stream
+                .get_ref()
+                .1
+                .export_keying_material(
+                    output,
+                    WSS_TRANSPORT_BINDING_LABEL,
+                    Some(WSS_TRANSPORT_BINDING_CONTEXT),
+                )
+                .map(|_| ())
+        })?;
+        self.accept_stream(stream, Some(binding), peer_addr).await
     }
 
+    /// Admit a WebSocket request and select direct framing or CDN inner TLS.
+    ///
+    /// Reject wrong paths, invalid admission proofs, and missing CDN subprotocols before upgrade.
+    /// Forwarded addresses apply only to configured trusted proxy source CIDRs.
+    /// CDN connections derive their binding from inner TLS. Direct connections retain the supplied TLS binding.
     async fn accept_stream<S>(
         &self,
         stream: S,
@@ -484,9 +487,8 @@ impl TunnelListener for WsTunnelListener {
         self.addr
             .set_port(Some(listener.local_addr()?.port()))
             .unwrap();
-        if is_wss(&self.addr)? {
-            self.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config(&self.flags)?)));
-        }
+        ensure_wss(&self.addr)?;
+        self.tls_acceptor = Some(TlsAcceptor::from(Arc::new(wss_server_config(&self.flags)?)));
         self.listener = Some(listener);
 
         Ok(())
@@ -542,28 +544,20 @@ impl TunnelListener for WsTunnelListener {
     }
 }
 
+/// WSS connector with shared TCP dialing and exporter-bound transport setup.
 pub struct WsTunnelConnector {
     addr: url::Url,
     flags: crate::common::config::Flags,
-    ip_version: IpVersion,
-    resolved_addr: Option<SocketAddr>,
-
-    bind_addrs: Vec<SocketAddr>,
-    socket_mark: Option<u32>,
-    underlay_policy: Arc<UnderlayPolicy>,
+    dialer: super::tcp_dial::TcpDialer,
 }
 
 impl WsTunnelConnector {
+    /// Use application defaults until the instance supplies its validated flags.
     pub fn new(addr: url::Url) -> Self {
-        WsTunnelConnector {
+        Self {
             addr,
             flags: crate::common::config::gen_default_flags(),
-            ip_version: IpVersion::Both,
-            resolved_addr: None,
-
-            bind_addrs: vec![],
-            socket_mark: None,
-            underlay_policy: Arc::new(UnderlayPolicy::default()),
+            dialer: Default::default(),
         }
     }
 
@@ -571,18 +565,12 @@ impl WsTunnelConnector {
         self.flags = flags;
     }
 
-    async fn connect_with(
-        addr: url::Url,
-        socket_addr: SocketAddr,
-        tcp_socket: TcpSocket,
-        underlay_policy: Arc<UnderlayPolicy>,
-        flags: crate::common::config::Flags,
-    ) -> Result<Box<dyn Tunnel>, TunnelError> {
-        super::common::size_tcp_socket_buffers(&socket2::SockRef::from(&tcp_socket));
-        let stream = tcp_socket.connect(socket_addr).await?;
-        Self::connect_punched(stream, addr, underlay_policy, None, flags).await
-    }
-
+    /// Complete WSS setup on an existing TCP socket, including a punched socket.
+    ///
+    /// Check the local address inside the supplied namespace, then check the remote address.
+    /// Direct WSS uses configured SNI and the outer TLS exporter.
+    /// CDN WSS verifies outer TLS certificates and derives its peer binding from inner TLS.
+    /// A failed TCP_NODELAY setting is logged because it affects latency, not authentication.
     pub(crate) async fn connect_punched(
         stream: TcpStream,
         addr: url::Url,
@@ -591,7 +579,7 @@ impl WsTunnelConnector {
         flags: crate::common::config::Flags,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         let addr = effective_wss_url(addr, &flags);
-        let is_wss = is_wss(&addr)?;
+        ensure_wss(&addr)?;
         let socket_addr = stream.peer_addr()?;
         {
             let _guard = net_ns.map(|namespace| namespace.guard());
@@ -616,41 +604,41 @@ impl WsTunnelConnector {
         };
 
         let stream = super::tcp_socket::prepare(stream);
-        if is_wss {
-            let via_cdn = ws_via_cdn(&addr);
-            let name = match flags.camouflage_config().server_name_for(socket_addr.ip()) {
-                Some(name) if !via_cdn => name,
-                _ => super::stealth_tls::url_dns_host(&addr)
-                    .unwrap_or(crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME),
-            };
-            let stream =
-                super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
-            let binding = if via_cdn {
-                None
-            } else {
-                let mut bytes = [0; 32];
-                stream
-                    .get_ref()
-                    .1
-                    .export_keying_material(
-                        &mut bytes,
-                        WSS_TRANSPORT_BINDING_LABEL,
-                        Some(WSS_TRANSPORT_BINDING_CONTEXT),
-                    )
-                    .map_err(|error| {
-                        TunnelError::InternalError(format!("derive WSS transport binding: {error}"))
-                    })?;
-                Some(TransportBinding {
-                    kind: TransportBindingKind::WssTlsExporterV1,
-                    bytes,
-                })
-            };
-            Self::connect_stream(&addr, stream, info, binding, &flags).await
+        let via_cdn = ws_via_cdn(&addr);
+        let name = match flags.camouflage_config().server_name_for(socket_addr.ip()) {
+            Some(name) if !via_cdn => name,
+            _ => super::stealth_tls::url_dns_host(&addr)
+                .unwrap_or(crate::common::control_config::DEFAULT_CAMOUFLAGE_SERVER_NAME),
+        };
+        let stream = super::browser_tls::connect(stream, name, &[HTTP_1_1_ALPN], via_cdn).await?;
+        let binding = if via_cdn {
+            None
         } else {
-            Self::connect_stream(&addr, stream, info, None, &flags).await
-        }
+            let mut bytes = [0; 32];
+            stream
+                .get_ref()
+                .1
+                .export_keying_material(
+                    &mut bytes,
+                    WSS_TRANSPORT_BINDING_LABEL,
+                    Some(WSS_TRANSPORT_BINDING_CONTEXT),
+                )
+                .map_err(|error| {
+                    TunnelError::InternalError(format!("derive WSS transport binding: {error}"))
+                })?;
+            Some(TransportBinding {
+                kind: TransportBindingKind::WssTlsExporterV1,
+                bytes,
+            })
+        };
+        Self::connect_stream(&addr, stream, info, binding, &flags).await
     }
 
+    /// Send the WebSocket upgrade and select its authenticated packet framing.
+    ///
+    /// Explicit HTTP authority overrides the URL authority.
+    /// Direct IP URLs otherwise use the configured camouflage server name.
+    /// CDN responses must select the inner TLS subprotocol before peer setup can continue.
     async fn connect_stream<S>(
         addr: &url::Url,
         stream: S,
@@ -718,86 +706,22 @@ impl WsTunnelConnector {
             binding,
         )))
     }
-
-    async fn connect_with_default_bind(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        let socket = if addr.is_ipv4() {
-            TcpSocket::new_v4()?
-        } else {
-            TcpSocket::new_v6()?
-        };
-        crate::tunnel::common::apply_socket_mark(
-            &socket2::SockRef::from(&socket),
-            self.socket_mark,
-        )?;
-        Self::connect_with(
-            self.addr.clone(),
-            addr,
-            socket,
-            self.underlay_policy.clone(),
-            self.flags.clone(),
-        )
-        .await
-    }
-
-    async fn connect_with_custom_bind(
-        &self,
-        addr: SocketAddr,
-        bind_addrs: &[SocketAddr],
-    ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        let futures = FuturesUnordered::new();
-
-        for bind_addr in bind_addrs {
-            tracing::info!(?bind_addr, ?addr, "bind addr");
-            match bind()
-                .addr(*bind_addr)
-                .only_v6(true)
-                .maybe_socket_mark(self.socket_mark)
-                .call()
-            {
-                Ok(socket) => futures.push(Self::connect_with(
-                    self.addr.clone(),
-                    addr,
-                    socket,
-                    self.underlay_policy.clone(),
-                    self.flags.clone(),
-                )),
-                Err(error) => {
-                    tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
-                    continue;
-                }
-            }
-        }
-
-        wait_for_connect_futures(futures).await
-    }
 }
 
 #[async_trait::async_trait]
 impl TunnelConnector for WsTunnelConnector {
     async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let addr = match self.resolved_addr {
-            Some(addr) => addr,
-            None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
-        };
-        ensure_remote_allowed(&self.underlay_policy, addr)?;
-        let bind_addrs = eligible_bind_addrs(&self.underlay_policy, &self.bind_addrs, addr)?;
-        let connect_lane = || async {
-            if bind_addrs.is_empty() {
-                self.connect_with_default_bind(addr).await
-            } else {
-                self.connect_with_custom_bind(addr, &bind_addrs).await
-            }
-        };
-        {
-            let count = super::tcp_lanes::requested(&self.addr)?;
-            if count > 1 {
-                return super::tcp_lanes::connect(count, connect_lane).await;
-            }
-        }
-        connect_lane().await
+        self.dialer
+            .connect(&self.addr, |stream| {
+                Self::connect_punched(
+                    stream,
+                    self.addr.clone(),
+                    self.dialer.underlay_policy.clone(),
+                    None,
+                    self.flags.clone(),
+                )
+            })
+            .await
     }
 
     fn remote_url(&self) -> url::Url {
@@ -805,23 +729,23 @@ impl TunnelConnector for WsTunnelConnector {
     }
 
     fn set_ip_version(&mut self, ip_version: IpVersion) {
-        self.ip_version = ip_version;
+        self.dialer.ip_version = ip_version;
     }
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
-        self.bind_addrs = addrs;
+        self.dialer.bind_addrs = addrs;
     }
 
     fn set_resolved_addr(&mut self, addr: SocketAddr) {
-        self.resolved_addr = Some(addr);
+        self.dialer.resolved_addr = Some(addr);
     }
 
     fn set_underlay_policy(&mut self, policy: Arc<UnderlayPolicy>) {
-        self.underlay_policy = policy;
+        self.dialer.underlay_policy = policy;
     }
 
     fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
-        self.socket_mark = socket_mark;
+        self.dialer.socket_mark = socket_mark;
     }
 }
 

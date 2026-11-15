@@ -2,6 +2,23 @@ import type { Doc } from "./api";
 
 export const NONE = "–";
 
+export type Numeric = number | string;
+
+/** Convert protobuf integer strings only when a display needs a number. */
+export function numeric(value?: Numeric | null): number | undefined {
+  return value == null ? undefined : Number(value);
+}
+
+/**
+ * Sum integer counters exactly. Convert counts to numbers only for the display ratio.
+ * Zero totals produce zero shares.
+ */
+export function counterShares(counters: readonly Numeric[]): number[] {
+  const counts = counters.map((value) => BigInt(value));
+  const total = counts.reduce((sum, value) => sum + value, 0n);
+  return counts.map((value) => (total === 0n ? 0 : Number(value) / Number(total)));
+}
+
 export function ipv4(inet?: Doc): string {
   const address = inet?.address?.addr;
   if (typeof address !== "number") return "";
@@ -19,19 +36,22 @@ function scaled(value: number, units: string[], step: number): string {
 }
 
 /** Bits per second. */
-export function rate(bps?: number): string {
-  if (bps == null || !Number.isFinite(bps)) return NONE;
-  return scaled(bps, ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"], 1000);
+export function rate(bps?: Numeric): string {
+  const value = numeric(bps);
+  if (value == null || !Number.isFinite(value)) return NONE;
+  return scaled(value, ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"], 1000);
 }
 
-export function bytes(count?: number): string {
-  if (count == null) return NONE;
-  return scaled(count, ["B", "KiB", "MiB", "GiB", "TiB"], 1024);
+export function bytes(count?: Numeric): string {
+  const value = numeric(count);
+  if (value == null || !Number.isFinite(value)) return NONE;
+  return scaled(value, ["B", "KiB", "MiB", "GiB", "TiB"], 1024);
 }
 
-export function latency(us?: number): string {
-  if (us == null) return NONE;
-  const ms = us / 1000;
+export function latency(us?: Numeric): string {
+  const value = numeric(us);
+  if (value == null || !Number.isFinite(value)) return NONE;
+  const ms = value / 1000;
   if (ms < 1) return `${ms.toFixed(2)} ms`;
   if (ms < 10) return `${ms.toFixed(1)} ms`;
   return `${Math.round(ms)} ms`;
@@ -53,8 +73,8 @@ export function ago(ms: number): string {
   return `${Math.round(seconds / 3600)}h`;
 }
 
-export function clock(unixMs: number): string {
-  return new Date(unixMs).toLocaleTimeString([], { hour12: false });
+export function clock(unixMs: Numeric): string {
+  return new Date(Number(unixMs)).toLocaleTimeString([], { hour12: false });
 }
 
 /** A short form of a base64 key. */

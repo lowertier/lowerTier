@@ -154,34 +154,37 @@ fn url_has_ip_literal_host(url: &url::Url) -> bool {
     })
 }
 
+/// Decide whether local policy permits an attempted direct connection.
+///
+/// Public servers require explicit permission. A peer that requires direct paths can override local off mode.
+/// A peer that disables direct paths accepts only a local required mode.
+/// Without peer capabilities, every local mode except off permits an attempt.
 pub(crate) fn should_try_p2p_with_peer(
     feature_flag: Option<&PeerFeatureFlag>,
     allow_public_server: bool,
-    local_disable_p2p: bool,
-    local_need_p2p: bool,
+    mode: crate::common::config::P2pMode,
 ) -> bool {
     feature_flag
         .map(|flag| {
             (allow_public_server || !flag.is_public_server)
-                && (!local_disable_p2p || flag.need_p2p)
-                && (!flag.disable_p2p || local_need_p2p)
+                && (mode != crate::common::config::P2pMode::Off || flag.need_p2p)
+                && (!flag.disable_p2p || mode == crate::common::config::P2pMode::Required)
         })
-        .unwrap_or(!local_disable_p2p)
+        .unwrap_or(mode != crate::common::config::P2pMode::Off)
 }
 
+/// Decide whether discovery should start a direct path before traffic arrives.
+///
+/// Lazy mode waits for traffic unless the remote peer requires a direct path.
+/// Other modes retain the admission decision from [`should_try_p2p_with_peer`].
 pub(crate) fn should_background_p2p_with_peer(
     feature_flag: Option<&PeerFeatureFlag>,
     allow_public_server: bool,
-    lazy_p2p: bool,
-    local_disable_p2p: bool,
-    local_need_p2p: bool,
+    mode: crate::common::config::P2pMode,
 ) -> bool {
-    should_try_p2p_with_peer(
-        feature_flag,
-        allow_public_server,
-        local_disable_p2p,
-        local_need_p2p,
-    ) && (!lazy_p2p || feature_flag.map(|flag| flag.need_p2p).unwrap_or(false))
+    should_try_p2p_with_peer(feature_flag, allow_public_server, mode)
+        && (mode != crate::common::config::P2pMode::Lazy
+            || feature_flag.map(|flag| flag.need_p2p).unwrap_or(false))
 }
 
 async fn set_bind_addr_for_peer_connector(

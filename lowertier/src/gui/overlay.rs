@@ -124,7 +124,11 @@ fn overlay_address(
     } else {
         format!("{hostname}.{zone}")
     };
-    Some((address, flags.no_tun, qualified))
+    Some((
+        address,
+        flags.tun_mode() != crate::common::config::TunMode::Kernel,
+        qualified,
+    ))
 }
 
 /// Keep one listener on the current overlay address, rebinding when it changes or the listener

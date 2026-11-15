@@ -27,7 +27,7 @@ use crate::{
     peers::{acl_filter::AclFilter, credential_manager::CredentialManager},
     proto::{
         acl::GroupIdentity,
-        api::{config::InstanceConfigPatch, instance::PeerConnInfo},
+        api::instance::PeerConnInfo,
         common::{PeerFeatureFlag, PortForwardConfigPb, SecureModeConfig},
         peer_rpc::PeerGroupInfo,
     },
@@ -305,7 +305,8 @@ pub enum GlobalCtxEvent {
 
     PortForwardAdded(PortForwardConfigPb),
 
-    ConfigPatched(InstanceConfigPatch),
+    /// Runtime flags were published. Subscribers read the current configuration and runtime flags.
+    ConfigPatched,
 
     ProxyCidrsUpdated(Vec<cidr::Ipv4Cidr>, Vec<cidr::Ipv4Cidr>), // (added, removed)
 
@@ -708,8 +709,8 @@ impl GlobalCtx {
 
     fn derive_feature_flags(flags: &Flags, mut feature_flags: PeerFeatureFlag) -> PeerFeatureFlag {
         feature_flags.support_conn_list_sync = true;
-        feature_flags.need_p2p = flags.need_p2p;
-        feature_flags.disable_p2p = flags.disable_p2p;
+        feature_flags.need_p2p = flags.p2p_mode() == crate::common::config::P2pMode::Required;
+        feature_flags.disable_p2p = flags.p2p_mode() == crate::common::config::P2pMode::Off;
         let interface_adapter = InterfaceAdapter::automatic();
         feature_flags.ethernet_input = interface_adapter.uses_native_ethernet();
         feature_flags.hybrid_l3 = true;
@@ -1373,7 +1374,7 @@ impl GlobalCtx {
         self.receive_limited
             .store(flags.receive_bps().is_some(), Ordering::Release);
         self.flags.store(Arc::new(flags));
-        self.issue_event(GlobalCtxEvent::ConfigPatched(Default::default()));
+        self.issue_event(GlobalCtxEvent::ConfigPatched);
     }
 
     pub fn get_underlay_policy(&self) -> Arc<UnderlayPolicy> {
@@ -1509,8 +1510,11 @@ impl GlobalCtx {
         self.flags.load().proxy_forward_by_system
     }
 
+    /// Return whether the instance omits a kernel TUN device.
+    ///
+    /// Userspace and none modes use packet consumers without a kernel TUN device.
     pub fn no_tun(&self) -> bool {
-        self.flags.load().no_tun
+        self.flags.load().tun_mode() != crate::common::config::TunMode::Kernel
     }
 
     pub fn get_feature_flags(&self) -> PeerFeatureFlag {

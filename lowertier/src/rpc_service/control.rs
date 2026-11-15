@@ -172,11 +172,7 @@ pub async fn call_owned_json_locked(
         .await
     {
         Ok(response) => response,
-        Err(_) => serde_json::json!({"error": ApiError {
-            code: "invalid_argument".into(),
-            message: "The control request is invalid.".into(),
-            ..Default::default()
-        }}),
+        Err(error) => serde_json::json!({"error": ApiError::from(error)}),
     };
     Ok((response, guard))
 }
@@ -271,6 +267,235 @@ mod tests {
             None => (table, path),
         };
         parent.get(key)
+    }
+
+    #[tokio::test]
+    async fn invalid_json_input_stays_distinct_from_rpc_packet_errors() {
+        use crate::{cli::error::CliError, proto::rpc_types::error::Error as RpcError};
+
+        let service =
+            ControlPlaneService::for_owned_instances(Arc::new(NetworkInstanceManager::new()));
+        let error = service
+            .json_call_method(
+                BaseController::default(),
+                "GetNode",
+                serde_json::json!({"meta": []}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, RpcError::InvalidJsonRequest(_)));
+        let input = CliError::from(error);
+        assert_eq!(input.0.code, "invalid_argument");
+        assert_eq!(input.0.field_path, "body");
+        let packet = CliError::from(RpcError::MalformatRpcPacket("invalid daemon reply".into()));
+        assert_eq!(packet.0.code, "internal");
+        assert!(packet.0.field_path.is_empty());
+        let unavailable = CliError::from(RpcError::Shutdown);
+        assert_eq!(unavailable.0.code, "unavailable");
+        assert!(unavailable.0.retryable);
+        let owned = call_owned_json(
+            &service.manager,
+            "api.control.v1.ControlPlaneV1Rpc",
+            "GetNode",
+            None,
+            serde_json::json!({"meta": []}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(owned["error"]["code"], "invalid_argument");
+        assert_eq!(owned["error"]["field_path"], "body");
+    }
+
+    fn runtime_test_config() -> crate::common::config::TomlConfigLoader {
+        crate::common::config::TomlConfigLoader::new_from_str(
+            r#"
+[node]
+threads = 1
+[transport]
+listen = []
+prefer = "h2"
+protocols = ["h2"]
+[tun]
+mode = "none"
+ipv6 = false
+[nat]
+p2p = "off"
+stun = []
+stun_v6 = []
+stun_tcp = []
+[gui]
+enabled = false
+"#,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configuration_reply_publishes_connectors_before_returning() {
+        use crate::common::config::{ConfigFileControl, ConfigLoader as _};
+
+        let config = runtime_test_config();
+        let id = config.get_id();
+        let manager = Arc::new(NetworkInstanceManager::new());
+        manager
+            .run_network_instance(config, false, ConfigFileControl::STATIC_CONFIG)
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while manager.get_instance_service(&id).is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut service = ControlPlaneService::for_owned_instances(manager.clone());
+        service.from_file = true;
+        let connectors = manager
+            .get_instance_service(&id)
+            .unwrap()
+            .connectors()
+            .unwrap();
+        for (revision, port) in [(1, 9), (2, 10)] {
+            let uri = format!("h2://127.0.0.1:{port}");
+            let response = service
+                .patch_config(
+                    BaseController::default(),
+                    PatchConfigRequest {
+                        meta: Some(RequestMeta {
+                            instance_id: id.to_string(),
+                            ..Default::default()
+                        }),
+                        patch: Some(ConfigPatch {
+                            expected_revision: revision,
+                            field_mask: vec!["peer".into()],
+                            values: values(&format!("[[peer]]\nuri = \"{uri}\"\n")),
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(response.error.is_none(), "{:?}", response.error);
+            assert_eq!(response.result.unwrap().revision, revision + 1);
+            assert!(
+                connectors.list_connectors().await.iter().any(|connector| {
+                    connector
+                        .url
+                        .as_ref()
+                        .is_some_and(|url| url::Url::from(url.clone()).as_str() == uri)
+                }),
+                "Revision {} returned before connector {uri} was registered",
+                revision + 1,
+            );
+        }
+        drop(connectors);
+        manager.delete_network_instance(vec![id]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_failure_preserves_committed_revision_and_connectors() {
+        use crate::common::config::{ConfigFileControl, ConfigLoader as _};
+        use std::time::Duration;
+
+        // The subprocess isolates the failed global logger from other tests.
+        const CHILD: &str = "LOWERTIER_LOG_FAILURE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "rpc_service::control::tests::log_failure_preserves_committed_revision_and_connectors",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("node.toml");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let uri = format!("h2://{}", listener.local_addr().unwrap());
+        let config = runtime_test_config();
+        let id = config.get_id();
+        let manager = Arc::new(NetworkInstanceManager::new());
+        manager
+            .run_network_instance(
+                config,
+                false,
+                ConfigFileControl::new(Some(path.clone()), 0u8.into()),
+            )
+            .unwrap();
+        maintenance::wait_ready(&manager, id).await.unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        crate::rpc_service::logger::LOGGER_LEVEL_SENDER
+            .set(std::sync::Mutex::new(sender))
+            .unwrap();
+        let service = ControlPlaneService::for_owned_instances(manager.clone());
+        let response = service
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    meta: Some(RequestMeta {
+                        instance_id: id.to_string(),
+                        ..Default::default()
+                    }),
+                    patch: Some(ConfigPatch {
+                        expected_revision: 1,
+                        field_mask: vec!["peer".into(), "log.console".into()],
+                        values: values(&format!(
+                            "[[peer]]\nuri = \"{uri}\"\n[log]\nconsole = \"debug\"\n"
+                        )),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "unavailable");
+        assert_eq!(error.field_path, "log.console");
+        let state = manager.control_configs.lock().unwrap()[&id].clone();
+        assert_eq!(state.revision, 2);
+        assert!(manager.reload_errors.lock().unwrap().contains_key(&id));
+        assert!(std::fs::read_to_string(path).unwrap().contains(&uri));
+        assert_eq!(
+            manager
+                .get_instance_config(&id)
+                .unwrap()
+                .get_log_config()
+                .console
+                .as_deref(),
+            Some("debug"),
+        );
+        let connectors = manager
+            .get_instance_service(&id)
+            .unwrap()
+            .connectors()
+            .unwrap();
+        assert!(connectors.list_connectors().await.iter().any(|connector| {
+            connector
+                .url
+                .as_ref()
+                .is_some_and(|url| url::Url::from(url.clone()).as_str() == uri)
+        }));
+        drop(connectors);
+        manager.delete_network_instance(vec![id]).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), manager.wait())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

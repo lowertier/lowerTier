@@ -1218,8 +1218,6 @@ impl ControlPlaneService {
             std::fs::remove_file(path)?;
         }
         self.manager.delete_network_instance(vec![id])?;
-        self.manager.release_stopped(&id);
-        self.manager.control_configs.lock().unwrap().remove(&id);
         Ok(DeleteInstanceResponse::default())
     }
 
@@ -1435,6 +1433,16 @@ impl ControlPlaneService {
         })
     }
 
+    /// Validate, persist, publish, and reconcile one configuration change under the mutation lock.
+    ///
+    /// A stale revision or invalid candidate leaves the active configuration unchanged.
+    /// Running instances publish live fields and stage fields that require a restart.
+    /// Stopped instances accept instance settings immediately.
+    /// Acquire runtime handles before persistence. Hold these handles through reconciliation.
+    /// Persistence completes before publication, so a write failure preserves the active state.
+    /// Connector reconciliation finishes before another mutation can publish its candidate.
+    /// The console log level applies last. Its failure preserves the committed revision and records a reload error.
+    /// An omitted console level keeps the current process setting.
     pub(super) async fn transact(
         &self,
         meta: Option<&RequestMeta>,
@@ -1465,8 +1473,13 @@ impl ControlPlaneService {
             select_apply(&active, &desired, state.revision, running.is_some())?;
         let rules = AclRuleBuilder::build_config(&candidate)?;
         let runtime = running
-            .as_ref()
-            .map(|instance| Ok::<_, anyhow::Error>((instance.context()?, instance.peers()?)))
+            .map(|instance| {
+                Ok::<_, anyhow::Error>((
+                    instance.context()?,
+                    instance.peers()?.get_route(),
+                    instance.connectors()?,
+                ))
+            })
             .transpose()?;
         let changed_desired = document(&current)? != after;
         if changed_desired {
@@ -1502,16 +1515,13 @@ impl ControlPlaneService {
         }
         let old_peers = runtime
             .as_ref()
-            .map(|(context, _)| context.config.get_peers())
+            .map(|(context, _, _)| context.config.get_peers())
             .unwrap_or_default();
         active.replace_active(&candidate);
-        if let Some((context, _)) = runtime {
+        if let Some((context, _, _)) = &runtime {
             context.set_hostname(candidate.get_hostname());
             context.set_flags(candidate.get_flags());
             context.get_acl_filter().reload_rules(rules.as_ref());
-            if let Some(level) = candidate.get_log_config().console {
-                super::read::apply_log_level(&level)?;
-            }
         }
         self.manager.control_configs.lock().unwrap().insert(
             id,
@@ -1522,16 +1532,19 @@ impl ControlPlaneService {
             },
         );
         self.manager.reload_errors.lock().unwrap().remove(&id);
-        if let Some(instance) = running {
-            let route = instance.peers()?.get_route();
-            let patcher = instance.patcher.clone();
-            let candidate_clone = candidate.snapshot();
-            tokio::spawn(async move {
-                if let Err(e) = patcher.sync_live_config(&old_peers, &candidate_clone).await {
-                    tracing::warn!(?e, "failed to sync live config changes");
+        if let Some((_, route, connectors)) = runtime {
+            connectors.sync_configuration(&old_peers, &candidate);
+            route.refresh_acl_groups().await;
+            if let Some(level) = candidate.get_log_config().console {
+                if let Err(error) = super::read::apply_log_level(&level) {
+                    self.manager
+                        .reload_errors
+                        .lock()
+                        .unwrap()
+                        .insert(id, "The log level could not be applied.".into());
+                    return Err(error);
                 }
-                route.refresh_acl_groups().await;
-            });
+            }
         }
         Ok(result)
     }

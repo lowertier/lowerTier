@@ -1500,7 +1500,9 @@ impl PeerManager {
         self.recent_data_traffic.insert(dst_peer_id, now);
 
         let flags = self.global_ctx.flags_arc();
-        if flags.disable_p2p || !flags.lazy_p2p || self.has_directly_connected_conn(dst_peer_id) {
+        if flags.p2p_mode() != crate::common::config::P2pMode::Lazy
+            || self.has_directly_connected_conn(dst_peer_id)
+        {
             return;
         }
 
@@ -3759,7 +3761,10 @@ impl PeerManager {
         result
     }
 
-    /// True when a [[path]] steers traffic to `dst_peer_id`, so streams must not take a direct link.
+    /// Return whether a configured path rule governs traffic to `dst_peer_id`.
+    ///
+    /// Matching traffic must use the path planner.
+    /// Inactive policy, missing forwarding state, and unmatched peers return false.
     pub(crate) fn path_applies_to(&self, dst_peer_id: PeerId) -> bool {
         self.refresh_paths();
         if !self.paths.is_active() {
@@ -3776,7 +3781,9 @@ impl PeerManager {
             })
     }
 
-    /// The [[path]] that applies to traffic for `peer_id`, if any.
+    /// Return the configured path rule for `peer_id`.
+    ///
+    /// Missing forwarding state or an unmatched peer returns none.
     pub fn path_for_peer(&self, peer_id: PeerId) -> Option<u16> {
         self.refresh_paths();
         let descriptor = self.peers.dataplane_descriptor();
@@ -3784,7 +3791,9 @@ impl PeerManager {
         self.paths.rule_for_destination(snapshot, peer_id)
     }
 
-    /// Status of every [[path]] for the control API.
+    /// Return the state of each configured path rule for the control API.
+    ///
+    /// Missing forwarding state returns an empty list.
     pub async fn path_status(&self) -> Vec<crate::proto::api::control::v1::PathStatus> {
         self.refresh_paths();
         let Some(snapshot) = self.peers.forwarding_decision_snapshot().await else {
@@ -5512,7 +5521,7 @@ impl PeerManager {
         }
     }
 
-    /// Destination peers, exit flag, blackhole flag, and the [[path]] for one IP packet.
+    /// Select destination peers, exit and blackhole flags, and the configured path rule for one IP packet.
     fn hybrid_destination_from_packet_snapshot_with_synced_routes(
         &self,
         packet: &ZCPacket,
@@ -5561,7 +5570,7 @@ impl PeerManager {
         (peers, is_exit_node, false, rule)
     }
 
-    /// Route a proxied connection. `connection` keys the per-flow [[path]] choice and stays
+    /// Route a proxied connection. `connection` keys the configured path choice and stays
     /// fixed for the connection's lifetime.
     pub async fn plan_user_route(
         &self,

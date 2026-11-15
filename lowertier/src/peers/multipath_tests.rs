@@ -66,7 +66,11 @@ impl TestNode {
         global_ctx.set_ipv4(Some(cidr::Ipv4Inet::new(ipv4, 24).unwrap()));
 
         let mut flags = global_ctx.get_flags();
-        flags.no_tun = no_tun;
+        flags.tun_mode = if no_tun {
+            crate::common::config::TunMode::None
+        } else {
+            crate::common::config::TunMode::Kernel
+        } as i32;
         flags.enable_bridge = enable_bridge;
         if enable_bridge {
             flags.l2_flood_bytes_per_second = 64 * 1024 * 1024;
@@ -113,7 +117,11 @@ impl TestNode {
     fn set_no_tun(&self, no_tun: bool) {
         let ctx = self.mgr.get_global_ctx();
         let mut flags = ctx.get_flags();
-        flags.no_tun = no_tun;
+        flags.tun_mode = if no_tun {
+            crate::common::config::TunMode::None
+        } else {
+            crate::common::config::TunMode::Kernel
+        } as i32;
         ctx.set_flags(flags);
         Self::apply_bridge_feature_flags(&ctx, self.enable_bridge);
     }

@@ -1321,7 +1321,7 @@ mod tests {
                 let ctx = peer.get_global_ctx();
                 ctx.set_ipv4(Some(ip.parse().unwrap()));
                 let mut flags = ctx.get_flags();
-                flags.no_tun = true;
+                flags.tun_mode = crate::common::config::TunMode::None as i32;
                 ctx.set_flags(flags);
             }
             let quic_sent = Arc::new(parking_lot::Mutex::new(Vec::new()));

@@ -122,7 +122,7 @@ impl Service {
                 quote! {
                     #method_str | #method_proto_str => {
                         let req: #Input = ::serde_json::from_value(json)
-                            .map_err(|e| #namespace::error::Error::MalformatRpcPacket(format!("json error: {}", e)))?;
+                            .map_err(|e| #namespace::error::Error::InvalidJsonRequest(e.to_string()))?;
                         let resp = self.#method(ctrl, req).await?;
                         Ok(::serde_json::to_value(resp)
                             .map_err(|e| #namespace::error::Error::MalformatRpcPacket(format!("json error: {}", e)))?)
@@ -155,6 +155,11 @@ impl Service {
 
                 #(#methods)*
 
+                /// Decode JSON input and invoke the selected method.
+                ///
+                /// Unknown names return InvalidMethodIndex.
+                /// Invalid input returns InvalidJsonRequest before dispatch.
+                /// Transport and response errors keep their RPC error types.
                 async fn json_call_method(
                     &self,
                     ctrl: Self::Controller,

@@ -6724,7 +6724,7 @@ impl PeerRouteServiceImpl {
     }
 
     fn handle_global_ctx_event(&self, event: &GlobalCtxEvent) {
-        if matches!(event, GlobalCtxEvent::ConfigPatched(_)) {
+        if matches!(event, GlobalCtxEvent::ConfigPatched) {
             self.rebuild_domains(RouteRebuildDomains::topology());
         }
         if matches!(

@@ -14,16 +14,18 @@ message FlagsInConfig {
   reserved 6;
   reserved "latency_first";
   bool enable_exit_node = 7;
-  bool no_tun = 8;
-  bool use_smoltcp = 9;
+  reserved 8, 9;
+  reserved "no_tun", "use_smoltcp";
   reserved 10;
   reserved "relay_network_whitelist";
-  bool disable_p2p = 11;
+  reserved 11;
+  reserved "disable_p2p";
   bool relay_all_peer_rpc = 12;
   bool disable_udp_hole_punching = 13;
   // string ipv6_listener = 14; [deprecated = true]; use -l quic://[::]:12345
   // instead
-  bool multi_thread = 15;
+  reserved 15;
+  reserved "multi_thread";
   reserved 16;
   reserved "data_compress_algo";
   bool bind_device = 17;
@@ -44,7 +46,8 @@ message FlagsInConfig {
   reserved 26;
   reserved "foreign_relay_bps_limit";
 
-  uint32 multi_thread_count = 27;
+  reserved 27;
+  reserved "multi_thread_count";
 
   reserved 28;
 
@@ -63,8 +66,8 @@ message FlagsInConfig {
 
   bool disable_tcp_hole_punching = 34;
 
-  bool lazy_p2p = 37;
-  bool need_p2p = 38;
+  reserved 37, 38;
+  reserved "lazy_p2p", "need_p2p";
   reserved 39;
   reserved "instance_recv_bps_limit";
   reserved 40, 41;
@@ -128,6 +131,31 @@ message FlagsInConfig {
   CamouflageConfig camouflage = 77;
   LimitsConfig limits = 78;
   PathPolicy path_policy = 79;
+
+  // Select ownership of the local network interface.
+  enum TunMode {
+    // Create and own a kernel TUN device.
+    kernel = 0;
+    // Use the userspace TCP/IP stack. Device binding defaults to disabled.
+    userspace = 1;
+    // Create no TUN device. Requested packet proxies remain available.
+    none = 2;
+  }
+  TunMode tun_mode = 80;
+  // Select when direct-path discovery can start a connection.
+  enum P2pMode {
+    // Start permitted direct paths during background discovery.
+    on = 0;
+    // Wait for traffic unless the remote peer requires a direct path.
+    lazy = 1;
+    // Advertise a direct-path requirement. Permit attempts when a peer disables P2P.
+    required = 2;
+    // Avoid optional direct paths. A remote requirement can permit an attempt.
+    off = 3;
+  }
+  P2pMode p2p_mode = 81;
+  // One uses a current-thread runtime. Larger values select that many workers.
+  uint32 threads = 82;
 }
 
 enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }

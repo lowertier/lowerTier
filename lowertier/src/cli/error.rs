@@ -35,17 +35,7 @@ impl From<serde_json::Error> for CliError {
 }
 impl From<RpcError> for CliError {
     fn from(error: RpcError) -> Self {
-        match error {
-            RpcError::Timeout(_) => Self::new(
-                "deadline_exceeded",
-                "The control request exceeded its deadline.",
-                "",
-            ),
-            RpcError::TunnelError(_) | RpcError::Shutdown => {
-                Self::new("unavailable", "The control connection is unavailable.", "")
-            }
-            _ => Self::new("internal", "The control RPC failed.", ""),
-        }
+        Self(error.into())
     }
 }
 pub type Result<T> = std::result::Result<T, CliError>;

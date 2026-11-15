@@ -1,4 +1,4 @@
-// TOML over HTTP to `lowertier gui`, which forwards calls to the selected daemon.
+// Protobuf JSON over HTTP. Configuration editor text remains TOML.
 import { parse, stringify } from "smol-toml";
 import { optionPatch } from "./settingsModel";
 
@@ -73,7 +73,7 @@ export async function api(path: string, body?: Doc): Promise<Doc> {
   if (target.remote) params.set("remote", target.remote);
   if (target.viaInstance) params.set("via_instance", target.viaInstance);
   const query = params.size ? `?${params}` : "";
-  const headers: Record<string, string> = { "x-lowertier-key": key, "content-type": "application/toml" };
+  const headers: Record<string, string> = { "x-lowertier-key": key, "content-type": "application/json" };
   if (target.remote && target.remoteSecret) {
     headers["x-lowertier-remote-secret"] = target.remoteSecret;
   }
@@ -82,7 +82,7 @@ export async function api(path: string, body?: Doc): Promise<Doc> {
     response = await fetch(`/api/${path}${query}`, {
       method: body ? "POST" : "GET",
       headers,
-      body: body ? stringify(body) : undefined,
+      body: body ? JSON.stringify(body) : undefined,
       cache: "no-store",
     });
   } catch {
@@ -94,7 +94,7 @@ export async function api(path: string, body?: Doc): Promise<Doc> {
   const text = await response.text();
   let doc: Doc;
   try {
-    doc = parse(text, { unsafeKeyBehaviour: "drop" });
+    doc = JSON.parse(text);
   } catch {
     throw new ApiError({ code: "internal", message: text || response.statusText });
   }

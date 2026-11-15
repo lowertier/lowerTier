@@ -2,7 +2,7 @@
 //!
 //! Every option has one dotted path. The TOML file, `run --set`, `lowertier set`, and the
 //! Control API field masks all use these paths. `to_internal` and `to_public` translate between
-//! this layout and the internal `Config` representation, so runtime getters stay unchanged.
+//! this layout and the typed runtime configuration.
 
 use anyhow::{Context as _, bail};
 use toml::{Table, Value};
@@ -90,7 +90,6 @@ pub enum Map {
     To(&'static str),
     /// A positive public bool stored as an internal `disable_*` bool.
     Not(&'static str),
-    Custom,
 }
 
 #[derive(Debug)]
@@ -185,7 +184,7 @@ pub static OPTIONS: &[OptionSpec] = &[
     opt(
         "node.threads",
         Int,
-        Custom,
+        To("flags.threads"),
         Restart,
         "2",
         "Runtime worker threads. 1 runs single-threaded.",
@@ -449,7 +448,7 @@ pub static OPTIONS: &[OptionSpec] = &[
     opt(
         "tun.mode",
         Enum(&["kernel", "userspace", "none"]),
-        Custom,
+        To("flags.tun_mode"),
         Restart,
         "kernel",
         "kernel: TUN/TAP device. userspace: in-process stack for proxies and forwards. none: no local interface.",
@@ -545,7 +544,7 @@ pub static OPTIONS: &[OptionSpec] = &[
     opt(
         "nat.p2p",
         Enum(&["on", "lazy", "required", "off"]),
-        Custom,
+        To("flags.p2p_mode"),
         Live,
         "on",
         "Direct connections: on, lazy (only when traffic needs it), required (never relay), off.",
@@ -1467,7 +1466,16 @@ fn normalize(spec: &OptionSpec, value: Value) -> anyhow::Result<Value> {
     };
     match spec.kind {
         Kind::Bool if value.is_bool() => Ok(value),
-        Kind::Int if value.is_integer() => Ok(value),
+        Kind::Int if value.is_integer() => {
+            if path == "node.threads" {
+                anyhow::ensure!(
+                    (1..=i64::from(u32::MAX)).contains(&value.as_integer().unwrap()),
+                    "node.threads must be between 1 and {}",
+                    u32::MAX
+                );
+            }
+            Ok(value)
+        }
         Kind::Str | Kind::Path if value.is_str() => Ok(value),
         Kind::Enum(values) => match value.as_str() {
             Some(text) if values.contains(&text) => Ok(value),
@@ -1579,7 +1587,11 @@ fn rename_fields(value: Value, path: &str, to_internal: bool) -> Value {
     )
 }
 
-/// Translate a public sectioned table into the internal configuration table.
+/// Validate public option paths and translate them into typed configuration fields.
+///
+/// Unknown paths and invalid values fail before conversion.
+/// Direct mappings copy values. Inverted mappings reverse positive public booleans.
+/// Userspace mode rejects kernel device settings and defaults underlay device binding to false.
 pub fn to_internal(public: &Table) -> anyhow::Result<Table> {
     let mut leaves = Vec::new();
     let mut errors = Vec::new();
@@ -1612,7 +1624,6 @@ pub fn to_internal(public: &Table) -> anyhow::Result<Table> {
                 target,
                 Value::Boolean(!value.as_bool().unwrap()),
             ),
-            Map::Custom => {}
         }
     }
 
@@ -1622,55 +1633,18 @@ pub fn to_internal(public: &Table) -> anyhow::Result<Table> {
             .find(|(spec, _)| spec.path == path)
             .map(|(_, value)| value)
     };
-    if let Some(threads) = given("node.threads").and_then(Value::as_integer) {
-        anyhow::ensure!(threads >= 1, "node.threads must be at least 1");
-        set(
-            &mut internal,
-            "flags.multi_thread",
-            Value::Boolean(threads > 1),
+    if given("tun.mode").and_then(Value::as_str) == Some("userspace") {
+        anyhow::ensure!(
+            given("tun.name").is_none(),
+            "tun.name cannot be used with tun.mode = \"userspace\""
         );
-        if threads > 1 {
-            set(
-                &mut internal,
-                "flags.multi_thread_count",
-                Value::Integer(threads),
-            );
-        }
-    }
-    if let Some(mode) = given("tun.mode").and_then(Value::as_str) {
-        let (no_tun, smoltcp) = match mode {
-            "kernel" => (false, false),
-            "userspace" => (true, true),
-            _ => (true, false),
-        };
-        set(&mut internal, "flags.no_tun", Value::Boolean(no_tun));
-        set(&mut internal, "flags.use_smoltcp", Value::Boolean(smoltcp));
-        if mode == "userspace" {
-            anyhow::ensure!(
-                given("tun.name").is_none(),
-                "tun.name cannot be used with tun.mode = \"userspace\""
-            );
-            anyhow::ensure!(
-                given("underlay.socket_mark").is_none(),
-                "underlay.socket_mark cannot be used with tun.mode = \"userspace\""
-            );
-            // The userspace stack has no device to bind its own traffic to.
-            if given("underlay.bind_device").is_none() {
-                set(&mut internal, "flags.bind_device", Value::Boolean(false));
-            }
-        }
-    }
-    if let Some(p2p) = given("nat.p2p").and_then(Value::as_str) {
-        for (flag, active) in [
-            ("disable_p2p", p2p == "off"),
-            ("lazy_p2p", p2p == "lazy"),
-            ("need_p2p", p2p == "required"),
-        ] {
-            set(
-                &mut internal,
-                &format!("flags.{flag}"),
-                Value::Boolean(active),
-            );
+        anyhow::ensure!(
+            given("underlay.socket_mark").is_none(),
+            "underlay.socket_mark cannot be used with tun.mode = \"userspace\""
+        );
+        // Userspace mode has no kernel device for underlay source binding.
+        if given("underlay.bind_device").is_none() {
+            set(&mut internal, "flags.bind_device", Value::Boolean(false));
         }
     }
     if let Some(identity) = internal
@@ -1692,11 +1666,11 @@ pub fn to_internal(public: &Table) -> anyhow::Result<Table> {
 
 /// Translate the internal configuration table into the public sectioned table.
 /// Internal values without a public path are dropped.
+/// Opaque tables omit children with separate registry entries.
+/// Numeric protobuf strings become TOML integers when they fit.
+/// Userspace mode omits its implicit false device-binding default.
 pub fn to_public(internal: &Table) -> Table {
     let mut public = Table::new();
-    let flag = |name: &str| get(internal, &format!("flags.{name}"));
-    let flag_bool =
-        |name: &str, default: bool| flag(name).and_then(Value::as_bool).unwrap_or(default);
     for spec in OPTIONS {
         let value = match spec.map {
             Map::Same => get(internal, spec.path).cloned(),
@@ -1704,46 +1678,6 @@ pub fn to_public(internal: &Table) -> Table {
             Map::Not(source) => get(internal, source)
                 .and_then(Value::as_bool)
                 .map(|value| Value::Boolean(!value)),
-            Map::Custom => match spec.path {
-                "node.threads"
-                    if flag("multi_thread").is_some() || flag("multi_thread_count").is_some() =>
-                {
-                    Some(Value::Integer(if flag_bool("multi_thread", true) {
-                        flag("multi_thread_count")
-                            .and_then(Value::as_integer)
-                            .unwrap_or(2)
-                    } else {
-                        1
-                    }))
-                }
-                "tun.mode" if flag("no_tun").is_some() || flag("use_smoltcp").is_some() => {
-                    Some(Value::String(
-                        match (flag_bool("no_tun", false), flag_bool("use_smoltcp", false)) {
-                            (false, _) => "kernel",
-                            (true, true) => "userspace",
-                            (true, false) => "none",
-                        }
-                        .into(),
-                    ))
-                }
-                "nat.p2p"
-                    if ["disable_p2p", "lazy_p2p", "need_p2p"]
-                        .iter()
-                        .any(|name| flag_bool(name, false)) =>
-                {
-                    Some(Value::String(
-                        if flag_bool("disable_p2p", false) {
-                            "off"
-                        } else if flag_bool("need_p2p", false) {
-                            "required"
-                        } else {
-                            "lazy"
-                        }
-                        .into(),
-                    ))
-                }
-                _ => None,
-            },
         };
         let Some(value) = value else {
             continue;
@@ -2011,15 +1945,55 @@ mod tests {
     }
 
     #[test]
+    fn typed_modes_and_thread_counts_round_trip() {
+        use crate::common::config::{ConfigLoader as _, P2pMode, TomlConfigLoader, TunMode};
+
+        for (tun, tun_mode) in [
+            ("kernel", TunMode::Kernel),
+            ("userspace", TunMode::Userspace),
+            ("none", TunMode::None),
+        ] {
+            for (p2p, p2p_mode) in [
+                ("on", P2pMode::On),
+                ("lazy", P2pMode::Lazy),
+                ("required", P2pMode::Required),
+                ("off", P2pMode::Off),
+            ] {
+                for threads in [1, 2] {
+                    let config = TomlConfigLoader::new_from_str(&format!(
+                        "[node]\nthreads = {threads}\n[tun]\nmode = \"{tun}\"\n[nat]\np2p = \"{p2p}\"\n"
+                    ))
+                    .unwrap();
+                    let flags = config.get_flags();
+                    assert_eq!(flags.tun_mode(), tun_mode);
+                    assert_eq!(flags.p2p_mode(), p2p_mode);
+                    assert_eq!(flags.threads, threads);
+                    let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+                    assert_eq!(restored.get_flags(), flags);
+                }
+            }
+        }
+        for invalid in [
+            "[node]\nthreads = 0\n",
+            "[node]\nthreads = -1\n",
+            "[node]\nthreads = 4294967296\n",
+            "[tun]\nmode = \"unknown\"\n",
+            "[nat]\np2p = \"unknown\"\n",
+        ] {
+            assert!(
+                TomlConfigLoader::new_from_str(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn custom_options_round_trip() {
         let public = table(
             "[node]\nthreads = 4\n[tun]\nmode = \"userspace\"\nmtu = 1200\n[nat]\np2p = \"lazy\"\nudp_punch = false\n[relay]\npolicy = \"latency\"\nforeign_rpc = true\n[[path]]\nto = \"internet\"\nlayers = [\"relays\", [\"10.0.0.4\", \"10.0.0.5\"]]\ngateway = \"10.0.0.9\"\n[[group]]\nname = \"relays\"\nnodes = [\"10.0.0.2\", \"10.0.0.3\"]\nweights = [2, 1]\n[[forward]]\nproto = \"tcp\"\nbind = \"0.0.0.0:80\"\ndest = \"10.0.0.1:80\"\n[acl]\ntcp_ports = [\"22\"]\n[acl.acl_v1]\nchains = []\n",
         );
         let internal = to_internal(&public).unwrap();
-        assert_eq!(
-            get(&internal, "flags.multi_thread_count"),
-            Some(&Value::Integer(4))
-        );
+        assert_eq!(get(&internal, "flags.threads"), Some(&Value::Integer(4)));
         assert_eq!(
             get(&internal, "flags.bind_device"),
             Some(&Value::Boolean(false))

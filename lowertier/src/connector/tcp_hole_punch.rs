@@ -756,8 +756,7 @@ impl Server {
             && should_try_p2p_with_peer(
                 route.as_ref().and_then(|r| r.feature_flag.as_ref()),
                 false,
-                flags.disable_p2p,
-                flags.need_p2p,
+                flags.p2p_mode(),
             )
     }
     async fn initiate(&self, peer: PeerId, protocol: Protocol) -> Result<()> {
@@ -1209,7 +1208,7 @@ mod tests {
                 peer.get_global_ctx()
                     .replace_stun_info_collector(Box::new(LocalStun(None)));
                 let mut flags = peer.get_global_ctx().get_flags();
-                flags.need_p2p = false;
+                flags.p2p_mode = crate::common::config::P2pMode::On as i32;
                 flags.disable_sym_hole_punching = true;
                 peer.get_global_ctx().set_flags(flags);
             }
@@ -1233,7 +1232,7 @@ mod tests {
             stage.set("H2 rendezvous");
             client.initiate(b.my_peer_id(), Protocol::H2).await.unwrap();
             let mut flags = a.get_global_ctx().get_flags();
-            flags.lazy_p2p = true;
+            flags.p2p_mode = crate::common::config::P2pMode::Lazy as i32;
             a.get_global_ctx().set_flags(flags);
             let launcher = Launcher(client.clone());
             let pending = launcher.collect_peers_need_task(&client).await;

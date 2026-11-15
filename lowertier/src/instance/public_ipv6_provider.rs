@@ -65,12 +65,6 @@ fn should_run_public_ipv6_provider_reconcile_task(
     config.provider_enabled
 }
 
-pub(super) fn should_run_public_ipv6_provider_reconcile(global_ctx: &ArcGlobalCtx) -> bool {
-    should_run_public_ipv6_provider_reconcile_task(read_public_ipv6_provider_config_snapshot(
-        global_ctx,
-    ))
-}
-
 fn is_global_routable_public_ipv6_prefix(prefix: Ipv6Cidr) -> bool {
     let addr = prefix.first_address();
     !addr.is_loopback()
@@ -974,7 +968,7 @@ fn new_ndp_proxy_runtime() -> NdpProxyRuntime {
 fn should_reconcile_immediately(event: &GlobalCtxEvent) -> bool {
     matches!(
         event,
-        GlobalCtxEvent::ConfigPatched(_)
+        GlobalCtxEvent::ConfigPatched
             | GlobalCtxEvent::TunDeviceReady(_)
             | GlobalCtxEvent::TunDeviceError(_)
             | GlobalCtxEvent::PublicIpv6RoutesUpdated(_, _)

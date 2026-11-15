@@ -221,7 +221,7 @@ impl LowTierLauncher {
         let data = self.data.clone();
         let api_service = self.api_service.clone();
         let attach_to_current =
-            !cfg.get_flags().multi_thread && tokio::runtime::Handle::try_current().is_ok();
+            cfg.get_flags().threads == 1 && tokio::runtime::Handle::try_current().is_ok();
         if attach_to_current {
             self.instance_join = Some(InstanceJoin::Task(tokio::spawn(Self::run_until_stopped(
                 cfg,
@@ -235,8 +235,8 @@ impl LowTierLauncher {
         }
 
         self.instance_join = Some(InstanceJoin::Thread(std::thread::spawn(move || {
-            let rt = if cfg.get_flags().multi_thread {
-                let worker_threads = 2.max(cfg.get_flags().multi_thread_count as usize);
+            let rt = if cfg.get_flags().threads > 1 {
+                let worker_threads = cfg.get_flags().threads as usize;
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(worker_threads)
                     .enable_all()

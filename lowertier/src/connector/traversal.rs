@@ -188,14 +188,11 @@ pub(super) async fn hole_punch_peers(peer_mgr: &PeerManager, protocol: &str) -> 
             && (should_background_p2p_with_peer(
                 route.feature_flag.as_ref(),
                 false,
-                flags.lazy_p2p,
-                flags.disable_p2p,
-                flags.need_p2p,
+                flags.p2p_mode(),
             ) || (should_try_p2p_with_peer(
                 route.feature_flag.as_ref(),
                 false,
-                flags.disable_p2p,
-                flags.need_p2p,
+                flags.p2p_mode(),
             ) && (peer_mgr.has_live_peer_connection(route.peer_id)
                 || peer_mgr.has_recent_traffic(route.peer_id, now))))
         {

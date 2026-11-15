@@ -2,12 +2,11 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
 #[cfg(all(not(mobile), feature = "tun"))]
 use std::time::Duration;
 
-use anyhow::Context;
 use cidr::{IpCidr, Ipv4Inet};
 use futures::FutureExt;
 #[cfg(all(not(mobile), feature = "tun"))]
@@ -36,11 +35,9 @@ use crate::peers::peer_manager::{PeerManager, RouteAlgoType};
 #[cfg(feature = "tun")]
 use crate::peers::recv_packet_from_chan;
 use crate::peers::{PacketRecvChanReceiver, create_packet_recv_chan};
-use crate::proto::api::config::{ConfigPatchAction, PortForwardPatch};
 use crate::proto::common::TunnelInfo;
 use crate::proto::rpc_impl::standalone::RpcServerHook;
 use crate::rpc_service::control::ControlInstance;
-use crate::utils::weak_upgrade;
 
 #[cfg(feature = "magic-dns")]
 use super::dns_server::{MAGIC_DNS_FAKE_IP, runner::DnsRunner};
@@ -48,8 +45,7 @@ use super::ip_proxy::IpProxy;
 use super::listeners::ListenerManager;
 use super::public_ipv6_provider::{
     PublicIpv6ProviderReconcileTask, reconcile_public_ipv6_provider_runtime,
-    run_public_ipv6_provider_reconcile_task, should_run_public_ipv6_provider_reconcile,
-    validate_public_ipv6_config, validate_public_ipv6_config_values,
+    run_public_ipv6_provider_reconcile_task, validate_public_ipv6_config,
 };
 
 #[cfg(feature = "socks5")]
@@ -207,407 +203,6 @@ impl RpcServerHook for InstanceRpcServerHook {
     }
 }
 
-#[derive(Clone)]
-pub struct InstanceConfigPatcher {
-    global_ctx: Weak<GlobalCtx>,
-    #[cfg(feature = "socks5")]
-    socks5_server: Weak<Socks5Server>,
-    peer_manager: Weak<PeerManager>,
-    conn_manager: Weak<ManualConnectorManager>,
-    public_ipv6_provider_task: ArcPublicIpv6ProviderTaskSlot,
-}
-
-impl InstanceConfigPatcher {
-    fn parse_ipv6_public_addr_prefix_patch(
-        prefix: Option<&str>,
-    ) -> Result<Option<Option<cidr::Ipv6Cidr>>, anyhow::Error> {
-        let Some(prefix) = prefix else {
-            return Ok(None);
-        };
-
-        let prefix = prefix.trim();
-        if prefix.is_empty() {
-            return Ok(Some(None));
-        }
-
-        let parsed = prefix
-            .parse()
-            .with_context(|| format!("failed to parse ipv6 public address prefix: {prefix}"))?;
-        Ok(Some(Some(parsed)))
-    }
-
-    fn effective_ipv6_for_public_ipv6_validation(
-        global_ctx: &ArcGlobalCtx,
-        patch: &crate::proto::api::config::InstanceConfigPatch,
-        _auto_enabled: bool,
-    ) -> Option<cidr::Ipv6Inet> {
-        if let Some(ipv6) = patch.ipv6 {
-            return Some(ipv6.into());
-        }
-
-        global_ctx.get_ipv6()
-    }
-
-    fn validate_public_ipv6_patch(
-        global_ctx: &ArcGlobalCtx,
-        patch: &crate::proto::api::config::InstanceConfigPatch,
-    ) -> Result<Option<Option<cidr::Ipv6Cidr>>, anyhow::Error> {
-        let parsed_prefix =
-            Self::parse_ipv6_public_addr_prefix_patch(patch.ipv6_public_addr_prefix.as_deref())?;
-
-        let auto_enabled = patch
-            .ipv6_public_addr_auto
-            .unwrap_or(global_ctx.config.get_ipv6_public_addr_auto());
-        let provider_enabled = patch
-            .ipv6_public_addr_provider
-            .unwrap_or(global_ctx.config.get_ipv6_public_addr_provider());
-        let prefix =
-            parsed_prefix.unwrap_or_else(|| global_ctx.config.get_ipv6_public_addr_prefix());
-        let ipv6 = Self::effective_ipv6_for_public_ipv6_validation(global_ctx, patch, auto_enabled);
-
-        validate_public_ipv6_config_values(ipv6, provider_enabled, auto_enabled, prefix)?;
-        Ok(parsed_prefix)
-    }
-
-    pub async fn apply_patch(
-        &self,
-        patch: crate::proto::api::config::InstanceConfigPatch,
-    ) -> Result<(), anyhow::Error> {
-        let patch_for_event = patch.clone();
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-        let parsed_ipv6_public_addr_prefix = Self::validate_public_ipv6_patch(&global_ctx, &patch)?;
-        let mut candidate_flags = global_ctx.get_flags();
-        if let Some(relay) = &patch.relay {
-            candidate_flags.relay = Some(relay.clone());
-        }
-        if let Some(camouflage) = &patch.camouflage {
-            candidate_flags.camouflage = Some(camouflage.clone());
-        }
-        if let Some(limits) = &patch.limits {
-            candidate_flags.limits = Some(limits.clone());
-        }
-        crate::common::config::validate_flags(&candidate_flags)?;
-        let secure_mode = global_ctx.config.get_secure_mode();
-        candidate_flags.relay_config().validate_local_key(
-            secure_mode
-                .as_ref()
-                .and_then(|mode| mode.local_public_key.as_deref()),
-        )?;
-        crate::common::control_config::validate_camouflage_listeners(
-            &candidate_flags,
-            global_ctx
-                .config
-                .get_listeners()
-                .as_deref()
-                .unwrap_or_default(),
-        )?;
-
-        self.patch_port_forwards(patch.port_forwards).await?;
-        self.patch_acl(patch.acl).await?;
-        self.patch_proxy_networks(patch.proxy_networks).await?;
-        self.patch_routes(patch.routes).await?;
-        self.patch_mapped_listeners(patch.mapped_listeners).await?;
-        self.patch_connector(patch.connectors, &candidate_flags)
-            .await?;
-
-        let mut provider_config_changed = false;
-        if let Some(hostname) = patch.hostname {
-            global_ctx.set_hostname(hostname.clone());
-            global_ctx.config.set_hostname(Some(hostname));
-        }
-        if let Some(ipv4) = patch.ipv4
-            && !global_ctx.config.get_dhcp()
-        {
-            global_ctx.set_ipv4(Some(ipv4.into()));
-            global_ctx.config.set_ipv4(Some(ipv4.into()));
-        }
-        if let Some(ipv6) = patch.ipv6 {
-            global_ctx.set_ipv6(Some(ipv6.into()));
-            global_ctx.config.set_ipv6(Some(ipv6.into()));
-        }
-        if patch.relay.is_some() || patch.camouflage.is_some() || patch.limits.is_some() {
-            global_ctx.set_flags(candidate_flags);
-        }
-        if let Some(enabled) = patch.ipv6_public_addr_provider {
-            global_ctx.config.set_ipv6_public_addr_provider(enabled);
-            provider_config_changed = true;
-        }
-        if let Some(enabled) = patch.ipv6_public_addr_auto {
-            global_ctx.config.set_ipv6_public_addr_auto(enabled);
-        }
-        if let Some(prefix) = parsed_ipv6_public_addr_prefix {
-            global_ctx.config.set_ipv6_public_addr_prefix(prefix);
-            provider_config_changed = true;
-        }
-
-        global_ctx.issue_event(GlobalCtxEvent::ConfigPatched(patch_for_event));
-
-        if provider_config_changed {
-            reconcile_public_ipv6_provider_runtime(&global_ctx).await;
-
-            if should_run_public_ipv6_provider_reconcile(&global_ctx) {
-                ensure_public_ipv6_provider_reconcile_task(
-                    &global_ctx,
-                    &self.public_ipv6_provider_task,
-                )
-                .await;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn trace_patchables<T: std::fmt::Debug>(
-        patches: &Vec<crate::proto::api::config::Patchable<T>>,
-    ) {
-        for patch in patches {
-            match patch.action {
-                Some(ConfigPatchAction::Add) | Some(ConfigPatchAction::Remove) => {
-                    if let Some(value) = &patch.value {
-                        tracing::info!("{:?} {:?}", patch.action, value);
-                    } else {
-                        tracing::warn!(
-                            "Ignored {:?} patch with no value for type '{}'. Please ensure the patch value is provided.",
-                            patch.action,
-                            std::any::type_name::<T>()
-                        );
-                    }
-                }
-                Some(ConfigPatchAction::Clear) => {
-                    tracing::info!("Clear all for type '{}'", std::any::type_name::<T>());
-                }
-                None => {
-                    tracing::warn!(
-                        "Invalid patch action for type '{}'",
-                        std::any::type_name::<T>()
-                    );
-                }
-            }
-        }
-    }
-
-    async fn patch_port_forwards(
-        &self,
-        port_forwards: Vec<PortForwardPatch>,
-    ) -> Result<(), anyhow::Error> {
-        if port_forwards.is_empty() {
-            return Ok(());
-        }
-        #[cfg(feature = "socks5")]
-        let Some(socks5_server) = self.socks5_server.upgrade() else {
-            return Err(anyhow::anyhow!("socks5 server not available"));
-        };
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-
-        let mut current_forwards = global_ctx.config.get_port_forwards();
-        let patches = port_forwards.into_iter().map(Into::into).collect();
-        InstanceConfigPatcher::trace_patchables(&patches);
-        crate::proto::api::config::patch_vec(&mut current_forwards, patches);
-
-        global_ctx
-            .config
-            .set_port_forwards(current_forwards.clone());
-        #[cfg(feature = "socks5")]
-        socks5_server
-            .reload_port_forwards(&current_forwards)
-            .await
-            .with_context(|| "Failed to reload port forwards")?;
-
-        Ok(())
-    }
-
-    async fn patch_acl(
-        &self,
-        acl_patch: Option<crate::proto::api::config::AclPatch>,
-    ) -> Result<(), anyhow::Error> {
-        let Some(acl_patch) = acl_patch else {
-            return Ok(());
-        };
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-        if let Some(acl) = acl_patch.acl {
-            global_ctx.config.set_acl(Some(acl));
-        }
-        if !acl_patch.tcp_whitelist.is_empty() {
-            let mut current_whitelist = global_ctx.config.get_tcp_whitelist();
-            let patches = acl_patch
-                .tcp_whitelist
-                .into_iter()
-                .map(Into::into)
-                .collect();
-            InstanceConfigPatcher::trace_patchables(&patches);
-            crate::proto::api::config::patch_vec(&mut current_whitelist, patches);
-            global_ctx.config.set_tcp_whitelist(current_whitelist);
-        }
-        if !acl_patch.udp_whitelist.is_empty() {
-            let mut current_whitelist = global_ctx.config.get_udp_whitelist();
-            let patches = acl_patch
-                .udp_whitelist
-                .into_iter()
-                .map(Into::into)
-                .collect();
-            InstanceConfigPatcher::trace_patchables(&patches);
-            crate::proto::api::config::patch_vec(&mut current_whitelist, patches);
-            global_ctx.config.set_udp_whitelist(current_whitelist);
-        }
-        global_ctx
-            .get_acl_filter()
-            .reload_rules(AclRuleBuilder::build(&global_ctx)?.as_ref());
-        weak_upgrade(&self.peer_manager)?
-            .get_route()
-            .refresh_acl_groups()
-            .await;
-        Ok(())
-    }
-
-    async fn patch_proxy_networks(
-        &self,
-        proxy_networks: Vec<crate::proto::api::config::ProxyNetworkPatch>,
-    ) -> Result<(), anyhow::Error> {
-        if proxy_networks.is_empty() {
-            return Ok(());
-        }
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-        for proxy_network_patch in proxy_networks {
-            match ConfigPatchAction::try_from(proxy_network_patch.action) {
-                Ok(ConfigPatchAction::Add) => {
-                    let Some(cidr) = proxy_network_patch.cidr.map(|c| c.into()) else {
-                        tracing::warn!("Proxy network cidr is None, skipping add.");
-                        continue;
-                    };
-                    let mapped_cidr: Option<cidr::Ipv4Cidr> =
-                        proxy_network_patch.mapped_cidr.map(|s| s.into());
-                    tracing::info!("Proxy network added: {}", cidr);
-                    global_ctx.config.add_proxy_cidr(cidr, mapped_cidr)?;
-                }
-                Ok(ConfigPatchAction::Remove) => {
-                    let Some(cidr) = proxy_network_patch.cidr.map(|c| c.into()) else {
-                        tracing::warn!("Proxy network cidr is None, skipping remove.");
-                        continue;
-                    };
-                    tracing::info!("Proxy network removed: {}", cidr);
-                    global_ctx.config.remove_proxy_cidr(cidr);
-                }
-                Ok(ConfigPatchAction::Clear) => {
-                    tracing::info!("Proxy networks cleared.");
-                    global_ctx.config.clear_proxy_cidrs();
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "Invalid proxy network action: {}",
-                        proxy_network_patch.action
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn patch_routes(
-        &self,
-        routes: Vec<crate::proto::api::config::RoutePatch>,
-    ) -> Result<(), anyhow::Error> {
-        if routes.is_empty() {
-            return Ok(());
-        }
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-        let mut current_routes = global_ctx.config.get_routes().unwrap_or_default();
-        let patches = routes.into_iter().map(Into::into).collect();
-        InstanceConfigPatcher::trace_patchables(&patches);
-        crate::proto::api::config::patch_vec(&mut current_routes, patches);
-        if current_routes.is_empty() {
-            global_ctx.config.set_routes(None);
-        } else {
-            global_ctx.config.set_routes(Some(current_routes));
-        }
-        Ok(())
-    }
-
-    async fn patch_mapped_listeners(
-        &self,
-        mapped_listeners: Vec<crate::proto::api::config::UrlPatch>,
-    ) -> Result<(), anyhow::Error> {
-        if mapped_listeners.is_empty() {
-            return Ok(());
-        }
-        let global_ctx = weak_upgrade(&self.global_ctx)?;
-        let mut current_mapped_listeners = global_ctx.config.get_mapped_listeners();
-        let patches = mapped_listeners.into_iter().map(Into::into).collect();
-        InstanceConfigPatcher::trace_patchables(&patches);
-        crate::proto::api::config::patch_vec(&mut current_mapped_listeners, patches);
-        if current_mapped_listeners.is_empty() {
-            global_ctx.config.set_mapped_listeners(None);
-        } else {
-            global_ctx
-                .config
-                .set_mapped_listeners(Some(current_mapped_listeners));
-        }
-        Ok(())
-    }
-
-    async fn patch_connector(
-        &self,
-        connectors: Vec<crate::proto::api::config::UrlPatch>,
-        flags: &crate::common::config::Flags,
-    ) -> Result<(), anyhow::Error> {
-        if connectors.is_empty() {
-            return Ok(());
-        }
-        let conn_manager = weak_upgrade(&self.conn_manager)?;
-        for connector in connectors {
-            let Some(url) = connector.url.map(Into::<url::Url>::into) else {
-                tracing::warn!("Connector url is None, skipping.");
-                return Ok(());
-            };
-            match ConfigPatchAction::try_from(connector.action) {
-                Ok(ConfigPatchAction::Add) => {
-                    tracing::info!("Connector added: {}", url);
-                    // Resolve new paths with this patch before its flags become active.
-                    conn_manager.add_connector_by_url_with_flags(url, flags);
-                }
-                Ok(ConfigPatchAction::Remove) => {
-                    tracing::info!("Connector removed: {}", url);
-                    conn_manager.remove_connector(url).await?;
-                }
-                Ok(ConfigPatchAction::Clear) => {
-                    tracing::info!("Connectors cleared.");
-                    conn_manager.clear_connectors().await;
-                }
-                Err(_) => {
-                    tracing::warn!("Invalid connector action: {}", connector.action);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn sync_live_config(
-        &self,
-        old_peers: &[crate::common::config::PeerConfig],
-        candidate: &crate::common::config::TomlConfigLoader,
-    ) -> Result<(), anyhow::Error> {
-        use std::collections::HashSet;
-
-        let conn_manager = weak_upgrade(&self.conn_manager)?;
-        let flags = candidate.get_flags();
-        let new_peers = candidate.get_peers();
-        let old_urls: HashSet<url::Url> = old_peers.iter().map(|p| p.uri.clone()).collect();
-        let new_urls: HashSet<url::Url> = new_peers.iter().map(|p| p.uri.clone()).collect();
-
-        for url in old_urls.difference(&new_urls) {
-            tracing::info!(%url, "hot-removing bootstrap peer");
-            if let Err(e) = conn_manager.remove_connector(url.clone()).await {
-                tracing::warn!(%url, ?e, "failed to remove connector during live config sync");
-            }
-        }
-        for url in new_urls.difference(&old_urls) {
-            tracing::info!(%url, "hot-adding bootstrap peer");
-            conn_manager.add_connector_by_url_with_flags(url.clone(), &flags);
-        }
-
-        Ok(())
-    }
-}
-
 pub struct Instance {
     id: uuid::Uuid,
 
@@ -726,13 +321,11 @@ impl Instance {
         self.conn_manager.clone()
     }
 
-    async fn add_initial_peers(&self) -> Result<(), Error> {
+    /// Register configured peers. Reconnect tasks perform dialing and authentication.
+    fn add_initial_peers(&self) {
         for peer in self.global_ctx.config.get_peers().iter() {
-            self.get_conn_manager()
-                .add_connector_by_url(peer.uri.clone())
-                .await?;
+            self.conn_manager.add_connector_by_url(peer.uri.clone());
         }
-        Ok(())
     }
 
     async fn prepare_public_ipv6_config(&self) -> Result<(), Error> {
@@ -1028,7 +621,9 @@ impl Instance {
             Self::clear_nic_ctx(self.nic_ctx.clone(), self.peer_packet_receiver.clone()).await;
 
             #[cfg(not(mobile))]
-            if !self.global_ctx.config.get_flags().no_tun {
+            if self.global_ctx.config.get_flags().tun_mode()
+                == crate::common::config::TunMode::Kernel
+            {
                 let (output_tx, output_rx) = oneshot::channel();
                 self.check_for_static_ip(output_tx);
                 output_rx.await.unwrap()?;
@@ -1069,7 +664,7 @@ impl Instance {
             .set_route_cost_fn(route_calc)
             .await;
 
-        self.add_initial_peers().await?;
+        self.add_initial_peers();
         if let Some(config) = self.global_ctx.config.get_tracker_discovery() {
             self.tracker_discovery = Some(crate::connector::tracker_discovery::start(
                 self.peer_manager.clone(),
@@ -1136,22 +731,12 @@ impl Instance {
         self.peer_manager.my_peer_id()
     }
 
-    pub fn get_config_patcher(&self) -> InstanceConfigPatcher {
-        InstanceConfigPatcher {
-            global_ctx: Arc::downgrade(&self.global_ctx),
-            #[cfg(feature = "socks5")]
-            socks5_server: Arc::downgrade(&self.socks5_server),
-            peer_manager: Arc::downgrade(&self.peer_manager),
-            conn_manager: Arc::downgrade(&self.conn_manager),
-            public_ipv6_provider_task: self.public_ipv6_provider_task.clone(),
-        }
-    }
-
+    /// Return management handles that cannot keep a stopped instance alive.
     pub fn control_instance(&self) -> ControlInstance {
         ControlInstance {
             peer_manager: Arc::downgrade(&self.peer_manager),
             global_ctx: Arc::downgrade(&self.global_ctx),
-            patcher: self.get_config_patcher(),
+            conn_manager: Arc::downgrade(&self.conn_manager),
         }
     }
 

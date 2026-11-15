@@ -1,12 +1,10 @@
 //! `lowertier gui`: a browser interface served on loopback by the CLI process.
 //!
-//! The page exchanges TOML documents with this server, the same format as the configuration
-//! file, and the server forwards each call to the selected daemon with the control token. The
-//! token never reaches the browser. Every API request must carry the per-run key from the URL
-//! fragment, and requests with a foreign Host or Origin are refused, so other sites open in the
-//! browser cannot reach the daemon through this port.
+//! HTTP messages use generated protobuf JSON. Configuration documents retain public TOML syntax.
+//! The server supplies the selected daemon's control token. The browser never receives that token.
+//! Untrusted sources need the per-run GUI key. Trusted source CIDRs can omit that key.
+//! Foreign Host and Origin headers are rejected before API dispatch.
 
-mod codec;
 pub mod overlay;
 
 use std::{
@@ -45,7 +43,7 @@ const STYLE: &[u8] = include_bytes!("../../gui/dist/app.css");
 const KEY_HEADER: &str = "x-lowertier-key";
 const REMOTE_SECRET_HEADER: &str = "x-lowertier-remote-secret";
 const MAX_BODY: usize = 1 << 20;
-const TOML: &str = "application/toml; charset=utf-8";
+const JSON: &str = "application/json; charset=utf-8";
 /// Both ends close a portal connection after 60 s without traffic. Dial again before that.
 const REUSE_IDLE: Duration = Duration::from_secs(20);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(5);
@@ -93,11 +91,9 @@ fn reply(status: StatusCode, kind: &str, body: impl Into<Bytes>) -> Reply {
     response
 }
 
-fn toml_reply(value: Value) -> Reply {
-    match codec::document(value) {
-        Ok(body) => reply(StatusCode::OK, TOML, body),
-        Err(error) => error_reply(&error),
-    }
+/// Encode the HTTP envelope without changing protobuf integer strings or optional fields.
+fn json_reply(value: Value) -> Reply {
+    reply(StatusCode::OK, JSON, value.to_string())
 }
 
 fn error_reply(error: &CliError) -> Reply {
@@ -115,7 +111,7 @@ fn error_reply(error: &CliError) -> Reply {
         "field_path": error.0.field_path,
         "retryable": error.0.retryable,
     }});
-    reply(status, TOML, codec::document(error).unwrap_or_default())
+    reply(status, JSON, error.to_string())
 }
 
 fn query(request: &Request<Incoming>) -> HashMap<String, String> {
@@ -130,7 +126,11 @@ fn query(request: &Request<Incoming>) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// `PATH=VALUE` assignments for every option in a `[set]` table in the public layout.
+/// Resolve configuration updates by registry path.
+///
+/// A registered leaf stays intact, including opaque tables.
+/// Section objects recurse until a leaf is found. Unknown leaves fail with their public path.
+/// Quoted dotted keys name one leaf and do not replace its parent section.
 fn assignments(prefix: &str, table: &toml::Table, out: &mut Vec<String>) -> Result<()> {
     for (key, value) in table {
         let path = if prefix.is_empty() {
@@ -155,8 +155,25 @@ fn assignments(prefix: &str, table: &toml::Table, out: &mut Vec<String>) -> Resu
     Ok(())
 }
 
+/// JSON configuration update in the public option layout.
+///
+/// Missing fields use empty updates. Unknown fields and invalid field types are rejected.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigUpdate {
+    #[serde(default)]
+    set: toml::Table,
+    #[serde(default)]
+    clear: Vec<String>,
+    #[serde(default)]
+    stage: bool,
+}
+
 impl Server {
-    /// Requests must name this server, so a rebinding DNS name cannot reach it.
+    /// Require an allowed Host to prevent DNS rebinding.
+    ///
+    /// Non-browser clients can omit Origin.
+    /// A supplied Origin must use HTTP and an allowed Host, including its port.
     fn same_origin(&self, request: &Request<Incoming>) -> bool {
         let host = request
             .headers()
@@ -175,6 +192,9 @@ impl Server {
         }
     }
 
+    /// Admit trusted source CIDRs without a key.
+    ///
+    /// Other sources must supply the per-run key. Compare key bytes in constant time.
     fn authorized(&self, request: &Request<Incoming>, trusted: bool) -> bool {
         use subtle::ConstantTimeEq as _;
         trusted
@@ -184,6 +204,11 @@ impl Server {
                 .is_some_and(|key| key.as_bytes().ct_eq(self.key.as_bytes()).into())
     }
 
+    /// Select the configured daemon or a live registry entry.
+    ///
+    /// Network-facing servers ignore the node parameter.
+    /// Standalone servers accept a registered name or portal address.
+    /// Without a selected target, return the saved selection error or not_found.
     fn target(&self, node: Option<&str>) -> Result<Target> {
         let node = node.filter(|node| !node.is_empty() && !self.pinned);
         let Some(node) = node else {
@@ -393,14 +418,14 @@ impl Server {
             "portal": view.portal,
             "instance": client.instance_name,
             "sampled_at_unix_ms": chrono::Utc::now().timestamp_millis(),
-            "node": codec::message("GetNodeResponse", &view.node)?,
-            "peers": codec::messages("PeerSnapshot", &peers.peers)?,
+            "node": serde_json::to_value(&view.node)?,
+            "peers": serde_json::to_value(&peers.peers)?,
             "active_policy": peers.active_policy,
-            "relay": codec::message("GetRelayResponse", &view.relay)?,
-            "discovery": codec::message("GetDiscoveryResponse", &view.discovery)?,
-            "listeners": codec::message("ListListenersResponse", &view.listeners)?,
-            "routes": codec::messages("RouteSnapshot", &routes.routes)?,
-            "paths": codec::messages("PathStatus", &paths.paths)?,
+            "relay": serde_json::to_value(&view.relay)?,
+            "discovery": serde_json::to_value(&view.discovery)?,
+            "listeners": serde_json::to_value(&view.listeners)?,
+            "routes": serde_json::to_value(&routes.routes)?,
+            "paths": serde_json::to_value(&paths.paths)?,
         }))
     }
 
@@ -420,34 +445,23 @@ impl Server {
         }))
     }
 
-    /// Apply a `[set]` table in the public layout and a `clear` list of option paths.
-    async fn set(&self, client: &Client, mut body: toml::Table) -> Result<Value> {
+    /// Apply JSON option values through the same transaction as CLI configuration changes.
+    ///
+    /// Empty updates fail. Clear paths restore defaults.
+    /// The stage flag permits desired settings that require a restart.
+    async fn set(&self, client: &Client, body: serde_json::Map<String, Value>) -> Result<Value> {
+        let update: ConfigUpdate = serde_json::from_value(Value::Object(body))
+            .map_err(|error| CliError::new("invalid_argument", error.to_string(), "body"))?;
         let mut values = toml::Table::new();
         let mut mask = Vec::new();
-        if let Some(set) = body.remove("set") {
-            let toml::Value::Table(set) = set else {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "set must be a table.",
-                    "set",
-                ));
-            };
-            let mut found = Vec::new();
-            assignments("", &set, &mut found)?;
-            for assignment in found {
-                let spec = config_schema::apply_set(&mut values, &assignment).map_err(|error| {
-                    CliError::new("invalid_argument", format!("{error:#}"), "set")
-                })?;
-                mask.push(spec.path.to_owned());
-            }
+        let mut found = Vec::new();
+        assignments("", &update.set, &mut found)?;
+        for assignment in found {
+            let spec = config_schema::apply_set(&mut values, &assignment)
+                .map_err(|error| CliError::new("invalid_argument", format!("{error:#}"), "set"))?;
+            mask.push(spec.path.to_owned());
         }
-        let clear: Vec<String> = match body.remove("clear") {
-            Some(toml::Value::Array(paths)) => paths
-                .iter()
-                .filter_map(|path| path.as_str().map(str::to_owned))
-                .collect(),
-            _ => Vec::new(),
-        };
+        let clear = update.clear;
         if mask.is_empty() && clear.is_empty() {
             return Err(CliError::new(
                 "invalid_argument",
@@ -456,15 +470,12 @@ impl Server {
             ));
         }
         let apply = ApplyArgs {
-            stage: body
-                .get("stage")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false),
+            stage: update.stage,
             ..Default::default()
         };
         match config::patch_noting(client, values, mask, clear, &apply, None).await? {
             (CliResponse::PatchConfigResponse(response), unsaved) => {
-                let mut reply = codec::message("PatchConfigResponse", &response)?;
+                let mut reply = serde_json::to_value(&response)?;
                 if let Some(reason) = unsaved {
                     reply["unsaved"] = Value::String(reason);
                 }
@@ -474,21 +485,18 @@ impl Server {
         }
     }
 
-    async fn call(&self, client: &Client, method: &str, body: toml::Table) -> Result<Value> {
-        let (input, output) = codec::method(method).ok_or_else(|| {
-            CliError::new(
-                "not_found",
-                format!("No control method {method}."),
-                "method",
-            )
-        })?;
-        let mut request = match codec::to_json(body)? {
-            Value::Object(request) => request,
-            _ => serde_json::Map::new(),
-        };
-        request.insert("meta".into(), serde_json::to_value(&client.meta)?);
-        let request = Value::Object(request);
-        codec::validate(input, &request)?;
+    /// Dispatch generated protobuf JSON with authentication metadata from the server.
+    ///
+    /// Caller metadata is replaced before dispatch.
+    /// Unknown methods return not_found. Invalid message fields return invalid_argument.
+    /// Other RPC failures retain their normal CLI error mapping.
+    async fn call(
+        &self,
+        client: &Client,
+        method: &str,
+        mut body: serde_json::Map<String, Value>,
+    ) -> Result<Value> {
+        body.insert("meta".into(), serde_json::to_value(&client.meta)?);
         let response = client
             .rpc
             .json_call_method(
@@ -497,15 +505,23 @@ impl Server {
                     ..Default::default()
                 },
                 method,
-                request,
+                Value::Object(body),
             )
-            .await?;
+            .await
+            .map_err(CliError::from)?;
         if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
             return Err(CliError(serde_json::from_value(error.clone())?));
         }
-        codec::normalize(output, response)
+        Ok(response)
     }
 
+    /// Dispatch an authenticated API request.
+    ///
+    /// Node and schema reads need no daemon connection.
+    /// POST bodies must be JSON objects within the body limit.
+    /// Remote snapshots receive a longer deadline for the overlay control exchange.
+    /// Unknown method and path combinations return not_found.
+    /// Failed daemon calls update the cached connection through [`Self::forget`].
     async fn api(&self, request: Request<Incoming>, path: &str) -> Result<Reply> {
         let method = request.method().clone();
         let params = query(&request);
@@ -516,8 +532,8 @@ impl Server {
             .unwrap_or("")
             .to_owned();
         match (&method, path) {
-            (&Method::GET, "nodes") => return Ok(toml_reply(self.nodes())),
-            (&Method::GET, "schema") => return Ok(toml_reply(schema())),
+            (&Method::GET, "nodes") => return Ok(json_reply(self.nodes())),
+            (&Method::GET, "schema") => return Ok(json_reply(schema())),
             _ => {}
         }
         let body = if method == Method::POST {
@@ -528,9 +544,10 @@ impl Server {
                     CliError::new("invalid_argument", "The request body is too large.", "")
                 })?
                 .to_bytes();
-            codec::parse(&bytes)?
+            serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes)
+                .map_err(|error| CliError::new("invalid_argument", error.to_string(), "body"))?
         } else {
-            toml::Table::new()
+            serde_json::Map::new()
         };
         let client = self.client(&params, &remote_secret).await?;
         let is_remote = params
@@ -569,7 +586,7 @@ impl Server {
         if let Err(error) = &result {
             self.forget(&client, error).await;
         }
-        result.map(toml_reply)
+        result.map(json_reply)
     }
 
     async fn handle(self: Arc<Self>, request: Request<Incoming>, trusted: bool) -> Reply {
@@ -781,5 +798,50 @@ pub async fn serve(args: &Arguments, gui: &GuiArgs) -> Result<()> {
     tokio::select! {
         _ = accept => Ok(()),
         _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn json_http_preserves_protobuf_integer_strings() {
+        let peer = crate::proto::api::control::v1::PeerSnapshot {
+            delivery_bps: Some(u64::MAX),
+            ..Default::default()
+        };
+        let response = json_reply(serde_json::to_value(peer).unwrap());
+        assert_eq!(response.headers()[header::CONTENT_TYPE], JSON);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let decoded: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["delivery_bps"], u64::MAX.to_string());
+        assert!(decoded.get("rtt_us").is_none());
+    }
+
+    #[test]
+    fn json_config_keeps_leaf_paths_and_rejects_invalid_envelopes() {
+        let update: ConfigUpdate = serde_json::from_value(json!({
+            "set": {"acl.tcp_ports": ["22"]},
+            "clear": ["acl.udp_ports"],
+            "stage": true,
+        }))
+        .unwrap();
+        let mut found = Vec::new();
+        assignments("", &update.set, &mut found).unwrap();
+        let mut values = toml::Table::new();
+        let spec = config_schema::apply_set(&mut values, &found[0]).unwrap();
+        assert_eq!(spec.path, "acl.tcp_ports");
+        assert_eq!(values["acl"]["tcp_ports"][0].as_str(), Some("22"));
+        assert_eq!(update.clear, ["acl.udp_ports"]);
+        assert!(update.stage);
+        for invalid in [
+            json!({"clear": [7]}),
+            json!({"stage": "true"}),
+            json!({"set": []}),
+            json!({"unknown": true}),
+        ] {
+            assert!(serde_json::from_value::<ConfigUpdate>(invalid).is_err());
+        }
     }
 }

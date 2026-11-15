@@ -37,6 +37,7 @@ pub(crate) mod queue_feedback;
 pub mod ring;
 pub mod stats;
 pub mod tcp;
+mod tcp_dial;
 pub(crate) mod tcp_lanes;
 mod tcp_socket;
 
@@ -199,11 +200,6 @@ pub trait Tunnel: Send {
     }
 }
 
-#[auto_impl::auto_impl(Arc)]
-pub trait TunnelConnCounter: 'static + Send + Sync + Debug {
-    fn get(&self) -> Option<u32>;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IpVersion {
     V4,
@@ -217,16 +213,6 @@ pub trait TunnelListener: Send {
     async fn listen(&mut self) -> Result<(), TunnelError>;
     async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError>;
     fn local_url(&self) -> url::Url;
-    fn get_conn_counter(&self) -> Arc<Box<dyn TunnelConnCounter>> {
-        #[derive(Debug)]
-        struct FakeTunnelConnCounter {}
-        impl TunnelConnCounter for FakeTunnelConnCounter {
-            fn get(&self) -> Option<u32> {
-                None
-            }
-        }
-        Arc::new(Box::new(FakeTunnelConnCounter {}))
-    }
 }
 
 #[async_trait]

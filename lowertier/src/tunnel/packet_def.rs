@@ -682,7 +682,8 @@ pub struct ZCPacket {
     pub(crate) transit_data: bool,
     pub(crate) transit_network: Option<std::sync::Arc<str>>,
     pub(crate) transit_destination: Option<PeerId>,
-    /// Local-only: the [[path]] chosen for this packet when it was routed by IP.
+    /// Record the configured path rule selected during local IP routing.
+    /// This metadata does not enter the overlay packet.
     pub(crate) path_rule: Option<u16>,
     /// End-to-end multipath flow tag and dense sequence number for `mode = "parallel"`.
     pub(crate) multipath_seq: Option<(u32, u32)>,

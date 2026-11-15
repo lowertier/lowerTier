@@ -29,7 +29,7 @@ pub struct Trace {
     pub measured_rtt_us: Option<u64>,
     pub delivery_bps: Option<u64>,
     pub hops: Vec<Hop>,
-    /// The [[path]] that steers traffic to this destination, summarized.
+    /// The configured path rule that selects this destination.
     pub path: Option<String>,
 }
 

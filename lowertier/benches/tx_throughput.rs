@@ -14,7 +14,7 @@ use bytes::BytesMut;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use lowertier::{
-    common::config::{ConfigLoader, NetworkIdentity, TomlConfigLoader},
+    common::config::{ConfigLoader, NetworkIdentity, TomlConfigLoader, TunMode},
     instance::instance::Instance,
     peers::{
         PeerPacketFilter,
@@ -23,9 +23,7 @@ use lowertier::{
     tunnel::{
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         packet_def::ZCPacket,
-        quic::QuicTunnelConnector,
         ring::create_ring_tunnel_pair,
-        tcp::TcpTunnelConnector,
     },
 };
 
@@ -429,29 +427,24 @@ async fn setup_topology(tunnel: TunnelKind, packet_size: usize) -> BenchTopology
                     .expect("ring benchmark server tunnel");
             });
         }
-        TunnelKind::H2 => inst_b
-            .get_conn_manager()
-            .add_connector(TcpTunnelConnector::new(
-                format!(
-                    "h2://{}:{}",
-                    docker.as_ref().expect("H2 benchmark needs Docker").ip_a,
-                    tunnel_port
-                )
-                .parse()
-                .unwrap(),
-            )),
-        TunnelKind::Quic => inst_b
-            .get_conn_manager()
-            .add_connector(QuicTunnelConnector::new(
-                format!(
-                    "quic://{}:{}",
-                    docker.as_ref().expect("quic benchmark needs Docker").ip_a,
-                    tunnel_port
-                )
-                .parse()
-                .unwrap(),
-                inst_b.get_global_ctx(),
-            )),
+        TunnelKind::H2 => inst_b.get_conn_manager().add_single_connector_by_url(
+            format!(
+                "h2://{}:{}",
+                docker.as_ref().expect("H2 benchmark needs Docker").ip_a,
+                tunnel_port
+            )
+            .parse()
+            .unwrap(),
+        ),
+        TunnelKind::Quic => inst_b.get_conn_manager().add_single_connector_by_url(
+            format!(
+                "quic://{}:{}",
+                docker.as_ref().expect("quic benchmark needs Docker").ip_a,
+                tunnel_port
+            )
+            .parse()
+            .unwrap(),
+        ),
     }
 
     wait_for_routes(&inst_a, &inst_b).await;
@@ -634,7 +627,7 @@ fn no_tun_config(
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_listeners(listeners);
     let mut flags = config.get_flags();
-    flags.no_tun = true;
+    flags.tun_mode = TunMode::None as i32;
     config.set_flags(flags);
     config
 }

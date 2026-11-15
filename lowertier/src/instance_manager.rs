@@ -2,7 +2,11 @@
 use crate::launcher::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket};
 use dashmap::DashMap;
 use std::fmt::{Display, Formatter};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
@@ -227,27 +231,17 @@ impl NetworkInstanceManager {
         Ok(instance_id)
     }
 
+    /// Remove every instance outside `instance_ids`, including its tasks and management state.
+    ///
+    /// Retained instances keep their configuration and stopped-instance guards.
+    /// Removed guards release the process when no running instance or daemon guard remains.
+    /// Hold the mutex from [`Self::remote_mutation_lock`] when lifecycle or configuration changes can run concurrently.
     pub fn retain_network_instance(
         &self,
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
-        self.instance_map.retain(|k, _| instance_ids.contains(k));
-        self.instance_stop_tasks
-            .retain(|id, _| instance_ids.contains(id));
-        #[cfg(feature = "gui")]
-        self.gui_tasks.retain(|id, _| instance_ids.contains(id));
-        self.control_stats
-            .lock()
-            .unwrap()
-            .retain(|id, _| instance_ids.contains(id));
-        self.control_configs
-            .lock()
-            .unwrap()
-            .retain(|id, _| instance_ids.contains(id));
-        self.instance_map.shrink_to_fit();
-        self.instance_error_messages
-            .retain(|k, _| instance_ids.contains(k));
-        self.instance_error_messages.shrink_to_fit();
+        let ids: BTreeSet<_> = instance_ids.into_iter().collect();
+        self.retain_instances(|id| ids.contains(id));
         Ok(self.list_network_instance_ids())
     }
 
@@ -302,28 +296,36 @@ impl NetworkInstanceManager {
         Ok(())
     }
 
+    /// Remove the named instances and all state that belongs to those instances.
+    ///
+    /// Unknown identifiers have no effect. Configuration files remain on disk.
+    /// The control API checks deletion permission before it removes a configuration file.
+    /// Hold the mutex from [`Self::remote_mutation_lock`] when lifecycle or configuration changes can run concurrently.
     pub fn delete_network_instance(
         &self,
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
-        self.instance_map.retain(|k, _| !instance_ids.contains(k));
-        self.instance_stop_tasks
-            .retain(|id, _| !instance_ids.contains(id));
+        let ids: BTreeSet<_> = instance_ids.into_iter().collect();
+        self.retain_instances(|id| !ids.contains(id));
+        Ok(self.list_network_instance_ids())
+    }
+
+    /// Apply one ownership decision to every instance store.
+    ///
+    /// Drop stopped-instance guards last so shutdown observes the completed cleanup.
+    fn retain_instances(&self, keep: impl Fn(&uuid::Uuid) -> bool) {
+        self.instance_map.retain(|id, _| keep(id));
+        self.instance_stop_tasks.retain(|id, _| keep(id));
         #[cfg(feature = "gui")]
-        self.gui_tasks.retain(|id, _| !instance_ids.contains(id));
-        self.control_stats
-            .lock()
-            .unwrap()
-            .retain(|id, _| !instance_ids.contains(id));
+        self.gui_tasks.retain(|id, _| keep(id));
+        self.control_stats.lock().unwrap().retain(|id, _| keep(id));
         self.control_configs
             .lock()
             .unwrap()
-            .retain(|id, _| !instance_ids.contains(id));
-        self.instance_map.shrink_to_fit();
-        self.instance_error_messages
-            .retain(|k, _| !instance_ids.contains(k));
-        self.instance_error_messages.shrink_to_fit();
-        Ok(self.list_network_instance_ids())
+            .retain(|id, _| keep(id));
+        self.reload_errors.lock().unwrap().retain(|id, _| keep(id));
+        self.instance_error_messages.retain(|id, _| keep(id));
+        self.stopped_holds.retain(|id, _| keep(id));
     }
 
     pub async fn collect_network_infos(
@@ -479,6 +481,10 @@ impl NetworkInstanceManager {
         Ok(())
     }
 
+    /// Update the file policy for a registered instance.
+    ///
+    /// The caller must serialize this update with instance removal.
+    /// A missing instance is the only error condition.
     pub(crate) fn set_instance_file_control(
         &self,
         id: uuid::Uuid,
@@ -525,6 +531,62 @@ impl NetworkInstanceManager {
             }
 
             self.stop_check_notifier.notified().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn removal_clears_owned_state_and_releases_stopped_guards() {
+        for retain in [false, true] {
+            let manager = NetworkInstanceManager::new();
+            let mut ids = Vec::new();
+            for name in ["removed", "retained"] {
+                let config = TomlConfigLoader::default();
+                config.set_id(uuid::Uuid::new_v4());
+                config.set_inst_name(name.into());
+                config.set_enabled(false);
+                let id = manager
+                    .run_network_instance(config, false, ConfigFileControl::STATIC_CONFIG)
+                    .unwrap();
+                manager
+                    .reload_errors
+                    .lock()
+                    .unwrap()
+                    .insert(id, name.into());
+                manager
+                    .control_configs
+                    .lock()
+                    .unwrap()
+                    .insert(id, Default::default());
+                ids.push(id);
+            }
+            if retain {
+                manager.retain_network_instance(vec![ids[1]]).unwrap();
+            } else {
+                manager.delete_network_instance(vec![ids[0]]).unwrap();
+            }
+            assert_eq!(manager.list_network_instance_ids(), vec![ids[1]]);
+            for id in &ids {
+                let retained = *id == ids[1];
+                assert_eq!(manager.stopped_holds.contains_key(id), retained);
+                assert_eq!(
+                    manager.reload_errors.lock().unwrap().contains_key(id),
+                    retained
+                );
+                assert_eq!(
+                    manager.control_configs.lock().unwrap().contains_key(id),
+                    retained
+                );
+            }
+            manager.delete_network_instance(vec![ids[1]]).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), manager.wait())
+                .await
+                .expect("removing the last stopped instance must release the process");
         }
     }
 }
@@ -668,8 +730,8 @@ fn handle_event(
                         );
                     }
 
-                    GlobalCtxEvent::ConfigPatched(patch) => {
-                        event!(info, ?patch, "[{}] config patched", instance_id);
+                    GlobalCtxEvent::ConfigPatched => {
+                        event!(info, "[{}] configuration changed", instance_id);
                     }
 
                     GlobalCtxEvent::ProxyCidrsUpdated(added, removed) => {

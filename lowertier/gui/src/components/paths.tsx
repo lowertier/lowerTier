@@ -9,7 +9,7 @@ import {
   stageNodes,
   type PathStageConfig,
 } from "../config";
-import { latency } from "../format";
+import { counterShares, latency } from "../format";
 import { peerName, peers, snapshot } from "../store";
 
 export const MAX_RELAY_LAYERS = 8;
@@ -197,7 +197,10 @@ function hopLabel(peerId: number): string {
   return peerName(peerId);
 }
 
-/** Live state of one path: each layer's members, active multipath chains, and traffic share. */
+/**
+ * Show path members, active chains, and traffic shares.
+ * Absent status hides the panel. Protobuf omits false, so absent health flags mean down.
+ */
 export function PathStatusView(props: { status?: Doc }) {
   const segments = createMemo(() => {
     const status = props.status;
@@ -217,7 +220,7 @@ export function PathStatusView(props: { status?: Doc }) {
           <For each={segments()}>
             {({ role, segment }) => {
               const members = () => (segment.members ?? []) as Doc[];
-              const total = () => members().reduce((sum, member) => sum + (member.picks ?? 0), 0);
+              const shares = createMemo(() => counterShares(members().map((member) => member.picks ?? 0)));
               return (
                 <div class="segment">
                   <span class="segment-name">
@@ -227,8 +230,8 @@ export function PathStatusView(props: { status?: Doc }) {
                     </Show>
                   </span>
                   <For each={members()}>
-                    {(member) => {
-                      const share = () => (total() ? (member.picks ?? 0) / total() : 0);
+                    {(member, index) => {
+                      const share = () => shares()[index()] ?? 0;
                       return (
                         <div class="member" classList={{ unusable: !member.usable }} title={member.reason || undefined}>
                           <span class="member-name">{member.hostname || refLabel(member.ref)}</span>
@@ -250,14 +253,14 @@ export function PathStatusView(props: { status?: Doc }) {
               <ul class="chain-list">
                 <For each={chains()}>
                   {(chain) => (
-                    <li class="chain-item" classList={{ unusable: chain.healthy === false }}>
+                    <li class="chain-item" classList={{ unusable: !chain.healthy }}>
                       <span>
                         {((chain.hops ?? []) as number[]).map(hopLabel).join(" → ")}
                       </span>
                       <span class="sub">
                         {chain.rtt_us ? `${latency(chain.rtt_us)} · ` : ""}
                         {chain.packets ?? 0} pkts
-                        {chain.healthy === false ? " · down" : ""}
+                        {!chain.healthy ? " · down" : ""}
                       </span>
                     </li>
                   )}

@@ -573,8 +573,7 @@ impl TcpProxy {
 
     async fn get_proxy_listener(&self) -> Result<ProxyTcpListener> {
         #[cfg(feature = "smoltcp")]
-        if self.global_ctx.get_flags().use_smoltcp
-            || self.global_ctx.no_tun()
+        if self.global_ctx.no_tun()
             || cfg!(any(any(
                 target_os = "ios",
                 all(target_os = "macos", feature = "macos-ne")

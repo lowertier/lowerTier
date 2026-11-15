@@ -10,7 +10,6 @@ import struct
 import subprocess
 import tempfile
 import time
-import tomllib
 
 
 def available_port() -> int:
@@ -30,7 +29,7 @@ def receive(stream: socket.socket, length: int) -> bytes:
 
 
 def request(proxy: int, port: int, path: str, key: str | None = None, host: str | None = None,
-            body: str | None = None, extra_headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+            body: dict | None = None, extra_headers: dict[str, str] | None = None) -> tuple[int, bytes]:
     with socket.create_connection(('127.0.0.1', proxy), timeout=3) as stream:
         stream.sendall(b'\x05\x01\x00')
         assert receive(stream, 2) == b'\x05\x00'
@@ -48,12 +47,13 @@ def request(proxy: int, port: int, path: str, key: str | None = None, host: str 
         if extra_headers:
             headers.update(extra_headers)
         if body is not None:
-            headers['Content-Type'] = 'application/toml'
-            headers['Content-Length'] = str(len(body.encode()))
+            encoded = json.dumps(body)
+            headers['Content-Type'] = 'application/json'
+            headers['Content-Length'] = str(len(encoded.encode()))
         message = ('POST ' if body is not None else 'GET ') + path + ' HTTP/1.1\r\n'
         message += ''.join(name + ': ' + value + '\r\n' for name, value in headers.items()) + '\r\n'
         if body is not None:
-            message += body
+            message += encoded
         stream.sendall(message.encode())
         response = http.client.HTTPResponse(stream)
         response.begin()
@@ -157,42 +157,53 @@ allow = []
         assert request(proxy, gui_port, '/api/snapshot')[0] == 403
         status, body = request(proxy, gui_port, '/api/snapshot', key)
         assert status == 200, status
-        assert tomllib.loads(body.decode())['node']['node']['hostname'] == 'gui-proxy-b'
+        assert json.loads(body.decode())['node']['node']['hostname'] == 'gui-proxy-b'
         assert request(proxy, gui_port, '/', host='foreign.invalid')[0] == 403
-        acl = '''[set.acl]
-udp_ports = ["53"]
-[[set.acl.acl_v1.chains]]
-name = "preserved-rule-chain"
-chain_type = 3
-enabled = true
-default_action = 1
-'''
+        assert request(
+            proxy, gui_port, '/api/snapshot', key,
+            extra_headers={'Origin': 'http://foreign.invalid'},
+        )[0] == 403
+        status, body = request(proxy, gui_port, '/api/rpc/ListPeers', key, body={'page': 7})
+        assert status == 400, body
+        assert json.loads(body)['error']['code'] == 'invalid_argument'
+        assert json.loads(body)['error']['field_path'] == 'body'
+        status, body = request(proxy, gui_port, '/api/rpc/NoSuchMethod', key, body={})
+        assert status == 404 and json.loads(body)['error']['code'] == 'not_found', body
+        acl = {'set': {'acl': {
+            'udp_ports': ['53'],
+            'acl_v1': {'chains': [{
+                'name': 'preserved-rule-chain',
+                'chain_type': 3,
+                'enabled': True,
+                'default_action': 1,
+            }]},
+        }}}
         status, body = request(proxy, gui_port, '/api/config', key, body=acl)
-        assert status == 200 and not tomllib.loads(body.decode()).get('result', {}).get('errors'), body
+        assert status == 200 and not json.loads(body.decode()).get('result', {}).get('errors'), body
         status, before = request(proxy, gui_port, '/api/config', key)
         assert status == 200
-        original = tomllib.loads(before.decode())['active']['acl']
-        patch = '[set]\n"acl.tcp_ports" = ["' + str(gui_port) + '"]\n'
+        original = json.loads(before.decode())['active']['acl']
+        patch = {'set': {'acl.tcp_ports': [str(gui_port)]}}
         status, body = request(proxy, gui_port, '/api/config', key, body=patch)
-        assert status == 200 and not tomllib.loads(body.decode()).get('result', {}).get('errors'), body
+        assert status == 200 and not json.loads(body.decode()).get('result', {}).get('errors'), body
         status, after = request(proxy, gui_port, '/api/config', key)
         assert status == 200
-        updated = tomllib.loads(after.decode())['active']['acl']
+        updated = json.loads(after.decode())['active']['acl']
         assert updated['acl_v1'] == original['acl_v1'], 'A port update replaced unrelated ACL rules'
         assert updated['udp_ports'] == original['udp_ports'], 'A TCP port update replaced UDP ports'
         assert updated['tcp_ports'] == [str(gui_port)]
-        status, body = request(proxy, gui_port, '/api/config', key, body='clear = ["acl.tcp_ports"]\n')
-        assert status == 200 and not tomllib.loads(body.decode()).get('result', {}).get('errors'), body
+        status, body = request(proxy, gui_port, '/api/config', key, body={'clear': ['acl.tcp_ports']})
+        assert status == 200 and not json.loads(body.decode()).get('result', {}).get('errors'), body
         status, after = request(proxy, gui_port, '/api/config', key)
         assert status == 200
-        cleared = tomllib.loads(after.decode())['active']['acl']
+        cleared = json.loads(after.decode())['active']['acl']
         assert 'tcp_ports' not in cleared
         assert cleared['acl_v1'] == original['acl_v1']
         assert cleared['udp_ports'] == original['udp_ports']
 
         # Verify controlling another node (?remote=...) through the web API.
         import urllib.parse
-        b_snap = tomllib.loads(request(proxy, gui_port, '/api/snapshot', key)[1].decode())
+        b_snap = json.loads(request(proxy, gui_port, '/api/snapshot', key)[1].decode())
         a_peers = [p for p in b_snap.get('peers', []) if p.get('route', {}).get('hostname') == 'gui-proxy-a']
         assert a_peers and a_peers[0].get('peer_key'), ('Missing peer_key for gui-proxy-a', b_snap)
         remote_q = urllib.parse.quote(a_peers[0]['peer_key'], safe='')
@@ -205,16 +216,16 @@ default_action = 1
             extra_headers={'x-lowertier-remote-secret': 'remote-test-secret'},
         )
         assert r_status == 200, (r_status, r_body)
-        assert tomllib.loads(r_body.decode())['node']['node']['hostname'] == 'gui-proxy-a'
+        assert json.loads(r_body.decode())['node']['node']['hostname'] == 'gui-proxy-a'
         r_cfg_status, r_cfg_body = request(
             proxy,
             gui_port,
             f'/api/config?remote={remote_q}',
             key,
-            body='[set]\n"relay.policy" = "latency"\n',
+            body={'set': {'relay.policy': 'latency'}},
             extra_headers={'x-lowertier-remote-secret': 'remote-test-secret'},
         )
-        assert r_cfg_status == 200 and not tomllib.loads(r_cfg_body.decode()).get('result', {}).get('errors'), r_cfg_body
+        assert r_cfg_status == 200 and not json.loads(r_cfg_body.decode()).get('result', {}).get('errors'), r_cfg_body
         r_get_status, r_get_body = request(
             proxy,
             gui_port,
@@ -223,7 +234,7 @@ default_action = 1
             extra_headers={'x-lowertier-remote-secret': 'remote-test-secret'},
         )
         assert r_get_status == 200
-        assert tomllib.loads(r_get_body.decode())['active']['relay']['policy'] == 'latency'
+        assert json.loads(r_get_body.decode())['active']['relay']['policy'] == 'latency'
 
         for loopback, key_file in [(other_loopback, directory / 'b/gui.key'), (foreign_loopback, directory / 'c/gui.key')]:
             try:

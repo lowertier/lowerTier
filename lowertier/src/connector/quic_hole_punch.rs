@@ -393,8 +393,7 @@ impl QuicHolePunchRpc for PunchServer {
                 && should_try_p2p_with_peer(
                     route.as_ref().and_then(|r| r.feature_flag.as_ref()),
                     false,
-                    flags.disable_p2p,
-                    flags.need_p2p,
+                    flags.p2p_mode(),
                 ),
             "peer policy denies QUIC punching",
         )?;

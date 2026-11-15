@@ -7,15 +7,13 @@ use std::{
 use super::FromUrl;
 use crate::{
     common::underlay_policy::UnderlayPolicy,
-    tunnel::common::{
-        apply_socket_mark, bind, eligible_bind_addrs, ensure_local_allowed, ensure_remote_allowed,
-    },
+    tunnel::common::{bind, ensure_remote_allowed},
 };
 use async_trait::async_trait;
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
-use super::{IpVersion, Tunnel, TunnelError, TunnelListener, common::wait_for_connect_futures};
+use super::{IpVersion, Tunnel, TunnelError, TunnelListener};
 
 const MAX_PENDING_ACCEPTS: usize = 32;
 const MAX_PENDING_ACCEPTS_PER_IP: usize = 4;
@@ -238,108 +236,36 @@ async fn get_tunnel_with_tcp_stream(
 }
 
 #[derive(Debug)]
+/// H2 connector with shared TCP address selection and socket policy.
 pub struct TcpTunnelConnector {
     addr: url::Url,
-
-    bind_addrs: Vec<SocketAddr>,
-    ip_version: IpVersion,
-    resolved_addr: Option<SocketAddr>,
-    socket_mark: Option<u32>,
-    underlay_policy: Arc<UnderlayPolicy>,
     flags: crate::common::config::Flags,
+    dialer: super::tcp_dial::TcpDialer,
 }
 
 impl TcpTunnelConnector {
+    /// Use application defaults until the instance supplies its validated flags.
     pub fn new(addr: url::Url) -> Self {
-        TcpTunnelConnector {
+        Self {
             addr,
-            bind_addrs: vec![],
-            ip_version: IpVersion::Both,
-            resolved_addr: None,
-            socket_mark: None,
-            underlay_policy: Arc::new(UnderlayPolicy::default()),
             flags: crate::common::config::gen_default_flags(),
+            dialer: Default::default(),
         }
     }
+
     pub fn set_flags(&mut self, flags: crate::common::config::Flags) {
         self.flags = flags;
-    }
-
-    async fn connect_with_default_bind(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        tracing::info!(url = ?self.addr, ?addr, "connect tcp start, bind addrs: {:?}", self.bind_addrs);
-        let socket = if addr.is_ipv4() {
-            TcpSocket::new_v4()?
-        } else {
-            TcpSocket::new_v6()?
-        };
-        apply_socket_mark(&socket2::SockRef::from(&socket), self.socket_mark)?;
-        super::common::size_tcp_socket_buffers(&socket2::SockRef::from(&socket));
-        let stream = socket.connect(addr).await?;
-        ensure_local_allowed(&self.underlay_policy, stream.local_addr()?)?;
-        ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)?;
-        tracing::info!(url = ?self.addr, ?addr, "connect tcp succ");
-        get_tunnel_with_tcp_stream(stream, self.addr.clone(), &self.flags).await
-    }
-
-    async fn connect_with_custom_bind(
-        &self,
-        addr: SocketAddr,
-        bind_addrs: &[SocketAddr],
-    ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
-        let futures = FuturesUnordered::new();
-
-        for bind_addr in bind_addrs {
-            tracing::info!(?bind_addr, ?addr, "bind addr");
-            match bind::<TcpSocket>()
-                .addr(*bind_addr)
-                .only_v6(true)
-                .maybe_socket_mark(self.socket_mark)
-                .call()
-            {
-                Ok(socket) => {
-                    super::common::size_tcp_socket_buffers(&socket2::SockRef::from(&socket));
-                    futures.push(socket.connect(addr));
-                }
-                Err(error) => {
-                    tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
-                    continue;
-                }
-            }
-        }
-
-        let stream = wait_for_connect_futures(futures).await?;
-        ensure_local_allowed(&self.underlay_policy, stream.local_addr()?)?;
-        ensure_remote_allowed(&self.underlay_policy, stream.peer_addr()?)?;
-        get_tunnel_with_tcp_stream(stream, self.addr.clone(), &self.flags).await
     }
 }
 
 #[async_trait]
 impl super::TunnelConnector for TcpTunnelConnector {
     async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let addr = match self.resolved_addr {
-            Some(addr) => addr,
-            None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
-        };
-        ensure_remote_allowed(&self.underlay_policy, addr)?;
-        let bind_addrs = eligible_bind_addrs(&self.underlay_policy, &self.bind_addrs, addr)?;
-        let connect_lane = || async {
-            if bind_addrs.is_empty() {
-                self.connect_with_default_bind(addr).await
-            } else {
-                self.connect_with_custom_bind(addr, &bind_addrs).await
-            }
-        };
-        {
-            let count = super::tcp_lanes::requested(&self.addr)?;
-            if count > 1 {
-                return super::tcp_lanes::connect(count, connect_lane).await;
-            }
-        }
-        connect_lane().await
+        self.dialer
+            .connect(&self.addr, |stream| {
+                get_tunnel_with_tcp_stream(stream, self.addr.clone(), &self.flags)
+            })
+            .await
     }
 
     fn remote_url(&self) -> url::Url {
@@ -347,23 +273,23 @@ impl super::TunnelConnector for TcpTunnelConnector {
     }
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
-        self.bind_addrs = addrs;
+        self.dialer.bind_addrs = addrs;
     }
 
     fn set_ip_version(&mut self, ip_version: IpVersion) {
-        self.ip_version = ip_version;
+        self.dialer.ip_version = ip_version;
     }
 
     fn set_resolved_addr(&mut self, addr: SocketAddr) {
-        self.resolved_addr = Some(addr);
+        self.dialer.resolved_addr = Some(addr);
     }
 
     fn set_underlay_policy(&mut self, policy: Arc<UnderlayPolicy>) {
-        self.underlay_policy = policy;
+        self.dialer.underlay_policy = policy;
     }
 
     fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
-        self.socket_mark = socket_mark;
+        self.dialer.socket_mark = socket_mark;
     }
 }
 

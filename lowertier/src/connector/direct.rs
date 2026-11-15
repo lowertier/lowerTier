@@ -169,7 +169,6 @@ impl PeerManagerForDirectConnector for PeerManager {
         let mut ret = vec![];
         let allow_public_server = use_global_var!(DIRECT_CONNECT_TO_PUBLIC_SERVER);
         let flags = self.get_global_ctx().get_flags();
-        let lazy_p2p = flags.lazy_p2p;
         let now = Instant::now();
 
         let routes = self.list_routes().await;
@@ -177,15 +176,12 @@ impl PeerManagerForDirectConnector for PeerManager {
             let static_allowed = should_background_p2p_with_peer(
                 route.feature_flag.as_ref(),
                 allow_public_server,
-                lazy_p2p,
-                flags.disable_p2p,
-                flags.need_p2p,
+                flags.p2p_mode(),
             );
             let dynamic_allowed = should_try_p2p_with_peer(
                 route.feature_flag.as_ref(),
                 allow_public_server,
-                flags.disable_p2p,
-                flags.need_p2p,
+                flags.p2p_mode(),
             ) && self.has_recent_traffic(route.peer_id, now);
             if static_allowed || dynamic_allowed {
                 ret.push(route.peer_id);

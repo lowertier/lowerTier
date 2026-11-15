@@ -17,8 +17,8 @@ import {
   tidyPath,
 } from "../src/settingsModel.ts";
 
-test("ACL child updates retain the exact path through TOML serialization", () => {
-  const body = parse(stringify(optionPatch({ "acl.tcp_ports": ["22"], "acl.udp_ports": null })));
+test("ACL child updates retain the exact path through JSON serialization", () => {
+  const body = JSON.parse(JSON.stringify(optionPatch({ "acl.tcp_ports": ["22"], "acl.udp_ports": null })));
   assert.deepEqual(Object.entries(body.set), [["acl.tcp_ports", ["22"]]]);
   assert.deepEqual(body.clear, ["acl.udp_ports"]);
   assert.throws(() => optionPatch({ acl: {}, "acl.tcp_ports": null }), /Overlapping settings/);

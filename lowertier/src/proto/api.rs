@@ -2,74 +2,38 @@ pub mod control {
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/api.control.v1.rs"));
         include!(concat!(env!("OUT_DIR"), "/api.control.v1.serde.rs"));
-    }
-}
 
-pub mod config {
-    include!(concat!(env!("OUT_DIR"), "/api.config.rs"));
-    include!(concat!(env!("OUT_DIR"), "/api.config.serde.rs"));
+        /// Preserve RPC error classes across local, owned, and remote control adapters.
+        ///
+        /// Invalid JSON identifies the request body. Unknown methods return `not_found`.
+        /// Timeouts and closed connections permit retries. Protocol and encoding failures remain internal.
+        impl From<crate::proto::rpc_types::error::Error> for ApiError {
+            fn from(error: crate::proto::rpc_types::error::Error) -> Self {
+                use crate::proto::rpc_types::error::Error;
 
-    pub struct Patchable<T> {
-        pub action: Option<ConfigPatchAction>,
-        pub value: Option<T>,
-    }
-
-    impl From<PortForwardPatch> for Patchable<crate::common::config::PortForwardConfig> {
-        fn from(patch: PortForwardPatch) -> Self {
-            Patchable {
-                action: ConfigPatchAction::try_from(patch.action).ok(),
-                value: patch.cfg.map(Into::into),
-            }
-        }
-    }
-
-    impl From<RoutePatch> for Patchable<cidr::Ipv4Cidr> {
-        fn from(value: RoutePatch) -> Self {
-            Patchable {
-                action: ConfigPatchAction::try_from(value.action).ok(),
-                value: value.cidr.map(Into::into),
-            }
-        }
-    }
-
-    impl From<StringPatch> for Patchable<String> {
-        fn from(value: StringPatch) -> Self {
-            Patchable {
-                action: ConfigPatchAction::try_from(value.action).ok(),
-                value: Some(value.value),
-            }
-        }
-    }
-
-    impl From<UrlPatch> for Patchable<url::Url> {
-        fn from(value: UrlPatch) -> Self {
-            Patchable {
-                action: ConfigPatchAction::try_from(value.action).ok(),
-                value: value.url.map(Into::into),
-            }
-        }
-    }
-
-    pub fn patch_vec<T>(v: &mut Vec<T>, patches: Vec<Patchable<T>>)
-    where
-        T: PartialEq,
-    {
-        for patch in patches {
-            match patch.action {
-                Some(ConfigPatchAction::Add) => {
-                    if let Some(value) = patch.value {
-                        v.push(value);
+                let (code, message, field_path) = match error {
+                    Error::InvalidJsonRequest(message) => ("invalid_argument", message, "body"),
+                    Error::InvalidMethodIndex(_, _) => {
+                        ("not_found", "The control method does not exist.".into(), "")
                     }
+                    Error::Timeout(_) => (
+                        "deadline_exceeded",
+                        "The control request exceeded its deadline.".into(),
+                        "",
+                    ),
+                    Error::TunnelError(_) | Error::Shutdown => (
+                        "unavailable",
+                        "The control connection is unavailable.".into(),
+                        "",
+                    ),
+                    _ => ("internal", "The control RPC failed.".into(), ""),
+                };
+                Self {
+                    code: code.into(),
+                    message,
+                    field_path: field_path.into(),
+                    retryable: matches!(code, "unavailable" | "deadline_exceeded"),
                 }
-                Some(ConfigPatchAction::Remove) => {
-                    if let Some(value) = patch.value {
-                        v.retain(|x| x != &value);
-                    }
-                }
-                Some(ConfigPatchAction::Clear) => {
-                    v.clear();
-                }
-                None => {}
             }
         }
     }

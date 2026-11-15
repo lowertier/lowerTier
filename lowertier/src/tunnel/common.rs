@@ -761,6 +761,10 @@ pub(crate) fn get_interface_name_by_ip(local_ip: &IpAddr) -> Option<String> {
     None
 }
 
+/// Return the first successful attempt and cancel the remaining attempts.
+///
+/// A failed attempt leaves the other attempts active.
+/// If all attempts fail, return the last completed error. An empty set returns shutdown.
 pub(crate) async fn wait_for_connect_futures<Fut, Ret, E>(
     mut futures: FuturesUnordered<Fut>,
 ) -> Result<Ret, TunnelError>
@@ -768,14 +772,12 @@ where
     Fut: Future<Output = Result<Ret, E>> + Send,
     E: std::error::Error + Into<TunnelError> + Send + 'static,
 {
-    // return last error
     let mut last_err = None;
 
-    while let Some(ret) = futures.next().await {
-        if let Err(e) = ret {
-            last_err = Some(e.into());
-        } else {
-            return ret.map_err(|e| e.into());
+    while let Some(attempt) = futures.next().await {
+        match attempt {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last_err = Some(error.into()),
         }
     }
 

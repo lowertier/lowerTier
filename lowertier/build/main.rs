@@ -165,7 +165,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "src/proto/api_control.proto",
         "src/proto/error.proto",
         "src/proto/api_instance.proto",
-        "src/proto/api_config.proto",
         "src/proto/api_manage.proto",
         "src/proto/magic_dns.proto",
         "src/proto/acl.proto",

@@ -24,6 +24,10 @@ pub enum Error {
     #[error("Invalid packet: {0}")]
     MalformatRpcPacket(String),
 
+    /// Generated JSON dispatch rejected the method input before calling the method.
+    #[error("Invalid JSON request: {0}")]
+    InvalidJsonRequest(String),
+
     #[error("Timeout: {0}")]
     Timeout(#[from] tokio::time::error::Elapsed),
 
