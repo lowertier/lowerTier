@@ -443,27 +443,13 @@ mod tcp_tests {
     }
 
     #[tokio::test]
-    async fn legacy_full_close_wait_reproduces_half_close_stall() {
+    async fn shutdown_finishes_before_the_remote_half_closes() {
         let (_a, _b, _forward, _backward, mut client, mut server) = connected_test_pair().await;
         client.write_all(b"request").await.unwrap();
-        // Exact previous shutdown condition: only CLOSED is accepted.
-        let legacy = future::poll_fn(|cx| {
-            let mut socket = client.reactor.get_socket::<tcp::Socket>(*client.handle);
-            if socket.is_open() {
-                socket.close();
-                client.reactor.notify();
-            }
-            if socket.state() == tcp::State::Closed {
-                return Poll::Ready(());
-            }
-            socket.register_send_waker(cx.waker());
-            Poll::Pending
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(150), legacy)
-                .await
-                .is_err()
-        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), client.shutdown())
+            .await
+            .expect("shutdown must finish while the remote send half remains open")
+            .unwrap();
         assert_eq!(
             client
                 .reactor
@@ -471,7 +457,6 @@ mod tcp_tests {
                 .state(),
             tcp::State::FinWait2
         );
-        client.shutdown().await.unwrap();
         let mut request = Vec::new();
         server.read_to_end(&mut request).await.unwrap();
         assert_eq!(&request, b"request");

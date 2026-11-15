@@ -44,18 +44,6 @@ Route withdrawal moves only flows whose gateway is no longer eligible.
 
 The supported actions are `FORWARD`, `EXIT_SNAT`, and `BLACKHOLE`.
 
-## Local BGP API
-
-The `PeerManageRpc` service provides `ReplaceLocalBgpRoutes` and `ListLocalBgpRoutes`.
-
-The replace operation is atomic for the local BGP source.
-
-The API accepts IPv4 and IPv6 prefixes.
-
-The API requires a loopback RPC connection and a valid administrator token.
-
-The gateway peer ID can identify any reachable node.
-
 ## Migration rule
 
 Protocol version 4 requires an exact peer protocol version match during the authenticated handshake.

@@ -27,12 +27,8 @@ pub const TCP_TUNNEL_HEADER_SIZE: usize = std::mem::size_of::<TCPTunnelHeader>()
 pub enum PacketType {
     Invalid = 0,
     Data = 1,
-    HandShake = 2,
-    RoutePacket = 3, // deprecated
     Ping = 4,
     Pong = 5,
-    TaRpc = 6, // deprecated
-    Route = 7, // deprecated
     RpcReq = 8,
     RpcResp = 9,
     ForeignNetworkPacket = 10,

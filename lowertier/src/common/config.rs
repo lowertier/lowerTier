@@ -3474,13 +3474,13 @@ mod protocol_memory_tests {
                 .memory_bytes(),
             Some(64 * mib)
         );
-        allowlist_is_explicit_and_empty_is_backwards_compatible();
+        empty_protocol_allowlist_enables_current_transports();
         allowlist_rejects_typos_duplicates_and_disabled_default();
         disabled_listener_and_bootstrap_are_rejected_before_startup();
         allowlist_round_trips_through_config();
     }
 
-    fn allowlist_is_explicit_and_empty_is_backwards_compatible() {
+    fn empty_protocol_allowlist_enables_current_transports() {
         let mut flags = gen_default_flags();
         for protocol in ["quic", "h2", "wss"] {
             assert!(transport_protocol_enabled(&flags, protocol));

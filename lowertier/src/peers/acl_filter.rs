@@ -351,7 +351,7 @@ impl AclFilter {
                 dst_group = packet_info.dst_groups.join(","),
                 protocol = ?packet_info.protocol,
                 action = ?result.action,
-                rule = result.matched_rule_str().as_deref().unwrap_or("unknown"),
+                rule = result.matched_rule_string().as_deref().unwrap_or("unknown"),
                 chain_type = ?chain_type,
                 "ACL: {}", log_message
             );

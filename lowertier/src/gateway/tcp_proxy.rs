@@ -296,10 +296,12 @@ impl PeerPacketFilter for TcpProxy {
                 if let Err(e) = smoltcp_stack_sender.try_send(packet) {
                     tracing::error!("send to smoltcp stack failed: {:?}", e);
                 }
-            } else if let Some(peer_manager) = self.get_peer_manager()
-                && let Err(e) = peer_manager.get_nic_channel().send(packet).await
-            {
-                tracing::error!("send to nic failed: {:?}", e);
+            } else if let Some(peer_manager) = self.get_peer_manager() {
+                // A stopped NIC has no destination for this packet.
+                match peer_manager.inject_packet_to_nic(packet).await {
+                    Ok(()) | Err(crate::tunnel::TunnelError::Shutdown) => {}
+                    Err(error) => tracing::error!(?error, "send to NIC failed"),
+                }
             }
             return None;
         } else {
@@ -1049,10 +1051,7 @@ mod rewrite_tests {
     #[cfg(feature = "gui")]
     #[tokio::test]
     async fn userspace_gui_syn_never_enters_the_localhost_proxy_before_listener_start() {
-        use crate::{
-            common::config::TomlConfigLoader,
-            peers::{create_packet_recv_chan, peer_manager::RouteAlgoType},
-        };
+        use crate::{common::config::TomlConfigLoader, peers::peer_manager::RouteAlgoType};
 
         for port in [15880, 18933] {
             let gui = if port == 15880 {
@@ -1065,8 +1064,7 @@ mod rewrite_tests {
                     .unwrap();
             let context = Arc::new(GlobalCtx::new(config));
             context.set_ipv4(Some("10.201.70.2/24".parse().unwrap()));
-            let (sender, _receiver) = create_packet_recv_chan();
-            let peer = Arc::new(PeerManager::new(RouteAlgoType::None, context, sender));
+            let peer = Arc::new(PeerManager::new(RouteAlgoType::None, context));
             let proxy = TcpProxy::new(peer.clone());
             let mut bytes = [0u8; 40];
             let mut ip = MutableIpv4Packet::new(&mut bytes).unwrap();

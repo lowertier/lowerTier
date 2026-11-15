@@ -89,7 +89,8 @@ message NodeInfo {
   common.StunInfo stun_info = 5;
   string inst_id = 6;
   repeated string listeners = 7;
-  string config = 8;
+  reserved 8;
+  reserved "config";
   string version = 9;
   common.PeerFeatureFlag feature_flag = 10;
   peer_rpc.GetIpListResponse ip_list = 11;
@@ -201,7 +202,8 @@ message CredentialInfo {
   repeated string allowed_proxy_cidrs = 5;
   optional bool reusable = 6;
   uint32 credential_version = 7;
-  uint64 serial = 8;
+  reserved 8;
+  reserved "serial";
   string role = 9;
   string network_name = 10;
   bytes root_fingerprint = 11;

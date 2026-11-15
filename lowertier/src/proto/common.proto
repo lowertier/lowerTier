@@ -22,8 +22,7 @@ message FlagsInConfig {
   reserved "disable_p2p";
   bool relay_all_peer_rpc = 12;
   bool disable_udp_hole_punching = 13;
-  // string ipv6_listener = 14; [deprecated = true]; use -l quic://[::]:12345
-  // instead
+  reserved 14;
   reserved 15;
   reserved "multi_thread";
   reserved 16;
@@ -233,8 +232,8 @@ message RpcDescriptor {
 }
 
 message RpcRequest {
-  RpcDescriptor descriptor = 1 [ deprecated = true ];
-
+  reserved 1;
+  reserved "descriptor";
   bytes request = 2;
   int32 timeout_ms = 3;
 }
@@ -244,21 +243,6 @@ message RpcResponse {
   error.Error error = 2;
 
   uint64 runtime_us = 3;
-}
-
-enum CompressionAlgoPb {
-  Invalid = 0;
-  None = 1;
-  Zstd = 2;
-}
-
-message RpcCompressionInfo {
-  // use this to compress the content
-  CompressionAlgoPb algo = 1;
-
-  // tell the peer which compression algo is used to compress the next
-  // response/request
-  CompressionAlgoPb accepted_algo = 2;
 }
 
 message RpcPacket {
@@ -275,7 +259,8 @@ message RpcPacket {
 
   int32 trace_id = 9;
 
-  RpcCompressionInfo compression_info = 10;
+  reserved 10;
+  reserved "compression_info";
 }
 
 message Void {}

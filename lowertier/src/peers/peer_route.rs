@@ -631,7 +631,6 @@ impl RoutePeerInfo {
             .truncate(MAX_ROUTE_SYNC_MULTICAST_GROUPS_PER_PEER);
     }
 
-    #[allow(deprecated)]
     pub fn new() -> Self {
         Self {
             peer_id: 0,
@@ -653,7 +652,6 @@ impl RoutePeerInfo {
             ipv6_addr: None,
             groups: Vec::new(),
 
-            quic_port: None,
             noise_static_pubkey: Vec::new(),
             trusted_credential_pubkeys: Vec::new(),
             ipv6_public_addr_prefix: None,
@@ -1604,8 +1602,6 @@ impl SyncedRouteInfo {
         let certificate = credential.certificate.as_ref()?;
         if credential.root_public_key != self.credential_root_public_key
             || credential.root_fingerprint != self.credential_root_fingerprint
-            || credential.serial != 0
-            || certificate.serial != 0
             || credential.certificate_id.len() != ROUTE_CREDENTIAL_ID_BYTES
             || credential.certificate_id.iter().all(|byte| *byte == 0)
             || certificate.certificate_id != credential.certificate_id
@@ -1644,7 +1640,6 @@ impl SyncedRouteInfo {
         normalized.root_public_key = certificate.root_public_key.clone();
         normalized.root_fingerprint = certificate.root_fingerprint.clone();
         normalized.pubkey = certificate.subject_x25519_public_key.clone();
-        normalized.serial = 0;
         normalized.certificate_id = certificate.certificate_id.clone();
         normalized.expiry_unix = certificate.expiry_unix;
         normalized.role = certificate.role.clone();

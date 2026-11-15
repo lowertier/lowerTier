@@ -288,6 +288,12 @@ pub struct PeerCenterInstanceService {
     global_peer_map_digest: Arc<AtomicCell<Digest>>,
 }
 
+/// Apply an explicit snapshot or delta response.
+///
+/// Missing generations and mixed response forms leave the cache unchanged.
+/// A matching generation without changes also preserves measurement times.
+/// A full snapshot replaces all sources. Deltas replace or remove their named sources.
+/// Replacement deltas require peer information. Removal deltas must omit peer information.
 fn apply_global_peer_map_response(
     global_peer_map: &RwLock<GlobalPeerMap>,
     global_peer_map_digest: &AtomicCell<Digest>,
@@ -296,19 +302,40 @@ fn apply_global_peer_map_response(
     requested_digest: Digest,
     response: GetGlobalPeerMapResponse,
 ) -> bool {
-    // A digest match must not replace a populated cache with an empty map.
-    // Accept the legacy default response and the explicit digest-only form.
-    if response == GetGlobalPeerMapResponse::default()
-        || (requested_digest != 0
-            && response.global_peer_map.is_empty()
-            && response.digest == Some(requested_digest))
+    let Some(generation) = response.digest else {
+        tracing::warn!("peer-center response has no generation");
+        return false;
+    };
+    if (response.full_snapshot && !response.deltas.is_empty())
+        || (!response.full_snapshot && !response.global_peer_map.is_empty())
+        || response.deltas.iter().any(|delta| {
+            if delta.removed {
+                delta.peer_info.is_some()
+            } else {
+                delta.peer_info.is_none()
+            }
+        })
     {
+        tracing::warn!(
+            generation,
+            "peer-center response mixes invalid update forms"
+        );
+        return false;
+    }
+    if !response.full_snapshot && response.deltas.is_empty() {
+        // Only the requested generation can confirm an unchanged map.
+        if requested_digest == 0 || generation != requested_digest {
+            tracing::warn!(
+                generation,
+                requested_digest,
+                "peer-center response omits its changes"
+            );
+        }
         return false;
     }
 
     let received_at = Instant::now();
-    let full_snapshot = response.full_snapshot
-        || (!response.global_peer_map.is_empty() && response.deltas.is_empty());
+    let full_snapshot = response.full_snapshot;
     let snapshot_residence_age_ms = response.snapshot_residence_age_ms;
     let mut next_map = if full_snapshot {
         response.global_peer_map
@@ -330,27 +357,27 @@ fn apply_global_peer_map_response(
         }
         next_source_times.extend(next_map.keys().copied().map(|source| (source, received_at)));
     }
-    if !response.deltas.is_empty() {
-        for delta in response.deltas {
-            if delta.removed {
-                next_map.remove(&delta.source_peer_id);
-                next_source_times.remove(&delta.source_peer_id);
-            } else if let Some(peer_info) = delta.peer_info {
-                let mut peer_info = peer_info;
-                for info in peer_info.direct_peers.values_mut() {
-                    info.speed_sample_age_ms = info
-                        .speed_sample_age_ms
-                        .saturating_add(delta.residence_age_ms);
-                }
-                next_map.insert(delta.source_peer_id, peer_info);
-                next_source_times.insert(delta.source_peer_id, received_at);
-            }
+    for delta in response.deltas {
+        if delta.removed {
+            next_map.remove(&delta.source_peer_id);
+            next_source_times.remove(&delta.source_peer_id);
+            continue;
         }
+        let mut peer_info = delta
+            .peer_info
+            .expect("replacement delta information was checked");
+        for info in peer_info.direct_peers.values_mut() {
+            info.speed_sample_age_ms = info
+                .speed_sample_age_ms
+                .saturating_add(delta.residence_age_ms);
+        }
+        next_map.insert(delta.source_peer_id, peer_info);
+        next_source_times.insert(delta.source_peer_id, received_at);
     }
 
     *global_peer_map.write().unwrap() = GlobalPeerMap { map: next_map };
     *source_update_times.write().unwrap() = next_source_times;
-    global_peer_map_digest.store(response.digest.unwrap_or_default());
+    global_peer_map_digest.store(generation);
     global_peer_map_update_time.store(received_at);
     true
 }
@@ -712,6 +739,53 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn peer_map_requires_explicit_response_forms() {
+        let original = std::collections::BTreeMap::from([(1, PeerInfoForGlobalMap::default())]);
+        let map = RwLock::new(GlobalPeerMap {
+            map: original.clone(),
+        });
+        let generation = AtomicCell::new(7);
+        let sampled_at = Instant::now();
+        let updated = AtomicCell::new(sampled_at);
+        let source_times = RwLock::new(HashMap::from([(1, sampled_at)]));
+        let apply = |response| {
+            apply_global_peer_map_response(&map, &generation, &updated, &source_times, 7, response)
+        };
+        assert!(!apply(GetGlobalPeerMapResponse::default()));
+        assert!(!apply(GetGlobalPeerMapResponse {
+            global_peer_map: original.clone(),
+            digest: Some(8),
+            ..Default::default()
+        }));
+        assert!(!apply(GetGlobalPeerMapResponse {
+            digest: Some(8),
+            deltas: vec![crate::proto::peer_rpc::PeerCenterSourceDelta::default()],
+            ..Default::default()
+        }));
+        assert!(!apply(GetGlobalPeerMapResponse {
+            digest: Some(7),
+            ..Default::default()
+        }));
+        assert!(!apply(GetGlobalPeerMapResponse {
+            digest: Some(8),
+            ..Default::default()
+        }));
+        assert_eq!(map.read().unwrap().map, original);
+        assert_eq!(generation.load(), 7);
+        assert_eq!(updated.load(), sampled_at);
+        assert_eq!(source_times.read().unwrap().get(&1), Some(&sampled_at));
+
+        assert!(apply(GetGlobalPeerMapResponse {
+            digest: Some(8),
+            full_snapshot: true,
+            ..Default::default()
+        }));
+        assert!(map.read().unwrap().map.is_empty());
+        assert!(source_times.read().unwrap().is_empty());
+        assert_eq!(generation.load(), 8);
+    }
+
     #[tokio::test]
     async fn local_center_jobs_share_the_registered_server() {
         let peer_mgr = create_mock_peer_manager().await;
@@ -743,6 +817,22 @@ mod tests {
             .await
             .unwrap();
         assert!(response.global_peer_map.contains_key(&peer_id));
+        let unchanged = base
+            .local_server
+            .get()
+            .unwrap()
+            .get_global_peer_map(
+                local.controller().unwrap(),
+                GetGlobalPeerMapRequest {
+                    digest: response.digest.unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.digest, response.digest);
+        assert!(unchanged.global_peer_map.is_empty());
+        assert!(unchanged.deltas.is_empty());
+        assert!(!unchanged.full_snapshot);
         assert!(
             local
                 .report_peers(

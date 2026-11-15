@@ -100,7 +100,7 @@ mod protocol_memory_tests {
         config::{ConfigLoader, TomlConfigLoader},
         global_ctx::GlobalCtx,
     };
-    use crate::peers::{create_packet_recv_chan, peer_manager::RouteAlgoType};
+    use crate::peers::peer_manager::RouteAlgoType;
     fn fixture(no_tun: bool) -> (Arc<PeerManager>, IpProxy) {
         let config = TomlConfigLoader::default();
         let mut flags = config.get_flags();
@@ -111,8 +111,7 @@ mod protocol_memory_tests {
         } as i32;
         config.set_flags(flags);
         let ctx = Arc::new(GlobalCtx::new(config));
-        let (sender, _receiver) = create_packet_recv_chan();
-        let peer = Arc::new(PeerManager::new(RouteAlgoType::None, ctx.clone(), sender));
+        let peer = Arc::new(PeerManager::new(RouteAlgoType::None, ctx.clone()));
         let proxy = IpProxy::new(ctx, peer.clone()).unwrap();
         (peer, proxy)
     }

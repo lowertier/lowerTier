@@ -619,18 +619,13 @@ mod tests {
     async fn reused_udp_flow_replies_to_the_current_peer() {
         use crate::{
             common::{config::TomlConfigLoader, global_ctx::GlobalCtx},
-            peers::{create_packet_recv_chan, peer_manager::RouteAlgoType},
+            peers::peer_manager::RouteAlgoType,
         };
         timeout(Duration::from_secs(3), async {
             let config = TomlConfigLoader::new_from_str("[tun]\nmode = \"userspace\"\n").unwrap();
             let context = Arc::new(GlobalCtx::new(config));
             context.set_ipv4(Some("10.201.70.2/24".parse().unwrap()));
-            let (sender, _receiver) = create_packet_recv_chan();
-            let manager = Arc::new(PeerManager::new(
-                RouteAlgoType::None,
-                context.clone(),
-                sender,
-            ));
+            let manager = Arc::new(PeerManager::new(RouteAlgoType::None, context.clone()));
             let proxy = UdpProxy::new(context, manager.clone()).unwrap();
             // Read replies before the routing stage to check their peer ownership.
             proxy.runtime_started.store(true, Ordering::Release);

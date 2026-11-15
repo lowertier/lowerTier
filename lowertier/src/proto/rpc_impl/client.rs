@@ -17,11 +17,8 @@ use crate::common::{
     PeerId, shrink_dashmap,
     stats_manager::{LabelSet, LabelType, MetricName, StatsManager},
 };
-use crate::proto::common::{RpcCompressionInfo, RpcDescriptor, RpcPacket, RpcRequest, RpcResponse};
-use crate::proto::rpc_impl::packet::{
-    BuildRpcPacketArgs, MAX_RPC_BODY_BYTES, build_rpc_packet, compress_packet, decompress_packet,
-    supported_rpc_compression,
-};
+use crate::proto::common::{RpcDescriptor, RpcPacket, RpcRequest, RpcResponse};
+use crate::proto::rpc_impl::packet::{BuildRpcPacketArgs, MAX_RPC_BODY_BYTES, build_rpc_packet};
 use crate::proto::rpc_types::controller::Controller;
 use crate::proto::rpc_types::descriptor::MethodDescriptor;
 use crate::proto::rpc_types::{
@@ -96,14 +93,7 @@ impl std::fmt::Debug for InflightRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PeerInfo {
-    pub compression_info: RpcCompressionInfo,
-    pub last_active: Option<Instant>,
-}
-
 type InflightRequestTable = Arc<DashMap<InflightRequestKey, InflightRequest>>;
-pub(crate) type PeerInfoTable = Arc<DashMap<PeerId, PeerInfo>>;
 
 fn response_peer_binding_valid(
     zc_packet: &ZCPacket,
@@ -143,7 +133,6 @@ pub struct Client {
     mpsc: Mutex<MpscTunnel<Box<dyn Tunnel>>>,
     transport: Mutex<Transport>,
     inflight_requests: InflightRequestTable,
-    peer_info: PeerInfoTable,
     tasks: Mutex<JoinSet<()>>,
     stats_manager: Option<Arc<StatsManager>>,
     inflight_admission: Arc<Semaphore>,
@@ -162,7 +151,6 @@ impl Client {
             mpsc: Mutex::new(MpscTunnel::new(ring_a, None)),
             transport: Mutex::new(MpscTunnel::new(ring_b, None)),
             inflight_requests: Arc::new(DashMap::new()),
-            peer_info: Arc::new(DashMap::new()),
             tasks: Mutex::new(JoinSet::new()),
             stats_manager: None,
             inflight_admission: Arc::new(Semaphore::new(256)),
@@ -187,22 +175,6 @@ impl Client {
 
     pub fn run(&self) {
         let mut tasks = self.tasks.lock().unwrap();
-
-        let peer_infos = self.peer_info.clone();
-        tasks.spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                let now = Instant::now();
-                peer_infos.retain(|_, v| {
-                    if let Some(last_active) = v.last_active {
-                        return now.duration_since(last_active)
-                            < std::time::Duration::from_secs(120);
-                    }
-                    true
-                });
-                peer_infos.shrink_to_fit();
-            }
-        });
 
         let mut rx = BatchToScalarStream::new(self.mpsc.lock().unwrap().get_stream());
         let inflight_requests = self.inflight_requests.clone();
@@ -364,7 +336,6 @@ impl Client {
             to_peer_id: PeerId,
             zc_packet_sender: MpscTunnelSender,
             inflight_requests: InflightRequestTable,
-            peer_info: PeerInfoTable,
             stats_manager: Option<Arc<StatsManager>>,
             inflight_admission: Arc<Semaphore>,
             _phan: PhantomData<F>,
@@ -454,7 +425,6 @@ impl Client {
                         input.into()
                     },
                     timeout_ms: ctrl.timeout_ms(),
-                    ..Default::default()
                 };
 
                 let rpc_req_bytes = rpc_req.encode_to_vec();
@@ -465,43 +435,17 @@ impl Client {
                     )));
                 }
 
-                let peer_info = self
-                    .peer_info
-                    .get(&self.to_peer_id)
-                    .map(|v| v.clone())
-                    .unwrap_or_default();
-                let (buf, c_algo) =
-                    compress_packet(peer_info.compression_info.accepted_algo(), &rpc_req_bytes)
-                        .await?;
-
                 let packets = build_rpc_packet(BuildRpcPacketArgs {
                     from_peer: self.from_peer_id,
                     to_peer: self.to_peer_id,
                     rpc_desc,
                     transaction_id,
                     is_req: true,
-                    content: &buf,
+                    content: &rpc_req_bytes,
                     trace_id: ctrl.trace_id(),
-                    compression_info: RpcCompressionInfo {
-                        algo: c_algo.into(),
-                        accepted_algo: supported_rpc_compression().into(),
-                    },
                 });
                 let timeout_dur = std::time::Duration::from_millis(ctrl.timeout_ms() as u64);
-                let mut rpc_packet = timeout(timeout_dur, self.do_rpc(packets, &mut rx)).await??;
-
-                if let Some(compression_info) = rpc_packet.compression_info {
-                    self.peer_info.insert(
-                        self.to_peer_id,
-                        PeerInfo {
-                            compression_info,
-                            last_active: Some(Instant::now()),
-                        },
-                    );
-
-                    rpc_packet.body =
-                        decompress_packet(compression_info.algo(), &rpc_packet.body).await?;
-                }
+                let rpc_packet = timeout(timeout_dur, self.do_rpc(packets, &mut rx)).await??;
 
                 assert_eq!(rpc_packet.transaction_id, transaction_id);
 
@@ -556,7 +500,6 @@ impl Client {
             to_peer_id,
             zc_packet_sender: self.mpsc.lock().unwrap().get_sink(),
             inflight_requests: self.inflight_requests.clone(),
-            peer_info: self.peer_info.clone(),
             stats_manager: self.stats_manager.clone(),
             inflight_admission: self.inflight_admission.clone(),
             _phan: PhantomData,

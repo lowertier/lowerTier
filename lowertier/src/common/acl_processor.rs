@@ -206,11 +206,6 @@ impl AclResult {
     pub fn matched_rule_string(&self) -> Option<String> {
         self.matched_rule.as_ref().map(|r| r.to_string_cached())
     }
-
-    /// Get matched rule as string reference for logging (compatibility method)
-    pub fn matched_rule_str(&self) -> Option<String> {
-        self.matched_rule.as_ref().map(|r| r.as_str())
-    }
 }
 
 // Context for lazy log message construction

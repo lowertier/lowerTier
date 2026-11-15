@@ -19,8 +19,9 @@ use crate::{
 };
 
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Maximum compatibility value for callers that still pass a recovery window.
-/// The store does not roll back an ambiguous transition when this window ends.
+/// Retention period for responder proofs and initiator receipts.
+///
+/// Hidden initiator reservations require authenticated recovery or reset. They do not expire.
 pub const INITIATOR_RECOVERY_LIFETIME: Duration = Duration::from_secs(120);
 const MAX_IN_DOUBT_RESERVATIONS: usize = 256;
 const MAX_COMMITTED_TRANSITIONS_PER_SESSION: usize = 8;
@@ -394,14 +395,15 @@ impl InitiatorSessionReservation {
         self.recovery_quota.lock().unwrap().take();
     }
 
+    /// Retain a pending transition after an ambiguous peer confirmation.
+    ///
+    /// Reject mismatched identities, zero peer tokens, and transitions that are no longer pending.
+    /// Missing quota permits and conflicting retained transitions cancel the pending reservation.
+    /// Successful retention transfers its quota permit and breaks the store ownership cycle.
     fn suspend_with_identity(
         mut self,
-        lifetime: Duration,
         identity: InitiatorTransitionIdentity,
     ) -> Result<(), anyhow::Error> {
-        if lifetime.is_zero() || lifetime > INITIATOR_RECOVERY_LIFETIME {
-            return Err(anyhow!("invalid initiator recovery lifetime"));
-        }
         if !self.matches_transition_identity_fields(&identity) {
             return Err(anyhow!(
                 "initiator recovery identity does not match reservation"
@@ -425,7 +427,6 @@ impl InitiatorSessionReservation {
             return Err(anyhow!("session transition is no longer pending"));
         }
         let store = self.store.clone();
-        store.expire_in_doubt_sessions();
         // Detach the store before retention. This prevents a store-to-map-to-
         // reservation ownership cycle while the reservation is suspended.
         self.store = PeerSessionStore::default();
@@ -438,7 +439,7 @@ impl InitiatorSessionReservation {
                 return Err(anyhow!("initiator recovery permit is missing"));
             }
         };
-        match store.retain_in_doubt_reservation(self, identity, lifetime, recovery_quota) {
+        match store.retain_in_doubt_reservation(self, identity, recovery_quota) {
             Ok(()) => Ok(()),
             Err((error, mut reservation, recovery_quota)) => {
                 reservation.store = store;
@@ -452,10 +453,10 @@ impl InitiatorSessionReservation {
         }
     }
 
-    /// Retain this reservation after an ambiguous confirmation result.
-    pub fn suspend(self, lifetime: Duration) -> Result<(), anyhow::Error> {
+    /// Retain this reservation until authenticated recovery or reset.
+    pub fn suspend(self) -> Result<(), anyhow::Error> {
         let identity = self.transition_identity();
-        self.suspend_with_identity(lifetime, identity)
+        self.suspend_with_identity(identity)
     }
 
     /// Retain this reservation with the authenticated peer session metadata.
@@ -465,10 +466,9 @@ impl InitiatorSessionReservation {
     pub fn suspend_with_session_metadata(
         self,
         session_metadata_id: uuid::Uuid,
-        lifetime: Duration,
     ) -> Result<(), anyhow::Error> {
         let identity = self.transition_identity_with_session_metadata(session_metadata_id);
-        self.suspend_with_identity(lifetime, identity)
+        self.suspend_with_identity(identity)
     }
 
     pub fn cancel(&self) {
@@ -678,7 +678,6 @@ impl PeerSessionStore {
         &self,
         reservation: InitiatorSessionReservation,
         identity: InitiatorTransitionIdentity,
-        _lifetime: Duration,
         recovery_quota: QuotaPermit,
     ) -> Result<(), (anyhow::Error, InitiatorSessionReservation, QuotaPermit)> {
         let _guard = self.creation_lock.lock().unwrap();
@@ -1122,19 +1121,11 @@ impl PeerSessionStore {
         true
     }
 
-    /// No timer may cancel an ambiguous hidden initiator transition.
-    pub fn expire_in_doubt_sessions(&self) -> usize {
-        // An ambiguous transition is never rolled back by a timer. The
-        // authenticated retry or an explicit authenticated reset owns cleanup.
-        0
-    }
-
     pub fn in_doubt_reservation_count(&self) -> usize {
         self.in_doubt_initiators.len()
     }
 
     pub fn in_doubt_identity(&self, key: &SessionKey) -> Option<InitiatorTransitionIdentity> {
-        self.expire_in_doubt_sessions();
         self.in_doubt_initiators
             .get(key)
             .map(|entry| entry.identity.clone())
@@ -1142,7 +1133,6 @@ impl PeerSessionStore {
 
     /// Return the retained peer static key for one hidden transition.
     pub fn in_doubt_peer_static_pubkey(&self, key: &SessionKey) -> Option<[u8; 32]> {
-        self.expire_in_doubt_sessions();
         self.in_doubt_initiators.get(key).and_then(|entry| {
             entry
                 .reservation
@@ -1160,7 +1150,6 @@ impl PeerSessionStore {
         identity: &InitiatorTransitionIdentity,
         peer_static_pubkey: Option<[u8; 32]>,
     ) -> Result<bool, anyhow::Error> {
-        self.expire_in_doubt_sessions();
         let entry = self
             .in_doubt_initiators
             .get(&identity.session_key)
@@ -1264,7 +1253,6 @@ impl PeerSessionStore {
         peer_static_pubkey: Option<[u8; 32]>,
         transition_id: [u8; 16],
     ) -> Result<InitiatorSessionReservation, anyhow::Error> {
-        self.expire_in_doubt_sessions();
         let _creation_guard = self.creation_lock.lock().unwrap();
         if self.in_doubt_initiators.contains_key(key) {
             return Err(anyhow!("session transition is awaiting exact recovery"));
@@ -1883,7 +1871,6 @@ impl PeerSessionStore {
         &self,
         identity: &InitiatorTransitionIdentity,
     ) -> Result<Option<ResponderTransitionRecovery>, anyhow::Error> {
-        self.expire_in_doubt_sessions();
         self.expire_responder_recoveries();
         let _guard = self.creation_lock.lock().unwrap();
         if let Some(entry) = self.responder_recoveries.get(&identity.session_key)
@@ -1919,7 +1906,6 @@ impl PeerSessionStore {
         recv_algorithm: String,
         peer_static_pubkey: Option<[u8; 32]>,
     ) -> Result<UpsertResponderSessionReturn, anyhow::Error> {
-        self.expire_in_doubt_sessions();
         let _creation_guard = self.creation_lock.lock().unwrap();
         self.prepare_responder_session_locked(
             key,
@@ -2147,7 +2133,6 @@ impl PeerSessionStore {
     }
 
     pub fn evict_unused_sessions_idle(&self, idle: Duration) {
-        self.expire_in_doubt_sessions();
         let _guard = self.creation_lock.lock().unwrap();
         self.expire_responder_recoveries_locked(INITIATOR_RECOVERY_LIFETIME);
         let now = Instant::now();
@@ -2794,7 +2779,7 @@ mod tests {
         let pending =
             replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).unwrap();
         let identity = pending.transition_identity();
-        pending.suspend(Duration::from_secs(1)).unwrap();
+        pending.suspend().unwrap();
         assert!(Arc::ptr_eq(&store.peek(&key).unwrap(), &old));
         assert!(
             replacement_reservation(&store, &key, PeerSession::new_root_key(), [7; 32]).is_err()
@@ -3141,7 +3126,7 @@ mod tests {
         let responder_metadata = uuid::Uuid::new_v4();
         let identity = reservation.transition_identity_with_session_metadata(responder_metadata);
         reservation
-            .suspend_with_session_metadata(responder_metadata, Duration::from_secs(1))
+            .suspend_with_session_metadata(responder_metadata)
             .unwrap();
         assert_eq!(store.in_doubt_reservation_count(), 1);
         let mut mismatch = identity.clone();
@@ -3183,7 +3168,7 @@ mod tests {
             )
             .unwrap();
         let identity = reservation.transition_identity();
-        reservation.suspend(Duration::from_secs(1)).unwrap();
+        reservation.suspend().unwrap();
 
         assert!(
             store
@@ -3205,7 +3190,7 @@ mod tests {
     }
 
     #[test]
-    fn suspended_initiator_reservation_is_not_rolled_back_by_time() {
+    fn maintenance_preserves_suspended_initiator_reservations() {
         let _test_guard = IN_DOUBT_TEST_LOCK.lock().unwrap();
         let store = PeerSessionStore::new();
         let key = SessionKey::new("test".to_string(), 14);
@@ -3221,9 +3206,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        reservation.suspend(Duration::from_millis(1)).unwrap();
-        std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(store.expire_in_doubt_sessions(), 0);
+        reservation.suspend().unwrap();
+        store.evict_unused_sessions();
         assert_eq!(store.in_doubt_reservation_count(), 1);
         assert!(store.peek(&key).is_none());
         assert!(
@@ -4028,7 +4012,7 @@ mod tests {
                 )
                 .unwrap();
             let identity = reservation.transition_identity();
-            reservation.suspend(Duration::from_secs(1)).unwrap();
+            reservation.suspend().unwrap();
             identities.push(identity);
         }
         assert_eq!(
@@ -4072,7 +4056,7 @@ mod tests {
             )
             .unwrap();
         let reset_identity = reset_reservation.transition_identity();
-        reset_reservation.suspend(Duration::from_secs(1)).unwrap();
+        reset_reservation.suspend().unwrap();
         assert_eq!(
             store.in_doubt_reservation_count(),
             MAX_IN_DOUBT_RESERVATIONS

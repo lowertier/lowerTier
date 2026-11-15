@@ -1,5 +1,3 @@
-#[cfg(feature = "tun")]
-use std::any::Any;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -7,13 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(not(mobile), feature = "tun"))]
 use std::time::Duration;
 
+#[cfg(mobile)]
+use anyhow::Context as _;
 use cidr::{IpCidr, Ipv4Inet};
 use futures::FutureExt;
 #[cfg(all(not(mobile), feature = "tun"))]
 use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify};
-#[cfg(feature = "tun")]
-use tokio::task::JoinSet;
 #[cfg(feature = "magic-dns")]
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -32,9 +30,6 @@ use crate::gateway::overlay_stream::OverlayStreamEndpoint;
 use crate::peer_center::instance::PeerCenterInstance;
 use crate::peers::peer_conn::PeerConnId;
 use crate::peers::peer_manager::{PeerManager, RouteAlgoType};
-#[cfg(feature = "tun")]
-use crate::peers::recv_packet_from_chan;
-use crate::peers::{PacketRecvChanReceiver, create_packet_recv_chan};
 use crate::proto::common::TunnelInfo;
 use crate::proto::rpc_impl::standalone::RpcServerHook;
 use crate::rpc_service::control::ControlInstance;
@@ -63,7 +58,7 @@ struct MagicDnsContainer {
 // nic container will be cleared when dhcp ip changed
 #[cfg(feature = "tun")]
 pub struct NicCtxContainer {
-    _nic_ctx: Option<Box<dyn Any + 'static + Send>>,
+    _nic_ctx: NicCtx,
     #[cfg(feature = "magic-dns")]
     magic_dns: Option<MagicDnsContainer>,
 }
@@ -72,9 +67,7 @@ pub struct NicCtxContainer {
 impl NicCtxContainer {
     #[cfg(not(feature = "magic-dns"))]
     fn new(nic_ctx: NicCtx) -> Self {
-        Self {
-            _nic_ctx: Some(Box::new(nic_ctx)),
-        }
+        Self { _nic_ctx: nic_ctx }
     }
 
     #[cfg(feature = "magic-dns")]
@@ -86,7 +79,7 @@ impl NicCtxContainer {
                 let _ = dns_runner.run(token_clone).await;
             });
             Self {
-                _nic_ctx: Some(Box::new(nic_ctx)),
+                _nic_ctx: nic_ctx,
                 magic_dns: Some(MagicDnsContainer {
                     dns_runner_task: AbortOnDropHandle::new(task),
                     dns_runner_cancel_token: token,
@@ -94,17 +87,9 @@ impl NicCtxContainer {
             }
         } else {
             Self {
-                _nic_ctx: Some(Box::new(nic_ctx)),
+                _nic_ctx: nic_ctx,
                 magic_dns: None,
             }
-        }
-    }
-
-    fn new_with_any<T: 'static + Send>(ctx: T) -> Self {
-        Self {
-            _nic_ctx: Some(Box::new(ctx)),
-            #[cfg(feature = "magic-dns")]
-            magic_dns: None,
         }
     }
 }
@@ -209,7 +194,6 @@ pub struct Instance {
     #[cfg(feature = "tun")]
     nic_ctx: ArcNicCtx,
 
-    peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
     peer_manager: Arc<PeerManager>,
     listener_manager: Arc<Mutex<ListenerManager<PeerManager>>>,
     conn_manager: Arc<ManualConnectorManager>,
@@ -242,14 +226,11 @@ impl Instance {
             "Creating the network instance"
         );
 
-        let (peer_packet_sender, peer_packet_receiver) = create_packet_recv_chan();
-
         let id = global_ctx.get_id();
 
         let peer_manager = Arc::new(PeerManager::new(
             RouteAlgoType::LinkState,
             global_ctx.clone(),
-            peer_packet_sender,
         ));
 
         peer_manager.set_allow_loopback_tunnel(false);
@@ -290,7 +271,6 @@ impl Instance {
         Instance {
             id,
 
-            peer_packet_receiver: Arc::new(Mutex::new(peer_packet_receiver)),
             #[cfg(feature = "tun")]
             nic_ctx: Arc::new(Mutex::new(None)),
 
@@ -334,12 +314,12 @@ impl Instance {
         Ok(())
     }
 
-    // use a mock nic ctx to consume packets.
+    /// Stop the NIC and its DNS runner before replacing the interface.
+    ///
+    /// Dropping the NIC context removes the direct writer endpoint.
+    /// Packets received without an endpoint are dropped.
     #[cfg(feature = "tun")]
-    async fn clear_nic_ctx(
-        arc_nic_ctx: ArcNicCtx,
-        packet_recv: Arc<Mutex<PacketRecvChanReceiver>>,
-    ) {
+    async fn clear_nic_ctx(arc_nic_ctx: ArcNicCtx) {
         #[cfg(feature = "magic-dns")]
         if let Some(old_ctx) = arc_nic_ctx.lock().await.take()
             && let Some(dns_runner) = old_ctx.magic_dns
@@ -350,17 +330,7 @@ impl Instance {
             tracing::debug!("dns runner task cancelled, ret: {:?}", ret);
         };
 
-        let mut tasks = JoinSet::new();
-        tasks.spawn(async move {
-            let mut packet_recv = packet_recv.lock().await;
-            while let Ok(packet) = recv_packet_from_chan(&mut packet_recv).await {
-                tracing::trace!("packet consumed by mock nic ctx: {:?}", packet);
-            }
-        });
-        arc_nic_ctx
-            .lock()
-            .await
-            .replace(NicCtxContainer::new_with_any(tasks));
+        arc_nic_ctx.lock().await.take();
 
         tracing::debug!("nic ctx cleared.");
     }
@@ -407,7 +377,6 @@ impl Instance {
         let global_ctx_c = self.get_global_ctx();
         #[cfg(feature = "tun")]
         let nic_ctx = self.nic_ctx.clone();
-        let _peer_packet_receiver = self.peer_packet_receiver.clone();
         tokio::spawn(async move {
             let default_ipv4_addr = Ipv4Inet::new(Ipv4Addr::new(10, 126, 126, 0), 24).unwrap();
             let mut current_dhcp_ip: Option<Ipv4Inet> = None;
@@ -472,7 +441,7 @@ impl Instance {
                 );
 
                 #[cfg(feature = "tun")]
-                Self::clear_nic_ctx(nic_ctx.clone(), _peer_packet_receiver.clone()).await;
+                Self::clear_nic_ctx(nic_ctx.clone()).await;
 
                 if let Some(ip) = candidate_ipv4_addr {
                     if global_ctx_c.no_tun() {
@@ -488,7 +457,6 @@ impl Instance {
                         let mut new_nic_ctx = NicCtx::new(
                             global_ctx_c.clone(),
                             &peer_manager_c,
-                            _peer_packet_receiver.clone(),
                             nic_closed_notifier.clone(),
                         );
                         if let Err(e) = new_nic_ctx.run(Some(ip), global_ctx_c.get_ipv6()).await {
@@ -537,7 +505,6 @@ impl Instance {
 
         let nic_ctx = self.nic_ctx.clone();
         let peer_mgr = Arc::downgrade(&self.peer_manager);
-        let peer_packet_receiver = self.peer_packet_receiver.clone();
 
         tokio::spawn(async move {
             let mut output_tx = Some(first_round_output);
@@ -553,12 +520,8 @@ impl Instance {
                         return;
                     };
 
-                    let mut new_nic_ctx = NicCtx::new(
-                        peer_mgr.get_global_ctx(),
-                        &peer_mgr,
-                        peer_packet_receiver.clone(),
-                        close_notifier.clone(),
-                    );
+                    let mut new_nic_ctx =
+                        NicCtx::new(peer_mgr.get_global_ctx(), &peer_mgr, close_notifier.clone());
 
                     if let Err(e) = new_nic_ctx.run(ipv4_addr, ipv6_addr).await {
                         if let Some(output_tx) = output_tx.take() {
@@ -618,7 +581,7 @@ impl Instance {
 
         #[cfg(feature = "tun")]
         {
-            Self::clear_nic_ctx(self.nic_ctx.clone(), self.peer_packet_receiver.clone()).await;
+            Self::clear_nic_ctx(self.nic_ctx.clone()).await;
 
             #[cfg(not(mobile))]
             if self.global_ctx.config.get_flags().tun_mode()
@@ -749,34 +712,25 @@ impl Instance {
         self.nic_ctx.clone()
     }
 
-    pub fn get_peer_packet_receiver(&self) -> Arc<Mutex<PacketRecvChanReceiver>> {
-        self.peer_packet_receiver.clone()
-    }
-
     #[cfg(mobile)]
     pub async fn setup_nic_ctx_for_mobile(
         nic_ctx: ArcNicCtx,
         global_ctx: ArcGlobalCtx,
         peer_manager: Arc<PeerManager>,
-        peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
         fd: i32,
     ) -> Result<(), anyhow::Error> {
         tracing::info!("setup_nic_ctx_for_mobile, fd: {}", fd);
-        Self::clear_nic_ctx(nic_ctx.clone(), peer_packet_receiver.clone()).await;
+        Self::clear_nic_ctx(nic_ctx.clone()).await;
         if fd <= 0 {
             return Ok(());
         }
         let close_notifier = Arc::new(Notify::new());
-        let mut new_nic_ctx = NicCtx::new(
-            global_ctx.clone(),
-            &peer_manager,
-            peer_packet_receiver.clone(),
-            close_notifier.clone(),
-        );
+        let mut new_nic_ctx =
+            NicCtx::new(global_ctx.clone(), &peer_manager, close_notifier.clone());
         new_nic_ctx
             .run_for_mobile(fd)
             .await
-            .with_context(|| "add ip failed")?;
+            .with_context(|| "attach mobile NIC failed")?;
 
         #[cfg(feature = "magic-dns")]
         let magic_dns_runner = global_ctx

@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use crate::{
     common::config::ConfigLoader,
     proto::{
-        api::{control::v1::*, instance as legacy},
+        api::{control::v1::*, instance},
         rpc_types::controller::{BaseController, Controller},
     },
 };
@@ -249,9 +249,7 @@ impl ControlPlaneService {
         request: GetNodeRequest,
     ) -> anyhow::Result<GetNodeResponse> {
         let (_, instance) = self.resolve(request.meta.as_ref())?;
-        let mut node = instance.peers()?.get_my_info().await;
-        // The legacy snapshot contains raw TOML with authentication secrets.
-        node.config.clear();
+        let node = instance.peers()?.get_my_info().await;
         Ok(GetNodeResponse {
             node: Some(node),
             snapshot: Some(self.snapshot(&instance).await?),
@@ -282,7 +280,7 @@ impl ControlPlaneService {
             if peer_id != peers.my_peer_id() {
                 peer_infos
                     .entry(peer_id)
-                    .or_insert_with(|| legacy::PeerInfo {
+                    .or_insert_with(|| instance::PeerInfo {
                         peer_id,
                         ..Default::default()
                     });
@@ -680,7 +678,7 @@ impl ControlPlaneService {
                     .stats_manager()
                     .get_all_metrics()
                     .into_iter()
-                    .map(|metric| legacy::MetricSnapshot {
+                    .map(|metric| instance::MetricSnapshot {
                         name: metric.name_str(),
                         value: metric.value,
                         labels: metric
@@ -935,7 +933,7 @@ impl ControlPlaneService {
                 .map(|credential| {
                     (
                         &credential.credential_id,
-                        credential.serial,
+                        &credential.certificate_id,
                         credential.expiry_unix,
                     )
                 })

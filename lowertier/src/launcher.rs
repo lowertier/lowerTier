@@ -117,7 +117,6 @@ impl LowTierLauncher {
         let global_ctx = instance.get_global_ctx();
         let peer_mgr = instance.get_peer_manager();
         let nic_ctx = instance.get_nic_ctx();
-        let peer_packet_receiver = instance.get_peer_packet_receiver();
         let mut tun_fd_receiver = data.tun_fd.1.lock().unwrap().take().unwrap();
 
         tasks.spawn(async move {
@@ -129,7 +128,6 @@ impl LowTierLauncher {
                     nic_ctx.clone(),
                     global_ctx.clone(),
                     peer_mgr.clone(),
-                    peer_packet_receiver.clone(),
                     tun_fd,
                 )
                 .await;

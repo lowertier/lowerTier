@@ -289,6 +289,11 @@ impl ManualConnectorManager {
         Ok(())
     }
 
+    /// List registered targets and owned reconnect attempts.
+    ///
+    /// Owned attempts report `Connecting`.
+    /// Registered targets report `Connected`, `Disconnected`, or `ColdRetry` from peer state and retry deadlines.
+    /// Removed targets stay hidden while existing attempts finish.
     pub async fn list_connectors(&self) -> Vec<Connector> {
         let seeds = self.data.seeds.lock().unwrap();
         let dead_urls = Self::collect_dead_conns(&self.data);

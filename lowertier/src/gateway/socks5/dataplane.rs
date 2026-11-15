@@ -416,10 +416,10 @@ mod tests {
         ip: cidr::Ipv4Inet,
     }
 
-    /// Brings up two peers connected by a ring tunnel, each with a virtual IPv4
-    /// and a running `Socks5Server`, and waits until the route to `b`'s IPv4 is
-    /// visible from `a`. `run(None)` leaves the legacy proxy endpoint unset, so the
-    /// connect path goes through smoltcp, matching the listener side under test.
+    /// Connect two peers through a ring tunnel and wait for the remote IPv4 route.
+    ///
+    /// Each peer runs a userspace SOCKS5 server. `run(None)` selects smoltcp for both
+    /// connection initiation and listener delivery.
     async fn setup_pair() -> (Endpoint, Endpoint) {
         let a = create_mock_peer_manager().await;
         let b = create_mock_peer_manager().await;

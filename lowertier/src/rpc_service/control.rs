@@ -67,6 +67,7 @@ fn api_error(error: anyhow::Error) -> ApiError {
 }
 
 impl ControlPlaneService {
+    /// Create a token-protected service for daemon requests.
     pub fn new(manager: Arc<NetworkInstanceManager>, token: ControlToken) -> Self {
         Self {
             stats: manager.control_stats.clone(),
@@ -78,6 +79,9 @@ impl ControlPlaneService {
         }
     }
 
+    /// Create a service for trusted callers that own this manager.
+    ///
+    /// The caller must authenticate requests received from external clients.
     pub fn for_owned_instances(manager: Arc<NetworkInstanceManager>) -> Self {
         Self {
             stats: manager.control_stats.clone(),
@@ -89,6 +93,7 @@ impl ControlPlaneService {
         }
     }
 
+    /// Accept trusted owned calls, or require the token configured for this service.
     fn authorize(&self, meta: Option<&RequestMeta>) -> std::result::Result<(), ApiError> {
         if self
             .token
@@ -105,6 +110,9 @@ impl ControlPlaneService {
         })
     }
 
+    /// Acquire the manager lock unless owned dispatch already holds it.
+    ///
+    /// Returning no guard prevents nested acquisition of the same mutex.
     async fn mutation_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         if self.externally_locked {
             None
@@ -114,6 +122,7 @@ impl ControlPlaneService {
     }
 }
 
+/// Dispatch an owned control request and release its mutation guard on completion.
 pub async fn call_owned_json(
     manager: &Arc<NetworkInstanceManager>,
     service_name: &str,
@@ -128,7 +137,11 @@ pub async fn call_owned_json(
     )
 }
 
-/// Keep the manager lock until the owned adapter completes lifecycle cleanup.
+/// Dispatch an owned control request and return its mutation guard.
+///
+/// Reject a nonempty domain or an unknown service or method before locking.
+/// `WatchChanges` waits without the lock, so writers can publish changes during the wait.
+/// Other methods retain the guard until the owned adapter completes lifecycle cleanup.
 pub async fn call_owned_json_locked(
     manager: &Arc<NetworkInstanceManager>,
     service_name: &str,

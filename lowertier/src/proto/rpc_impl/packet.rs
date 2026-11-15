@@ -7,7 +7,7 @@ use quanta::Instant;
 use crate::{
     common::PeerId,
     proto::{
-        common::{CompressionAlgoPb, RpcCompressionInfo, RpcDescriptor, RpcPacket},
+        common::{RpcDescriptor, RpcPacket},
         rpc_types::error::Error,
     },
     tunnel::packet_def::{PacketType, TAIL_RESERVED_SIZE, ZCPacket, ZCPacketType},
@@ -19,7 +19,7 @@ use super::RpcTransactId;
 // QUIC fragments records to its path MTU. H2 and WSS use stream framing.
 const RPC_PACKET_RECORD_BUDGET: usize = 1300;
 
-/// Maximum logical RPC body after fragment reassembly or decompression.
+/// Maximum RPC body after fragment reassembly.
 pub(crate) const MAX_RPC_BODY_BYTES: usize = 256 * 1024;
 const MAX_RPC_PIECES: u32 = 1024;
 // Account for the sparse map slot retained for each fragment.
@@ -27,49 +27,13 @@ const RPC_MERGER_MAP_ENTRY_OVERHEAD: usize = 64;
 // Account for the immutable envelope retained once per fragmented transaction.
 const RPC_MERGER_ENVELOPE_OVERHEAD: usize = 128;
 
-pub const fn supported_rpc_compression() -> CompressionAlgoPb {
-    CompressionAlgoPb::None
-}
-
 pub(crate) fn logical_body_size(packet: &RpcPacket) -> Result<usize, Error> {
     if packet.body.len() > MAX_RPC_BODY_BYTES {
         return Err(Error::MalformatRpcPacket(
             "RPC body is too large".to_owned(),
         ));
     }
-    if packet
-        .compression_info
-        .is_some_and(|info| info.algo != CompressionAlgoPb::None as i32)
-    {
-        return Err(Error::MalformatRpcPacket(
-            "RPC compression is no longer supported".to_owned(),
-        ));
-    }
     Ok(packet.body.len())
-}
-
-pub async fn compress_packet(
-    _accepted_compression_algo: CompressionAlgoPb,
-    content: &[u8],
-) -> Result<(Vec<u8>, CompressionAlgoPb), Error> {
-    Ok((content.to_vec(), CompressionAlgoPb::None))
-}
-
-pub async fn decompress_packet(
-    compression_algo: CompressionAlgoPb,
-    content: &[u8],
-) -> Result<Vec<u8>, Error> {
-    if compression_algo != CompressionAlgoPb::None {
-        return Err(Error::MalformatRpcPacket(
-            "RPC compression is no longer supported".to_owned(),
-        ));
-    }
-    if content.len() > MAX_RPC_BODY_BYTES {
-        return Err(Error::MalformatRpcPacket(
-            "RPC body is too large".to_owned(),
-        ));
-    }
-    Ok(content.to_vec())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,8 +67,6 @@ impl FragmentEnvelope {
 
 pub(crate) struct PacketMerger {
     first_envelope: Option<FragmentEnvelope>,
-    first_compression_info: Option<RpcCompressionInfo>,
-    compression_info_known: bool,
     pieces: HashMap<u32, RpcPacket>,
     body_bytes: usize,
     retained_bytes: usize,
@@ -121,8 +83,6 @@ impl PacketMerger {
     pub fn new() -> Self {
         Self {
             first_envelope: None,
-            first_compression_info: None,
-            compression_info_known: false,
             pieces: HashMap::new(),
             body_bytes: 0,
             retained_bytes: 0,
@@ -130,36 +90,16 @@ impl PacketMerger {
         }
     }
 
-    fn compression_is_legal(packet: &RpcPacket) -> bool {
-        packet.piece_idx == 0 || packet.compression_info.is_none()
-    }
-
+    /// Return the complete body when all unique fragment indexes are present.
+    ///
+    /// `feed` checks each index and envelope before insertion. Equal counts therefore
+    /// establish that every index exists. Incomplete transactions return `None`.
     fn try_merge_pieces(&self) -> Option<RpcPacket> {
-        let Some(first_envelope) = self.first_envelope.as_ref() else {
-            return None;
-        };
-        if self.pieces.is_empty() {
-            return None;
-        }
-
+        let first_envelope = self.first_envelope.as_ref()?;
         let total_pieces = first_envelope.total_pieces;
         if self.pieces.len() != total_pieces as usize {
             return None;
         }
-        for piece_idx in 0..total_pieces {
-            let Some(p) = self.pieces.get(&piece_idx) else {
-                return None;
-            };
-            // Some piece is missing.
-            if p.total_pieces == 0 || p.piece_idx != piece_idx {
-                return None;
-            }
-            if !first_envelope.matches(p) || !Self::compression_is_legal(p) {
-                return None;
-            }
-        }
-
-        // all pieces are received
         let mut body = Vec::with_capacity(self.body_bytes);
         for piece_idx in 0..total_pieces {
             let p = self
@@ -169,7 +109,6 @@ impl PacketMerger {
             body.extend_from_slice(&p.body);
         }
 
-        // Piece zero carries the complete compression metadata.
         let mut tmpl_packet = self.pieces.get(&0)?.clone();
         tmpl_packet.total_pieces = 1;
         tmpl_packet.piece_idx = 0;
@@ -178,20 +117,14 @@ impl PacketMerger {
         Some(tmpl_packet)
     }
 
+    /// Accept one fragment from the current RPC format.
+    ///
+    /// Reject zero counts, invalid indexes, missing descriptors, and changed envelopes.
+    /// Identical duplicates do not add memory charges. Changed duplicates return an error.
+    /// Incomplete bodies return `None`. Complete bodies return one reassembled packet.
     pub fn feed(&mut self, rpc_packet: RpcPacket) -> Result<Option<RpcPacket>, Error> {
         let total_pieces = rpc_packet.total_pieces;
         let piece_idx = rpc_packet.piece_idx;
-
-        // for compatibility with old version
-        if total_pieces == 0 && piece_idx == 0 {
-            if rpc_packet.body.len() > MAX_RPC_BODY_BYTES {
-                return Err(Error::MalformatRpcPacket(format!(
-                    "unfragmented RPC body is too large: {} bytes",
-                    rpc_packet.body.len()
-                )));
-            }
-            return Ok(Some(rpc_packet));
-        }
 
         if total_pieces == 0 {
             return Err(Error::MalformatRpcPacket(
@@ -202,12 +135,6 @@ impl PacketMerger {
         if rpc_packet.descriptor.is_none() {
             return Err(Error::MalformatRpcPacket(
                 "descriptor is missing".to_owned(),
-            ));
-        }
-
-        if !Self::compression_is_legal(&rpc_packet) {
-            return Err(Error::MalformatRpcPacket(
-                "compression metadata is only allowed on piece zero".to_owned(),
             ));
         }
 
@@ -244,22 +171,8 @@ impl PacketMerger {
             );
         }
 
-        if rpc_packet.piece_idx == 0 {
-            if self.compression_info_known
-                && self.first_compression_info != rpc_packet.compression_info
-            {
-                return Err(Error::MalformatRpcPacket(
-                    "piece zero compression metadata changed".to_owned(),
-                ));
-            }
-            self.first_compression_info = rpc_packet.compression_info;
-            self.compression_info_known = true;
-        }
-
         if let Some(piece) = self.pieces.get(&piece_idx) {
-            if piece.body != rpc_packet.body
-                || piece.compression_info != rpc_packet.compression_info
-            {
+            if piece.body != rpc_packet.body {
                 return Err(Error::MalformatRpcPacket(
                     "duplicate RPC fragment has a different body".to_owned(),
                 ));
@@ -336,7 +249,6 @@ pub struct BuildRpcPacketArgs<'a> {
     pub is_req: bool,
     pub content: &'a [u8],
     pub trace_id: i32,
-    pub compression_info: RpcCompressionInfo,
 }
 
 // NIC headroom covers the largest retained transport prefix.
@@ -368,11 +280,6 @@ fn build_rpc_piece(
         transaction_id: args.transaction_id,
         body: body.to_vec(),
         trace_id: args.trace_id,
-        compression_info: if piece_idx == 0 {
-            Some(args.compression_info)
-        } else {
-            None
-        },
     }
 }
 
@@ -419,25 +326,10 @@ fn pick_piece_len_for_budget(
         .max(1)
 }
 
-// Pre-split the raw RPC content using conservative worst-case protobuf sizing.
-// We compute separate base sizes because only the first piece carries
-// `compression_info`.
-//
-// Split flow:
-//
-//   raw RPC content
-//   +--------------------------------------------------------------+
-//   |                         args.content                          |
-//   +--------------------------------------------------------------+
-//        | first piece uses first_piece_base_len
-//        | later pieces use other_piece_base_len
-//        v
-//   +-----------+-----------+-----------+----- ...
-//   | offset,len| offset,len| offset,len|
-//   +-----------+-----------+-----------+----- ...
-//
-// The result is only a slicing plan. Actual RpcPacket objects are built later
-// with the real `total_pieces`.
+/// Plan fragments within the transport record budget.
+///
+/// An empty body still produces one fragment. Nonempty bodies use a conservative
+/// metadata size with maximum-width counters. Packet construction sets the actual counters.
 fn split_rpc_content_for_record_budget(args: &BuildRpcPacketArgs<'_>) -> Vec<(usize, usize)> {
     if args.content.is_empty() {
         return vec![(0, 0)];
@@ -446,19 +338,11 @@ fn split_rpc_content_for_record_budget(args: &BuildRpcPacketArgs<'_>) -> Vec<(us
     let max_encoded_len = max_rpc_packet_encoded_len().max(1);
     // Use the worst-case varint width for piece counters so the budget remains
     // valid without iterating on `total_pieces`/`piece_idx`.
-    let first_piece_base_len = build_rpc_piece(args, u32::MAX, 0, &[]).encoded_len();
-    let other_piece_base_len = build_rpc_piece(args, u32::MAX, u32::MAX, &[]).encoded_len();
+    let base_len = build_rpc_piece(args, u32::MAX, u32::MAX, &[]).encoded_len();
 
     let mut pieces = Vec::new();
     let mut offset = 0usize;
     while offset < args.content.len() {
-        // The first piece has a different metadata shape because it carries
-        // `compression_info`.
-        let base_len = if pieces.is_empty() {
-            first_piece_base_len
-        } else {
-            other_piece_base_len
-        };
         let piece_len =
             pick_piece_len_for_budget(base_len, args.content.len() - offset, max_encoded_len);
         pieces.push((offset, piece_len));
@@ -497,4 +381,60 @@ pub fn build_rpc_packet(args: BuildRpcPacketArgs<'_>) -> Vec<ZCPacket> {
     }
 
     ret
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_fragment_count_is_rejected() {
+        let packet = RpcPacket {
+            descriptor: Some(RpcDescriptor::default()),
+            body: b"request".to_vec(),
+            ..Default::default()
+        };
+        assert!(PacketMerger::new().feed(packet).is_err());
+    }
+
+    #[test]
+    fn fragments_use_one_format_and_reassemble_out_of_order() {
+        let body = vec![0x5a; 32 * 1024];
+        let records = build_rpc_packet(BuildRpcPacketArgs {
+            from_peer: 1,
+            to_peer: 2,
+            rpc_desc: RpcDescriptor::default(),
+            transaction_id: 3,
+            is_req: true,
+            content: &body,
+            trace_id: 4,
+        });
+        assert!(records.len() > 1);
+        let mut pieces: Vec<_> = records
+            .iter()
+            .map(|record| {
+                let packet = RpcPacket::decode(record.payload()).unwrap();
+                assert!(packet.encoded_len() <= max_rpc_packet_encoded_len());
+                packet
+            })
+            .collect();
+        let last = pieces.pop().unwrap();
+        let mut merger = PacketMerger::new();
+        assert!(merger.feed(last.clone()).unwrap().is_none());
+        let retained = merger.retained_bytes();
+        assert!(merger.feed(last.clone()).unwrap().is_none());
+        assert_eq!(merger.retained_bytes(), retained);
+        let mut changed = last;
+        changed.body[0] ^= 1;
+        assert!(merger.feed(changed).is_err());
+
+        let mut result = None;
+        for piece in pieces.into_iter().rev() {
+            result = merger.feed(piece).unwrap();
+        }
+        let result = result.unwrap();
+        assert_eq!(result.total_pieces, 1);
+        assert_eq!(result.piece_idx, 0);
+        assert_eq!(result.body, body);
+    }
 }

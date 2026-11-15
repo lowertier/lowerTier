@@ -17,7 +17,7 @@ use crate::{
         stats_manager::{LabelSet, LabelType, MetricName, StatsManager},
     },
     proto::{
-        common::{self, RpcCompressionInfo, RpcPacket, RpcRequest, RpcResponse, TunnelInfo},
+        common::{self, RpcPacket, RpcRequest, RpcResponse, TunnelInfo},
         rpc_impl::packet::BuildRpcPacketArgs,
         rpc_types::{
             controller::Controller,
@@ -92,10 +92,7 @@ fn rpc_authentication_tuple_valid(
 
 use super::{
     RpcController, Transport,
-    packet::{
-        MAX_RPC_BODY_BYTES, PacketMerger, build_rpc_packet, compress_packet, decompress_packet,
-        logical_body_size, supported_rpc_compression,
-    },
+    packet::{MAX_RPC_BODY_BYTES, PacketMerger, build_rpc_packet, logical_body_size},
     service_registry::ServiceRegistry,
 };
 
@@ -520,7 +517,11 @@ impl Server {
                     Ok(packet) => packet,
                 };
 
-                let unfragmented = packet.total_pieces <= 1;
+                if packet.total_pieces == 0 {
+                    tracing::warn!("Dropping RPC packet with zero fragments");
+                    continue;
+                }
+                let unfragmented = packet.total_pieces == 1;
                 if unfragmented && packet.piece_idx != 0 {
                     tracing::warn!(
                         from_peer = packet.from_peer,
@@ -737,23 +738,13 @@ impl Server {
                         );
                     }
                     if let Some(packet) = completed_packet.as_ref() {
-                        let logical_bytes = match logical_body_size(packet) {
-                            Ok(bytes) => bytes,
+                        match logical_body_size(packet) {
+                            Ok(_) => {}
                             Err(error) => {
                                 feed_error = Some(error);
-                                0
                             }
-                        };
-                        let decompressed_extra = packet
-                            .compression_info
-                            .as_ref()
-                            .is_some_and(|info| info.algo() != common::CompressionAlgoPb::None)
-                            .then_some(logical_bytes)
-                            .unwrap_or(0);
-                        let execution_bytes = packet
-                            .encoded_len()
-                            .checked_add(decompressed_extra)
-                            .unwrap_or(usize::MAX);
+                        }
+                        let execution_bytes = packet.encoded_len();
                         if feed_error.is_none()
                             && merger_budget.lock().unwrap().transfer_to_execution(
                                 session,
@@ -956,25 +947,8 @@ impl Server {
             return Err(anyhow::anyhow!("foreign relay RPC service is not permitted").into());
         }
 
-        let body = if let Some(compression_info) = packet.compression_info {
-            let compression_algo = common::CompressionAlgoPb::try_from(compression_info.algo)
-                .map_err(|_| {
-                    Error::MalformatRpcPacket(format!(
-                        "unknown RPC compression algorithm: {}",
-                        compression_info.algo
-                    ))
-                })?;
-            decompress_packet(compression_algo, &packet.body).await?
-        } else {
-            if packet.body.len() > MAX_RPC_BODY_BYTES {
-                return Err(Error::MalformatRpcPacket(format!(
-                    "RPC body is too large: {} bytes",
-                    packet.body.len()
-                )));
-            }
-            packet.body
-        };
-        let rpc_request = RpcRequest::decode(Bytes::from(body))?;
+        logical_body_size(&packet)?;
+        let rpc_request = RpcRequest::decode(Bytes::from(packet.body))?;
         let timeout_ms = u64::try_from(rpc_request.timeout_ms)
             .ok()
             .filter(|timeout_ms| (1..=MAX_RPC_TIMEOUT_MS).contains(timeout_ms))
@@ -1060,7 +1034,6 @@ impl Server {
         let mut resp_msg = RpcResponse::default();
         let now = Instant::now();
 
-        let compression_info = packet.compression_info;
         let resp_bytes = Self::handle_rpc_request(
             packet,
             reg,
@@ -1137,25 +1110,14 @@ impl Server {
                 Some((&Error::MalformatRpcPacket("RPC response is too large".to_string())).into());
         }
 
-        let (compressed_resp, algo) = compress_packet(
-            compression_info.unwrap_or_default().accepted_algo(),
-            &resp_msg.encode_to_vec(),
-        )
-        .await
-        .unwrap();
-
         let packets = build_rpc_packet(BuildRpcPacketArgs {
             from_peer: to_peer,
             to_peer: from_peer,
             rpc_desc: desc,
             transaction_id,
             is_req: false,
-            content: &compressed_resp,
+            content: &resp_msg.encode_to_vec(),
             trace_id,
-            compression_info: RpcCompressionInfo {
-                algo: algo.into(),
-                accepted_algo: supported_rpc_compression().into(),
-            },
         });
         for packet in packets {
             if let Err(err) = sender.send(packet).await {

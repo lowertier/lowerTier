@@ -468,7 +468,9 @@ pub(super) struct DirectNicIngress {
     pub(super) route: ArcRoute,
     pub(super) l2_fabric: Arc<L2Fabric>,
     pub(super) traffic_metrics: Arc<TrafficMetricRecorder>,
-    pub(super) peer_packet_process_pipeline: Arc<RwLock<Vec<BoxPeerPacketFilter>>>,
+    // The pipeline contains peer-map owners. A strong reference would retain the
+    // ingress channel through those maps after the manager stops.
+    pub(super) peer_packet_process_pipeline: Weak<RwLock<Vec<BoxPeerPacketFilter>>>,
     pub(super) ethernet_input: bool,
     pub(super) nic: Arc<DirectNicBatchWriter>,
     pub(super) self_rx_bytes: CounterHandle,
@@ -487,6 +489,9 @@ impl DirectNicIngress {
             return Err(batch);
         };
         let Some(endpoint) = self.nic.current_endpoint() else {
+            return Err(batch);
+        };
+        let Some(pipeline) = self.peer_packet_process_pipeline.upgrade() else {
             return Err(batch);
         };
         for packet in batch.iter_mut() {
@@ -548,7 +553,7 @@ impl DirectNicIngress {
 
         let mut batch = batch;
         {
-            let pipelines = self.peer_packet_process_pipeline.read().await;
+            let pipelines = pipeline.read().await;
             for pipeline in pipelines.iter().rev() {
                 if pipeline.is_direct_nic_terminal()
                     || !pipeline.is_interested_in_direct_nic_batch(&batch)

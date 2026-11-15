@@ -41,10 +41,9 @@ a bundle with a different root fingerprint.
 
 ## RPC output
 
-`GenerateCredentialResponse.credential_secret` contains the complete signed
-bundle. The response also contains the decoded `CredentialBundle`. Operators
-must store the complete bundle. A private key copied without its certificate
-cannot authenticate.
+`IssueCredentialResponse.credential_secret` contains the complete signed bundle.
+Operators must store the complete bundle.
+A private key copied without its certificate cannot authenticate.
 
 `CredentialInfo` reports the certificate ID, role, network name, expiry, and
 root fingerprint. It does not report a private key outside the signed bundle.

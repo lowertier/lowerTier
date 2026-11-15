@@ -1777,10 +1777,9 @@ impl RelayPeerMap {
             _ => false,
         };
         if confirm_accepted {
-            if let Err(error) = reservation.suspend_with_session_metadata(
-                responder_session_metadata_id,
-                INITIATOR_RECOVERY_LIFETIME,
-            ) {
+            if let Err(error) =
+                reservation.suspend_with_session_metadata(responder_session_metadata_id)
+            {
                 self.pending_confirmation_acks
                     .remove_if(&dst_peer_id, |_, pending| {
                         pending.handshake_id == handshake_id

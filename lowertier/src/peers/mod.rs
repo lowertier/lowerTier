@@ -143,12 +143,6 @@ fn queue_credit_count(batch: &mut PacketBatch) -> Option<u32> {
 }
 
 impl PacketRecvChan {
-    pub(crate) fn create_sibling_channel(&self) -> (Self, PacketRecvChanReceiver) {
-        // Each queue needs independent credits. Its consumer can await delivery
-        // to the sibling while producers refill the source queue.
-        create_packet_recv_chan()
-    }
-
     pub async fn send(
         &self,
         packet: ZCPacket,
@@ -357,7 +351,7 @@ mod vector_channel_tests {
     use super::create_packet_recv_chan;
 
     #[tokio::test]
-    async fn full_ingress_cannot_block_nic_delivery() {
+    async fn independent_queues_keep_separate_memory_limits() {
         use std::task::Poll;
 
         fn batch(value: u8) -> PacketBatch {
@@ -371,14 +365,14 @@ mod vector_channel_tests {
         }
 
         let (nic, mut nic_rx) = create_packet_recv_chan();
-        let (ingress, mut ingress_rx) = nic.create_sibling_channel();
+        let (ingress, mut ingress_rx) = create_packet_recv_chan();
         ingress.send_batch(batch(1)).await.unwrap();
         ingress.send_batch(batch(2)).await.unwrap();
         let current = ingress_rx.recv_batch().await.unwrap();
         ingress.send_batch(batch(3)).await.unwrap();
         assert_eq!(ingress.queue_credits.available_permits(), 0);
 
-        // Production awaits NIC delivery before it can dequeue more ingress.
+        // A consumer can deliver one batch while the source queue remains full.
         let delivery = nic.send_batch(current);
         tokio::pin!(delivery);
         assert!(matches!(futures::poll!(&mut delivery), Poll::Ready(Ok(()))));

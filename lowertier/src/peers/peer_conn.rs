@@ -33,9 +33,7 @@ use snow::{HandshakeState, TransportState, params::NoiseParams};
 use super::{
     PacketRecvChan,
     peer_conn_ping::PeerConnPinger,
-    peer_session::{
-        INITIATOR_RECOVERY_LIFETIME, InitiatorTransitionIdentity, PeerSession, PeerSessionAction,
-    },
+    peer_session::{InitiatorTransitionIdentity, PeerSession, PeerSessionAction},
     receiver_pacing::{
         RECEIVER_PACING_FEATURE, RECEIVER_PRESSURE_REPORT_INTERVAL, ReceiverPacer,
         ReceiverPressureReport, paced_batch_bytes, paced_packet_bytes, receiver_pacing_enabled,
@@ -2820,7 +2818,7 @@ impl PeerConn {
                         Error::WaitRespError("missing responder session metadata".to_owned())
                     })?;
                 reservation
-                    .suspend_with_session_metadata(responder_metadata, INITIATOR_RECOVERY_LIFETIME)
+                    .suspend_with_session_metadata(responder_metadata)
                     .map_err(|error| {
                         Error::WaitRespError(format!("retain recovery reservation failed: {error}"))
                     })?;

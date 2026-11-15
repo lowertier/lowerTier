@@ -22,7 +22,6 @@ use crate::{
     },
     instance::proxy_cidrs_monitor::ProxyCidrsMonitor,
     peers::{
-        PacketRecvChanReceiver,
         direct_nic::DirectNicEndpoint,
         fabric::{FabricBatch, FabricPayloadKind},
         flow::classify_nic_packet_flow,
@@ -1196,7 +1195,6 @@ impl VirtualNic {
 pub struct NicCtx {
     global_ctx: ArcGlobalCtx,
     peer_mgr: Weak<PeerManager>,
-    peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
 
     close_notifier: Arc<Notify>,
 
@@ -1213,13 +1211,11 @@ impl NicCtx {
     pub fn new(
         global_ctx: ArcGlobalCtx,
         peer_manager: &Arc<PeerManager>,
-        peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
         close_notifier: Arc<Notify>,
     ) -> Self {
         NicCtx {
             global_ctx: global_ctx.clone(),
             peer_mgr: Arc::downgrade(peer_manager),
-            peer_packet_receiver,
 
             close_notifier,
 
@@ -1231,30 +1227,6 @@ impl NicCtx {
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
         }
-    }
-
-    // Consume the legacy peer-packet channel and forward into the bounded TUN
-    // admission queue. The batched dataplane rework removed this consumer, so
-    // under load the channel stranded batches (and their shared byte credits)
-    // until every sibling channel parked permanently.
-    fn start_peer_packet_receiver_drain_task(&mut self) {
-        let peer_mgr = self.peer_mgr.clone();
-        let peer_packet_receiver = self.peer_packet_receiver.clone();
-        self.tasks.spawn(async move {
-            loop {
-                let batch = {
-                    let mut receiver = peer_packet_receiver.lock().await;
-                    receiver.recv_batch().await
-                };
-                let Some(batch) = batch else {
-                    break;
-                };
-                let Some(peer_mgr) = peer_mgr.upgrade() else {
-                    break;
-                };
-                peer_mgr.deliver_batch_to_nic(batch).await;
-            }
-        });
     }
 
     fn start_multicast_membership_expiry_task(&mut self) {
@@ -2010,7 +1982,6 @@ impl NicCtx {
         };
         self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
         self.do_forward_nic_to_peers_task(streams)?;
-        self.start_peer_packet_receiver_drain_task();
 
         // Assign IPv4 address if provided
         if let Some(ipv4_addr) = ipv4_addr {
@@ -2058,7 +2029,6 @@ impl NicCtx {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
         self.direct_nic_endpoint = Some(peer_mgr.install_direct_nic_sink(sink));
-        self.start_peer_packet_receiver_drain_task();
         self.start_multicast_membership_expiry_task();
 
         Ok(())

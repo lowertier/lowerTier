@@ -17,11 +17,10 @@ use crate::{
     },
     gateway::overlay_stream::OverlayStreamEndpoint,
     peers::{
-        PacketRecvChanReceiver, create_packet_recv_chan,
         peer_conn::tests::set_secure_mode_cfg,
         peer_manager::{PeerManager, RouteAlgoType},
         route_trait::Route,
-        tests::wait_route_appear,
+        tests::{TestNicReceiver, capture_nic_packets, wait_route_appear},
     },
     proto::common::{PathGroup, PathPolicy, PathRule, PathStage},
     tunnel::{
@@ -36,7 +35,7 @@ use crate::{
 
 struct TestNode {
     mgr: Arc<PeerManager>,
-    nic_rx: PacketRecvChanReceiver,
+    nic_rx: TestNicReceiver,
     ipv4: Ipv4Addr,
     enable_bridge: bool,
 }
@@ -78,12 +77,8 @@ impl TestNode {
         global_ctx.set_flags(flags);
         Self::apply_bridge_feature_flags(&global_ctx, enable_bridge);
 
-        let (packet_send, nic_rx) = create_packet_recv_chan();
-        let mgr = Arc::new(PeerManager::new(
-            RouteAlgoType::LinkState,
-            global_ctx,
-            packet_send,
-        ));
+        let mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, global_ctx));
+        let nic_rx = capture_nic_packets(&mgr);
         mgr.run().await.unwrap();
         Self {
             mgr,
@@ -228,7 +223,7 @@ async fn send_ipv4_burst(
 }
 
 async fn recv_ipv4_seqs(
-    rx: &mut PacketRecvChanReceiver,
+    rx: &mut TestNicReceiver,
     expected_src: Ipv4Addr,
     expected_dst: Ipv4Addr,
     dst_port: u16,
@@ -260,7 +255,7 @@ async fn recv_ipv4_seqs(
 }
 
 async fn recv_ethernet_tagged(
-    rx: &mut PacketRecvChanReceiver,
+    rx: &mut TestNicReceiver,
     expected_src: [u8; 6],
     expected_tag: &[u8],
 ) {

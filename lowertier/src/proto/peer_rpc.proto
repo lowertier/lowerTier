@@ -28,8 +28,8 @@ message TrustedCredentialPubkey {
   repeated string allowed_proxy_cidrs = 5; // allowed proxy_cidrs ranges
   optional bool reusable = 6;   // whether multiple peers may use the same credential concurrently
   uint32 credential_version = 7;
-  // Deprecated. New credentials use certificate_id.
-  uint64 serial = 8 [deprecated = true];
+  reserved 8;
+  reserved "serial";
   string network_name = 9;
   bytes root_public_key = 10;
   bytes root_fingerprint = 11;
@@ -51,8 +51,8 @@ message CredentialCertificate {
   bytes root_public_key = 3;
   bytes root_fingerprint = 4;
   bytes subject_x25519_public_key = 5;
-  // Deprecated. New credentials use certificate_id.
-  uint64 serial = 6 [deprecated = true];
+  reserved 6;
+  reserved "serial";
   int64 issued_unix = 7;
   int64 expiry_unix = 8;
   string role = 9;
@@ -70,8 +70,8 @@ message CredentialBundle {
   string network_name = 3;
   bytes root_public_key = 4;
   bytes root_fingerprint = 5;
-  // Deprecated. New credentials use certificate_id.
-  uint64 serial = 6 [deprecated = true];
+  reserved 6;
+  reserved "serial";
   CredentialCertificate certificate = 7;
   int64 issued_unix = 8;
   int64 expiry_unix = 9;
@@ -89,8 +89,8 @@ message CredentialRevocationState {
   bytes root_public_key = 3;
   bytes root_fingerprint = 4;
   uint64 state_version = 5;
-  // Deprecated. New states use revoked_certificate_ids.
-  repeated uint64 revoked_serials = 6 [deprecated = true];
+  reserved 6;
+  reserved "revoked_serials";
   int64 issued_unix = 7;
   bytes signature = 8;
   repeated bytes revoked_certificate_ids = 9;
@@ -128,7 +128,8 @@ message RoutePeerInfo {
 
   uint32 network_length = 13;
 
-  optional uint32 quic_port = 14 [deprecated = true];
+  reserved 14;
+  reserved "quic_port";
   optional common.Ipv6Inet ipv6_addr = 15;
 
   repeated PeerGroupInfo groups = 16;

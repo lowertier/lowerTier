@@ -149,7 +149,7 @@ async fn demo() -> Result<()> {
     }));
 
     let mut flags = gen_default_flags();
-    flags.camouflage_config_mut().server_name = HOST.to_owned();
+    flags.camouflage_config_mut().server_names = vec![HOST.to_owned()];
     flags
         .camouflage_config_mut()
         .set_decoy_upstream(origin_addr.to_string());

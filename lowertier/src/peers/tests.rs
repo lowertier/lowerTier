@@ -13,10 +13,46 @@ use crate::{
 };
 
 use super::{
-    create_packet_recv_chan,
+    PacketRecvChanReceiver, create_packet_recv_chan,
     peer_conn::tests::set_secure_mode_cfg,
     peer_manager::{PeerManager, RouteAlgoType},
 };
+
+pub struct TestNicReceiver {
+    receiver: PacketRecvChanReceiver,
+    _endpoint: Arc<super::direct_nic::DirectNicEndpoint>,
+}
+
+impl std::ops::Deref for TestNicReceiver {
+    type Target = PacketRecvChanReceiver;
+
+    fn deref(&self) -> &Self::Target {
+        &self.receiver
+    }
+}
+
+impl std::ops::DerefMut for TestNicReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.receiver
+    }
+}
+
+/// Keep a test NIC endpoint alive and capture its delivered packets.
+pub fn capture_nic_packets(peer: &PeerManager) -> TestNicReceiver {
+    let (sender, receiver) = create_packet_recv_chan();
+    let sink = futures::sink::unfold(sender, |sender, batch| async move {
+        sender
+            .send_batch(batch)
+            .await
+            .map_err(|_| crate::tunnel::TunnelError::Shutdown)?;
+        Ok(sender)
+    });
+    let endpoint = peer.install_direct_nic_sink(Box::pin(sink));
+    TestNicReceiver {
+        receiver,
+        _endpoint: endpoint,
+    }
+}
 
 fn credential_private_key_from_secret(secret: &str) -> x25519_dalek::StaticSecret {
     crate::peers::credential_manager::CredentialManager::private_key_from_bundle(secret)
@@ -44,21 +80,18 @@ pub async fn create_mock_peer_manager_with_mock_stun(
 }
 
 pub async fn create_mock_peer_manager() -> Arc<PeerManager> {
-    let (s, _r) = create_packet_recv_chan();
     let peer_mgr = Arc::new(PeerManager::new(
         RouteAlgoType::LinkState,
         get_mock_global_ctx(),
-        s,
     ));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
 
 pub async fn create_mock_peer_manager_with_name(network_name: String) -> Arc<PeerManager> {
-    let (s, _r) = create_packet_recv_chan();
     let g =
         get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name, "".to_string())));
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -67,11 +100,10 @@ pub async fn create_mock_peer_manager_secure(
     network_name: String,
     network_secret: String,
 ) -> Arc<PeerManager> {
-    let (s, _r) = create_packet_recv_chan();
     let g =
         get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name, network_secret)));
     set_secure_mode_cfg(&g, true);
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -134,7 +166,6 @@ pub async fn create_mock_peer_manager_credential(
     let private_key = credential_private_key_from_secret(encoded_bundle);
     let public = x25519_dalek::PublicKey::from(&private_key);
 
-    let (s, _r) = create_packet_recv_chan();
     let g = get_mock_global_ctx_with_network(Some(
         NetworkIdentity::new_credential_with_root_fingerprint(
             network_name,
@@ -154,7 +185,7 @@ pub async fn create_mock_peer_manager_credential(
             .unwrap_or_default(),
     }));
 
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -162,9 +193,8 @@ pub async fn create_mock_peer_manager_credential(
 /// Helper: create a credential node whose bundle is signed by an unknown root,
 /// so no admin in the test network trusts it.
 pub async fn create_mock_peer_manager_unknown_credential(network_name: String) -> Arc<PeerManager> {
-    let (s, _r) = create_packet_recv_chan();
     let g = crate::common::global_ctx::tests::get_mock_credential_global_ctx(network_name);
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::LinkState, g));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }

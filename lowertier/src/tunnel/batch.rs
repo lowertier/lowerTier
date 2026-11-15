@@ -401,8 +401,7 @@ impl<'a> IntoIterator for &'a PacketBatch {
 pin_project! {
     /// Converts a scalar transport reader into the batch-first tunnel interface.
     ///
-    /// This adapter is for control and compatibility transports. Native data
-    /// transports must produce `PacketBatch` directly.
+    /// Control readers use this adapter. Data transports produce `PacketBatch` directly.
     pub struct ScalarToBatchStream<S> {
         #[pin]
         inner: S,

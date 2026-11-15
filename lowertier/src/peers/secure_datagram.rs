@@ -1081,9 +1081,10 @@ mod tests {
             "aes-256-gcm".to_string(),
             "aes-256-gcm".to_string(),
         );
-
+        // Public timestamps can contain a byte value from the secret.
+        session.send_epoch_started_ms.store(165, Ordering::Relaxed);
         let output = format!("{session:?}");
-        assert!(!output.contains("165"));
+        assert!(!output.contains(&format!("{root_key:?}")));
         assert!(output.contains("root_key: <redacted>"));
     }
     use crate::tunnel::packet_def::PacketType;

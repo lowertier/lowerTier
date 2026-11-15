@@ -21,7 +21,6 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use quanta::Instant;
 use smallvec::SmallVec;
-use tokio::sync::Notify;
 
 use crate::{
     common::PeerId,
@@ -589,7 +588,6 @@ pub struct MultipathReorderBuffer {
     global_buffered: AtomicUsize,
     total_reordered: AtomicU64,
     per_peer_reordered: DashMap<PeerId, AtomicU64>,
-    timer_wake: Notify,
 }
 
 impl Default for MultipathReorderBuffer {
@@ -608,25 +606,11 @@ impl MultipathReorderBuffer {
             global_buffered: AtomicUsize::new(0),
             total_reordered: AtomicU64::new(0),
             per_peer_reordered: DashMap::new(),
-            timer_wake: Notify::new(),
         }
     }
 
     pub fn has_buffered(&self) -> bool {
         self.global_buffered.load(Ordering::Acquire) > 0
-    }
-
-    pub async fn wait_for_buffered(&self) {
-        if self.has_buffered() {
-            return;
-        }
-        let notified = self.timer_wake.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if self.has_buffered() {
-            return;
-        }
-        notified.await;
     }
 
     pub fn reordered_count_for_peer(&self, peer_id: Option<PeerId>) -> u64 {
@@ -724,10 +708,7 @@ impl MultipathReorderBuffer {
                 if state.gap_since.is_none() {
                     state.gap_since = Some(now);
                 }
-                let prev_global = self.global_buffered.fetch_add(1, Ordering::AcqRel);
-                if prev_global == 0 {
-                    self.timer_wake.notify_one();
-                }
+                self.global_buffered.fetch_add(1, Ordering::AcqRel);
                 self.record_reordered(from_peer_id);
             }
         }

@@ -548,9 +548,7 @@ struct HybridBatchRoute {
 }
 
 fn is_peer_rpc_packet_type(packet_type: u8) -> bool {
-    packet_type == PacketType::TaRpc as u8
-        || packet_type == PacketType::RpcReq as u8
-        || packet_type == PacketType::RpcResp as u8
+    packet_type == PacketType::RpcReq as u8 || packet_type == PacketType::RpcResp as u8
 }
 
 fn is_foreign_network_packet_type(packet_type: u8) -> bool {
@@ -602,23 +600,14 @@ fn decoded_local_nic_batch_source(batch: &PacketBatch, my_peer_id: PeerId) -> Op
         .then_some((source, packet_type))
 }
 
+/// Check payload shape before the terminal NIC processor sends a batch.
+///
+/// Reject unsupported packet types, suppressed TUN delivery, and encoded payloads.
+/// Ethernet also requires TAP support. Valid Ethernet frames supply their source to the callback.
 fn prepare_direct_nic_batch<F>(
     batch: &PacketBatch,
     ethernet_input: bool,
     mut learn_ethernet_source: F,
-) -> bool
-where
-    F: FnMut(&[u8], PeerId),
-{
-    // Tests and callers that only need structural validation pass peer id 0 and
-    // skip the destination identity check by using a dedicated helper below.
-    inspect_direct_nic_batch_structure(batch, ethernet_input, &mut learn_ethernet_source)
-}
-
-fn inspect_direct_nic_batch_structure<F>(
-    batch: &PacketBatch,
-    ethernet_input: bool,
-    learn_ethernet_source: &mut F,
 ) -> bool
 where
     F: FnMut(&[u8], PeerId),
@@ -661,8 +650,11 @@ where
     true
 }
 
-/// One pass validates a direct NIC batch, returns its source, and optionally
-/// learns Ethernet sources. Callers no longer scan the same batch three times.
+/// Validate a direct NIC batch and return its authenticated source.
+///
+/// Multipath packets require ordered delivery through the receive loop.
+/// Other batches require one source, a local destination, and decoded payloads.
+/// Ethernet batches also require TAP support and complete Ethernet metadata.
 pub(super) fn inspect_direct_nic_batch<F>(
     batch: &PacketBatch,
     my_peer_id: PeerId,
@@ -697,6 +689,9 @@ where
     }
 
     for packet in batch {
+        if packet.multipath_seq.is_some() {
+            return None;
+        }
         if packet.authenticated_peer_id() != Some(source) {
             return None;
         }
@@ -802,7 +797,6 @@ pub struct PeerManager {
     my_peer_id: PeerId,
 
     global_ctx: ArcGlobalCtx,
-    nic_channel: PacketRecvChan,
     packet_ingress: PacketRecvChan,
     direct_nic_writer: Arc<DirectNicBatchWriter>,
 
@@ -1276,14 +1270,10 @@ impl PeerManager {
         }
     }
 
-    pub fn new(
-        route_algo: RouteAlgoType,
-        global_ctx: ArcGlobalCtx,
-        nic_channel: PacketRecvChan,
-    ) -> Self {
+    pub fn new(route_algo: RouteAlgoType, global_ctx: ArcGlobalCtx) -> Self {
         let my_peer_id = rand::random();
 
-        let (packet_send, packet_recv) = nic_channel.create_sibling_channel();
+        let (packet_send, packet_recv) = super::create_packet_recv_chan();
         let packet_ingress = packet_send.clone();
         let peers = Arc::new(PeerMap::new(
             packet_send.clone(),
@@ -1437,7 +1427,6 @@ impl PeerManager {
             my_peer_id,
 
             global_ctx,
-            nic_channel,
             packet_ingress,
             direct_nic_writer: Arc::new(DirectNicBatchWriter::default()),
 
@@ -2425,21 +2414,26 @@ impl PeerManager {
 
         let traffic_metrics = self.traffic_metrics.clone();
 
-        let reorder_flush = multipath_reorder.clone();
-        let reorder_pipeline = pipe_line.clone();
         let mut tasks = self.tasks.lock().await;
         tasks.spawn(async move {
-            loop {
-                reorder_flush.wait_for_buffered().await;
-                tokio::time::sleep(super::multipath::REORDER_FLUSH_TICK).await;
-                for expired_batch in reorder_flush.flush_expired(Instant::now()) {
-                    Self::deliver_batch_to_pipelines(&reorder_pipeline, expired_batch).await;
-                }
-            }
-        });
-        tasks.spawn(async move {
             tracing::trace!("start_peer_recv");
-            while let Ok(mut batch) = recv_packet_batch_from_chan(&mut recv).await {
+            let mut reorder_tick = tokio::time::interval(super::multipath::REORDER_FLUSH_TICK);
+            reorder_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                // One task owns reassembly and downstream delivery. A timer must
+                // not advance a flow while an earlier batch waits for NIC capacity.
+                let mut batch = tokio::select! {
+                    batch = recv_packet_batch_from_chan(&mut recv) => {
+                        let Ok(batch) = batch else { break };
+                        batch
+                    }
+                    _ = reorder_tick.tick(), if multipath_reorder.has_buffered() => {
+                        for batch in multipath_reorder.flush_expired(Instant::now()) {
+                            Self::deliver_batch_to_pipelines(&pipe_line, batch).await;
+                        }
+                        continue;
+                    }
+                };
                 let mut local_batch = if let Some((from_peer_id, packet_type)) =
                     decoded_local_nic_batch_source(&batch, my_peer_id)
                 {
@@ -2722,8 +2716,7 @@ impl PeerManager {
 
                             // Step 10b: credential nodes don't forward handshake packets
                             if is_credential_node
-                                && (packet_type == PacketType::HandShake as u8
-                                    || packet_type == PacketType::NoiseHandshakeMsg1 as u8
+                                && (packet_type == PacketType::NoiseHandshakeMsg1 as u8
                                     || packet_type == PacketType::NoiseHandshakeMsg2 as u8
                                     || packet_type == PacketType::NoiseHandshakeMsg3 as u8)
                             {
@@ -2970,7 +2963,7 @@ impl PeerManager {
         }
 
         struct NicPacketProcessor {
-            nic_channel: PacketRecvChan,
+            nic: Arc<DirectNicBatchWriter>,
             l2_fabric: Arc<L2Fabric>,
             peers: Arc<PeerMap>,
             relay_peer_map: Arc<RelayPeerMap>,
@@ -2981,6 +2974,29 @@ impl PeerManager {
         }
 
         impl NicPacketProcessor {
+            /// Send accepted packets through the current NIC writer.
+            ///
+            /// A missing endpoint means that the NIC is stopped. Drop those packets.
+            /// The writer applies its queue limit and preserves batch order.
+            async fn send(&self, batch: PacketBatch) {
+                let Some(endpoint) = self.nic.current_endpoint() else {
+                    return;
+                };
+                let result = match plan_direct_nic_delivery(batch) {
+                    Ok(delivery) => DirectNicBatchWriter::send_to(endpoint, delivery).await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    tracing::error!(?error, "send packet batch to NIC failed");
+                }
+            }
+
+            /// Select delivery, rejection, or the next packet processor.
+            ///
+            /// Other packet types and packets marked to skip TUN continue through the pipeline.
+            /// Ethernet requires local TAP support, bridge permission, and authenticated source ownership.
+            /// Encrypted or compressed payloads are rejected. L2 admission checks each remaining packet.
+            /// Accepted IP and Ethernet packets go to the direct NIC writer.
             fn classify_at(
                 &self,
                 packet: ZCPacket,
@@ -3076,8 +3092,7 @@ impl PeerManager {
             async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
                 match self.classify(packet) {
                     NicPacketAction::Send(packet) => {
-                        tracing::trace!(?packet, "send packet to nic channel");
-                        let _ = self.nic_channel.send(packet).await;
+                        self.send(PacketBatch::singleton(packet)).await;
                         None
                     }
                     NicPacketAction::Continue(packet) => Some(packet),
@@ -3135,12 +3150,8 @@ impl PeerManager {
                             .collect();
                         batch.retain_flags(&keep);
                     }
-                    tracing::trace!(
-                        packets = batch.len(),
-                        "send owned packet batch to nic channel"
-                    );
                     if !batch.is_empty() {
-                        let _ = self.nic_channel.send_batch(batch).await;
+                        self.send(batch).await;
                     }
                     return PacketBatch::new();
                 }
@@ -3159,15 +3170,13 @@ impl PeerManager {
                     }
                 }
                 if !to_nic.is_empty() {
-                    tracing::trace!(packets = to_nic.len(), "send packet batch to nic channel");
-                    // The channel is bounded and preserves packet order.
-                    let _ = self.nic_channel.send_batch(to_nic).await;
+                    self.send(to_nic).await;
                 }
                 remaining
             }
         }
         self.add_packet_process_pipeline(Box::new(NicPacketProcessor {
-            nic_channel: self.nic_channel.clone(),
+            nic: self.direct_nic_writer.clone(),
             l2_fabric: self.l2_fabric.clone(),
             peers: self.peers.clone(),
             relay_peer_map: self.relay_peer_map.clone(),
@@ -6569,10 +6578,6 @@ impl PeerManager {
         &self.global_ctx
     }
 
-    pub fn get_nic_channel(&self) -> PacketRecvChan {
-        self.nic_channel.clone()
-    }
-
     pub(crate) fn install_direct_nic_sink(
         &self,
         sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
@@ -6588,7 +6593,7 @@ impl PeerManager {
                 route: self.get_route().into(),
                 l2_fabric: self.l2_fabric.clone(),
                 traffic_metrics: self.traffic_metrics.clone(),
-                peer_packet_process_pipeline: self.peer_packet_process_pipeline.clone(),
+                peer_packet_process_pipeline: Arc::downgrade(&self.peer_packet_process_pipeline),
                 ethernet_input: self.global_ctx.get_feature_flags().ethernet_input,
                 nic: self.direct_nic_writer.clone(),
                 self_rx_bytes: stats.get_counter(MetricName::TrafficBytesSelfRx, label_set.clone()),
@@ -6610,33 +6615,6 @@ impl PeerManager {
         stamp_critical_l2_control(&mut packet);
         let delivery = plan_direct_nic_delivery(PacketBatch::singleton(packet))?;
         DirectNicBatchWriter::send_to(endpoint, delivery).await
-    }
-
-    // Drain target for the legacy peer-packet channel. The batched dataplane
-    // rework removed the task that consumed this channel, so batches stranded
-    // there kept their byte credits forever and starved every sibling channel
-    // sharing the same semaphore under load.
-    pub(crate) async fn deliver_batch_to_nic(&self, batch: PacketBatch) {
-        if batch.is_empty() {
-            return;
-        }
-        let Some(endpoint) = self.direct_nic_writer.current_endpoint() else {
-            tracing::debug!(
-                packets = batch.len(),
-                "dropping NIC-bound batch because no direct NIC endpoint is installed"
-            );
-            return;
-        };
-        match plan_direct_nic_delivery(batch) {
-            Ok(delivery) => {
-                if let Err(error) = DirectNicBatchWriter::send_to(endpoint, delivery).await {
-                    tracing::error!(?error, "send direct packet batch to NIC failed");
-                }
-            }
-            Err(error) => {
-                tracing::error!(?error, "prepare direct packet batch for NIC failed");
-            }
-        }
     }
 
     pub fn get_foreign_network_manager(&self) -> Arc<ForeignNetworkManager> {
@@ -6674,7 +6652,6 @@ impl PeerManager {
                 .iter()
                 .map(|x| x.to_string())
                 .collect(),
-            config: self.global_ctx.config.dump(),
             version: LOWTIER_VERSION.to_string(),
             feature_flag: Some(self.global_ctx.get_feature_flags()),
             ip_list: Some(self.global_ctx.get_ip_collector().collect_ip_addrs().await),
@@ -6749,11 +6726,12 @@ mod tests {
     use crate::{
         common::{PeerId, config::Flags, global_ctx::tests::get_mock_global_ctx},
         peers::{
-            PacketRecvChanReceiver, create_packet_recv_chan,
             peer_manager::RouteAlgoType,
             route_trait::{ForwardingPeerInfo, ForwardingPeerTable},
             service_route::{ServiceRoute, ServiceRouteAction},
-            tests::{connect_peer_manager, wait_route_appear},
+            tests::{
+                TestNicReceiver, capture_nic_packets, connect_peer_manager, wait_route_appear,
+            },
         },
         proto::peer_rpc::{PeerIdentityType, SecureAuthLevel},
         tunnel::{
@@ -6763,6 +6741,116 @@ mod tests {
     };
 
     use super::PeerManager;
+
+    #[tokio::test]
+    async fn receive_loop_orders_delivery_before_gap_release() {
+        struct DeliveryGate {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl crate::peers::PeerPacketFilter for DeliveryGate {
+            async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
+                if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Some(packet)
+            }
+        }
+        let context = get_mock_global_ctx();
+        context.set_ipv4(Some("10.88.1.2/24".parse().unwrap()));
+        let peer = PeerManager::new(RouteAlgoType::None, context);
+        let mut nic = capture_nic_packets(&peer);
+        peer.run().await.unwrap();
+        let gate = Arc::new(DeliveryGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        peer.add_packet_process_pipeline(Box::new(gate.clone()))
+            .await;
+        let mut batch = PacketBatch::new();
+        for sequence in [0, 2] {
+            let mut packet = routed_ipv4_packet(
+                "10.88.1.1".parse().unwrap(),
+                "10.88.1.2".parse().unwrap(),
+                sequence as u8,
+            );
+            packet.fill_peer_manager_hdr(
+                peer.my_peer_id(),
+                peer.my_peer_id(),
+                PacketType::Data as u8,
+            );
+            packet.multipath_seq = Some((7, sequence));
+            batch.try_push(packet).unwrap();
+        }
+        peer.packet_ingress.send_batch(batch).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            gate.entered.notified().await;
+            tokio::time::sleep(
+                crate::peers::multipath::REORDER_GAP_TIMEOUT
+                    + 2 * crate::peers::multipath::REORDER_FLUSH_TICK,
+            )
+            .await;
+            assert_eq!(gate.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(matches!(
+                nic.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            gate.release.notify_one();
+            for expected in [0, 2] {
+                assert_eq!(nic.recv().await.unwrap().payload()[24], expected);
+            }
+        })
+        .await
+        .expect("delivery must resume and release the idle gap after downstream capacity returns");
+    }
+
+    #[test]
+    fn sequenced_packets_require_the_receive_loop() {
+        let mut packet = routed_ipv4_packet(
+            "10.88.1.1".parse().unwrap(),
+            "10.88.1.2".parse().unwrap(),
+            7,
+        );
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        assert!(packet.set_authenticated_peer_id(1));
+        assert_eq!(
+            super::inspect_direct_nic_batch(
+                &PacketBatch::singleton(packet.clone()),
+                2,
+                false,
+                &mut |_, _| {},
+            ),
+            Some((1, PacketType::Data as u8))
+        );
+        packet.multipath_seq = Some((3, 4));
+        assert!(
+            super::inspect_direct_nic_batch(
+                &PacketBatch::singleton(packet),
+                2,
+                false,
+                &mut |_, _| {},
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn nic_endpoint_does_not_keep_peer_state_alive() {
+        for route_algo in [RouteAlgoType::None, RouteAlgoType::LinkState] {
+            let peer = PeerManager::new(route_algo, get_mock_global_ctx());
+            peer.init_packet_process_pipeline().await;
+            let _nic = capture_nic_packets(&peer);
+            let peers = Arc::downgrade(&peer.peers);
+            let pipeline = Arc::downgrade(&peer.peer_packet_process_pipeline);
+            drop(peer);
+            assert!(pipeline.upgrade().is_none());
+            assert!(peers.upgrade().is_none());
+        }
+    }
 
     #[tokio::test]
     async fn new_direct_connection_preempts_a_pinned_relay_before_graph_publication() {
@@ -6930,14 +7018,14 @@ mod tests {
 
     async fn create_tap_peer_manager(
         l2_flood_bytes_per_second: u64,
-    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
+    ) -> (Arc<PeerManager>, TestNicReceiver) {
         create_tap_peer_manager_with_ipv4(l2_flood_bytes_per_second, None).await
     }
 
     async fn create_tap_peer_manager_with_ipv4(
         l2_flood_bytes_per_second: u64,
         ipv4: Option<std::net::Ipv4Addr>,
-    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
+    ) -> (Arc<PeerManager>, TestNicReceiver) {
         create_tap_peer_manager_with_policy(l2_flood_bytes_per_second, ipv4, |_| {}).await
     }
 
@@ -6945,7 +7033,7 @@ mod tests {
         l2_flood_bytes_per_second: u64,
         ipv4: Option<std::net::Ipv4Addr>,
         configure: impl FnOnce(&mut Flags),
-    ) -> (Arc<PeerManager>, PacketRecvChanReceiver) {
+    ) -> (Arc<PeerManager>, TestNicReceiver) {
         let global_ctx = get_mock_global_ctx();
         global_ctx.set_ipv4(ipv4.map(|address| cidr::Ipv4Inet::new(address, 24).unwrap()));
         let mut flags = global_ctx.get_flags();
@@ -6960,12 +7048,8 @@ mod tests {
         features.multicast_membership = true;
         global_ctx.set_base_advertised_feature_flags(features);
 
-        let (packet_send, packet_recv) = create_packet_recv_chan();
-        let peer_manager = Arc::new(PeerManager::new(
-            RouteAlgoType::LinkState,
-            global_ctx,
-            packet_send,
-        ));
+        let peer_manager = Arc::new(PeerManager::new(RouteAlgoType::LinkState, global_ctx));
+        let packet_recv = capture_nic_packets(&peer_manager);
         peer_manager.run().await.unwrap();
         (peer_manager, packet_recv)
     }
@@ -6999,7 +7083,7 @@ mod tests {
     #[tokio::test]
     async fn l2_nic_policy_precedes_neighbor_replies_and_membership() {
         use crate::instance::virtual_nic::NicCtx;
-        let (peer_a, _legacy_nic_a) =
+        let (peer_a, _nic_a) =
             create_tap_peer_manager_with_policy(0, Some("10.77.0.1".parse().unwrap()), |flags| {
                 flags.l2_allowed_vlans = vec![0];
                 flags.l2_allowed_ether_types = vec![0x0806, 0x0800];
@@ -7151,7 +7235,7 @@ mod tests {
             now,
         ));
         for allowed_type in [0x0800, 0x86dd] {
-            let (peer, _legacy_nic) = create_tap_peer_manager_with_policy(0, None, |flags| {
+            let (peer, _nic) = create_tap_peer_manager_with_policy(0, None, |flags| {
                 flags.enable_bridge = false;
                 flags.l2_allowed_ether_types = vec![allowed_type];
             })

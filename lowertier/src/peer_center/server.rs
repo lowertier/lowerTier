@@ -553,9 +553,11 @@ impl PeerCenterRpc for PeerCenterServer {
 
         let snapshot = self.data.snapshot.load();
         if req.digest != 0 && req.digest == snapshot.generation {
-            // An unchanged response uses the exact default protobuf value.
-            // The instance client uses this value to keep its cached map.
-            return Ok(GetGlobalPeerMapResponse::default());
+            // The current generation confirms that the client cache remains valid.
+            return Ok(GetGlobalPeerMapResponse {
+                digest: Some(snapshot.generation),
+                ..Default::default()
+            });
         }
 
         if req.digest != 0 {

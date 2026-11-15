@@ -120,7 +120,7 @@ impl ForeignNetworkEntry {
             Self::build_foreign_global_ctx(&network, global_ctx.clone(), relay_data);
         let network_name = network.network_name.clone();
 
-        let (packet_sender, packet_recv) = pm_packet_sender.create_sibling_channel();
+        let (packet_sender, packet_recv) = super::create_packet_recv_chan();
 
         let peer_map = Arc::new(PeerMap::new(
             packet_sender,
@@ -604,8 +604,7 @@ impl ForeignNetworkEntry {
                         continue;
                     }
 
-                    if packet_type == PacketType::TaRpc as u8
-                        || packet_type == PacketType::RpcReq as u8
+                    if packet_type == PacketType::RpcReq as u8
                         || packet_type == PacketType::RpcResp as u8
                     {
                         rx_bytes.add(buf_len as u64);

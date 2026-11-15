@@ -103,7 +103,6 @@ impl CredentialEntry {
             allowed_proxy_cidrs: self.allowed_proxy_cidrs.clone(),
             reusable: Some(self.reusable),
             credential_version: CREDENTIAL_BUNDLE_VERSION,
-            serial: 0,
             network_name: network_name.to_owned(),
             root_public_key: root_public_key.to_vec(),
             root_fingerprint: root_fingerprint.to_vec(),
@@ -128,7 +127,6 @@ impl CredentialEntry {
             allowed_proxy_cidrs: self.allowed_proxy_cidrs.clone(),
             reusable: Some(self.reusable),
             credential_version: CREDENTIAL_BUNDLE_VERSION,
-            serial: 0,
             role: self.role.clone(),
             network_name: network_name.to_owned(),
             root_fingerprint: root_fingerprint.to_vec(),
@@ -395,7 +393,6 @@ impl CredentialManager {
             network_name: self.network_name.clone(),
             root_public_key: self.root_public_key.to_vec(),
             root_fingerprint: self.root_fingerprint.to_vec(),
-            serial: 0,
             certificate: Some(certificate.clone()),
             issued_unix: now,
             expiry_unix: expiry,
@@ -508,7 +505,6 @@ impl CredentialManager {
             root_public_key: self.root_public_key.to_vec(),
             root_fingerprint: self.root_fingerprint.to_vec(),
             subject_x25519_public_key: subject_x25519_public_key.to_vec(),
-            serial: 0,
             certificate_id: certificate_id.to_vec(),
             issued_unix,
             expiry_unix,
@@ -633,7 +629,6 @@ impl CredentialManager {
             root_public_key: self.root_public_key.to_vec(),
             root_fingerprint: self.root_fingerprint.to_vec(),
             state_version: store.revocation_state_version,
-            revoked_serials: Vec::new(),
             issued_unix: current_unix_timestamp(),
             signature: Vec::new(),
             revoked_certificate_ids: store.revoked_certificate_ids.iter().cloned().collect(),
@@ -787,7 +782,6 @@ impl CredentialManager {
         if !is_canonical_strings(&bundle.groups)
             || !is_canonical_strings(&bundle.allowed_proxy_cidrs)
             || certificate.version != CREDENTIAL_BUNDLE_VERSION
-            || certificate.serial != 0
             || certificate.certificate_id != bundle.certificate_id
             || certificate.network_name != bundle.network_name
             || certificate.root_public_key != bundle.root_public_key
@@ -836,7 +830,6 @@ impl CredentialManager {
                 != root_fingerprint_for(root_public_key).as_slice()
             || certificate.certificate_id.len() != CERTIFICATE_ID_LEN
             || certificate.certificate_id.iter().all(|byte| *byte == 0)
-            || certificate.serial != 0
             || certificate.subject_x25519_public_key.len() != 32
             || certificate.expiry_unix <= now
             || certificate.issued_unix > now.saturating_add(MAX_FUTURE_SKEW)
@@ -1059,7 +1052,6 @@ impl CredentialManager {
             || state.root_fingerprint.as_slice() != root_fingerprint_for(root_public_key).as_slice()
             || state.issued_unix < now.saturating_sub(MAX_REVOCATION_AGE)
             || state.issued_unix > now.saturating_add(MAX_FUTURE_SKEW)
-            || !state.revoked_serials.is_empty()
             || state.revoked_certificate_ids.iter().any(|certificate_id| {
                 certificate_id.len() != CERTIFICATE_ID_LEN
                     || certificate_id.iter().all(|byte| *byte == 0)
