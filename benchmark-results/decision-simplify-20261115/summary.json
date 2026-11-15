@@ -1,0 +1,163 @@
+{
+  "verified_at": "2026-11-15T14:17:36.520960+00:00",
+  "application_commit": "fe4ca81f",
+  "software_version": "0.03",
+  "changes": [
+    "Packet routing and proxy routing share destination policy.",
+    "Individual packet sends and batch sends share dispatch classification.",
+    "TCP backend selection is separate from connection creation.",
+    "TCP and UDP share target normalization and route validation."
+  ],
+  "preserved_contracts": [
+    "Packet destination overrides and proxy system fallback",
+    "CIDR precedence, service route actions, and strict internet policy",
+    "Ethernet authority and credential checks across asynchronous boundaries",
+    "Direct preference before relay flow pin reuse",
+    "Four TCP backends and existing remote admission checks",
+    "Only Ok(None) from the transport proxy permits packet fallback",
+    "Transport errors, timeouts, and OverlayStream errors propagate",
+    "The individual sender retains its final foreign-route check"
+  ],
+  "checks": {
+    "permitted_library_tests_passed": 559,
+    "library_test_mode": "sequential",
+    "optional_caddy_integration_tests_passed": 2,
+    "tracker_bootstrap_verified_bytes": 4194304,
+    "gui_proxy_admission": "passed",
+    "formatting": "passed",
+    "independent_read_only_review": "No actionable defect found.",
+    "release_targets": [
+      "native",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
+    ],
+    "public_domain_probes_excluded_from_acceptance": [
+      "live_challenges_cloudflare_probe_through_tcp_passthrough",
+      "live_challenges_cloudflare_probe_through_udp_passthrough"
+    ],
+    "parallel_suite": {
+      "status": "failed",
+      "test": "explicit_close_drains_admitted_work_and_bounds_a_stalled_flush",
+      "observed_log_events": 0,
+      "expected_log_events": 1,
+      "isolated_test": "passed",
+      "sequential_suite": "passed",
+      "cause": "Unconfirmed. The affected test and production source are unchanged."
+    }
+  },
+  "fleet": {
+    "verified_instances": 11,
+    "kernel_instances": 10,
+    "userspace_instances": 1,
+    "running_transfer_integrity_checks": 11,
+    "identities_preserved": 11,
+    "configurations_preserved": 11,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "effective_mtu": 1280,
+    "icmp_sent": 55,
+    "icmp_received": 55,
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_instances": 11,
+    "application_sources": {
+      "861jp": "10.126.126.2",
+      "862jp": "10.126.126.2",
+      "jpali": "10.126.126.2",
+      "s6916": "10.126.126.2",
+      "yutoms-mcp": "10.126.126.2",
+      "la": "10.126.126.2",
+      "alibj": "10.126.126.100",
+      "hattori-opwrt": "10.126.126.2",
+      "jpaws": "10.126.126.2",
+      "local": "10.126.126.100",
+      "btrouter": "10.126.126.100"
+    },
+    "udp_sent": 165,
+    "udp_received": 165,
+    "udp_payload_bytes": [
+      64,
+      1160,
+      1252
+    ],
+    "keyless_gui_pages": 11,
+    "keyless_gui_api_reads": 11,
+    "keyless_gui_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "gui_port": 15880,
+    "gui_allow_and_open": [
+      "10.126.126.0/24",
+      "192.168.51.0/24",
+      "192.168.40.0/24"
+    ],
+    "access_key_required_outside_open": true,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ]
+  },
+  "flywheel": {
+    "verified_at": "2026-11-15T14:05:26.473667+00:00",
+    "nodes": 38,
+    "dependency_edges": 33,
+    "source_files": 19,
+    "interfaces": [
+      {
+        "address": "10.126.126.2",
+        "port": 8484,
+        "graph_matches_export": true
+      },
+      {
+        "address": "100.108.186.13",
+        "port": 8484,
+        "graph_matches_export": true
+      }
+    ]
+  },
+  "transfer_recovery": [
+    {
+      "host": "alibj",
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "d69b98fd0c5f40ef2be134e58a871e0c6c7bfda8f6d9ea9cc9fc13738af78b3b",
+      "resumed_from_bytes": 3538944,
+      "completed_transfer_bytes": 12684771,
+      "prefix_transfer_integrity_verified": true,
+      "via_jpaws": true
+    },
+    {
+      "host": "btrouter",
+      "target": "x86_64-unknown-linux-musl",
+      "transfer_sha256": "d69b98fd0c5f40ef2be134e58a871e0c6c7bfda8f6d9ea9cc9fc13738af78b3b",
+      "resumed_from_bytes": 5111628,
+      "completed_transfer_bytes": 12684771,
+      "prefix_transfer_integrity_verified": true,
+      "via_jpaws": true
+    }
+  ],
+  "local_beijing_delivery_trial": {
+    "status": "timed out",
+    "client_budget_seconds": 85,
+    "download_verified_bytes": 8388608,
+    "upload_bytes_accepted_by_local_socket_at_last_report": 1048576,
+    "accepted_followup_client": "jpaws"
+  },
+  "cleanup": {
+    "superseded_test_binaries_replaced": 11,
+    "completed_transfer_files_removed": true,
+    "task_fixtures_stopped": true,
+    "configuration_keys_logs_and_measurements_preserved": true
+  },
+  "limitations": [
+    "The default parallel suite retains one unchanged logging assertion failure.",
+    "Earlier unrestricted runs included public-domain probes. Those runs are excluded from accepted local verification.",
+    "No matched performance comparison was run.",
+    "The checks do not establish long-term availability.",
+    "The Beijing fixture missed its setup window and later became ready without a restart.",
+    "Local-to-Beijing upload exceeded its budget while making progress. The accepted follow-up used JPaws, so this is not a matched performance comparison."
+  ],
+  "audit": "benchmark-results/.work/route-choice-20261115/audit.jsonl",
+  "fleet_audit": "benchmark-results/.work/decision-simplify-20261115/audit.jsonl"
+}

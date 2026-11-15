@@ -946,8 +946,8 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                         tracing::debug!(?addr, "userspace proxy selected HTTP/3 stream");
                         return Ok(SocksTcpStream::Transport(stream));
                     }
-                    // Only an unsupported stream permits packet fallback. Recheck the
-                    // packet backend after the remote request; propagate refusals above.
+                    // Only an unsupported stream permits packet fallback.
+                    // Recheck the packet backend after the remote request.
                     backend = self.plan_tcp_packet_backend(&peer_mgr_arc, &target).await;
                 }
                 TcpBackend::Overlay(connector) => {

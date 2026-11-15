@@ -424,7 +424,9 @@ D24 retains current path checks before cached sends.
 ## Verification and limits
 
 The map follows inspected production functions and their direct callers.
-The sequential library suite passed 561 tests.
+The permitted sequential library suite passed 559 tests.
+Two public-domain probes were excluded under the local-test policy.
+Both optional Caddy integration tests passed separately.
 The following tests protect relevant contracts:
 
 - [disabled_punchers_are_never_constructed](../../lowertier/src/instance/instance.rs#L796).
@@ -435,7 +437,7 @@ The following tests protect relevant contracts:
 - [sequenced_packets_require_the_receive_loop](../../lowertier/src/peers/peer_manager.rs#L6780).
 - [new_direct_connection_preempts_a_pinned_relay_before_graph_publication](../../lowertier/src/peers/peer_manager.rs#L6824).
 
-The first parallel run failed in an unchanged direct-tunnel logging assertion.
+Parallel runs failed in an unchanged direct-tunnel logging assertion.
 That test passed in isolation and in the sequential suite.
 The parallel failure cause is not confirmed.
 The map does not prove that all combinations work or that a branch is unnecessary.
