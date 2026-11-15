@@ -13,6 +13,7 @@ The guides one level up cover setup and use.
 
 ## Behavior
 
+- [Decision map](decision-map.md): conditions that select routes, transports, proxy implementations, and receive paths.
 - [Ethernet forwarding rules](l2-forwarding.md): learning, flooding, MAC ownership, MTU, and the test harness.
 - [Relay and transit semantics](relay-transit.md): permissions, budgets, and goodput selection.
 - [Userspace proxy internals](userspace-proxy.md): name resolution, dialing, and buffers.

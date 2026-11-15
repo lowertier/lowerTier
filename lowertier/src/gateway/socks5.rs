@@ -191,6 +191,15 @@ mod exit_dns_tests {
             let destination = "192.0.2.17:443".parse().unwrap();
             assert!(connector.tcp_connect(destination, 1).await.is_err());
             assert!(connector.udp_connect(destination, 1).await.is_err());
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let local_address = listener.local_addr().unwrap();
+            assert!(matches!(
+                connector.tcp_connect(local_address, 1).await.unwrap(),
+                SocksTcpStream::Tcp(_)
+            ));
+            let udp = connector.udp_connect(local_address, 1).await.unwrap();
+            assert!(matches!(udp.socket.as_ref(), SocksUdpSocket::UdpSocket(_)));
         })
         .await
         .unwrap();
@@ -590,6 +599,29 @@ struct Socks5AutoConnector {
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
 }
 
+struct ProxyTarget {
+    address: SocketAddr,
+    peer_ids: Option<Vec<crate::common::PeerId>>,
+}
+
+enum TcpBackend {
+    Kernel,
+    Transport(Arc<crate::tunnel::quic::proxy::ProxyEndpoint>),
+    Overlay(OverlayStreamConnector),
+    Smoltcp,
+}
+
+impl TcpBackend {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Kernel => "system route or loopback destination",
+            Self::Transport(_) => "direct peer with negotiated QUIC proxy capability",
+            Self::Overlay(_) => "enabled OverlayStream with a matching peer route",
+            Self::Smoltcp => "overlay packet path",
+        }
+    }
+}
+
 struct Socks5UdpConnection {
     socket: Arc<SocksUdpSocket>,
     target: SocketAddr,
@@ -750,6 +782,77 @@ fn resolve_overlay_name(
 }
 
 impl Socks5AutoConnector {
+    async fn plan_proxy_target(
+        &self,
+        peer_manager: &PeerManager,
+        mut address: SocketAddr,
+    ) -> crate::gateway::fast_socks5::Result<ProxyTarget> {
+        if self.smoltcp_net.as_ref().map(|net| net.get_address()) == Some(address.ip()) {
+            address.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        }
+        let route = if address.ip().is_loopback() {
+            UserRoutePlan::System
+        } else {
+            peer_manager
+                .plan_user_route(address.ip(), self.flow)
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?
+        };
+        let peer_ids = match route {
+            UserRoutePlan::Blackhole => {
+                return Err(
+                    anyhow::anyhow!("the route policy blocks destination {address}").into(),
+                );
+            }
+            UserRoutePlan::Overlay { peer_ids, .. } => {
+                if self.smoltcp_net.is_none() {
+                    return Err(anyhow::anyhow!("userspace routing is not ready").into());
+                }
+                Some(peer_ids)
+            }
+            UserRoutePlan::System => None,
+        };
+        Ok(ProxyTarget { address, peer_ids })
+    }
+
+    async fn plan_tcp_backend(
+        &self,
+        peer_manager: &PeerManager,
+        target: &ProxyTarget,
+    ) -> TcpBackend {
+        if target.peer_ids.is_none() {
+            return TcpBackend::Kernel;
+        }
+        if std::env::var_os("LOWTIER_DISABLE_TCP_STREAM_PROXY").is_none()
+            && !peer_manager.get_global_ctx().get_acl_filter().is_enabled()
+            && let IpAddr::V4(ip) = target.address.ip()
+            && let Some(peer_id) = peer_manager.get_peer_map().get_peer_id_by_ipv4(&ip).await
+            && !peer_manager.path_applies_to(peer_id)
+            && target.peer_ids.as_deref() == Some(&[peer_id])
+            && let Some(connection) = peer_manager.get_peer_map().only_direct_conn(peer_id)
+            && let Some(proxy) = connection.tcp_proxy()
+        {
+            return TcpBackend::Transport(proxy);
+        }
+        self.plan_tcp_packet_backend(peer_manager, target).await
+    }
+
+    async fn plan_tcp_packet_backend(
+        &self,
+        peer_manager: &PeerManager,
+        target: &ProxyTarget,
+    ) -> TcpBackend {
+        if let Some(connector) = self.overlay_connector.clone()
+            && let IpAddr::V4(ip) = target.address.ip()
+            && let Some(peer_id) = peer_manager.get_peer_map().get_peer_id_by_ipv4(&ip).await
+            && target.peer_ids.as_deref() == Some(&[peer_id])
+        {
+            TcpBackend::Overlay(connector)
+        } else {
+            TcpBackend::Smoltcp
+        }
+    }
+
     async fn resolve_target(
         &self,
         target: TargetAddr,
@@ -797,7 +900,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
 
     async fn tcp_connect(
         &self,
-        mut addr: SocketAddr,
+        addr: SocketAddr,
         timeout_s: u64,
     ) -> crate::gateway::fast_socks5::Result<SocksTcpStream> {
         if self.inner_connector.lock().is_some() {
@@ -809,119 +912,66 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             return Err(anyhow::anyhow!("peer manager is dropped").into());
         };
 
-        if let Some(local_addr) = self.smoltcp_net.as_ref().map(|n| n.get_address())
-            && local_addr == addr.ip()
-        {
-            addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), addr.port());
-        }
-
-        let has_smoltcp_net = self.smoltcp_net.is_some();
-        let route_plan = if !addr.ip().is_loopback() {
-            Some(
-                peer_mgr_arc
-                    .plan_user_route(addr.ip(), self.flow)
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error))?,
-            )
-        } else {
-            None
-        };
-        let dst_peers = match &route_plan {
-            Some(UserRoutePlan::Overlay { peer_ids, .. }) => Some(peer_ids),
-            _ => None,
-        };
-
-        if matches!(route_plan, Some(UserRoutePlan::Blackhole)) {
-            return Err(anyhow::anyhow!("the route policy blocks destination {addr}").into());
-        }
-
-        if !has_smoltcp_net && matches!(route_plan, Some(UserRoutePlan::Overlay { .. })) {
-            return Err(anyhow::anyhow!("userspace routing is not ready").into());
-        }
-
-        if !has_smoltcp_net
-            || matches!(route_plan, Some(UserRoutePlan::System))
-            || addr.ip().is_loopback()
-        {
+        let target = self.plan_proxy_target(&peer_mgr_arc, addr).await?;
+        let addr = target.address;
+        let mut backend = self.plan_tcp_backend(&peer_mgr_arc, &target).await;
+        let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync> = loop {
             tracing::trace!(
                 ?addr,
                 src_addr = ?self.src_addr,
-                has_smoltcp_net,
-                dst_peer_count = dst_peers.map(Vec::len),
-                is_loopback = addr.ip().is_loopback(),
-                "socks5 auto connector falling back to kernel tcp connect"
+                reason = backend.reason(),
+                "socks5 auto connector selected TCP backend"
             );
-            return Ok(SocksTcpStream::Tcp(
-                tcp_connect_with_timeout(addr, timeout_s).await?,
-            ));
-        }
-
-        // Direct peer services can use the existing HTTP/3 stream. Only the
-        // negotiated capability on the selected live direct connection enables
-        // this path; ACLs, relays, mapped subnets and old peers keep smoltcp.
-        if std::env::var_os("LOWTIER_DISABLE_TCP_STREAM_PROXY").is_none()
-            && !peer_mgr_arc.get_global_ctx().get_acl_filter().is_enabled()
-            && let IpAddr::V4(ip) = addr.ip()
-            && let Some(peer_id) = peer_mgr_arc.get_peer_map().get_peer_id_by_ipv4(&ip).await
-            && !peer_mgr_arc.path_applies_to(peer_id)
-            && dst_peers.is_some_and(|peers| peers.as_slice() == [peer_id])
-            && let Some(connection) = peer_mgr_arc.get_peer_map().only_direct_conn(peer_id)
-            && let Some(proxy) = connection.tcp_proxy()
-        {
-            let source = SocketAddr::new(
-                peer_mgr_arc
-                    .get_global_ctx()
-                    .get_ipv4()
-                    .unwrap()
-                    .address()
-                    .into(),
-                self.src_addr.port(),
-            );
-            if let Some(stream) =
-                timeout(Duration::from_secs(timeout_s), proxy.connect(source, addr))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("TCP transport proxy open timed out"))??
-            {
-                tracing::debug!(?addr, "userspace proxy selected HTTP/3 stream");
-                return Ok(SocksTcpStream::Transport(stream));
+            match backend {
+                TcpBackend::Kernel => {
+                    return Ok(SocksTcpStream::Tcp(
+                        tcp_connect_with_timeout(addr, timeout_s).await?,
+                    ));
+                }
+                TcpBackend::Transport(proxy) => {
+                    let source = SocketAddr::new(
+                        peer_mgr_arc
+                            .get_global_ctx()
+                            .get_ipv4()
+                            .unwrap()
+                            .address()
+                            .into(),
+                        self.src_addr.port(),
+                    );
+                    if let Some(stream) =
+                        timeout(Duration::from_secs(timeout_s), proxy.connect(source, addr))
+                            .await
+                            .map_err(|_| anyhow::anyhow!("TCP transport proxy open timed out"))??
+                    {
+                        tracing::debug!(?addr, "userspace proxy selected HTTP/3 stream");
+                        return Ok(SocksTcpStream::Transport(stream));
+                    }
+                    // Only an unsupported stream permits packet fallback. Recheck the
+                    // packet backend after the remote request; propagate refusals above.
+                    backend = self.plan_tcp_packet_backend(&peer_mgr_arc, &target).await;
+                }
+                TcpBackend::Overlay(connector) => {
+                    break Box::new(Socks5OverlayConnector {
+                        connector,
+                        src_addr: peer_mgr_arc
+                            .get_global_ctx()
+                            .get_ipv4()
+                            .map(|inet| {
+                                SocketAddr::new(IpAddr::V4(inet.address()), self.src_addr.port())
+                            })
+                            .unwrap_or(self.src_addr),
+                    });
+                }
+                TcpBackend::Smoltcp => {
+                    break Box::new(SmolTcpConnector {
+                        net: self.smoltcp_net.clone().unwrap(),
+                        entries: self.entries.clone(),
+                        entry_count: self.entry_count.clone(),
+                        current_entry: std::sync::Mutex::new(None),
+                        flow: self.flow,
+                    });
+                }
             }
-        }
-
-        let overlay_src_addr = peer_mgr_arc
-            .get_global_ctx()
-            .get_ipv4()
-            .map(|inet| SocketAddr::new(IpAddr::V4(inet.address()), self.src_addr.port()))
-            .unwrap_or(self.src_addr);
-        if let Some(connector) = self.overlay_connector.clone()
-            && let IpAddr::V4(ip) = addr.ip()
-            && let Some(peer_id) = peer_mgr_arc.get_peer_map().get_peer_id_by_ipv4(&ip).await
-            && dst_peers.is_some_and(|peers| peers.as_slice() == [peer_id])
-        {
-            tracing::trace!(?addr, "socks5 auto connector selected overlay stream");
-            let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync> =
-                Box::new(Socks5OverlayConnector {
-                    connector,
-                    src_addr: overlay_src_addr,
-                });
-            let result = connector.tcp_connect(addr, timeout_s).await;
-            self.inner_connector.lock().replace(Box::new(connector));
-            return result;
-        }
-
-        let connector = {
-            tracing::trace!(
-                ?addr,
-                src_addr = ?self.src_addr,
-                dst_peer_count = dst_peers.map(Vec::len),
-                "socks5 auto connector selected smoltcp"
-            );
-            Box::new(SmolTcpConnector {
-                net: self.smoltcp_net.clone().unwrap(),
-                entries: self.entries.clone(),
-                entry_count: self.entry_count.clone(),
-                current_entry: std::sync::Mutex::new(None),
-                flow: self.flow,
-            })
         };
 
         let ret = connector.tcp_connect(addr, timeout_s).await;
@@ -945,38 +995,16 @@ impl AsyncUdpConnector for Socks5AutoConnector {
 
     async fn udp_connect(
         &self,
-        mut addr: SocketAddr,
+        addr: SocketAddr,
         _timeout_s: u64,
     ) -> crate::gateway::fast_socks5::Result<Self::S> {
         let Some(peer_manager) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager is dropped").into());
         };
 
-        if let Some(local_addr) = self.smoltcp_net.as_ref().map(|net| net.get_address())
-            && local_addr == addr.ip()
-        {
-            addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        }
-
-        let route_plan = if !addr.ip().is_loopback() {
-            Some(
-                peer_manager
-                    .plan_user_route(addr.ip(), self.flow)
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error))?,
-            )
-        } else {
-            None
-        };
-        if matches!(route_plan, Some(UserRoutePlan::Blackhole)) {
-            return Err(anyhow::anyhow!("the route policy blocks destination {addr}").into());
-        }
-        let use_overlay = matches!(route_plan, Some(UserRoutePlan::Overlay { .. }));
-        if use_overlay && self.smoltcp_net.is_none() {
-            return Err(anyhow::anyhow!("userspace routing is not ready").into());
-        }
-
-        if !use_overlay {
+        let target = self.plan_proxy_target(&peer_manager, addr).await?;
+        let addr = target.address;
+        if target.peer_ids.is_none() {
             let bind_addr = if addr.is_ipv4() {
                 "0.0.0.0:0"
             } else {
