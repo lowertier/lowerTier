@@ -20,8 +20,7 @@ use crate::{
     gateway::{
         fast_socks5::{
             server::{
-                AcceptAuthentication, AsyncTcpConnector, AsyncUdpConnector, AsyncUdpSocket, Config,
-                ProxyTcpStream, Socks5Socket,
+                AsyncTcpConnector, AsyncUdpConnector, AsyncUdpSocket, ProxyTcpStream, Socks5Socket,
             },
             util::{stream::tcp_connect_with_timeout, target_addr::TargetAddr},
         },
@@ -1168,18 +1167,8 @@ impl Socks5ServerNet {
                 .local_addr()
                 .map(|address| address.ip())
                 .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            let mut config = Config::<AcceptAuthentication>::default();
-            config.set_request_timeout(10);
-            config.set_udp_support(true);
-            config.set_skip_auth(false);
-            config.set_allow_no_auth(true);
-            config.set_dns_resolve(false);
-
-            let mut socket = Socks5Socket::new(stream, Arc::new(config), connector);
-            socket.set_reply_ip(reply_ip);
-
-            match socket.upgrade_to_socks5().await {
-                Ok(_) => {
+            match Socks5Socket::new(stream, reply_ip, connector).serve().await {
+                Ok(()) => {
                     tracing::info!("socks5 handle success");
                 }
                 Err(e) => {

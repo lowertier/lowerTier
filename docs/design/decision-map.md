@@ -5,6 +5,7 @@ This map identifies 27 routing and implementation boundaries in seven areas.
 Each site is a named boundary with one or more conditions.
 The count does not measure every `if`, every `match`, or every possible path combination.
 Three shared selection functions now replace repeated policy checks.
+The proxy cleanup also removes six fixed internal settings and unreachable authentication alternatives.
 
 The map describes the source inspected on November 15, 2026.
 It covers startup, network devices, forwarding, connection selection, proxies, and receive processing.
@@ -100,7 +101,7 @@ These are platform and resource decisions during device creation.
 
 ### D05: Inner IP proxy activation
 
-**Source:** [IpProxy::start](../../lowertier/src/instance/ip_proxy.rs#L45).
+**Source:** [IpProxy::start](../../lowertier/src/instance/ip_proxy.rs#L41).
 
 An instance with no exported CIDRs, no exit service, and a TUN device skips protocol proxy allocation.
 System forwarding also skips this allocation when a TUN device exists.
@@ -110,7 +111,7 @@ This decision controls resource ownership.
 
 ### D06: Kernel or userspace TCP proxy listener
 
-**Source:** [TcpProxy::get_proxy_listener](../../lowertier/src/gateway/tcp_proxy.rs#L576).
+**Source:** [TcpProxy::get_proxy_listener](../../lowertier/src/gateway/tcp_proxy.rs#L572).
 
 With the `smoltcp` feature, no-TUN operation selects `SmolTcpListener`.
 iOS and the macOS Network Extension also select this listener.
@@ -300,7 +301,7 @@ Route selection and transport connection selection are different decisions.
 
 ### D21: TCP backend plan
 
-**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L785), [plan_tcp_backend](../../lowertier/src/gateway/socks5.rs#L818), [plan_tcp_packet_backend](../../lowertier/src/gateway/socks5.rs#L840), [tcp_connect](../../lowertier/src/gateway/socks5.rs#L901), [Instance::run](../../lowertier/src/instance/instance.rs#L567).
+**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L784), [plan_tcp_backend](../../lowertier/src/gateway/socks5.rs#L817), [plan_tcp_packet_backend](../../lowertier/src/gateway/socks5.rs#L839), [tcp_connect](../../lowertier/src/gateway/socks5.rs#L900), [Instance::run](../../lowertier/src/instance/instance.rs#L567).
 
 TCP and UDP share target normalization and route validation through `plan_proxy_target`.
 TCP backend selection runs before connection creation.
@@ -322,6 +323,10 @@ The connector selects the packet backend again after that result.
 Transport errors, timeouts, and OverlayStream errors propagate.
 `LOWTIER_EXPERIMENT_OVERLAY_STREAM` controls OverlayStream endpoint construction at startup.
 This decision runs for a new connection.
+The local SOCKS5 listener always negotiates the no-authentication method.
+It rejects clients that do not offer that method.
+CONNECT and UDP ASSOCIATE pass domain targets to the connector.
+The listener has no separate DNS, authentication, command-execution, or UDP setting.
 
 ### D22: Remote direct transport proxy admission
 
@@ -336,7 +341,7 @@ This independent server decision can refuse the client's D21 shortcut.
 
 ### D23: UDP proxy implementation
 
-**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L785), [udp_connect](../../lowertier/src/gateway/socks5.rs#L996).
+**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L784), [udp_connect](../../lowertier/src/gateway/socks5.rs#L995).
 
 The shared target planner rejects blackholes and overlay routes without a ready userspace network.
 An admitted overlay route uses the smoltcp UDP socket.
@@ -420,24 +425,27 @@ All four TCP backends remain available under their existing eligibility rules.
 Only an unsupported transport result permits packet fallback.
 D22 retains remote admission checks.
 D24 retains current path checks before cached sends.
+The local SOCKS5 [listener](../../lowertier/src/gateway/fast_socks5/server.rs#L108) also removes its fixed configuration object and unused authentication alternatives.
+The 10-second connector timeout and both proxy commands remain available.
+The [cleanup report](dead-options-cleanup.md) records the other unused APIs.
 
 ## Verification and limits
 
 The map follows inspected production functions and their direct callers.
-The permitted sequential library suite passed 559 tests.
+The permitted sequential library suite passed 561 tests.
 Two public-domain probes were excluded under the local-test policy.
 Both optional Caddy integration tests passed separately.
 The following tests protect relevant contracts:
 
 - [disabled_punchers_are_never_constructed](../../lowertier/src/instance/instance.rs#L796).
 - [disabled_factories_fail_before_dns_and_socket_allocation](../../lowertier/src/instance/instance.rs#L809).
-- [inactive_proxy_and_status_query_allocate_no_protocol_state](../../lowertier/src/instance/ip_proxy.rs#L119).
+- [inactive_proxy_allocates_no_protocol_state](../../lowertier/src/instance/ip_proxy.rs#L115).
 - [compile_validates_multipath_and_multilayer_references](../../lowertier/src/peers/path_policy.rs#L1483).
 - [expands_parallel_multilayer_chains_without_loops_and_prefers_exact_peer_over_wildcard](../../lowertier/src/peers/path_policy.rs#L1552).
 - [sequenced_packets_require_the_receive_loop](../../lowertier/src/peers/peer_manager.rs#L6780).
 - [new_direct_connection_preempts_a_pinned_relay_before_graph_publication](../../lowertier/src/peers/peer_manager.rs#L6824).
 
-Parallel runs failed in an unchanged direct-tunnel logging assertion.
+Earlier parallel runs failed in an unchanged direct-tunnel logging assertion.
 That test passed in isolation and in the sequential suite.
 The parallel failure cause is not confirmed.
 The map does not prove that all combinations work or that a branch is unnecessary.

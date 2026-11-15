@@ -30,7 +30,6 @@ use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
 use crate::peers::fabric::{FabricBatch, FabricPayloadKind};
 use crate::peers::peer_manager::PeerManager;
 use crate::peers::{NicPacketFilter, PeerPacketFilter};
-use crate::proto::api::instance::{TcpProxyEntry, TcpProxyEntryState};
 #[cfg(feature = "smoltcp")]
 use crate::tunnel::batch::PacketBatch;
 use crate::tunnel::packet_def::{PacketType, PeerManagerHeader, ZCPacket};
@@ -40,7 +39,15 @@ use super::CidrSet;
 #[cfg(feature = "smoltcp")]
 use super::tokio_smoltcp::{self, Net, NetConfig, channel_device};
 
-type NatDstEntryState = TcpProxyEntryState;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NatDstEntryState {
+    SynReceived,
+    ConnectingDst,
+    Connected,
+    Closed,
+    ClosingSrc,
+    ClosingDst,
+}
 
 #[derive(Debug)]
 pub struct NatDstEntry {
@@ -49,7 +56,6 @@ pub struct NatDstEntry {
     real_dst: SocketAddr,
     mapped_dst: SocketAddr,
     start_time: Instant,
-    start_time_local: chrono::DateTime<chrono::Local>,
     tasks: Mutex<JoinSet<()>>,
     state: AtomicCell<NatDstEntryState>,
 }
@@ -62,18 +68,8 @@ impl NatDstEntry {
             real_dst,
             mapped_dst,
             start_time: Instant::now(),
-            start_time_local: chrono::Local::now(),
             tasks: Mutex::new(JoinSet::new()),
             state: AtomicCell::new(NatDstEntryState::SynReceived),
-        }
-    }
-
-    fn parse_as_pb(&self) -> TcpProxyEntry {
-        TcpProxyEntry {
-            src: Some(self.src.into()),
-            dst: Some(self.real_dst.into()),
-            start_time: self.start_time_local.timestamp() as u64,
-            state: self.state.load().into(),
         }
     }
 }
@@ -1030,17 +1026,6 @@ impl TcpProxy {
         tracing::trace!(?source, ?ipv4_addr, ?packet, "tcp packet after modified");
 
         Some(())
-    }
-
-    pub fn list_proxy_entries(&self) -> Vec<TcpProxyEntry> {
-        let mut entries: Vec<TcpProxyEntry> = Vec::new();
-        for entry in self.syn_map.iter() {
-            entries.push(entry.value().as_ref().parse_as_pb());
-        }
-        for entry in self.conn_map.iter() {
-            entries.push(entry.value().as_ref().parse_as_pb());
-        }
-        entries
     }
 }
 

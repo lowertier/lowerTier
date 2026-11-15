@@ -289,6 +289,7 @@ impl PunchServer {
         Some(0)
     }
 
+    #[cfg(test)]
     async fn initiate(&self, peer: PeerId) -> Result<()> {
         let permit = self.permits.clone().acquire_owned().await?;
         self.initiate_with(peer, permit).await

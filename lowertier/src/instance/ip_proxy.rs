@@ -38,10 +38,6 @@ impl IpProxy {
         })
     }
 
-    pub(super) fn tcp_proxy(&self) -> Arc<OnceLock<Arc<TcpProxy>>> {
-        self.tcp_proxy.clone()
-    }
-
     pub(super) async fn start(&self) -> Result<(), Error> {
         if self.started.load(Ordering::Acquire) {
             return Ok(());
@@ -116,15 +112,9 @@ mod protocol_memory_tests {
         (peer, proxy)
     }
     #[tokio::test]
-    async fn inactive_proxy_and_status_query_allocate_no_protocol_state() {
+    async fn inactive_proxy_allocates_no_protocol_state() {
         let (_peer, proxy) = fixture(false);
         proxy.start().await.unwrap();
-        let entries = proxy
-            .tcp_proxy()
-            .get()
-            .map(|proxy| proxy.list_proxy_entries())
-            .unwrap_or_default();
-        assert!(entries.is_empty());
         assert!(proxy.tcp_proxy.get().is_none());
         assert!(proxy.icmp_proxy.get().is_none());
         assert!(proxy.udp_proxy.get().is_none());

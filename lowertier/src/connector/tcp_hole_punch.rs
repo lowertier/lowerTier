@@ -759,6 +759,7 @@ impl Server {
                 flags.p2p_mode(),
             )
     }
+    #[cfg(test)]
     async fn initiate(&self, peer: PeerId, protocol: Protocol) -> Result<()> {
         let permit = self.permits.clone().acquire_owned().await?;
         self.initiate_with(peer, protocol, permit).await

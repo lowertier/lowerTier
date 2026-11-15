@@ -129,19 +129,6 @@ fn routing_secret(flags: &Flags) -> Option<Vec<u8>> {
     }
 }
 
-#[cfg(test)]
-fn tcp_routing_prefix(flags: &Flags) -> bool {
-    tcp_routing_prefix_for(flags, false)
-}
-
-fn tcp_routing_prefix_for(flags: &Flags, allow_default: bool) -> bool {
-    !flags.camouflage_config().sni_routing
-        && !flags
-            .camouflage_config()
-            .effective_tcp_decoy(allow_default)
-            .is_empty()
-}
-
 fn tcp_routing_record(cid: &[u8; QUIC_ROUTING_CID_BYTES]) -> [u8; TCP_ROUTING_RECORD_LEN] {
     let mut record = [0_u8; TCP_ROUTING_RECORD_LEN];
     record[0] = 0x16;
@@ -1183,7 +1170,6 @@ async fn connect_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::tcp_routing_prefix;
     use crate::common::config::gen_default_flags;
 
     async fn stream_pair<B: bytes::Buf + Send + std::fmt::Debug + 'static>() -> (
@@ -1297,23 +1283,6 @@ mod tests {
         assert_eq!(writer.budget.available(), 6);
         drop(data);
         assert_eq!(writer.budget.available(), 10);
-    }
-
-    #[test]
-    fn routing_prefix_is_off_behind_sni_passthrough() {
-        let mut flags = gen_default_flags();
-        flags
-            .camouflage_config_mut()
-            .set_decoy_upstream("127.0.0.1:443".to_owned());
-        flags.camouflage_config_mut().admission_secret = "routing-test-secret-material".to_owned();
-        assert!(tcp_routing_prefix(&flags));
-        // Prefix selection must not depend on the client's DNS view of the server's decoy.
-        flags
-            .camouflage_config_mut()
-            .set_decoy_upstream("decoy.invalid:443".to_owned());
-        assert!(tcp_routing_prefix(&flags));
-        flags.camouflage_config_mut().sni_routing = true;
-        assert!(!tcp_routing_prefix(&flags));
     }
 
     #[test]

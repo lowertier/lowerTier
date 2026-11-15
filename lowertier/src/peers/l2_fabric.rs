@@ -319,6 +319,7 @@ impl L2Fabric {
     }
 
     /// Apply bridge policy before forwarding or learning an Ethernet source.
+    #[cfg(test)]
     pub(crate) fn admit_source_at(&self, frame: &[u8], peer_id: PeerId, now: Instant) -> bool {
         let Some((vlan, source)) = self.permitted_source(frame) else {
             return false;

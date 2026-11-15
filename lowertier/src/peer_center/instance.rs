@@ -282,12 +282,6 @@ impl PeerCenterBase {
     }
 }
 
-#[derive(Clone)]
-pub struct PeerCenterInstanceService {
-    global_peer_map: Arc<RwLock<GlobalPeerMap>>,
-    global_peer_map_digest: Arc<AtomicCell<Digest>>,
-}
-
 /// Apply an explicit snapshot or delta response.
 ///
 /// Missing generations and mixed response forms leave the cache unchanged.
@@ -380,33 +374,6 @@ fn apply_global_peer_map_response(
     global_peer_map_digest.store(generation);
     global_peer_map_update_time.store(received_at);
     true
-}
-
-#[async_trait::async_trait]
-impl PeerCenterRpc for PeerCenterInstanceService {
-    type Controller = BaseController;
-
-    async fn get_global_peer_map(
-        &self,
-        _: BaseController,
-        _: GetGlobalPeerMapRequest,
-    ) -> Result<GetGlobalPeerMapResponse, rpc_types::error::Error> {
-        let global_peer_map = self.global_peer_map.read().unwrap();
-        Ok(GetGlobalPeerMapResponse {
-            global_peer_map: global_peer_map.map.clone(),
-            digest: Some(self.global_peer_map_digest.load()),
-            full_snapshot: true,
-            ..Default::default()
-        })
-    }
-
-    async fn report_peers(
-        &self,
-        _: BaseController,
-        _req: ReportPeersRequest,
-    ) -> Result<ReportPeersResponse, rpc_types::error::Error> {
-        Err(anyhow::anyhow!("not implemented").into())
-    }
 }
 
 pub struct PeerCenterInstance {
@@ -565,13 +532,6 @@ impl PeerCenterInstance {
                 Ok(5000)
             })
             .await;
-    }
-
-    pub fn get_rpc_service(&self) -> PeerCenterInstanceService {
-        PeerCenterInstanceService {
-            global_peer_map: self.global_peer_map.clone(),
-            global_peer_map_digest: self.global_peer_map_digest.clone(),
-        }
     }
 
     pub fn get_cost_calculator(&self) -> RouteCostCalculator {

@@ -162,30 +162,6 @@ message Connector {
   uint64 retry_after_seconds = 3;
 }
 
-enum TcpProxyEntryState {
-  Unknown = 0;
-  // receive syn packet but not start connecting to dst
-  SynReceived = 1;
-  // connecting to dst
-  ConnectingDst = 2;
-  // connected to dst
-  Connected = 3;
-  // connection closed
-  Closed = 4;
-  // closing src
-  ClosingSrc = 5;
-  // closing dst
-  ClosingDst = 6;
-}
-
-message TcpProxyEntry {
-  common.SocketAddr src = 1;
-  common.SocketAddr dst = 2;
-  uint64 start_time = 3;
-  TcpProxyEntryState state = 4;
-  reserved 5;
-}
-
 message MetricSnapshot {
   string name = 1;
   uint64 value = 2;

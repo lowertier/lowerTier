@@ -62,6 +62,8 @@ Use the kernel interface (`tun.mode = "kernel"`) when you need those.
 ## Security
 
 The proxy has no authentication. Bind it to `127.0.0.1` or `::1` unless a firewall you trust protects it.
+SOCKS5 clients must offer the no-authentication method (`0x00`).
+The proxy returns `0xff` if the client does not offer that method.
 Traffic between the application and the proxy is plain TCP on the local machine. Everything after the proxy is encrypted like any other lowertier traffic.
 
 HTTP proxy requests reveal their destination to the proxy, as HTTP proxies always do. HTTPS uses `CONNECT`, so the application's TLS runs end to end.
