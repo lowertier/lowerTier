@@ -1,15 +1,15 @@
 {
-  "verified_at": "2026-11-15T14:17:36.520960+00:00",
+  "verified_at": "2026-11-15T15:18:29.698584+00:00",
   "connectivity_verified_at": "2026-11-15T14:17:36.520960+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable instances passed the route selection checks. Three historical hosts remain pending. Earlier verification sections retain their original observations.",
-  "application_commit": "fe4ca81f",
-  "repository_commit_at_verification": "fe4ca81f",
-  "application_note": "Eleven reachable test instances run the shared route selection from fe4ca81f. Their identities, configuration, GUI policy, and MTUs remain unchanged. Three historical hosts remain pending. Earlier sections retain their original observations.",
+  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable instances passed the option cleanup checks. Three historical hosts remain pending. Earlier sections retain their original observations.",
+  "application_commit": "57d2151b",
+  "repository_commit_at_verification": "57d2151b",
+  "application_note": "Eleven reachable test instances run the option cleanup from 57d2151b. Their identities, configuration, GUI policy, and MTUs remain unchanged. Three historical hosts remain pending. Earlier sections retain their original observations.",
   "route_selection_simplification": {
     "verified_at": "2026-11-15T14:17:36.520960+00:00",
     "application_commit": "fe4ca81f",
@@ -181,7 +181,7 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -190,7 +190,7 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -199,7 +199,7 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -208,7 +208,7 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -217,7 +217,7 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -226,7 +226,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
@@ -258,7 +258,7 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -267,7 +267,7 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "userspace", "configured_mtu": 1280, "tcp_device_mtu": 1280},
       "kernel_migration_status": "blocked_administrator_access"
     },
@@ -277,7 +277,7 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -286,7 +286,7 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -295,7 +295,7 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "fe4ca81f",
+      "application_commit": "57d2151b",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     }
   ],
@@ -822,5 +822,75 @@
   },
   "software_version": "0.03",
   "peer_protocol_version": 0,
-  "release_url": "https://github.com/lowertier/lowerTier/releases/tag/v0.01"
+  "release_url": "https://github.com/lowertier/lowerTier/releases/tag/v0.01",
+  "dead_option_cleanup": {
+    "verified_instances": 11,
+    "kernel_instances": 10,
+    "userspace_instances": 1,
+    "running_transfer_integrity_checks": 11,
+    "identities_preserved": 11,
+    "configurations_preserved": 11,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "effective_mtu": 1280,
+    "icmp_sent": 55,
+    "icmp_received": 55,
+    "icmp_scope": "Final checks after route recovery. The all-trial record also retains two failed initial checks.",
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_sources": {
+      "861jp": "10.126.126.2",
+      "862jp": "10.126.126.2",
+      "jpali": "10.126.126.2",
+      "s6916": "10.126.126.2",
+      "yutoms-mcp": "10.126.126.2",
+      "la": "10.126.126.2",
+      "alibj": "10.126.126.100",
+      "hattori-opwrt": "10.126.126.2",
+      "jpaws": "10.126.126.2",
+      "local": "10.126.126.100",
+      "btrouter": "10.126.126.100"
+    },
+    "udp_sent": 165,
+    "udp_received": 165,
+    "udp_payload_bytes": [
+      64,
+      1160,
+      1252
+    ],
+    "keyless_gui_pages": 11,
+    "keyless_gui_api_reads": 11,
+    "keyless_gui_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "gui_port": 15880,
+    "gui_allow_and_open": [
+      "10.126.126.0/24",
+      "192.168.51.0/24",
+      "192.168.40.0/24"
+    ],
+    "access_key_required_outside_open": true,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "verified_at": "2026-11-15T15:18:29.698584+00:00",
+    "application_commit": "57d2151b",
+    "fixed_socks5_settings_removed": 6,
+    "permitted_sequential_library_tests_passed": 561,
+    "separate_caddy_integration_tests_passed": 2,
+    "completed_transfer_files_removed": true,
+    "temporary_test_processes_stopped": true,
+    "summary": "benchmark-results/dead-options-20261115/summary.json",
+    "audit": "benchmark-results/.work/dead-options-20261115/audit.jsonl",
+    "initial_icmp_sent": 10,
+    "initial_icmp_received": 0,
+    "initial_failed_hosts": [
+      "yutoms-mcp",
+      "alibj"
+    ],
+    "recovery": "Beijing acquired a direct controller route. The userspace node passed after one restart cleared its old controller route."
+  }
 }

@@ -1,0 +1,272 @@
+{
+  "verified_at": "2026-11-15T15:18:29.698584+00:00",
+  "application_commit": "57d2151b3ecc0ec15c9465786a7bffa8a789fb85",
+  "software_version": "0.03",
+  "removed_fixed_socks5_settings": [
+    "request_timeout",
+    "skip_auth",
+    "allow_no_auth",
+    "dns_resolve",
+    "execute_command",
+    "allow_udp"
+  ],
+  "other_cleanup": [
+    "Unreachable SOCKS5 authentication implementations, parsing, credentials, and error variants",
+    "Unused SOCKS5 stream wrappers and generic configuration",
+    "Unused TCP-status APIs, protobuf types, and wall-clock timestamp",
+    "Unregistered PeerCenterInstanceService and its constructor",
+    "Unused HTTP/2 helper and its scalar test",
+    "Unused FFI dataplane fixture without test cases",
+    "Three helpers restricted to their test callers"
+  ],
+  "behavior_fix": "SOCKS5 returns method 0xff when the client does not offer method 0x00.",
+  "retained_contracts": [
+    "SOCKS5 CONNECT and UDP ASSOCIATE",
+    "Connector-managed DNS, destination policy, and 10-second connection timeout",
+    "TCP transfer lifetime and UDP control-connection lifetime",
+    "Kernel, Transport, Overlay, and Smoltcp TCP backends",
+    "Current peer authentication, TLS exporter bindings, ACLs, and GUI admission",
+    "Active public configuration fields and environment controls"
+  ],
+  "checks": {
+    "permitted_library_tests_passed": 561,
+    "library_test_mode": "sequential",
+    "new_socks5_tests_passed": 3,
+    "optional_caddy_integration_tests_passed": 2,
+    "tracker_bootstrap_verified_bytes": 4194304,
+    "gui_proxy_admission": "passed",
+    "minimal_feature_compilation": "passed",
+    "full_feature_and_ffi_compilation": "passed",
+    "formatting": "passed",
+    "independent_read_only_review": "No actionable defect found.",
+    "release_targets": [
+      "native",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
+    ],
+    "public_domain_probes_excluded": [
+      "live_challenges_cloudflare_probe_through_tcp_passthrough",
+      "live_challenges_cloudflare_probe_through_udp_passthrough"
+    ],
+    "parallel_suite": "Not repeated. Earlier parallel runs had an unchanged logging assertion failure."
+  },
+  "fleet": {
+    "verified_instances": 11,
+    "kernel_instances": 10,
+    "userspace_instances": 1,
+    "running_transfer_integrity_checks": 11,
+    "identities_preserved": 11,
+    "configurations_preserved": 11,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "effective_mtu": 1280,
+    "icmp_sent": 55,
+    "icmp_received": 55,
+    "icmp_scope": "Final checks after route recovery. The all-trial record also retains two failed initial checks.",
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_sources": {
+      "861jp": "10.126.126.2",
+      "862jp": "10.126.126.2",
+      "jpali": "10.126.126.2",
+      "s6916": "10.126.126.2",
+      "yutoms-mcp": "10.126.126.2",
+      "la": "10.126.126.2",
+      "alibj": "10.126.126.100",
+      "hattori-opwrt": "10.126.126.2",
+      "jpaws": "10.126.126.2",
+      "local": "10.126.126.100",
+      "btrouter": "10.126.126.100"
+    },
+    "udp_sent": 165,
+    "udp_received": 165,
+    "udp_payload_bytes": [
+      64,
+      1160,
+      1252
+    ],
+    "keyless_gui_pages": 11,
+    "keyless_gui_api_reads": 11,
+    "keyless_gui_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "gui_port": 15880,
+    "gui_allow_and_open": [
+      "10.126.126.0/24",
+      "192.168.51.0/24",
+      "192.168.40.0/24"
+    ],
+    "access_key_required_outside_open": true,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ]
+  },
+  "flywheel": {
+    "verified_at": "2026-11-15T15:18:29.636051+00:00",
+    "nodes": 38,
+    "dependency_edges": 33,
+    "source_files": 20,
+    "interfaces": [
+      {
+        "address": "10.126.126.2",
+        "port": 8484,
+        "graph_matches_export": true
+      },
+      {
+        "address": "100.108.186.13",
+        "port": 8484,
+        "graph_matches_export": true
+      }
+    ]
+  },
+  "all_full_size_icmp_trials": {
+    "sent": 65,
+    "received": 55,
+    "trials": [
+      {
+        "label": "jpali-full-size-ping",
+        "timestamp": "2026-11-15T15:10:01.733879+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "s6916-full-size-ping",
+        "timestamp": "2026-11-15T15:10:01.769229+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "861jp-full-size-ping",
+        "timestamp": "2026-11-15T15:10:02.173015+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "862jp-full-size-ping",
+        "timestamp": "2026-11-15T15:10:02.643436+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "hattori-opwrt-full-size-ping",
+        "timestamp": "2026-11-15T15:10:07.338154+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "jpaws-full-size-ping",
+        "timestamp": "2026-11-15T15:10:07.328259+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "la-full-size-ping",
+        "timestamp": "2026-11-15T15:10:09.549093+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "yutoms-mcp-full-size-ping",
+        "timestamp": "2026-11-15T15:10:05.879153+00:00",
+        "sent": 5,
+        "received": 0,
+        "exit_code": 2
+      },
+      {
+        "label": "jpaws-local-full-size-ping",
+        "timestamp": "2026-11-15T15:10:17.443455+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "btrouter-full-size-ping",
+        "timestamp": "2026-11-15T15:10:40.157359+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "alibj-full-size-ping",
+        "timestamp": "2026-11-15T15:10:40.407388+00:00",
+        "sent": 5,
+        "received": 0,
+        "exit_code": 2
+      },
+      {
+        "label": "alibj-full-size-ping",
+        "timestamp": "2026-11-15T15:16:10.088627+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      },
+      {
+        "label": "yutoms-mcp-full-size-ping",
+        "timestamp": "2026-11-15T15:16:59.394026+00:00",
+        "sent": 5,
+        "received": 5,
+        "exit_code": 0
+      }
+    ],
+    "initial_failed_hosts": [
+      "yutoms-mcp",
+      "alibj"
+    ],
+    "final_checks": "55 replies from 55 packets after route recovery"
+  },
+  "route_recovery": {
+    "yutoms-mcp": {
+      "initial_controller_peer_id": 4191345634,
+      "current_controller_peer_id": 1811562752,
+      "additional_node_restarts": 1,
+      "post_restart_controller_route": "Direct and NetworkSecretConfirmed",
+      "configuration_changed": false,
+      "integrity_after_restart": true,
+      "final_delivery": "passed",
+      "limitation": "The observations do not establish the underlying topology convergence defect."
+    },
+    "alibj": {
+      "initial_controller_route": "Relay, cost 2, no direct connection",
+      "later_controller_route": "Direct, cost 1, three authenticated connections",
+      "additional_node_restarts": 0,
+      "final_delivery": "passed",
+      "limitation": "The route change preceded successful checks. It does not prove the cause of the initial loss."
+    }
+  },
+  "router_restart_observation": {
+    "initial_registry_entries": 0,
+    "service_running_when_inspected": true,
+    "later_running_binary_integrity": "passed",
+    "additional_restart_required": false,
+    "cause": "The initial registry gap was not established from the retained service state and logs.",
+    "evidence": "benchmark-results/.work/dead-options-20261115/btrouter-startup-observation.json"
+  },
+  "cleanup": {
+    "superseded_test_binaries_replaced": 11,
+    "completed_transfer_files_removed": true,
+    "task_fixtures_stopped": true,
+    "configuration_keys_logs_and_measurements_preserved": true
+  },
+  "limitations": [
+    "No matched performance comparison was run.",
+    "The checks do not establish long-term availability.",
+    "The default parallel test suite was not repeated.",
+    "Two initial ICMP checks lost five packets each. Final checks passed after the recorded route recovery.",
+    "Windows, FreeBSD, and mobile native builds were not run.",
+    "Source caller checks cannot establish use by external Rust consumers.",
+    "Initial inspection calls preceded the JSONL runner. Their process IDs and exact times were not saved."
+  ],
+  "audit": "benchmark-results/.work/dead-options-20261115/audit.jsonl",
+  "recovery_records": "benchmark-results/.work/dead-options-20261115/recovery-results.jsonl",
+  "tool_recovery_records": "benchmark-results/.work/dead-options-20261115/tool-call-recovery.jsonl"
+}

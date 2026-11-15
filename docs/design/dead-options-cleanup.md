@@ -1,6 +1,7 @@
 # Unused option and API cleanup
 
-The November 15, 2026 cleanup removes fixed internal SOCKS5 settings and unused APIs.
+The cleanup started on November 15, 2026.
+It removes fixed internal SOCKS5 settings and unused APIs.
 The public configuration fields checked in this audit have runtime consumers.
 
 ## SOCKS5 settings
@@ -61,3 +62,13 @@ The new SOCKS5 tests exercise TCP transfer, UDP delivery and control closure, co
 The core suite excludes public-domain probes under the local-test policy.
 Release, integration, feature, FFI, and fleet results are recorded with the cleanup report.
 These checks do not establish a performance improvement.
+
+Fleet deployment finished on November 16, 2026, in Asia/Tokyo time.
+All 11 reachable instances passed the final binary, authentication, delivery, and GUI checks.
+Final ICMP checks returned 55 replies from 55 packets.
+Two initial checks lost five packets each.
+Beijing passed after a direct controller route appeared.
+The macOS userspace node passed after one additional restart replaced its old controller route.
+These observations do not establish the underlying convergence defect.
+The [deployment report](../../benchmark-results/dead-options-20261115/summary.json) retains both failed and successful checks.
+The historical nodes `tw2-ingress`, `btower`, and `UTMOWRT` remain pending.
