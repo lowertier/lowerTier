@@ -1,0 +1,711 @@
+{
+  "verified_at": "2026-11-15T10:06:01.235172+00:00",
+  "application_commit": "9b0fc462",
+  "source_commits": [
+    "29fb6bf5",
+    "9b0fc462"
+  ],
+  "software_version": "0.03",
+  "removed": [
+    "Configuration patch interfaces and duplicate reconciliation state",
+    "Custom GUI JSON codec and conflicting configuration flags",
+    "Unused RPC compression schema, negotiation, cache, and cleanup task",
+    "Zero-fragment RPC acceptance and deprecated protocol fields",
+    "Retired packet types and unused recovery interfaces",
+    "NIC delivery channels, drain tasks, and mock consumers",
+    "Separate multipath timeout delivery task",
+    "Obsolete security and relay design drafts"
+  ],
+  "repairs": [
+    "Connector ownership and retries use explicit states.",
+    "Peer-center responses explicitly select snapshot, delta, or unchanged generation.",
+    "Direct NIC ingress holds a weak packet pipeline reference.",
+    "One receive task orders packet delivery and timeout release.",
+    "Sequenced packets cannot bypass the receive task.",
+    "Rustdoc explains changed conditions, ownership, errors, and delivery paths."
+  ],
+  "checks": {
+    "library_tests_passed": 560,
+    "ffi_tests_passed": 20,
+    "gui_frontend_tests_passed": 19,
+    "caddy_integration_tests_passed": 2,
+    "stalled_delivery_regression_passed": true,
+    "workspace_all_targets": true,
+    "mobile_nic_feature": true,
+    "rustdoc_private_items": true,
+    "rustdoc_broken_links_denied": true,
+    "rustdoc_invalid_html_denied": true,
+    "formatting": true,
+    "gui_production_build": true,
+    "gui_release_authentication_and_json": true,
+    "tracker_bootstrap_transfer_bytes": 4194304,
+    "release_targets": [
+      "aarch64-unknown-linux-musl",
+      "native",
+      "x86_64-unknown-linux-musl"
+    ],
+    "excluded_test": {
+      "name": "live_challenges_cloudflare_probe_through_tcp_passthrough",
+      "reason": "Test traffic must use explicit local test addresses."
+    }
+  },
+  "fleet": {
+    "scope": "Final successful per-instance checks. Router recovery records preserve earlier failures.",
+    "verified_instances": 11,
+    "kernel_instances": 10,
+    "userspace_instances": 1,
+    "running_transfer_integrity_checks": 11,
+    "identities_preserved": 11,
+    "configurations_preserved": 11,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_ip_bytes": 1280,
+    "icmp_sent": 55,
+    "icmp_received": 55,
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_instances": 11,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "udp_payload_bytes": [
+      64,
+      1160,
+      1252
+    ],
+    "keyless_gui_pages": 11,
+    "keyless_gui_api_reads": 11,
+    "keyless_gui_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "gui_port": 15880,
+    "gui_allow_and_open": [
+      "10.126.126.0/24",
+      "192.168.51.0/24",
+      "192.168.40.0/24"
+    ],
+    "access_key_required_outside_open": true
+  },
+  "binary_transfer_integrity": {
+    "x86_64-unknown-linux-musl": {
+      "transfer_sha256": "1a0e82e52f9dc02b82c9d0e76de07f1020b32c8743f3b63f955fca23211743c9"
+    },
+    "native": {
+      "transfer_sha256": "4484ee7db726b9cb6e7b3fd4776dc728fb65c14ee7ecf8863130852d4a8c9c27"
+    },
+    "aarch64-unknown-linux-musl": {
+      "transfer_sha256": "c5cced3b801e6a6e2d514f1b6499b96033385e3f9c4990c0364c40e9387e48a5"
+    }
+  },
+  "cleanup": {
+    "superseded_test_binaries_replaced": 11,
+    "completed_transfer_files_removed": true,
+    "retired_remote_cache_binaries_removed": 2,
+    "retired_remote_cache_bytes_removed": 22898784,
+    "task_fixtures_stopped": true,
+    "configuration_keys_logs_and_measurements_preserved": true
+  },
+  "router_recovery": {
+    "failed_complete_upload_attempts": 2,
+    "resumed_from_bytes": 8945367,
+    "remaining_upload_bytes": 3745698,
+    "prefix_transfer_integrity_verified": true,
+    "initial_delivery_client_budget_seconds": 85,
+    "initial_delivery_client_remained_running": true,
+    "orphaned_delivery_client_stopped": true,
+    "acknowledged_bytes_at_stop": 7921932,
+    "retransmitted_bytes_at_stop": 820304,
+    "final_delivery_client_budget_seconds": 900,
+    "final_exact_byte_and_udp_checks": "passed",
+    "tcp_and_udp_passed_in_separate_client_executions": true,
+    "udp_reply_timeout_after_tcp_passed": true,
+    "initial_failed_udp_exchange_details": "The client did not record the failed packet size or sequence.",
+    "isolated_udp_sent": 15,
+    "isolated_udp_received": 15,
+    "initial_udp_timeout_cause": "Unconfirmed. The isolated check did not reproduce the timeout.",
+    "final_client_progress": [
+      {
+        "phase": "download",
+        "bytes": 0,
+        "elapsed_seconds": 1.616496592760086e-05
+      },
+      {
+        "phase": "download",
+        "bytes": 1048576,
+        "elapsed_seconds": 1.974010894075036
+      },
+      {
+        "phase": "download",
+        "bytes": 2097152,
+        "elapsed_seconds": 2.156890560872853
+      },
+      {
+        "phase": "download",
+        "bytes": 3145728,
+        "elapsed_seconds": 2.273495519068092
+      },
+      {
+        "phase": "download",
+        "bytes": 4194304,
+        "elapsed_seconds": 2.3967364318668842
+      },
+      {
+        "phase": "download",
+        "bytes": 5242880,
+        "elapsed_seconds": 2.718836846295744
+      },
+      {
+        "phase": "download",
+        "bytes": 6291456,
+        "elapsed_seconds": 2.7567315250635147
+      },
+      {
+        "phase": "download",
+        "bytes": 7340032,
+        "elapsed_seconds": 3.231952107977122
+      },
+      {
+        "phase": "download",
+        "bytes": 8388608,
+        "elapsed_seconds": 3.481294748838991
+      },
+      {
+        "phase": "upload",
+        "bytes": 0,
+        "elapsed_seconds": 3.649568981025368
+      },
+      {
+        "phase": "upload",
+        "bytes": 1048576,
+        "elapsed_seconds": 48.09116923389956
+      },
+      {
+        "phase": "upload",
+        "bytes": 2097152,
+        "elapsed_seconds": 97.23900807788596
+      },
+      {
+        "phase": "upload",
+        "bytes": 3145728,
+        "elapsed_seconds": 143.32372065028176
+      },
+      {
+        "phase": "upload",
+        "bytes": 4194304,
+        "elapsed_seconds": 189.09624558594078
+      },
+      {
+        "phase": "upload",
+        "bytes": 5242880,
+        "elapsed_seconds": 231.14512583008036
+      },
+      {
+        "phase": "upload",
+        "bytes": 6291456,
+        "elapsed_seconds": 275.22557098418474
+      },
+      {
+        "phase": "upload",
+        "bytes": 7340032,
+        "elapsed_seconds": 326.66413062112406
+      },
+      {
+        "phase": "upload",
+        "bytes": 8388608,
+        "elapsed_seconds": 372.4786802842282
+      }
+    ]
+  },
+  "pending": [
+    "tw2-ingress",
+    "btower",
+    "UTMOWRT"
+  ],
+  "pending_checked_at": "2026-11-15T10:03:52.582680+00:00",
+  "pending_reason": "Tailscale reports these hosts offline. SSH attempts timed out.",
+  "limitations": [
+    "No matched performance comparison was run.",
+    "Delivery checks did not force each transport independently.",
+    "JPaws supplied application traffic for AliBJ, BTROUTER, and the local node.",
+    "Other remote nodes used the local native node for application traffic.",
+    "The router TCP path had retransmissions. A longer execution budget verified delivery.",
+    "One router UDP reply timed out. An isolated check passed all fifteen exchanges. The first timeout cause remains unconfirmed.",
+    "Three offline hosts still require migration and binary cleanup."
+  ],
+  "instances": [
+    {
+      "node": "861jp",
+      "address": "10.126.126.81",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 1848809,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 34,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "862jp-secondary",
+      "address": "10.126.126.82",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 2642771,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 40,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "jpali-secondary",
+      "address": "10.126.126.62",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 1822121,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 35,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "s6916",
+      "address": "10.126.126.60",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 805792,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 44,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "yutoms-mcp-userspace",
+      "address": "10.126.126.3",
+      "mode": "userspace",
+      "configured_mtu": 1280,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 45221,
+      "binary_target": "native",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 37,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "la",
+      "address": "10.126.126.87",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 274377,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 40,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "alibj",
+      "address": "10.126.126.110",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 263129,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 38,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.100",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "hattori-wrt",
+      "address": "10.126.126.1",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 15025,
+      "binary_target": "aarch64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 46,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "jpaws",
+      "address": "10.126.126.100",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 2289887,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 39,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.2",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "local-native",
+      "address": "10.126.126.2",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 82373,
+      "binary_target": "native",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 35,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.100",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.100",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    },
+    {
+      "node": "btrouter",
+      "address": "10.126.126.40",
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "runtime_version": "0.03",
+      "pid": 15333,
+      "binary_target": "x86_64-unknown-linux-musl",
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "authenticated_connections": 54,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "application_source": "10.126.126.100",
+      "download_bytes": 8388608,
+      "upload_bytes": 8388608,
+      "full_size_icmp_received": 5,
+      "icmp_source": "10.126.126.2",
+      "udp_payload_bytes": [
+        64,
+        1160,
+        1252
+      ],
+      "udp_sent": 15,
+      "udp_received": 15,
+      "keyless_gui_page_status": 200,
+      "keyless_gui_api_status": 200,
+      "keyless_gui_rpc_status": 200,
+      "foreign_origin_status": 403
+    }
+  ],
+  "verification_records": {
+    "final-current-only-library-and-ffi-tests": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:11:05.342Z",
+      "finished_at": "2026-11-15T09:13:47.443Z"
+    },
+    "stalled-delivery-order-regression": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:16:01.197Z",
+      "finished_at": "2026-11-15T09:16:23.680Z"
+    },
+    "current-only-caddy-integration": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:05:52.688Z",
+      "finished_at": "2026-11-15T09:05:58.141Z"
+    },
+    "current-only-workspace-targets": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:05:52.682Z",
+      "finished_at": "2026-11-15T09:06:31.325Z"
+    },
+    "mobile-nic-check-recovery": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:09:08.310Z",
+      "finished_at": "2026-11-15T09:09:29.410Z"
+    },
+    "current-only-rustdoc": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:05:52.687Z",
+      "finished_at": "2026-11-15T09:06:38.192Z"
+    },
+    "final-source-format-check": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:11:55.400Z",
+      "finished_at": "2026-11-15T09:11:56.661Z"
+    },
+    "reviewed-gui-tests": {
+      "result": "passed",
+      "started_at": "2026-11-15T06:42:24.804Z",
+      "finished_at": "2026-11-15T06:42:25.059Z"
+    },
+    "reviewed-gui-build": {
+      "result": "passed",
+      "started_at": "2026-11-15T06:42:24.806Z",
+      "finished_at": "2026-11-15T06:42:26.307Z"
+    },
+    "current-only-release-tracker-bootstrap": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:18:18.105Z",
+      "finished_at": "2026-11-15T09:18:20.274Z"
+    },
+    "current-only-release-gui-integration": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:18:18.103Z",
+      "finished_at": "2026-11-15T09:18:29.748Z"
+    },
+    "current-only-native-release": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:11:05.345Z",
+      "finished_at": "2026-11-15T09:14:56.135Z"
+    },
+    "current-only-linux-releases": {
+      "result": "passed",
+      "started_at": "2026-11-15T09:11:05.347Z",
+      "finished_at": "2026-11-15T09:19:04.077Z"
+    },
+    "stop-current-fleet-delivery-fixtures": {
+      "result": "passed",
+      "started_at": "2026-11-15T10:02:42.649Z",
+      "finished_at": "2026-11-15T10:02:47.929Z"
+    },
+    "verify-completed-transfer-cleanup": {
+      "result": "passed",
+      "started_at": "2026-11-15T10:04:28.001Z",
+      "finished_at": "2026-11-15T10:04:32.007Z"
+    },
+    "refresh-pending-host-availability": {
+      "result": "passed",
+      "started_at": "2026-11-15T10:03:52.466Z",
+      "finished_at": "2026-11-15T10:03:52.585Z"
+    },
+    "verify-fleet-gui-policy-snapshots": {
+      "result": "passed",
+      "started_at": "2026-11-15T10:03:52.468Z",
+      "finished_at": "2026-11-15T10:03:52.487Z"
+    }
+  },
+  "audit": "benchmark-results/.work/source-review-2026-11-15.jsonl",
+  "fleet_audit": "benchmark-results/.work/source-simplify-20261115/audit.jsonl"
+}

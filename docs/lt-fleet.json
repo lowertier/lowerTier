@@ -1,15 +1,46 @@
 {
-  "verified_at": "2026-11-14T17:24:02.010349+00:00",
-  "connectivity_verified_at": "2026-11-14T17:14:10.218669+00:00",
+  "verified_at": "2026-11-15T10:06:01.235172+00:00",
+  "connectivity_verified_at": "2026-11-15T10:06:01.235172+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable hosts passed the MTU audit. Their kernel interfaces and userspace TCP device use MTU 1280. Taiwan remains pending. Earlier verification sections retain their historical observations.",
-  "application_commit": "c35b93b1",
-  "repository_commit_at_verification": "c35b93b1",
-  "application_note": "Eleven reachable test instances run the handshake and UDP ownership repair from c35b93b1. Ten use kernel mode. The remote Mac uses userspace mode. Taiwan retains version 0.02 and pending SSH access. Historical verification sections describe their original builds.",
+  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable instances passed the current protocol checks. Taiwan, btower, and UTMOWRT remain offline. Earlier verification sections retain their original observations.",
+  "application_commit": "9b0fc462",
+  "repository_commit_at_verification": "9b0fc462",
+  "application_note": "Eleven reachable test instances run the current protocol and direct NIC delivery from 9b0fc462. Their identities, configuration, GUI policy, and MTUs remain unchanged. Three offline hosts remain pending. Historical sections retain their original observations.",
+  "source_simplification": {
+    "verified_at": "2026-11-15T10:06:01.235172+00:00",
+    "application_commit": "9b0fc462",
+    "source_commits": ["29fb6bf5", "9b0fc462"],
+    "retired_runtime_paths_removed": true,
+    "backward_compatibility_paths_added": false,
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "configuration_preserved": true,
+    "identities_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols_per_instance": ["h2", "quic", "wss"],
+    "final_full_size_icmp_sent": 55,
+    "final_full_size_icmp_received": 55,
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_instances": 11,
+    "final_udp_sent": 165,
+    "final_udp_received": 165,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "completed_transfer_files_removed": true,
+    "obsolete_remote_cache_binaries_removed": 2,
+    "temporary_test_processes_stopped": true,
+    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "summary": "benchmark-results/source-simplify-20261115/summary.json",
+    "audit": "benchmark-results/.work/source-simplify-20261115/audit.jsonl",
+    "source_audit": "benchmark-results/.work/source-review-2026-11-15.jsonl",
+    "limitations": "No matched performance comparison was run. Router TCP required a longer execution budget after retransmissions. Router TCP and UDP passed in separate checks. An earlier router UDP reply timed out. The timeout cause remains unconfirmed."
+  },
   "handshake_repair": {
     "verified_at": "2026-11-14T17:24:02.010349+00:00",
     "application_commit": "c35b93b1",
@@ -58,12 +89,12 @@
     ],
     "api_key_required": false,
     "api_key_required_outside_open": true,
-    "access_verified_at": "2026-11-14T16:22:36.940984+00:00",
-    "verification_scope": "Eleven instances passed keyless page and API reads from 10.126.126.2 after the MTU deployment. All eleven rejected a foreign Origin. GUI configuration is unchanged. Earlier control-write, LAN, and outside-source checks remain historical evidence.",
-    "schema_verified_at": "2026-11-08T13:54:38.072745+00:00",
-    "schema_evidence": "benchmark-results/.work/h2-domain-20261108/verify-webui.json",
-    "bundle_verified_at": "2026-11-09T06:46:57.175222+00:00",
-    "bundle_evidence": "benchmark-results/.work/settings-dedup-20261109/result.json"
+    "access_verified_at": "2026-11-15T10:06:01.235172+00:00",
+    "verification_scope": "Eleven instances passed keyless page, JSON API, and RPC reads from the overlay subnet. Each instance rejected a foreign Origin. GUI configuration remained unchanged. Earlier control-write and LAN checks remain historical evidence. The release integration check verified access key enforcement outside open sources.",
+    "schema_verified_at": "2026-11-15T09:18:29.748Z",
+    "schema_evidence": "benchmark-results/source-simplify-20261115/summary.json",
+    "bundle_verified_at": "2026-11-15T06:42:26.307Z",
+    "bundle_evidence": "benchmark-results/source-simplify-20261115/summary.json"
   },
   "nat_discovery": {
     "policy": "Each instance configures explicit IPv4 STUN addresses for UDP and TCP. Underlay deny rules exclude the hostname defaults.",
@@ -93,9 +124,10 @@
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
       "version": "0.02",
       "application_commit": null,
+      "pending_application_commit": "9b0fc462",
       "previous_recorded_application_commit": "d211a9fc",
       "deployment_status": "pending_ssh_and_overlay_connectivity",
-      "software_verification_note": "The kernel endpoint audit observed runtime version 0.02. Its source commit is unknown. The version 0.03 transfer remains pending after SSH timeouts.",
+      "software_verification_note": "The last observed runtime version was 0.02. The current protocol migration remains pending while Tailscale and SSH are unavailable. The recorded partial candidate predates this migration.",
       "runtime_observed_at": "2026-11-14T13:41:42.947137+00:00",
       "observed_pid": 189214,
       "pending_binary_transfer": {
@@ -116,7 +148,7 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -125,7 +157,7 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -134,7 +166,7 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -143,7 +175,7 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -152,7 +184,7 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -161,7 +193,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
@@ -193,7 +225,7 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -202,7 +234,7 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "userspace", "configured_mtu": 1280, "tcp_device_mtu": 1280},
       "kernel_migration_status": "blocked_administrator_access"
     },
@@ -212,7 +244,7 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -221,7 +253,7 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     },
     {
@@ -230,7 +262,7 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "c35b93b1",
+      "application_commit": "9b0fc462",
       "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
     }
   ],
