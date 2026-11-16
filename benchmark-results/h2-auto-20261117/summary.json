@@ -1,0 +1,1016 @@
+{
+  "verified_at": "2026-11-16T23:39:59.592288+00:00",
+  "local_date": "2026-11-17",
+  "application_commit": "67ada09f",
+  "repository_commit_before_rollout": "f37dd6e4",
+  "change": "Persist transport.h2.tcp_proxy=auto through the live control API.",
+  "product_default": "off",
+  "fleet_mode": "auto",
+  "configuration_revision_before": 1,
+  "configuration_revision_after": 2,
+  "revision_guard_used": true,
+  "verified_instances": 11,
+  "service_restarts": 0,
+  "binary_replacements": 0,
+  "unrelated_configuration_preserved": true,
+  "identities_preserved": true,
+  "configured_routes_preserved": true,
+  "gui_policy_preserved": true,
+  "mtu_policy_preserved": true,
+  "authenticated_protocols_per_instance": [
+    "h2",
+    "quic",
+    "wss"
+  ],
+  "full_size_icmp_sent": 55,
+  "full_size_icmp_received": 55,
+  "icmp_payload_bytes": 1252,
+  "udp_sent": 165,
+  "udp_received": 165,
+  "udp_payload_bytes": [
+    64,
+    1160,
+    1252
+  ],
+  "tcp_bytes_per_instance_per_direction": 8388608,
+  "tcp_total_delivered_bytes": 184549376,
+  "keyless_webui_pages": 11,
+  "keyless_json_api_reads": 11,
+  "keyless_json_rpc_reads": 11,
+  "foreign_origin_rejections": 11,
+  "temporary_test_processes_stopped": true,
+  "rollout_failures": [],
+  "pending_state_verified_at": "2026-11-16T23:36:03.634883+00:00",
+  "pending_hosts": [
+    {
+      "host": "tw2-ingress",
+      "online": false,
+      "last_seen": "2026-11-15T14:56:24.1Z",
+      "migration_verified": false
+    },
+    {
+      "host": "btower",
+      "online": false,
+      "last_seen": "2026-10-17T08:28:58.1Z",
+      "migration_verified": false
+    },
+    {
+      "host": "UTMOWRT",
+      "online": false,
+      "last_seen": "2026-10-27T04:12:15.1Z",
+      "migration_verified": false
+    }
+  ],
+  "instances": [
+    {
+      "host": "local",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 64415,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 39,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.2",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.2",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.100",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 917,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "862jp",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 2766115,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 36,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.82",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.82",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 127,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1162,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "jpali",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 1906263,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 41,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.62",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.62",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 127,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1007,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "s6916",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 902076,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 43,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.60",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.60",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 937,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "yutoms-mcp",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 93396,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1280,
+      "effective_mtu": 1280,
+      "authenticated_connections": 40,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.3",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.3",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 129,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 805,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "jpaws",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 2404317,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 40,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.100",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.100",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 947,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "861jp",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 1894574,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 35,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.81",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.81",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 939,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "alibj",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 269478,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 44,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.110",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.110",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.100",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 825,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "hattori-opwrt",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 3851,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 43,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.1",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.1",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1496,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "btrouter",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 8742,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 37,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.40",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.40",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.100",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 119,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 1495,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "host": "la",
+      "h2_tcp_proxy": "auto",
+      "persisted": true,
+      "effective": true,
+      "pid": 333570,
+      "restarted": false,
+      "revision": "2",
+      "identity_preserved": true,
+      "other_configuration_preserved": true,
+      "configured_routes_preserved": true,
+      "gui_policy_preserved": true,
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "authenticated_connections": 38,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "icmp_sent": 5,
+      "icmp_received": 5,
+      "application": [
+        {
+          "address": "10.126.126.87",
+          "download_bytes": 8388608,
+          "upload_bytes": 8388608
+        },
+        {
+          "address": "10.126.126.87",
+          "udp": [
+            {
+              "udp_payload_bytes": 64,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1160,
+              "sent": 5,
+              "received": 5
+            },
+            {
+              "udp_payload_bytes": 1252,
+              "sent": 5,
+              "received": 5
+            }
+          ]
+        }
+      ],
+      "application_source": "10.126.126.2",
+      "gui": [
+        {
+          "method": "GET",
+          "path": "/",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 864,
+          "content_type": "text/html; charset=utf-8"
+        },
+        {
+          "method": "GET",
+          "path": "/api/nodes",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 112,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": false,
+          "status": 200,
+          "body_bytes": 842,
+          "content_type": "application/json; charset=utf-8"
+        },
+        {
+          "method": "POST",
+          "path": "/api/rpc/GetNode",
+          "foreign_origin": true,
+          "status": 403,
+          "body_bytes": 25,
+          "content_type": "text/plain"
+        }
+      ]
+    }
+  ],
+  "scope": "Configuration-only rollout. Existing validated binaries remain active. Packet delivery and Web UI checks cover all reachable retained instances.",
+  "limitations": [
+    "Native H2 applies only to eligible direct proxy flows to a userspace peer's own IPv4 address.",
+    "Kernel TUN forwarding keeps the packet path.",
+    "Auto checks admission health and resources. It does not predict throughput or loaded latency.",
+    "The delivery checks do not force a specific transport or establish long-term availability.",
+    "This rollout adds no throughput benchmark or artificial-loss experiment.",
+    "The earlier jpaws-LA measurements remain the performance evidence.",
+    "QUIC admission improvements are source-derived proposals. QUIC code and configuration are unchanged.",
+    "Three offline historical hosts remain pending."
+  ],
+  "report": "docs/performance/h2-auto-20261117.md",
+  "quic_analysis": "docs/design/quic-proxy-policy.md",
+  "previous_performance_report": "docs/performance/h2-native-20261117.md",
+  "audit": "benchmark-results/.work/h2-auto-20261117/audit.jsonl"
+}

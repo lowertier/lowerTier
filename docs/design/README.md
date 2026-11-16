@@ -17,6 +17,8 @@ The guides one level up cover setup and use.
 - [Ethernet forwarding rules](l2-forwarding.md): learning, flooding, MAC ownership, MTU, and the test harness.
 - [Relay and transit semantics](relay-transit.md): permissions, budgets, and goodput selection.
 - [Userspace proxy internals](userspace-proxy.md): name resolution, dialing, and buffers.
+- [H2 native proxy](h2-native-proxy.md): stream modes, automatic admission, and receive-credit costs.
+- [QUIC proxy policy](quic-proxy-policy.md): current admission behavior and proposed policy reuse.
 - [Memory budget](memory-budget.md): QUIC admission, userspace TCP buffers, and Network Extension limits.
 - [Decoy passthrough limits](decoy-passthrough.md): probe sessions, bandwidth, and UDP anti-amplification.
 
