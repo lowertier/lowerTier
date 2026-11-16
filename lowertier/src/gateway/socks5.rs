@@ -203,6 +203,30 @@ mod exit_dns_tests {
     }
 
     #[tokio::test]
+    async fn idle_packet_gate_does_not_wait_for_entry_shards() {
+        let peer = crate::peers::tests::create_mock_peer_manager_secure(
+            "idle-gate".into(),
+            "secret".into(),
+        )
+        .await;
+        let server = Socks5Server::new(peer.get_global_ctx(), peer);
+        let held_shard = server.entries.entry(Socks5Entry {
+            src: "10.42.0.1:4000".parse().unwrap(),
+            dst: "192.0.2.17:443".parse().unwrap(),
+            entry_type: TCP_ENTRY,
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let checking = server.clone();
+        let worker = std::thread::spawn(move || {
+            sender.send(checking.packet_path_is_idle()).unwrap();
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        drop(held_shard);
+        worker.join().unwrap();
+        assert_eq!(result, Ok(true), "the idle gate waited for an entry shard");
+    }
+
+    #[tokio::test]
     async fn listener_and_system_connections_leave_packet_stack_unallocated() {
         timeout(Duration::from_secs(10), async {
             let peer = crate::peers::tests::create_mock_peer_manager_secure(
@@ -490,7 +514,7 @@ fn stamp_proxy_flow(
 
 fn increment_entry_count(entry_count: &AtomicUsize) -> (usize, usize) {
     let old_entry_count = entry_count
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
             count.checked_add(1)
         })
         .unwrap_or_else(|count| count);
@@ -508,7 +532,7 @@ fn decrement_entry_count_by(entry_count: &AtomicUsize, delta: usize) -> (usize, 
     }
 
     let old_entry_count = entry_count
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
             Some(count.saturating_sub(delta))
         })
         .unwrap_or_else(|count| count);
@@ -1603,9 +1627,9 @@ impl Socks5Server {
     }
 
     fn packet_path_is_idle(&self) -> bool {
-        // Entries reserve their count before publication. An enabled listener
-        // alone cannot receive packets from the overlay.
-        self.entry_count.load(Ordering::Relaxed) == 0 && self.entries.is_empty()
+        // Insertion reserves the count before publication. Removal releases it afterward.
+        // A zero count permits this decision without locking the entry map.
+        self.entry_count.load(Ordering::Acquire) == 0
     }
 
     pub fn new(global_ctx: Arc<GlobalCtx>, peer_manager: Arc<PeerManager>) -> Arc<Self> {
