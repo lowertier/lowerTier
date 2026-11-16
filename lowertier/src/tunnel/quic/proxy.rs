@@ -206,12 +206,10 @@ impl ProxyEndpoint {
             endpoint: self.clone(),
             permit,
         };
-        if let Err(error) = self.incoming.try_send(incoming) {
-            return reject(
-                error.into_inner().stream,
-                http::StatusCode::SERVICE_UNAVAILABLE,
-            )
-            .await;
+        // Each pending request holds a stream slot and a memory permit.
+        // Wait for the bounded queue instead of rejecting a permitted burst.
+        if let Err(error) = self.incoming.send(incoming).await {
+            return reject(error.0.stream, http::StatusCode::SERVICE_UNAVAILABLE).await;
         }
         Ok(())
     }
@@ -552,5 +550,68 @@ mod tests {
         assert!(endpoint.reserve().is_err());
         drop(permits);
         assert!(endpoint.reserve().is_ok());
+    }
+
+    #[tokio::test]
+    async fn admitted_streams_wait_for_incoming_queue_capacity() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut listener = QuicTunnelListener::new(
+                "quic://127.0.0.1:0".parse().unwrap(),
+                get_mock_global_ctx(),
+            );
+            listener.listen().await.unwrap();
+            let url = listener.local_url();
+            let accepted = tokio::spawn(async move { listener.accept().await.unwrap() });
+            let client_tunnel = QuicTunnelConnector::new(url, get_mock_global_ctx())
+                .connect()
+                .await
+                .unwrap();
+            let server_tunnel = accepted.await.unwrap();
+            let client = client_tunnel.tcp_proxy().unwrap();
+            let server = server_tunnel.tcp_proxy().unwrap();
+            client.authenticated(true);
+            server.authenticated(true);
+            let mut incoming = server.take_incoming().unwrap();
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        client
+                            .connect(
+                                "192.0.2.1:40000".parse().unwrap(),
+                                "192.0.2.2:8080".parse().unwrap(),
+                            )
+                            .await
+                    })
+                })
+                .collect();
+            while server.slots.available_permits() > MAX_STREAMS - opens.len()
+                && !opens.iter().any(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                opens.iter().all(|open| !open.is_finished()),
+                "queue pressure rejected an admitted stream"
+            );
+            assert_eq!(incoming.len(), 2);
+            let mut accepted_streams = Vec::new();
+            for _ in 0..opens.len() {
+                let mut stream = incoming.recv().await.unwrap().accept().await.unwrap();
+                stream.write_all(b"accepted").await.unwrap();
+                stream.shutdown().await.unwrap();
+                accepted_streams.push(stream);
+            }
+            for open in opens {
+                let mut stream = open.await.unwrap().unwrap().unwrap();
+                let mut received = Vec::new();
+                stream.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received, b"accepted");
+            }
+            drop(accepted_streams);
+            assert_eq!(server.slots.available_permits(), MAX_STREAMS);
+        })
+        .await
+        .unwrap();
     }
 }
