@@ -1,0 +1,4447 @@
+{
+  "verified_at": "2026-11-16T07:34:25.036289+00:00",
+  "application_commit": "00b50c6b",
+  "source_commits": [
+    "9f1b5c83",
+    "1321101b",
+    "00b50c6b"
+  ],
+  "baseline_application_commit": "57d2151b",
+  "software_version": "0.03",
+  "peer_protocol_version": 0,
+  "changes": {
+    "packet_filter_activity": "Registered packet consumers control filtering.",
+    "idle_packet_gate": "One atomic load replaces the empty-map shard scan.",
+    "source_packet_stack": "Allocate on demand and reuse until address change or shutdown.",
+    "route_updates": "Publish configuration and service routes before packet dispatch.",
+    "tcp_backends": [
+      "Kernel",
+      "HTTP/3 transport",
+      "Smoltcp"
+    ],
+    "removed": [
+      "OverlayStream",
+      "experiment switch",
+      "packet type 43 implementation",
+      "orphan QuicConnData",
+      "send-side configuration refresh"
+    ],
+    "admission_repair": "Wait for bounded queue capacity after reserving the existing stream and memory permits."
+  },
+  "verification": {
+    "permitted_sequential_core_tests_passed": 556,
+    "separate_caddy_tests_passed": 2,
+    "public_domain_probes_excluded": 2,
+    "full_feature_and_ffi_check": true,
+    "minimal_feature_check": true,
+    "release_targets": [
+      "native",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
+    ],
+    "source_review": "No remaining actionable findings after both repairs.",
+    "regression_tests_failed_before_repairs": [
+      "admitted_streams_wait_for_incoming_queue_capacity",
+      "idle_packet_gate_does_not_wait_for_entry_shards"
+    ]
+  },
+  "fleet": {
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "application_bytes_per_instance_per_direction": 8388608,
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "configuration_preserved": true,
+    "identities_preserved": true,
+    "effective_mtu": 1280,
+    "nodes": [
+      {
+        "host": "local",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 35,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 915,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "full_size_icmp_received": 5,
+        "full_size_icmp_source": "10.126.126.100",
+        "application": [
+          {
+            "address": "10.126.126.2",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.2",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "application_commit": "00b50c6b",
+        "pid": 88913,
+        "transfer_sha256": "a73b70802b6d0c261d62fbb29c11658a9e197453ecc38eafa90dbff3aa2ad94e"
+      },
+      {
+        "host": "862jp",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 39,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.82",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.82",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 127,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1161,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 2726052,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "jpali",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 35,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.62",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.62",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 127,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1006,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 1879702,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "s6916",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 37,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.60",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.60",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 936,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 871876,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "yutoms-mcp",
+        "configured_mtu": 1280,
+        "effective_mtu": 1280,
+        "mode": "userspace",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 38,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.3",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.3",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 129,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 802,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 94048,
+        "transfer_sha256": "a73b70802b6d0c261d62fbb29c11658a9e197453ecc38eafa90dbff3aa2ad94e"
+      },
+      {
+        "host": "jpaws",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 43,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.100",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.100",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 946,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 2364442,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "861jp",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 33,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.81",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.81",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 938,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 1880257,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "alibj",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 41,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.110",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.110",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 824,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 267848,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "hattori-opwrt",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 40,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.1",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.1",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1489,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 11938,
+        "transfer_sha256": "17d103e4c5f504fce671462a26582015fcdd700acb1541eb0631e92b773de6e1"
+      },
+      {
+        "host": "btrouter",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 44,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.40",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.40",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1563,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 21673,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      },
+      {
+        "host": "la",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 38,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.87",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.87",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 797,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 112,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 841,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_commit": "00b50c6b",
+        "pid": 308277,
+        "transfer_sha256": "c8d8e629be0970f04374f4828886e59b09764307d5b64449afc08fb0c6ae0a2e"
+      }
+    ],
+    "cleanup": [
+      {
+        "host": "local",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "862jp",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "jpali",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "s6916",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "yutoms-mcp",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "jpaws",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "861jp",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "alibj",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "hattori-opwrt",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "btrouter",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      },
+      {
+        "host": "la",
+        "fixture_stopped": true,
+        "completed_transfer_files_removed": true
+      }
+    ],
+    "pending": [
+      {
+        "HostName": "tw2-ingress",
+        "Online": false,
+        "LastSeen": "2026-11-15T14:56:24.1Z",
+        "TailscaleIPs": [
+          "100.93.133.6",
+          "fd7a:115c:a1e0::a03a:8507"
+        ]
+      },
+      {
+        "HostName": "btower",
+        "Online": false,
+        "LastSeen": "2026-10-17T08:28:58.1Z",
+        "TailscaleIPs": [
+          "100.110.19.124",
+          "fd7a:115c:a1e0::ec32:137c"
+        ]
+      },
+      {
+        "HostName": "UTMOWRT",
+        "Online": false,
+        "LastSeen": "2026-10-27T04:12:15.1Z",
+        "TailscaleIPs": [
+          "100.87.183.91",
+          "fd7a:115c:a1e0::ea32:b75b"
+        ]
+      }
+    ]
+  },
+  "binary_sizes": {
+    "native": {
+      "baseline_bytes": 22801664,
+      "candidate_bytes": 22669088,
+      "removed_bytes": 132576,
+      "reduction_percent": 0.5814312499298296
+    },
+    "x86_64-unknown-linux-musl": {
+      "baseline_bytes": 29677000,
+      "candidate_bytes": 29493192,
+      "removed_bytes": 183808,
+      "reduction_percent": 0.6193617953297166
+    },
+    "aarch64-unknown-linux-musl": {
+      "baseline_bytes": 25318352,
+      "candidate_bytes": 25168976,
+      "removed_bytes": 149376,
+      "reduction_percent": 0.5899910073135882
+    }
+  },
+  "work_model": {
+    "variables": {
+      "N": "Received data packets",
+      "B": "Received packet batches",
+      "R": "Topology service routes",
+      "L": "Local service routes",
+      "C": "Active proxy connections",
+      "S": "Packet-entry map shards"
+    },
+    "predictions": [
+      {
+        "change": "Idle proxy filtering",
+        "before": "With a proxy listener enabled and no registered packet consumers, the batch filter traverses N packets and parses eligible headers.",
+        "after": "One atomic entry-count load returns each idle batch before parsing packets.",
+        "dominant_saved_cost": "N header inspections with an enabled listener, or S shard locks per idle batch in the old empty-map gate",
+        "shards": "DashMap uses next_power_of_two(4 times available_parallelism) shards. The 16-core local host uses 64.",
+        "memory": "Avoids temporary packet-batch vectors on the inactive path."
+      },
+      {
+        "change": "Lazy source packet stack",
+        "before": "Listener startup can retain a reactor, two forwarding tasks, one task collector, two device channels, and three packet queues.",
+        "after": "The stack state appears only when a packet consumer needs it.",
+        "memory": "Avoids fixed stack and queue storage in stream-only use. TCP payload buffers are allocated per socket and are not an idle-stack saving.",
+        "constraint": "The GUI and FFI listeners are real packet consumers. Their stack remains allocated."
+      },
+      {
+        "change": "Route publication",
+        "before": "IP batch routing and ordered sending refresh path configuration. Changed topology routes are copied into a second store during sending.",
+        "after": "Configuration setters update path state. Route publication publishes combined service routes.",
+        "dominant_saved_cost": "Repeated per-batch update checks and local-address atomic swaps",
+        "memory": "Topology-only instances share O(R) immutable prefix tables. Instances with local routes build O(R+L) combined route data on updates.",
+        "constraint": "Authorization and route-generation validation remain at dispatch boundaries."
+      },
+      {
+        "change": "Experimental stream removal",
+        "before": "Each enabled experimental stream owns three bounded channels, one command channel, a session task, two ordered reliability windows, and retry timers.",
+        "after": "Eligible TCP traffic uses an existing authenticated HTTP/3 stream. Other TCP traffic uses the retained packet stack.",
+        "memory": "Compiled code decreases. Active packet-stack memory can exceed the removed custom stream windows.",
+        "constraint": "Do not claim an idle endpoint saving when the experiment was already disabled."
+      }
+    ],
+    "measurement_contract": {
+      "source": "Same host, baseline application 57d2151b, candidate 00b50c6b",
+      "transport_matrix": [
+        "quic",
+        "h2",
+        "wss"
+      ],
+      "paths": [
+        "direct",
+        "relay",
+        "ACL-controlled"
+      ],
+      "flows": [
+        1,
+        4
+      ],
+      "directions": [
+        "download",
+        "upload"
+      ],
+      "payload_integrity": "Compare every delivered byte with a repeated known block.",
+      "cpu": "Sum of both LowTier endpoint processes and the relay when present, normalized by delivered Gbit.",
+      "rss": "Process RSS sampled every 100 milliseconds; retain idle, minimum, and maximum.",
+      "latency": "Twenty-one application echo samples per process set.",
+      "loss": "Record delivery ratio and QUIC path lost-packet counters.",
+      "limitations": "Loopback results do not establish WAN performance. Native fleet routes use the automatic protocol policy.",
+      "tcp_loss": "H2/WSS captures cover the isolated listener port. Capture drops must be zero. Native TCP_INFO covers the exact application connection.",
+      "connection_setup": "Accepted throughput measurements establish connections before timing. The burst regression test separately verifies concurrent admission."
+    },
+    "fixture_correction": {
+      "before": "The local validator allocated and copied 128 KiB for each recv call, in addition to the expected byte slice.",
+      "after": "The validator reuses one 128 KiB pattern. The exact comparison still covers every received byte.",
+      "saved_traffic": "128 KiB multiplied by recv call count",
+      "evidence": "Preserve every earlier result. Final candidate comparisons use release- groups. Accepted overlay groups retain the unchanged experimental reference."
+    }
+  },
+  "userspace_comparison": {
+    "completed_groups": 20,
+    "required_groups": 20,
+    "groups": [
+      {
+        "label": "release-acl-quic-f1-baseline-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": false,
+        "acl": true,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.28262496925890446,
+        "rss_kib": {
+          "idle_rss_kib": 64720,
+          "active_rss_kib_min": 64720,
+          "active_rss_kib_max": 104816
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 1889.136377976765,
+              "minimum": 1832.157118002255,
+              "maximum": 2564.4166579302473
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.5459954738616934,
+              "minimum": 1.1920928955078123,
+              "maximum": 1.5785917639732354
+            },
+            "seconds": {
+              "median": 1.1367541661020368,
+              "minimum": 0.8374160421080887,
+              "maximum": 1.1721067079342902
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 1536.546993466942,
+              "minimum": 1506.9595824989387,
+              "maximum": 1538.9006863529842
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 2.034939825534821,
+              "minimum": 1.9744038581848145,
+              "maximum": 2.0908191800117493
+            },
+            "seconds": {
+              "median": 1.3976036249659956,
+              "minimum": 1.3954660408198833,
+              "maximum": 1.4250439580064267
+            }
+          }
+        }
+      },
+      {
+        "label": "release-acl-quic-f1-candidate-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": false,
+        "acl": true,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.31075021252036095,
+        "rss_kib": {
+          "idle_rss_kib": 64288,
+          "active_rss_kib_min": 64288,
+          "active_rss_kib_max": 107968
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 2372.959051563488,
+              "minimum": 2206.543059587685,
+              "maximum": 2387.2976442250642
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.2898817658424375,
+              "minimum": 1.2712553143501284,
+              "maximum": 1.3876706361770623
+            },
+            "seconds": {
+              "median": 0.904981333995238,
+              "minimum": 0.8995458330027759,
+              "maximum": 0.9732344169169664
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 1587.0375902133803,
+              "minimum": 1582.7382912162548,
+              "maximum": 1611.9822658250318
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.9604340195655825,
+              "minimum": 1.9231811165809625,
+              "maximum": 1.9744038581848153
+            },
+            "seconds": {
+              "median": 1.3531397499609739,
+              "minimum": 1.3322005418594927,
+              "maximum": 1.3568153749220073
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-h2-f1-baseline-auto",
+        "protocol": "h2",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.2888748422265053,
+        "rss_kib": {
+          "idle_rss_kib": 63120,
+          "active_rss_kib_min": 63120,
+          "active_rss_kib_max": 122208
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 241063,
+          "tcp_payload_bytes": 1698750617,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 8444.50475222714,
+              "minimum": 8125.3436905572125,
+              "maximum": 9997.450679043865
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.3632158041000363,
+              "minimum": 0.32130628824234025,
+              "maximum": 0.367872416973114
+            },
+            "seconds": {
+              "median": 0.25430545792914927,
+              "minimum": 0.21480312501080334,
+              "maximum": 0.26429449999704957
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 8162.313721569088,
+              "minimum": 7735.543784339444,
+              "maximum": 8859.878833421686
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.3818422555923463,
+              "minimum": 0.3678724169731139,
+              "maximum": 0.4004687070846559
+            },
+            "seconds": {
+              "median": 0.26309741591103375,
+              "minimum": 0.242382958997041,
+              "maximum": 0.27761249989271164
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-h2-f1-candidate-auto",
+        "protocol": "h2",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.2865409478545189,
+        "rss_kib": {
+          "idle_rss_kib": 62928,
+          "active_rss_kib_min": 62928,
+          "active_rss_kib_max": 117792
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 241866,
+          "tcp_payload_bytes": 1698827214,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 7796.784597479615,
+              "minimum": 7689.229750382844,
+              "maximum": 8681.741119522578
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.3864988684654238,
+              "minimum": 0.36321580410003673,
+              "maximum": 0.39115548133850087
+            },
+            "seconds": {
+              "median": 0.275431958027184,
+              "minimum": 0.24735633307136595,
+              "maximum": 0.27928462508134544
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 8110.1374931117725,
+              "minimum": 7734.909914861965,
+              "maximum": 8442.272194752997
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.3864988684654236,
+              "minimum": 0.3818422555923461,
+              "maximum": 0.40978193283081027
+            },
+            "seconds": {
+              "median": 0.2647900420706719,
+              "minimum": 0.2543727089650929,
+              "maximum": 0.2776352500077337
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-h2-f4-baseline-auto",
+        "protocol": "h2",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 4,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.2768749836832285,
+        "rss_kib": {
+          "idle_rss_kib": 63168,
+          "active_rss_kib_min": 63168,
+          "active_rss_kib_max": 138688
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 234738,
+          "tcp_payload_bytes": 1704119343,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 7572.242817116796,
+              "minimum": 7348.065039461124,
+              "maximum": 7706.185399111557
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.43306499719619745,
+              "minimum": 0.42840838432312006,
+              "maximum": 0.44703483581542963
+            },
+            "seconds": {
+              "median": 0.28359941695816815,
+              "minimum": 0.2786701249424368,
+              "maximum": 0.2922515841200948
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 7668.56083663567,
+              "minimum": 7608.629386957899,
+              "maximum": 7752.077157574479
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.43772161006927507,
+              "minimum": 0.43772161006927507,
+              "maximum": 0.44237822294235196
+            },
+            "seconds": {
+              "median": 0.2800373751670122,
+              "minimum": 0.2770204171538353,
+              "maximum": 0.28224316611886024
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-h2-f4-candidate-auto",
+        "protocol": "h2",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 4,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.28458284214138985,
+        "rss_kib": {
+          "idle_rss_kib": 62976,
+          "active_rss_kib_min": 62976,
+          "active_rss_kib_max": 163200
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 234677,
+          "tcp_payload_bytes": 1705413152,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 7733.235196213673,
+              "minimum": 7596.266916618963,
+              "maximum": 7979.701535136161
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.40978193283081055,
+              "minimum": 0.40512531995773277,
+              "maximum": 0.42375177145004256
+            },
+            "seconds": {
+              "median": 0.27769537502899766,
+              "minimum": 0.2691182920243591,
+              "maximum": 0.28270250000059605
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 7438.981552973846,
+              "minimum": 7213.761674704554,
+              "maximum": 7662.434011697547
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.45169144868850736,
+              "minimum": 0.4470348358154301,
+              "maximum": 0.4563480615615844
+            },
+            "seconds": {
+              "median": 0.28867979208007455,
+              "minimum": 0.2802612909581512,
+              "maximum": 0.29769262485206127
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-quic-f1-baseline-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.2556249964982271,
+        "rss_kib": {
+          "idle_rss_kib": 63168,
+          "active_rss_kib_min": 63168,
+          "active_rss_kib_max": 80432
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 3121.2907146913567,
+              "minimum": 3099.139890530347,
+              "maximum": 3142.922888879553
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.8568167686462409,
+              "minimum": 0.8568167686462402,
+              "maximum": 0.8614733815193178
+            },
+            "seconds": {
+              "median": 0.6880114171653986,
+              "minimum": 0.683275958057493,
+              "maximum": 0.6929289170075208
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 2418.1184569101847,
+              "minimum": 2402.238096560893,
+              "maximum": 2465.4639915375064
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.0663643479347225,
+              "minimum": 1.0430812835693357,
+              "maximum": 1.0710209608077996
+            },
+            "seconds": {
+              "median": 0.8880804171785712,
+              "minimum": 0.871026166016236,
+              "maximum": 0.8939512078650296
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-quic-f1-candidate-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.25920895859599113,
+        "rss_kib": {
+          "idle_rss_kib": 63008,
+          "active_rss_kib_min": 63008,
+          "active_rss_kib_max": 80656
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 2986.4654003025175,
+              "minimum": 2879.548344203021,
+              "maximum": 3024.7157390132065
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.8940696716308593,
+              "minimum": 0.8847564458847047,
+              "maximum": 0.9126961231231688
+            },
+            "seconds": {
+              "median": 0.7190719998907298,
+              "minimum": 0.7099786668550223,
+              "maximum": 0.7457709999289364
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 2392.462762310711,
+              "minimum": 2348.0947912541565,
+              "maximum": 2422.4827845763607
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.0849907994270322,
+              "minimum": 1.075677573680878,
+              "maximum": 1.1036172509193425
+            },
+            "seconds": {
+              "median": 0.8976037921383977,
+              "minimum": 0.8864804578479379,
+              "maximum": 0.9145642910152674
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-quic-f4-baseline-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 4,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.2535830717533827,
+        "rss_kib": {
+          "idle_rss_kib": 63120,
+          "active_rss_kib_min": 63120,
+          "active_rss_kib_max": 82416
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 2549.33980003177,
+              "minimum": 2518.595678296471,
+              "maximum": 2563.0490523829835
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.0989606380462642,
+              "minimum": 1.0756775736808775,
+              "maximum": 1.1175870895385736
+            },
+            "seconds": {
+              "median": 0.842368541052565,
+              "minimum": 0.8378628750797361,
+              "maximum": 0.8526512081734836
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 2018.1596427457857,
+              "minimum": 1979.9278793927679,
+              "maximum": 2031.382519377475
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.3364478945732121,
+              "minimum": 1.3364478945732121,
+              "maximum": 1.3737007975578306
+            },
+            "seconds": {
+              "median": 1.0640801661647856,
+              "minimum": 1.0571537499781698,
+              "maximum": 1.0846272080671042
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-quic-f4-candidate-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 4,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.25174999609589577,
+        "rss_kib": {
+          "idle_rss_kib": 62576,
+          "active_rss_kib_min": 62576,
+          "active_rss_kib_max": 81088
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 2600.7791972238756,
+              "minimum": 2581.321902730819,
+              "maximum": 2609.046342193325
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.080334186553955,
+              "minimum": 1.0617077350616453,
+              "maximum": 1.080334186553955
+            },
+            "seconds": {
+              "median": 0.825707791838795,
+              "minimum": 0.8230914159212261,
+              "maximum": 0.8319317500572652
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 1988.3007088375334,
+              "minimum": 1977.3687208123633,
+              "maximum": 2004.5724970745887
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.3597309589385984,
+              "minimum": 1.355074346065521,
+              "maximum": 1.3690441846847523
+            },
+            "seconds": {
+              "median": 1.0800597909837961,
+              "minimum": 1.071292582899332,
+              "maximum": 1.0860309589188546
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-wss-f1-baseline-auto",
+        "protocol": "wss",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.27358299121260643,
+        "rss_kib": {
+          "idle_rss_kib": 62096,
+          "active_rss_kib_min": 62096,
+          "active_rss_kib_max": 108496
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 215902,
+          "tcp_payload_bytes": 1703470987,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 9517.296837442715,
+              "minimum": 9150.34435554894,
+              "maximum": 9556.616589937968
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.3539025783538817,
+              "minimum": 0.3539025783538817,
+              "maximum": 0.35855919122695923
+            },
+            "seconds": {
+              "median": 0.22564008296467364,
+              "minimum": 0.22471170919016004,
+              "maximum": 0.23468883405439556
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 6895.249026586262,
+              "minimum": 5481.310657922657,
+              "maximum": 7425.389673755051
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.44237822294235235,
+              "minimum": 0.4237517714500428,
+              "maximum": 0.48428773880004883
+            },
+            "seconds": {
+              "median": 0.31144395796582103,
+              "minimum": 0.28920820890925825,
+              "maximum": 0.3917828749399632
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-wss-f1-candidate-auto",
+        "protocol": "wss",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.27770805172622204,
+        "rss_kib": {
+          "idle_rss_kib": 62064,
+          "active_rss_kib_min": 62064,
+          "active_rss_kib_max": 129584
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 212533,
+          "tcp_payload_bytes": 1700890506,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 8965.469755932932,
+              "minimum": 7540.672616509911,
+              "maximum": 9244.721222874166
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.3678724169731141,
+              "minimum": 0.3632158041000363,
+              "maximum": 0.4004687070846559
+            },
+            "seconds": {
+              "median": 0.23952829092741013,
+              "minimum": 0.2322929590009153,
+              "maximum": 0.28478675009682775
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 7546.854862433329,
+              "minimum": 7489.412804118999,
+              "maximum": 7557.023054240304
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.4237517714500428,
+              "minimum": 0.42375177145004256,
+              "maximum": 0.4330649971961978
+            },
+            "seconds": {
+              "median": 0.28455345798283815,
+              "minimum": 0.2841705831233412,
+              "maximum": 0.28673591697588563
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-wss-f4-baseline-auto",
+        "protocol": "wss",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 4,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.2816249616444111,
+        "rss_kib": {
+          "idle_rss_kib": 62208,
+          "active_rss_kib_min": 62208,
+          "active_rss_kib_max": 169216
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 209589,
+          "tcp_payload_bytes": 1707255002,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 7932.243205786376,
+              "minimum": 7850.098159168594,
+              "maximum": 8371.207498803975
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.4097819328308109,
+              "minimum": 0.4004687070846557,
+              "maximum": 0.4144385457038878
+            },
+            "seconds": {
+              "median": 0.2707284172065556,
+              "minimum": 0.2565321249421686,
+              "maximum": 0.2735613752156496
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 7353.707701092184,
+              "minimum": 6667.900136399345,
+              "maximum": 7570.3575650464545
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.4610046744346619,
+              "minimum": 0.45634806156158464,
+              "maximum": 0.4796311259269711
+            },
+            "seconds": {
+              "median": 0.2920273330528289,
+              "minimum": 0.28367004194296896,
+              "maximum": 0.32206295896321535
+            }
+          }
+        }
+      },
+      {
+        "label": "release-direct-wss-f4-candidate-auto",
+        "protocol": "wss",
+        "backend": "auto",
+        "relay": false,
+        "acl": false,
+        "flows": 4,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.28133299201726913,
+        "rss_kib": {
+          "idle_rss_kib": 62000,
+          "active_rss_kib_min": 62000,
+          "active_rss_kib_max": 159120
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 210917,
+          "tcp_payload_bytes": 1708281186,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 7224.0163895133965,
+              "minimum": 6845.3075521272485,
+              "maximum": 7364.956900098892
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.44237822294235235,
+              "minimum": 0.43772161006927507,
+              "maximum": 0.4656612873077392
+            },
+            "seconds": {
+              "median": 0.2972700409591198,
+              "minimum": 0.2915812919382006,
+              "maximum": 0.31371616711840034
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 6725.037876761093,
+              "minimum": 6536.824708001408,
+              "maximum": 7156.230356374435
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.47963112592697155,
+              "minimum": 0.4749745130538938,
+              "maximum": 0.4936009645462034
+            },
+            "seconds": {
+              "median": 0.3193266249727458,
+              "minimum": 0.300085874972865,
+              "maximum": 0.32852091710083187
+            }
+          }
+        }
+      },
+      {
+        "label": "release-relay-h2-f1-baseline-auto",
+        "protocol": "h2",
+        "backend": "auto",
+        "relay": true,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.401749974116683,
+        "rss_kib": {
+          "idle_rss_kib": 95216,
+          "active_rss_kib_min": 95216,
+          "active_rss_kib_max": 163520
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 478081,
+          "tcp_payload_bytes": 3524785163,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 5232.169662227858,
+              "minimum": 5099.368954111616,
+              "maximum": 5236.1063633553285
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.9499490261077876,
+              "minimum": 0.9452924132347104,
+              "maximum": 0.9499490261077881
+            },
+            "seconds": {
+              "median": 0.4104384579695761,
+              "minimum": 0.4101298749446869,
+              "maximum": 0.4211273330729455
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 4484.581378311717,
+              "minimum": 4480.508515083395,
+              "maximum": 4910.429479390256
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 0.9872019290924068,
+              "minimum": 0.9685754776000977,
+              "maximum": 0.9872019290924077
+            },
+            "seconds": {
+              "median": 0.4788593330886215,
+              "minimum": 0.4373311249073595,
+              "maximum": 0.4792946248780936
+            }
+          }
+        }
+      },
+      {
+        "label": "release-relay-h2-f1-candidate-auto",
+        "protocol": "h2",
+        "backend": "auto",
+        "relay": true,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.41908398270606995,
+        "rss_kib": {
+          "idle_rss_kib": 95488,
+          "active_rss_kib_min": 95488,
+          "active_rss_kib_max": 154112
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 508723,
+          "tcp_payload_bytes": 3527045469,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 4858.1870325881755,
+              "minimum": 4763.5484282003545,
+              "maximum": 4858.325341678789
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.0104849934577942,
+              "minimum": 1.0058283805847168,
+              "maximum": 1.0151416063308718
+            },
+            "seconds": {
+              "median": 0.4420339590869844,
+              "minimum": 0.4420213750563562,
+              "maximum": 0.4508159579709172
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 3984.2252869557506,
+              "minimum": 3957.896960030033,
+              "maximum": 3996.4873064200797
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.2107193470001218,
+              "minimum": 1.2107193470001218,
+              "maximum": 1.2246891856193538
+            },
+            "seconds": {
+              "median": 0.538996540941298,
+              "minimum": 0.5373427921440452,
+              "maximum": 0.5425819999072701
+            }
+          }
+        }
+      },
+      {
+        "label": "release-relay-quic-f1-baseline-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": true,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.4072918090969324,
+        "rss_kib": {
+          "idle_rss_kib": 96288,
+          "active_rss_kib_min": 96288,
+          "active_rss_kib_max": 146560
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 1460.2066177184045,
+              "minimum": 1264.2607584183,
+              "maximum": 1465.6154599815707
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 3.3108517527580257,
+              "minimum": 3.296881914138796,
+              "maximum": 3.376044332981109
+            },
+            "seconds": {
+              "median": 1.470671083079651,
+              "minimum": 1.4652435830794275,
+              "maximum": 1.698608165839687
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 1305.2738238543814,
+              "minimum": 1299.4924714232188,
+              "maximum": 1467.779364568152
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 3.296881914138793,
+              "minimum": 3.2922253012657166,
+              "maximum": 3.3108517527580257
+            },
+            "seconds": {
+              "median": 1.6452361249830574,
+              "minimum": 1.463083416922018,
+              "maximum": 1.652555667096749
+            }
+          }
+        }
+      },
+      {
+        "label": "release-relay-quic-f1-candidate-auto",
+        "protocol": "quic",
+        "backend": "auto",
+        "relay": true,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.4060829523950815,
+        "rss_kib": {
+          "idle_rss_kib": 96368,
+          "active_rss_kib_min": 96368,
+          "active_rss_kib_max": 139104
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": null,
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 1376.1386989526095,
+              "minimum": 1260.5049309803373,
+              "maximum": 1413.1900816007676
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 3.4086406230926514,
+              "minimum": 3.385357558727264,
+              "maximum": 3.5017728805542006
+            },
+            "seconds": {
+              "median": 1.5605139581020921,
+              "minimum": 1.5195999999996275,
+              "maximum": 1.7036693750414997
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 1272.9158724921429,
+              "minimum": 1247.2474870939045,
+              "maximum": 1429.5215686820263
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 3.413297235965728,
+              "minimum": 3.403984010219573,
+              "maximum": 3.501772880554197
+            },
+            "seconds": {
+              "median": 1.6870585829019547,
+              "minimum": 1.5022394170518965,
+              "maximum": 1.7217782919760793
+            }
+          }
+        }
+      },
+      {
+        "label": "release-relay-wss-f1-baseline-auto",
+        "protocol": "wss",
+        "backend": "auto",
+        "relay": true,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "57d2151b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.4000419285148382,
+        "rss_kib": {
+          "idle_rss_kib": 93584,
+          "active_rss_kib_min": 93584,
+          "active_rss_kib_max": 147504
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 461091,
+          "tcp_payload_bytes": 3528626208,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 4714.487545592925,
+              "minimum": 4602.2314495612545,
+              "maximum": 4753.340212661437
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.0337680578231814,
+              "minimum": 1.0244548320770264,
+              "maximum": 1.0477378964424133
+            },
+            "seconds": {
+              "median": 0.4555073329247534,
+              "minimum": 0.4517841248307377,
+              "maximum": 0.46661791601218283
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 3968.6124209035934,
+              "minimum": 3924.280721103467,
+              "maximum": 4043.142845615247
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.2060627341270445,
+              "minimum": 1.19674950838089,
+              "maximum": 1.215375959873199
+            },
+            "seconds": {
+              "median": 0.5411170001607388,
+              "minimum": 0.5311421658843756,
+              "maximum": 0.5472298748791218
+            }
+          }
+        }
+      },
+      {
+        "label": "release-relay-wss-f1-candidate-auto",
+        "protocol": "wss",
+        "backend": "auto",
+        "relay": true,
+        "acl": false,
+        "flows": 1,
+        "source_reference": "00b50c6b",
+        "connection_setup": "before timing",
+        "payload_validation": "Every byte checked against a preallocated repeated pattern",
+        "rtt_median_ms": 0.40145800448954105,
+        "rss_kib": {
+          "idle_rss_kib": 93536,
+          "active_rss_kib_min": 93536,
+          "active_rss_kib_max": 149920
+        },
+        "delivery_ratio": 1.0,
+        "quic_lost_packets": 0,
+        "tcp_capture": {
+          "tcp_payload_packets": 461602,
+          "tcp_payload_bytes": 3529368981,
+          "repeated_sequence_packets": 0,
+          "repeated_sequence_bytes": 0,
+          "capture_kernel_drops": 0,
+          "scope": "Both directions on the isolated underlay listener port"
+        },
+        "directions": {
+          "GET": {
+            "mbps": {
+              "median": 4730.572175448348,
+              "minimum": 3401.612558531257,
+              "maximum": 4812.482856830417
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.0244548320770261,
+              "minimum": 1.024454832077026,
+              "maximum": 1.1594966053962699
+            },
+            "seconds": {
+              "median": 0.453958542086184,
+              "minimum": 0.44623195799067616,
+              "maximum": 0.6313134171068668
+            }
+          },
+          "PUT": {
+            "mbps": {
+              "median": 3707.7131222858475,
+              "minimum": 3683.989329382376,
+              "maximum": 3721.966787291328
+            },
+            "cpu_seconds_per_delivered_gbit": {
+              "median": 1.2759119272232065,
+              "minimum": 1.2479722499847414,
+              "maximum": 1.280568540096283
+            },
+            "seconds": {
+              "median": 0.5791935829911381,
+              "minimum": 0.576975499978289,
+              "maximum": 0.5829234169796109
+            }
+          }
+        }
+      }
+    ],
+    "comparisons": [
+      {
+        "scenario": "release-acl-quic-f1",
+        "throughput_change_percent": {
+          "GET": 25.610785924565672,
+          "PUT": 3.2859780378415415
+        },
+        "cpu_change_percent": {
+          "GET": -16.566265060240926,
+          "PUT": -3.661327231121292
+        },
+        "rss_peak_change_percent": 3.0071744771790643
+      },
+      {
+        "scenario": "release-direct-h2-f1",
+        "throughput_change_percent": {
+          "GET": -7.670315474411882,
+          "PUT": -0.639233313459131
+        },
+        "cpu_change_percent": {
+          "GET": 6.410256410256565,
+          "PUT": 1.21951219512193
+        },
+        "rss_peak_change_percent": -3.613511390416335
+      },
+      {
+        "scenario": "release-direct-h2-f4",
+        "throughput_change_percent": {
+          "GET": 2.1260857976313163,
+          "PUT": -2.993772737187339
+        },
+        "cpu_change_percent": {
+          "GET": -5.37634408602149,
+          "PUT": 3.191489361702149
+        },
+        "rss_peak_change_percent": 17.674203968620205
+      },
+      {
+        "scenario": "release-direct-quic-f1",
+        "throughput_change_percent": {
+          "GET": -4.319537227155434,
+          "PUT": -1.060977576435862
+        },
+        "cpu_change_percent": {
+          "GET": 4.34782608695643,
+          "PUT": 1.7467248908297206
+        },
+        "rss_peak_change_percent": 0.2784961209468806
+      },
+      {
+        "scenario": "release-direct-quic-f4",
+        "throughput_change_percent": {
+          "GET": 2.017753662790045,
+          "PUT": -1.4795129818188202
+        },
+        "cpu_change_percent": {
+          "GET": -1.6949152542372503,
+          "PUT": 1.7421602787455859
+        },
+        "rss_peak_change_percent": -1.6113376043486727
+      },
+      {
+        "scenario": "release-direct-wss-f1",
+        "throughput_change_percent": {
+          "GET": -5.798149316293233,
+          "PUT": 9.450069654259718
+        },
+        "cpu_change_percent": {
+          "GET": 3.9473684210526994,
+          "PUT": -4.210526315789476
+        },
+        "rss_peak_change_percent": 19.436661259401266
+      },
+      {
+        "scenario": "release-direct-wss-f4",
+        "throughput_change_percent": {
+          "GET": -8.928455644884236,
+          "PUT": -8.549018398402207
+        },
+        "cpu_change_percent": {
+          "GET": 7.95454545454537,
+          "PUT": 4.040404040404044
+        },
+        "rss_peak_change_percent": -5.966338880484113
+      },
+      {
+        "scenario": "release-relay-h2-f1",
+        "throughput_change_percent": {
+          "GET": -7.147754254598093,
+          "PUT": -11.157253022005209
+        },
+        "cpu_change_percent": {
+          "GET": 6.372549019607887,
+          "PUT": 22.641509433962305
+        },
+        "rss_peak_change_percent": -5.753424657534245
+      },
+      {
+        "scenario": "release-relay-quic-f1",
+        "throughput_change_percent": {
+          "GET": -5.757261865937324,
+          "PUT": -2.4790163390151942
+        },
+        "cpu_change_percent": {
+          "GET": 2.9535864978903037,
+          "PUT": 3.5310734463276816
+        },
+        "rss_peak_change_percent": -5.0873362445414845
+      },
+      {
+        "scenario": "release-relay-wss-f1",
+        "throughput_change_percent": {
+          "GET": 0.34117451154280776,
+          "PUT": -6.57406848911547
+        },
+        "cpu_change_percent": {
+          "GET": -0.9009009009009472,
+          "PUT": 5.791505791505891
+        },
+        "rss_peak_change_percent": 1.6379216834797594
+      }
+    ]
+  },
+  "retired_stream_reference": [
+    {
+      "label": "accepted-acl-quic-f1-baseline-overlay",
+      "protocol": "quic",
+      "backend": "overlay",
+      "relay": false,
+      "acl": true,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.4553825829643756,
+          "mbps": 1475.5457933445432,
+          "cpu_seconds_per_delivered_gbit": 1.401640474796295
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.162279084092006,
+          "mbps": 1847.6488800257932,
+          "cpu_seconds_per_delivered_gbit": 1.569278538227081
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.5137066249735653,
+          "mbps": 1418.6921115163266,
+          "cpu_seconds_per_delivered_gbit": 1.3737007975578313
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.134211750002578,
+          "mbps": 1893.371011184745,
+          "cpu_seconds_per_delivered_gbit": 1.5273690223693843
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.4546109579969198,
+          "mbps": 1476.3285235780186,
+          "cpu_seconds_per_delivered_gbit": 1.3923272490501395
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.5313925410155207,
+          "mbps": 1402.3077626954662,
+          "cpu_seconds_per_delivered_gbit": 1.4947727322578432
+        }
+      ],
+      "idle_rss_kib": 64336,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 64336,
+      "active_rss_kib_max": 72976,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.3970828838646412,
+        0.37875003181397915,
+        0.35208300687372684,
+        0.33541698940098286,
+        0.33791596069931984,
+        0.38175005465745926,
+        0.29337499290704727,
+        0.28429110534489155,
+        0.30208309181034565,
+        0.28737494722008705,
+        0.2752079162746668,
+        0.2692500129342079,
+        0.3047920763492584,
+        0.32312492839992046,
+        0.3022500313818455,
+        0.3033329267054796,
+        0.29004202224314213,
+        0.2834999468177557,
+        0.26995805092155933,
+        0.2822501119226217,
+        0.25570904836058617
+      ],
+      "rtt_median_ms": 0.30208309181034565,
+      "quic_path_statistics": {
+        "client-5224326586384": {
+          "connection": 5224326586384,
+          "tx_bytes": 867372648,
+          "rx_bytes": 870751459,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 652858,
+          "mtu": 1452
+        },
+        "server-5881589563408": {
+          "connection": 5881589563408,
+          "tx_bytes": 870751363,
+          "rx_bytes": 867367848,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 670644,
+          "mtu": 1452
+        }
+      }
+    },
+    {
+      "label": "accepted-direct-h2-f1-baseline-overlay",
+      "protocol": "h2",
+      "backend": "overlay",
+      "relay": false,
+      "acl": false,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 2.157113749999553,
+          "mbps": 995.5356540657372,
+          "cpu_seconds_per_delivered_gbit": 0.903382897377014
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 2.002585208043456,
+          "mbps": 1072.3556927188686,
+          "cpu_seconds_per_delivered_gbit": 0.819563865661621
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 2.145748875103891,
+          "mbps": 1000.8084696751968,
+          "cpu_seconds_per_delivered_gbit": 0.9080395102500916
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 2.000923000043258,
+          "mbps": 1073.2465207074802,
+          "cpu_seconds_per_delivered_gbit": 0.8288770914077763
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 2.3450644169934094,
+          "mbps": 915.7461229799707,
+          "cpu_seconds_per_delivered_gbit": 0.9126961231231685
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.7135069160722196,
+          "mbps": 1253.268153082546,
+          "cpu_seconds_per_delivered_gbit": 0.8102506399154663
+        }
+      ],
+      "idle_rss_kib": 62592,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 62592,
+      "active_rss_kib_max": 72928,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.40091690607368946,
+        0.38554216735064983,
+        0.3334160428494215,
+        0.31387503258883953,
+        0.3241251688450575,
+        0.3334588836878538,
+        0.30212500132620335,
+        0.2969170454889536,
+        0.30308403074741364,
+        0.32445904798805714,
+        0.31462498009204865,
+        0.29004085808992386,
+        0.2984169404953718,
+        0.31162495724856853,
+        0.2827912103384733,
+        0.2709999680519104,
+        0.2701252233237028,
+        0.29737502336502075,
+        0.24070916697382927,
+        0.27120811864733696,
+        0.27175014838576317
+      ],
+      "rtt_median_ms": 0.30212500132620335,
+      "quic_path_statistics": {},
+      "tcp_capture": {
+        "tcp_payload_packets": 218517,
+        "tcp_payload_bytes": 1700087304,
+        "repeated_sequence_packets": 0,
+        "repeated_sequence_bytes": 0,
+        "capture_kernel_drops": 0,
+        "scope": "Both directions on the isolated underlay listener port"
+      }
+    },
+    {
+      "label": "accepted-direct-h2-f4-baseline-overlay",
+      "protocol": "h2",
+      "backend": "overlay",
+      "relay": false,
+      "acl": false,
+      "flows": 4,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 0.8252045831177384,
+          "mbps": 2602.3651491203627,
+          "cpu_seconds_per_delivered_gbit": 0.7404014468193053
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 0.7093654170166701,
+          "mbps": 3027.3306204177893,
+          "cpu_seconds_per_delivered_gbit": 0.6798654794692992
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 0.8479137918911874,
+          "mbps": 2532.667434516251,
+          "cpu_seconds_per_delivered_gbit": 0.7497146725654603
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 0.6283639171160758,
+          "mbps": 3417.579510064869,
+          "cpu_seconds_per_delivered_gbit": 0.6798654794692992
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 0.596279458142817,
+          "mbps": 3601.471790909236,
+          "cpu_seconds_per_delivered_gbit": 0.7310882210731503
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 0.93614162504673,
+          "mbps": 2293.973038420124,
+          "cpu_seconds_per_delivered_gbit": 0.7171183824539188
+        }
+      ],
+      "idle_rss_kib": 62896,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 62896,
+      "active_rss_kib_max": 81600,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.3667499404400587,
+        0.35041687078773975,
+        0.3098328597843647,
+        0.3079159650951624,
+        0.2876250073313713,
+        0.3072500694543123,
+        0.3372090868651867,
+        0.31570810824632645,
+        0.3072500694543123,
+        0.3117090091109276,
+        0.2851251047104597,
+        0.29812497086822987,
+        0.2752498257905245,
+        0.30908314511179924,
+        0.2785001415759325,
+        0.2866671420633793,
+        0.2939170226454735,
+        0.2552501391619444,
+        0.24779210798442364,
+        0.2698749303817749,
+        0.26350002735853195
+      ],
+      "rtt_median_ms": 0.29812497086822987,
+      "quic_path_statistics": {},
+      "tcp_capture": {
+        "tcp_payload_packets": 219593,
+        "tcp_payload_bytes": 1697550394,
+        "repeated_sequence_packets": 0,
+        "repeated_sequence_bytes": 0,
+        "capture_kernel_drops": 0,
+        "scope": "Both directions on the isolated underlay listener port"
+      }
+    },
+    {
+      "label": "accepted-direct-quic-f1-baseline-overlay",
+      "protocol": "quic",
+      "backend": "overlay",
+      "relay": false,
+      "acl": false,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.5117322080768645,
+          "mbps": 1420.5450122227007,
+          "cpu_seconds_per_delivered_gbit": 1.3643875718116758
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.1464484159369022,
+          "mbps": 1873.1620351579713,
+          "cpu_seconds_per_delivered_gbit": 1.5506520867347717
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.3431714170146734,
+          "mbps": 1598.815773472151,
+          "cpu_seconds_per_delivered_gbit": 1.4435499906539915
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.1556622500065714,
+          "mbps": 1858.227737375508,
+          "cpu_seconds_per_delivered_gbit": 1.5506520867347724
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.3321329159662127,
+          "mbps": 1612.064098305388,
+          "cpu_seconds_per_delivered_gbit": 1.401640474796294
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.1498261669185013,
+          "mbps": 1867.6593991204688,
+          "cpu_seconds_per_delivered_gbit": 1.5506520867347724
+        }
+      ],
+      "idle_rss_kib": 63392,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 63392,
+      "active_rss_kib_max": 72128,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.3837919794023037,
+        0.3305841237306595,
+        0.3251249436289072,
+        0.35075005143880844,
+        0.31554093584418297,
+        0.34041679464280605,
+        0.29870797879993916,
+        0.3086249344050884,
+        0.26050000451505184,
+        0.2567500341683626,
+        0.24529197253286839,
+        0.32404204830527306,
+        0.29345788061618805,
+        0.29312516562640667,
+        0.26533310301601887,
+        0.25879195891320705,
+        0.23933290503919125,
+        0.26012491434812546,
+        0.27841702103614807,
+        0.24725007824599743,
+        0.2754582092165947
+      ],
+      "rtt_median_ms": 0.29312516562640667,
+      "quic_path_statistics": {
+        "client-2238787903504": {
+          "connection": 2238787903504,
+          "tx_bytes": 867392803,
+          "rx_bytes": 870562802,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 653096,
+          "mtu": 1452
+        },
+        "server-3258740277264": {
+          "connection": 3258740277264,
+          "tx_bytes": 870562706,
+          "rx_bytes": 867388003,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 665177,
+          "mtu": 1452
+        }
+      }
+    },
+    {
+      "label": "accepted-direct-quic-f4-baseline-overlay",
+      "protocol": "quic",
+      "backend": "overlay",
+      "relay": false,
+      "acl": false,
+      "flows": 4,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.0626742918975651,
+          "mbps": 2020.829584731314,
+          "cpu_seconds_per_delivered_gbit": 1.4435499906539915
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.165287374984473,
+          "mbps": 1842.8790134524666,
+          "cpu_seconds_per_delivered_gbit": 1.5366822481155396
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.0198471669573337,
+          "mbps": 2105.6916345680665,
+          "cpu_seconds_per_delivered_gbit": 1.4109537005424495
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.178607540903613,
+          "mbps": 1822.0515086417745,
+          "cpu_seconds_per_delivered_gbit": 1.5553086996078498
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.0215727498289198,
+          "mbps": 2102.1348194336956,
+          "cpu_seconds_per_delivered_gbit": 1.415610313415527
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.1592919998802245,
+          "mbps": 1852.4096157153447,
+          "cpu_seconds_per_delivered_gbit": 1.5320256352424617
+        }
+      ],
+      "idle_rss_kib": 63472,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 63472,
+      "active_rss_kib_max": 82528,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.39729196578264236,
+        0.3391250502318144,
+        0.35699992440640926,
+        0.35091605968773365,
+        0.3424158785492182,
+        0.29433402232825756,
+        0.32791588455438614,
+        0.280875014141202,
+        0.3266669809818268,
+        0.2882499247789383,
+        0.2927500754594803,
+        0.33083301968872547,
+        0.30874996446073055,
+        0.29870797879993916,
+        0.298874918371439,
+        0.30837487429380417,
+        0.28645782731473446,
+        0.2965829335153103,
+        0.32441713847219944,
+        0.27820910327136517,
+        0.26750005781650543
+      ],
+      "rtt_median_ms": 0.30837487429380417,
+      "quic_path_statistics": {
+        "client-2270798831632": {
+          "connection": 2270798831632,
+          "tx_bytes": 867231534,
+          "rx_bytes": 870696259,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 641567,
+          "mtu": 1452
+        },
+        "server-3474998591504": {
+          "connection": 3474998591504,
+          "tx_bytes": 870696163,
+          "rx_bytes": 867226734,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 661551,
+          "mtu": 1452
+        }
+      }
+    },
+    {
+      "label": "accepted-direct-wss-f1-baseline-overlay",
+      "protocol": "wss",
+      "backend": "overlay",
+      "relay": false,
+      "acl": false,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 2.1729512920137495,
+          "mbps": 988.2796986258501,
+          "cpu_seconds_per_delivered_gbit": 0.8847564458847045
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.8756230000872165,
+          "mbps": 1144.9441854253982,
+          "cpu_seconds_per_delivered_gbit": 0.8055940270423887
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.848606624873355,
+          "mbps": 1161.6769187696275,
+          "cpu_seconds_per_delivered_gbit": 0.805594027042389
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.866318792104721,
+          "mbps": 1150.652105677079,
+          "cpu_seconds_per_delivered_gbit": 0.7823109626770022
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 2.668201749911532,
+          "mbps": 804.8430550917685,
+          "cpu_seconds_per_delivered_gbit": 0.9220093488693235
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 2.302869083127007,
+          "mbps": 932.5252849736413,
+          "cpu_seconds_per_delivered_gbit": 0.8335337042808536
+        }
+      ],
+      "idle_rss_kib": 62176,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 62176,
+      "active_rss_kib_max": 68480,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.3227498382329941,
+        0.30191591940820217,
+        0.2965419553220272,
+        0.2908329479396343,
+        0.2799998037517071,
+        0.2669161185622215,
+        0.3013329114764929,
+        0.3025829792022705,
+        0.26783300563693047,
+        0.2774170134216547,
+        0.267665833234787,
+        0.269290991127491,
+        0.2729578409343958,
+        0.2562080044299364,
+        0.26325020007789135,
+        0.2579588908702135,
+        0.2601251471787691,
+        0.2547500189393759,
+        0.26220805011689663,
+        0.2609589137136936,
+        0.26633311063051224
+      ],
+      "rtt_median_ms": 0.26783300563693047,
+      "quic_path_statistics": {},
+      "tcp_capture": {
+        "tcp_payload_packets": 221078,
+        "tcp_payload_bytes": 1702268753,
+        "repeated_sequence_packets": 0,
+        "repeated_sequence_bytes": 0,
+        "capture_kernel_drops": 0,
+        "scope": "Both directions on the isolated underlay listener port"
+      }
+    },
+    {
+      "label": "accepted-direct-wss-f4-baseline-overlay",
+      "protocol": "wss",
+      "backend": "overlay",
+      "relay": false,
+      "acl": false,
+      "flows": 4,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 0.6417857918422669,
+          "mbps": 3346.1065596911685,
+          "cpu_seconds_per_delivered_gbit": 0.7497146725654601
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 0.5988895420450717,
+          "mbps": 3585.775835501871,
+          "cpu_seconds_per_delivered_gbit": 0.7124617695808412
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 0.7267905829939991,
+          "mbps": 2954.7488619809637,
+          "cpu_seconds_per_delivered_gbit": 0.7171183824539185
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 0.6288852919824421,
+          "mbps": 3414.7461792761337,
+          "cpu_seconds_per_delivered_gbit": 0.7310882210731507
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 0.8078862079419196,
+          "mbps": 2658.1511441700295,
+          "cpu_seconds_per_delivered_gbit": 0.7450580596923826
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 0.6235705001745373,
+          "mbps": 3443.850610955649,
+          "cpu_seconds_per_delivered_gbit": 0.7124617695808415
+        }
+      ],
+      "idle_rss_kib": 62016,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 62016,
+      "active_rss_kib_max": 74896,
+      "rss_scope": "Sum of 2 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.36041694693267345,
+        0.3160410560667515,
+        0.34262496046721935,
+        0.28487504459917545,
+        0.3009159117937088,
+        0.28262496925890446,
+        0.3172089345753193,
+        0.3305829595774412,
+        0.2935410011559725,
+        0.2997920382767916,
+        0.2916250377893448,
+        0.2822920214384794,
+        0.29075006023049355,
+        0.28095790185034275,
+        0.25816611014306545,
+        0.2584999892860651,
+        0.2768749836832285,
+        0.2626250497996807,
+        0.27595809660851955,
+        0.26220805011689663,
+        0.2601251471787691
+      ],
+      "rtt_median_ms": 0.28487504459917545,
+      "quic_path_statistics": {},
+      "tcp_capture": {
+        "tcp_payload_packets": 207208,
+        "tcp_payload_bytes": 1697164756,
+        "repeated_sequence_packets": 0,
+        "repeated_sequence_bytes": 0,
+        "capture_kernel_drops": 0,
+        "scope": "Both directions on the isolated underlay listener port"
+      }
+    },
+    {
+      "label": "accepted-relay-h2-f1-baseline-overlay",
+      "protocol": "h2",
+      "backend": "overlay",
+      "relay": true,
+      "acl": false,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.4035966249648482,
+          "mbps": 1529.9863292659186,
+          "cpu_seconds_per_delivered_gbit": 2.244487404823303
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.4642002501059324,
+          "mbps": 1466.6598013793764,
+          "cpu_seconds_per_delivered_gbit": 2.025626599788666
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.4015618751291186,
+          "mbps": 1532.207522270227,
+          "cpu_seconds_per_delivered_gbit": 2.2491440176963797
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.4655206671450287,
+          "mbps": 1465.3383579936126,
+          "cpu_seconds_per_delivered_gbit": 2.0302832126617427
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.399915749905631,
+          "mbps": 1534.0092060145498,
+          "cpu_seconds_per_delivered_gbit": 2.244487404823305
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.4785049159545451,
+          "mbps": 1452.4697380620828,
+          "cpu_seconds_per_delivered_gbit": 2.0256265997886644
+        }
+      ],
+      "idle_rss_kib": 95024,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 95024,
+      "active_rss_kib_max": 105760,
+      "rss_scope": "Sum of 3 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.5542919971048832,
+        0.44220895506441593,
+        0.5034590139985085,
+        0.47404179349541664,
+        0.4874579608440399,
+        0.42912503704428673,
+        0.4855419974774122,
+        0.45808288268744946,
+        0.4760841839015484,
+        0.4147919826209545,
+        0.41854195296764374,
+        0.43870904482901096,
+        0.4267080221325159,
+        0.40483404882252216,
+        0.43870811350643635,
+        0.3933750558644533,
+        0.3860830329358578,
+        0.44420803897082806,
+        0.4302079323679209,
+        0.360333826392889,
+        0.378292053937912
+      ],
+      "rtt_median_ms": 0.43870811350643635,
+      "quic_path_statistics": {},
+      "tcp_capture": {
+        "tcp_payload_packets": 652045,
+        "tcp_payload_bytes": 3538279099,
+        "repeated_sequence_packets": 0,
+        "repeated_sequence_bytes": 0,
+        "capture_kernel_drops": 0,
+        "scope": "Both directions on the isolated underlay listener port"
+      }
+    },
+    {
+      "label": "accepted-relay-quic-f1-baseline-overlay",
+      "protocol": "quic",
+      "backend": "overlay",
+      "relay": true,
+      "acl": false,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.97712979093194,
+          "mbps": 1086.1622023244927,
+          "cpu_seconds_per_delivered_gbit": 3.864988684654236
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.9012213330715895,
+          "mbps": 1129.5284828992278,
+          "cpu_seconds_per_delivered_gbit": 3.688037395477294
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.7631832920014858,
+          "mbps": 1217.9582563774602,
+          "cpu_seconds_per_delivered_gbit": 3.823079168796541
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.6981290420517325,
+          "mbps": 1264.617467118602,
+          "cpu_seconds_per_delivered_gbit": 3.6600977182388266
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.7856909579131752,
+          "mbps": 1202.606553213233,
+          "cpu_seconds_per_delivered_gbit": 3.8743019104003937
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.8866130840033293,
+          "mbps": 1138.2745440538938,
+          "cpu_seconds_per_delivered_gbit": 3.6833807826042158
+        }
+      ],
+      "idle_rss_kib": 96464,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 96464,
+      "active_rss_kib_max": 109744,
+      "rss_scope": "Sum of 3 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.5572088994085789,
+        0.46770786866545677,
+        0.4354999400675297,
+        0.43179094791412354,
+        0.43066591024398804,
+        0.39199995808303356,
+        0.41662505827844143,
+        0.4241669084876776,
+        0.4041660577058792,
+        0.4312081728130579,
+        0.42325002141296864,
+        0.4127919673919678,
+        0.39845798164606094,
+        0.348083209246397,
+        0.3578749019652605,
+        0.3058328293263912,
+        0.3760000690817833,
+        0.3514168784022331,
+        0.3678330685943365,
+        0.3349999897181988,
+        0.34837517887353897
+      ],
+      "rtt_median_ms": 0.4041660577058792,
+      "quic_path_statistics": {
+        "client-2438167937040": {
+          "connection": 2438167937040,
+          "tx_bytes": 903807984,
+          "rx_bytes": 908977246,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 693991,
+          "mtu": 1452
+        },
+        "server-3424769368080": {
+          "connection": 3424769368080,
+          "tx_bytes": 909014048,
+          "rx_bytes": 903920512,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 699921,
+          "mtu": 1452
+        },
+        "relay-2706199707664": {
+          "connection": 2706199707664,
+          "tx_bytes": 903920416,
+          "rx_bytes": 909009248,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 697464,
+          "mtu": 1452
+        },
+        "relay-2706234236944": {
+          "connection": 2706234236944,
+          "tx_bytes": 908977150,
+          "rx_bytes": 903805584,
+          "lost_packets": 0,
+          "lost_bytes": 0,
+          "sent_packets": 699380,
+          "mtu": 1452
+        }
+      }
+    },
+    {
+      "label": "accepted-relay-wss-f1-baseline-overlay",
+      "protocol": "wss",
+      "backend": "overlay",
+      "relay": true,
+      "acl": false,
+      "flows": 1,
+      "binary": "/Users/boyu/code/lowertier/benchmark-results/.work/decision-runtime-20261116/baseline/native/lowertier",
+      "results": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.7085557919926941,
+          "mbps": 1256.899925694193,
+          "cpu_seconds_per_delivered_gbit": 2.016313374042511
+        },
+        {
+          "repeat": 0,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.7071257920470089,
+          "mbps": 1257.9527870790116,
+          "cpu_seconds_per_delivered_gbit": 1.8766149878501888
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.458684790879488,
+          "mbps": 1472.2054150610654,
+          "cpu_seconds_per_delivered_gbit": 2.0815059542655945
+        },
+        {
+          "repeat": 1,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.6657794169150293,
+          "mbps": 1289.1764817079272,
+          "cpu_seconds_per_delivered_gbit": 1.9231811165809634
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 268435456,
+          "seconds": 1.609838374890387,
+          "mbps": 1333.974690562474,
+          "cpu_seconds_per_delivered_gbit": 2.0116567611694336
+        },
+        {
+          "repeat": 2,
+          "direction": "PUT",
+          "bytes": 268435456,
+          "seconds": 1.6642944999039173,
+          "mbps": 1290.3267108819853,
+          "cpu_seconds_per_delivered_gbit": 1.8998980522155753
+        }
+      ],
+      "idle_rss_kib": 93648,
+      "source_reference": "57d2151b",
+      "connection_setup": "before timing",
+      "payload_validation": "Every byte checked against a preallocated repeated pattern",
+      "active_rss_kib_min": 93648,
+      "active_rss_kib_max": 104192,
+      "rss_scope": "Sum of 3 LowTier processes; sampled every 100 ms",
+      "delivery_ratio": 1.0,
+      "missing_bytes": 0,
+      "rtt_ms": [
+        0.33666612580418587,
+        0.31550019048154354,
+        0.3392088692635298,
+        0.29458291828632355,
+        0.32712495885789394,
+        0.30791712924838066,
+        0.29270793311297894,
+        0.26295799762010574,
+        0.28741685673594475,
+        0.3055830020457506,
+        0.2833751495927572,
+        0.3179169725626707,
+        0.30033313669264317,
+        0.2658329904079437,
+        0.28491695411503315,
+        0.26783300563693047,
+        0.24554203264415264,
+        0.2922499552369118,
+        0.2460838295519352,
+        0.284707872197032,
+        0.28033298440277576
+      ],
+      "rtt_median_ms": 0.2922499552369118,
+      "quic_path_statistics": {},
+      "tcp_capture": {
+        "tcp_payload_packets": 545900,
+        "tcp_payload_bytes": 3537208967,
+        "repeated_sequence_packets": 2,
+        "repeated_sequence_bytes": 18020,
+        "capture_kernel_drops": 0,
+        "scope": "Both directions on the isolated underlay listener port"
+      }
+    }
+  ],
+  "native_comparison": {
+    "client": "861jp",
+    "server": "862jp",
+    "effective_mtu": 1280,
+    "transport": "Automatic fleet policy; the underlying protocol was not isolated.",
+    "baseline": {
+      "runs": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.862715891562402,
+          "mbps": 220.81113681001096,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.5890767574310045,
+          "rss_kib_min": 80832,
+          "rss_kib_max": 98012,
+          "tcp_retransmissions": 15,
+          "rtt_ms": [
+            2.6271576061844826,
+            1.3123173266649246,
+            1.371840015053749,
+            7.044377736747265,
+            1.4306511729955673,
+            1.3466514647006989,
+            1.310683786869049,
+            1.2382371351122856,
+            2.2050077095627785,
+            2.196451649069786,
+            1.331913284957409,
+            1.1625243350863457,
+            1.4343485236167908,
+            1.7626602202653885,
+            1.3824999332427979,
+            1.1926200240850449,
+            1.2395577505230904,
+            1.4048218727111816,
+            1.4209328219294548,
+            1.521802507340908,
+            1.3518407940864563
+          ],
+          "rtt_median_ms": 1.3824999332427979,
+          "local_tcp": {
+            "rtt_us": 1695,
+            "total_retrans": 0
+          },
+          "remote_tcp": {
+            "rtt_us": 94411,
+            "total_retrans": 16
+          }
+        },
+        {
+          "repeat": 0,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 5.119455455802381,
+          "mbps": 209.73750690281386,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.849847078323313,
+          "rss_kib_min": 87304,
+          "rss_kib_max": 97260,
+          "tcp_retransmissions": 15,
+          "rtt_ms": [
+            2.6271576061844826,
+            1.3123173266649246,
+            1.371840015053749,
+            7.044377736747265,
+            1.4306511729955673,
+            1.3466514647006989,
+            1.310683786869049,
+            1.2382371351122856,
+            2.2050077095627785,
+            2.196451649069786,
+            1.331913284957409,
+            1.1625243350863457,
+            1.4343485236167908,
+            1.7626602202653885,
+            1.3824999332427979,
+            1.1926200240850449,
+            1.2395577505230904,
+            1.4048218727111816,
+            1.4209328219294548,
+            1.521802507340908,
+            1.3518407940864563
+          ],
+          "rtt_median_ms": 1.3824999332427979,
+          "local_tcp": {
+            "rtt_us": 88903,
+            "total_retrans": 15
+          },
+          "remote_tcp": {
+            "rtt_us": 63582,
+            "total_retrans": 16
+          }
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.960904099978507,
+          "mbps": 216.44075401591658,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.5518238544464196,
+          "rss_kib_min": 89096,
+          "rss_kib_max": 97176,
+          "tcp_retransmissions": 9,
+          "rtt_ms": [
+            2.6271576061844826,
+            1.3123173266649246,
+            1.371840015053749,
+            7.044377736747265,
+            1.4306511729955673,
+            1.3466514647006989,
+            1.310683786869049,
+            1.2382371351122856,
+            2.2050077095627785,
+            2.196451649069786,
+            1.331913284957409,
+            1.1625243350863457,
+            1.4343485236167908,
+            1.7626602202653885,
+            1.3824999332427979,
+            1.1926200240850449,
+            1.2395577505230904,
+            1.4048218727111816,
+            1.4209328219294548,
+            1.521802507340908,
+            1.3518407940864563
+          ],
+          "rtt_median_ms": 1.3824999332427979,
+          "local_tcp": {
+            "rtt_us": 60452,
+            "total_retrans": 15
+          },
+          "remote_tcp": {
+            "rtt_us": 17845,
+            "total_retrans": 25
+          }
+        },
+        {
+          "repeat": 1,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 4.808191806077957,
+          "mbps": 223.31509792157217,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.6449561119078826,
+          "rss_kib_min": 91640,
+          "rss_kib_max": 97904,
+          "tcp_retransmissions": 14,
+          "rtt_ms": [
+            2.6271576061844826,
+            1.3123173266649246,
+            1.371840015053749,
+            7.044377736747265,
+            1.4306511729955673,
+            1.3466514647006989,
+            1.310683786869049,
+            1.2382371351122856,
+            2.2050077095627785,
+            2.196451649069786,
+            1.331913284957409,
+            1.1625243350863457,
+            1.4343485236167908,
+            1.7626602202653885,
+            1.3824999332427979,
+            1.1926200240850449,
+            1.2395577505230904,
+            1.4048218727111816,
+            1.4209328219294548,
+            1.521802507340908,
+            1.3518407940864563
+          ],
+          "rtt_median_ms": 1.3824999332427979,
+          "local_tcp": {
+            "rtt_us": 82450,
+            "total_retrans": 29
+          },
+          "remote_tcp": {
+            "rtt_us": 12366,
+            "total_retrans": 25
+          }
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.957490609958768,
+          "mbps": 216.5897847275863,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.4959444999695415,
+          "rss_kib_min": 88892,
+          "rss_kib_max": 97788,
+          "tcp_retransmissions": 1,
+          "rtt_ms": [
+            2.6271576061844826,
+            1.3123173266649246,
+            1.371840015053749,
+            7.044377736747265,
+            1.4306511729955673,
+            1.3466514647006989,
+            1.310683786869049,
+            1.2382371351122856,
+            2.2050077095627785,
+            2.196451649069786,
+            1.331913284957409,
+            1.1625243350863457,
+            1.4343485236167908,
+            1.7626602202653885,
+            1.3824999332427979,
+            1.1926200240850449,
+            1.2395577505230904,
+            1.4048218727111816,
+            1.4209328219294548,
+            1.521802507340908,
+            1.3518407940864563
+          ],
+          "rtt_median_ms": 1.3824999332427979,
+          "local_tcp": {
+            "rtt_us": 56027,
+            "total_retrans": 29
+          },
+          "remote_tcp": {
+            "rtt_us": 94006,
+            "total_retrans": 26
+          }
+        },
+        {
+          "repeat": 2,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 4.73105843923986,
+          "mbps": 226.95594184470028,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.5518238544464196,
+          "rss_kib_min": 89872,
+          "rss_kib_max": 98540,
+          "tcp_retransmissions": 14,
+          "rtt_ms": [
+            2.6271576061844826,
+            1.3123173266649246,
+            1.371840015053749,
+            7.044377736747265,
+            1.4306511729955673,
+            1.3466514647006989,
+            1.310683786869049,
+            1.2382371351122856,
+            2.2050077095627785,
+            2.196451649069786,
+            1.331913284957409,
+            1.1625243350863457,
+            1.4343485236167908,
+            1.7626602202653885,
+            1.3824999332427979,
+            1.1926200240850449,
+            1.2395577505230904,
+            1.4048218727111816,
+            1.4209328219294548,
+            1.521802507340908,
+            1.3518407940864563
+          ],
+          "rtt_median_ms": 1.3824999332427979,
+          "local_tcp": {
+            "rtt_us": 83892,
+            "total_retrans": 43
+          },
+          "remote_tcp": {
+            "rtt_us": 63886,
+            "total_retrans": 26
+          }
+        }
+      ],
+      "median": {
+        "GET": {
+          "mbps": 216.5897847275863,
+          "cpu_seconds_per_delivered_gbit": 2.5518238544464196,
+          "seconds": 4.957490609958768
+        },
+        "POST": {
+          "mbps": 223.31509792157217,
+          "cpu_seconds_per_delivered_gbit": 2.6449561119078826,
+          "seconds": 4.808191806077957
+        }
+      },
+      "rss_kib_min": 80832,
+      "rss_kib_sampled_peak": 98540,
+      "tcp_retransmissions": 68,
+      "rtt_median_ms": 1.3824999332427979
+    },
+    "candidate": {
+      "runs": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 6.65116726141423,
+          "mbps": 161.43659929124857,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 3.222376108169555,
+          "rss_kib_min": 81472,
+          "rss_kib_max": 91152,
+          "tcp_retransmissions": 59,
+          "rtt_ms": [
+            3.338295966386795,
+            1.838352531194687,
+            1.2566614896059036,
+            1.1910861358046532,
+            1.2223469093441963,
+            1.1424953117966652,
+            1.268753781914711,
+            1.1517414823174477,
+            1.1269161477684975,
+            1.103951595723629,
+            1.159587875008583,
+            63.74511122703552,
+            1.3835513964295387,
+            1.2835217639803886,
+            1.394573599100113,
+            1.5923874452710152,
+            1.1880602687597275,
+            1.4523006975650787,
+            2.00706347823143,
+            1.142393797636032,
+            1.157352700829506
+          ],
+          "rtt_median_ms": 1.2566614896059036,
+          "local_tcp": {
+            "rtt_us": 2818,
+            "total_retrans": 0
+          },
+          "remote_tcp": {
+            "rtt_us": 70817,
+            "total_retrans": 60
+          }
+        },
+        {
+          "repeat": 0,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 4.933399189263582,
+          "mbps": 217.6474643156293,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.5518238544464102,
+          "rss_kib_min": 89212,
+          "rss_kib_max": 94176,
+          "tcp_retransmissions": 22,
+          "rtt_ms": [
+            3.338295966386795,
+            1.838352531194687,
+            1.2566614896059036,
+            1.1910861358046532,
+            1.2223469093441963,
+            1.1424953117966652,
+            1.268753781914711,
+            1.1517414823174477,
+            1.1269161477684975,
+            1.103951595723629,
+            1.159587875008583,
+            63.74511122703552,
+            1.3835513964295387,
+            1.2835217639803886,
+            1.394573599100113,
+            1.5923874452710152,
+            1.1880602687597275,
+            1.4523006975650787,
+            2.00706347823143,
+            1.142393797636032,
+            1.157352700829506
+          ],
+          "rtt_median_ms": 1.2566614896059036,
+          "local_tcp": {
+            "rtt_us": 75382,
+            "total_retrans": 22
+          },
+          "remote_tcp": {
+            "rtt_us": 47750,
+            "total_retrans": 60
+          }
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.856728347018361,
+          "mbps": 221.08336050114698,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.3562461137771606,
+          "rss_kib_min": 86784,
+          "rss_kib_max": 93412,
+          "tcp_retransmissions": 0,
+          "rtt_ms": [
+            3.338295966386795,
+            1.838352531194687,
+            1.2566614896059036,
+            1.1910861358046532,
+            1.2223469093441963,
+            1.1424953117966652,
+            1.268753781914711,
+            1.1517414823174477,
+            1.1269161477684975,
+            1.103951595723629,
+            1.159587875008583,
+            63.74511122703552,
+            1.3835513964295387,
+            1.2835217639803886,
+            1.394573599100113,
+            1.5923874452710152,
+            1.1880602687597275,
+            1.4523006975650787,
+            2.00706347823143,
+            1.142393797636032,
+            1.157352700829506
+          ],
+          "rtt_median_ms": 1.2566614896059036,
+          "local_tcp": {
+            "rtt_us": 51052,
+            "total_retrans": 22
+          },
+          "remote_tcp": {
+            "rtt_us": 64928,
+            "total_retrans": 60
+          }
+        },
+        {
+          "repeat": 1,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 5.823671701364219,
+          "mbps": 184.37540422281558,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.39349901676178,
+          "rss_kib_min": 85700,
+          "rss_kib_max": 89920,
+          "tcp_retransmissions": 2,
+          "rtt_ms": [
+            3.338295966386795,
+            1.838352531194687,
+            1.2566614896059036,
+            1.1910861358046532,
+            1.2223469093441963,
+            1.1424953117966652,
+            1.268753781914711,
+            1.1517414823174477,
+            1.1269161477684975,
+            1.103951595723629,
+            1.159587875008583,
+            63.74511122703552,
+            1.3835513964295387,
+            1.2835217639803886,
+            1.394573599100113,
+            1.5923874452710152,
+            1.1880602687597275,
+            1.4523006975650787,
+            2.00706347823143,
+            1.142393797636032,
+            1.157352700829506
+          ],
+          "rtt_median_ms": 1.2566614896059036,
+          "local_tcp": {
+            "rtt_us": 61876,
+            "total_retrans": 24
+          },
+          "remote_tcp": {
+            "rtt_us": 44250,
+            "total_retrans": 60
+          }
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.693890776485205,
+          "mbps": 228.753048404765,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.169981598854066,
+          "rss_kib_min": 86220,
+          "rss_kib_max": 88256,
+          "tcp_retransmissions": 0,
+          "rtt_ms": [
+            3.338295966386795,
+            1.838352531194687,
+            1.2566614896059036,
+            1.1910861358046532,
+            1.2223469093441963,
+            1.1424953117966652,
+            1.268753781914711,
+            1.1517414823174477,
+            1.1269161477684975,
+            1.103951595723629,
+            1.159587875008583,
+            63.74511122703552,
+            1.3835513964295387,
+            1.2835217639803886,
+            1.394573599100113,
+            1.5923874452710152,
+            1.1880602687597275,
+            1.4523006975650787,
+            2.00706347823143,
+            1.142393797636032,
+            1.157352700829506
+          ],
+          "rtt_median_ms": 1.2566614896059036,
+          "local_tcp": {
+            "rtt_us": 41996,
+            "total_retrans": 24
+          },
+          "remote_tcp": {
+            "rtt_us": 25749,
+            "total_retrans": 60
+          }
+        },
+        {
+          "repeat": 2,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 5.201466183178127,
+          "mbps": 206.4306074838186,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.533197402954101,
+          "rss_kib_min": 85484,
+          "rss_kib_max": 88536,
+          "tcp_retransmissions": 55,
+          "rtt_ms": [
+            3.338295966386795,
+            1.838352531194687,
+            1.2566614896059036,
+            1.1910861358046532,
+            1.2223469093441963,
+            1.1424953117966652,
+            1.268753781914711,
+            1.1517414823174477,
+            1.1269161477684975,
+            1.103951595723629,
+            1.159587875008583,
+            63.74511122703552,
+            1.3835513964295387,
+            1.2835217639803886,
+            1.394573599100113,
+            1.5923874452710152,
+            1.1880602687597275,
+            1.4523006975650787,
+            2.00706347823143,
+            1.142393797636032,
+            1.157352700829506
+          ],
+          "rtt_median_ms": 1.2566614896059036,
+          "local_tcp": {
+            "rtt_us": 70037,
+            "total_retrans": 79
+          },
+          "remote_tcp": {
+            "rtt_us": 17567,
+            "total_retrans": 60
+          }
+        }
+      ],
+      "median": {
+        "GET": {
+          "mbps": 221.08336050114698,
+          "cpu_seconds_per_delivered_gbit": 2.3562461137771606,
+          "seconds": 4.856728347018361
+        },
+        "POST": {
+          "mbps": 206.4306074838186,
+          "cpu_seconds_per_delivered_gbit": 2.533197402954101,
+          "seconds": 5.201466183178127
+        }
+      },
+      "rss_kib_min": 81472,
+      "rss_kib_sampled_peak": 94176,
+      "tcp_retransmissions": 138,
+      "rtt_median_ms": 1.2566614896059036
+    },
+    "intermediate_application_commit": "1321101b",
+    "intermediate": {
+      "runs": [
+        {
+          "repeat": 0,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.672730724327266,
+          "mbps": 229.7889365654784,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.6170164346694946,
+          "rss_kib_min": 89400,
+          "rss_kib_max": 103372,
+          "tcp_retransmissions": 19,
+          "rtt_ms": [
+            2.0109908655285835,
+            1.2449892237782478,
+            1.1482257395982742,
+            1.0783318430185318,
+            1.1979807168245316,
+            1.3454798609018326,
+            1.5303194522857666,
+            1.1563515290617943,
+            1.5089483931660652,
+            1.3201506808400154,
+            1.3972381129860878,
+            1.2447675690054893,
+            1.2197410687804222,
+            1.2298086658120155,
+            1.2359917163848877,
+            1.2026289477944374,
+            2.2795191034674644,
+            1.1087404564023018,
+            1.1295415461063385,
+            1.1228974908590317,
+            1.1544181033968925
+          ],
+          "rtt_median_ms": 1.2298086658120155,
+          "local_tcp": {
+            "rtt_us": 1182,
+            "total_retrans": 0
+          },
+          "remote_tcp": {
+            "rtt_us": 92780,
+            "total_retrans": 19
+          }
+        },
+        {
+          "repeat": 0,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 4.728068808093667,
+          "mbps": 227.09944960232656,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.6635825634002686,
+          "rss_kib_min": 98944,
+          "rss_kib_max": 106592,
+          "tcp_retransmissions": 21,
+          "rtt_ms": [
+            2.0109908655285835,
+            1.2449892237782478,
+            1.1482257395982742,
+            1.0783318430185318,
+            1.1979807168245316,
+            1.3454798609018326,
+            1.5303194522857666,
+            1.1563515290617943,
+            1.5089483931660652,
+            1.3201506808400154,
+            1.3972381129860878,
+            1.2447675690054893,
+            1.2197410687804222,
+            1.2298086658120155,
+            1.2359917163848877,
+            1.2026289477944374,
+            2.2795191034674644,
+            1.1087404564023018,
+            1.1295415461063385,
+            1.1228974908590317,
+            1.1544181033968925
+          ],
+          "rtt_median_ms": 1.2298086658120155,
+          "local_tcp": {
+            "rtt_us": 80716,
+            "total_retrans": 21
+          },
+          "remote_tcp": {
+            "rtt_us": 62463,
+            "total_retrans": 19
+          }
+        },
+        {
+          "repeat": 1,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.875538194552064,
+          "mbps": 220.2304199359573,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.468004822731018,
+          "rss_kib_min": 99096,
+          "rss_kib_max": 105092,
+          "tcp_retransmissions": 64,
+          "rtt_ms": [
+            2.0109908655285835,
+            1.2449892237782478,
+            1.1482257395982742,
+            1.0783318430185318,
+            1.1979807168245316,
+            1.3454798609018326,
+            1.5303194522857666,
+            1.1563515290617943,
+            1.5089483931660652,
+            1.3201506808400154,
+            1.3972381129860878,
+            1.2447675690054893,
+            1.2197410687804222,
+            1.2298086658120155,
+            1.2359917163848877,
+            1.2026289477944374,
+            2.2795191034674644,
+            1.1087404564023018,
+            1.1295415461063385,
+            1.1228974908590317,
+            1.1544181033968925
+          ],
+          "rtt_median_ms": 1.2298086658120155,
+          "local_tcp": {
+            "rtt_us": 56073,
+            "total_retrans": 21
+          },
+          "remote_tcp": {
+            "rtt_us": 33215,
+            "total_retrans": 83
+          }
+        },
+        {
+          "repeat": 1,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 4.0025993986055255,
+          "mbps": 268.26112660039956,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.1606683731079093,
+          "rss_kib_min": 101828,
+          "rss_kib_max": 107952,
+          "tcp_retransmissions": 55,
+          "rtt_ms": [
+            2.0109908655285835,
+            1.2449892237782478,
+            1.1482257395982742,
+            1.0783318430185318,
+            1.1979807168245316,
+            1.3454798609018326,
+            1.5303194522857666,
+            1.1563515290617943,
+            1.5089483931660652,
+            1.3201506808400154,
+            1.3972381129860878,
+            1.2447675690054893,
+            1.2197410687804222,
+            1.2298086658120155,
+            1.2359917163848877,
+            1.2026289477944374,
+            2.2795191034674644,
+            1.1087404564023018,
+            1.1295415461063385,
+            1.1228974908590317,
+            1.1544181033968925
+          ],
+          "rtt_median_ms": 1.2298086658120155,
+          "local_tcp": {
+            "rtt_us": 84756,
+            "total_retrans": 76
+          },
+          "remote_tcp": {
+            "rtt_us": 22724,
+            "total_retrans": 83
+          }
+        },
+        {
+          "repeat": 2,
+          "direction": "GET",
+          "bytes": 134217728,
+          "seconds": 4.760536603629589,
+          "mbps": 225.55058670935207,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.4028122425079346,
+          "rss_kib_min": 101132,
+          "rss_kib_max": 107292,
+          "tcp_retransmissions": 1,
+          "rtt_ms": [
+            2.0109908655285835,
+            1.2449892237782478,
+            1.1482257395982742,
+            1.0783318430185318,
+            1.1979807168245316,
+            1.3454798609018326,
+            1.5303194522857666,
+            1.1563515290617943,
+            1.5089483931660652,
+            1.3201506808400154,
+            1.3972381129860878,
+            1.2447675690054893,
+            1.2197410687804222,
+            1.2298086658120155,
+            1.2359917163848877,
+            1.2026289477944374,
+            2.2795191034674644,
+            1.1087404564023018,
+            1.1295415461063385,
+            1.1228974908590317,
+            1.1544181033968925
+          ],
+          "rtt_median_ms": 1.2298086658120155,
+          "local_tcp": {
+            "rtt_us": 57217,
+            "total_retrans": 76
+          },
+          "remote_tcp": {
+            "rtt_us": 88459,
+            "total_retrans": 84
+          }
+        },
+        {
+          "repeat": 2,
+          "direction": "POST",
+          "bytes": 134217728,
+          "seconds": 4.150907188653946,
+          "mbps": 258.6764230563759,
+          "delivery_ratio": 1.0,
+          "cpu_seconds_per_delivered_gbit": 2.477318048477173,
+          "rss_kib_min": 101252,
+          "rss_kib_max": 106540,
+          "tcp_retransmissions": 1,
+          "rtt_ms": [
+            2.0109908655285835,
+            1.2449892237782478,
+            1.1482257395982742,
+            1.0783318430185318,
+            1.1979807168245316,
+            1.3454798609018326,
+            1.5303194522857666,
+            1.1563515290617943,
+            1.5089483931660652,
+            1.3201506808400154,
+            1.3972381129860878,
+            1.2447675690054893,
+            1.2197410687804222,
+            1.2298086658120155,
+            1.2359917163848877,
+            1.2026289477944374,
+            2.2795191034674644,
+            1.1087404564023018,
+            1.1295415461063385,
+            1.1228974908590317,
+            1.1544181033968925
+          ],
+          "rtt_median_ms": 1.2298086658120155,
+          "local_tcp": {
+            "rtt_us": 99770,
+            "total_retrans": 77
+          },
+          "remote_tcp": {
+            "rtt_us": 61419,
+            "total_retrans": 84
+          }
+        }
+      ],
+      "median": {
+        "GET": {
+          "mbps": 225.55058670935207,
+          "cpu_seconds_per_delivered_gbit": 2.468004822731018,
+          "seconds": 4.760536603629589
+        },
+        "POST": {
+          "mbps": 258.6764230563759,
+          "cpu_seconds_per_delivered_gbit": 2.477318048477173,
+          "seconds": 4.150907188653946
+        }
+      },
+      "rss_kib_min": 89400,
+      "rss_kib_sampled_peak": 107952,
+      "tcp_retransmissions": 161,
+      "rtt_median_ms": 1.2298086658120155
+    }
+  },
+  "graph": [
+    {
+      "address": "10.126.126.2",
+      "port": 8484,
+      "nodes": 37,
+      "edges": 30,
+      "source_pages": 21,
+      "verified": true
+    },
+    {
+      "address": "100.108.186.13",
+      "port": 8484,
+      "nodes": 37,
+      "edges": 30,
+      "source_pages": 21,
+      "verified": true
+    }
+  ],
+  "limitations": [
+    "Whole-tunnel throughput and sampled RSS results are mixed. No universal speed or memory gain is established.",
+    "Local measurements use loopback. They do not establish WAN throughput.",
+    "CPU covers LowTier processes. Other processes and kernel work charged elsewhere are excluded.",
+    "RSS is sampled every 100 milliseconds and is summed across participating LowTier processes.",
+    "The local matrix uses three transfers per direction. Additional baseline process starts showed variation.",
+    "Native runs use automatic transport selection. They cannot isolate a transport or establish a universal version ranking.",
+    "The intermediate candidate had a higher native upload rate in a separate automatic-route run. That run does not establish a matched transport ranking.",
+    "The GUI and FFI can require the source packet stack. Lazy allocation does not remove that required state.",
+    "The unchanged parallel-suite logging assertion remains outside accepted sequential verification.",
+    "Stripped release profiles do not identify individual Rust functions."
+  ],
+  "recovered_failures": [
+    "HTTP/3 request bursts received false 503 replies before bounded queue admission was repaired.",
+    "The idle gate waited for a DashMap shard before the atomic-only gate was installed.",
+    "The first TCP capture retained packets in the kernel. Immediate capture mode recovered the evidence.",
+    "The timed native fixture ended with queued bytes. The replacement verifies exact receiver bytes.",
+    "An initial local benchmark validator allocated 128 KiB per read. Final measurements reuse a fixed pattern.",
+    "Local protected configuration records were recovered from verified pre-install references.",
+    "The old local node lost routes to restarted peers. Its planned update restored routes and delivery.",
+    "The router upload timed out. A verified 8879849-byte prefix allowed the remaining transfer to resume.",
+    "The router restart returned before the new process was ready. Its new PID and running image were verified afterward.",
+    "The viewer required a restart to include the new source page in its file allowlist.",
+    "The cleanup audit first included an offline historical host. It was corrected to inspect the eleven deployed hosts."
+  ],
+  "audit": "benchmark-results/.work/decision-runtime-20261116/audit.jsonl",
+  "raw_measurements": "benchmark-results/.work/decision-runtime-20261116"
+}

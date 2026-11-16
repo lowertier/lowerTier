@@ -124,7 +124,7 @@ It does not select the overlay transport.
 
 ### D07: IP or Ethernet fabric entry
 
-**Source:** [NicCtx::do_forward_nic_batch_to_peers](../../lowertier/src/instance/virtual_nic.rs#L1318), [PeerManager::send_fabric_batch](../../lowertier/src/peers/peer_manager.rs#L5706).
+**Source:** [NicCtx::do_forward_nic_batch_to_peers](../../lowertier/src/instance/virtual_nic.rs#L1318), [PeerManager::send_fabric_batch](../../lowertier/src/peers/peer_manager.rs#L5633).
 
 A native Ethernet adapter creates `FabricPayloadKind::Ethernet`.
 Other adapters create `FabricPayloadKind::Ip`.
@@ -133,7 +133,7 @@ This is a payload representation decision for each batch.
 
 ### D08: Ethernet control, IP, or complete Ethernet
 
-**Source:** [send_msg_by_hybrid_ethernet_batch](../../lowertier/src/peers/peer_manager.rs#L5726).
+**Source:** [send_msg_by_hybrid_ethernet_batch](../../lowertier/src/peers/peer_manager.rs#L5653).
 
 Source admission runs before local control handling.
 A handled neighbor control frame stops at the local handler.
@@ -161,7 +161,7 @@ Both packet routing and proxy routing use this result.
 
 ### D10: Service route selection
 
-**Source:** [ServiceRouteSnapshot::candidates](../../lowertier/src/peers/service_route.rs#L93), [ServiceRouteStore::select_gateway](../../lowertier/src/peers/service_route.rs#L198).
+**Source:** [ServiceRouteSnapshot::candidates](../../lowertier/src/peers/service_route.rs#L97), [ServiceRouteStore::select_gateway](../../lowertier/src/peers/service_route.rs#L210).
 
 The route snapshot supplies the longest matching prefix.
 The selector keeps live gateways and blackhole routes.
@@ -176,7 +176,7 @@ Packet sending does not copy topology routes into another store.
 
 ### D11: Proxy route adapter
 
-**Source:** [PeerManager::plan_user_route](../../lowertier/src/peers/peer_manager.rs#L5587).
+**Source:** [PeerManager::plan_user_route](../../lowertier/src/peers/peer_manager.rs#L5516).
 
 The proxy planner reads the published forwarding snapshot and calls the shared D09 resolver.
 Its output selects `UserRoutePlan::Overlay`, `UserRoutePlan::Blackhole`, or `UserRoutePlan::System`.
@@ -186,7 +186,7 @@ The adapter retains the proxy fallback contract without repeating destination po
 
 ### D12: Compact IP and complete Ethernet recipients
 
-**Source:** [hybrid_compact_unicast_peer](../../lowertier/src/peers/peer_manager.rs#L5158), [hybrid_recipient_sets](../../lowertier/src/peers/peer_manager.rs#L5186), [route_requires_full_ethernet](../../lowertier/src/peers/peer_manager.rs#L5100).
+**Source:** [hybrid_compact_unicast_peer](../../lowertier/src/peers/peer_manager.rs#L5102), [hybrid_recipient_sets](../../lowertier/src/peers/peer_manager.rs#L5130), [route_requires_full_ethernet](../../lowertier/src/peers/peer_manager.rs#L5044).
 
 A single eligible unicast recipient can use compact IP.
 Other cases build separate compact and complete Ethernet recipient sets.
@@ -199,7 +199,7 @@ These decisions preserve Ethernet semantics and authorization.
 
 ### D13: Path rule precedence
 
-**Source:** [PathRuntime::rule_for_destination](../../lowertier/src/peers/path_policy.rs#L903), [rule_for_address](../../lowertier/src/peers/path_policy.rs#L892).
+**Source:** [PathRuntime::rule_for_destination](../../lowertier/src/peers/path_policy.rs#L911), [rule_for_address](../../lowertier/src/peers/path_policy.rs#L900).
 
 Peer selection checks an exact peer rule first.
 It then checks a gateway rule with relay layers for that peer.
@@ -212,7 +212,7 @@ Send paths do not refresh configuration.
 
 ### D14: Relay group mode
 
-**Source:** [PathRuntime::pick_one](../../lowertier/src/peers/path_policy.rs#L776), [expand_rule_chains](../../lowertier/src/peers/path_policy.rs#L934), [PathPolicy::rule](../../lowertier/src/peers/path_policy.rs#L357).
+**Source:** [PathRuntime::pick_one](../../lowertier/src/peers/path_policy.rs#L784), [expand_rule_chains](../../lowertier/src/peers/path_policy.rs#L942), [PathPolicy::rule](../../lowertier/src/peers/path_policy.rs#L357).
 
 `Failover` selects the first usable member.
 `Flow` selects one member with the existing weighted flow score.
@@ -223,7 +223,7 @@ The runtime retains at most 16 active chains.
 
 ### D15: Explicit chain result
 
-**Source:** [PathRuntime::plan_for_destination](../../lowertier/src/peers/path_policy.rs#L1147), [PeerManager::send_path_packets](../../lowertier/src/peers/peer_manager.rs#L4189).
+**Source:** [PathRuntime::plan_for_destination](../../lowertier/src/peers/path_policy.rs#L1155), [PeerManager::send_path_packets](../../lowertier/src/peers/peer_manager.rs#L4135).
 
 | Condition | Plan | Sender action |
 | --- | --- | --- |
@@ -242,7 +242,7 @@ This table describes planning fallback, not a general retry after every send err
 
 ### D16: Packet next-hop policy
 
-**Source:** [PeerManager::get_next_hop_policy](../../lowertier/src/peers/peer_manager.rs#L3707).
+**Source:** [PeerManager::get_next_hop_policy](../../lowertier/src/peers/peer_manager.rs#L3705).
 
 Control traffic selects `ControlHop`.
 Data marked `speed_first` selects `MaxGoodput`.
@@ -252,7 +252,7 @@ Packet classification takes precedence over the data preference flags.
 
 ### D17: Automatic route algorithm and table fallback
 
-**Source:** [RouteTable::build_automatic_next_hops](../../lowertier/src/peers/peer_route.rs#L4109), [ForwardingDecisionSnapshot::next_hop](../../lowertier/src/peers/route_trait.rs#L421).
+**Source:** [RouteTable::build_automatic_next_hops](../../lowertier/src/peers/peer_route.rs#L4109), [ForwardingDecisionSnapshot::next_hop](../../lowertier/src/peers/route_trait.rs#L429).
 
 `ControlHop` builds a least-hop map from the control graph.
 `LeastHop` and `LeastCost` use their corresponding data graph algorithms.
@@ -265,7 +265,7 @@ Control lookup uses its separate control map.
 
 ### D18: Shared direct or relay selection
 
-**Source:** [resolve_peer_send_target](../../lowertier/src/peers/peer_manager.rs#L4829), [authorize_peer_send](../../lowertier/src/peers/peer_manager.rs#L4806), [send_ordered_peer_batches](../../lowertier/src/peers/peer_manager.rs#L4337), [send_msg_internal_authorized](../../lowertier/src/peers/peer_manager.rs#L4865), [send_msg_internal_batch_authorized](../../lowertier/src/peers/peer_manager.rs#L4949).
+**Source:** [resolve_peer_send_target](../../lowertier/src/peers/peer_manager.rs#L4773), [authorize_peer_send](../../lowertier/src/peers/peer_manager.rs#L4750), [send_ordered_peer_batches](../../lowertier/src/peers/peer_manager.rs#L4282), [send_msg_internal_authorized](../../lowertier/src/peers/peer_manager.rs#L4809), [send_msg_internal_batch_authorized](../../lowertier/src/peers/peer_manager.rs#L4893).
 
 The ordered sender processes configured paths before its direct send shortcut.
 A uniform single-peer batch with one eligible connection can use prepared direct dispatch.
@@ -282,7 +282,7 @@ The batch sender retains its previous result at that boundary.
 
 ### D19: Gateway flow pin and immediate direct preference
 
-**Source:** [PeerMap::get_gateway_peer_id_for_flow](../../lowertier/src/peers/peer_map.rs#L1591), [get_gateway_peer_id_with_generation](../../lowertier/src/peers/peer_map.rs#L1620), [get_gateway_peer_id_for_packet](../../lowertier/src/peers/peer_map.rs#L1651).
+**Source:** [PeerMap::get_gateway_peer_id_for_flow](../../lowertier/src/peers/peer_map.rs#L1595), [get_gateway_peer_id_with_generation](../../lowertier/src/peers/peer_map.rs#L1624), [get_gateway_peer_id_for_packet](../../lowertier/src/peers/peer_map.rs#L1655).
 
 Snapshot policy supplies the candidate route.
 A live direct link replaces an authorized snapshot relay candidate immediately.
@@ -347,7 +347,7 @@ This independent server decision can refuse the client's D21 shortcut.
 
 ### D23: UDP proxy implementation
 
-**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L784), [udp_connect](../../lowertier/src/gateway/socks5.rs#L995).
+**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L874), [udp_connect](../../lowertier/src/gateway/socks5.rs#L1071).
 
 The shared target planner rejects blackholes and overlay routes without a local overlay IPv4 address.
 An admitted overlay route creates or reuses the packet stack and opens a smoltcp UDP socket.
@@ -364,7 +364,7 @@ TCP uses the three D21 backends.
 
 ### D25: Direct NIC receive shortcut
 
-**Source:** [DirectNicIngress::try_process](../../lowertier/src/peers/direct_nic.rs#L481), [inspect_direct_nic_batch](../../lowertier/src/peers/peer_manager.rs#L689).
+**Source:** [DirectNicIngress::try_process](../../lowertier/src/peers/direct_nic.rs#L481), [inspect_direct_nic_batch](../../lowertier/src/peers/peer_manager.rs#L688).
 
 An eligible batch has one authenticated origin, one data type, and the local destination.
 Packets must be decoded and permitted for NIC delivery.
@@ -375,10 +375,11 @@ A failed authorization consumes and drops the batch.
 The shortcut does not bypass these checks.
 The SOCKS5 packet filter is inactive when no packet consumer is registered.
 An enabled proxy listener alone does not activate this filter.
+The idle gate reads one atomic entry counter and does not lock map shards.
 
 ### D26: General receive dispatch
 
-**Source:** [PeerManager::start_peer_recv](../../lowertier/src/peers/peer_manager.rs#L2406).
+**Source:** [PeerManager::start_peer_recv](../../lowertier/src/peers/peer_manager.rs#L2405).
 
 Foreign envelopes can enter foreign-network handling.
 Waypoint packets can advance their source route.
@@ -435,21 +436,22 @@ The [cleanup report](dead-options-cleanup.md) records the other unused APIs.
 ## Verification and limits
 
 The map follows inspected production functions and their direct callers.
-The permitted sequential library suite passed 554 tests after these removals.
+The permitted sequential library suite passed 556 tests after these removals.
 Two public-domain probes were excluded under the local-test policy.
 Both optional Caddy integration tests passed separately.
 The following tests protect relevant contracts:
 
-- [Lazy stack allocation, address changes, and proxy shutdown](../../lowertier/src/gateway/socks5.rs).
+- [Lazy stack allocation, address changes, proxy shutdown, and the idle gate](../../lowertier/src/gateway/socks5.rs).
+- [Bounded HTTP/3 admission under concurrent opens](../../lowertier/src/tunnel/quic/proxy.rs).
 - [Immutable service-route snapshots and shared topology tables](../../lowertier/src/peers/service_route.rs).
 - [Asymmetric packet proxy paths](../../lowertier/src/peers/multipath_tests.rs).
-- [disabled_punchers_are_never_constructed](../../lowertier/src/instance/instance.rs#L796).
-- [disabled_factories_fail_before_dns_and_socket_allocation](../../lowertier/src/instance/instance.rs#L809).
+- [disabled_punchers_are_never_constructed](../../lowertier/src/instance/instance.rs#L782).
+- [disabled_factories_fail_before_dns_and_socket_allocation](../../lowertier/src/instance/instance.rs#L795).
 - [inactive_proxy_allocates_no_protocol_state](../../lowertier/src/instance/ip_proxy.rs#L115).
-- [compile_validates_multipath_and_multilayer_references](../../lowertier/src/peers/path_policy.rs#L1483).
-- [expands_parallel_multilayer_chains_without_loops_and_prefers_exact_peer_over_wildcard](../../lowertier/src/peers/path_policy.rs#L1552).
-- [sequenced_packets_require_the_receive_loop](../../lowertier/src/peers/peer_manager.rs#L6780).
-- [new_direct_connection_preempts_a_pinned_relay_before_graph_publication](../../lowertier/src/peers/peer_manager.rs#L6824).
+- [compile_validates_multipath_and_multilayer_references](../../lowertier/src/peers/path_policy.rs#L1491).
+- [expands_parallel_multilayer_chains_without_loops_and_prefers_exact_peer_over_wildcard](../../lowertier/src/peers/path_policy.rs#L1560).
+- [sequenced_packets_require_the_receive_loop](../../lowertier/src/peers/peer_manager.rs#L6701).
+- [new_direct_connection_preempts_a_pinned_relay_before_graph_publication](../../lowertier/src/peers/peer_manager.rs#L6745).
 
 Earlier parallel runs failed in an unchanged direct-tunnel logging assertion.
 That test passed in isolation and in the sequential suite.
