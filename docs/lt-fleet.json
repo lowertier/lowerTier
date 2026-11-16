@@ -1,15 +1,88 @@
 {
-  "verified_at": "2026-11-16T07:34:25.036289+00:00",
-  "connectivity_verified_at": "2026-11-16T07:34:25.036289+00:00",
+  "verified_at": "2026-11-16T17:55:53.900716+00:00",
+  "connectivity_verified_at": "2026-11-16T17:55:53.900716+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Twelve retained instances include ten kernel nodes and two userspace nodes. Eleven reachable instances passed the runtime cleanup checks. Three offline hosts remain pending. Earlier sections retain their original observations.",
-  "application_commit": "00b50c6b",
-  "repository_commit_at_verification": "00b50c6b",
-  "application_note": "Eleven reachable test instances run the four runtime simplifications and the admission and idle-gate repairs from 00b50c6b. Identities, configuration, GUI policy, and MTUs are preserved. Three offline hosts remain pending. Earlier sections retain their original observations.",
+  "inventory_scope": "Eleven reachable retained instances passed the native H2 deployment checks. Three offline hosts remain pending. Earlier sections retain their original observations.",
+  "application_commit": "67ada09f",
+  "repository_commit_at_verification": "67ada09f",
+  "application_note": "Eleven reachable test instances run native H2 modes and the receive-credit repairs. The fleet retains the off default. Identities, configuration, GUI policy, and MTUs are preserved. The declared DHCP default route was restored on btrouter. Three offline hosts remain pending.",
+  "h2_native_proxy": {
+    "verified_at": "2026-11-16T17:55:53.900716+00:00",
+    "application_commit": "67ada09f",
+    "source_commits": [
+      "58f5da69",
+      "67ada09f"
+    ],
+    "modes": [
+      "off",
+      "on",
+      "auto"
+    ],
+    "product_default": "off",
+    "retained_fleet_mode": "off",
+    "mode_source": "Existing configurations retain the verified off default.",
+    "backward_compatibility_paths_added": false,
+    "old_feature_aliases_removed": true,
+    "old_proxy_module_path_removed": true,
+    "obsolete_diagnostic_switch_removed": true,
+    "native_scope": "Client-initiated direct TCP proxy flows to a userspace peer's own IPv4 address.",
+    "quic_multiplexer_added": false,
+    "application_data_replayed": false,
+    "receive_credit_lifetime_accounted": true,
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "configuration_preserved": true,
+    "identities_preserved": true,
+    "configured_lowertier_routes_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_instances": 11,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "completed_transfer_files_removed": true,
+    "temporary_test_processes_stopped": true,
+    "permitted_sequential_library_tests_passed": 565,
+    "separate_caddy_integration_tests_passed": 2,
+    "focused_stream_tests_passed": 9,
+    "final_full_ffi_check_passed": true,
+    "final_minimal_check_passed": true,
+    "tracker_bootstrap_bytes": 4194304,
+    "candidate_wan_trials": 36,
+    "bounded_producer_control_trials": 6,
+    "all_measured_payloads_delivered": true,
+    "route_repair": "btrouter: restored the default route declared by cmcc4 DHCP. Firewall and VPN rules are unchanged.",
+    "recovery": [
+      "The live-switch fixture used startup overrides and was read-only. A complete TOML fixture restored writable control.",
+      "The fleet verifier lacked local reference files. Protected pre-install copies supplied those files.",
+      "The option verifier expected an explicit value. Schema verification confirmed the off default for unset values.",
+      "btrouter had no IPv4 default route. Restoring its declared DHCP route recovered authenticated peers and delivery."
+    ],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "pending_state_verified_at": "2026-11-16T17:55:53.868393+00:00",
+    "summary": "benchmark-results/h2-native-20261117/summary.json",
+    "report": "docs/performance/h2-native-20261117.md",
+    "audit": "benchmark-results/.work/h2-native-20261116/audit.jsonl",
+    "limitations": "Native H2 streams do not cover kernel TUN forwarding. Auto checks admission health and resources. It does not predict speed or loaded latency. Four-flow uploads showed kernel TCP memory pressure. The exact vendor shrink path remains unresolved. No artificial-loss trial was run. H2 retains TCP head-of-line blocking."
+  },
   "runtime_simplification": {
     "verified_at": "2026-11-16T07:34:25.036289+00:00",
     "application_commit": "00b50c6b",
@@ -198,10 +271,10 @@
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
       "version": "0.02",
       "application_commit": null,
-      "pending_application_commit": "00b50c6b",
+      "pending_application_commit": "67ada09f",
       "previous_recorded_application_commit": "d211a9fc",
       "deployment_status": "pending_ssh_and_overlay_connectivity",
-      "software_verification_note": "The last observed runtime version was 0.02. The current protocol migration remains pending while Tailscale and SSH are unavailable. The recorded partial candidate predates this migration.",
+      "software_verification_note": "The host remains offline. Migration is unverified. Replace the historical incomplete candidate before installation.",
       "runtime_observed_at": "2026-11-14T13:41:42.947137+00:00",
       "observed_pid": 189214,
       "pending_binary_transfer": {
@@ -212,7 +285,10 @@
         "candidate_complete": false,
         "installed": false
       },
-      "tun": {"mode": "userspace", "configured_mtu": 1300},
+      "tun": {
+        "mode": "userspace",
+        "configured_mtu": 1300
+      },
       "mtu_status": "pending_ssh",
       "kernel_migration_status": "blocked_container_capabilities"
     },
@@ -222,8 +298,19 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 269478,
+      "pending_binary_transfer": null
     },
     {
       "node": "jpaws",
@@ -231,8 +318,19 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 2404317,
+      "pending_binary_transfer": null
     },
     {
       "node": "861jp",
@@ -240,8 +338,19 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 1894574,
+      "pending_binary_transfer": null
     },
     {
       "node": "862jp-secondary",
@@ -249,8 +358,19 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 2766115,
+      "pending_binary_transfer": null
     },
     {
       "node": "jpali-secondary",
@@ -258,8 +378,19 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 1906263,
+      "pending_binary_transfer": null
     },
     {
       "node": "s6916",
@@ -267,7 +398,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "00b50c6b",
+      "application_commit": "67ada09f",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
@@ -281,17 +412,34 @@
         "warmup_seconds": 2,
         "measurement_seconds": 10,
         "repetitions_per_direction": 2,
-        "receiver_download_mbps": [450.99659924142225, 451.34093803644714],
-        "receiver_upload_mbps": [393.56167484872014, 413.52587337735145],
+        "receiver_download_mbps": [
+          450.99659924142225,
+          451.34093803644714
+        ],
+        "receiver_upload_mbps": [
+          393.56167484872014,
+          413.52587337735145
+        ],
         "application_pattern_verified_bytes_per_direction": 67108864,
         "original_configuration_reference": "/opt/lowertier/config/lowertier-lt.toml.userspace-speed-reference",
         "identity_and_other_configuration_preserved": true,
         "binary_changed": false,
-        "protocols": ["quic", "h2", "wss"],
+        "protocols": [
+          "quic",
+          "h2",
+          "wss"
+        ],
         "evidence": "benchmark-results/.work/s6916-speed-20261114/result.json",
         "report": "docs/performance/s6916-userspace-tcp-20261114.md",
         "scope": "Local native Mac to s6916. Kernel mode replaces the userspace TCP endpoint. Effective MTUs differ between endpoint modes."
-      }
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 902076,
+      "pending_binary_transfer": null
     },
     {
       "node": "hattori-wrt",
@@ -299,8 +447,19 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 3851,
+      "pending_binary_transfer": null
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -308,9 +467,20 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "userspace", "configured_mtu": 1280, "tcp_device_mtu": 1280},
-      "kernel_migration_status": "blocked_administrator_access"
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "userspace",
+        "configured_mtu": 1280,
+        "tcp_device_mtu": 1280
+      },
+      "kernel_migration_status": "blocked_administrator_access",
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 93396,
+      "pending_binary_transfer": null
     },
     {
       "node": "local-native",
@@ -318,8 +488,19 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 64415,
+      "pending_binary_transfer": null
     },
     {
       "node": "la",
@@ -327,8 +508,19 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 333570,
+      "pending_binary_transfer": null
     },
     {
       "node": "btrouter",
@@ -336,8 +528,19 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "00b50c6b",
-      "tun": {"mode": "kernel", "configured_mtu": 1300, "observed_mtu": 1280}
+      "application_commit": "67ada09f",
+      "tun": {
+        "mode": "kernel",
+        "configured_mtu": 1300,
+        "observed_mtu": 1280
+      },
+      "previous_recorded_application_commit": "00b50c6b",
+      "pending_application_commit": null,
+      "deployment_status": "verified",
+      "software_verification_note": "Native H2 modes are available. The off default, identity, configuration, GUI policy, and MTU are verified.",
+      "runtime_observed_at": "2026-11-16T17:55:53.900716+00:00",
+      "observed_pid": 19103,
+      "pending_binary_transfer": null
     }
   ],
   "verification": {

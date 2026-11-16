@@ -1,0 +1,3375 @@
+{
+  "generated_at": "2026-11-16T17:05:50.757150+00:00",
+  "local_date": "2026-11-17",
+  "pair": [
+    "jpaws",
+    "la"
+  ],
+  "application_commit": "67ada09f",
+  "source_commits": [
+    "58f5da69",
+    "67ada09f"
+  ],
+  "transport": "h2",
+  "tun_mode": "userspace",
+  "configured_mtu": 1300,
+  "payload_bytes_per_trial": 67108864,
+  "product_default": "off",
+  "retained_fleet_mode": "off",
+  "measurement": {
+    "repeats_per_cell": 3,
+    "interval_order": "GET then PUT; one then four flows",
+    "cohort_order": [
+      "reference",
+      "off",
+      "on",
+      "auto"
+    ],
+    "connections_established_before_timing": true,
+    "payload_validation": "Every byte; receiver acknowledges upload count",
+    "half_close": true,
+    "cpu": "Both LowTier processes; user plus system CPU",
+    "cpu_exclusions": "Generator, service, SSH, and softirq work outside these processes",
+    "server_cpu_window": "Includes control gaps and unloaded echo work",
+    "rss_interval_seconds": 0.1,
+    "rss_excludes": "Kernel and other processes",
+    "latency": "Median of per-trial percentiles; linear interpolation for p95",
+    "wire": "Unique TCP payload received; includes TLS, H2, and control traffic",
+    "wire_exclusions": "Outer TCP/IP headers, outer ACKs, duplicate retransmissions, and most bulk-flow setup",
+    "missing_counter_policy": "null means absent; an omitted ss field does not prove zero",
+    "bounded_producer": "SO_SNDBUF request 32768; Linux reports 65536 per generator socket",
+    "production_limits_changed": false,
+    "congestion_control": {
+      "jpaws": "cubic",
+      "la": "bbr"
+    }
+  },
+  "trials": [
+    {
+      "label": "reference-r0-f1-get",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 10.927420643158257,
+      "mbps": 49.13061641277066,
+      "cpu_seconds_per_delivered_gbit": 5.62518835067749,
+      "client_rss_kib": [
+        27008,
+        34520
+      ],
+      "server_rss_kib": [
+        27100,
+        43316
+      ],
+      "unloaded_rtt_p50_ms": 112.21669660881162,
+      "loaded_rtt_p50_ms": 120.76097610406578,
+      "loaded_rtt_p95_ms": 295.9875480271876,
+      "loaded_rtt_samples": 72,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70696040,
+      "carrier_unique_payload_overhead_percent": 5.345308780670166,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r0-f1-get.json"
+    },
+    {
+      "label": "reference-r0-f1-put",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 13.522736203391105,
+      "mbps": 39.7013521468657,
+      "cpu_seconds_per_delivered_gbit": 5.029141902923583,
+      "client_rss_kib": [
+        28232,
+        40332
+      ],
+      "server_rss_kib": [
+        29880,
+        36124
+      ],
+      "unloaded_rtt_p50_ms": 112.18391498550773,
+      "loaded_rtt_p50_ms": 115.36456178873777,
+      "loaded_rtt_p95_ms": 335.58052428998053,
+      "loaded_rtt_samples": 86,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70610773,
+      "carrier_unique_payload_overhead_percent": 5.218251049518585,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r0-f1-put.json"
+    },
+    {
+      "label": "reference-r0-f4-get",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 9.643190883100033,
+      "mbps": 55.67357511722407,
+      "cpu_seconds_per_delivered_gbit": 5.5693089962005615,
+      "client_rss_kib": [
+        26828,
+        33256
+      ],
+      "server_rss_kib": [
+        30332,
+        55160
+      ],
+      "unloaded_rtt_p50_ms": 112.21114313229918,
+      "loaded_rtt_p50_ms": 113.02374489605427,
+      "loaded_rtt_p95_ms": 316.0649894271046,
+      "loaded_rtt_samples": 64,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70696964,
+      "carrier_unique_payload_overhead_percent": 5.3466856479644775,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r0-f4-get.json"
+    },
+    {
+      "label": "reference-r0-f4-put",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 35.185218702070415,
+      "mbps": 15.258421911369524,
+      "cpu_seconds_per_delivered_gbit": 6.072223186492918,
+      "client_rss_kib": [
+        23200,
+        44524
+      ],
+      "server_rss_kib": [
+        32064,
+        37220
+      ],
+      "unloaded_rtt_p50_ms": 112.1769999153912,
+      "loaded_rtt_p50_ms": 226.13700199872255,
+      "loaded_rtt_p95_ms": 2126.722972653806,
+      "loaded_rtt_samples": 55,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 109151,
+      "outer_retransmitted_segments": 77,
+      "carrier_unique_received_bytes": 70620561,
+      "carrier_unique_payload_overhead_percent": 5.232836306095123,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r0-f4-put.json"
+    },
+    {
+      "label": "reference-r1-f1-get",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 11.935440100729465,
+      "mbps": 44.981241367646575,
+      "cpu_seconds_per_delivered_gbit": 6.3516199588775635,
+      "client_rss_kib": [
+        17812,
+        26316
+      ],
+      "server_rss_kib": [
+        33312,
+        43660
+      ],
+      "unloaded_rtt_p50_ms": 112.231336068362,
+      "loaded_rtt_p50_ms": 112.35679034143686,
+      "loaded_rtt_p95_ms": 322.5720747373998,
+      "loaded_rtt_samples": 77,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70725721,
+      "carrier_unique_payload_overhead_percent": 5.389536917209625,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r1-f1-get.json"
+    },
+    {
+      "label": "reference-r1-f1-put",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 13.919951842166483,
+      "mbps": 38.56844607563255,
+      "cpu_seconds_per_delivered_gbit": 5.1781535148620605,
+      "client_rss_kib": [
+        17204,
+        32964
+      ],
+      "server_rss_kib": [
+        32476,
+        40548
+      ],
+      "unloaded_rtt_p50_ms": 112.2238771058619,
+      "loaded_rtt_p50_ms": 115.50451628863811,
+      "loaded_rtt_p95_ms": 231.3586417585611,
+      "loaded_rtt_samples": 93,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 20949,
+      "outer_retransmitted_segments": 15,
+      "carrier_unique_received_bytes": 70626811,
+      "carrier_unique_payload_overhead_percent": 5.242149531841278,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r1-f1-put.json"
+    },
+    {
+      "label": "reference-r1-f4-get",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 10.022374083288014,
+      "mbps": 53.56723941238783,
+      "cpu_seconds_per_delivered_gbit": 7.264316082000731,
+      "client_rss_kib": [
+        17164,
+        24448
+      ],
+      "server_rss_kib": [
+        32416,
+        50336
+      ],
+      "unloaded_rtt_p50_ms": 112.22876189276576,
+      "loaded_rtt_p50_ms": 122.78691679239273,
+      "loaded_rtt_p95_ms": 332.3361940216273,
+      "loaded_rtt_samples": 55,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70816176,
+      "carrier_unique_payload_overhead_percent": 5.524325370788574,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r1-f4-get.json"
+    },
+    {
+      "label": "reference-r1-f4-put",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 9.21239166893065,
+      "mbps": 58.277039371939615,
+      "cpu_seconds_per_delivered_gbit": 6.202608346939085,
+      "client_rss_kib": [
+        17412,
+        46620
+      ],
+      "server_rss_kib": [
+        32616,
+        42284
+      ],
+      "unloaded_rtt_p50_ms": 112.19626991078258,
+      "loaded_rtt_p50_ms": 115.41011999361217,
+      "loaded_rtt_p95_ms": 343.4666003566235,
+      "loaded_rtt_samples": 52,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 73654,
+      "outer_retransmitted_segments": 51,
+      "carrier_unique_received_bytes": 70618952,
+      "carrier_unique_payload_overhead_percent": 5.230438709259033,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r1-f4-put.json"
+    },
+    {
+      "label": "reference-r2-f1-get",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 12.66223000921309,
+      "mbps": 42.399396599917274,
+      "cpu_seconds_per_delivered_gbit": 6.724148988723758,
+      "client_rss_kib": [
+        17316,
+        24712
+      ],
+      "server_rss_kib": [
+        32828,
+        48656
+      ],
+      "unloaded_rtt_p50_ms": 113.0415890365839,
+      "loaded_rtt_p50_ms": 113.53546939790249,
+      "loaded_rtt_p95_ms": 323.62052442040294,
+      "loaded_rtt_samples": 82,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70746821,
+      "carrier_unique_payload_overhead_percent": 5.420978367328644,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r2-f1-get.json"
+    },
+    {
+      "label": "reference-r2-f1-put",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 13.197233290877193,
+      "mbps": 40.68056540086481,
+      "cpu_seconds_per_delivered_gbit": 5.103647708892826,
+      "client_rss_kib": [
+        17640,
+        31880
+      ],
+      "server_rss_kib": [
+        32828,
+        36904
+      ],
+      "unloaded_rtt_p50_ms": 113.038360606879,
+      "loaded_rtt_p50_ms": 117.22490470856428,
+      "loaded_rtt_p95_ms": 333.65458361804485,
+      "loaded_rtt_samples": 85,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 167968,
+      "outer_retransmitted_segments": 116,
+      "carrier_unique_received_bytes": 70610844,
+      "carrier_unique_payload_overhead_percent": 5.2183568477630615,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r2-f1-put.json"
+    },
+    {
+      "label": "reference-r2-f4-get",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 8.989429126027972,
+      "mbps": 59.722470078277304,
+      "cpu_seconds_per_delivered_gbit": 6.87316060066223,
+      "client_rss_kib": [
+        17692,
+        23328
+      ],
+      "server_rss_kib": [
+        32808,
+        63876
+      ],
+      "unloaded_rtt_p50_ms": 113.06510306894779,
+      "loaded_rtt_p50_ms": 164.20787572860718,
+      "loaded_rtt_p95_ms": 326.170839369297,
+      "loaded_rtt_samples": 41,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70741043,
+      "carrier_unique_payload_overhead_percent": 5.412368476390839,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r2-f4-get.json"
+    },
+    {
+      "label": "reference-r2-f4-put",
+      "mode": "reference",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 10.527722639031708,
+      "mbps": 50.99592099905274,
+      "cpu_seconds_per_delivered_gbit": 6.016343832015985,
+      "client_rss_kib": [
+        18432,
+        29556
+      ],
+      "server_rss_kib": [
+        33332,
+        57768
+      ],
+      "unloaded_rtt_p50_ms": 113.066874910146,
+      "loaded_rtt_p50_ms": 119.42774103954434,
+      "loaded_rtt_p95_ms": 347.6503637386486,
+      "loaded_rtt_samples": 58,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 40148,
+      "outer_retransmitted_segments": 28,
+      "carrier_unique_received_bytes": 70639690,
+      "carrier_unique_payload_overhead_percent": 5.2613407373428345,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-reference-r2-f4-put.json"
+    },
+    {
+      "label": "off-r0-f1-get",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 10.58706600498408,
+      "mbps": 50.710075080976814,
+      "cpu_seconds_per_delivered_gbit": 5.774199962615967,
+      "client_rss_kib": [
+        27136,
+        32640
+      ],
+      "server_rss_kib": [
+        26912,
+        42464
+      ],
+      "unloaded_rtt_p50_ms": 107.94191109016538,
+      "loaded_rtt_p50_ms": 117.00062127783895,
+      "loaded_rtt_p95_ms": 298.3619225211441,
+      "loaded_rtt_samples": 73,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70697027,
+      "carrier_unique_payload_overhead_percent": 5.346779525279999,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r0-f1-get.json"
+    },
+    {
+      "label": "off-r0-f1-put",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 12.379492125939578,
+      "mbps": 43.36776553822095,
+      "cpu_seconds_per_delivered_gbit": 4.936009645462036,
+      "client_rss_kib": [
+        29824,
+        41760
+      ],
+      "server_rss_kib": [
+        30456,
+        34496
+      ],
+      "unloaded_rtt_p50_ms": 107.88690485060215,
+      "loaded_rtt_p50_ms": 108.03420096635818,
+      "loaded_rtt_p95_ms": 317.94697644654656,
+      "loaded_rtt_samples": 88,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70609855,
+      "carrier_unique_payload_overhead_percent": 5.21688312292099,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r0-f1-put.json"
+    },
+    {
+      "label": "off-r0-f4-get",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 7.956918300129473,
+      "mbps": 67.47221622110462,
+      "cpu_seconds_per_delivered_gbit": 5.513429641723631,
+      "client_rss_kib": [
+        29184,
+        36860
+      ],
+      "server_rss_kib": [
+        30436,
+        48504
+      ],
+      "unloaded_rtt_p50_ms": 107.94842289760709,
+      "loaded_rtt_p50_ms": 111.77662992849946,
+      "loaded_rtt_p95_ms": 303.6063760286197,
+      "loaded_rtt_samples": 50,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70688262,
+      "carrier_unique_payload_overhead_percent": 5.333718657493591,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r0-f4-get.json"
+    },
+    {
+      "label": "off-r0-f4-put",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 28.964029156137258,
+      "mbps": 18.5357813688791,
+      "cpu_seconds_per_delivered_gbit": 5.979090929031371,
+      "client_rss_kib": [
+        26152,
+        42664
+      ],
+      "server_rss_kib": [
+        31400,
+        36224
+      ],
+      "unloaded_rtt_p50_ms": 107.90880583226681,
+      "loaded_rtt_p50_ms": 119.60997455753386,
+      "loaded_rtt_p95_ms": 1960.2765964809803,
+      "loaded_rtt_samples": 60,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 4344,
+      "outer_retransmitted_segments": 3,
+      "carrier_unique_received_bytes": 70645172,
+      "carrier_unique_payload_overhead_percent": 5.269509553909302,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r0-f4-put.json"
+    },
+    {
+      "label": "off-r1-f1-get",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 11.248809415381402,
+      "mbps": 47.72690977108149,
+      "cpu_seconds_per_delivered_gbit": 5.4016709327697745,
+      "client_rss_kib": [
+        17580,
+        27672
+      ],
+      "server_rss_kib": [
+        31636,
+        45380
+      ],
+      "unloaded_rtt_p50_ms": 108.69924910366535,
+      "loaded_rtt_p50_ms": 109.80933578684926,
+      "loaded_rtt_p95_ms": 307.3876359499991,
+      "loaded_rtt_samples": 73,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 70670453,
+      "carrier_unique_payload_overhead_percent": 5.307181179523468,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r1-f1-get.json"
+    },
+    {
+      "label": "off-r1-f1-put",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 17.13460053410381,
+      "mbps": 31.332560740557696,
+      "cpu_seconds_per_delivered_gbit": 6.072223186492921,
+      "client_rss_kib": [
+        15280,
+        30832
+      ],
+      "server_rss_kib": [
+        31636,
+        35272
+      ],
+      "unloaded_rtt_p50_ms": 108.75843837857246,
+      "loaded_rtt_p50_ms": 108.92296954989433,
+      "loaded_rtt_p95_ms": 419.6987906238064,
+      "loaded_rtt_samples": 92,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 147354,
+      "outer_retransmitted_segments": 102,
+      "carrier_unique_received_bytes": 70681096,
+      "carrier_unique_payload_overhead_percent": 5.32304048538208,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r1-f1-put.json"
+    },
+    {
+      "label": "off-r1-f4-get",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 8.966638173907995,
+      "mbps": 59.87426966354455,
+      "cpu_seconds_per_delivered_gbit": 5.736947059631346,
+      "client_rss_kib": [
+        16028,
+        24912
+      ],
+      "server_rss_kib": [
+        33888,
+        47620
+      ],
+      "unloaded_rtt_p50_ms": 108.7377080693841,
+      "loaded_rtt_p50_ms": 110.94224988482893,
+      "loaded_rtt_p95_ms": 306.132426392287,
+      "loaded_rtt_samples": 60,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 70705358,
+      "carrier_unique_payload_overhead_percent": 5.359193682670593,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r1-f4-get.json"
+    },
+    {
+      "label": "off-r1-f4-put",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 9.700848582200706,
+      "mbps": 55.34267517432037,
+      "cpu_seconds_per_delivered_gbit": 5.699694156646731,
+      "client_rss_kib": [
+        15836,
+        39652
+      ],
+      "server_rss_kib": [
+        32440,
+        40880
+      ],
+      "unloaded_rtt_p50_ms": 108.75420505180955,
+      "loaded_rtt_p50_ms": 112.44621081277728,
+      "loaded_rtt_p95_ms": 356.6818650113414,
+      "loaded_rtt_samples": 54,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 72400,
+      "outer_retransmitted_segments": 50,
+      "carrier_unique_received_bytes": 70616210,
+      "carrier_unique_payload_overhead_percent": 5.22635281085968,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r1-f4-put.json"
+    },
+    {
+      "label": "off-r2-f1-get",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 11.010833862703294,
+      "mbps": 48.758424538447414,
+      "cpu_seconds_per_delivered_gbit": 5.3271651268005344,
+      "client_rss_kib": [
+        14604,
+        21992
+      ],
+      "server_rss_kib": [
+        33500,
+        44096
+      ],
+      "unloaded_rtt_p50_ms": 108.71023312211037,
+      "loaded_rtt_p50_ms": 109.45549374446273,
+      "loaded_rtt_p95_ms": 230.282885953784,
+      "loaded_rtt_samples": 81,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 70671003,
+      "carrier_unique_payload_overhead_percent": 5.30800074338913,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r2-f1-get.json"
+    },
+    {
+      "label": "off-r2-f1-put",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 14.733291431330144,
+      "mbps": 36.439305806328605,
+      "cpu_seconds_per_delivered_gbit": 5.6065618991851816,
+      "client_rss_kib": [
+        17276,
+        24932
+      ],
+      "server_rss_kib": [
+        32760,
+        35740
+      ],
+      "unloaded_rtt_p50_ms": 108.76972274854779,
+      "loaded_rtt_p50_ms": 113.60234208405018,
+      "loaded_rtt_p95_ms": 318.36179294623435,
+      "loaded_rtt_samples": 91,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 60816,
+      "outer_retransmitted_segments": 42,
+      "carrier_unique_received_bytes": 70646600,
+      "carrier_unique_payload_overhead_percent": 5.271637439727783,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r2-f1-put.json"
+    },
+    {
+      "label": "off-r2-f4-get",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 8.45420860312879,
+      "mbps": 63.503390701917525,
+      "cpu_seconds_per_delivered_gbit": 5.774199962615962,
+      "client_rss_kib": [
+        13752,
+        18544
+      ],
+      "server_rss_kib": [
+        32760,
+        55844
+      ],
+      "unloaded_rtt_p50_ms": 108.73775603249669,
+      "loaded_rtt_p50_ms": 109.12631917744875,
+      "loaded_rtt_p95_ms": 306.9940896704793,
+      "loaded_rtt_samples": 57,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 70710856,
+      "carrier_unique_payload_overhead_percent": 5.367386341094971,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r2-f4-get.json"
+    },
+    {
+      "label": "off-r2-f4-put",
+      "mode": "off",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 8.267983173951507,
+      "mbps": 64.93372092137604,
+      "cpu_seconds_per_delivered_gbit": 5.494803190231325,
+      "client_rss_kib": [
+        13256,
+        37292
+      ],
+      "server_rss_kib": [
+        32448,
+        41776
+      ],
+      "unloaded_rtt_p50_ms": 108.7286057882011,
+      "loaded_rtt_p50_ms": 117.91863478720188,
+      "loaded_rtt_p95_ms": 326.7987866420299,
+      "loaded_rtt_samples": 47,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 661988,
+      "outer_retransmitted_segments": 460,
+      "carrier_unique_received_bytes": 70615454,
+      "carrier_unique_payload_overhead_percent": 5.225226283073425,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-off-r2-f4-put.json"
+    },
+    {
+      "label": "on-r0-f1-get",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.791547138243914,
+      "mbps": 92.69904900796293,
+      "cpu_seconds_per_delivered_gbit": 2.7008354663848873,
+      "client_rss_kib": [
+        26240,
+        28160
+      ],
+      "server_rss_kib": [
+        27400,
+        28424
+      ],
+      "unloaded_rtt_p50_ms": 107.55197610706091,
+      "loaded_rtt_p50_ms": 107.64019517228007,
+      "loaded_rtt_p95_ms": 122.85487698391066,
+      "loaded_rtt_samples": 49,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67267391,
+      "carrier_unique_payload_overhead_percent": 0.23622363805770874,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r0-f1-get.json"
+    },
+    {
+      "label": "on-r0-f1-put",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 7.018675296101719,
+      "mbps": 76.49177221493441,
+      "cpu_seconds_per_delivered_gbit": 2.5704503059387203,
+      "client_rss_kib": [
+        28160,
+        28288
+      ],
+      "server_rss_kib": [
+        28424,
+        28680
+      ],
+      "unloaded_rtt_p50_ms": 107.52737196162343,
+      "loaded_rtt_p50_ms": 127.14797491207719,
+      "loaded_rtt_p95_ms": 413.9655980281529,
+      "loaded_rtt_samples": 45,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265571,
+      "carrier_unique_payload_overhead_percent": 0.23351162672042847,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r0-f1-put.json"
+    },
+    {
+      "label": "on-r0-f4-get",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 4.258526023011655,
+      "mbps": 126.06965628457561,
+      "cpu_seconds_per_delivered_gbit": 2.5145709514617915,
+      "client_rss_kib": [
+        28288,
+        29184
+      ],
+      "server_rss_kib": [
+        28680,
+        29064
+      ],
+      "unloaded_rtt_p50_ms": 107.5905803591013,
+      "loaded_rtt_p50_ms": 125.81436545588076,
+      "loaded_rtt_p95_ms": 130.42150700930506,
+      "loaded_rtt_samples": 34,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265189,
+      "carrier_unique_payload_overhead_percent": 0.2329424023628235,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r0-f4-get.json"
+    },
+    {
+      "label": "on-r0-f4-put",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.691268290858716,
+      "mbps": 94.33238507879152,
+      "cpu_seconds_per_delivered_gbit": 2.458691596984863,
+      "client_rss_kib": [
+        29184,
+        29312
+      ],
+      "server_rss_kib": [
+        29064,
+        29832
+      ],
+      "unloaded_rtt_p50_ms": 107.5673121958971,
+      "loaded_rtt_p50_ms": 214.55021994188428,
+      "loaded_rtt_p95_ms": 218.90501626767218,
+      "loaded_rtt_samples": 27,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 67266875,
+      "carrier_unique_payload_overhead_percent": 0.2354547381401062,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r0-f4-put.json"
+    },
+    {
+      "label": "on-r1-f1-get",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 6.665281376801431,
+      "mbps": 80.54737401913502,
+      "cpu_seconds_per_delivered_gbit": 2.719461917877197,
+      "client_rss_kib": [
+        29440,
+        29696
+      ],
+      "server_rss_kib": [
+        29832,
+        29960
+      ],
+      "unloaded_rtt_p50_ms": 107.55169438198209,
+      "loaded_rtt_p50_ms": 109.96137140318751,
+      "loaded_rtt_p95_ms": 169.4301535375416,
+      "loaded_rtt_samples": 50,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67261950,
+      "carrier_unique_payload_overhead_percent": 0.22811591625213623,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r1-f1-get.json"
+    },
+    {
+      "label": "on-r1-f1-put",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.882009230088443,
+      "mbps": 91.27338822484771,
+      "cpu_seconds_per_delivered_gbit": 2.570450305938721,
+      "client_rss_kib": [
+        29440,
+        29440
+      ],
+      "server_rss_kib": [
+        29960,
+        30216
+      ],
+      "unloaded_rtt_p50_ms": 107.49628394842148,
+      "loaded_rtt_p50_ms": 114.16675918735564,
+      "loaded_rtt_p95_ms": 183.20143113378435,
+      "loaded_rtt_samples": 44,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": 142918,
+      "outer_retransmitted_segments": 99,
+      "carrier_unique_received_bytes": 67265538,
+      "carrier_unique_payload_overhead_percent": 0.23346245288848877,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r1-f1-put.json"
+    },
+    {
+      "label": "on-r1-f4-get",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 4.256280225235969,
+      "mbps": 126.13617609499285,
+      "cpu_seconds_per_delivered_gbit": 2.5890767574310285,
+      "client_rss_kib": [
+        29440,
+        29824
+      ],
+      "server_rss_kib": [
+        30020,
+        30148
+      ],
+      "unloaded_rtt_p50_ms": 107.52386134117842,
+      "loaded_rtt_p50_ms": 126.49126816540956,
+      "loaded_rtt_p95_ms": 131.38177506625652,
+      "loaded_rtt_samples": 33,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265671,
+      "carrier_unique_payload_overhead_percent": 0.23366063833236694,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r1-f4-get.json"
+    },
+    {
+      "label": "on-r1-f4-put",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 42.42392401210964,
+      "mbps": 12.654909334807257,
+      "cpu_seconds_per_delivered_gbit": 3.166496753692627,
+      "client_rss_kib": [
+        29668,
+        30080
+      ],
+      "server_rss_kib": [
+        29904,
+        30672
+      ],
+      "unloaded_rtt_p50_ms": 107.52138588577509,
+      "loaded_rtt_p50_ms": 321.88681699335575,
+      "loaded_rtt_p95_ms": 429.6427832916379,
+      "loaded_rtt_samples": 137,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 1448,
+      "outer_retransmitted_segments": 1,
+      "carrier_unique_received_bytes": 67277200,
+      "carrier_unique_payload_overhead_percent": 0.2508401870727539,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r1-f4-put.json"
+    },
+    {
+      "label": "on-r2-f1-get",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.195961315650493,
+      "mbps": 103.32465532083894,
+      "cpu_seconds_per_delivered_gbit": 2.589076757431027,
+      "client_rss_kib": [
+        29796,
+        30436
+      ],
+      "server_rss_kib": [
+        30588,
+        30800
+      ],
+      "unloaded_rtt_p50_ms": 107.48470388352871,
+      "loaded_rtt_p50_ms": 110.25631427764893,
+      "loaded_rtt_p95_ms": 111.49371527135372,
+      "loaded_rtt_samples": 47,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265445,
+      "carrier_unique_payload_overhead_percent": 0.233323872089386,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r2-f1-get.json"
+    },
+    {
+      "label": "on-r2-f1-put",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 7.327906502876431,
+      "mbps": 73.26388673071382,
+      "cpu_seconds_per_delivered_gbit": 2.626329660415652,
+      "client_rss_kib": [
+        29808,
+        30436
+      ],
+      "server_rss_kib": [
+        30588,
+        30588
+      ],
+      "unloaded_rtt_p50_ms": 107.52663528546691,
+      "loaded_rtt_p50_ms": 138.31255119293928,
+      "loaded_rtt_p95_ms": 224.11950184032312,
+      "loaded_rtt_samples": 45,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": 519229,
+      "outer_retransmitted_segments": 359,
+      "carrier_unique_received_bytes": 67265440,
+      "carrier_unique_payload_overhead_percent": 0.23331642150878906,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r2-f1-put.json"
+    },
+    {
+      "label": "on-r2-f4-get",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 4.56263313582167,
+      "mbps": 117.66690330304556,
+      "cpu_seconds_per_delivered_gbit": 2.551823854446411,
+      "client_rss_kib": [
+        29808,
+        30192
+      ],
+      "server_rss_kib": [
+        30588,
+        30716
+      ],
+      "unloaded_rtt_p50_ms": 107.52334631979465,
+      "loaded_rtt_p50_ms": 126.51309976354241,
+      "loaded_rtt_p95_ms": 146.80329356342554,
+      "loaded_rtt_samples": 33,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67266199,
+      "carrier_unique_payload_overhead_percent": 0.2344474196434021,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r2-f4-get.json"
+    },
+    {
+      "label": "on-r2-f4-put",
+      "mode": "on",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 49.68791633890942,
+      "mbps": 10.804858636818894,
+      "cpu_seconds_per_delivered_gbit": 3.222376108169554,
+      "client_rss_kib": [
+        21488,
+        30192
+      ],
+      "server_rss_kib": [
+        30716,
+        31100
+      ],
+      "unloaded_rtt_p50_ms": 107.52557124942541,
+      "loaded_rtt_p50_ms": 322.2719789482653,
+      "loaded_rtt_p95_ms": 428.9004251360893,
+      "loaded_rtt_samples": 153,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 67276203,
+      "carrier_unique_payload_overhead_percent": 0.2493545413017273,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-on-r2-f4-put.json"
+    },
+    {
+      "label": "auto-r0-f1-get",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.741038508247584,
+      "mbps": 93.51459866167602,
+      "cpu_seconds_per_delivered_gbit": 2.6263296604156494,
+      "client_rss_kib": [
+        26972,
+        28892
+      ],
+      "server_rss_kib": [
+        27108,
+        28132
+      ],
+      "unloaded_rtt_p50_ms": 107.0959148928523,
+      "loaded_rtt_p50_ms": 107.10679972544312,
+      "loaded_rtt_p95_ms": 120.9228885360061,
+      "loaded_rtt_samples": 49,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67258866,
+      "carrier_unique_payload_overhead_percent": 0.2235203981399536,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r0-f1-get.json"
+    },
+    {
+      "label": "auto-r0-f1-put",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 6.576504837721586,
+      "mbps": 81.63468669871725,
+      "cpu_seconds_per_delivered_gbit": 2.495944499969482,
+      "client_rss_kib": [
+        26076,
+        26716
+      ],
+      "server_rss_kib": [
+        28132,
+        28516
+      ],
+      "unloaded_rtt_p50_ms": 107.10175288841128,
+      "loaded_rtt_p50_ms": 116.45738827064633,
+      "loaded_rtt_p95_ms": 217.30310292914507,
+      "loaded_rtt_samples": 45,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265266,
+      "carrier_unique_payload_overhead_percent": 0.2330571413040161,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r0-f1-put.json"
+    },
+    {
+      "label": "auto-r0-f4-get",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 4.244919719174504,
+      "mbps": 126.47374921483876,
+      "cpu_seconds_per_delivered_gbit": 2.5704503059387203,
+      "client_rss_kib": [
+        26076,
+        26888
+      ],
+      "server_rss_kib": [
+        28516,
+        28772
+      ],
+      "unloaded_rtt_p50_ms": 107.07299085333943,
+      "loaded_rtt_p50_ms": 125.57580508291721,
+      "loaded_rtt_p95_ms": 145.76816176995632,
+      "loaded_rtt_samples": 33,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67267360,
+      "carrier_unique_payload_overhead_percent": 0.2361774444580078,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r0-f4-get.json"
+    },
+    {
+      "label": "auto-r0-f4-put",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 7.698721378110349,
+      "mbps": 69.73507490821483,
+      "cpu_seconds_per_delivered_gbit": 2.533197402954101,
+      "client_rss_kib": [
+        13064,
+        27144
+      ],
+      "server_rss_kib": [
+        28772,
+        29796
+      ],
+      "unloaded_rtt_p50_ms": 107.09658218547702,
+      "loaded_rtt_p50_ms": 214.18420621193945,
+      "loaded_rtt_p95_ms": 320.53592009469867,
+      "loaded_rtt_samples": 32,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 298288,
+      "outer_retransmitted_segments": 206,
+      "carrier_unique_received_bytes": 67266256,
+      "carrier_unique_payload_overhead_percent": 0.23453235626220703,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r0-f4-put.json"
+    },
+    {
+      "label": "auto-r1-f1-get",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.480544256046414,
+      "mbps": 97.95941551018345,
+      "cpu_seconds_per_delivered_gbit": 2.663582563400268,
+      "client_rss_kib": [
+        24328,
+        25096
+      ],
+      "server_rss_kib": [
+        29796,
+        29796
+      ],
+      "unloaded_rtt_p50_ms": 107.0862989872694,
+      "loaded_rtt_p50_ms": 109.48295798152685,
+      "loaded_rtt_p95_ms": 115.92752486467361,
+      "loaded_rtt_samples": 47,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67261078,
+      "carrier_unique_payload_overhead_percent": 0.22681653499603271,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r1-f1-get.json"
+    },
+    {
+      "label": "auto-r1-f1-put",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 6.335010938812047,
+      "mbps": 84.74664324741876,
+      "cpu_seconds_per_delivered_gbit": 2.4773180484771715,
+      "client_rss_kib": [
+        25096,
+        25096
+      ],
+      "server_rss_kib": [
+        29796,
+        29796
+      ],
+      "unloaded_rtt_p50_ms": 107.05941636115313,
+      "loaded_rtt_p50_ms": 117.23004002124071,
+      "loaded_rtt_p95_ms": 210.40559578686953,
+      "loaded_rtt_samples": 44,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": 27512,
+      "outer_retransmitted_segments": 19,
+      "carrier_unique_received_bytes": 67265145,
+      "carrier_unique_payload_overhead_percent": 0.23287683725357056,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r1-f1-put.json"
+    },
+    {
+      "label": "auto-r1-f4-get",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 4.235989924985915,
+      "mbps": 126.74036565414755,
+      "cpu_seconds_per_delivered_gbit": 2.589076757431032,
+      "client_rss_kib": [
+        25096,
+        25352
+      ],
+      "server_rss_kib": [
+        29796,
+        29924
+      ],
+      "unloaded_rtt_p50_ms": 107.07360971719027,
+      "loaded_rtt_p50_ms": 124.47537807747722,
+      "loaded_rtt_p95_ms": 140.02681961283088,
+      "loaded_rtt_samples": 33,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265398,
+      "carrier_unique_payload_overhead_percent": 0.2332538366317749,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r1-f4-get.json"
+    },
+    {
+      "label": "auto-r1-f4-put",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 43.12166946195066,
+      "mbps": 12.450142090943851,
+      "cpu_seconds_per_delivered_gbit": 3.110617399215695,
+      "client_rss_kib": [
+        24328,
+        25992
+      ],
+      "server_rss_kib": [
+        29428,
+        30436
+      ],
+      "unloaded_rtt_p50_ms": 107.0779929868877,
+      "loaded_rtt_p50_ms": 321.2286171037704,
+      "loaded_rtt_p95_ms": 323.08151475153863,
+      "loaded_rtt_samples": 138,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 285256,
+      "outer_retransmitted_segments": 197,
+      "carrier_unique_received_bytes": 67274897,
+      "carrier_unique_payload_overhead_percent": 0.2474084496498108,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r1-f4-put.json"
+    },
+    {
+      "label": "auto-r2-f1-get",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.510657499078661,
+      "mbps": 97.42411174887219,
+      "cpu_seconds_per_delivered_gbit": 2.6449561119079594,
+      "client_rss_kib": [
+        25992,
+        25992
+      ],
+      "server_rss_kib": [
+        29864,
+        30068
+      ],
+      "unloaded_rtt_p50_ms": 107.10177477449179,
+      "loaded_rtt_p50_ms": 109.14889024570584,
+      "loaded_rtt_p95_ms": 109.62635418400168,
+      "loaded_rtt_samples": 47,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67260917,
+      "carrier_unique_payload_overhead_percent": 0.22657662630081177,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r2-f1-get.json"
+    },
+    {
+      "label": "auto-r2-f1-put",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 1,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 6.954441514797509,
+      "mbps": 77.19827837471317,
+      "cpu_seconds_per_delivered_gbit": 2.6822090148925795,
+      "client_rss_kib": [
+        24212,
+        25992
+      ],
+      "server_rss_kib": [
+        29864,
+        29864
+      ],
+      "unloaded_rtt_p50_ms": 107.08600422367454,
+      "loaded_rtt_p50_ms": 137.1040646918118,
+      "loaded_rtt_p95_ms": 207.3543468490243,
+      "loaded_rtt_samples": 45,
+      "native_decisions": 3,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 67265602,
+      "carrier_unique_payload_overhead_percent": 0.2335578203201294,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r2-f1-put.json"
+    },
+    {
+      "label": "auto-r2-f4-get",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "GET",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 4.5547015448100865,
+      "mbps": 117.87180932013965,
+      "cpu_seconds_per_delivered_gbit": 2.570450305938722,
+      "client_rss_kib": [
+        23444,
+        23956
+      ],
+      "server_rss_kib": [
+        29864,
+        29864
+      ],
+      "unloaded_rtt_p50_ms": 107.07855224609375,
+      "loaded_rtt_p50_ms": 124.17344306595623,
+      "loaded_rtt_p95_ms": 143.03804859519005,
+      "loaded_rtt_samples": 34,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67266787,
+      "carrier_unique_payload_overhead_percent": 0.23532360792160034,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r2-f4-get.json"
+    },
+    {
+      "label": "auto-r2-f4-put",
+      "mode": "auto",
+      "scenario": "unbounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 7.727736255154014,
+      "mbps": 69.47324472182056,
+      "cpu_seconds_per_delivered_gbit": 2.812594175338744,
+      "client_rss_kib": [
+        14612,
+        23700
+      ],
+      "server_rss_kib": [
+        29864,
+        29992
+      ],
+      "unloaded_rtt_p50_ms": 107.09092812612653,
+      "loaded_rtt_p50_ms": 213.44792656600475,
+      "loaded_rtt_p95_ms": 321.04918230324984,
+      "loaded_rtt_samples": 35,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 262088,
+      "outer_retransmitted_segments": 181,
+      "carrier_unique_received_bytes": 67266241,
+      "carrier_unique_payload_overhead_percent": 0.23451000452041626,
+      "producer_send_buffer_requested": 0,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-auto-r2-f4-put.json"
+    },
+    {
+      "label": "bounded-off-r0-f4-put",
+      "mode": "off",
+      "scenario": "bounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 9.172575080767274,
+      "mbps": 58.53001008688298,
+      "cpu_seconds_per_delivered_gbit": 5.792826414108276,
+      "client_rss_kib": [
+        27136,
+        61288
+      ],
+      "server_rss_kib": [
+        27488,
+        40496
+      ],
+      "unloaded_rtt_p50_ms": 107.08205727860332,
+      "loaded_rtt_p50_ms": 109.44238305091858,
+      "loaded_rtt_p95_ms": 343.1033356115222,
+      "loaded_rtt_samples": 53,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 70621674,
+      "carrier_unique_payload_overhead_percent": 5.2344948053359985,
+      "producer_send_buffer_requested": 32768,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-bounded-off-r0-f4-put.json"
+    },
+    {
+      "label": "bounded-off-r1-f4-put",
+      "mode": "off",
+      "scenario": "bounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 9.707564871758223,
+      "mbps": 55.30438571282631,
+      "cpu_seconds_per_delivered_gbit": 5.513429641723633,
+      "client_rss_kib": [
+        29112,
+        43064
+      ],
+      "server_rss_kib": [
+        30564,
+        40380
+      ],
+      "unloaded_rtt_p50_ms": 107.05956723541021,
+      "loaded_rtt_p50_ms": 114.3240462988615,
+      "loaded_rtt_p95_ms": 376.9982129335402,
+      "loaded_rtt_samples": 57,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 95568,
+      "outer_retransmitted_segments": 66,
+      "carrier_unique_received_bytes": 70621797,
+      "carrier_unique_payload_overhead_percent": 5.234678089618683,
+      "producer_send_buffer_requested": 32768,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-bounded-off-r1-f4-put.json"
+    },
+    {
+      "label": "bounded-off-r2-f4-put",
+      "mode": "off",
+      "scenario": "bounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 8.334083145018667,
+      "mbps": 64.41871321152958,
+      "cpu_seconds_per_delivered_gbit": 5.830079317092896,
+      "client_rss_kib": [
+        23596,
+        39936
+      ],
+      "server_rss_kib": [
+        31804,
+        40460
+      ],
+      "unloaded_rtt_p50_ms": 107.152143958956,
+      "loaded_rtt_p50_ms": 116.06874689459801,
+      "loaded_rtt_p95_ms": 318.6389290727675,
+      "loaded_rtt_samples": 47,
+      "native_decisions": 0,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 70616415,
+      "carrier_unique_payload_overhead_percent": 5.226658284664154,
+      "producer_send_buffer_requested": 32768,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-bounded-off-r2-f4-put.json"
+    },
+    {
+      "label": "bounded-auto-r0-f4-put",
+      "mode": "auto",
+      "scenario": "bounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.626868676394224,
+      "mbps": 95.41202094377549,
+      "cpu_seconds_per_delivered_gbit": 2.3841857910156246,
+      "client_rss_kib": [
+        16128,
+        21248
+      ],
+      "server_rss_kib": [
+        27364,
+        28772
+      ],
+      "unloaded_rtt_p50_ms": 111.92068504169583,
+      "loaded_rtt_p50_ms": 223.89125335030258,
+      "loaded_rtt_p95_ms": 247.22734128590673,
+      "loaded_rtt_samples": 26,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": null,
+      "outer_retransmitted_segments": null,
+      "carrier_unique_received_bytes": 67265725,
+      "carrier_unique_payload_overhead_percent": 0.23374110460281372,
+      "producer_send_buffer_requested": 32768,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-bounded-auto-r0-f4-put.json"
+    },
+    {
+      "label": "bounded-auto-r1-f4-put",
+      "mode": "auto",
+      "scenario": "bounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 5.295486816205084,
+      "mbps": 101.38273035768577,
+      "cpu_seconds_per_delivered_gbit": 2.4400651454925533,
+      "client_rss_kib": [
+        18688,
+        22528
+      ],
+      "server_rss_kib": [
+        28772,
+        29284
+      ],
+      "unloaded_rtt_p50_ms": 111.844961065799,
+      "loaded_rtt_p50_ms": 225.70872493088245,
+      "loaded_rtt_p95_ms": 234.0792020317167,
+      "loaded_rtt_samples": 23,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 0,
+      "outer_retransmitted_segments": 0,
+      "carrier_unique_received_bytes": 67264945,
+      "carrier_unique_payload_overhead_percent": 0.2325788140296936,
+      "producer_send_buffer_requested": 32768,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-bounded-auto-r1-f4-put.json"
+    },
+    {
+      "label": "bounded-auto-r2-f4-put",
+      "mode": "auto",
+      "scenario": "bounded-producer",
+      "flows": 4,
+      "direction": "PUT",
+      "delivered_bytes": 67108864,
+      "delivery_ratio": 1.0,
+      "seconds": 7.822742639109492,
+      "mbps": 68.62949949496422,
+      "cpu_seconds_per_delivered_gbit": 2.5890767574310294,
+      "client_rss_kib": [
+        13056,
+        19584
+      ],
+      "server_rss_kib": [
+        29412,
+        29924
+      ],
+      "unloaded_rtt_p50_ms": 111.91757535561919,
+      "loaded_rtt_p50_ms": 222.57336787879467,
+      "loaded_rtt_p95_ms": 282.8183107078075,
+      "loaded_rtt_samples": 37,
+      "native_decisions": 6,
+      "outer_retransmitted_bytes": 40544,
+      "outer_retransmitted_segments": 28,
+      "carrier_unique_received_bytes": 67266948,
+      "carrier_unique_payload_overhead_percent": 0.2355635166168213,
+      "producer_send_buffer_requested": 32768,
+      "raw_record": "benchmark-results/.work/h2-native-20261116/wan-bounded-auto-r2-f4-put.json"
+    }
+  ],
+  "groups": [
+    {
+      "scenario": "bounded-producer",
+      "mode": "auto",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 95.41202094377549,
+      "mbps_range": [
+        68.62949949496422,
+        101.38273035768577
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.4400651454925533,
+      "unloaded_rtt_p50_ms_median": 111.91757535561919,
+      "loaded_rtt_p50_ms_median": 223.89125335030258,
+      "loaded_rtt_p95_ms_median": 247.22734128590673,
+      "client_rss_kib_range": [
+        13056,
+        22528
+      ],
+      "server_rss_kib_range": [
+        27364,
+        29924
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.23374110460281372,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "bounded-auto-r0-f4-put",
+        "bounded-auto-r1-f4-put",
+        "bounded-auto-r2-f4-put"
+      ]
+    },
+    {
+      "scenario": "bounded-producer",
+      "mode": "off",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 58.53001008688298,
+      "mbps_range": [
+        55.30438571282631,
+        64.41871321152958
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 5.792826414108276,
+      "unloaded_rtt_p50_ms_median": 107.08205727860332,
+      "loaded_rtt_p50_ms_median": 114.3240462988615,
+      "loaded_rtt_p95_ms_median": 343.1033356115222,
+      "client_rss_kib_range": [
+        23596,
+        61288
+      ],
+      "server_rss_kib_range": [
+        27488,
+        40496
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.2344948053359985,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "bounded-off-r0-f4-put",
+        "bounded-off-r1-f4-put",
+        "bounded-off-r2-f4-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "auto",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 97.42411174887219,
+      "mbps_range": [
+        93.51459866167602,
+        97.95941551018345
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.6449561119079594,
+      "unloaded_rtt_p50_ms_median": 107.0959148928523,
+      "loaded_rtt_p50_ms_median": 109.14889024570584,
+      "loaded_rtt_p95_ms_median": 115.92752486467361,
+      "client_rss_kib_range": [
+        24328,
+        28892
+      ],
+      "server_rss_kib_range": [
+        27108,
+        30068
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.22657662630081177,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "auto-r0-f1-get",
+        "auto-r1-f1-get",
+        "auto-r2-f1-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "auto",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 81.63468669871725,
+      "mbps_range": [
+        77.19827837471317,
+        84.74664324741876
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.495944499969482,
+      "unloaded_rtt_p50_ms_median": 107.08600422367454,
+      "loaded_rtt_p50_ms_median": 117.23004002124071,
+      "loaded_rtt_p95_ms_median": 210.40559578686953,
+      "client_rss_kib_range": [
+        24212,
+        26716
+      ],
+      "server_rss_kib_range": [
+        28132,
+        29864
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.2330571413040161,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "auto-r0-f1-put",
+        "auto-r1-f1-put",
+        "auto-r2-f1-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "auto",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 126.47374921483876,
+      "mbps_range": [
+        117.87180932013965,
+        126.74036565414755
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.570450305938722,
+      "unloaded_rtt_p50_ms_median": 107.07360971719027,
+      "loaded_rtt_p50_ms_median": 124.47537807747722,
+      "loaded_rtt_p95_ms_median": 143.03804859519005,
+      "client_rss_kib_range": [
+        23444,
+        26888
+      ],
+      "server_rss_kib_range": [
+        28516,
+        29924
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.23532360792160034,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "auto-r0-f4-get",
+        "auto-r1-f4-get",
+        "auto-r2-f4-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "auto",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 69.47324472182056,
+      "mbps_range": [
+        12.450142090943851,
+        69.73507490821483
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.812594175338744,
+      "unloaded_rtt_p50_ms_median": 107.09092812612653,
+      "loaded_rtt_p50_ms_median": 214.18420621193945,
+      "loaded_rtt_p95_ms_median": 321.04918230324984,
+      "client_rss_kib_range": [
+        13064,
+        27144
+      ],
+      "server_rss_kib_range": [
+        28772,
+        30436
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.23453235626220703,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "auto-r0-f4-put",
+        "auto-r1-f4-put",
+        "auto-r2-f4-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "off",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 48.758424538447414,
+      "mbps_range": [
+        47.72690977108149,
+        50.710075080976814
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 5.4016709327697745,
+      "unloaded_rtt_p50_ms_median": 108.69924910366535,
+      "loaded_rtt_p50_ms_median": 109.80933578684926,
+      "loaded_rtt_p95_ms_median": 298.3619225211441,
+      "client_rss_kib_range": [
+        14604,
+        32640
+      ],
+      "server_rss_kib_range": [
+        26912,
+        45380
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.30800074338913,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "off-r0-f1-get",
+        "off-r1-f1-get",
+        "off-r2-f1-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "off",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 36.439305806328605,
+      "mbps_range": [
+        31.332560740557696,
+        43.36776553822095
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 5.6065618991851816,
+      "unloaded_rtt_p50_ms_median": 108.75843837857246,
+      "loaded_rtt_p50_ms_median": 108.92296954989433,
+      "loaded_rtt_p95_ms_median": 318.36179294623435,
+      "client_rss_kib_range": [
+        15280,
+        41760
+      ],
+      "server_rss_kib_range": [
+        30456,
+        35740
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.271637439727783,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "off-r0-f1-put",
+        "off-r1-f1-put",
+        "off-r2-f1-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "off",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 63.503390701917525,
+      "mbps_range": [
+        59.87426966354455,
+        67.47221622110462
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 5.736947059631346,
+      "unloaded_rtt_p50_ms_median": 108.7377080693841,
+      "loaded_rtt_p50_ms_median": 110.94224988482893,
+      "loaded_rtt_p95_ms_median": 306.132426392287,
+      "client_rss_kib_range": [
+        13752,
+        36860
+      ],
+      "server_rss_kib_range": [
+        30436,
+        55844
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.359193682670593,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "off-r0-f4-get",
+        "off-r1-f4-get",
+        "off-r2-f4-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "off",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 55.34267517432037,
+      "mbps_range": [
+        18.5357813688791,
+        64.93372092137604
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 5.699694156646731,
+      "unloaded_rtt_p50_ms_median": 108.7286057882011,
+      "loaded_rtt_p50_ms_median": 117.91863478720188,
+      "loaded_rtt_p95_ms_median": 356.6818650113414,
+      "client_rss_kib_range": [
+        13256,
+        42664
+      ],
+      "server_rss_kib_range": [
+        31400,
+        41776
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.22635281085968,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "off-r0-f4-put",
+        "off-r1-f4-put",
+        "off-r2-f4-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "on",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 92.69904900796293,
+      "mbps_range": [
+        80.54737401913502,
+        103.32465532083894
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.7008354663848873,
+      "unloaded_rtt_p50_ms_median": 107.55169438198209,
+      "loaded_rtt_p50_ms_median": 109.96137140318751,
+      "loaded_rtt_p95_ms_median": 122.85487698391066,
+      "client_rss_kib_range": [
+        26240,
+        30436
+      ],
+      "server_rss_kib_range": [
+        27400,
+        30800
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.233323872089386,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "on-r0-f1-get",
+        "on-r1-f1-get",
+        "on-r2-f1-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "on",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 76.49177221493441,
+      "mbps_range": [
+        73.26388673071382,
+        91.27338822484771
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.570450305938721,
+      "unloaded_rtt_p50_ms_median": 107.52663528546691,
+      "loaded_rtt_p50_ms_median": 127.14797491207719,
+      "loaded_rtt_p95_ms_median": 224.11950184032312,
+      "client_rss_kib_range": [
+        28160,
+        30436
+      ],
+      "server_rss_kib_range": [
+        28424,
+        30588
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.23346245288848877,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "on-r0-f1-put",
+        "on-r1-f1-put",
+        "on-r2-f1-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "on",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 126.06965628457561,
+      "mbps_range": [
+        117.66690330304556,
+        126.13617609499285
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 2.551823854446411,
+      "unloaded_rtt_p50_ms_median": 107.52386134117842,
+      "loaded_rtt_p50_ms_median": 126.49126816540956,
+      "loaded_rtt_p95_ms_median": 131.38177506625652,
+      "client_rss_kib_range": [
+        28288,
+        30192
+      ],
+      "server_rss_kib_range": [
+        28680,
+        30716
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.23366063833236694,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "on-r0-f4-get",
+        "on-r1-f4-get",
+        "on-r2-f4-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "on",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 12.654909334807257,
+      "mbps_range": [
+        10.804858636818894,
+        94.33238507879152
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 3.166496753692627,
+      "unloaded_rtt_p50_ms_median": 107.52557124942541,
+      "loaded_rtt_p50_ms_median": 321.88681699335575,
+      "loaded_rtt_p95_ms_median": 428.9004251360893,
+      "client_rss_kib_range": [
+        21488,
+        30192
+      ],
+      "server_rss_kib_range": [
+        29064,
+        31100
+      ],
+      "carrier_unique_payload_overhead_percent_median": 0.2493545413017273,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "on-r0-f4-put",
+        "on-r1-f4-put",
+        "on-r2-f4-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "reference",
+      "flows": 1,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 44.981241367646575,
+      "mbps_range": [
+        42.399396599917274,
+        49.13061641277066
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 6.3516199588775635,
+      "unloaded_rtt_p50_ms_median": 112.231336068362,
+      "loaded_rtt_p50_ms_median": 113.53546939790249,
+      "loaded_rtt_p95_ms_median": 322.5720747373998,
+      "client_rss_kib_range": [
+        17316,
+        34520
+      ],
+      "server_rss_kib_range": [
+        27100,
+        48656
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.389536917209625,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "reference-r0-f1-get",
+        "reference-r1-f1-get",
+        "reference-r2-f1-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "reference",
+      "flows": 1,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 39.7013521468657,
+      "mbps_range": [
+        38.56844607563255,
+        40.68056540086481
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 5.103647708892826,
+      "unloaded_rtt_p50_ms_median": 112.2238771058619,
+      "loaded_rtt_p50_ms_median": 115.50451628863811,
+      "loaded_rtt_p95_ms_median": 333.65458361804485,
+      "client_rss_kib_range": [
+        17204,
+        40332
+      ],
+      "server_rss_kib_range": [
+        29880,
+        40548
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.2183568477630615,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "reference-r0-f1-put",
+        "reference-r1-f1-put",
+        "reference-r2-f1-put"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "reference",
+      "flows": 4,
+      "direction": "GET",
+      "repeats": 3,
+      "mbps_median": 55.67357511722407,
+      "mbps_range": [
+        53.56723941238783,
+        59.722470078277304
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 6.87316060066223,
+      "unloaded_rtt_p50_ms_median": 112.22876189276576,
+      "loaded_rtt_p50_ms_median": 122.78691679239273,
+      "loaded_rtt_p95_ms_median": 326.170839369297,
+      "client_rss_kib_range": [
+        17164,
+        33256
+      ],
+      "server_rss_kib_range": [
+        30332,
+        63876
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.412368476390839,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "reference-r0-f4-get",
+        "reference-r1-f4-get",
+        "reference-r2-f4-get"
+      ]
+    },
+    {
+      "scenario": "unbounded-producer",
+      "mode": "reference",
+      "flows": 4,
+      "direction": "PUT",
+      "repeats": 3,
+      "mbps_median": 50.99592099905274,
+      "mbps_range": [
+        15.258421911369524,
+        58.277039371939615
+      ],
+      "cpu_seconds_per_delivered_gbit_median": 6.072223186492918,
+      "unloaded_rtt_p50_ms_median": 112.19626991078258,
+      "loaded_rtt_p50_ms_median": 119.42774103954434,
+      "loaded_rtt_p95_ms_median": 347.6503637386486,
+      "client_rss_kib_range": [
+        17412,
+        46620
+      ],
+      "server_rss_kib_range": [
+        32064,
+        57768
+      ],
+      "carrier_unique_payload_overhead_percent_median": 5.232836306095123,
+      "delivered_bytes": 201326592,
+      "delivery_ratio": 1.0,
+      "labels": [
+        "reference-r0-f4-put",
+        "reference-r1-f4-put",
+        "reference-r2-f4-put"
+      ]
+    }
+  ],
+  "candidate_primary_trials": 36,
+  "primary_and_control_trials": 54,
+  "all_measured_payloads_delivered": true,
+  "limitations": [
+    "Cohorts were sequential and not randomized.",
+    "Unbounded four-flow uploads encountered TCP memory pressure on jpaws.",
+    "The exact vendor-kernel path that first reduced send capacity remains unresolved.",
+    "Auto evaluates admission health and resources, rather than transfer speed or loaded latency.",
+    "No artificial-loss trial was run.",
+    "H2 retains TCP head-of-line blocking and shared carrier failure.",
+    "Native scope excludes ordinary kernel TUN forwarding."
+  ],
+  "raw_evidence": "benchmark-results/.work/h2-native-20261116",
+  "fleet": {
+    "verified_at": "2026-11-16T17:55:53.900716+00:00",
+    "application_commit": "67ada09f",
+    "source_commits": [
+      "58f5da69",
+      "67ada09f"
+    ],
+    "modes": [
+      "off",
+      "on",
+      "auto"
+    ],
+    "product_default": "off",
+    "retained_fleet_mode": "off",
+    "mode_source": "Existing configurations retain the verified off default.",
+    "backward_compatibility_paths_added": false,
+    "old_feature_aliases_removed": true,
+    "old_proxy_module_path_removed": true,
+    "obsolete_diagnostic_switch_removed": true,
+    "native_scope": "Client-initiated direct TCP proxy flows to a userspace peer's own IPv4 address.",
+    "quic_multiplexer_added": false,
+    "application_data_replayed": false,
+    "receive_credit_lifetime_accounted": true,
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "configuration_preserved": true,
+    "identities_preserved": true,
+    "configured_lowertier_routes_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "application_bytes_per_instance_per_direction": 8388608,
+    "application_instances": 11,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "completed_transfer_files_removed": true,
+    "temporary_test_processes_stopped": true,
+    "permitted_sequential_library_tests_passed": 565,
+    "separate_caddy_integration_tests_passed": 2,
+    "focused_stream_tests_passed": 9,
+    "final_full_ffi_check_passed": true,
+    "final_minimal_check_passed": true,
+    "tracker_bootstrap_bytes": 4194304,
+    "candidate_wan_trials": 36,
+    "bounded_producer_control_trials": 6,
+    "all_measured_payloads_delivered": true,
+    "route_repair": "btrouter: restored the default route declared by cmcc4 DHCP. Firewall and VPN rules are unchanged.",
+    "recovery": [
+      "The live-switch fixture used startup overrides and was read-only. A complete TOML fixture restored writable control.",
+      "The fleet verifier lacked local reference files. Protected pre-install copies supplied those files.",
+      "The option verifier expected an explicit value. Schema verification confirmed the off default for unset values.",
+      "btrouter had no IPv4 default route. Restoring its declared DHCP route recovered authenticated peers and delivery."
+    ],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "pending_state_verified_at": "2026-11-16T17:55:53.868393+00:00",
+    "summary": "benchmark-results/h2-native-20261117/summary.json",
+    "report": "docs/performance/h2-native-20261117.md",
+    "audit": "benchmark-results/.work/h2-native-20261116/audit.jsonl",
+    "limitations": "Native H2 streams do not cover kernel TUN forwarding. Auto checks admission health and resources. It does not predict speed or loaded latency. Four-flow uploads showed kernel TCP memory pressure. The exact vendor shrink path remains unresolved. No artificial-loss trial was run. H2 retains TCP head-of-line blocking.",
+    "hosts": [
+      {
+        "host": "local",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 34,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 915,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.2",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.2",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "pid": 64415,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "local",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "862jp",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 29,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.82",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.82",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 127,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1161,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 2766115,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "862jp",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "jpali",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 34,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.62",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.62",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 127,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1006,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 1906263,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "jpali",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "s6916",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 35,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.60",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.60",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 936,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 902076,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "s6916",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "yutoms-mcp",
+        "configured_mtu": 1280,
+        "effective_mtu": 1280,
+        "mode": "userspace",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 31,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.3",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.3",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 129,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 804,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 93396,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "yutoms-mcp",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "jpaws",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 35,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.100",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.100",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 946,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 2404317,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "jpaws",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "861jp",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 32,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.81",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.81",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 938,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 1894574,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "861jp",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "alibj",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 36,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.110",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.110",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 824,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 269478,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "alibj",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "hattori-opwrt",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 37,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.1",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.1",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1472,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 3851,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "hattori-opwrt",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "btrouter",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 28,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.40",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.40",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.100",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 119,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 1180,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 19103,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "btrouter",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      },
+      {
+        "host": "la",
+        "configured_mtu": 1300,
+        "effective_mtu": 1280,
+        "mode": "kernel",
+        "identity_preserved": true,
+        "other_configuration_preserved": true,
+        "runtime_version": "0.03",
+        "authenticated_connections": 31,
+        "protocols": [
+          "h2",
+          "quic",
+          "wss"
+        ],
+        "full_size_icmp_received": 5,
+        "application": [
+          {
+            "address": "10.126.126.87",
+            "download_bytes": 8388608,
+            "upload_bytes": 8388608
+          },
+          {
+            "address": "10.126.126.87",
+            "udp": [
+              {
+                "udp_payload_bytes": 64,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1160,
+                "sent": 5,
+                "received": 5
+              },
+              {
+                "udp_payload_bytes": 1252,
+                "sent": 5,
+                "received": 5
+              }
+            ]
+          }
+        ],
+        "application_source": "10.126.126.2",
+        "gui": [
+          {
+            "method": "GET",
+            "path": "/",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 864,
+            "content_type": "text/html; charset=utf-8"
+          },
+          {
+            "method": "GET",
+            "path": "/api/nodes",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 112,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": false,
+            "status": 200,
+            "body_bytes": 841,
+            "content_type": "application/json; charset=utf-8"
+          },
+          {
+            "method": "POST",
+            "path": "/api/rpc/GetNode",
+            "foreign_origin": true,
+            "status": 403,
+            "body_bytes": 25,
+            "content_type": "text/plain"
+          }
+        ],
+        "pid": 333570,
+        "running_transfer_integrity": true,
+        "h2_tcp_proxy": "off",
+        "option_default_verified": true,
+        "cleanup": {
+          "host": "la",
+          "fixture_stopped": true,
+          "completed_transfer_artifacts_removed": true
+        }
+      }
+    ],
+    "pending_hosts": [
+      {
+        "host": "tw2-ingress",
+        "online": false,
+        "last_seen": "2026-11-15T14:56:24.1Z",
+        "migration_verified": false
+      },
+      {
+        "host": "btower",
+        "online": false,
+        "last_seen": "2026-10-17T08:28:58.1Z",
+        "migration_verified": false
+      },
+      {
+        "host": "UTMOWRT",
+        "online": false,
+        "last_seen": "2026-10-27T04:12:15.1Z",
+        "migration_verified": false
+      }
+    ]
+  },
+  "verification": {
+    "library_tests_passed": 565,
+    "caddy_tests_passed": 2,
+    "focused_stream_tests_passed": 9,
+    "public_domain_probes_excluded": 2,
+    "final_full_ffi_check": true,
+    "final_minimal_check": true,
+    "tracker_bootstrap_bytes": 4194304
+  }
+}
