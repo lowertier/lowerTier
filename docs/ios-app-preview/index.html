@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; form-action 'none'; base-uri 'none'">
+<title>LowTier iOS app review</title><link rel="stylesheet" href="app.css"></head>
+<body class="device-mode-active"><main class="render-gallery">
+<h1>LowTier iOS app review</h1>
+<p>These HTML pages come from the production frontend. Connected states use explicit browser fixtures.
+These renders do not establish a working VPN session. The page links work without JavaScript.</p>
+<ul class="render-pages"><li><a href="connect.html">Connect</a></li>
+<li><a href="machines.html">Machines</a></li>
+<li><a href="routes.html">Routes</a></li>
+<li><a href="settings.html">Settings</a></li>
+<li><a href="machine-detail.html">Machine details</a></li>
+<li><a href="connect-dark.html">Connect · dark appearance</a></li>
+<li><a href="unconfigured.html">No network configured</a></li>
+<li><a href="disconnected.html">Saved network · disconnected</a></li>
+<li><a href="connecting.html">Connecting</a></li>
+<li><a href="reconnecting.html">Reconnecting</a></li>
+<li><a href="quick-setup.html">Quick setup</a></li>
+<li><a href="import-setup.html">Import TOML</a></li></ul>
+<h2>Control path</h2>
+<div class="render-path" aria-label="Control path"><span>Solid UI</span> → <span>Tauri IPC and async Rust adapter</span> →
+<span>Swift main queue</span> → <span>OS provider message</span> → <span>Extension control queue</span> →
+<span>C FFI control API</span> → <span>Rust core</span></div>
+<p>One visible poll returns system state and a network snapshot. The Rust command awaits the mobile plugin.
+The Swift manager and provider retain their ownership queues.
+Provider admission remains closed after a timeout until the callback returns or the VPN disconnects.
+Connection generations reject old snapshots and logs.</p>
+<h2>Removed work</h2>
+<table><thead><tr><th scope="col">Operation</th><th scope="col">Before</th><th scope="col">After</th></tr></thead><tbody>
+<tr><th scope="row">Connected UI polling</th><td>Two loops</td><td>One loop</td></tr>
+<tr><th scope="row">Blocking Rust worker</th><td>One per command</td><td>None</td></tr>
+<tr><th scope="row">Preference callback dispatches</th><td>Two redundant dispatches per connect</td><td>None</td></tr>
+<tr><th scope="row">Nested payload JSON</th><td>Extra string encoding and parsing</td><td>Object payload</td></tr>
+<tr><th scope="row">Core calls per snapshot</th><td>Four</td><td>Three</td></tr>
+<tr><th scope="row">Steady status Keychain reads</th><td>One per status sample</td><td>None after initial metadata load</td></tr>
+<tr><th scope="row">App chart history</th><td>Up to 120 samples per series</td><td>No chart history</td></tr>
+<tr><th scope="row">Direct route label</th><td>Two hops</td><td>One hop</td></tr>
+</tbody></table>
+<h2>Packet path</h2>
+<div class="render-path" aria-label="Packet path"><span>iOS packet flow</span> → <span>Swift batch adapter</span> →
+<span>C FFI</span> → <span>Bounded core ring</span> → <span>NIC forwarding</span> → <span>Authenticated transport</span></div>
+<div class="render-path" aria-label="Packet output path"><span>Authenticated transport</span> → <span>NIC writer</span> →
+<span>Bounded core ring</span> → <span>Borrowed C callback</span> → <span>Swift Data copy</span> → <span>iOS packet flow</span></div>
+<p>Packets do not enter JavaScript. The adapter keeps 64-packet batches and 128-packet rings.
+The shutdown barrier protects borrowed callback data. Device throughput, memory use, and signed operation remain unmeasured.</p>
+</main></body></html>

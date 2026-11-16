@@ -78,7 +78,7 @@ function median(values: number[]): number | undefined {
   return sorted[Math.floor(sorted.length / 2)];
 }
 
-function ingest(doc: Doc) {
+function ingest(doc: Doc, keepHistory = true) {
   const at = doc.sampled_at_unix_ms ?? Date.now();
   const counters = new Map<string, { rx: bigint; tx: bigint }>();
   const elapsed = previous ? Math.max(0.2, (at - previous.at) / 1000) : 0;
@@ -158,12 +158,14 @@ function ingest(doc: Doc) {
       raw: peer,
     };
     rows.push(row);
-    let series = history.get(row.id);
-    if (!series) history.set(row.id, (series = { rtt: [], rx: [], tx: [] }));
-    if (previous) {
-      push(series.rtt, row.rtt ?? NaN);
-      push(series.rx, rx);
-      push(series.tx, tx);
+    if (keepHistory) {
+      let series = history.get(row.id);
+      if (!series) history.set(row.id, (series = { rtt: [], rx: [], tx: [] }));
+      if (previous) {
+        push(series.rtt, row.rtt ?? NaN);
+        push(series.rx, rx);
+        push(series.tx, tx);
+      }
     }
   }
   const names = disambiguatePeerNames(
@@ -177,7 +179,7 @@ function ingest(doc: Doc) {
   );
   for (const row of rows) row.name = names.get(row.id) ?? row.name;
   rows.sort((a, b) => a.name.localeCompare(b.name));
-  if (previous) {
+  if (keepHistory && previous) {
     push(totals.rx, rows.reduce((sum, row) => sum + row.rx, 0));
     push(totals.tx, rows.reduce((sum, row) => sum + row.tx, 0));
     push(totals.rtt, median(rows.flatMap((row) => (row.rtt != null ? [row.rtt] : []))) ?? NaN);
@@ -185,7 +187,7 @@ function ingest(doc: Doc) {
   previous = { at, counters };
   setSnapshot(doc);
   setPeers(rows);
-  if (!selection().remote) setLocalPeers(rows);
+  if (keepHistory && !selection().remote) setLocalPeers(rows);
   setSampledAt(at);
   setTick((value) => value + 1);
 }
@@ -216,13 +218,27 @@ export function restart() {
   poll();
 }
 
-function resetView() {
+export function clearSnapshot() {
   history.clear();
   for (const ring of Object.values(totals)) ring.length = 0;
   previous = null;
   setSnapshot(null);
   setPeers([]);
   setError(null);
+}
+
+/** The app supplies one native sample and does not use the browser chart histories. */
+export function updateSnapshot(doc: Doc) {
+  if (doc.error) {
+    setError(new ApiError(doc.error));
+    return;
+  }
+  ingest(doc, false);
+  setError(null);
+}
+
+function resetView() {
+  clearSnapshot();
   restart();
 }
 

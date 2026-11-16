@@ -6,6 +6,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "node --test test/*.test.mjs",
     "test:app": "playwright test",
+    "render:app": "node ../../script/ios/render-pages.mjs",
     "dev": "vite",
     "tauri": "tauri",
     "ios:init": "tauri ios init --ci && tauri icon src-tauri/ios/icon.svg --output src-tauri/icons && python3 ../../script/ios/configure.py",

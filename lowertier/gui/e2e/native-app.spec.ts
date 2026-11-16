@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { installVpnFixture } from "./vpn-fixture.mjs";
 
 test("the shared app layout reflows and keeps browser VPN controls inactive", async ({ page }, info) => {
   const failures: string[] = [];
@@ -17,6 +18,8 @@ test("the shared app layout reflows and keeps browser VPN controls inactive", as
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Connect", exact: true }).click();
   await page.screenshot({ path: info.outputPath("ios-layout-dark.png"), fullPage: true });
   await page.getByRole("button", { name: "Add a network", exact: true }).last().click();
+  await expect(page.getByRole("heading", { name: "Add your network" })).toBeInViewport();
+  await expect(page.locator(".device-overview")).toHaveCount(0);
   await page.getByRole("radio", { name: "Import TOML" }).check();
   await page.getByRole("textbox", { name: "Profile name" }).fill("Local fixture");
   await page.getByRole("textbox", { name: "Configuration", exact: true }).fill('[address]\nipv4 = "10.44.0.9/24"');
@@ -25,38 +28,14 @@ test("the shared app layout reflows and keeps browser VPN controls inactive", as
   await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
   await page.setViewportSize({ width: 320, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole("navigation").getByRole("button", { name: "Machines" }).click();
+  await expect(page.getByRole("heading", { name: "Machines", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Add your network" })).toHaveCount(0);
   expect(failures).toEqual([]);
 });
 
 test("native IPC owns profile storage and the system VPN state controls the connection display", async ({ page }) => {
-  await page.addInitScript(() => {
-    const runtime = window as any;
-    runtime.isTauri = true;
-    let state = "disconnected";
-    let profile: { id: string; name: string } | undefined;
-    runtime.nativeRequests = [];
-    runtime.setVpnState = (next: string) => { state = next; };
-    const status = () => ({ state, platform: "ios", mtu: 1280, lastError: "", profile });
-    runtime.__TAURI_INTERNALS__ = {
-      invoke: async (command: string, args: { action: string; payload: string }) => {
-        if (command !== "plugin:lowertier-vpn|execute") throw new Error("Unexpected native command.");
-        const body = JSON.parse(args.payload);
-        runtime.nativeRequests.push({ action: args.action, body });
-        if (args.action === "saveProfile") {
-          profile = { id: "fixture-profile", name: body.name };
-          return status();
-        }
-        if (args.action === "connect") { state = "connecting"; return status(); }
-        if (args.action === "disconnect") { state = "disconnected"; return status(); }
-        if (args.action === "request") return {
-          sampled_at_unix_ms: Date.now(),
-          node: { node: { hostname: "iPhone", ipv4_addr: "10.44.0.9/24", inst_id: "fixture", peer_id: 1 } },
-          peers: [], routes: [], paths: [],
-        };
-        return status();
-      },
-    };
-  });
+  await page.addInitScript(installVpnFixture);
   await page.goto("/");
   await page.getByRole("button", { name: "Add a network", exact: true }).last().click();
   await page.getByRole("textbox", { name: "Profile name" }).fill("Fixture network");
@@ -66,6 +45,12 @@ test("native IPC owns profile storage and the system VPN state controls the conn
   await page.getByRole("textbox", { name: "Peer addresses" }).fill("quic://127.0.0.1:11012");
   await page.getByRole("button", { name: "Save network" }).click();
   await expect(page.getByRole("heading", { name: "Fixture network" })).toBeVisible();
+  await page.getByRole("navigation").getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Replace configuration" }).click();
+  await expect(page.getByRole("heading", { name: "Network setup" })).toBeVisible();
+  await page.getByRole("button", { name: "Close network setup" }).click();
+  await expect(page.getByRole("heading", { name: "Network profile", exact: true })).toBeVisible();
+  await page.getByRole("navigation").getByRole("button", { name: "Connect", exact: true }).click();
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain("fixture-secret");
   const config = await page.evaluate(() => (window as any).nativeRequests.find((call: any) => call.action === "saveProfile").body.config);
   expect(config).toContain('secret = "fixture-secret-not-for-storage"');
@@ -82,4 +67,77 @@ test("native IPC owns profile storage and the system VPN state controls the conn
   await page.getByRole("button", { name: "Disconnect", exact: true }).click();
   await expect(page.locator(".device-status")).toHaveText("Disconnected");
   await expect(page.getByText("No address yet")).toBeVisible();
+});
+
+test("one visible poll owns sampling and discards a reply from before disconnect", async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(installVpnFixture, {
+    state: "connected", profile: { id: "fixture-profile", name: "Fixture network" }, members: true,
+  });
+  await page.goto("/");
+  await expect(page.getByText("3 machines available")).toBeVisible();
+  await page.clock.runFor(3100);
+  const calls = await page.evaluate(() => (window as any).nativeRequests);
+  expect(calls.map((call: any) => call.action)).toEqual(["poll", "poll", "poll", "poll"]);
+
+  await page.getByRole("navigation").getByRole("button", { name: "Routes" }).click();
+  await expect(page.locator(".device-route").first()).toContainText("Mac Studio");
+  await expect(page.locator(".device-route").first()).toContainText("10.44.0.2");
+  await expect(page.locator(".device-route").first()).toContainText("1 hop");
+  await expect(page.locator(".device-route").nth(2)).toContainText("2 hops");
+  await expect(page.locator(".device-route").last()).toContainText("Path unavailable");
+  await page.evaluate(() => {
+    const runtime = window as any;
+    runtime.fixtureHidden = true;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => runtime.fixtureHidden });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.runFor(6000);
+  expect(await page.evaluate(() => (window as any).nativeRequests.length)).toBe(4);
+  await page.evaluate(() => {
+    (window as any).fixtureHidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).nativeRequests.length)).toBe(5);
+  await page.evaluate(() => { (window as any).blockNextVpnPoll = true; });
+  await page.clock.runFor(1000);
+  expect(await page.evaluate(() => (window as any).activeVpnPolls)).toBe(1);
+  await page.getByRole("navigation").getByRole("button", { name: "Settings" }).click();
+  await page.evaluate(() => { (window as any).blockNextVpnLogs = true; });
+  await page.getByRole("button", { name: "Read recent logs" }).click();
+  await page.getByRole("navigation").getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(page.locator(".device-status")).toHaveText("Disconnected");
+  await page.evaluate(() => (window as any).releaseVpnPoll());
+  await page.evaluate(() => (window as any).releaseVpnLogs());
+  await expect.poll(() => page.evaluate(() => (window as any).activeVpnPolls)).toBe(0);
+  await expect(page.getByText("No address yet")).toBeVisible();
+  await page.getByRole("navigation").getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByRole("button", { name: "Read recent logs" })).toBeDisabled();
+  await expect(page.getByLabel("Recent VPN logs")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).maxVpnPolls)).toBe(1);
+});
+
+test("a system connection generation invalidates logs without a local VPN action", async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(installVpnFixture, {
+    state: "connected", profile: { id: "fixture-profile", name: "Fixture network" }, members: true,
+  });
+  await page.goto("/");
+  await expect(page.getByText("3 machines available")).toBeVisible();
+  await page.getByRole("navigation").getByRole("button", { name: "Settings" }).click();
+  for (const failure of [false, true]) {
+    await page.evaluate(() => { (window as any).blockNextVpnLogs = true; });
+    await page.getByRole("button", { name: "Read recent logs" }).click();
+    await page.evaluate(() => (window as any).setVpnState("connected"));
+    await page.clock.runFor(1000);
+    await page.evaluate((fail) => {
+      (window as any).failNextVpnLogs = fail;
+      (window as any).releaseVpnLogs();
+    }, failure);
+    await expect(page.getByLabel("Recent VPN logs")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "Read recent logs" }).click();
+  await expect(page.getByLabel("Recent VPN logs")).toContainText("Fixture: packet interface attached");
 });

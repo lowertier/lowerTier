@@ -14,7 +14,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
 pub struct LowertierVpn<R: Runtime>(AppHandle<R>);
 
 impl<R: Runtime> LowertierVpn<R> {
-  pub fn execute(&self, _payload: Request) -> crate::Result<serde_json::Value> {
+  pub async fn execute(&self, _payload: Request) -> crate::Result<serde_json::Value> {
     let _ = &self.0;
     Err(std::io::Error::new(
       std::io::ErrorKind::Unsupported,

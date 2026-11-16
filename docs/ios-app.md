@@ -11,6 +11,9 @@ The same frontend bundle serves the browser interface and the native app.
 Tauri selects the app layout automatically.
 The browser query `?layout=app` shows the layout without VPN controls.
 The preview does not create peers or simulate a VPN connection.
+Connect and Settings open the same setup page in one tap.
+The setup form appears directly below the page heading.
+Selecting a main tab closes setup.
 
 | Tab | Purpose |
 | --- | --- |
@@ -22,6 +25,79 @@ The preview does not create peers or simulate a VPN connection.
 The layout supports safe areas, enlarged text, and light and dark appearance.
 The app polls the provider only while the VPN is connected and the app is visible.
 “VPN active” reports the system connection state. Peer availability is a separate result.
+
+## Rendered pages
+
+Open [the HTML review](ios-app-preview/index.html) to inspect the four tabs and setup states.
+The review contains 12 renders from the production frontend.
+Connected states use explicit browser fixtures.
+Each page identifies its fixture or browser-preview state.
+The exported pages contain no JavaScript.
+The exported controls are inactive.
+The tab links work as ordinary HTML links.
+
+From `lowertier/gui`, regenerate the pages with:
+
+```sh
+pnpm build
+pnpm render:app
+```
+
+The renderer checks widths of 320, 390, and 820 pixels.
+It also checks 200% text size at 320 pixels.
+Screenshots and validation records reside in `benchmark-results/.work/ios-review-20261116/renders/`.
+These checks do not establish signed device operation.
+
+## Control sampling
+
+The app uses one poll for system status and the network snapshot.
+It waits one second after a connected poll completes.
+It waits two seconds in other system states.
+The app stops polling while hidden.
+Only one poll can remain active.
+Profile changes and visibility changes invalidate older replies.
+Late log replies cannot restore data after disconnection.
+
+The Rust command awaits Tauri's asynchronous mobile plugin call.
+It does not allocate a blocking worker for the native callback.
+Command payloads remain JSON objects.
+The previous nested JSON string and its extra decode are removed.
+Swift retains its main queue for VPN manager ownership.
+Preference save and reload callbacks already run on the main thread under the NetworkExtension contract.
+The connect operation removes two redundant main-queue dispatches from those callbacks.
+Provider requests have a five-second reply deadline.
+A late provider response cannot complete the same invocation twice.
+The deadline releases the invocation without reopening provider admission.
+One provider request remains admitted until its callback returns or the VPN disconnects.
+Reassertion does not reopen admission.
+System connection generations invalidate previous snapshots and logs.
+This check also covers connections restarted outside the app.
+
+The app caches only the profile ID and name.
+The first metadata load reads the Keychain.
+Successful profile saves and deletion update the metadata cache.
+The extension can update credentials and identity without changing those metadata fields.
+The cache does not retain the configuration or credentials.
+
+The native snapshot reads `GetNode`, `ListPeers`, and `ListRoutes`.
+`ListRoutes` includes route paths.
+The app does not consume `ListPaths`, so sampling no longer fetches that response.
+Explicit read RPCs retain their existing allowlist.
+Native samples update current peers and rate counters without allocating browser chart histories.
+The browser daemon view retains its existing polling and chart histories.
+
+| Source operation | Before review | After review |
+| --- | --- | --- |
+| Visible app polling loops | Two | One |
+| Blocking workers per command | One | Zero |
+| Redundant preference callback dispatches per connect | Two | Zero |
+| Core RPC calls per native snapshot | Four | Three |
+| Steady status Keychain reads | One per sample | Zero after the first metadata load |
+| Native chart samples per series | Up to 120 | Zero |
+| Direct route display | Two endpoint nodes counted as two hops | One link counted as one hop |
+
+These counts describe removed work.
+They do not establish CPU time, process RSS, or packet throughput improvements.
 
 ## Native packet path
 
@@ -191,6 +267,14 @@ cargo test --locked -p lowertier-ffi --lib -- --test-threads=1
 The packet tests cover profile identity, packet integrity, bounded admission, and cancellation.
 They also cover concurrent close, callback lifetime, ownership, reopen, and C/RPC lifecycle cleanup.
 The Swift fixture covers borrowed pointers, IPv4/IPv6 metadata, and batch boundaries.
+The control fixture runs the production Swift plugin with host VPN and Tauri fixtures:
+
+```sh
+python3 script/ios/test-control.py
+```
+
+It covers provider deadlines, admission after timeout, reassertion, connection generations, late replies, and cached profile metadata.
+It does not run Network Extension or real Tauri IPC.
 After building the app, check its embedded extension and runtime library paths:
 
 ```sh

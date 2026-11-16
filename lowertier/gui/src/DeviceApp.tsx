@@ -2,9 +2,9 @@ import { For, Match, Show, Switch, createMemo, createSignal, onCleanup, onMount 
 import { parse, stringify } from "smol-toml";
 import { rpc, type Doc } from "./api";
 import { Mark } from "./components/icons";
-import { ago, bytes, latency, rate } from "./format";
-import { nativeRuntime, vpnCommand, type VpnStatus } from "./native";
-import { error, peers, snapshot, start, stop, type PeerRow } from "./store";
+import { ago, bytes, ipv4, latency, rate } from "./format";
+import { nativeRuntime, vpnCommand, type VpnPoll, type VpnStatus } from "./native";
+import { clearSnapshot, error, peers, snapshot, updateSnapshot, type PeerRow } from "./store";
 import { THEMES, setTheme, theme, type Theme } from "./theme";
 
 type Tab = "connect" | "machines" | "routes" | "settings";
@@ -122,11 +122,18 @@ function MachineCard(props: { peer: PeerRow; expanded?: boolean; onClick: () => 
   </article>;
 }
 
+function routeHops(route: Doc): string {
+  const count = (route.path_peer_ids?.length ?? 0) - 1;
+  if (route.path_error || count < 1) return "Path unavailable";
+  return `${count} ${count === 1 ? "hop" : "hops"}`;
+}
+
 export default function DeviceApp() {
   const [tab, setTab] = createSignal<Tab>("connect");
-  const [status, setStatus] = createSignal<VpnStatus>({ state: "disconnected", platform: "preview", mtu: 1280, lastError: "" });
+  const [status, setStatus] = createSignal<VpnStatus>({ state: "disconnected", platform: "preview", mtu: 1280, connectionGeneration: 0, lastError: "" });
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal("");
+  const [pollError, setPollError] = createSignal("");
   const [setup, setSetup] = createSignal(false);
   const [query, setQuery] = createSignal("");
   const [expanded, setExpanded] = createSignal<number>();
@@ -135,6 +142,8 @@ export default function DeviceApp() {
   let timer: number | undefined;
   let disposed = false;
   let revision = 0;
+  let polling = false;
+  let refreshPending = false;
   const connected = () => status().state === "connected";
   const running = () => connected() || status().state === "reconnecting";
   const changing = () => busy() || ["connecting", "disconnecting"].includes(status().state);
@@ -143,22 +152,48 @@ export default function DeviceApp() {
   const node = () => connected() ? snapshot()?.node?.node : undefined;
   const incoming = () => visiblePeers().reduce((sum, peer) => sum + peer.rx, 0);
   const outgoing = () => visiblePeers().reduce((sum, peer) => sum + peer.tx, 0);
+  const openTab = (next: Tab) => {
+    setSetup(false);
+    setTab(next);
+    window.scrollTo({ top: 0 });
+  };
+  const openSetup = () => {
+    setSetup(true);
+    window.scrollTo({ top: 0 });
+  };
 
   const applyStatus = (next: VpnStatus) => {
+    const changed = next.connectionGeneration !== status().connectionGeneration;
     setStatus(next);
-    if (next.state === "connected" && !document.hidden) start();
-    else stop();
+    setNow(Date.now());
+    if (next.state !== "connected" || changed) {
+      clearSnapshot();
+      setLogs(null);
+    }
   };
   const refresh = async () => {
     window.clearTimeout(timer);
+    if (disposed || document.hidden || busy()) return;
+    if (polling) { refreshPending = true; return }
+    polling = true;
+    refreshPending = false;
     const mine = revision;
     try {
-      const next = await vpnCommand<VpnStatus>("status");
-      if (!disposed && mine === revision) applyStatus(next);
+      const next = await vpnCommand<VpnPoll>("poll");
+      if (!disposed && mine === revision) {
+        applyStatus(next.status);
+        if (next.status.state === "connected" && next.snapshot) updateSnapshot(next.snapshot);
+        setPollError("");
+      }
     } catch (caught) {
-      if (!disposed && mine === revision) setFailure(String(caught));
+      if (!disposed && mine === revision) setPollError(String(caught));
+    } finally {
+      polling = false;
+      if (!disposed && !document.hidden && !busy()) {
+        if (refreshPending || mine !== revision) void refresh();
+        else timer = window.setTimeout(refresh, connected() ? 1000 : 2000);
+      }
     }
-    if (!disposed && !document.hidden) timer = window.setTimeout(refresh, 2000);
   };
   const action = async (name: string, payload: Record<string, unknown> = {}, formHandlesError = false) => {
     setBusy(true);
@@ -169,26 +204,33 @@ export default function DeviceApp() {
     finally { setBusy(false); refresh(); }
   };
   const toggle = () => {
-    if (!status().profile) { setSetup(true); return }
+    if (!status().profile) { openSetup(); return }
     void action(running() ? "disconnect" : "connect").catch(() => {});
+  };
+  const readLogs = async () => {
+    const mine = revision;
+    const connection = status().connectionGeneration;
+    try {
+      const result = await rpc("ReadLogs", { page: { limit: 100 } });
+      if (!disposed && mine === revision && connection === status().connectionGeneration && connected()) setLogs(result.logs ?? []);
+    } catch (caught) {
+      if (!disposed && mine === revision && connection === status().connectionGeneration) setFailure(String(caught));
+    }
   };
   onMount(() => {
     document.body.classList.add("device-mode-active");
     refresh();
-    const clock = window.setInterval(() => setNow(Date.now()), 1000);
     const visibility = () => {
       revision++;
       window.clearTimeout(timer);
-      if (document.hidden) stop();
-      else refresh();
+      if (!document.hidden) void refresh();
     };
     document.addEventListener("visibilitychange", visibility);
     onCleanup(() => {
       disposed = true;
       revision++;
       window.clearTimeout(timer);
-      window.clearInterval(clock);
-      stop();
+      clearSnapshot();
       document.removeEventListener("visibilitychange", visibility);
       document.body.classList.remove("device-mode-active");
     });
@@ -196,13 +238,17 @@ export default function DeviceApp() {
 
   return <div class="device-shell">
     <header class="device-header">
-      <a href="#connect" class="device-brand" onClick={(event) => { event.preventDefault(); setTab("connect"); }}><Mark size={30} /><span>lowertier<span class="device-brand-tag">YOUR PRIVATE NETWORK</span></span></a>
+      <a href="#connect" class="device-brand" onClick={(event) => { event.preventDefault(); openTab("connect"); }}><Mark size={30} /><span>lowertier<span class="device-brand-tag">YOUR PRIVATE NETWORK</span></span></a>
       <span class="device-platform">{nativeRuntime ? "iOS" : "Preview"}</span>
     </header>
     <main class="device-main" id="device-content">
       <Show when={!nativeRuntime}><p class="device-preview">Layout preview. VPN controls require the iOS app.</p></Show>
-      <Show when={failure() || status().lastError}><p role="alert" class="device-error">{failure() || status().lastError}</p></Show>
-      <div class="device-heading"><div><p class="device-eyebrow">{tab() === "connect" ? "OVERVIEW" : "YOUR NETWORK"}</p><h1>{tab() === "connect" ? "Your private network" : tabs.find((item) => item.id === tab())?.title}</h1></div></div>
+      <Show when={failure() || pollError() || status().lastError}><p role="alert" class="device-error">{failure() || pollError() || status().lastError}</p></Show>
+      <Show when={connected() && error()}><p class="device-error" role="status">{error()?.message}</p></Show>
+      <div class="device-heading"><div><p class="device-eyebrow">{setup() ? "CONFIGURATION" : tab() === "connect" ? "OVERVIEW" : "YOUR NETWORK"}</p><h1>{setup() ? "Network setup" : tab() === "connect" ? "Your private network" : tabs.find((item) => item.id === tab())?.title}</h1></div></div>
+      <Show when={!setup()} fallback={
+        <NetworkForm busy={busy()} onClose={() => setSetup(false)} onSave={async (name, config) => { await action("saveProfile", { name, config }, true); }} />
+      }>
       <Switch>
         <Match when={tab() === "connect"}>
           <div class="device-overview">
@@ -221,8 +267,7 @@ export default function DeviceApp() {
               </section>
             </div>
           </div>
-          <Show when={setup()}><NetworkForm busy={busy()} onClose={() => setSetup(false)} onSave={async (name, config) => { await action("saveProfile", { name, config }, true); }} /></Show>
-          <section class="device-card device-members"><div class="device-section-title"><h2>Machines <span class="device-count">{visiblePeers().length}</span></h2><button type="button" class="device-text-button" onClick={() => setTab("machines")}>View all<Glyph name="chevron" size={15} /></button></div>
+          <section class="device-card device-members"><div class="device-section-title"><h2>Machines <span class="device-count">{visiblePeers().length}</span></h2><button type="button" class="device-text-button" onClick={() => openTab("machines")}>View all<Glyph name="chevron" size={15} /></button></div>
             <For each={visiblePeers().slice(0, 3)} fallback={<div class="device-empty"><span class="device-empty-icon"><Glyph name="machines" size={28} /></span><h3>{connected() ? "Finding your machines" : "Your machines will appear here"}</h3><p>{connected() ? "Keep a network member online. Check its peer address or discovery tracker." : "Connect to see live connections and routes."}</p></div>}>
               {(peer) => <MachineCard peer={peer} expanded={expanded() === peer.id} onClick={() => setExpanded(expanded() === peer.id ? undefined : peer.id)} />}
             </For>
@@ -231,22 +276,27 @@ export default function DeviceApp() {
         </Match>
         <Match when={tab() === "machines"}>
           <label class="device-field device-search"><span class="sr-only">Search machines</span><input type="search" placeholder="Search name or address" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} /></label>
-          <Show when={connected() && error()}><p class="device-error" role="status">{error()?.message}</p></Show>
           <section class="device-card device-members"><For each={rows()} fallback={<div class="device-empty"><Glyph name="machines" size={34} /><h2>{connected() ? "No matching machines" : "Connect to see your machines"}</h2><p>Machine details come from the running VPN extension.</p></div>}>{(peer) => <MachineCard peer={peer} expanded={expanded() === peer.id} onClick={() => setExpanded(expanded() === peer.id ? undefined : peer.id)} />}</For></section>
         </Match>
         <Match when={tab() === "routes"}>
           <section class="device-card"><div class="device-section-title"><h2>Active overlay routes</h2><span class="device-label">LIVE</span></div><p class="device-secondary">These routes describe the overlay. iOS captures the profile subnet and its explicit routes.</p>
-            <For each={connected() ? snapshot()?.routes ?? [] : []} fallback={<div class="device-empty"><Glyph name="routes" size={34} /><h3>No active routes</h3><p>Connect to read the current forwarding state.</p></div>}>{(route: Doc) => <div class="device-route"><Glyph name="routes" /><div><b>{route.destination || route.route?.hostname || "Overlay route"}</b><span>{route.effective_policy || route.policy || "Automatic"} · {route.path_peer_ids?.length || 1} hops</span></div><span>{latency(route.measured_rtt_us)}</span></div>}</For>
+            <For each={connected() ? snapshot()?.routes ?? [] : []} fallback={<div class="device-empty"><Glyph name="routes" size={34} /><h3>No active routes</h3><p>Connect to read the current forwarding state.</p></div>}>{(route: Doc) => {
+              const address = ipv4(route.route?.ipv4_addr);
+              return <div class="device-route"><Glyph name="routes" /><div>
+                <b>{route.route?.hostname || route.destination || "Overlay route"}</b>
+                <span>{address ? `${address} · ` : ""}{route.effective_policy || route.policy || "Automatic"} · {routeHops(route)}</span>
+              </div><span>{latency(route.measured_rtt_us)}</span></div>;
+            }}</For>
           </section>
         </Match>
         <Match when={tab() === "settings"}>
-          <section class="device-card"><div class="device-section-title"><h2>Network profile</h2><Glyph name="shield" /></div><p class="device-profile-name">{status().profile?.name || "No network configured"}</p><p class="device-secondary">The Keychain stores configuration, credentials, and node identity. Replacing a profile creates a new identity unless you import its private key.</p><button type="button" class="device-secondary-button" disabled={running() || changing()} onClick={() => setSetup(!setup())}>{status().profile ? "Replace configuration" : "Add network"}<Glyph name="plus" size={18} /></button></section>
-          <Show when={setup()}><NetworkForm busy={busy()} onClose={() => setSetup(false)} onSave={async (name, config) => { await action("saveProfile", { name, config }, true); }} /></Show>
+          <section class="device-card"><div class="device-section-title"><h2>Network profile</h2><Glyph name="shield" /></div><p class="device-profile-name">{status().profile?.name || "No network configured"}</p><p class="device-secondary">The Keychain stores configuration, credentials, and node identity. Replacing a profile creates a new identity unless you import its private key.</p><button type="button" class="device-secondary-button" disabled={running() || changing()} onClick={openSetup}>{status().profile ? "Replace configuration" : "Add network"}<Glyph name="plus" size={18} /></button></section>
           <section class="device-card"><div class="device-section-title"><h2>Appearance</h2></div><fieldset class="device-mode"><legend class="sr-only">Theme</legend><For each={THEMES}>{(value) => <label><input type="radio" name="theme" value={value} checked={theme() === value} onChange={() => setTheme(value as Theme)} />{value}</label>}</For></fieldset></section>
-          <section class="device-card"><div class="device-section-title"><h2>Diagnostics</h2><span class="device-label">ON DEVICE</span></div><dl class="device-detail"><div><dt>VPN backend</dt><dd>Network Extension</dd></div><div><dt>Overlay MTU</dt><dd>{status().mtu}</dd></div><div><dt>Protocol</dt><dd>QUIC · H2 · WSS</dd></div></dl><button type="button" class="device-secondary-button" disabled={!connected()} onClick={async () => { try { setLogs((await rpc("ReadLogs", { page: { limit: 100 } })).logs ?? []); } catch (caught) { setFailure(String(caught)); } }}>Read recent logs<Glyph name="chevron" size={18} /></button><Show when={logs()}><div class="device-logs" aria-label="Recent VPN logs"><For each={logs()} fallback={<p>No recent log entries.</p>}>{(line) => <p><b>{line.level}</b> {line.message}</p>}</For></div></Show></section>
+          <section class="device-card"><div class="device-section-title"><h2>Diagnostics</h2><span class="device-label">ON DEVICE</span></div><dl class="device-detail"><div><dt>VPN backend</dt><dd>Network Extension</dd></div><div><dt>Overlay MTU</dt><dd>{status().mtu}</dd></div><div><dt>Protocol</dt><dd>QUIC · H2 · WSS</dd></div></dl><button type="button" class="device-secondary-button" disabled={!connected()} onClick={readLogs}>Read recent logs<Glyph name="chevron" size={18} /></button><Show when={logs()}><div class="device-logs" aria-label="Recent VPN logs"><For each={logs()} fallback={<p>No recent log entries.</p>}>{(line) => <p><b>{line.level}</b> {line.message}</p>}</For></div></Show></section>
         </Match>
       </Switch>
+      </Show>
     </main>
-    <nav class="device-tabs" aria-label="Main navigation"><For each={tabs}>{(item) => <button type="button" aria-current={tab() === item.id ? "page" : undefined} onClick={() => { setTab(item.id); window.scrollTo({ top: 0 }); }}><Glyph name={item.id} /><span>{item.title}</span></button>}</For></nav>
+    <nav class="device-tabs" aria-label="Main navigation"><For each={tabs}>{(item) => <button type="button" aria-current={tab() === item.id ? "page" : undefined} onClick={() => openTab(item.id)}><Glyph name={item.id} /><span>{item.title}</span></button>}</For></nav>
   </div>;
 }

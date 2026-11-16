@@ -165,11 +165,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let node = try self.rpc("GetNode")
                     let peers = try self.rpc("ListPeers", ["page": ["limit": 256]])
                     let routes = try self.rpc("ListRoutes", ["include_paths": true, "page": ["limit": 256]])
-                    let paths = try self.rpc("ListPaths")
                     response = [
                         "instance": self.instanceName ?? "", "sampled_at_unix_ms": Date().timeIntervalSince1970 * 1000,
-                        "node": node, "peers": peers["peers"] ?? [], "routes": routes["routes"] ?? [],
-                        "paths": paths["paths"] ?? []
+                        "node": node, "peers": peers["peers"] ?? [], "routes": routes["routes"] ?? []
                     ]
                 } else if path.hasPrefix("rpc/") {
                     let method = String(path.dropFirst(4))
