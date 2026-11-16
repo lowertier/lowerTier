@@ -305,7 +305,6 @@ pub(crate) enum TrafficKind {
 pub(crate) fn traffic_kind(packet_type: u8) -> TrafficKind {
     if packet_type == PacketType::Data as u8
         || packet_type == PacketType::Ethernet as u8
-        || packet_type == PacketType::OverlayStream as u8
         || packet_type == PacketType::Waypoint as u8
     {
         TrafficKind::Data

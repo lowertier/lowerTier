@@ -70,7 +70,14 @@ Changes apply live: `lowertier set`, `lowertier edit`, the configuration file, o
 3. Automatic `[[export]]` subnet routes.
 4. `to = "internet"` for destinations outside the overlay network.
 
-Paths govern traffic this node **sends** across L3 IP payloads, L2 bridged Ethernet frames, and `OverlayStream` connections (including SOCKS5/HTTP `tcp_proxy` destinations). Return traffic follows the remote peer's own `[[path]]` and routes, so forward and reverse directions can be completely asymmetric.
+Paths govern outbound L3 IP packets, L2 Ethernet frames, and packet-based SOCKS5/HTTP connections.
+A matching path rule prevents the direct HTTP/3 proxy shortcut.
+Return traffic follows the remote peer's path rules and routes.
+Forward and reverse directions can use different relays.
+
+Configuration changes update compiled path rules before the setter returns.
+Route publication prepares path resolution and publishes service routes with the forwarding snapshot.
+Packet sending does not synchronize configuration or copy topology service routes.
 
 ## Source-routed transit without decryption
 

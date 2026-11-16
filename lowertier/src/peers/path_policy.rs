@@ -485,6 +485,7 @@ struct ResolvedMember {
 struct Resolved {
     generation: u64,
     version: u64,
+    local_ipv4: Option<Ipv4Addr>,
     /// Per rule: per segment (`layers`, then optional `gateway`), per member.
     members: Vec<Vec<Vec<ResolvedMember>>>,
     peer_rules: HashMap<PeerId, u16>,
@@ -642,6 +643,10 @@ impl PathRuntime {
             .is_some_and(|compiled| !compiled.policy.rules.is_empty())
     }
 
+    pub(crate) fn prepare(&self, snapshot: &ForwardingDecisionSnapshot) {
+        let _ = self.resolved(snapshot);
+    }
+
     fn resolved(
         &self,
         snapshot: &ForwardingDecisionSnapshot,
@@ -650,9 +655,11 @@ impl PathRuntime {
         if compiled.policy.rules.is_empty() {
             return None;
         }
+        let local_ipv4 = Self::decode_ipv4(self.local_ipv4.load(Ordering::Acquire));
         if let Some(resolved) = self.resolved.load_full()
             && resolved.generation == snapshot.generation()
             && resolved.version == compiled.version
+            && resolved.local_ipv4 == local_ipv4
         {
             return Some((compiled, resolved));
         }
@@ -661,7 +668,7 @@ impl PathRuntime {
             snapshot,
             self.my_peer_id,
             self.local_public_key,
-            Self::decode_ipv4(self.local_ipv4.load(Ordering::Acquire)),
+            local_ipv4,
         ));
         self.resolved.store(Some(resolved.clone()));
         Some((compiled, resolved))
@@ -711,6 +718,7 @@ impl PathRuntime {
         let mut resolved = Resolved {
             generation: snapshot.generation(),
             version: compiled.version,
+            local_ipv4,
             members: Vec::with_capacity(compiled.policy.rules.len()),
             peer_rules: HashMap::new(),
             any_peer: None,
@@ -1777,5 +1785,15 @@ mod tests {
         assert_eq!(statuses[0].layers[0].members[0].reason, "This node.");
         assert_eq!(statuses[0].layers[0].members[1].reason, "This node.");
         assert_eq!(statuses[1].reason, "Destination is this node.");
+
+        let previous = runtime.resolved.load_full().unwrap();
+        let new_address = Some(Ipv4Addr::new(10, 0, 0, 8));
+        runtime.set_local_ipv4(new_address);
+        // Model a publication that started before the address change and
+        // completed after invalidation.
+        runtime.resolved.store(Some(previous));
+        let (_, resolved) = runtime.resolved(&snapshot).unwrap();
+        assert_eq!(resolved.local_ipv4, new_address);
+        assert_ne!(resolved.rule_peers[1], Some(1));
     }
 }

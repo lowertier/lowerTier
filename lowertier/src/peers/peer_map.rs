@@ -359,6 +359,8 @@ pub struct PeerMap {
     route_flow_paths: Arc<FlowPathCache<PeerId>>,
     connection_admission: Arc<PeerConnectionAdmission>,
     l2_fabric: std::sync::OnceLock<Arc<super::l2_fabric::L2Fabric>>,
+    service_routes: std::sync::OnceLock<Arc<super::service_route::ServiceRouteStore>>,
+    paths: std::sync::OnceLock<Arc<super::path_policy::PathRuntime>>,
 }
 
 impl PeerMap {
@@ -393,6 +395,8 @@ impl PeerMap {
             route_flow_paths: Arc::new(FlowPathCache::new(1024, Duration::from_secs(120))),
             connection_admission: Arc::new(PeerConnectionAdmission::new()),
             l2_fabric: std::sync::OnceLock::new(),
+            service_routes: std::sync::OnceLock::new(),
+            paths: std::sync::OnceLock::new(),
         }
     }
 
@@ -442,6 +446,9 @@ impl PeerMap {
         origin_auth_snapshot: Arc<OriginAuthSnapshot>,
         source_token: Option<ForwardingSnapshotSourceToken>,
     ) {
+        if let (Some(paths), Some(snapshot)) = (self.paths.get(), &forwarding_snapshot) {
+            paths.prepare(snapshot);
+        }
         let route_trust = Arc::new(RouteTrustSnapshot::from_sources(
             source_token,
             &self.origin_auth_sources,
@@ -992,6 +999,9 @@ impl PeerMap {
         for (key, grant) in grant_candidates {
             self.origin_auth_grants.insert(key, grant);
         }
+        if let Some(routes) = self.service_routes.get() {
+            routes.replace_overlay(None);
+        }
         self.publish_dataplane_descriptor_with_source(
             None,
             Arc::new(OriginAuthSnapshot {
@@ -1310,6 +1320,12 @@ impl PeerMap {
         for (key, grant) in grant_candidates {
             self.origin_auth_grants.insert(key, grant);
         }
+        let forwarding_snapshot = if let Some(routes) = self.service_routes.get() {
+            routes.replace_overlay(Some(forwarding_snapshot.service_routes().clone()));
+            forwarding_snapshot.with_service_routes(routes.snapshot())
+        } else {
+            forwarding_snapshot
+        };
         self.publish_dataplane_descriptor_with_source(
             Some(forwarding_snapshot),
             Arc::new(OriginAuthSnapshot {
@@ -1518,18 +1534,6 @@ impl PeerMap {
     pub(crate) fn only_direct_conn(&self, dst_peer_id: PeerId) -> Option<ArcPeerConn> {
         self.get_peer_by_id(dst_peer_id)
             .and_then(|peer| peer.only_direct_conn())
-    }
-
-    pub(crate) async fn send_msg_on_selected_conn(
-        &self,
-        dst_peer_id: PeerId,
-        conn: &ArcPeerConn,
-        msg: ZCPacket,
-    ) -> Result<(), Error> {
-        let peer = self
-            .get_peer_by_id(dst_peer_id)
-            .ok_or_else(|| Error::RouteError(Some("peer is not connected".to_owned())))?;
-        peer.send_msg_on_conn(conn, msg).await
     }
 
     pub(crate) async fn send_prepared_msg_batch_on_selected_conn(
@@ -2256,6 +2260,34 @@ impl PeerMap {
 
     pub fn get_global_ctx(&self) -> ArcGlobalCtx {
         self.global_ctx.clone()
+    }
+
+    pub(crate) fn replace_local_bgp_routes(&self, routes: Vec<super::service_route::ServiceRoute>) {
+        let _guard = self.origin_auth_publish_lock.lock();
+        let service_routes = self
+            .service_routes
+            .get()
+            .expect("destination policy is installed");
+        service_routes.replace_source(super::service_route::RouteSource::Bgp, routes);
+        let descriptor = self.load_dataplane_descriptor();
+        let snapshot = descriptor
+            .forwarding_snapshot
+            .clone()
+            .map(|snapshot| snapshot.with_service_routes(service_routes.snapshot()));
+        self.publish_dataplane_descriptor_with_source(
+            snapshot,
+            descriptor.origin_auth_snapshot.clone(),
+            descriptor.source_token,
+        );
+    }
+
+    pub(crate) fn install_destination_policy(
+        &self,
+        routes: Arc<super::service_route::ServiceRouteStore>,
+        paths: Arc<super::path_policy::PathRuntime>,
+    ) {
+        assert!(self.service_routes.set(routes).is_ok());
+        assert!(self.paths.set(paths).is_ok());
     }
 }
 

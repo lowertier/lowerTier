@@ -17,10 +17,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, atomic::AtomicUsize},
     task::{Context, Poll},
     time::Duration,
 };
@@ -37,11 +34,6 @@ use super::{
     decrement_entry_count, insert_entry_and_increment_count, try_insert_entry_and_increment_count,
 };
 use crate::gateway::tokio_smoltcp::{Net, TcpListener};
-
-struct DataPlaneRef {
-    refs: Arc<AtomicUsize>,
-    notifier: Arc<tokio::sync::Notify>,
-}
 
 /// A route-table entry whose lifetime is tied to this value: constructing it
 /// reserves the route and bumps the active-entry count, dropping it removes the
@@ -119,7 +111,6 @@ enum DataPlaneTcpStreamRoute {
 pub struct DataPlaneTcpStream {
     stream: SocksTcpStream,
     local_addr: SocketAddr,
-    _data_plane_ref: DataPlaneRef,
     _route: DataPlaneTcpStreamRoute,
 }
 
@@ -131,7 +122,6 @@ pub struct DataPlaneTcpListener {
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
     _listen_route: OwnedRouteEntry,
-    _data_plane_ref: DataPlaneRef,
 }
 
 pub struct DataPlaneUdpSocket {
@@ -139,15 +129,6 @@ pub struct DataPlaneUdpSocket {
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
     local_addr: SocketAddr,
-    _data_plane_ref: DataPlaneRef,
-}
-
-impl Drop for DataPlaneRef {
-    fn drop(&mut self) {
-        if self.refs.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.notifier.notify_one();
-        }
-    }
 }
 
 impl DataPlaneTcpStream {
@@ -176,7 +157,6 @@ impl DataPlaneTcpListener {
         let accepted = DataPlaneTcpStream {
             stream: SocksTcpStream::SmolTcp(stream),
             local_addr,
-            _data_plane_ref: self._data_plane_ref.clone(),
             _route: DataPlaneTcpStreamRoute::Accepted { _route: route },
         };
         Ok((accepted, peer_addr))
@@ -259,47 +239,22 @@ impl Drop for DataPlaneUdpSocket {
     }
 }
 
-impl Clone for DataPlaneRef {
-    fn clone(&self) -> Self {
-        self.refs.fetch_add(1, Ordering::Relaxed);
-        Self {
-            refs: self.refs.clone(),
-            notifier: self.notifier.clone(),
-        }
-    }
-}
-
 impl Socks5Server {
-    fn acquire_data_plane_ref(&self) -> DataPlaneRef {
-        self.data_plane_refs.fetch_add(1, Ordering::Relaxed);
-        self.port_forward_list_change_notifier.notify_one();
-        DataPlaneRef {
-            refs: self.data_plane_refs.clone(),
-            notifier: self.port_forward_list_change_notifier.clone(),
-        }
-    }
-
     async fn wait_data_plane_net(
         &self,
         deadline: Instant,
     ) -> Result<(cidr::Ipv4Inet, Arc<Net>), Error> {
-        let mut ready = self.data_plane_net_ready.subscribe();
+        let mut events = self.global_ctx.subscribe();
         loop {
-            if let Some(net) = self
-                .net
-                .lock()
-                .await
-                .as_ref()
-                .map(|net| (net.ipv4_addr, net.smoltcp_net.clone()))
-            {
-                return Ok(net);
+            if self.global_ctx.get_ipv4().is_some() {
+                return Ok(self.packet_net().await?);
             }
 
             let now = Instant::now();
             if now >= deadline {
                 return Err(anyhow::anyhow!("data plane net is not ready").into());
             }
-            let _ = tokio::time::timeout(deadline - now, ready.wait_for(|ready| *ready)).await;
+            let _ = tokio::time::timeout(deadline - now, events.recv()).await;
         }
     }
 
@@ -308,7 +263,6 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
         let (ipv4_addr, smoltcp_net) = self.wait_data_plane_net(deadline).await?;
         // FIXME: This is the data-plane source address reserved for route
@@ -319,10 +273,9 @@ impl Socks5Server {
         let local_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
         let connector = Socks5AutoConnector {
             flow: rand::random(),
-            overlay_connector: self.overlay_connector.lock().await.clone(),
+            server: self.self_ref.clone(),
             peer_mgr: self.peer_manager.clone(),
             entries: self.entries.clone(),
-            smoltcp_net: Some(smoltcp_net),
             src_addr: local_addr,
             entry_count: self.entry_count.clone(),
             inner_connector: parking_lot::Mutex::new(None),
@@ -338,7 +291,6 @@ impl Socks5Server {
         Ok(DataPlaneTcpStream {
             stream,
             local_addr,
-            _data_plane_ref: data_plane_ref,
             _route: DataPlaneTcpStreamRoute::Outbound { _route: connector },
         })
     }
@@ -348,7 +300,6 @@ impl Socks5Server {
         local_port: u16,
         timeout: Duration,
     ) -> Result<DataPlaneTcpListener, Error> {
-        let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
         let (ipv4_addr, smoltcp_net) = self.wait_data_plane_net(deadline).await?;
         let bind_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
@@ -371,7 +322,6 @@ impl Socks5Server {
             entries: self.entries.clone(),
             entry_count: self.entry_count.clone(),
             _listen_route: listen_route,
-            _data_plane_ref: data_plane_ref,
         })
     }
 
@@ -380,7 +330,6 @@ impl Socks5Server {
         local_port: u16,
         timeout: Duration,
     ) -> Result<DataPlaneUdpSocket, Error> {
-        let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
         let (ipv4_addr, smoltcp_net) = self.wait_data_plane_net(deadline).await?;
         let bind_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
@@ -393,7 +342,6 @@ impl Socks5Server {
             entries: self.entries.clone(),
             entry_count: self.entry_count.clone(),
             local_addr,
-            _data_plane_ref: data_plane_ref,
         })
     }
 }

@@ -45,12 +45,12 @@ pub struct ServiceRouteSelection {
     pub action: ServiceRouteAction,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ServiceRouteSnapshot {
     generation: u64,
     routes: Arc<[ServiceRoute]>,
-    ipv4: PrefixMap<Ipv4Cidr, Arc<[ServiceRoute]>>,
-    ipv6: PrefixMap<Ipv6Cidr, Arc<[ServiceRoute]>>,
+    ipv4: Arc<PrefixMap<Ipv4Cidr, Arc<[ServiceRoute]>>>,
+    ipv6: Arc<PrefixMap<Ipv6Cidr, Arc<[ServiceRoute]>>>,
 }
 
 impl ServiceRouteSnapshot {
@@ -76,10 +76,14 @@ impl ServiceRouteSnapshot {
             let candidates = Arc::<[ServiceRoute]>::from(candidates);
             match prefix {
                 IpCidr::V4(prefix) => {
-                    snapshot.ipv4.insert(prefix, candidates);
+                    Arc::get_mut(&mut snapshot.ipv4)
+                        .unwrap()
+                        .insert(prefix, candidates);
                 }
                 IpCidr::V6(prefix) => {
-                    snapshot.ipv6.insert(prefix, candidates);
+                    Arc::get_mut(&mut snapshot.ipv6)
+                        .unwrap()
+                        .insert(prefix, candidates);
                 }
             }
         }
@@ -133,8 +137,14 @@ struct GatewayFlowPlan {
     created_at: Instant,
 }
 
+#[derive(Default)]
+struct RouteSources {
+    local: HashMap<RouteSource, Vec<ServiceRoute>>,
+    overlay: Option<Arc<ServiceRouteSnapshot>>,
+}
+
 pub struct ServiceRouteStore {
-    routes: RwLock<HashMap<RouteSource, Vec<ServiceRoute>>>,
+    routes: RwLock<RouteSources>,
     snapshot: ArcSwap<ServiceRouteSnapshot>,
     pins: DashMap<GatewayFlowKey, GatewayPin>,
     plans: DashMap<GatewayFlowPlanKey, GatewayFlowPlan>,
@@ -148,7 +158,7 @@ impl ServiceRouteStore {
     pub fn new(pin_capacity: usize, pin_ttl: Duration) -> Self {
         assert!(pin_capacity > 0);
         Self {
-            routes: RwLock::new(HashMap::new()),
+            routes: RwLock::new(RouteSources::default()),
             snapshot: ArcSwap::from_pointee(ServiceRouteSnapshot::default()),
             // Capacity is a traffic bound, not a startup reservation.
             pins: DashMap::new(),
@@ -180,7 +190,7 @@ impl ServiceRouteStore {
             .routes
             .write()
             .expect("service route table was poisoned");
-        table.insert(source, routes);
+        table.local.insert(source, routes);
         let generation = self.snapshot.load().generation.wrapping_add(1).max(1);
         self.snapshot
             .store(Arc::new(Self::build_snapshot(&table, generation)));
@@ -190,13 +200,46 @@ impl ServiceRouteStore {
         self.routes
             .read()
             .expect("service route table was poisoned")
+            .local
             .get(&source)
             .cloned()
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn select_gateway<F>(
         &self,
+        address: IpAddr,
+        flow: u64,
+        gateway_is_live: F,
+    ) -> Option<ServiceRouteSelection>
+    where
+        F: Fn(PeerId) -> bool,
+    {
+        self.select_gateway_from(&self.snapshot.load_full(), address, flow, gateway_is_live)
+    }
+
+    pub(crate) fn replace_overlay(&self, overlay: Option<Arc<ServiceRouteSnapshot>>) {
+        let mut sources = self
+            .routes
+            .write()
+            .expect("service route table was poisoned");
+        if match (&sources.overlay, &overlay) {
+            (Some(current), Some(next)) => Arc::ptr_eq(current, next),
+            (None, None) => true,
+            _ => false,
+        } {
+            return;
+        }
+        sources.overlay = overlay;
+        let generation = self.snapshot.load().generation.wrapping_add(1).max(1);
+        self.snapshot
+            .store(Arc::new(Self::build_snapshot(&sources, generation)));
+    }
+
+    pub(crate) fn select_gateway_from<F>(
+        &self,
+        snapshot: &ServiceRouteSnapshot,
         address: IpAddr,
         flow: u64,
         gateway_is_live: F,
@@ -207,7 +250,6 @@ impl ServiceRouteStore {
         #[cfg(test)]
         self.selection_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let snapshot = self.snapshot.load_full();
         let plan_key = GatewayFlowPlanKey { address, flow };
         let now = Instant::now();
         if let Entry::Occupied(plan) = self.plans.entry(plan_key) {
@@ -304,11 +346,30 @@ impl ServiceRouteStore {
         Some(selection)
     }
 
-    fn build_snapshot(
-        routes: &HashMap<RouteSource, Vec<ServiceRoute>>,
-        generation: u64,
-    ) -> ServiceRouteSnapshot {
-        ServiceRouteSnapshot::from_routes(generation, routes.values().flatten().cloned().collect())
+    fn build_snapshot(routes: &RouteSources, generation: u64) -> ServiceRouteSnapshot {
+        if routes.local.values().all(Vec::is_empty) {
+            // Most instances use only topology routes. Share their immutable
+            // prefix tables instead of copying and rebuilding them.
+            return ServiceRouteSnapshot {
+                generation,
+                ..routes.overlay.as_deref().cloned().unwrap_or_default()
+            };
+        }
+        ServiceRouteSnapshot::from_routes(
+            generation,
+            routes
+                .local
+                .values()
+                .flatten()
+                .cloned()
+                .chain(
+                    routes
+                        .overlay
+                        .iter()
+                        .flat_map(|snapshot| snapshot.routes().iter().cloned()),
+                )
+                .collect(),
+        )
     }
 
     fn reserve_pin_capacity(&self, now: Instant) {
@@ -365,5 +426,56 @@ mod protocol_memory_tests {
         assert_eq!(store.pins.capacity(), 0);
         assert_eq!(store.plans.capacity(), 0);
         assert_eq!(store.pin_capacity, 65_536);
+    }
+
+    #[test]
+    fn published_routes_share_topology_and_preserve_old_decisions() {
+        let store = ServiceRouteStore::new(32, Duration::from_secs(300));
+        let route = ServiceRoute {
+            prefix: "192.0.2.0/24".parse().unwrap(),
+            gateway: 7,
+            preference: 100,
+            metric: 0,
+            path_id: 1,
+            action: ServiceRouteAction::Forward,
+        };
+        let topology = Arc::new(ServiceRouteSnapshot::from_routes(4, vec![route.clone()]));
+        store.replace_overlay(Some(topology.clone()));
+        let original = store.snapshot();
+        assert!(Arc::ptr_eq(&original.ipv4, &topology.ipv4));
+        store.replace_overlay(Some(topology));
+        assert!(Arc::ptr_eq(&original, &store.snapshot()));
+        store.replace_source(
+            RouteSource::Bgp,
+            vec![ServiceRoute {
+                preference: 200,
+                action: ServiceRouteAction::Blackhole,
+                ..route
+            }],
+        );
+        let current = store.snapshot();
+        let destination = "192.0.2.1".parse().unwrap();
+        assert_eq!(
+            store
+                .select_gateway_from(&current, destination, 1, |_| true)
+                .unwrap()
+                .action,
+            ServiceRouteAction::Blackhole
+        );
+        assert_eq!(
+            store
+                .select_gateway_from(&original, destination, 1, |_| true)
+                .unwrap()
+                .action,
+            ServiceRouteAction::Forward
+        );
+        store.replace_overlay(None);
+        assert_eq!(
+            store
+                .select_gateway(destination, 1, |_| true)
+                .unwrap()
+                .action,
+            ServiceRouteAction::Blackhole
+        );
     }
 }

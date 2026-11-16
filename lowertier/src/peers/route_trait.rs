@@ -409,6 +409,14 @@ impl ForwardingDecisionSnapshot {
         &self.service_routes
     }
 
+    pub(crate) fn with_service_routes(
+        mut self: Arc<Self>,
+        routes: Arc<ServiceRouteSnapshot>,
+    ) -> Arc<Self> {
+        Arc::make_mut(&mut self).service_routes = routes;
+        self
+    }
+
     /// Return true only for a route peer that the authenticated route marked as an Admin bridge.
     pub fn is_authorized_bridge(&self, peer_id: PeerId) -> bool {
         self.capabilities.is_authorized_bridge(peer_id)

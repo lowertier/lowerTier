@@ -41,6 +41,18 @@ rules enabled. ACL-controlled destinations, relayed or mapped routes, peers
 without the capability, and H2/WSS retain the packet path. Enabling ACL rules
 stops an active direct stream so reconnecting uses the policy-aware packet path.
 
+The source packet stack is created when a packet connection, UDP socket, or data-plane listener first needs it.
+Starting a SOCKS5 or HTTP listener does not create this stack.
+An enabled listener does not activate packet filtering without registered packet consumers.
+Address changes discard the old packet stack and its route entries.
+The next packet consumer creates a stack for the new address.
+The inbound TCP proxy remains available for local services and the overlay GUI.
+
+TCP has three backends: an operating system socket, an authenticated HTTP/3 stream, and the userspace packet stack.
+The experimental OverlayStream backend and its runtime switch have been removed.
+Only an unsupported HTTP/3 request permits packet fallback.
+Connection errors and timeouts propagate to the caller.
+
 Each packet-path userspace TCP socket starts with an 8 KiB receive buffer and an 8 KiB transmit buffer.
 Active buffers grow with measured application demand and TCP round-trip time.
 Each buffer can grow to 8 MiB, subject to the shared process memory budget.

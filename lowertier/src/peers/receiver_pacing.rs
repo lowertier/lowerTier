@@ -356,7 +356,6 @@ pub(crate) fn paced_packet_bytes(packet: &ZCPacket) -> usize {
         packet_type
             if packet_type == PacketType::Data as u8
                 || packet_type == PacketType::ForeignNetworkPacket as u8
-                || packet_type == PacketType::OverlayStream as u8
                 || packet_type == PacketType::Ethernet as u8
     );
     paced.then(|| packet.payload().len()).unwrap_or(0)

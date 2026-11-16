@@ -384,16 +384,6 @@ impl Peer {
         Ok(())
     }
 
-    pub(crate) async fn send_msg_on_conn(
-        &self,
-        conn: &ArcPeerConn,
-        mut msg: ZCPacket,
-    ) -> Result<(), Error> {
-        stamp_critical_l2_control(&mut msg);
-        stamp_packet_flow(&mut msg);
-        conn.send_msg(msg).await
-    }
-
     /// Sends a batch whose control and flow metadata was already stamped by
     /// `PeerManager::prepare_packet_batch`.
     pub(crate) async fn send_prepared_msg_batch_on_conn(

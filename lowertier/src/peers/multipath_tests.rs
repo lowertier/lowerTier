@@ -15,7 +15,6 @@ use crate::{
         global_ctx::{NetworkIdentity, tests::get_mock_global_ctx_with_network},
         stats_manager::{LabelSet, LabelType, MetricName},
     },
-    gateway::overlay_stream::OverlayStreamEndpoint,
     peers::{
         peer_conn::tests::set_secure_mode_cfg,
         peer_manager::{PeerManager, RouteAlgoType},
@@ -491,7 +490,7 @@ async fn multilayer_mixed_transport_chain_opaque_forwarding_and_probe_rtt() {
 }
 
 #[tokio::test]
-async fn asymmetric_paths_cover_data_ethernet_overlay_stream_and_socks5_guard() {
+async fn asymmetric_paths_cover_data_ethernet_and_proxy() {
     timeout(Duration::from_secs(30), async {
         let net = "mp-test-3";
         let mut a = TestNode::new(net, "10.89.0.1", false, true).await;
@@ -558,7 +557,6 @@ async fn asymmetric_paths_cover_data_ethernet_overlay_stream_and_socks5_guard() 
         assert!(a.mgr.path_applies_to(b.peer_id()));
         assert!(b.mgr.path_applies_to(a.peer_id()));
         assert!(a.mgr.get_peer_map().only_direct_conn(b.peer_id()).is_some());
-        assert!(a.mgr.only_direct_proxy_conn(b.peer_id()).is_none());
 
         // 1) Asymmetric L3 Data packets
         let fwd0 = r_fwd.forwarded_packets();
@@ -684,58 +682,64 @@ async fn asymmetric_paths_cover_data_ethernet_overlay_stream_and_socks5_guard() 
         assert!(r_fwd.forwarded_packets() > fwd4);
         assert_eq!(r_rev.forwarded_packets(), rev4);
 
-        // 3) Asymmetric OverlayStream (direct QUIC link must not bypass [[path]])
-        a.set_no_tun(true);
-        b.set_no_tun(true);
-        let ep_a = OverlayStreamEndpoint::start(a.mgr.clone(), false).await;
-        let _ep_b = OverlayStreamEndpoint::start(b.mgr.clone(), true).await;
+        // The retained TCP packet path must obey both asymmetric relay rules.
+        #[cfg(feature = "ffi-dataplane")]
+        {
+            a.set_no_tun(true);
+            b.set_no_tun(true);
+            let server = crate::gateway::tcp_proxy::TcpProxy::new(b.mgr.clone());
+            server.start(true).await.unwrap();
+            let client =
+                crate::gateway::socks5::Socks5Server::new(a.mgr.get_global_ctx(), a.mgr.clone());
+            client.run().await.unwrap();
 
-        let echo_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let echo_port = echo_listener.local_addr().unwrap().port();
-        let _echo_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            loop {
-                let Ok((mut tcp, _)) = echo_listener.accept().await else {
-                    break;
-                };
-                tokio::spawn(async move {
-                    let (mut rd, mut wr) = tcp.split();
-                    let _ = tokio::io::copy(&mut rd, &mut wr).await;
-                });
-            }
-        }));
+            let echo_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let echo_port = echo_listener.local_addr().unwrap().port();
+            let _echo_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                loop {
+                    let Ok((mut tcp, _)) = echo_listener.accept().await else {
+                        break;
+                    };
+                    tokio::spawn(async move {
+                        let (mut rd, mut wr) = tcp.split();
+                        let _ = tokio::io::copy(&mut rd, &mut wr).await;
+                    });
+                }
+            }));
 
-        let fwd5 = r_fwd.forwarded_packets();
-        let rev5 = r_rev.forwarded_packets();
-        let mut stream = timeout(
-            Duration::from_secs(8),
-            ep_a.connector().connect(
-                SocketAddr::new(IpAddr::V4(a.ipv4), 40_000),
-                SocketAddr::new(IpAddr::V4(b.ipv4), echo_port),
-            ),
-        )
-        .await
-        .expect("overlay stream connect")
-        .unwrap();
+            let fwd5 = r_fwd.forwarded_packets();
+            let rev5 = r_rev.forwarded_packets();
+            let mut stream = timeout(
+                Duration::from_secs(8),
+                client.data_plane_tcp_connect(
+                    SocketAddr::new(IpAddr::V4(b.ipv4), echo_port),
+                    Duration::from_secs(8),
+                ),
+            )
+            .await
+            .expect("packet proxy connect")
+            .unwrap();
 
-        let payload: Vec<u8> = (0..32 * 1024).map(|i| (i % 251) as u8).collect();
-        timeout(Duration::from_secs(8), async {
-            stream.write_all(&payload).await.unwrap();
-            stream.flush().await.unwrap();
-            let mut echoed = vec![0_u8; payload.len()];
-            stream.read_exact(&mut echoed).await.unwrap();
-            assert_eq!(echoed, payload);
-        })
-        .await
-        .expect("overlay stream echo");
+            let payload: Vec<u8> = (0..32 * 1024).map(|i| (i % 251) as u8).collect();
+            timeout(Duration::from_secs(8), async {
+                stream.write_all(&payload).await.unwrap();
+                stream.flush().await.unwrap();
+                let mut echoed = vec![0_u8; payload.len()];
+                stream.read_exact(&mut echoed).await.unwrap();
+                assert_eq!(echoed, payload);
+            })
+            .await
+            .expect("packet proxy echo");
 
-        assert!(
-            r_fwd.forwarded_packets() > fwd5,
-            "OverlayStream a->b bypassed r_fwd"
-        );
-        assert!(
-            r_rev.forwarded_packets() > rev5,
-            "OverlayStream b->a bypassed r_rev"
-        );
+            assert!(
+                r_fwd.forwarded_packets() > fwd5,
+                "TCP proxy a->b bypassed r_fwd"
+            );
+            assert!(
+                r_rev.forwarded_packets() > rev5,
+                "TCP proxy b->a bypassed r_rev"
+            );
+        }
     })
     .await
     .unwrap();

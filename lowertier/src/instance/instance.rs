@@ -26,7 +26,6 @@ use crate::connector::manual::ManualConnectorManager;
 use crate::connector::quic_hole_punch::QuicHolePunchConnector;
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
 
-use crate::gateway::overlay_stream::OverlayStreamEndpoint;
 use crate::peer_center::instance::PeerCenterInstance;
 use crate::peers::peer_conn::PeerConnId;
 use crate::peers::peer_manager::{PeerManager, RouteAlgoType};
@@ -203,7 +202,6 @@ pub struct Instance {
     tracker_discovery: Option<AbortOnDropHandle<()>>,
 
     ip_proxy: Option<IpProxy>,
-    overlay_stream: Option<Arc<OverlayStreamEndpoint>>,
 
     peer_center: Arc<PeerCenterInstance>,
 
@@ -283,7 +281,6 @@ impl Instance {
             tracker_discovery: None,
 
             ip_proxy: None,
-            overlay_stream: None,
 
             peer_center,
 
@@ -597,11 +594,6 @@ impl Instance {
             self.check_dhcp_ip_conflict();
         }
 
-        if std::env::var_os("LOWTIER_EXPERIMENT_OVERLAY_STREAM").is_some() {
-            self.overlay_stream =
-                Some(OverlayStreamEndpoint::start(self.get_peer_manager(), true).await);
-        }
-
         self.global_ctx
             .get_acl_filter()
             .reload_rules(AclRuleBuilder::build(&self.global_ctx)?.as_ref());
@@ -642,13 +634,7 @@ impl Instance {
         self.proxy_cidrs_monitor = Some(monitor.start());
 
         #[cfg(feature = "socks5")]
-        self.socks5_server
-            .run(
-                self.overlay_stream
-                    .as_ref()
-                    .map(|endpoint| endpoint.connector()),
-            )
-            .await?;
+        self.socks5_server.run().await?;
 
         Ok(())
     }

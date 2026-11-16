@@ -58,7 +58,7 @@ pub enum PacketType {
     RelayHandshakeReset = 40,
     RelayHandshakeResetAck = 41,
     ReceiverPressure = 42,
-    OverlayStream = 43,
+    // Value 43 belonged to the retired experimental stream protocol.
     // A sealed packet on its way through source-routed relays. See `ZCPacket::encode_source_route`.
     Waypoint = 44,
     // End-to-end RTT probe along a specific source-route chain.
@@ -905,18 +905,6 @@ impl ZCPacket {
         let mut ret = Self::new_nic_packet();
         let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
         ret.inner.resize(payload_off + payload_len, 0);
-        ret
-    }
-
-    pub(crate) fn new_with_payload_parts(parts: &[&[u8]]) -> Self {
-        let mut ret = Self::new_nic_packet();
-        let payload_off = ret.packet_type.get_packet_offsets().payload_offset;
-        let payload_len = parts.iter().map(|part| part.len()).sum::<usize>();
-        ret.inner.reserve(payload_off.saturating_add(payload_len));
-        ret.inner.resize(payload_off, 0);
-        for part in parts {
-            ret.inner.extend_from_slice(part);
-        }
         ret
     }
 
@@ -2023,13 +2011,6 @@ mod tests {
         let mut self_dst = ZCPacket::new_with_payload(b"sealed");
         self_dst.fill_peer_manager_hdr(9, 9, PacketType::Data as u8);
         assert!(self_dst.encode_source_route(&[5], 0).is_err());
-    }
-
-    #[test]
-    fn payload_parts_constructor_initializes_only_the_supplied_payload() {
-        let packet = ZCPacket::new_with_payload_parts(&[b"abc", b"def"]);
-
-        assert_eq!(packet.payload(), b"abcdef");
     }
 
     #[test]

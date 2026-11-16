@@ -1,13 +1,14 @@
 # Decision map
 
 LowTier has many decisions that select a function or a data path.
-This map identifies 27 routing and implementation boundaries in seven areas.
+This map identifies 26 active routing and implementation boundaries in seven areas.
+The retired D24 boundary remains listed for reference.
 Each site is a named boundary with one or more conditions.
 The count does not measure every `if`, every `match`, or every possible path combination.
 Three shared selection functions now replace repeated policy checks.
 The proxy cleanup also removes six fixed internal settings and unreachable authentication alternatives.
 
-The map describes the source inspected on November 15, 2026.
+The map describes the source inspected on November 16, 2026.
 It covers startup, network devices, forwarding, connection selection, proxies, and receive processing.
 It does not inventory management commands, GUI handlers, every discovery strategy, or transport framing internals.
 
@@ -18,7 +19,7 @@ flowchart TD
     Setup["D01-D03: Enable transports and connections"]
     Device["D04-D06: Select device and proxy backends"]
     Nic["D07-D08: Classify NIC payload"]
-    Proxy["D21-D24: Validate target and plan TCP backend"]
+    Proxy["D21-D23: Validate target and plan TCP backend"]
     Destination["D09-D12: Use shared destination policy"]
     Path["D13-D15: Apply explicit paths"]
     Automatic["D16-D19: Use shared direct or relay selection"]
@@ -143,7 +144,7 @@ NIC transforms and ACL processing precede later recipient selection.
 
 ### D09: Shared IP destination policy
 
-**Source:** [resolve_ip_destination](../../lowertier/src/peers/peer_manager.rs#L5550), [hybrid_destination_from_packet_snapshot_with_synced_routes](../../lowertier/src/peers/peer_manager.rs#L5529), [hybrid_destination_from_snapshot](../../lowertier/src/peers/peer_manager.rs#L5446).
+**Source:** `resolve_ip_destination`, `hybrid_destination_from_packet_snapshot`, and `hybrid_destination_from_snapshot` in [peer_manager.rs](../../lowertier/src/peers/peer_manager.rs).
 
 The packet adapter accepts a nonzero header destination before applying IP policy.
 The shared resolver then applies these decisions:
@@ -168,13 +169,16 @@ It selects the highest preference, then the lowest metric.
 A valid cached plan or eligible flow pin retains the existing choice.
 Otherwise, the existing flow score selects among equal candidates.
 Snapshot generation, pin age, and gateway liveness control reuse.
+Service routes are published with their forwarding snapshot.
+Topology-only instances share immutable prefix tables.
+BGP updates publish a new combined snapshot.
+Packet sending does not copy topology routes into another store.
 
 ### D11: Proxy route adapter
 
 **Source:** [PeerManager::plan_user_route](../../lowertier/src/peers/peer_manager.rs#L5587).
 
-The proxy planner synchronizes service routes and refreshes configured paths.
-It then calls the shared D09 resolver.
+The proxy planner reads the published forwarding snapshot and calls the shared D09 resolver.
 Its output selects `UserRoutePlan::Overlay`, `UserRoutePlan::Blackhole`, or `UserRoutePlan::System`.
 An `Unresolved` result normally permits the system route.
 A strict internet rule can turn that result into `Blackhole`.
@@ -202,6 +206,9 @@ It then checks a gateway rule with relay layers for that peer.
 It finally checks the wildcard peer rule.
 Address selection uses the longest matching CIDR rule.
 A packet's previously selected `path_rule` can carry that address rule into the sender.
+Configuration and local-address setters update path state synchronously.
+Topology publication prepares resolved path state.
+Send paths do not refresh configuration.
 
 ### D14: Relay group mode
 
@@ -226,7 +233,7 @@ The runtime retains at most 16 active chains.
 | One usable chain | `Single` | Send through that chain |
 | More than one usable chain | `Parallel` | Schedule packets across candidate chains |
 
-Only local, unencrypted `Data`, `Ethernet`, and `OverlayStream` packets enter this explicit path planner.
+Only local, unencrypted `Data` and `Ethernet` packets enter this explicit path planner.
 `send_path_packets` returns remaining automatic packets to its caller.
 Errors during an attempted chain send are reported to the caller.
 This table describes planning fallback, not a general retry after every send error.
@@ -301,7 +308,7 @@ Route selection and transport connection selection are different decisions.
 
 ### D21: TCP backend plan
 
-**Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L784), [plan_tcp_backend](../../lowertier/src/gateway/socks5.rs#L817), [plan_tcp_packet_backend](../../lowertier/src/gateway/socks5.rs#L839), [tcp_connect](../../lowertier/src/gateway/socks5.rs#L900), [Instance::run](../../lowertier/src/instance/instance.rs#L567).
+**Source:** [Socks5AutoConnector and Socks5Server](../../lowertier/src/gateway/socks5.rs), [Instance::run](../../lowertier/src/instance/instance.rs).
 
 TCP and UDP share target normalization and route validation through `plan_proxy_target`.
 TCP backend selection runs before connection creation.
@@ -310,18 +317,17 @@ TCP backend selection runs before connection creation.
 | Condition, in evaluation order | Action |
 | --- | --- |
 | Route blackhole | Return an error |
-| Overlay route with no ready userspace network | Return an error |
+| Overlay route with no local overlay IPv4 address | Return an error |
 | Validated system route or loopback destination | Select `Kernel` |
 | Eligible direct peer and negotiated QUIC proxy capability | Select `Transport` |
-| Available OverlayStream connector and matching IPv4 peer route | Select `Overlay` |
-| Remaining overlay connection | Select `Smoltcp` |
+| Remaining overlay connection | Create or reuse the packet stack and select `Smoltcp` |
 
 The direct QUIC stream requires disabled ACL filtering, no matching explicit path, and exactly one live direct connection.
 `LOWTIER_DISABLE_TCP_STREAM_PROXY` disables that attempt.
 Only a transport proxy result of `Ok(None)` permits packet fallback.
-The connector selects the packet backend again after that result.
-Transport errors, timeouts, and OverlayStream errors propagate.
-`LOWTIER_EXPERIMENT_OVERLAY_STREAM` controls OverlayStream endpoint construction at startup.
+Transport errors and timeouts propagate.
+The experimental OverlayStream backend and its runtime switch have been removed.
+Starting a SOCKS5 or HTTP listener does not allocate the source packet stack.
 This decision runs for a new connection.
 The local SOCKS5 listener always negotiates the no-authentication method.
 It rejects clients that do not offer that method.
@@ -343,21 +349,16 @@ This independent server decision can refuse the client's D21 shortcut.
 
 **Source:** [Socks5AutoConnector::plan_proxy_target](../../lowertier/src/gateway/socks5.rs#L784), [udp_connect](../../lowertier/src/gateway/socks5.rs#L995).
 
-The shared target planner rejects blackholes and overlay routes without a ready userspace network.
-An admitted overlay route uses the smoltcp UDP socket.
+The shared target planner rejects blackholes and overlay routes without a local overlay IPv4 address.
+An admitted overlay route creates or reuses the packet stack and opens a smoltcp UDP socket.
 An admitted system route uses an operating system UDP socket.
 This path has no corresponding HTTP/3 TCP stream shortcut.
 
-### D24: OverlayStream cached connection or current route
+### D24: Retired experimental stream selection
 
-**Source:** [OverlayStreamEndpoint::spawn_session](../../lowertier/src/gateway/overlay_stream.rs#L601), [send_frame](../../lowertier/src/gateway/overlay_stream.rs#L1050), [PeerManager::only_direct_proxy_conn](../../lowertier/src/peers/peer_manager.rs#L3867).
-
-Session creation can cache a weak reference to the only direct connection.
-Every frame checks for a matching current path rule before using that cached connection.
-A live cached connection selects `send_msg_for_proxy_on_conn`.
-Other cases select `send_msg_for_proxy` and its current path planning.
-A failed cached send clears that reference and returns the error.
-The same call does not resend that frame through the general route.
+The custom stream backend, cached-connection selection, retransmission state, and stream queues have been removed.
+Packet type 43 remains reserved.
+TCP uses the three D21 backends.
 
 ## Receive and relay state
 
@@ -372,6 +373,8 @@ Missing state or an ineligible batch returns the batch to the caller.
 Eligible batches still pass authority checks, ACL processing, relevant filters, and L2 admission.
 A failed authorization consumes and drops the batch.
 The shortcut does not bypass these checks.
+The SOCKS5 packet filter is inactive when no packet consumer is registered.
+An enabled proxy listener alone does not activate this filter.
 
 ### D26: General receive dispatch
 
@@ -421,10 +424,10 @@ The individual sender retains its additional final foreign-route check.
 
 **Change:** D21 returns a named `TcpBackend` before opening a connection.
 TCP and UDP share destination normalization and route validation.
-All four TCP backends remain available under their existing eligibility rules.
+Three TCP backends remain available under their eligibility rules.
 Only an unsupported transport result permits packet fallback.
 D22 retains remote admission checks.
-D24 retains current path checks before cached sends.
+D24 has been removed with the experimental backend.
 The local SOCKS5 [listener](../../lowertier/src/gateway/fast_socks5/server.rs#L108) also removes its fixed configuration object and unused authentication alternatives.
 The 10-second connector timeout and both proxy commands remain available.
 The [cleanup report](dead-options-cleanup.md) records the other unused APIs.
@@ -432,11 +435,14 @@ The [cleanup report](dead-options-cleanup.md) records the other unused APIs.
 ## Verification and limits
 
 The map follows inspected production functions and their direct callers.
-The permitted sequential library suite passed 561 tests.
+The permitted sequential library suite passed 554 tests after these removals.
 Two public-domain probes were excluded under the local-test policy.
 Both optional Caddy integration tests passed separately.
 The following tests protect relevant contracts:
 
+- [Lazy stack allocation, address changes, and proxy shutdown](../../lowertier/src/gateway/socks5.rs).
+- [Immutable service-route snapshots and shared topology tables](../../lowertier/src/peers/service_route.rs).
+- [Asymmetric packet proxy paths](../../lowertier/src/peers/multipath_tests.rs).
 - [disabled_punchers_are_never_constructed](../../lowertier/src/instance/instance.rs#L796).
 - [disabled_factories_fail_before_dns_and_socket_allocation](../../lowertier/src/instance/instance.rs#L809).
 - [inactive_proxy_allocates_no_protocol_state](../../lowertier/src/instance/ip_proxy.rs#L115).

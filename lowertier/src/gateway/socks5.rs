@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -14,7 +14,6 @@ use quanta::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::gateway::overlay_stream::{OverlayStream, OverlayStreamConnector};
 use crate::{
     common::{config::PortForwardConfig, global_ctx::GlobalCtxEvent, join_joinset_background},
     gateway::{
@@ -42,7 +41,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
-    sync::{Mutex, Notify, mpsc},
+    sync::{Mutex, mpsc},
     task::JoinSet,
     time::timeout,
 };
@@ -172,11 +171,10 @@ mod exit_dns_tests {
             });
             context.set_flags(flags);
             let connector = Socks5AutoConnector {
-                overlay_connector: None,
+                server: Weak::new(),
                 peer_mgr: Arc::downgrade(&peer),
                 entries,
                 entry_count: Arc::new(AtomicUsize::new(0)),
-                smoltcp_net: None,
                 src_addr: "127.0.0.1:4000".parse().unwrap(),
                 flow: 37,
                 inner_connector: parking_lot::Mutex::new(None),
@@ -203,12 +201,125 @@ mod exit_dns_tests {
         .await
         .unwrap();
     }
+
+    #[tokio::test]
+    async fn listener_and_system_connections_leave_packet_stack_unallocated() {
+        timeout(Duration::from_secs(10), async {
+            let peer = crate::peers::tests::create_mock_peer_manager_secure(
+                "lazy-proxy".into(),
+                "secret".into(),
+            )
+            .await;
+            let context = peer.get_global_ctx();
+            context.set_ipv4(Some("10.42.0.1/24".parse().unwrap()));
+            context
+                .config
+                .set_socks5_portal(Some("socks5://127.0.0.1:0".parse().unwrap()));
+            let server = Socks5Server::new(context.clone(), peer.clone());
+            server.run().await.unwrap();
+            tokio::task::yield_now().await;
+            assert!(server.net.lock().await.is_none());
+            assert!(server.packet_path_is_idle());
+
+            let connector = Socks5AutoConnector {
+                server: Arc::downgrade(&server),
+                peer_mgr: Arc::downgrade(&peer),
+                entries: server.entries.clone(),
+                entry_count: server.entry_count.clone(),
+                src_addr: "127.0.0.1:4000".parse().unwrap(),
+                flow: 1,
+                inner_connector: parking_lot::Mutex::new(None),
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let _stream = connector
+                .tcp_connect(listener.local_addr().unwrap(), 1)
+                .await
+                .unwrap();
+            assert!(server.net.lock().await.is_none());
+            let (first, second) = tokio::join!(server.packet_net(), server.packet_net());
+            let first = first.unwrap().1;
+            assert!(Arc::ptr_eq(&first, &second.unwrap().1));
+            #[cfg(feature = "ffi-dataplane")]
+            {
+                let listener = server
+                    .data_plane_tcp_bind(12000, Duration::from_secs(1))
+                    .await
+                    .unwrap();
+                assert!(!server.packet_path_is_idle());
+                drop(listener);
+                assert!(server.packet_path_is_idle());
+
+                let locked = server.net.lock().await;
+                let mut binding =
+                    Box::pin(server.data_plane_tcp_bind(12001, Duration::from_secs(1)));
+                assert!(futures::poll!(&mut binding).is_pending());
+                context.set_ipv4(Some("10.42.0.3/24".parse().unwrap()));
+                drop(locked);
+                let listener = binding.await.unwrap();
+                assert_eq!(
+                    listener.local_addr().ip(),
+                    "10.42.0.3".parse::<IpAddr>().unwrap()
+                );
+                drop(listener);
+            }
+            context.set_ipv4(Some("10.42.0.2/24".parse().unwrap()));
+            let replacement = server.packet_net().await.unwrap().1;
+            assert_eq!(
+                replacement.get_address(),
+                "10.42.0.2".parse::<IpAddr>().unwrap()
+            );
+            assert!(!Arc::ptr_eq(&first, &replacement));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_closes_active_system_proxy_sessions() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        timeout(Duration::from_secs(10), async {
+            let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy = reservation.local_addr().unwrap();
+            drop(reservation);
+            let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = destination.local_addr().unwrap().port();
+            let peer = crate::peers::tests::create_mock_peer_manager_secure(
+                "proxy-shutdown".into(),
+                "secret".into(),
+            )
+            .await;
+            let context = peer.get_global_ctx();
+            context
+                .config
+                .set_socks5_portal(Some(format!("socks5://{proxy}").parse().unwrap()));
+            let server = Socks5Server::new(context, peer.clone());
+            server.run().await.unwrap();
+            let mut client = TcpStream::connect(proxy).await.unwrap();
+            client.write_all(&[5, 1, 0]).await.unwrap();
+            let mut greeting = [0; 2];
+            client.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 0]);
+            let mut request = vec![5, 1, 0, 1, 127, 0, 0, 1];
+            request.extend_from_slice(&port.to_be_bytes());
+            client.write_all(&request).await.unwrap();
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], 0);
+            let (mut accepted, _) = destination.accept().await.unwrap();
+            assert!(server.net.lock().await.is_none());
+            drop(peer);
+            drop(server);
+            assert_eq!(accepted.read(&mut [0; 1]).await.unwrap(), 0);
+            assert_eq!(client.read(&mut [0; 1]).await.unwrap(), 0);
+        })
+        .await
+        .unwrap();
+    }
 }
 
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
-    Overlay(OverlayStream),
     Transport(crate::tunnel::quic::proxy::ProxyStream),
 }
 
@@ -221,7 +332,6 @@ impl AsyncRead for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
-            SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
         }
     }
@@ -237,19 +347,6 @@ impl ProxyTcpStream for SocksTcpStream {
             stream.copy_owned(inbound).await?;
             return Ok(());
         }
-        if matches!(&self, SocksTcpStream::Overlay(_)) {
-            let SocksTcpStream::Overlay(stream) = self else {
-                unreachable!()
-            };
-            match stream.copy_bidirectional_owned(inbound).await {
-                Ok((uploaded, downloaded)) => {
-                    tracing::info!(uploaded, downloaded, "owned overlay transfer closed")
-                }
-                Err(error) => tracing::error!(?error, "owned overlay transfer error"),
-            }
-            return Ok(());
-        }
-
         let mut stream = self;
         match tokio::io::copy_bidirectional(inbound, &mut stream).await {
             Ok((uploaded, downloaded)) => {
@@ -270,7 +367,6 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
-            SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
         }
     }
@@ -282,7 +378,6 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
-            SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_flush(cx),
         }
     }
@@ -294,7 +389,6 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
-            SocksTcpStream::Overlay(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             SocksTcpStream::Transport(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
         }
     }
@@ -561,37 +655,11 @@ impl Drop for SmolTcpConnector {
     }
 }
 
-struct Socks5OverlayConnector {
-    connector: OverlayStreamConnector,
-    src_addr: SocketAddr,
-}
-
-#[async_trait::async_trait]
-impl AsyncTcpConnector for Socks5OverlayConnector {
-    type S = SocksTcpStream;
-
-    async fn tcp_connect(
-        &self,
-        addr: SocketAddr,
-        timeout_s: u64,
-    ) -> crate::gateway::fast_socks5::Result<SocksTcpStream> {
-        let stream = timeout(
-            Duration::from_secs(timeout_s),
-            self.connector.connect(self.src_addr, addr),
-        )
-        .await
-        .with_context(|| "overlay stream connect timed out")?
-        .map_err(super::fast_socks5::SocksError::Other)?;
-        Ok(SocksTcpStream::Overlay(stream))
-    }
-}
-
 struct Socks5AutoConnector {
-    overlay_connector: Option<OverlayStreamConnector>,
+    server: Weak<Socks5Server>,
     peer_mgr: Weak<PeerManager>,
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
-    smoltcp_net: Option<Arc<Net>>,
     src_addr: SocketAddr,
     flow: u64,
 
@@ -606,7 +674,6 @@ struct ProxyTarget {
 enum TcpBackend {
     Kernel,
     Transport(Arc<crate::tunnel::quic::proxy::ProxyEndpoint>),
-    Overlay(OverlayStreamConnector),
     Smoltcp,
 }
 
@@ -615,7 +682,6 @@ impl TcpBackend {
         match self {
             Self::Kernel => "system route or loopback destination",
             Self::Transport(_) => "direct peer with negotiated QUIC proxy capability",
-            Self::Overlay(_) => "enabled OverlayStream with a matching peer route",
             Self::Smoltcp => "overlay packet path",
         }
     }
@@ -786,7 +852,12 @@ impl Socks5AutoConnector {
         peer_manager: &PeerManager,
         mut address: SocketAddr,
     ) -> crate::gateway::fast_socks5::Result<ProxyTarget> {
-        if self.smoltcp_net.as_ref().map(|net| net.get_address()) == Some(address.ip()) {
+        if peer_manager
+            .get_global_ctx()
+            .get_ipv4()
+            .map(|ip| IpAddr::V4(ip.address()))
+            == Some(address.ip())
+        {
             address.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
         }
         let route = if address.ip().is_loopback() {
@@ -804,7 +875,7 @@ impl Socks5AutoConnector {
                 );
             }
             UserRoutePlan::Overlay { peer_ids, .. } => {
-                if self.smoltcp_net.is_none() {
+                if peer_manager.get_global_ctx().get_ipv4().is_none() {
                     return Err(anyhow::anyhow!("userspace routing is not ready").into());
                 }
                 Some(peer_ids)
@@ -833,23 +904,17 @@ impl Socks5AutoConnector {
         {
             return TcpBackend::Transport(proxy);
         }
-        self.plan_tcp_packet_backend(peer_manager, target).await
+        TcpBackend::Smoltcp
     }
 
-    async fn plan_tcp_packet_backend(
-        &self,
-        peer_manager: &PeerManager,
-        target: &ProxyTarget,
-    ) -> TcpBackend {
-        if let Some(connector) = self.overlay_connector.clone()
-            && let IpAddr::V4(ip) = target.address.ip()
-            && let Some(peer_id) = peer_manager.get_peer_map().get_peer_id_by_ipv4(&ip).await
-            && target.peer_ids.as_deref() == Some(&[peer_id])
-        {
-            TcpBackend::Overlay(connector)
-        } else {
-            TcpBackend::Smoltcp
-        }
+    async fn packet_net(&self) -> crate::gateway::fast_socks5::Result<Arc<Net>> {
+        self.server
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("userspace proxy is stopped"))?
+            .packet_net()
+            .await
+            .map(|(_, net)| net)
+            .map_err(Into::into)
     }
 
     async fn resolve_target(
@@ -932,7 +997,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                         peer_mgr_arc
                             .get_global_ctx()
                             .get_ipv4()
-                            .unwrap()
+                            .ok_or_else(|| anyhow::anyhow!("userspace routing is not ready"))?
                             .address()
                             .into(),
                         self.src_addr.port(),
@@ -946,24 +1011,11 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                         return Ok(SocksTcpStream::Transport(stream));
                     }
                     // Only an unsupported stream permits packet fallback.
-                    // Recheck the packet backend after the remote request.
-                    backend = self.plan_tcp_packet_backend(&peer_mgr_arc, &target).await;
-                }
-                TcpBackend::Overlay(connector) => {
-                    break Box::new(Socks5OverlayConnector {
-                        connector,
-                        src_addr: peer_mgr_arc
-                            .get_global_ctx()
-                            .get_ipv4()
-                            .map(|inet| {
-                                SocketAddr::new(IpAddr::V4(inet.address()), self.src_addr.port())
-                            })
-                            .unwrap_or(self.src_addr),
-                    });
+                    backend = TcpBackend::Smoltcp;
                 }
                 TcpBackend::Smoltcp => {
                     break Box::new(SmolTcpConnector {
-                        net: self.smoltcp_net.clone().unwrap(),
+                        net: self.packet_net().await?,
                         entries: self.entries.clone(),
                         entry_count: self.entry_count.clone(),
                         current_entry: std::sync::Mutex::new(None),
@@ -1022,7 +1074,7 @@ impl AsyncUdpConnector for Socks5AutoConnector {
 
         let port_holder = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
         let port = port_holder.local_addr()?.port();
-        let smoltcp_net = self.smoltcp_net.as_ref().unwrap();
+        let smoltcp_net = self.packet_net().await?;
         let local_addr = SocketAddr::new(smoltcp_net.get_address(), port);
         let socket = Arc::new(SocksUdpSocket::SmolUdpSocket(
             smoltcp_net.udp_bind(local_addr).await?,
@@ -1063,7 +1115,7 @@ struct Socks5ServerNet {
     ipv4_addr: cidr::Ipv4Inet,
 
     smoltcp_net: Arc<Net>,
-    forward_tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
+    _forward_tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
 }
 
 impl Socks5ServerNet {
@@ -1154,7 +1206,7 @@ impl Socks5ServerNet {
             ipv4_addr,
 
             smoltcp_net: Arc::new(net),
-            forward_tasks,
+            _forward_tasks: forward_tasks,
         }
     }
 
@@ -1217,18 +1269,6 @@ impl Socks5ServerNet {
             }
         }
     }
-
-    fn handle_tcp_stream(
-        &self,
-        stream: TcpStream,
-        connector: Socks5AutoConnector,
-        protocols: ProxyProtocols,
-    ) {
-        self.forward_tasks
-            .lock()
-            .unwrap()
-            .spawn(Self::dispatch_tcp_stream_task(stream, connector, protocols));
-    }
 }
 
 struct UdpClientInfo {
@@ -1246,6 +1286,7 @@ struct UdpClientKey {
 }
 
 pub struct Socks5Server {
+    self_ref: Weak<Socks5Server>,
     global_ctx: Arc<GlobalCtx>,
     peer_manager: Weak<PeerManager>,
 
@@ -1259,16 +1300,7 @@ pub struct Socks5Server {
     udp_client_map: Arc<DashMap<UdpClientKey, Arc<UdpClientInfo>>>,
     udp_forward_task: Arc<DashMap<UdpClientKey, AbortOnDropHandle<()>>>,
 
-    overlay_connector: Mutex<Option<OverlayStreamConnector>>,
-
-    userspace_proxy_enabled: Arc<AtomicBool>,
-    #[cfg(feature = "ffi-dataplane")]
-    data_plane_refs: Arc<AtomicUsize>,
-    // Tracks whether the smoltcp `net` is ready for data-plane callers.
-    #[cfg(feature = "ffi-dataplane")]
-    data_plane_net_ready: tokio::sync::watch::Sender<bool>,
     cancel_tokens: Arc<DashMap<PortForwardConfig, DropGuard>>,
-    port_forward_list_change_notifier: Arc<Notify>,
     entry_count: Arc<AtomicUsize>,
 }
 
@@ -1287,8 +1319,7 @@ impl PeerPacketFilter for Socks5Server {
 
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         let entry_count = self.entry_count.load(Ordering::Relaxed);
-        let userspace_proxy_enabled = self.userspace_proxy_enabled.load(Ordering::Relaxed);
-        if entry_count == 0 && !userspace_proxy_enabled && self.entries.is_empty() {
+        if self.packet_path_is_idle() {
             if tracing::enabled!(tracing::Level::TRACE)
                 && let Some(hdr) = packet.peer_manager_header()
                 && hdr.packet_type == PacketType::Data as u8
@@ -1319,7 +1350,6 @@ impl PeerPacketFilter for Socks5Server {
                         ?tcp_dst_port,
                         ?tcp_flags,
                         entry_count,
-                        userspace_proxy_enabled,
                         "userspace proxy fast gate passed packet from peer"
                     );
                 } else {
@@ -1328,7 +1358,6 @@ impl PeerPacketFilter for Socks5Server {
                         from_peer_id = hdr.from_peer_id.get(),
                         to_peer_id = hdr.to_peer_id.get(),
                         entry_count,
-                        userspace_proxy_enabled,
                         "userspace proxy fast gate passed non-ipv4 packet from peer"
                     );
                 }
@@ -1437,7 +1466,6 @@ impl PeerPacketFilter for Socks5Server {
                 ipv4_src = %ipv4.get_source(),
                 ipv4_dst = %ipv4.get_destination(),
                 entry_count = self.entry_count.load(Ordering::Relaxed),
-                userspace_proxy_enabled = self.userspace_proxy_enabled.load(Ordering::Relaxed),
                 "userspace proxy has no entry for packet from peer"
             );
             return Some(packet);
@@ -1575,14 +1603,15 @@ impl Socks5Server {
     }
 
     fn packet_path_is_idle(&self) -> bool {
-        self.entry_count.load(Ordering::Relaxed) == 0
-            && !self.userspace_proxy_enabled.load(Ordering::Relaxed)
-            && self.entries.is_empty()
+        // Entries reserve their count before publication. An enabled listener
+        // alone cannot receive packets from the overlay.
+        self.entry_count.load(Ordering::Relaxed) == 0 && self.entries.is_empty()
     }
 
     pub fn new(global_ctx: Arc<GlobalCtx>, peer_manager: Arc<PeerManager>) -> Arc<Self> {
         let (packet_sender, packet_recv) = mpsc::channel(1024);
-        Arc::new(Self {
+        Arc::new_cyclic(|self_ref| Self {
+            self_ref: self_ref.clone(),
             global_ctx,
             peer_manager: Arc::downgrade(&peer_manager),
 
@@ -1596,139 +1625,72 @@ impl Socks5Server {
             udp_client_map: Arc::new(DashMap::new()),
             udp_forward_task: Arc::new(DashMap::new()),
 
-            overlay_connector: Mutex::new(None),
-
-            userspace_proxy_enabled: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "ffi-dataplane")]
-            data_plane_refs: Arc::new(AtomicUsize::new(0)),
-            #[cfg(feature = "ffi-dataplane")]
-            data_plane_net_ready: tokio::sync::watch::channel(false).0,
             cancel_tokens: Arc::new(DashMap::new()),
-            port_forward_list_change_notifier: Arc::new(Notify::new()),
             entry_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
+    fn clear_packet_entries(&self) {
+        let mut removed = 0;
+        self.entries.retain(|_, _| {
+            removed += 1;
+            false
+        });
+        decrement_entry_count_by(&self.entry_count, removed);
+        self.udp_client_map.clear();
+        self.udp_forward_task.clear();
+    }
+
+    async fn packet_net(&self) -> anyhow::Result<(cidr::Ipv4Inet, Arc<Net>)> {
+        let mut net = self.net.lock().await;
+        let address = self
+            .global_ctx
+            .get_ipv4()
+            .ok_or_else(|| anyhow::anyhow!("userspace routing is not ready"))?;
+        if net.as_ref().is_some_and(|net| net.ipv4_addr != address) {
+            net.take();
+            self.clear_packet_entries();
+        }
+        let net = net.get_or_insert_with(|| {
+            Socks5ServerNet::new(
+                address,
+                self.peer_manager.clone(),
+                self.packet_recv.clone(),
+                self.entries.clone(),
+            )
+        });
+        Ok((net.ipv4_addr, net.smoltcp_net.clone()))
+    }
+
     async fn run_net_update_task(self: &Arc<Self>) {
-        let net = self.net.clone();
-        let global_ctx = self.global_ctx.clone();
-        let peer_manager = self.peer_manager.clone();
-        let packet_recv = self.packet_recv.clone();
-        let entries = self.entries.clone();
-        let entry_count = self.entry_count.clone();
-        let udp_client_map = self.udp_client_map.clone();
-        let cancel_tokens = self.cancel_tokens.clone();
-        let port_forward_list_change_notifier = self.port_forward_list_change_notifier.clone();
-        let userspace_proxy_enabled = self.userspace_proxy_enabled.clone();
-        #[cfg(feature = "ffi-dataplane")]
-        let data_plane_refs = self.data_plane_refs.clone();
-        #[cfg(feature = "ffi-dataplane")]
-        let data_plane_net_ready = self.data_plane_net_ready.clone();
+        let server = self.self_ref.clone();
+        let mut events = self.global_ctx.subscribe();
         self.tasks.lock().unwrap().spawn(async move {
-            let mut prev_ipv4 = None;
             loop {
-                #[cfg(feature = "ffi-dataplane")]
-                let data_plane_active = data_plane_refs.load(Ordering::Relaxed) > 0;
-                #[cfg(not(feature = "ffi-dataplane"))]
-                let data_plane_active = false;
-
-                let active_port_forwards = cancel_tokens.len();
-                let is_userspace_proxy_enabled = userspace_proxy_enabled.load(Ordering::Relaxed);
-                if active_port_forwards == 0 && !is_userspace_proxy_enabled && !data_plane_active {
-                    let had_net = {
-                        let mut net_guard = net.lock().await;
-                        net_guard.take().is_some()
-                    };
-                    tracing::trace!(
-                        had_net,
-                        active_port_forwards,
-                        is_userspace_proxy_enabled,
-                        data_plane_active,
-                        entry_count = entry_count.load(Ordering::Relaxed),
-                        entries_len = entries.len(),
-                        "userspace proxy net update waiting for consumers"
-                    );
-                    #[cfg(feature = "ffi-dataplane")]
-                    let _ = data_plane_net_ready.send_replace(false);
-                    port_forward_list_change_notifier.notified().await;
-                    continue;
-                }
-
-                let mut event_recv = global_ctx.subscribe();
-
-                let cur_ipv4 = global_ctx.get_ipv4();
-                if prev_ipv4 != cur_ipv4 {
-                    let old_ipv4 = prev_ipv4;
-                    prev_ipv4 = cur_ipv4;
-
-                    tracing::trace!(
-                        ?old_ipv4,
-                        ?cur_ipv4,
-                        old_entry_count = entry_count.load(Ordering::Relaxed),
-                        old_entries_len = entries.len(),
-                        udp_client_count = udp_client_map.len(),
-                        "socks5 net update resetting entries for ipv4 change"
-                    );
-                    let mut removed_entries = 0;
-                    entries.retain(|_, _| {
-                        removed_entries += 1;
-                        false
-                    });
-                    let (_, new_entry_count) =
-                        decrement_entry_count_by(&entry_count, removed_entries);
-                    udp_client_map.clear();
-                    tracing::trace!(
-                        ?old_ipv4,
-                        ?cur_ipv4,
-                        removed_entries,
-                        new_entry_count,
-                        new_entries_len = entries.len(),
-                        udp_client_count = udp_client_map.len(),
-                        "socks5 net update reset entries complete"
-                    );
-
-                    if let Some(cur_ipv4) = cur_ipv4 {
-                        net.lock().await.replace(Socks5ServerNet::new(
-                            cur_ipv4,
-                            peer_manager.clone(),
-                            packet_recv.clone(),
-                            entries.clone(),
-                        ));
-                        tracing::trace!(
-                            ?cur_ipv4,
-                            entry_count = entry_count.load(Ordering::Relaxed),
-                            entries_len = entries.len(),
-                            "socks5 net update installed smoltcp net"
-                        );
-                        // Wake any data-plane callers waiting in
-                        // `wait_data_plane_net` for the smoltcp net to appear.
-                        #[cfg(feature = "ffi-dataplane")]
-                        let _ = data_plane_net_ready.send_replace(true);
-                    } else {
-                        let _ = net.lock().await.take();
-                        tracing::trace!(
-                            entry_count = entry_count.load(Ordering::Relaxed),
-                            entries_len = entries.len(),
-                            "socks5 net update removed smoltcp net"
-                        );
-                        #[cfg(feature = "ffi-dataplane")]
-                        let _ = data_plane_net_ready.send_replace(false);
-                    }
-                }
-
                 select! {
-                    _ = event_recv.recv() => {}
+                    event = events.recv() => {
+                        if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                            break;
+                        }
+                    }
                     _ = tokio::time::sleep(Duration::from_secs(120)) => {}
+                }
+                let Some(server) = server.upgrade() else {
+                    break;
+                };
+                let mut net = server.net.lock().await;
+                if net
+                    .as_ref()
+                    .is_some_and(|net| Some(net.ipv4_addr) != server.global_ctx.get_ipv4())
+                {
+                    net.take();
+                    server.clear_packet_entries();
                 }
             }
         });
     }
 
-    pub async fn run(
-        self: &Arc<Self>,
-        overlay_connector: Option<OverlayStreamConnector>,
-    ) -> Result<(), Error> {
-        *self.overlay_connector.lock().await = overlay_connector.clone();
+    pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
         let proxy_listeners = plan_proxy_listeners(
             self.global_ctx.config.get_socks5_portal(),
             self.global_ctx.config.get_outbound_http_proxy(),
@@ -1750,9 +1712,9 @@ impl Socks5Server {
                 let entries = self.entries.clone();
                 let entry_count = self.entry_count.clone();
                 let peer_manager = self.peer_manager.clone();
-                let net = self.net.clone();
+                let server = self.self_ref.clone();
+                let tasks = Arc::downgrade(&self.tasks);
                 let protocols = proxy_listener.protocols;
-                let listener_overlay_connector = overlay_connector.clone();
                 self.tasks.lock().unwrap().spawn(async move {
                     loop {
                         match listener.accept().await {
@@ -1760,25 +1722,21 @@ impl Socks5Server {
                                 tracing::info!("accept a new connection, {:?}", socket);
                                 let connector = Socks5AutoConnector {
                                     flow: rand::random(),
-                                    smoltcp_net: net
-                                        .lock()
-                                        .await
-                                        .as_ref()
-                                        .map(|net| net.smoltcp_net.clone()),
+                                    server: server.clone(),
                                     entries: entries.clone(),
-                                    overlay_connector: listener_overlay_connector.clone(),
                                     peer_mgr: peer_manager.clone(),
                                     src_addr: addr,
                                     inner_connector: parking_lot::Mutex::new(None),
                                     entry_count: entry_count.clone(),
                                 };
-                                if let Some(net) = net.lock().await.as_ref() {
-                                    net.handle_tcp_stream(socket, connector, protocols);
-                                } else {
-                                    tokio::spawn(Socks5ServerNet::dispatch_tcp_stream_task(
+                                let Some(tasks) = tasks.upgrade() else {
+                                    break;
+                                };
+                                tasks.lock().unwrap().spawn(
+                                    Socks5ServerNet::dispatch_tcp_stream_task(
                                         socket, connector, protocols,
-                                    ));
-                                }
+                                    ),
+                                );
                             }
                             Err(err) => tracing::error!("accept error = {:?}", err),
                         }
@@ -1786,7 +1744,6 @@ impl Socks5Server {
                 });
             }
 
-            self.userspace_proxy_enabled.store(true, Ordering::Relaxed);
             join_joinset_background(self.tasks.clone(), "userspace proxy server".to_string());
         }
 
@@ -1829,7 +1786,6 @@ impl Socks5Server {
                 self.add_port_forward(cfg.clone()).await?;
             }
         }
-        self.port_forward_list_change_notifier.notify_one();
         Ok(())
     }
 
@@ -1891,13 +1847,12 @@ impl Socks5Server {
             .net_ns(self.global_ctx.net_ns.clone())
             .call()?;
 
-        let net = self.net.clone();
+        let server = self.self_ref.clone();
         let entries = self.entries.clone();
         let entry_count = self.entry_count.clone();
         let tasks = Arc::new(std::sync::Mutex::new(JoinSet::new()));
         join_joinset_background(tasks.clone(), "tcp port forward".to_string());
         let forward_tasks = tasks;
-        let overlay_connector = self.overlay_connector.lock().await.clone();
         let peer_mgr = self.peer_manager.clone();
         let cancel_token = CancellationToken::new();
         self.cancel_tokens
@@ -1928,30 +1883,11 @@ impl Socks5Server {
                     dst_addr
                 );
 
-                let (smoltcp_net, net_ipv4) = {
-                    let net_guard = net.lock().await;
-                    (
-                        net_guard.as_ref().map(|net| net.smoltcp_net.clone()),
-                        net_guard.as_ref().map(|net| net.ipv4_addr),
-                    )
-                };
-                tracing::trace!(
-                    ?bind_addr,
-                    ?dst_addr,
-                    client_addr = ?addr,
-                    has_smoltcp_net = smoltcp_net.is_some(),
-                    ?net_ipv4,
-                    entry_count = entry_count.load(Ordering::Relaxed),
-                    entries_len = entries.len(),
-                    "port forward: preparing connector"
-                );
-
                 let connector = Socks5AutoConnector {
                     flow: rand::random(),
-                    overlay_connector: overlay_connector.clone(),
+                    server: server.clone(),
                     peer_mgr: peer_mgr.clone(),
                     entries: entries.clone(),
-                    smoltcp_net,
                     src_addr: addr,
                     entry_count: entry_count.clone(),
                     inner_connector: parking_lot::Mutex::new(None),
@@ -1985,6 +1921,7 @@ impl Socks5Server {
         let entry_count = self.entry_count.clone();
         let net_ns = self.global_ctx.net_ns.clone();
         let net = self.net.clone();
+        let server = self.self_ref.clone();
         let udp_client_map = self.udp_client_map.clone();
         let udp_forward_task = self.udp_forward_task.clone();
         let cancel_token = CancellationToken::new();
@@ -2027,6 +1964,12 @@ impl Socks5Server {
                 let client_info = match binded_socket {
                     Some(s) => s.clone(),
                     None => {
+                        let Some(server) = server.upgrade() else { break; };
+                        if let Err(error) = server.packet_net().await {
+                            tracing::debug!(?error, "UDP forwarding stack is not ready");
+                            continue;
+                        }
+                        drop(server);
                         let _g = net_ns.guard();
                         // reserve a port so os will not use it to connect to the virtual network
                         let binded_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await;

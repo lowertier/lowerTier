@@ -18,7 +18,6 @@ pub mod http_proxy;
 #[cfg(feature = "socks5")]
 pub mod socks5;
 
-pub mod overlay_stream;
 pub(crate) mod transport_proxy;
 
 fn cidr_mappings(cidrs: &[ProxyNetworkConfig]) -> Vec<(cidr::Ipv4Cidr, cidr::Ipv4Cidr)> {

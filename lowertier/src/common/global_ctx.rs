@@ -467,6 +467,7 @@ pub struct GlobalCtx {
     tun_device_name: Mutex<Option<String>>,
 
     flags: ArcSwap<Flags>,
+    path_runtimes: Mutex<Vec<std::sync::Weak<crate::peers::path_policy::PathRuntime>>>,
     transit_budget: std::sync::Mutex<super::transit_budget::TransitBudget>,
     receive_budget: std::sync::Mutex<super::transit_budget::TransitBudget>,
     receive_limited: AtomicBool,
@@ -881,6 +882,7 @@ impl GlobalCtx {
             )),
             receive_limited: AtomicBool::new(flags.receive_bps().is_some()),
             flags: ArcSwap::new(Arc::new(flags)),
+            path_runtimes: Mutex::new(Vec::new()),
             underlay_policy,
 
             base_feature_flags: AtomicCell::new(base_feature_flags),
@@ -1073,8 +1075,18 @@ impl GlobalCtx {
     }
 
     pub fn set_ipv4(&self, addr: Option<cidr::Ipv4Inet>) {
+        let mut paths = self.path_runtimes.lock().unwrap();
         self.config.set_ipv4(addr);
         self.cached_ipv4.store(None);
+        paths.retain(|path| {
+            let Some(path) = path.upgrade() else {
+                return false;
+            };
+            path.set_local_ipv4(addr.map(|address| address.address()));
+            true
+        });
+        drop(paths);
+        self.issue_event(GlobalCtxEvent::ConfigPatched);
     }
 
     pub fn get_ipv6(&self) -> Option<cidr::Ipv6Inet> {
@@ -1352,6 +1364,7 @@ impl GlobalCtx {
         let policy =
             UnderlayPolicy::new(&flags.underlay_deny_interfaces, &flags.underlay_deny_cidrs)
                 .expect("underlay policy was validated");
+        let mut paths = self.path_runtimes.lock().unwrap();
         self.config.set_flags(flags.clone());
         self.process_memory_governor.configure(flags.memory_bytes());
         self.feature_flags.store(Self::derive_feature_flags(
@@ -1373,7 +1386,16 @@ impl GlobalCtx {
         // Publish the fast-path flag after the budget accepts the new limit.
         self.receive_limited
             .store(flags.receive_bps().is_some(), Ordering::Release);
-        self.flags.store(Arc::new(flags));
+        let flags = Arc::new(flags);
+        paths.retain(|path| {
+            let Some(path) = path.upgrade() else {
+                return false;
+            };
+            path.refresh(&flags);
+            true
+        });
+        self.flags.store(flags);
+        drop(paths);
         self.issue_event(GlobalCtxEvent::ConfigPatched);
     }
 
@@ -1383,6 +1405,16 @@ impl GlobalCtx {
 
     pub fn flags_arc(&self) -> Arc<Flags> {
         self.flags.load_full()
+    }
+
+    pub(crate) fn register_path_runtime(&self, path: &Arc<crate::peers::path_policy::PathRuntime>) {
+        // Registration and mutation share this lock. A new runtime cannot
+        // miss a configuration or address update.
+        let mut paths = self.path_runtimes.lock().unwrap();
+        path.set_local_ipv4(self.get_ipv4().map(|address| address.address()));
+        path.refresh(&self.flags_arc());
+        paths.retain(|path| path.strong_count() != 0);
+        paths.push(Arc::downgrade(path));
     }
 
     pub(crate) fn admit_transit(
