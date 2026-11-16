@@ -33,6 +33,7 @@ No fallback follows an ambiguous failure.
 No application bytes are replayed.
 
 Each endpoint stores a failure count, deadline, probe flag, and generation.
+Mode selection reads the shared active flag snapshot without cloning the full configuration.
 The cooldown starts at two seconds and caps at thirty seconds.
 One real flow can probe recovery after the deadline.
 Generation checks prevent stale concurrent results from changing newer health state.
@@ -46,7 +47,7 @@ Let `M` be the inner IPv4 MTU.
 Let `T` be the inner TCP header size.
 Let `P = M - 20 - T` be application payload per full inner packet.
 Let `C` be a native copy chunk, at most 32 KiB.
-Let `N` be concurrent admitted native streams, at most 32.
+Let `N` be the peak number of concurrent native streams on this carrier, at most 32.
 
 The model excludes outer IP, TCP, TLS, and their acknowledgments.
 Both paths still require those costs.
@@ -85,23 +86,28 @@ They do not wait for a new H2 capacity increase when credit is already available
 Consumed or discarded DATA releases queue admission and wakes all native waiters.
 
 The standard receive settings start with a 2 MiB stream window and a 4 MiB connection window.
-Each admitted H2 native stream reserves its full receive window plus 64 KiB of copy storage.
-The existing process memory governor can refuse that reservation.
+Each admitted H2 native stream requires one reserved receive window plus 64 KiB of copy storage.
+The per-carrier receive reservation grows when native concurrency exceeds its previous peak.
+The existing process memory governor can refuse that growth or the copy storage.
 The governor's limit does not increase.
 The maximum standard reservation for 32 native streams is 66 MiB per endpoint.
 Reservations describe governed storage, not total process RSS.
 
-For `N` active native reservations, the target connection window is:
+For peak concurrency `N`, the target connection window is:
 
 ```text
 target_connection_window = original_connection_window + N × stream_receive_window
 ```
 
 This preserves the original packet credit when admitted native readers stop consuming data.
-The H2 driver receives one coalesced window update signal when reservations change.
-Closing a stream reduces the target.
-H2 cannot revoke credit already advertised to the peer.
-It withholds later updates until outstanding data falls below the reduced target.
+The H2 driver receives one coalesced signal when the receive reservation grows.
+Closing a stream releases its copy storage and stream slot.
+The receive reservation remains available for later streams on that carrier.
+H2 cannot revoke advertised credit, so its memory reservation remains charged.
+The reservation ends when the carrier and its remaining native streams release the receive budget.
+The driver holds that budget while it can receive DATA, including DATA sent before native admission.
+This retained reservation can reduce the memory available to other flows after a concurrency burst.
+The policy does not raise the process memory limit to hide that cost.
 
 The receiver returns native stream credit only after the destination consumes the bytes.
 The server always drives the H2 connection, including when its bounded request handlers are full.

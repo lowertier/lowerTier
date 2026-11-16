@@ -196,13 +196,11 @@ impl ProxyEndpoint {
             return Ok("on");
         }
         // Return stable literals; configuration snapshots can change between flows.
-        Ok(
-            match self.context()?.config.get_flags().h2_tcp_proxy.as_str() {
-                "on" => "on",
-                "auto" => "auto",
-                _ => "off",
-            },
-        )
+        Ok(match self.context()?.flags_arc().h2_tcp_proxy.as_str() {
+            "on" => "on",
+            "auto" => "auto",
+            _ => "off",
+        })
     }
     pub(crate) fn requires_capability(&self) -> bool {
         self.h2_budget.is_some() && matches!(self.mode(), Ok("on"))
@@ -245,26 +243,25 @@ impl ProxyEndpoint {
     }
     fn reserve(&self) -> io::Result<StreamPermit> {
         let slot = self.slots.clone().try_acquire_owned().map_err(error)?;
-        let memory = self
-            .context()?
-            .process_memory_governor()
-            .try_reserve_owned(
-                COPY_BYTES * 2
-                    + self
-                        .h2_receive
-                        .as_ref()
-                        .map_or(0, |receive| receive.window_bytes()),
+        let governor = self.context()?.process_memory_governor();
+        let exhausted = || {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "TCP proxy memory budget exhausted",
             )
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
-                    "TCP proxy memory budget exhausted",
-                )
-            })?;
+        };
+        let memory = governor
+            .try_reserve_owned(COPY_BYTES * 2)
+            .ok_or_else(exhausted)?;
+        let receive = self
+            .h2_receive
+            .as_ref()
+            .map(|receive| receive.reserve(&governor).ok_or_else(exhausted))
+            .transpose()?;
         Ok(StreamPermit {
             _slot: slot,
             _memory: memory,
-            _h2_receive: self.h2_receive.as_ref().map(|receive| receive.reserve()),
+            _h2_receive: receive,
         })
     }
     pub(crate) async fn connect(
@@ -477,9 +474,10 @@ async fn reject(
     Ok(())
 }
 struct StreamPermit {
-    _slot: OwnedSemaphorePermit,
-    _memory: ProcessMemoryPermit,
+    // Release accounting before another flow can acquire the slot.
     _h2_receive: Option<http2::H2ReceivePermit>,
+    _memory: ProcessMemoryPermit,
+    _slot: OwnedSemaphorePermit,
 }
 pub(crate) struct IncomingProxy {
     pub source: SocketAddr,
@@ -804,7 +802,7 @@ mod tests {
         for context in [&client_context, &server_context] {
             let mut flags = context.config.get_flags();
             flags.h2_tcp_proxy = "on".into();
-            context.config.set_flags(flags);
+            context.set_flags(flags);
         }
         let mut listener = TcpTunnelListener::new("h2://127.0.0.1:0".parse().unwrap());
         listener.listen().await.unwrap();
@@ -847,7 +845,7 @@ mod tests {
             let mut stream = client.connect(source, destination).await.unwrap().unwrap();
             let mut flags = client.context().unwrap().config.get_flags();
             flags.h2_tcp_proxy = "off".into();
-            client.context().unwrap().config.set_flags(flags);
+            client.context().unwrap().set_flags(flags);
             assert!(client.connect(source, destination).await.unwrap().is_none());
             stream.write_all(&vec![0x5a; 256 * 1024]).await.unwrap();
             stream.shutdown().await.unwrap();
@@ -871,17 +869,17 @@ mod tests {
             let destination = "192.0.2.2:8080".parse().unwrap();
             let mut flags = server.context().unwrap().config.get_flags();
             flags.h2_tcp_proxy = "off".into();
-            server.context().unwrap().config.set_flags(flags);
+            server.context().unwrap().set_flags(flags);
             assert!(client.connect(source, destination).await.is_err());
             let mut flags = client.context().unwrap().config.get_flags();
             flags.h2_tcp_proxy = "auto".into();
-            client.context().unwrap().config.set_flags(flags);
+            client.context().unwrap().set_flags(flags);
             assert!(client.connect(source, destination).await.unwrap().is_none());
             assert!(client.connect(source, destination).await.unwrap().is_none());
             client.auto.lock().unwrap().retry_at = Some(Instant::now());
             let mut flags = server.context().unwrap().config.get_flags();
             flags.h2_tcp_proxy = "on".into();
-            server.context().unwrap().config.set_flags(flags);
+            server.context().unwrap().set_flags(flags);
             let mut incoming = server.take_incoming().unwrap();
             let remote = tokio::spawn(async move {
                 incoming
@@ -931,7 +929,7 @@ mod tests {
             server_tunnel.probe_guard().unwrap().authenticate();
             let mut flags = client.context().unwrap().config.get_flags();
             flags.h2_tcp_proxy = "auto".into();
-            client.context().unwrap().config.set_flags(flags);
+            client.context().unwrap().set_flags(flags);
             let source = "192.0.2.1:40000".parse().unwrap();
             let destination = "192.0.2.2:8080".parse().unwrap();
             let mut incoming = server.take_incoming().unwrap();

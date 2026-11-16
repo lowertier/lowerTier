@@ -27,7 +27,10 @@ use super::{
         valid_routing_cid_bytes,
     },
 };
-use crate::common::config::Flags;
+use crate::common::{
+    config::Flags,
+    global_ctx::{ProcessMemoryGovernor, ProcessMemoryPermit},
+};
 use bytes::{Buf, Bytes, BytesMut};
 use futures::Stream;
 use h2::{RecvStream, SendStream};
@@ -36,7 +39,7 @@ use std::{
     io::{self, IoSlice},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context as TaskContext, Poll, ready},
@@ -503,13 +506,20 @@ impl H2SendBudget {
     }
 }
 
-// Each native stream reserves its receive window in the process memory governor.
-// Add that credit to the original window so blocked streams preserve packet credit.
+// Advertised connection credit cannot be revoked. Retain its memory reservation
+// until the carrier and its remaining streams release this budget.
 pub(super) struct H2ReceiveBudget {
     stream_window: u32,
     connection_window: u32,
-    active: AtomicUsize,
+    state: Mutex<H2ReceiveState>,
     target: tokio::sync::watch::Sender<u32>,
+}
+
+#[derive(Default)]
+struct H2ReceiveState {
+    active: usize,
+    windows: usize,
+    memory: Option<ProcessMemoryPermit>,
 }
 
 impl H2ReceiveBudget {
@@ -522,28 +532,33 @@ impl H2ReceiveBudget {
             Arc::new(Self {
                 stream_window,
                 connection_window,
-                active: AtomicUsize::new(0),
+                state: Mutex::new(H2ReceiveState::default()),
                 target,
             }),
             updates,
         )
     }
 
-    pub(super) fn window_bytes(&self) -> usize {
-        self.stream_window as usize
-    }
-
-    fn publish(&self) {
-        self.target.send_modify(|target| {
-            *target = self.connection_window
-                + self.stream_window * self.active.load(Ordering::Acquire) as u32;
-        });
-    }
-
-    pub(super) fn reserve(self: &Arc<Self>) -> H2ReceivePermit {
-        self.active.fetch_add(1, Ordering::AcqRel);
-        self.publish();
-        H2ReceivePermit(self.clone())
+    pub(super) fn reserve(
+        self: &Arc<Self>,
+        governor: &Arc<ProcessMemoryGovernor>,
+    ) -> Option<H2ReceivePermit> {
+        let mut state = self.state.lock().unwrap();
+        if state.active == state.windows {
+            let bytes = self.stream_window as usize;
+            if let Some(memory) = &mut state.memory {
+                if !memory.try_extend(bytes) {
+                    return None;
+                }
+            } else {
+                state.memory = Some(governor.try_reserve_owned(bytes)?);
+            }
+            state.windows += 1;
+            self.target
+                .send_replace(self.connection_window + self.stream_window * state.windows as u32);
+        }
+        state.active += 1;
+        Some(H2ReceivePermit(self.clone()))
     }
 }
 
@@ -551,8 +566,7 @@ pub(super) struct H2ReceivePermit(Arc<H2ReceiveBudget>);
 
 impl Drop for H2ReceivePermit {
     fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::AcqRel);
-        self.0.publish();
+        self.0.state.lock().unwrap().active -= 1;
     }
 }
 
@@ -1116,9 +1130,11 @@ async fn accept_inner(
         )
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 response: {error}")))?;
 
+    let receive_guard = receive_budget.clone();
     let proxy = super::stream_proxy::ProxyEndpoint::new_h2(None, budget.clone(), receive_budget);
     let handler = proxy.clone();
     let driver = AbortOnDropHandle::new(tokio::spawn(async move {
+        let _receive_guard = receive_guard;
         let mut requests = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
@@ -1249,7 +1265,9 @@ async fn connect_inner(
         .handshake(tls)
         .await
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 client handshake: {error}")))?;
+    let receive_guard = receive_budget.clone();
     let driver = AbortOnDropHandle::new(tokio::spawn(async move {
+        let _receive_guard = receive_guard;
         loop {
             tokio::select! {
                 _ = &mut conn => break,
@@ -1422,6 +1440,28 @@ mod tests {
         assert_eq!(writer.budget.available(), 6);
         drop(data);
         assert_eq!(writer.budget.available(), 10);
+    }
+
+    #[test]
+    fn receive_credit_remains_charged_after_native_streams_close() {
+        use super::{H2ReceiveBudget, ProcessMemoryGovernor};
+        use std::sync::Arc;
+        let governor = Arc::new(ProcessMemoryGovernor::with_limit(2048));
+        let (budget, updates) = H2ReceiveBudget::new(1024, 2048);
+        let first = budget.reserve(&governor).unwrap();
+        let second = budget.reserve(&governor).unwrap();
+        assert!(budget.reserve(&governor).is_none());
+        assert_eq!(*updates.borrow(), 4096);
+        drop((first, second));
+        assert!(governor.try_reserve_owned(1).is_none());
+        assert_eq!(*updates.borrow(), 4096);
+        let reused = budget.reserve(&governor).unwrap();
+        drop(reused);
+        let carrier = budget.clone();
+        drop(budget);
+        assert!(governor.try_reserve_owned(1).is_none());
+        drop(carrier);
+        assert!(governor.try_reserve_owned(2048).is_some());
     }
 
     #[tokio::test]
