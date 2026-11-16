@@ -375,6 +375,7 @@ tun = ["dep:tun", "dep:quincy-tun", "dep:io-uring"]
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]
 ffi-dataplane = ["socks5"]
+packet-tunnel = ["tun"]
 jemalloc = ["dep:jemallocator", "dep:jemalloc-sys"]
 jemalloc-prof = [
     "jemalloc",

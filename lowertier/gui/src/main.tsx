@@ -4,6 +4,9 @@ import { hasKey } from "./api";
 import { start } from "./store";
 import "./style.css";
 import "./theme";
+import { appLayout } from "./native";
+import DeviceApp from "./DeviceApp";
+import "./device.css";
 
-render(() => <App />, document.getElementById("app")!);
-if (hasKey) start();
+render(() => appLayout ? <DeviceApp /> : <App />, document.getElementById("app")!);
+if (hasKey && !appLayout) start();

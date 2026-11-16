@@ -10,7 +10,7 @@ use std::{
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use uuid::Uuid;
 
@@ -70,6 +70,7 @@ pub struct RingStream {
     id: Uuid,
     ring_cons_impl: AsyncHeapCons<RingItem>,
     pending: Option<PacketBatchIntoIter>,
+    packet_permits: Arc<Semaphore>,
 }
 
 impl RingStream {
@@ -78,6 +79,7 @@ impl RingStream {
             id: tunnel.id,
             ring_cons_impl: tunnel.ring_cons_impl.take().unwrap(),
             pending: None,
+            packet_permits: tunnel.packet_permits.clone(),
         }
     }
 
@@ -113,6 +115,13 @@ impl RingStream {
             return Some(batch);
         }
         self.ring_cons_impl.next().await.map(|item| item.batch)
+    }
+}
+
+impl Drop for RingStream {
+    fn drop(&mut self) {
+        // Packet credits must wake producers when the consumer closes a full ring.
+        self.packet_permits.close();
     }
 }
 
@@ -156,7 +165,9 @@ pub struct RingSink {
     ring_prod_impl: AsyncHeapProd<RingItem>,
     packet_permits: Arc<Semaphore>,
     packet_capacity: usize,
-    permit_wait: Option<Pin<Box<dyn Future<Output = OwnedSemaphorePermit> + Send + Sync>>>,
+    permit_wait: Option<
+        Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>,
+    >,
     ready_permit: Option<OwnedSemaphorePermit>,
     pending: PacketBatch,
     pending_permits: Option<OwnedSemaphorePermit>,
@@ -221,12 +232,7 @@ impl RingSink {
                 Err(TryAcquireError::NoPermits) => {}
             }
             let permits = self.packet_permits.clone();
-            self.permit_wait = Some(Box::pin(async move {
-                permits
-                    .acquire_owned()
-                    .await
-                    .expect("ring packet semaphore is never closed")
-            }));
+            self.permit_wait = Some(Box::pin(async move { permits.acquire_owned().await }));
         }
         let permit = ready!(
             self.permit_wait
@@ -236,7 +242,7 @@ impl RingSink {
                 .poll(cx)
         );
         self.permit_wait = None;
-        self.ready_permit = Some(permit);
+        self.ready_permit = Some(permit.map_err(|_| TunnelError::Shutdown)?);
         Poll::Ready(Ok(()))
     }
 

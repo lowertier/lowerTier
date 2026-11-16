@@ -103,6 +103,8 @@ pub(crate) unsafe fn call_json_rpc(
             }
         }
         crate::data_plane::remove_data_plane_handles_by_instance_ids(&removed);
+        #[cfg(feature = "packet-tunnel")]
+        crate::packet_flow::remove_by_instances(&removed);
         crate::state::INSTANCE_NAME_ID_MAP.clear();
         for id in after {
             if let Some(name) = INSTANCE_MANAGER.get_instance_name(&id) {

@@ -430,6 +430,14 @@ impl TrustedKeyMapManager {
     }
 }
 
+#[derive(Default)]
+struct TunDeviceState {
+    name: Option<String>,
+    writer_generation: u64,
+    #[cfg(feature = "packet-tunnel")]
+    packet_flow_owned: bool,
+}
+
 pub struct GlobalCtx {
     pub inst_name: String,
     pub id: uuid::Uuid,
@@ -464,7 +472,7 @@ pub struct GlobalCtx {
     >,
     discovery_observations: Mutex<Vec<crate::connector::tracker_discovery::DiscoveryObservation>>,
     advertised_ipv6_public_addr_prefix: Mutex<Option<cidr::Ipv6Cidr>>,
-    tun_device_name: Mutex<Option<String>>,
+    tun_device: Mutex<TunDeviceState>,
 
     flags: ArcSwap<Flags>,
     path_runtimes: Mutex<Vec<std::sync::Weak<crate::peers::path_policy::PathRuntime>>>,
@@ -868,7 +876,7 @@ impl GlobalCtx {
             discovery_sources: Mutex::new(HashMap::new()),
             discovery_observations: Mutex::new(Vec::new()),
             advertised_ipv6_public_addr_prefix: Mutex::new(None),
-            tun_device_name: Mutex::new(None),
+            tun_device: Mutex::new(TunDeviceState::default()),
 
             transit_budget: std::sync::Mutex::new(super::transit_budget::TransitBudget::new(
                 flags.relay_config(),
@@ -923,7 +931,7 @@ impl GlobalCtx {
     }
 
     fn set_tun_device_name(&self, name: Option<String>) {
-        *self.tun_device_name.lock().unwrap() = name;
+        self.tun_device.lock().unwrap().name = name;
     }
 
     pub(crate) fn set_tun_device_ready(&self, name: String) {
@@ -937,7 +945,44 @@ impl GlobalCtx {
     }
 
     pub fn get_tun_device_name(&self) -> Option<String> {
-        self.tun_device_name.lock().unwrap().clone()
+        self.tun_device.lock().unwrap().name.clone()
+    }
+
+    pub(crate) fn begin_tun_writer(&self) -> u64 {
+        let mut device = self.tun_device.lock().unwrap();
+        device.writer_generation = device.writer_generation.wrapping_add(1);
+        device.writer_generation
+    }
+
+    pub(crate) fn set_tun_writer_error(&self, generation: u64, error: String) -> bool {
+        let mut device = self.tun_device.lock().unwrap();
+        if device.writer_generation != generation {
+            return false;
+        }
+        device.name = None;
+        // Publish the error before a replacement writer can claim its generation.
+        self.issue_event(GlobalCtxEvent::TunDeviceError(error));
+        drop(device);
+        true
+    }
+
+    #[cfg(feature = "packet-tunnel")]
+    pub(crate) fn claim_packet_flow(&self) -> bool {
+        let mut device = self.tun_device.lock().unwrap();
+        if device.packet_flow_owned || device.name.is_some() {
+            return false;
+        }
+        device.packet_flow_owned = true;
+        device.name = Some("packet-flow".into());
+        true
+    }
+
+    #[cfg(feature = "packet-tunnel")]
+    pub(crate) fn release_packet_flow(&self) {
+        let mut device = self.tun_device.lock().unwrap();
+        device.packet_flow_owned = false;
+        device.name = None;
+        device.writer_generation = device.writer_generation.wrapping_add(1);
     }
 
     pub fn get_multicast_groups(&self) -> BTreeSet<std::net::IpAddr> {

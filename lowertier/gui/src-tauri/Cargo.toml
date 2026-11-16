@@ -1,0 +1,27 @@
+[package]
+name = "lowertier-app"
+version = "0.0.3"
+edition = "2024"
+
+[lib]
+name = "lowertier_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[workspace]
+members = [".", "plugins/vpn"]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-lowertier-vpn = { path = "plugins/vpn" }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

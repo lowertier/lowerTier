@@ -272,14 +272,28 @@ async function refreshNodes() {
   } catch {}
 }
 
+let started = false;
+const intervals: number[] = [];
+const becameVisible = () => {
+  if (!document.hidden) restart();
+};
+
 export function start() {
+  if (started) return;
+  started = true;
+  previous = null;
   restart();
   refreshNodes();
-  window.setInterval(refreshNodes, 5000);
-  window.setInterval(() => setNow(Date.now()), 1000);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) restart();
-  });
+  intervals.push(window.setInterval(refreshNodes, 5000), window.setInterval(() => setNow(Date.now()), 1000));
+  document.addEventListener("visibilitychange", becameVisible);
+}
+
+export function stop() {
+  started = false;
+  generation++;
+  window.clearTimeout(timer);
+  for (const interval of intervals.splice(0)) window.clearInterval(interval);
+  document.removeEventListener("visibilitychange", becameVisible);
 }
 
 /** The local node's peer ID. */

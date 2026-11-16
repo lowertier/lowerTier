@@ -332,12 +332,14 @@ async fn feed_direct_nic_write_batch(
 fn record_direct_nic_writer_failure(
     terminal_error: &OnceLock<String>,
     global_ctx: &ArcGlobalCtx,
+    generation: u64,
     error: TunnelError,
 ) {
     let error = error.to_string();
     let _ = terminal_error.set(error.clone());
-    global_ctx.set_tun_device_error(format!("TUN write failed: {error}"));
-    tracing::error!(%error, "direct NIC writer failed");
+    if global_ctx.set_tun_writer_error(generation, format!("TUN write failed: {error}")) {
+        tracing::error!(%error, "direct NIC writer failed");
+    }
 }
 
 async fn run_direct_nic_writer(
@@ -345,6 +347,7 @@ async fn run_direct_nic_writer(
     mut receiver: mpsc::Receiver<DirectNicWork>,
     terminal_error: Arc<OnceLock<String>>,
     global_ctx: ArcGlobalCtx,
+    generation: u64,
 ) {
     let mut pending = None;
     while let Some(work) = match pending.take() {
@@ -353,7 +356,7 @@ async fn run_direct_nic_writer(
     } {
         let write = collect_direct_nic_write_batch(work, &mut receiver, &mut pending);
         if let Err(error) = feed_direct_nic_write_batch(&mut sink, write).await {
-            record_direct_nic_writer_failure(&terminal_error, &global_ctx, error);
+            record_direct_nic_writer_failure(&terminal_error, &global_ctx, generation, error);
             return;
         }
 
@@ -361,7 +364,12 @@ async fn run_direct_nic_writer(
             if let Some(work) = pending.take() {
                 let write = collect_direct_nic_write_batch(work, &mut receiver, &mut pending);
                 if let Err(error) = feed_direct_nic_write_batch(&mut sink, write).await {
-                    record_direct_nic_writer_failure(&terminal_error, &global_ctx, error);
+                    record_direct_nic_writer_failure(
+                        &terminal_error,
+                        &global_ctx,
+                        generation,
+                        error,
+                    );
                     return;
                 }
                 continue;
@@ -380,6 +388,7 @@ async fn run_direct_nic_writer(
                                 record_direct_nic_writer_failure(
                                     &terminal_error,
                                     &global_ctx,
+                                    generation,
                                     error,
                                 );
                                 return;
@@ -390,6 +399,7 @@ async fn run_direct_nic_writer(
                                 record_direct_nic_writer_failure(
                                     &terminal_error,
                                     &global_ctx,
+                                    generation,
                                     error,
                                 );
                             }
@@ -406,6 +416,7 @@ async fn run_direct_nic_writer(
                             record_direct_nic_writer_failure(
                                 &terminal_error,
                                 &global_ctx,
+                                generation,
                                 error,
                             );
                             return;
@@ -440,11 +451,13 @@ impl DirectNicBatchWriter {
             terminal_error: terminal_error.clone(),
         });
         *self.endpoint.write() = Arc::downgrade(&endpoint);
+        let generation = global_ctx.begin_tun_writer();
         tokio::spawn(run_direct_nic_writer(
             sink,
             receiver,
             terminal_error,
             global_ctx,
+            generation,
         ));
         endpoint
     }
@@ -704,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_nic_writer_coalesces_ready_batches_in_order() {
+    async fn direct_nic_writer_preserves_order_and_interface_ownership() {
         let global_ctx = get_mock_global_ctx();
         let (sender, receiver) = tokio::sync::mpsc::channel(3);
         let terminal_error = Arc::new(std::sync::OnceLock::new());
@@ -724,11 +737,13 @@ mod tests {
         drop(endpoint);
 
         let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let generation = global_ctx.begin_tun_writer();
         run_direct_nic_writer(
             Box::pin(ImmediateFlushDirectNicSink { events: events_tx }),
             receiver,
             terminal_error,
-            global_ctx,
+            global_ctx.clone(),
+            generation,
         )
         .await;
 
@@ -738,5 +753,33 @@ mod tests {
         );
         assert_eq!(events_rx.next().await, Some(DirectNicWriterEvent::Flush));
         assert_eq!(events_rx.next().await, None);
+        let current = global_ctx.begin_tun_writer();
+        global_ctx.set_tun_device_ready("replacement".into());
+        record_direct_nic_writer_failure(
+            &std::sync::OnceLock::new(),
+            &global_ctx,
+            generation,
+            crate::tunnel::TunnelError::Shutdown,
+        );
+        assert_eq!(
+            global_ctx.get_tun_device_name().as_deref(),
+            Some("replacement")
+        );
+        record_direct_nic_writer_failure(
+            &std::sync::OnceLock::new(),
+            &global_ctx,
+            current,
+            crate::tunnel::TunnelError::Shutdown,
+        );
+        assert_eq!(global_ctx.get_tun_device_name(), None);
+        #[cfg(feature = "packet-tunnel")]
+        {
+            assert!(global_ctx.claim_packet_flow());
+            global_ctx.set_tun_device_error("fixture interface failure".into());
+            assert!(!global_ctx.claim_packet_flow());
+            global_ctx.release_packet_flow();
+            assert!(global_ctx.claim_packet_flow());
+            global_ctx.release_packet_flow();
+        }
     }
 }

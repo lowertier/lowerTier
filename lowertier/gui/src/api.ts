@@ -1,6 +1,7 @@
 // Protobuf JSON over HTTP. Configuration editor text remains TOML.
 import { parse, stringify } from "smol-toml";
 import { optionPatch } from "./settingsModel";
+import { appLayout, nativeRequest } from "./native";
 
 export type Doc = Record<string, any>;
 
@@ -37,7 +38,7 @@ function readKey(): string {
 const key = readKey();
 // A server that trusts this peer's network marks the page and needs no key.
 export const hasKey =
-  key !== "" || document.querySelector('meta[name="lowertier-open"]') !== null;
+  appLayout || key !== "" || document.querySelector('meta[name="lowertier-open"]') !== null;
 
 /** Keep a key typed on the lock screen for this tab and load the page with it. */
 export function saveKey(value: string) {
@@ -67,6 +68,16 @@ export function setTarget(
 }
 
 export async function api(path: string, body?: Doc): Promise<Doc> {
+  if (appLayout) {
+    try {
+      const doc = await nativeRequest(path, body);
+      if (doc.error) throw new ApiError(doc.error);
+      return doc;
+    } catch (caught) {
+      if (caught instanceof ApiError) throw caught;
+      throw new ApiError({ code: "offline", message: caught instanceof Error ? caught.message : String(caught) });
+    }
+  }
   const params = new URLSearchParams();
   if (target.node) params.set("node", target.node);
   if (target.instance) params.set("instance", target.instance);

@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Local VPN controls for the bundled frontend.",
+  "windows": ["main"],
+  "permissions": ["core:default", "lowertier-vpn:default"]
+}

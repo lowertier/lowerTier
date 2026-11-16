@@ -1,0 +1,13 @@
+/target/
+/gen/schemas/
+/gen/apple/build/
+/gen/apple/Externals/
+/gen/apple/.build/
+/gen/apple/Pods/
+/gen/apple/assets/
+/gen/apple/.tauri/
+/plugins/vpn/.tauri/
+/plugins/vpn/ios/.build/
+**/xcuserdata/
+/icons/*
+!/icons/icon.png

@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 
+const mobileHost = process.env.TAURI_DEV_HOST;
+
 // Fixed file names: the lowertier binary embeds index.html, app.js and app.css.
 export default defineConfig({
   plugins: [solid()],
@@ -22,6 +24,11 @@ export default defineConfig({
   // Development: open http://localhost:5173/#key=... with the key printed by `lowertier gui`.
   // The proxy presents the request as same-origin, as the embedded page would be.
   server: {
+    host: mobileHost || "127.0.0.1",
+    port: 5173,
+    strictPort: true,
+    hmr: mobileHost ? { protocol: "ws", host: mobileHost, port: 5173 } : undefined,
+    watch: { ignored: ["**/src-tauri/**"] },
     proxy: {
       "/api": {
         target: process.env.LOWTIER_GUI ?? "http://127.0.0.1:15880",

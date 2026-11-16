@@ -5,13 +5,21 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "test": "node --test test/*.test.mjs",
-    "dev": "vite"
+    "test:app": "playwright test",
+    "dev": "vite",
+    "tauri": "tauri",
+    "ios:init": "tauri ios init --ci && tauri icon src-tauri/ios/icon.svg --output src-tauri/icons && python3 ../../script/ios/configure.py",
+    "ios:dev": "tauri ios dev",
+    "ios:build": "tauri ios build"
   },
   "dependencies": {
+    "@tauri-apps/api": "2.12.4",
     "smol-toml": "1.9.1",
     "solid-js": "1.9.17"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@tauri-apps/cli": "2.12.4",
     "typescript": "6.0.3",
     "vite": "8.3.4",
     "vite-plugin-solid": "2.11.14"

@@ -1,0 +1,181 @@
+---
+name: lowertier-app
+options:
+  bundleIdPrefix: com.lowertier.app
+  deploymentTarget:
+    iOS: 16.0
+fileGroups:
+- "../../src"
+configs:
+  debug: debug
+  release: release
+settingGroups:
+  app:
+    base:
+      PRODUCT_NAME: LowTier
+      PRODUCT_BUNDLE_IDENTIFIER: com.lowertier.app
+targetTemplates:
+  app:
+    type: application
+    sources:
+    - path: Sources
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      groups:
+      - app
+targets:
+  lowertier-app_iOS:
+    type: application
+    platform: iOS
+    sources:
+    - path: Sources
+    - path: Assets.xcassets
+    - path: Externals
+      excludes:
+      - "**/*.a"
+    - path: lowertier-app_iOS
+    - path: assets
+      buildPhase: resources
+      type: folder
+    - path: LaunchScreen.storyboard
+    info:
+      path: lowertier-app_iOS/Info.plist
+      properties:
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiredDeviceCapabilities:
+        - arm64
+        - metal
+        UISupportedInterfaceOrientations:
+        - UIInterfaceOrientationPortrait
+        - UIInterfaceOrientationLandscapeLeft
+        - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+        - UIInterfaceOrientationPortrait
+        - UIInterfaceOrientationPortraitUpsideDown
+        - UIInterfaceOrientationLandscapeLeft
+        - UIInterfaceOrientationLandscapeRight
+        CFBundleShortVersionString: 0.0.3
+        CFBundleVersion: 0.0.3
+        LowTierKeychainGroup: "$(AppIdentifierPrefix)$(LOWTIER_BUNDLE_ID).shared"
+        LowTierAppGroup: group.$(LOWTIER_BUNDLE_ID)
+        NSLocalNetworkUsageDescription: LowTier connects this device to members of
+          your private network.
+    entitlements:
+      path: "../../ios/App.entitlements"
+      properties:
+        com.apple.developer.networking.networkextension:
+        - packet-tunnel-provider
+        com.apple.security.application-groups:
+        - group.$(LOWTIER_BUNDLE_ID)
+        keychain-access-groups:
+        - "$(AppIdentifierPrefix)$(LOWTIER_BUNDLE_ID).shared"
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      base:
+        ENABLE_BITCODE: false
+        ARCHS:
+        - arm64
+        VALID_ARCHS: arm64
+        LIBRARY_SEARCH_PATHS[arch=x86_64]: "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION)
+          $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME)
+          $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)"
+        LIBRARY_SEARCH_PATHS[arch=arm64]: "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION)
+          $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME)
+          $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+        LOWTIER_BUNDLE_ID: com.lowertier.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.lowertier.app
+      groups:
+      - app
+    dependencies:
+    - framework: libapp.a
+      embed: false
+    - sdk: CoreGraphics.framework
+    - sdk: Metal.framework
+    - sdk: MetalKit.framework
+    - sdk: QuartzCore.framework
+    - sdk: Security.framework
+    - sdk: UIKit.framework
+    - sdk: WebKit.framework
+    - target: LowTierPacketTunnel
+      embed: true
+    - sdk: NetworkExtension.framework
+    preBuildScripts:
+    - script: 'pnpm tauri ios xcode-script -v --platform "${PLATFORM_DISPLAY_NAME:?}"
+        --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}"
+        --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions
+        "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR}
+        ${ARCHS:?}
+
+        '
+      name: Build Rust Code
+      basedOnDependencyAnalysis: false
+      outputFiles:
+      - "$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a"
+      - "$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a"
+  LowTierPacketTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: '16.0'
+    sources:
+    - path: "../../ios/PacketTunnel"
+      excludes:
+      - "*.h"
+      - "*.entitlements"
+    - path: "../../plugins/vpn/ios/Sources/Shared.swift"
+    info:
+      path: "../../ios/PacketTunnel/Info.plist"
+      properties:
+        LowTierKeychainGroup: "$(AppIdentifierPrefix)$(LOWTIER_BUNDLE_ID).shared"
+        LowTierAppGroup: group.$(LOWTIER_BUNDLE_ID)
+        NSLocalNetworkUsageDescription: LowTier connects this device to members of
+          your private network.
+        CFBundleDisplayName: LowTier VPN
+        CFBundleShortVersionString: 0.0.3
+        CFBundleVersion: 0.0.3
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).PacketTunnelProvider"
+    entitlements:
+      path: "../../ios/PacketTunnel/PacketTunnel.entitlements"
+      properties:
+        com.apple.developer.networking.networkextension:
+        - packet-tunnel-provider
+        com.apple.security.application-groups:
+        - group.$(LOWTIER_BUNDLE_ID)
+        keychain-access-groups:
+        - "$(AppIdentifierPrefix)$(LOWTIER_BUNDLE_ID).shared"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lowertier.app.PacketTunnel
+        LOWTIER_BUNDLE_ID: com.lowertier.app
+        SWIFT_VERSION: '5.0'
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../../ios/PacketTunnel/LowTierFFI.h"
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: true
+        ENABLE_BITCODE: false
+        ARCHS:
+        - arm64
+        LOWTIER_ROOT: "$(SRCROOT)/../../../../.."
+        LOWTIER_RUST_TARGET[sdk=iphoneos*]: aarch64-apple-ios
+        LOWTIER_RUST_TARGET[sdk=iphonesimulator*]: aarch64-apple-ios-sim
+        OTHER_LDFLAGS: $(inherited) "$(LOWTIER_ROOT)/target/$(LOWTIER_RUST_TARGET)/release/liblowertier_ffi.a"
+    dependencies:
+    - sdk: NetworkExtension.framework
+    - sdk: Security.framework
+    - sdk: SystemConfiguration.framework
+    - sdk: Network.framework
+    - sdk: libresolv.tbd
+    - sdk: libiconv.tbd
+    preBuildScripts:
+    - name: Build LowTier VPN core
+      script: python3 "${LOWTIER_ROOT}/script/ios/build-core.py" "${LOWTIER_RUST_TARGET}"
+      basedOnDependencyAnalysis: false

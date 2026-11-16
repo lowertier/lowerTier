@@ -18,6 +18,7 @@
 ## Manage
 
 - [Web interface](web-interface.md): the management page, join codes, and its API.
+- [iOS app](ios-app.md): the shared frontend, native packet tunnel, builds, and signing.
 - [Remote control and SSH](remote-control.md): manage other nodes across the network.
 - [Troubleshooting](troubleshooting.md)
 

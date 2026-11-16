@@ -4,15 +4,19 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-default = ["c-abi", "ffi-dataplane"]
+default = ["c-abi", "ffi-dataplane", "core-default"]
 c-abi = []
+core-default = ["lowertier/default"]
 ffi-dataplane = ["lowertier/ffi-dataplane"]
+packet-tunnel = ["lowertier/packet-tunnel", "lowertier/socks5", "dep:toml", "dep:futures"]
 
 [dependencies]
-lowertier = { path = "../../lowertier" }
+lowertier = { path = "../../lowertier", default-features = false }
+toml = { version = "0.8.12", optional = true }
+futures = { version = "0.3", optional = true }
 
 once_cell = "1.18.0"
 dashmap = "6.0"

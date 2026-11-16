@@ -1202,6 +1202,8 @@ pub struct NicCtx {
     tasks: JoinSet<()>,
     multicast_expiry_task_started: bool,
     direct_nic_endpoint: Option<Arc<DirectNicEndpoint>>,
+    #[cfg(feature = "packet-tunnel")]
+    packet_flow_attached: bool,
 
     #[cfg(target_os = "windows")]
     windows_udp_broadcast_relay: Option<AbortOnDropHandle<()>>,
@@ -1223,6 +1225,8 @@ impl NicCtx {
             tasks: JoinSet::new(),
             multicast_expiry_task_started: false,
             direct_nic_endpoint: None,
+            #[cfg(feature = "packet-tunnel")]
+            packet_flow_attached: false,
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
@@ -2021,8 +2025,23 @@ impl NicCtx {
             }
         };
 
-        let (streams, sink) = tunnel.split_ingress_queues();
+        self.attach_packet_tunnel(tunnel)
+    }
 
+    #[cfg(feature = "packet-tunnel")]
+    pub fn run_for_packet_flow(&mut self, tunnel: Box<dyn Tunnel>) -> Result<(), Error> {
+        if !self.global_ctx.claim_packet_flow() {
+            return Err(anyhow::anyhow!("The instance already has a packet interface.").into());
+        }
+        self.packet_flow_attached = true;
+        self.attach_packet_tunnel(tunnel)?;
+        self.global_ctx.set_tun_device_ready("packet-flow".into());
+        Ok(())
+    }
+
+    #[cfg(any(mobile, feature = "packet-tunnel"))]
+    fn attach_packet_tunnel(&mut self, tunnel: Box<dyn Tunnel>) -> Result<(), Error> {
+        let (streams, sink) = tunnel.split_ingress_queues();
         self.do_forward_nic_to_peers_task(streams)?;
         let peer_mgr = self
             .peer_mgr
@@ -2032,6 +2051,17 @@ impl NicCtx {
         self.start_multicast_membership_expiry_task();
 
         Ok(())
+    }
+}
+
+#[cfg(feature = "packet-tunnel")]
+impl Drop for NicCtx {
+    fn drop(&mut self) {
+        self.tasks.abort_all();
+        self.direct_nic_endpoint.take();
+        if self.packet_flow_attached {
+            self.global_ctx.release_packet_flow();
+        }
     }
 }
 

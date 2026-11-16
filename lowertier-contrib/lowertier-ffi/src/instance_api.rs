@@ -152,6 +152,8 @@ pub(crate) unsafe fn retain_network_instance(
             return -1;
         }
         remove_data_plane_handles_by_instance_ids(&removed_ids);
+        #[cfg(feature = "packet-tunnel")]
+        crate::packet_flow::remove_by_instances(&removed_ids);
         INSTANCE_NAME_ID_MAP.clear();
         return 0;
     }
@@ -175,6 +177,8 @@ pub(crate) unsafe fn retain_network_instance(
         return -1;
     }
     remove_data_plane_handles_by_instance_ids(&removed_ids);
+    #[cfg(feature = "packet-tunnel")]
+    crate::packet_flow::remove_by_instances(&removed_ids);
     INSTANCE_NAME_ID_MAP.retain(|k, _| inst_names.contains(k));
 
     0
@@ -213,6 +217,8 @@ pub(crate) unsafe fn delete_network_instance(
         return -1;
     }
     remove_data_plane_handles_by_instance_ids(&removed_ids);
+    #[cfg(feature = "packet-tunnel")]
+    crate::packet_flow::remove_by_instances(&removed_ids);
     for name in inst_names {
         INSTANCE_NAME_ID_MAP.remove(&name);
     }

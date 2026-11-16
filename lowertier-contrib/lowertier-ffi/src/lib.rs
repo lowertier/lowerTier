@@ -31,12 +31,21 @@
 //! - `get_error_msg`: copy the last FFI error message.
 //! - `free_string`: release strings allocated by this library.
 
+// The FFI shares the core's recursive peer-manager types.
+#![recursion_limit = "256"]
+
 mod data_plane;
 #[cfg(feature = "ffi-dataplane")]
 mod data_plane_async;
 mod error;
 mod instance_api;
 mod json_rpc;
+#[cfg(feature = "packet-tunnel")]
+mod packet_flow;
+#[cfg(feature = "packet-tunnel")]
+mod packet_tunnel;
+#[cfg(feature = "packet-tunnel")]
+pub use packet_flow::{PacketReceiver, PacketSlice};
 mod state;
 mod strings;
 mod types;
@@ -51,6 +60,73 @@ use std::ffi::{c_char, c_int};
 use std::ffi::{c_uchar, c_ushort};
 
 // ===== Network Management API =====
+
+/// Prepare an embedded packet-tunnel configuration and its network settings.
+///
+/// The returned JSON contains private configuration. Store it in the Keychain.
+/// The caller must release the returned string with `free_string`.
+///
+/// # Safety
+/// `config` must point to a null-terminated UTF-8 TOML string.
+/// `output` must point to writable storage for one string pointer.
+#[cfg(feature = "packet-tunnel")]
+#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
+pub unsafe extern "C" fn prepare_packet_tunnel_config(
+    config: *const c_char,
+    output: *mut *const c_char,
+) -> c_int {
+    unsafe { packet_tunnel::prepare(config, output) }
+}
+
+/// Attach a public packet-flow adapter to an instance.
+///
+/// The callback borrows each packet only during the call.
+/// `packet_tunnel_close` waits for the final callback before it returns.
+/// Do not call blocking FFI functions from the callback.
+///
+/// # Safety
+/// `name` must point to a null-terminated UTF-8 instance name.
+/// `receiver` and `context` must remain valid until `packet_tunnel_close` returns.
+/// `handle` must point to writable output storage.
+/// Return `0` after attachment, `1` while the instance starts, or `-1` on error.
+#[cfg(feature = "packet-tunnel")]
+#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
+pub unsafe extern "C" fn packet_tunnel_open(
+    name: *const c_char,
+    receiver: Option<PacketReceiver>,
+    context: *mut std::ffi::c_void,
+    handle: *mut u64,
+) -> c_int {
+    unsafe { packet_flow::open(name, receiver, context, handle) }
+}
+
+/// Submit one batch. This call waits for bounded queue capacity.
+///
+/// # Safety
+/// `packets` must contain `count` valid slices for the duration of this call.
+#[cfg(feature = "packet-tunnel")]
+#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
+pub unsafe extern "C" fn packet_tunnel_send(
+    handle: u64,
+    packets: *const PacketSlice,
+    count: usize,
+) -> c_int {
+    unsafe { packet_flow::send(handle, packets, count) }
+}
+
+/// Stop packet callbacks and release the interface. Concurrent sends are canceled.
+#[cfg(feature = "packet-tunnel")]
+#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
+pub extern "C" fn packet_tunnel_close(handle: u64) -> c_int {
+    packet_flow::close(handle)
+}
+
+/// Return the existing core packet-batch capacity.
+#[cfg(feature = "packet-tunnel")]
+#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
+pub extern "C" fn packet_tunnel_batch_capacity() -> usize {
+    lowertier::tunnel::batch::MAX_PACKET_BATCH_SIZE
+}
 
 /// Validate a TOML network config string.
 ///

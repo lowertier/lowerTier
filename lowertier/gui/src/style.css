@@ -87,12 +87,14 @@ body {
   margin: 0;
   background: var(--page);
   color: var(--ink);
-  font: 14px/1.45 var(--sans);
+  font-family: var(--sans);
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
 
 body {
   min-height: 100vh;
+  font-size: 14px;
 }
 
 button,

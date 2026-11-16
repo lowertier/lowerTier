@@ -3885,6 +3885,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "dashmap",
+ "futures",
  "log",
  "lowertier",
  "once_cell",
@@ -3893,6 +3894,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "toml 0.8.19",
  "url",
  "uuid",
 ]

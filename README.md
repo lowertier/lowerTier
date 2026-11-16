@@ -64,6 +64,7 @@ If you know an address, `--peer quic://192.0.2.10:11012` on `init` dials it dire
 | [Routing](docs/routing.md) and [paths](docs/paths.md) | Relays, exit nodes, subnets, chosen routes |
 | [Camouflage](docs/camouflage.md) | Port 443 with a website, CDNs |
 | [Web interface](docs/web-interface.md) | The management page and join codes |
+| [iOS app](docs/ios-app.md) | Shared frontend, native VPN, builds, and signing |
 | [Remote control](docs/remote-control.md) | Managing and SSH into other nodes |
 | [Security](docs/security.md) | Admission, encryption, what observers see |
 | [Option reference](docs/options.md) | Every option |
