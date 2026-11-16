@@ -38,6 +38,7 @@ pub use crate::proto::common::flags_in_config::{P2pMode, TunMode};
 pub fn gen_default_flags() -> Flags {
     Flags {
         default_protocol: "quic".to_string(),
+        h2_tcp_proxy: "off".to_string(),
         enabled_protocols: Vec::new(),
         dev_name: "".to_string(),
         enable_ipv6: true,
@@ -121,6 +122,10 @@ pub fn validate_flags_with_network_secret(
     anyhow::ensure!(flags.threads >= 1, "node.threads must be at least 1");
     TunMode::try_from(flags.tun_mode).map_err(|_| anyhow::anyhow!("tun.mode is invalid"))?;
     P2pMode::try_from(flags.p2p_mode).map_err(|_| anyhow::anyhow!("nat.p2p is invalid"))?;
+    anyhow::ensure!(
+        matches!(flags.h2_tcp_proxy.as_str(), "off" | "on" | "auto"),
+        "transport.h2.tcp_proxy must be off, on, or auto"
+    );
     anyhow::ensure!(
         flags
             .memory_bytes()

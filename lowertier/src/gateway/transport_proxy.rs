@@ -3,7 +3,7 @@ use super::tcp_proxy::TcpProxy;
 use crate::{
     common::{PeerId, global_ctx::ArcGlobalCtx},
     peers::{peer_conn::PeerConnCloseNotify, peer_map::PeerMap},
-    tunnel::quic::proxy::{IncomingProxy, ProxyEndpoint},
+    tunnel::stream_proxy::{IncomingProxy, ProxyEndpoint},
 };
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -62,7 +62,7 @@ async fn admit(
         || !context.no_tun()
         || !context.is_ip_local_virtual_ip(&request.destination.ip())
     {
-        return Err(http::StatusCode::NOT_IMPLEMENTED);
+        return Err(http::StatusCode::NOT_ACCEPTABLE);
     }
     let IpAddr::V4(source) = request.source.ip() else {
         return Err(http::StatusCode::FORBIDDEN);
@@ -75,7 +75,7 @@ async fn admit(
         let gui = context.config.get_gui_config();
         if gui.enabled.unwrap_or(true) && request.destination.port() == gui.port.unwrap_or(15880) {
             // The overlay GUI must retain its source address and instance in the packet stack.
-            return Err(http::StatusCode::NOT_IMPLEMENTED);
+            return Err(http::StatusCode::NOT_ACCEPTABLE);
         }
     }
     if context.should_deny_proxy(&request.destination, false) {
@@ -92,7 +92,7 @@ async fn admit(
                 // The port may belong to the userspace packet stack (for example
                 // the overlay GUI), rather than an operating-system listener.
                 // Let the client use the normal authenticated packet path.
-                http::StatusCode::NOT_IMPLEMENTED
+                http::StatusCode::NOT_ACCEPTABLE
             } else {
                 http::StatusCode::BAD_GATEWAY
             }

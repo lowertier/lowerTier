@@ -27,18 +27,19 @@ A resolver worker retains its capacity reservation until the operating system lo
 The resolver enters the exit instance's network namespace on its own worker thread.
 Application TLS still terminates at the application and origin server.
 
-For an eligible direct QUIC connection, TCP proxy traffic uses an HTTP/3 CONNECT
+For an eligible direct H2 or QUIC connection, TCP proxy traffic uses a native CONNECT
 stream on the existing authenticated connection. Both peers must advertise the
 stream capability in the authenticated Noise admission transcript. The receiver
 checks the source peer, destination address, and protected local ports before
 opening the destination socket. Each connection retains bounded send/receive
-storage and uses QUIC flow control and reliable delivery; it does not create a
+storage and uses the transport's flow control and reliable delivery; it does not create a
 second TCP stack for that stream.
 
-This path currently applies when the local peer initiated QUIC, the destination
+This path applies when the local peer initiated the transport, the destination
 is the remote userspace peer's own IPv4 address, and neither endpoint has ACL
 rules enabled. ACL-controlled destinations, relayed or mapped routes, peers
-without the capability, and H2/WSS retain the packet path. Enabling ACL rules
+without the capability, and WSS retain the packet path. H2 also applies its configured mode.
+Enabling ACL rules
 stops an active direct stream so reconnecting uses the policy-aware packet path.
 
 The source packet stack is created when a packet connection, UDP socket, or data-plane listener first needs it.
@@ -48,10 +49,12 @@ Address changes discard the old packet stack and its route entries.
 The next packet consumer creates a stack for the new address.
 The inbound TCP proxy remains available for local services and the overlay GUI.
 
-TCP has three backends: an operating system socket, an authenticated HTTP/3 stream, and the userspace packet stack.
+TCP has three backends: an operating system socket, an authenticated native stream, and the userspace packet stack.
 The experimental OverlayStream backend and its runtime switch have been removed.
-Only an unsupported HTTP/3 request permits packet fallback.
-Connection errors and timeouts propagate to the caller.
+Explicit refusals before destination admission can permit packet fallback.
+H2 `on` reports native capability and capacity failures.
+Connection errors and timeouts fail the current flow.
+See the [H2 cost model](h2-native-proxy.md) for automatic policy and receive credit reservations.
 
 Each packet-path userspace TCP socket starts with an 8 KiB receive buffer and an 8 KiB transmit buffer.
 Active buffers grow with measured application demand and TCP round-trip time.

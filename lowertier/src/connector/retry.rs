@@ -308,7 +308,7 @@ impl Tunnel for RetryingTunnel {
     fn pinned_peer_key(&self) -> Option<&str> {
         self.pin.as_deref().or_else(|| self.inner.pinned_peer_key())
     }
-    fn tcp_proxy(&self) -> Option<Arc<crate::tunnel::quic::proxy::ProxyEndpoint>> {
+    fn tcp_proxy(&self) -> Option<Arc<crate::tunnel::stream_proxy::ProxyEndpoint>> {
         self.inner.tcp_proxy()
     }
     fn receive_backpressure(&self) -> Option<ReceiveBackpressure> {

@@ -50,9 +50,51 @@ Fragment reassembly also separates peers, including fragments with identical IPv
 - Peer names, peer addresses, exported subnets, and the internet through an exit node.
   With an exit, names outside the network resolve on the exit.
 - Routes, ACLs, and paths apply as they do for kernel-mode traffic.
-- TCP to the own address of a directly connected proxy-mode peer can run over a QUIC stream instead of packets, when this node dialed the QUIC connection and neither side has ACL rules.
+- TCP to a directly connected proxy-mode peer can use native H2 or QUIC streams.
+  The destination must be the remote peer's own IPv4 address.
+  This node must have initiated the transport connection.
+  Both endpoints must have ACL rules disabled.
 
 Targets inside the network must be IPv4 for now.
+
+## H2 TCP streams
+
+Set the H2 mode on both peers:
+
+```toml
+[transport.h2]
+tcp_proxy = "auto"
+```
+
+| Mode | New TCP flows |
+| --- | --- |
+| `off` | Use the packet path. This is the default. |
+| `on` | Require native streams for eligible direct H2 flows. Report native capability, capacity, and open errors. |
+| `auto` | Use native streams when scope, capacity, and health permit. Permit safe packet fallback before destination admission. |
+
+Mode changes apply to new flows.
+Admitted streams continue after a mode change.
+Authentication loss or an ACL change can stop an admitted stream.
+
+The remote userspace peer checks the source identity and destination before opening a local socket.
+Protected GUI ports, kernel peers, and other destinations outside the native scope retain the packet path.
+Mapped routes, relays, and WSS also retain the packet path.
+The H2 server cannot initiate native request streams.
+In `auto`, that direction uses packets.
+In `on`, an eligible native open from the server side returns an error.
+
+An ambiguous error or timeout fails the current flow.
+The proxy does not replay application data.
+In `auto`, an endpoint refusal or native open failure starts a cooldown for later flows.
+The cooldown grows from two seconds to thirty seconds.
+One real flow can attempt recovery after the cooldown.
+No synthetic probe runs in the background.
+Destination and policy failures do not reduce native transport health.
+
+H2 streams share one TCP carrier.
+A lost outer TCP segment can delay all streams.
+The automatic policy does not repair that carrier by selecting packets on the same connection.
+QUIC continues to use its native stream and datagram facilities.
 
 ## What does not
 
@@ -71,4 +113,5 @@ lowertier does not log request payloads or full request targets.
 
 ## More
 
-- [Userspace proxy internals](design/userspace-proxy.md): name resolution, dialing, buffers, and the QUIC stream path.
+- [Userspace proxy internals](design/userspace-proxy.md): name resolution, dialing, buffers, and native stream admission.
+- [H2 stream cost model](design/h2-native-proxy.md): overhead, flow control, and automatic policy.

@@ -36,6 +36,7 @@ pub mod packet_def;
 pub(crate) mod queue_feedback;
 pub mod ring;
 pub mod stats;
+pub mod stream_proxy;
 pub mod tcp;
 mod tcp_dial;
 pub(crate) mod tcp_lanes;
@@ -190,7 +191,7 @@ pub trait Tunnel: Send {
         None
     }
 
-    fn tcp_proxy(&self) -> Option<Arc<quic::proxy::ProxyEndpoint>> {
+    fn tcp_proxy(&self) -> Option<Arc<stream_proxy::ProxyEndpoint>> {
         None
     }
 

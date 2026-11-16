@@ -452,10 +452,11 @@ impl Stream for H2PacketReader {
 }
 
 #[derive(Debug)]
-struct H2SendBudget {
+pub(super) struct H2SendBudget {
     limit: Arc<AtomicUsize>,
     queued: AtomicUsize,
     waker: futures::task::AtomicWaker,
+    pub(super) notify: tokio::sync::Notify,
 }
 
 impl H2SendBudget {
@@ -464,6 +465,7 @@ impl H2SendBudget {
             limit,
             queued: AtomicUsize::new(0),
             waker: futures::task::AtomicWaker::new(),
+            notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -477,20 +479,100 @@ impl H2SendBudget {
         if bytes != 0 {
             self.queued.fetch_sub(bytes, Ordering::AcqRel);
             self.waker.wake();
+            self.notify.notify_waiters();
         }
+    }
+
+    pub(super) fn claim(&self, want: usize) -> usize {
+        let mut queued = self.queued.load(Ordering::Acquire);
+        loop {
+            let take = want.min(self.limit.load(Ordering::Relaxed).saturating_sub(queued));
+            if take == 0 {
+                return 0;
+            }
+            match self.queued.compare_exchange_weak(
+                queued,
+                queued + take,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return take,
+                Err(actual) => queued = actual,
+            }
+        }
+    }
+}
+
+// Each native stream reserves its receive window in the process memory governor.
+// Add that credit to the original window so blocked streams preserve packet credit.
+pub(super) struct H2ReceiveBudget {
+    stream_window: u32,
+    connection_window: u32,
+    active: AtomicUsize,
+    target: tokio::sync::watch::Sender<u32>,
+}
+
+impl H2ReceiveBudget {
+    fn new(
+        stream_window: u32,
+        connection_window: u32,
+    ) -> (Arc<Self>, tokio::sync::watch::Receiver<u32>) {
+        let (target, updates) = tokio::sync::watch::channel(connection_window);
+        (
+            Arc::new(Self {
+                stream_window,
+                connection_window,
+                active: AtomicUsize::new(0),
+                target,
+            }),
+            updates,
+        )
+    }
+
+    pub(super) fn window_bytes(&self) -> usize {
+        self.stream_window as usize
+    }
+
+    fn publish(&self) {
+        self.target.send_modify(|target| {
+            *target = self.connection_window
+                + self.stream_window * self.active.load(Ordering::Acquire) as u32;
+        });
+    }
+
+    pub(super) fn reserve(self: &Arc<Self>) -> H2ReceivePermit {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        self.publish();
+        H2ReceivePermit(self.clone())
+    }
+}
+
+pub(super) struct H2ReceivePermit(Arc<H2ReceiveBudget>);
+
+impl Drop for H2ReceivePermit {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        self.0.publish();
     }
 }
 
 // Release application admission when h2 consumes DATA, before TLS and socket admission.
 #[derive(Debug)]
-struct H2Data {
+pub(super) struct H2Data {
     bytes: Bytes,
     budget: Arc<H2SendBudget>,
 }
 
 impl H2Data {
-    fn new(bytes: Bytes, budget: &Arc<H2SendBudget>) -> Self {
+    pub(super) fn new(bytes: Bytes, budget: &Arc<H2SendBudget>) -> Self {
         budget.queued.fetch_add(bytes.len(), Ordering::AcqRel);
+        Self {
+            bytes,
+            budget: budget.clone(),
+        }
+    }
+
+    pub(super) fn admitted(bytes: Bytes, budget: &Arc<H2SendBudget>) -> Self {
         Self {
             bytes,
             budget: budget.clone(),
@@ -525,7 +607,12 @@ struct H2Writer {
 }
 
 impl H2Writer {
+    #[cfg(test)]
     fn new(send: SendStream<H2Data>, limit: Arc<AtomicUsize>) -> Self {
+        Self::with_budget(send, H2SendBudget::new(limit))
+    }
+
+    fn with_budget(send: SendStream<H2Data>, budget: Arc<H2SendBudget>) -> Self {
         let coalesce_bytes = if cfg!(target_os = "linux")
             && std::env::var_os("LOWTIER_ENABLE_TCP_LARGE_BUFFERS").is_some()
         {
@@ -535,7 +622,7 @@ impl H2Writer {
         };
         Self {
             send,
-            budget: H2SendBudget::new(limit),
+            budget,
             pending: BytesMut::with_capacity(coalesce_bytes),
             coalesce_bytes,
         }
@@ -565,17 +652,22 @@ impl H2Writer {
             return Poll::Pending;
         }
         self.send.reserve_capacity(want);
-        match ready!(self.send.poll_capacity(cx)) {
+        let capacity = self.send.capacity();
+        match if capacity != 0 {
+            Some(Ok(capacity))
+        } else {
+            ready!(self.send.poll_capacity(cx))
+        } {
             Some(Ok(0)) => Poll::Pending,
             Some(Ok(capacity)) => {
-                let take = capacity.min(want);
+                let take = self.budget.claim(capacity.min(want));
                 if take == 0 {
                     return Poll::Pending;
                 }
                 let data = self.pending.split_to(take).freeze();
                 let end = end_stream && self.pending.is_empty();
                 self.send
-                    .send_data(H2Data::new(data, &self.budget), end)
+                    .send_data(H2Data::admitted(data, &self.budget), end)
                     .map_err(io::Error::other)?;
                 Poll::Ready(Ok(()))
             }
@@ -660,17 +752,19 @@ impl AsyncWrite for H2Writer {
 fn wrap_http2_tunnel(
     recv: RecvStream,
     send: SendStream<H2Data>,
-    budget: Arc<AtomicUsize>,
+    budget: Arc<H2SendBudget>,
     info: TunnelInfo,
     binding: TransportBinding,
     driver: AbortOnDropHandle<()>,
+    proxy: Arc<super::stream_proxy::ProxyEndpoint>,
 ) -> Box<dyn Tunnel> {
     let mut tunnel = TunnelWrapper::new_with_transport_binding(
         H2PacketReader::new(recv),
-        FramedWriter::new(H2Writer::new(send, budget)),
+        FramedWriter::new(H2Writer::with_budget(send, budget)),
         Some(info),
         Some(binding),
-    );
+    )
+    .with_tcp_proxy(proxy);
     tunnel.set_associate_data(Box::new(driver));
     Box::new(tunnel)
 }
@@ -950,12 +1044,15 @@ async fn accept_inner(
     let tls = super::decoy::ProbeIo::new(tls, guard.clone());
 
     let (stream_window, conn_window) = window_sizes();
+    let budget = H2SendBudget::new(budget);
+    let (receive_budget, mut window_updates) = H2ReceiveBudget::new(stream_window, conn_window);
     let mut server = h2::server::Builder::new();
     server
         .enable_connect_protocol()
         .initial_window_size(stream_window)
         .initial_connection_window_size(conn_window)
         .max_send_buffer_size(super::tcp_socket::TCP_MAX_UNSENT_BYTES)
+        .max_concurrent_streams(super::stream_proxy::MAX_STREAMS as u32 + 1)
         .max_frame_size(HTTP2_MAX_FRAME);
     let mut conn = server
         .handshake(tls)
@@ -1019,9 +1116,36 @@ async fn accept_inner(
         )
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 response: {error}")))?;
 
+    let proxy = super::stream_proxy::ProxyEndpoint::new_h2(None, budget.clone(), receive_budget);
+    let handler = proxy.clone();
     let driver = AbortOnDropHandle::new(tokio::spawn(async move {
-        while let Some(Ok((_, mut respond))) = conn.accept().await {
-            respond.send_reset(h2::Reason::REFUSED_STREAM);
+        let mut requests = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                result = requests.join_next(), if !requests.is_empty() => {
+                    if !matches!(result, Some(Ok(Ok(())))) {
+                        tracing::debug!(?result, "HTTP/2 proxy request ended");
+                    }
+                }
+                changed = window_updates.changed() => {
+                    if changed.is_err() { break; }
+                    conn.set_target_window_size(*window_updates.borrow_and_update());
+                }
+                incoming = conn.accept() => {
+                    let Some(Ok((request, mut respond))) = incoming else { break; };
+                    if super::stream_proxy::ProxyEndpoint::is_request(&request) {
+                        if requests.len() < super::stream_proxy::MAX_STREAMS {
+                            requests.spawn(handler.clone().receive_h2(request, respond));
+                        } else {
+                            let _ = respond.send_response(
+                                Response::builder().status(StatusCode::SERVICE_UNAVAILABLE)
+                                    .body(()).unwrap(), true);
+                        }
+                    } else {
+                        respond.send_reset(h2::Reason::REFUSED_STREAM);
+                    }
+                }
+            }
         }
     }));
 
@@ -1034,11 +1158,12 @@ async fn accept_inner(
     };
     let mut tunnel = TunnelWrapper::new_with_transport_binding(
         H2PacketReader::new(recv),
-        FramedWriter::new(H2Writer::new(send, budget)),
+        FramedWriter::new(H2Writer::with_budget(send, budget)),
         Some(info),
         Some(binding),
     )
-    .with_probe_guard(guard);
+    .with_probe_guard(guard)
+    .with_tcp_proxy(proxy);
     tunnel.set_associate_data(Box::new(driver));
     Ok(Some(Box::new(tunnel)))
 }
@@ -1112,18 +1237,28 @@ async fn connect_inner(
     };
 
     let (stream_window, conn_window) = window_sizes();
+    let budget = H2SendBudget::new(budget);
+    let (receive_budget, mut window_updates) = H2ReceiveBudget::new(stream_window, conn_window);
     let mut client = h2::client::Builder::new();
     client
         .initial_window_size(stream_window)
         .initial_connection_window_size(conn_window)
         .max_send_buffer_size(super::tcp_socket::TCP_MAX_UNSENT_BYTES)
         .max_frame_size(HTTP2_MAX_FRAME);
-    let (h2, conn) = client
+    let (h2, mut conn) = client
         .handshake(tls)
         .await
         .map_err(|error| TunnelError::InternalError(format!("HTTP/2 client handshake: {error}")))?;
     let driver = AbortOnDropHandle::new(tokio::spawn(async move {
-        let _ = conn.await;
+        loop {
+            tokio::select! {
+                _ = &mut conn => break,
+                changed = window_updates.changed() => {
+                    if changed.is_err() { break; }
+                    conn.set_target_window_size(*window_updates.borrow_and_update());
+                }
+            }
+        }
     }));
 
     let mut h2 = h2;
@@ -1156,6 +1291,8 @@ async fn connect_inner(
         )));
     }
     let recv = response.into_body();
+    let proxy =
+        super::stream_proxy::ProxyEndpoint::new_h2(Some(h2), budget.clone(), receive_budget);
 
     let info = TunnelInfo {
         tunnel_type: "h2".to_owned(),
@@ -1165,7 +1302,9 @@ async fn connect_inner(
             super::build_url_from_socket_addr(&peer_addr.to_string(), "h2").into(),
         ),
     };
-    Ok(wrap_http2_tunnel(recv, send, budget, info, binding, driver))
+    Ok(wrap_http2_tunnel(
+        recv, send, budget, info, binding, driver, proxy,
+    ))
 }
 
 #[cfg(test)]
@@ -1283,6 +1422,51 @@ mod tests {
         assert_eq!(writer.budget.available(), 6);
         drop(data);
         assert_eq!(writer.budget.available(), 10);
+    }
+
+    #[tokio::test]
+    async fn shared_send_budget_bounds_concurrent_claims_and_wakes_all_waiters() {
+        use super::{H2Data, H2SendBudget, Ordering};
+        use std::sync::{Arc, Barrier, atomic::AtomicUsize};
+        let budget = H2SendBudget::new(Arc::new(AtomicUsize::new(6 * 16384)));
+        let barrier = Arc::new(Barrier::new(16));
+        let total: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let budget = budget.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        budget.claim(16384)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .sum()
+        });
+        assert_eq!(total, 6 * 16384);
+        assert_eq!(budget.queued.load(Ordering::Acquire), total);
+        let first = budget.notify.notified();
+        let second = budget.notify.notified();
+        tokio::pin!(first, second);
+        first.as_mut().enable();
+        second.as_mut().enable();
+        let data = H2Data::admitted(bytes::Bytes::from(vec![0; total]), &budget);
+        drop(data);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            first.await;
+            second.await;
+        })
+        .await
+        .unwrap();
+        assert_eq!(budget.queued.load(Ordering::Acquire), 0);
+        assert_eq!(budget.claim(total + 1), total);
+        drop(H2Data::admitted(
+            bytes::Bytes::from(vec![0; total]),
+            &budget,
+        ));
     }
 
     #[test]

@@ -155,6 +155,8 @@ message FlagsInConfig {
   P2pMode p2p_mode = 81;
   // One uses a current-thread runtime. Larger values select that many workers.
   uint32 threads = 82;
+  // Select native HTTP/2 TCP proxy streams: off, on, or auto.
+  string h2_tcp_proxy = 83;
 }
 
 enum RelayPolicy { hop = 0; latency = 1; goodput = 2; }

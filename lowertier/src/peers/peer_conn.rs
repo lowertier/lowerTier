@@ -121,8 +121,11 @@ fn handshake_features(receive_capabilities: u64) -> Vec<String> {
         SPEED_ROUTING_FEATURE.to_string(),
         RECEIVER_PACING_FEATURE.to_string(),
     ];
-    if receive_capabilities & crate::tunnel::quic::proxy::RECEIVE_CAPABILITY != 0 {
-        features.push(crate::tunnel::quic::proxy::FEATURE.to_string());
+    if receive_capabilities & crate::tunnel::stream_proxy::RECEIVE_CAPABILITY != 0 {
+        features.push(crate::tunnel::stream_proxy::FEATURE.to_string());
+        if receive_capabilities & crate::tunnel::stream_proxy::LOCAL_DESTINATION_CAPABILITY != 0 {
+            features.push(crate::tunnel::stream_proxy::DESTINATION_FEATURE.to_string());
+        }
     }
     features
 }
@@ -1306,7 +1309,7 @@ pub struct PeerConn {
     probe_guard: Option<Arc<crate::tunnel::ProbeGuard>>,
     transport_binding: Option<TransportBinding>,
     receive_backpressure: Option<crate::tunnel::ReceiveBackpressure>,
-    tcp_proxy: Option<Arc<crate::tunnel::quic::proxy::ProxyEndpoint>>,
+    tcp_proxy: Option<Arc<crate::tunnel::stream_proxy::ProxyEndpoint>>,
 
     tasks: JoinSet<Result<(), TunnelError>>,
 
@@ -1379,6 +1382,9 @@ impl PeerConn {
         let transport_binding = tunnel.transport_binding();
         let receive_backpressure = tunnel.receive_backpressure();
         let tcp_proxy = tunnel.tcp_proxy();
+        if let Some(proxy) = &tcp_proxy {
+            proxy.bind_context(global_ctx.clone());
+        }
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
         let (speed_ack_sender, _speed_ack_receiver) = broadcast::channel(8);
 
@@ -2052,6 +2058,7 @@ impl PeerConn {
             }
         };
         let local_root_fingerprint = self.admission_root_fingerprint();
+        let local_receive_capabilities = self.local_receive_capabilities();
         let msg1_pb = PeerConnNoiseMsg1Pb {
             version: VERSION,
             a_network_name: network.network_name.clone(),
@@ -2062,7 +2069,7 @@ impl PeerConn {
             acknowledged_transition_id: acknowledged_transition_id
                 .map(|id| id.to_vec())
                 .unwrap_or_default(),
-            receive_capabilities: crate::tunnel::quic::proxy::RECEIVE_CAPABILITY,
+            receive_capabilities: local_receive_capabilities,
             transmit_capabilities: 0,
             credential_root_fingerprint: local_root_fingerprint.to_vec(),
             initiator_certificate_digest: local_certificate_digest.to_vec(),
@@ -2518,7 +2525,7 @@ impl PeerConn {
             responder_identity_type_for_msg3,
             initiator_auth_level_for_context,
             responder_auth_level_for_context,
-            crate::tunnel::quic::proxy::RECEIVE_CAPABILITY,
+            local_receive_capabilities,
             msg2_pb.receive_capabilities,
             0,
             msg2_pb.transmit_capabilities,
@@ -3328,7 +3335,7 @@ impl PeerConn {
                 .map_err(|_| Error::WaitRespError("invalid Admin certificate status".to_owned()))?
                 .sequence
         };
-        let responder_receive_capabilities = crate::tunnel::quic::proxy::RECEIVE_CAPABILITY;
+        let responder_receive_capabilities = self.local_receive_capabilities();
         let responder_transmit_capabilities = 0;
         let local_data_protection = self.local_data_protection()?;
         let (transport_binding_kind, transport_binding_digest) =
@@ -4151,18 +4158,43 @@ impl PeerConn {
             .or_else(|| self.tunnel_info.clone())
     }
 
-    pub(crate) fn tcp_proxy(&self) -> Option<Arc<crate::tunnel::quic::proxy::ProxyEndpoint>> {
-        if self
-            .info
-            .as_ref()?
-            .features
+    fn local_receive_capabilities(&self) -> u64 {
+        crate::tunnel::stream_proxy::RECEIVE_CAPABILITY
+            | if self.global_ctx.no_tun() {
+                crate::tunnel::stream_proxy::LOCAL_DESTINATION_CAPABILITY
+            } else {
+                0
+            }
+    }
+
+    pub(crate) fn tcp_proxy(&self) -> Option<Arc<crate::tunnel::stream_proxy::ProxyEndpoint>> {
+        if !self.is_closed() && self.info.as_ref()?.features
             .iter()
-            .any(|feature| feature == crate::tunnel::quic::proxy::FEATURE)
-            && !self.is_closed()
+            .any(|feature| feature == crate::tunnel::stream_proxy::FEATURE)
         {
             self.tcp_proxy.clone()
         } else {
             None
+        }
+    }
+
+    pub(crate) fn select_tcp_proxy(
+        &self,
+    ) -> std::io::Result<Option<Arc<crate::tunnel::stream_proxy::ProxyEndpoint>>> {
+        let proxy = self.tcp_proxy();
+        if proxy.is_some() && self.info.as_ref().is_some_and(|info|
+            !info.features.iter().any(|feature|
+                feature == crate::tunnel::stream_proxy::DESTINATION_FEATURE))
+        {
+            return Ok(None);
+        }
+        if proxy.is_none() && !self.is_closed() && self.info.is_some()
+            && self.tcp_proxy.as_ref().is_some_and(|proxy| proxy.requires_capability())
+        {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                "peer does not advertise native TCP proxy streams"))
+        } else {
+            Ok(proxy)
         }
     }
 
@@ -5485,10 +5517,10 @@ pub mod tests {
 
     #[test]
     fn stream_feature_requires_the_authenticated_remote_capability() {
-        let feature = crate::tunnel::quic::proxy::FEATURE;
+        let feature = crate::tunnel::stream_proxy::FEATURE;
         assert!(!handshake_features(0).iter().any(|value| value == feature));
         assert!(
-            handshake_features(crate::tunnel::quic::proxy::RECEIVE_CAPABILITY)
+            handshake_features(crate::tunnel::stream_proxy::RECEIVE_CAPABILITY)
                 .iter()
                 .any(|value| value == feature)
         );
@@ -5497,6 +5529,12 @@ pub mod tests {
                 .iter()
                 .any(|value| value == feature)
         );
+        let destination = crate::tunnel::stream_proxy::DESTINATION_FEATURE;
+        let base = crate::tunnel::stream_proxy::RECEIVE_CAPABILITY;
+        let local = crate::tunnel::stream_proxy::LOCAL_DESTINATION_CAPABILITY;
+        assert!(!handshake_features(base).iter().any(|value| value == destination));
+        assert!(handshake_features(base | local).iter().any(|value| value == destination));
+        assert!(!handshake_features(local).iter().any(|value| value == destination));
     }
 
     #[test]

@@ -344,7 +344,7 @@ mod exit_dns_tests {
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
-    Transport(crate::tunnel::quic::proxy::ProxyStream),
+    Transport(crate::tunnel::stream_proxy::ProxyStream),
 }
 
 impl AsyncRead for SocksTcpStream {
@@ -697,7 +697,7 @@ struct ProxyTarget {
 
 enum TcpBackend {
     Kernel,
-    Transport(Arc<crate::tunnel::quic::proxy::ProxyEndpoint>),
+    Transport(Arc<crate::tunnel::stream_proxy::ProxyEndpoint>),
     Smoltcp,
 }
 
@@ -705,7 +705,7 @@ impl TcpBackend {
     fn reason(&self) -> &'static str {
         match self {
             Self::Kernel => "system route or loopback destination",
-            Self::Transport(_) => "direct peer with negotiated QUIC proxy capability",
+            Self::Transport(_) => "direct peer with negotiated TCP proxy capability",
             Self::Smoltcp => "overlay packet path",
         }
     }
@@ -913,22 +913,21 @@ impl Socks5AutoConnector {
         &self,
         peer_manager: &PeerManager,
         target: &ProxyTarget,
-    ) -> TcpBackend {
+    ) -> crate::gateway::fast_socks5::Result<TcpBackend> {
         if target.peer_ids.is_none() {
-            return TcpBackend::Kernel;
+            return Ok(TcpBackend::Kernel);
         }
-        if std::env::var_os("LOWTIER_DISABLE_TCP_STREAM_PROXY").is_none()
-            && !peer_manager.get_global_ctx().get_acl_filter().is_enabled()
+        if !peer_manager.get_global_ctx().get_acl_filter().is_enabled()
             && let IpAddr::V4(ip) = target.address.ip()
             && let Some(peer_id) = peer_manager.get_peer_map().get_peer_id_by_ipv4(&ip).await
             && !peer_manager.path_applies_to(peer_id)
             && target.peer_ids.as_deref() == Some(&[peer_id])
             && let Some(connection) = peer_manager.get_peer_map().only_direct_conn(peer_id)
-            && let Some(proxy) = connection.tcp_proxy()
+            && let Some(proxy) = connection.select_tcp_proxy()?
         {
-            return TcpBackend::Transport(proxy);
+            return Ok(TcpBackend::Transport(proxy));
         }
-        TcpBackend::Smoltcp
+        Ok(TcpBackend::Smoltcp)
     }
 
     async fn packet_net(&self) -> crate::gateway::fast_socks5::Result<Arc<Net>> {
@@ -1002,7 +1001,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
 
         let target = self.plan_proxy_target(&peer_mgr_arc, addr).await?;
         let addr = target.address;
-        let mut backend = self.plan_tcp_backend(&peer_mgr_arc, &target).await;
+        let mut backend = self.plan_tcp_backend(&peer_mgr_arc, &target).await?;
         let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send + Sync> = loop {
             tracing::trace!(
                 ?addr,
@@ -1031,10 +1030,10 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                             .await
                             .map_err(|_| anyhow::anyhow!("TCP transport proxy open timed out"))??
                     {
-                        tracing::debug!(?addr, "userspace proxy selected HTTP/3 stream");
+                        tracing::debug!(?addr, "userspace proxy selected native CONNECT stream");
                         return Ok(SocksTcpStream::Transport(stream));
                     }
-                    // Only an unsupported stream permits packet fallback.
+                    // The transport permits fallback only before destination admission.
                     backend = TcpBackend::Smoltcp;
                 }
                 TcpBackend::Smoltcp => {

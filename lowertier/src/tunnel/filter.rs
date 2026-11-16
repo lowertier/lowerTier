@@ -272,7 +272,7 @@ where
         self.inner.transport_binding()
     }
 
-    fn tcp_proxy(&self) -> Option<Arc<quic::proxy::ProxyEndpoint>> {
+    fn tcp_proxy(&self) -> Option<Arc<super::stream_proxy::ProxyEndpoint>> {
         self.inner.tcp_proxy()
     }
 

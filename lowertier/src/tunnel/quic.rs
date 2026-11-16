@@ -63,7 +63,7 @@ use super::packet_def::{NIC_TUNNEL_HEADROOM, PEER_MANAGER_HEADER_SIZE, ZCPacket}
 mod decoy_tests;
 mod fragments;
 mod migration;
-pub mod proxy;
+use super::stream_proxy as proxy;
 #[cfg(test)]
 mod rebind_tests;
 #[cfg(target_os = "linux")]
@@ -335,7 +335,7 @@ fn configure_quic_socket_buffers(socket_ref: &socket2::SockRef<'_>) {
 }
 
 type H3ClientStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
-type H3ServerStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+pub(super) type H3ServerStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 #[async_trait::async_trait]
 trait ConnectIpRequestStream: Send {

@@ -518,6 +518,14 @@ pub static OPTIONS: &[OptionSpec] = &[
         "Public listener URLs announced to peers, for port mappings.",
     ),
     opt(
+        "transport.h2.tcp_proxy",
+        Enum(&["off", "on", "auto"]),
+        To("flags.h2_tcp_proxy"),
+        Live,
+        "off",
+        "Native H2 TCP proxy streams. off uses packets; on requires streams in the supported scope; auto permits safe fallback. Applies to new flows.",
+    ),
+    opt(
         "transport.quic.initial_receive_window",
         Bytes,
         To("flags.quic_initial_receive_window"),
@@ -1942,6 +1950,23 @@ mod tests {
         ] {
             assert!(error.contains(expected), "{expected}\n{error}");
         }
+    }
+
+    #[test]
+    fn h2_proxy_modes_round_trip_and_reject_unknown_values() {
+        use crate::common::config::{ConfigLoader as _, TomlConfigLoader};
+        for mode in ["off", "on", "auto"] {
+            let config = TomlConfigLoader::new_from_str(
+                &format!("[transport.h2]\ntcp_proxy = \"{mode}\"\n")
+            ).unwrap();
+            assert_eq!(config.get_flags().h2_tcp_proxy, mode);
+            let restored = TomlConfigLoader::new_from_str(&config.dump()).unwrap();
+            assert_eq!(restored.get_flags().h2_tcp_proxy, mode);
+        }
+        assert!(TomlConfigLoader::new_from_str(
+            "[transport.h2]\ntcp_proxy = \"unknown\"\n"
+        ).is_err());
+        assert_eq!(lookup("transport.h2.tcp_proxy").unwrap().apply, Live);
     }
 
     #[test]

@@ -148,6 +148,7 @@ pub struct TunnelWrapper<R, W> {
     transport_binding: Option<TransportBinding>,
     transport_authenticated: bool,
     probe_guard: Option<Arc<super::ProbeGuard>>,
+    tcp_proxy: Option<Arc<super::stream_proxy::ProxyEndpoint>>,
 }
 
 impl<R, W> TunnelWrapper<R, W> {
@@ -169,6 +170,7 @@ impl<R, W> TunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated: false,
             probe_guard: None,
+            tcp_proxy: None,
         }
     }
 
@@ -186,6 +188,7 @@ impl<R, W> TunnelWrapper<R, W> {
             transport_binding: None,
             transport_authenticated,
             probe_guard: None,
+            tcp_proxy: None,
         }
     }
 
@@ -219,6 +222,7 @@ impl<R, W> TunnelWrapper<R, W> {
             transport_binding,
             transport_authenticated,
             probe_guard: None,
+            tcp_proxy: None,
         }
     }
 
@@ -228,6 +232,11 @@ impl<R, W> TunnelWrapper<R, W> {
 
     pub(crate) fn with_probe_guard(mut self, guard: Arc<super::ProbeGuard>) -> Self {
         self.probe_guard = Some(guard);
+        self
+    }
+
+    pub(crate) fn with_tcp_proxy(mut self, proxy: Arc<super::stream_proxy::ProxyEndpoint>) -> Self {
+        self.tcp_proxy = Some(proxy);
         self
     }
 }
@@ -261,6 +270,10 @@ where
     fn probe_guard(&self) -> Option<Arc<super::ProbeGuard>> {
         self.probe_guard.clone()
     }
+
+    fn tcp_proxy(&self) -> Option<Arc<super::stream_proxy::ProxyEndpoint>> {
+        self.tcp_proxy.clone()
+    }
 }
 
 /// Holds a transport that already reads and writes owned packet batches.
@@ -273,7 +286,7 @@ pub struct BatchTunnelWrapper<R, W> {
     transport_authenticated: bool,
     receive_backpressure: Option<ReceiveBackpressure>,
     path_state: Option<Arc<super::TunnelPathState>>,
-    tcp_proxy: Option<Arc<super::quic::proxy::ProxyEndpoint>>,
+    tcp_proxy: Option<Arc<super::stream_proxy::ProxyEndpoint>>,
 }
 
 impl<R, W> BatchTunnelWrapper<R, W> {
@@ -337,7 +350,7 @@ impl<R, W> BatchTunnelWrapper<R, W> {
 
     pub(crate) fn with_tcp_proxy(
         mut self,
-        proxy: Option<Arc<super::quic::proxy::ProxyEndpoint>>,
+        proxy: Option<Arc<super::stream_proxy::ProxyEndpoint>>,
     ) -> Self {
         self.tcp_proxy = proxy;
         self
@@ -383,7 +396,7 @@ where
         self.receive_backpressure.clone()
     }
 
-    fn tcp_proxy(&self) -> Option<Arc<super::quic::proxy::ProxyEndpoint>> {
+    fn tcp_proxy(&self) -> Option<Arc<super::stream_proxy::ProxyEndpoint>> {
         self.tcp_proxy.clone()
     }
 }
