@@ -1,15 +1,87 @@
 {
-  "verified_at": "2026-11-16T23:39:59.592288+00:00",
-  "connectivity_verified_at": "2026-11-16T23:39:59.592288+00:00",
+  "verified_at": "2026-11-17T05:39:20.483093+00:00",
+  "connectivity_verified_at": "2026-11-17T05:39:20.483093+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Eleven reachable retained instances use saved and effective H2 auto. All eleven passed delivery and Web UI checks. Three offline hosts remain pending. Earlier sections retain their original observations.",
-  "application_commit": "67ada09f",
-  "repository_commit_at_verification": "f37dd6e4",
-  "application_note": "Eleven reachable test instances explicitly use H2 auto. The live control API saved the setting without service restarts. Identities, unrelated configuration, configured routes, GUI policy, and MTUs are preserved. QUIC is unchanged. Three offline hosts remain pending.",
+  "inventory_scope": "Eleven reachable retained instances use saved H2 auto and the compiled QUIC auto default. All eleven passed final delivery and Web UI checks. Three offline hosts remain pending. Earlier sections retain their original observations.",
+  "application_commit": "6e62db63",
+  "repository_commit_at_verification": "6e62db63",
+  "application_note": "Eleven reachable test instances run the QUIC admission policy and copy-permit repair. Saved configuration, identities, routes, GUI policy, and MTUs are preserved. QUIC uses its compiled auto default. H2 retains saved auto. The slow-reader carrier stall remains unresolved. Three offline hosts remain pending.",
+  "quic_auto_rollout": {
+    "verified_at": "2026-11-17T05:39:20.483093+00:00",
+    "application_commit": "6e62db63",
+    "product_quic_default": "auto",
+    "product_h2_default": "off",
+    "fleet_h2_mode": "auto",
+    "fleet_quic_mode": "auto",
+    "quic_mode_source": "Compiled default. Saved QUIC overrides remain absent.",
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "binary_replacements": 11,
+    "service_restarts": 11,
+    "identities_preserved": true,
+    "configuration_preserved": true,
+    "configured_routes_preserved": true,
+    "gui_policy_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "tcp_bytes_per_instance_per_direction": 8388608,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "temporary_fleet_fixtures_stopped": true,
+    "completed_transfer_files_removed": true,
+    "legacy_binary_backups_created": false,
+    "removed_wan_candidate_binaries": 2,
+    "removed_wan_candidate_bytes": 59148944,
+    "quic_multiplexer_added": false,
+    "application_data_replayed": false,
+    "production_resource_limits_changed": false,
+    "copy_permit_lifetime_repaired": true,
+    "backward_compatibility_paths_added": false,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "pending_status_checked_at": "2026-11-17T05:31:10.227776+00:00",
+    "application_source_overrides": {
+      "local": "10.126.126.100",
+      "alibj": "10.126.126.100",
+      "btrouter": "10.126.126.100"
+    },
+    "summary": "benchmark-results/quic-auto-20261117/fleet.json",
+    "report": "docs/performance/quic-auto-20261117.md",
+    "audit": "benchmark-results/.work/quic-auto-20261117/audit.jsonl",
+    "recoveries": [
+      "Beijing staging passed through jpaws after the direct upload failed.",
+      "BTROUTER resumed a validated 11337350-byte prefix after two full upload timeouts.",
+      "BTROUTER lacked stat. The guarded resume used its installed Python.",
+      "The verifier now checks omitted QUIC fields against the compiled default.",
+      "Beijing passed exact delivery from jpaws after the Mac bulk check exceeded 120 seconds.",
+      "s6916 passed the repeated full check with unchanged UDP assertions and a four-second deadline."
+    ],
+    "limitations": [
+      "Delivery checks use normal transport selection. They do not force each protocol.",
+      "One initial s6916 full-size UDP reply missed four seconds. Late delivery and loss remain indistinguishable.",
+      "The initial s6916 timeout cause remains unconfirmed. The failed record and fixture log are preserved.",
+      "The initial Mac-to-Beijing bulk check exceeded its deadline. That path remains unresolved.",
+      "Four unread native downloads still stall native admission, fallback, and UDP on a shared QUIC carrier.",
+      "WSS retains packet forwarding. No native WSS throughput or reliability gain was measured."
+    ]
+  },
   "h2_auto_rollout": {
     "verified_at": "2026-11-16T23:39:59.592288+00:00",
     "application_commit": "67ada09f",
@@ -131,7 +203,11 @@
   "runtime_simplification": {
     "verified_at": "2026-11-16T07:34:25.036289+00:00",
     "application_commit": "00b50c6b",
-    "source_commits": ["9f1b5c83", "1321101b", "00b50c6b"],
+    "source_commits": [
+      "9f1b5c83",
+      "1321101b",
+      "00b50c6b"
+    ],
     "packet_consumer_activity_gate": true,
     "atomic_idle_gate_without_map_locks": true,
     "lazy_source_packet_stack": true,
@@ -145,7 +221,11 @@
     "configuration_preserved": true,
     "identities_preserved": true,
     "mtu_policy_preserved": true,
-    "authenticated_protocols_per_instance": ["h2", "quic", "wss"],
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
     "full_size_icmp_sent": 55,
     "full_size_icmp_received": 55,
     "application_bytes_per_instance_per_direction": 8388608,
@@ -163,7 +243,11 @@
     "matched_userspace_groups": 20,
     "matched_userspace_transfers": 120,
     "final_measurements_delivered_all_payloads": true,
-    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
     "summary": "benchmark-results/decision-runtime-20261116/summary.json",
     "report": "docs/performance/decision-runtime-20261116.md",
     "audit": "benchmark-results/.work/decision-runtime-20261116/audit.jsonl",
@@ -181,7 +265,11 @@
     "configuration_preserved": true,
     "identities_preserved": true,
     "mtu_policy_preserved": true,
-    "authenticated_protocols_per_instance": ["h2", "quic", "wss"],
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
     "full_size_icmp_sent": 55,
     "full_size_icmp_received": 55,
     "application_bytes_per_instance_per_direction": 8388608,
@@ -196,7 +284,11 @@
     "temporary_test_processes_stopped": true,
     "permitted_sequential_library_tests_passed": 559,
     "separate_caddy_integration_tests_passed": 2,
-    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
     "summary": "benchmark-results/decision-simplify-20261115/summary.json",
     "audit": "benchmark-results/.work/route-choice-20261115/audit.jsonl",
     "fleet_audit": "benchmark-results/.work/decision-simplify-20261115/audit.jsonl",
@@ -205,7 +297,10 @@
   "source_simplification": {
     "verified_at": "2026-11-15T10:06:01.235172+00:00",
     "application_commit": "9b0fc462",
-    "source_commits": ["29fb6bf5", "9b0fc462"],
+    "source_commits": [
+      "29fb6bf5",
+      "9b0fc462"
+    ],
     "retired_runtime_paths_removed": true,
     "backward_compatibility_paths_added": false,
     "verified_instances": 11,
@@ -213,7 +308,11 @@
     "configuration_preserved": true,
     "identities_preserved": true,
     "mtu_policy_preserved": true,
-    "authenticated_protocols_per_instance": ["h2", "quic", "wss"],
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
     "final_full_size_icmp_sent": 55,
     "final_full_size_icmp_received": 55,
     "application_bytes_per_instance_per_direction": 8388608,
@@ -227,7 +326,11 @@
     "completed_transfer_files_removed": true,
     "obsolete_remote_cache_binaries_removed": 2,
     "temporary_test_processes_stopped": true,
-    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
     "summary": "benchmark-results/source-simplify-20261115/summary.json",
     "audit": "benchmark-results/.work/source-simplify-20261115/audit.jsonl",
     "source_audit": "benchmark-results/.work/source-review-2026-11-15.jsonl",
@@ -240,14 +343,22 @@
     "running_transfer_integrity_checks": 11,
     "configuration_preserved": true,
     "mtu_policy_preserved": true,
-    "authenticated_protocols_per_instance": ["h2", "quic", "wss"],
+    "authenticated_protocols_per_instance": [
+      "h2",
+      "quic",
+      "wss"
+    ],
     "controller_packets_sent": 30,
     "controller_packets_received": 30,
     "router_packets_sent": 20,
     "router_packets_received": 20,
     "continuous_log_window_seconds": 122.235103,
     "listed_errors_in_continuous_window": 0,
-    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
     "report": "docs/performance/handshake-relay-20261115.md",
     "summary": "benchmark-results/handshake-relay-20261115/summary.json",
     "audit": "benchmark-results/.work/handshake-relay-20261115/audit.jsonl",
@@ -262,7 +373,11 @@
     "userspace_socks_device_mtu": 1284,
     "scope": "Ten kernel overlay interfaces use MTU 1280. The verified userspace TCP device has a fixed MTU of 1280. Its separate SOCKS device retains MTU 1284. No retained instance enables native Ethernet bridging.",
     "verified_instances": 11,
-    "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
     "report": "docs/performance/fleet-mtu-20261114.md",
     "summary": "benchmark-results/fleet-mtu-20261114/summary.json"
   },
@@ -316,7 +431,7 @@
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
       "version": "0.02",
       "application_commit": null,
-      "pending_application_commit": "67ada09f",
+      "pending_application_commit": "6e62db63",
       "previous_recorded_application_commit": "d211a9fc",
       "deployment_status": "pending_ssh_and_overlay_connectivity",
       "pending_h2_tcp_proxy": "auto",
@@ -336,7 +451,12 @@
         "configured_mtu": 1300
       },
       "mtu_status": "pending_ssh",
-      "kernel_migration_status": "blocked_container_capabilities"
+      "kernel_migration_status": "blocked_container_capabilities",
+      "pending_quic_tcp_proxy": "auto",
+      "migration_verified": false,
+      "tailscale_online": false,
+      "tailscale_last_seen": "2026-11-15T14:56:24.1Z",
+      "tailscale_checked_at": "2026-11-17T05:31:10.227776+00:00"
     },
     {
       "node": "alibj",
@@ -344,20 +464,22 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 269478,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:22:56.135753+00:00",
+      "observed_pid": 272248,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "jpaws",
@@ -365,20 +487,22 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 2404317,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:18.177237+00:00",
+      "observed_pid": 2466077,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "861jp",
@@ -386,20 +510,22 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 1894574,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:18.999314+00:00",
+      "observed_pid": 1914638,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "862jp-secondary",
@@ -407,20 +533,22 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 2766115,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:12.602288+00:00",
+      "observed_pid": 2816294,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "jpali-secondary",
@@ -428,20 +556,22 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 1906263,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:12.254630+00:00",
+      "observed_pid": 1938659,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "s6916",
@@ -449,7 +579,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
@@ -484,14 +614,16 @@
         "report": "docs/performance/s6916-userspace-tcp-20261114.md",
         "scope": "Local native Mac to s6916. Kernel mode replaces the userspace TCP endpoint. Effective MTUs differ between endpoint modes."
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 902076,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:35:11.108025+00:00",
+      "observed_pid": 939452,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "hattori-wrt",
@@ -499,20 +631,22 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 3851,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:20.378153+00:00",
+      "observed_pid": 327,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -520,21 +654,23 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "userspace",
         "configured_mtu": 1280,
         "tcp_device_mtu": 1280
       },
       "kernel_migration_status": "blocked_administrator_access",
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 93396,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:16.244060+00:00",
+      "observed_pid": 31309,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "local-native",
@@ -542,20 +678,22 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 64415,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:13.626239+00:00",
+      "observed_pid": 54694,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "la",
@@ -563,20 +701,22 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 333570,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:19:25.001944+00:00",
+      "observed_pid": 377119,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     },
     {
       "node": "btrouter",
@@ -584,20 +724,22 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "67ada09f",
+      "application_commit": "6e62db63",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "00b50c6b",
+      "previous_recorded_application_commit": "67ada09f",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "Saved and effective H2 auto is verified. Identity, unrelated configuration, configured routes, GUI policy, and MTU are preserved.",
+      "software_verification_note": "The new process image, compiled QUIC auto default, saved H2 auto, authentication, exact delivery, GUI policy, and MTUs passed verification.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-16T23:39:59.592288+00:00",
-      "observed_pid": 8742,
-      "pending_binary_transfer": null
+      "runtime_observed_at": "2026-11-17T05:25:41.791890+00:00",
+      "observed_pid": 1903,
+      "pending_binary_transfer": false,
+      "quic_tcp_proxy": "auto",
+      "quic_policy_source": "compiled_default"
     }
   ],
   "verification": {
@@ -642,7 +784,11 @@
       "temporary_runtime_overrides_removed": true,
       "local_bulk_transfer_limit": "The Mac checks to AliBJ and BTROUTER timed out. Exact transfers and UDP echoes passed from JPaws. The local bulk failures remain unresolved.",
       "quic_limit": "Outer MTU fell from 1452 to 1200 during slow four-stream trials. This deployment does not repair that fallback.",
-      "pending": ["tw2-ingress", "btower", "UTMOWRT"],
+      "pending": [
+        "tw2-ingress",
+        "btower",
+        "UTMOWRT"
+      ],
       "evidence": "benchmark-results/.work/fleet-mtu-20261114/verification.json",
       "audit": "benchmark-results/.work/fleet-mtu-20261114/audit.jsonl",
       "summary": "benchmark-results/fleet-mtu-20261114/summary.json",
@@ -967,6 +1113,13 @@
       },
       "scope": "The checks verify configuration, identity, GUI delivery, authentication, and packet delivery. They do not measure throughput or full mesh convergence.",
       "evidence": "benchmark-results/.work/settings-dedup-20261109/audit.jsonl"
+    },
+    "quic_auto_rollout": {
+      "verified_at": "2026-11-17T05:39:20.483093+00:00",
+      "application_commit": "6e62db63",
+      "summary": "benchmark-results/quic-auto-20261117/fleet.json",
+      "report": "docs/performance/quic-auto-20261117.md",
+      "audit": "benchmark-results/.work/quic-auto-20261117/audit.jsonl"
     }
   },
   "pending_historical_hosts": [
@@ -974,13 +1127,23 @@
       "node": "btower",
       "status": "offline",
       "pending_h2_tcp_proxy": "auto",
-      "migration_verified": false
+      "migration_verified": false,
+      "pending_application_commit": "6e62db63",
+      "pending_quic_tcp_proxy": "auto",
+      "tailscale_online": false,
+      "tailscale_last_seen": "2026-10-17T08:28:58.1Z",
+      "tailscale_checked_at": "2026-11-17T05:31:10.227776+00:00"
     },
     {
       "node": "UTMOWRT",
       "status": "offline",
       "pending_h2_tcp_proxy": "auto",
-      "migration_verified": false
+      "migration_verified": false,
+      "pending_application_commit": "6e62db63",
+      "pending_quic_tcp_proxy": "auto",
+      "tailscale_online": false,
+      "tailscale_last_seen": "2026-10-27T04:12:15.1Z",
+      "tailscale_checked_at": "2026-11-17T05:31:10.227776+00:00"
     }
   ],
   "binary_retention": {

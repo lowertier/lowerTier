@@ -166,6 +166,7 @@ Keep the current WSS packet path until a native protocol passes those tests.
 
 ## Sources
 
+- [Sukka, Hikyaku](https://blog.skk.moe/post/hikyaku-proxy/): shared carriers, admission cost, timeouts, and health checks.
 - `lowertier/src/tunnel/stream_proxy.rs`: admission, health state, stream slots, and copy storage.
 - `lowertier/src/tunnel/quic.rs`: H3 CONNECT setup, transport windows, and datagram queues.
 - `lowertier/src/peers/peer_conn.rs`: authenticated capability selection.
