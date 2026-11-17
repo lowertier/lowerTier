@@ -90,6 +90,7 @@ The onboarding form offers three offline retention policies:
 | **Keep until removed** | Keep the record until you remove it. |
 
 The join code writes the policy to `node.offline_retention` on the new machine.
+The joining machine needs a build that supports this option.
 The value uses seconds.
 `0` selects temporary records.
 `-1` selects permanent records.
@@ -101,6 +102,7 @@ Credential lifetime and revocation still control network access.
 Shared-secret codes retain their existing unlimited reuse.
 
 Nodes sample authenticated routes once each second, even when no browser is open.
+History starts when the updated observer first sees a machine.
 The last online time means the last route observation by that node.
 Different observers can report different times.
 The observer saves history beside its configuration as `<name>.machines.json`.

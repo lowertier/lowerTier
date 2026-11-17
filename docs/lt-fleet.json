@@ -1,15 +1,15 @@
 {
-  "verified_at": "2026-11-17T08:37:12.580911+00:00",
-  "connectivity_verified_at": "2026-11-17T08:37:12.580911+00:00",
+  "verified_at": "2026-11-17T16:23:43.906845+00:00",
+  "connectivity_verified_at": "2026-11-17T16:23:43.906845+00:00",
   "network": "lt-",
   "subnet": "10.126.126.0/24",
   "controller": "hattori-wrt",
   "topology_verified_at": "2026-11-14T10:59:06.536802+00:00",
   "membership_policy": "Run one joined instance per physical host. Keep retired configuration and keys. Keep retired services and watchdogs disabled.",
-  "inventory_scope": "Eleven reachable test instances passed transport cleanup verification. They retain saved H2 auto and the compiled QUIC auto default. Three offline historical hosts remain pending. Earlier sections retain historical observations.",
-  "application_commit": "94cca88a",
-  "repository_commit_at_verification": "94cca88a",
-  "application_note": "The transport cleanup removes four inactive experimental selectors and repairs release multicast deadline refresh. All eleven running images, identities, configuration, routes, MTUs, Web UI policy, authentication, and exact delivery passed. The QUIC shared-carrier slow-reader stall remains unresolved.",
+  "inventory_scope": "Eleven reachable test instances passed machine retention deployment verification. Three historical hosts remain pending. Earlier sections retain historical observations.",
+  "application_commit": "eada0e44",
+  "repository_commit_at_verification": "eada0e44",
+  "application_note": "The Web UI now supports temporary nodes and retained offline records. All eleven running images, identities, configurations, GUI policies, authentication checks, and exact delivery checks passed. No performance comparison was performed.",
   "quic_auto_rollout": {
     "verified_at": "2026-11-17T05:39:20.483093+00:00",
     "application_commit": "6e62db63",
@@ -431,7 +431,7 @@
       "instance_id": "5a51de4f-c6fd-4d49-a60e-53a74702a864",
       "version": "0.02",
       "application_commit": null,
-      "pending_application_commit": "94cca88a",
+      "pending_application_commit": "eada0e44",
       "previous_recorded_application_commit": "d211a9fc",
       "deployment_status": "pending_ssh_and_overlay_connectivity",
       "pending_h2_tcp_proxy": "auto",
@@ -464,22 +464,23 @@
       "public_key": "FOuEG9CIxijcSo0rEHuZ5mrqAa4ohAVzshYL9+MdEmA=",
       "instance_id": "ffeba43c-f49b-4392-af9b-074ca86aa33a",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:51.636218+00:00",
-      "observed_pid": 273590,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 275423,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "jpaws",
@@ -487,22 +488,23 @@
       "public_key": "OrtW2bArGTDj5tGbwgT7bpj4g7fEA6A4pKHo6LkD70o=",
       "instance_id": "ff006bd1-1a66-4504-a6bd-ecf979d6e4ed",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:49.149973+00:00",
-      "observed_pid": 2478057,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 2505945,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "861jp",
@@ -510,22 +512,23 @@
       "public_key": "e8RfxlupPIrziwuwdf8q3cLcPFnFjNoyGbLDA5mHwXY=",
       "instance_id": "0d8f2a5a-3f04-4dd5-a45a-06c3d9c3f3fc",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:49.820737+00:00",
-      "observed_pid": 1920736,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 1932616,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "862jp-secondary",
@@ -533,22 +536,23 @@
       "public_key": "2m8tzk3AdjM7+p9iUla9MEsMeKasQRBlhRK1fqbj2jY=",
       "instance_id": "d19d568d-79d0-4e32-9ded-a8e0b7dbe76f",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:44.014060+00:00",
-      "observed_pid": 2831182,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 2862135,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "jpali-secondary",
@@ -556,22 +560,23 @@
       "public_key": "yT5PDGa4XRzSTR0bvhR6ZOWKmR9RCzt0AdMjRAJ3+14=",
       "instance_id": "f3a374af-d645-4847-8a18-675a02f52b37",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:43.479907+00:00",
-      "observed_pid": 1947699,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 1968707,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "s6916",
@@ -579,7 +584,7 @@
       "public_key": "rmfUuNLon5Ozcm6bEm5n3Urhx/cFWjGzx9oJvFEOhF8=",
       "instance_id": "12ae9712-2be5-4995-b2eb-e3e34fadad1f",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
@@ -614,16 +619,17 @@
         "report": "docs/performance/s6916-userspace-tcp-20261114.md",
         "scope": "Local native Mac to s6916. Kernel mode replaces the userspace TCP endpoint. Effective MTUs differ between endpoint modes."
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:43.505921+00:00",
-      "observed_pid": 949793,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 973526,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "hattori-wrt",
@@ -631,22 +637,23 @@
       "public_key": "jjyGmLpFPYpV2djEFYmFVYV+bfY5VPnmkZyj1Ckv8XI=",
       "instance_id": "ec278792-1bcc-4be7-ab97-bf69a0d32523",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:52.939332+00:00",
-      "observed_pid": 16249,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 28656,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "yutoms-mcp-userspace",
@@ -654,23 +661,24 @@
       "public_key": "FUOT3xBz6OWL/xYf6Lt24+YYZfV1gSwffMtHY5YyEUs=",
       "instance_id": "b3ef1ac6-13cc-447f-8d4a-802c2b759349",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "userspace",
         "configured_mtu": 1280,
         "tcp_device_mtu": 1280
       },
       "kernel_migration_status": "blocked_administrator_access",
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:50.603523+00:00",
-      "observed_pid": 51174,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 92538,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "local-native",
@@ -678,22 +686,23 @@
       "public_key": "bXX4SOJKUIfZl8WGnqilZTKRLvh1FouQxoa3JcFXcls=",
       "instance_id": "211c42db-27ad-4d01-8f34-b5d4d8543c80",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:45.000637+00:00",
-      "observed_pid": 24118,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 68524,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "la",
@@ -701,22 +710,23 @@
       "public_key": "IhstGULZ5LlhPl9Y8CZc77oFS28fgME8BV4l/2puYGM=",
       "instance_id": "7092e7c5-6fd5-4533-8c60-8ffbc719f90c",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:56.798290+00:00",
-      "observed_pid": 383186,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 389016,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     },
     {
       "node": "btrouter",
@@ -724,22 +734,23 @@
       "public_key": "yv57cG738gs8j5zjK+PvJBuoQ1GwCjyJhphMdqQr0hw=",
       "instance_id": "0c50db08-c43e-4bde-b726-5ac464806642",
       "version": "0.03",
-      "application_commit": "94cca88a",
+      "application_commit": "eada0e44",
       "tun": {
         "mode": "kernel",
         "configured_mtu": 1300,
         "observed_mtu": 1280
       },
-      "previous_recorded_application_commit": "6e62db63",
+      "previous_recorded_application_commit": "94cca88a",
       "pending_application_commit": null,
       "deployment_status": "verified",
-      "software_verification_note": "The transport cleanup build passed running-image integrity, authenticated H2/QUIC/WSS, exact delivery, saved policy, Web UI, and MTU checks.",
+      "software_verification_note": "Machine retention, running image integrity, preserved configuration, authenticated links, and exact delivery passed.",
       "h2_tcp_proxy": "auto",
-      "runtime_observed_at": "2026-11-17T08:28:59.126846+00:00",
-      "observed_pid": 3952,
+      "runtime_observed_at": "2026-11-17T16:23:43.906845+00:00",
+      "observed_pid": 8586,
       "pending_binary_transfer": false,
       "quic_tcp_proxy": "auto",
-      "quic_policy_source": "compiled_default"
+      "quic_policy_source": "compiled_default",
+      "migration_verified": true
     }
   ],
   "verification": {
@@ -1127,6 +1138,61 @@
       "summary": "benchmark-results/transport-conditions-20261117/fleet.json",
       "report": "docs/performance/transport-conditions-20261117.md",
       "audit": "benchmark-results/.work/transport-conditions-20261117/audit.jsonl"
+    },
+    "machine_retention_rollout": {
+      "verified_at": "2026-11-17T16:23:43.906845+00:00",
+      "application_commit": "eada0e44",
+      "verified_instances": 11,
+      "running_transfer_integrity_checks": 11,
+      "identities_preserved": true,
+      "configuration_preserved": true,
+      "routes_preserved": true,
+      "gui_policy_preserved": true,
+      "mtu_policy_preserved": true,
+      "authenticated_protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "full_size_icmp_sent": 55,
+      "full_size_icmp_received": 55,
+      "udp_sent": 165,
+      "udp_received": 165,
+      "tcp_bytes_per_instance_per_direction": 8388608,
+      "keyless_webui_pages": 11,
+      "keyless_json_api_reads": 11,
+      "keyless_json_rpc_reads": 11,
+      "foreign_origin_rejections": 11,
+      "machine_history_files": 11,
+      "paginated_history_api_checks": 11,
+      "temporary_fleet_fixtures_stopped": true,
+      "completed_transfer_files_removed": true,
+      "legacy_binary_backups_created": false,
+      "default_offline_retention_seconds": 604800,
+      "max_history_records": 1024,
+      "history_page_records": 128,
+      "history_page_bytes": 65536,
+      "pending": [
+        "tw2-ingress",
+        "btower",
+        "UTMOWRT"
+      ],
+      "audit": "benchmark-results/.work/node-lifecycle/audit.jsonl",
+      "summary": "benchmark-results/node-lifecycle-20261118/fleet.json",
+      "recoveries": [
+        "The router's unavailable IPv6 SSH path used its verified Tailscale IPv4 path.",
+        "The router's later direct IPv4 timeout used the verified Tailscale jump route.",
+        "The failed Beijing upload left 2359296 bytes and no writer. The jump route completed replacement.",
+        "The first local lifecycle fixture used an invalid empty tracker list. The corrected fixture passed."
+      ],
+      "limitations": [
+        "History starts with observations from the updated observer.",
+        "Steady observations persist once each minute. Membership and retention changes persist immediately.",
+        "Three historical hosts remain pending. Their migration is not verified.",
+        "The package format check still reports existing differences in peer_conn.rs. Changed files pass.",
+        "Delivery checks use normal transport selection. They do not force each protocol.",
+        "No performance comparison was performed. The packet transport implementation is unchanged."
+      ]
     }
   },
   "pending_historical_hosts": [
@@ -1135,7 +1201,7 @@
       "status": "offline",
       "pending_h2_tcp_proxy": "auto",
       "migration_verified": false,
-      "pending_application_commit": "94cca88a",
+      "pending_application_commit": "eada0e44",
       "pending_quic_tcp_proxy": "auto",
       "tailscale_online": false,
       "tailscale_last_seen": "2026-10-17T08:28:58.1Z",
@@ -1146,7 +1212,7 @@
       "status": "offline",
       "pending_h2_tcp_proxy": "auto",
       "migration_verified": false,
-      "pending_application_commit": "94cca88a",
+      "pending_application_commit": "eada0e44",
       "pending_quic_tcp_proxy": "auto",
       "tailscale_online": false,
       "tailscale_last_seen": "2026-10-27T04:12:15.1Z",
@@ -1430,6 +1496,61 @@
       "The shared-carrier QUIC slow-reader stall remains unresolved.",
       "Three offline historical hosts remain pending.",
       "No matched throughput, CPU, RSS, or artificial-loss experiment was run."
+    ]
+  },
+  "machine_retention_rollout": {
+    "verified_at": "2026-11-17T16:23:43.906845+00:00",
+    "application_commit": "eada0e44",
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "identities_preserved": true,
+    "configuration_preserved": true,
+    "routes_preserved": true,
+    "gui_policy_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "tcp_bytes_per_instance_per_direction": 8388608,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "machine_history_files": 11,
+    "paginated_history_api_checks": 11,
+    "temporary_fleet_fixtures_stopped": true,
+    "completed_transfer_files_removed": true,
+    "legacy_binary_backups_created": false,
+    "default_offline_retention_seconds": 604800,
+    "max_history_records": 1024,
+    "history_page_records": 128,
+    "history_page_bytes": 65536,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "audit": "benchmark-results/.work/node-lifecycle/audit.jsonl",
+    "summary": "benchmark-results/node-lifecycle-20261118/fleet.json",
+    "recoveries": [
+      "The router's unavailable IPv6 SSH path used its verified Tailscale IPv4 path.",
+      "The router's later direct IPv4 timeout used the verified Tailscale jump route.",
+      "The failed Beijing upload left 2359296 bytes and no writer. The jump route completed replacement.",
+      "The first local lifecycle fixture used an invalid empty tracker list. The corrected fixture passed."
+    ],
+    "limitations": [
+      "History starts with observations from the updated observer.",
+      "Steady observations persist once each minute. Membership and retention changes persist immediately.",
+      "Three historical hosts remain pending. Their migration is not verified.",
+      "The package format check still reports existing differences in peer_conn.rs. Changed files pass.",
+      "Delivery checks use normal transport selection. They do not force each protocol.",
+      "No performance comparison was performed. The packet transport implementation is unchanged."
     ]
   }
 }

@@ -1,0 +1,598 @@
+{
+  "rollout": {
+    "verified_at": "2026-11-17T16:23:43.906845+00:00",
+    "application_commit": "eada0e44",
+    "verified_instances": 11,
+    "running_transfer_integrity_checks": 11,
+    "identities_preserved": true,
+    "configuration_preserved": true,
+    "routes_preserved": true,
+    "gui_policy_preserved": true,
+    "mtu_policy_preserved": true,
+    "authenticated_protocols": [
+      "h2",
+      "quic",
+      "wss"
+    ],
+    "full_size_icmp_sent": 55,
+    "full_size_icmp_received": 55,
+    "udp_sent": 165,
+    "udp_received": 165,
+    "tcp_bytes_per_instance_per_direction": 8388608,
+    "keyless_webui_pages": 11,
+    "keyless_json_api_reads": 11,
+    "keyless_json_rpc_reads": 11,
+    "foreign_origin_rejections": 11,
+    "machine_history_files": 11,
+    "paginated_history_api_checks": 11,
+    "temporary_fleet_fixtures_stopped": true,
+    "completed_transfer_files_removed": true,
+    "legacy_binary_backups_created": false,
+    "default_offline_retention_seconds": 604800,
+    "max_history_records": 1024,
+    "history_page_records": 128,
+    "history_page_bytes": 65536,
+    "pending": [
+      "tw2-ingress",
+      "btower",
+      "UTMOWRT"
+    ],
+    "audit": "benchmark-results/.work/node-lifecycle/audit.jsonl",
+    "summary": "benchmark-results/node-lifecycle-20261118/fleet.json",
+    "recoveries": [
+      "The router's unavailable IPv6 SSH path used its verified Tailscale IPv4 path.",
+      "The router's later direct IPv4 timeout used the verified Tailscale jump route.",
+      "The failed Beijing upload left 2359296 bytes and no writer. The jump route completed replacement.",
+      "The first local lifecycle fixture used an invalid empty tracker list. The corrected fixture passed."
+    ],
+    "limitations": [
+      "History starts with observations from the updated observer.",
+      "Steady observations persist once each minute. Membership and retention changes persist immediately.",
+      "Three historical hosts remain pending. Their migration is not verified.",
+      "The package format check still reports existing differences in peer_conn.rs. Changed files pass.",
+      "Delivery checks use normal transport selection. They do not force each protocol.",
+      "No performance comparison was performed. The packet transport implementation is unchanged."
+    ]
+  },
+  "instances": [
+    {
+      "host": "local",
+      "address": "10.126.126.2",
+      "pid": 68524,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.100",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "local",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4530,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "862jp",
+      "address": "10.126.126.82",
+      "pid": 2862135,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "862jp",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4543,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "jpali",
+      "address": "10.126.126.62",
+      "pid": 1968707,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "jpali",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4511,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "s6916",
+      "address": "10.126.126.60",
+      "pid": 973526,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "s6916",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4513,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "yutoms-mcp",
+      "address": "10.126.126.3",
+      "pid": 92538,
+      "mode": "userspace",
+      "configured_mtu": 1280,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "yutoms-mcp",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4529,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "jpaws",
+      "address": "10.126.126.100",
+      "pid": 2505945,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "jpaws",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4518,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "861jp",
+      "address": "10.126.126.81",
+      "pid": 1932616,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "861jp",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4518,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "alibj",
+      "address": "10.126.126.110",
+      "pid": 275423,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.100",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "alibj",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4547,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "hattori-opwrt",
+      "address": "10.126.126.1",
+      "pid": 28656,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.2",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "hattori-opwrt",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4510,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "btrouter",
+      "address": "10.126.126.40",
+      "pid": 8586,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.100",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "btrouter",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4544,
+        "private_permissions": true
+      }
+    },
+    {
+      "host": "la",
+      "address": "10.126.126.87",
+      "pid": 389016,
+      "mode": "kernel",
+      "configured_mtu": 1300,
+      "effective_mtu": 1280,
+      "running_transfer_integrity": true,
+      "identity_preserved": true,
+      "configuration_preserved": true,
+      "protocols": [
+        "h2",
+        "quic",
+        "wss"
+      ],
+      "tcp_download_bytes": 8388608,
+      "tcp_upload_bytes": 8388608,
+      "application_source": "10.126.126.100",
+      "full_size_icmp_received": 5,
+      "udp": [
+        {
+          "udp_payload_bytes": 64,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1160,
+          "sent": 5,
+          "received": 5
+        },
+        {
+          "udp_payload_bytes": 1252,
+          "sent": 5,
+          "received": 5
+        }
+      ],
+      "fixture_stopped": true,
+      "transfer_files_removed": true,
+      "machine_history": {
+        "host": "la",
+        "ui_options": true,
+        "snapshot_history": true,
+        "paginated_api": true,
+        "history_file": true,
+        "history_records": 10,
+        "file_bytes": 4551,
+        "private_permissions": true
+      }
+    }
+  ]
+}
