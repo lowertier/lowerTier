@@ -168,6 +168,7 @@ impl InterfaceInner {
     }
 
     /// Get the first link-local IPv6 address of the interface, if present.
+    #[cfg(feature = "multicast")]
     fn link_local_ipv6_address(&self) -> Option<Ipv6Address> {
         self.ip_addrs.iter().find_map(|addr| match *addr {
             #[cfg(feature = "proto-ipv4")]
@@ -188,7 +189,7 @@ impl InterfaceInner {
         &mut self,
         sockets: &mut SocketSet,
         meta: PacketMeta,
-        source_hardware_addr: HardwareAddress,
+        _source_hardware_addr: HardwareAddress,
         ipv6_packet: &Ipv6Packet<&'frame [u8]>,
     ) -> Option<Packet<'frame>> {
         let ipv6_repr = check!(Ipv6Repr::parse(ipv6_packet));
@@ -245,7 +246,7 @@ impl InterfaceInner {
         if ipv6_repr.dst_addr.x_is_unicast() {
             self.neighbor_cache.reset_expiry_if_existing(
                 IpAddress::Ipv6(ipv6_repr.src_addr),
-                source_hardware_addr,
+                _source_hardware_addr,
                 self.now,
             );
         }
@@ -533,6 +534,7 @@ impl InterfaceInner {
         ))
     }
 
+    #[cfg(feature = "multicast")]
     pub(super) fn mldv2_report_packet<'any>(
         &self,
         records: &'any [MldAddressRecordRepr<'any>],

@@ -435,6 +435,7 @@ impl TrafficMetricRecorder {
 
     /// Fast path for the direct NIC receive loop. Returns true when the peer
     /// counter cache is warm and no async instance lookup is required.
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn try_record_rx_batch(
         &self,
         peer_id: PeerId,

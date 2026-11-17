@@ -505,6 +505,7 @@ impl std::fmt::Debug for ReusableBufferPool {
 }
 
 impl ReusableBufferPool {
+    #[cfg(any(feature = "tun", test))]
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn new(buffer_len: usize, buffer_count: usize) -> Self {
         assert!(buffer_len > 0);
@@ -524,11 +525,13 @@ impl ReusableBufferPool {
         }
     }
 
+    #[cfg(any(feature = "tun", test))]
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn try_take(&self) -> Option<BytesMut> {
         self.inner.buffers.pop()
     }
 
+    #[cfg(any(feature = "tun", test))]
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn take_or_allocate(&self) -> BytesMut {
         // Receive APIs expose slices before writing. Recycling can restore the full slab length.
@@ -858,6 +861,7 @@ impl ZCPacket {
         packet
     }
 
+    #[cfg(any(feature = "tun", test))]
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", test))]
     pub(crate) fn new_from_reusable_buf(
         buf: BytesMut,
@@ -901,6 +905,7 @@ impl ZCPacket {
         ret
     }
 
+    #[cfg(any(feature = "smoltcp", test))]
     pub(crate) fn new_with_payload_len(payload_len: usize) -> Self {
         let mut ret = Self::new_nic_packet();
         let payload_off = ret.packet_type.get_packet_offsets().payload_offset;

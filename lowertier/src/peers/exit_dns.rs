@@ -7,18 +7,20 @@ use std::{
 use anyhow::{Context, ensure};
 use tokio::sync::Semaphore;
 
+#[cfg(any(feature = "socks5", test))]
+use crate::proto::peer_rpc::ExitDnsRpcClientFactory;
 use crate::{
     common::global_ctx::ArcGlobalCtx,
     proto::{
         peer_rpc::{
-            ExitDnsRequest, ExitDnsResponse, ExitDnsRpc, ExitDnsRpcClientFactory, PeerIdentityType,
-            SecureAuthLevel,
+            ExitDnsRequest, ExitDnsResponse, ExitDnsRpc, PeerIdentityType, SecureAuthLevel,
         },
         rpc_types::{controller::BaseController, error},
     },
 };
 
 impl super::peer_manager::PeerManager {
+    #[cfg(any(feature = "socks5", test))]
     pub(crate) fn resolve_proxy_domain(
         &self,
         name: String,

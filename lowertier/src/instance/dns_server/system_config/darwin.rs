@@ -10,7 +10,6 @@ use super::{OSConfig, SystemConfig};
 
 const MAC_RESOLVER_FILE_HEADER: &str = "# Added by lowertier\n";
 const ETC_RESOLVER: &str = "/etc/resolver";
-const ETC_RESOLV_CONF: &str = "/etc/resolv.conf";
 
 #[derive(Default)]
 pub struct DarwinConfigurator {}

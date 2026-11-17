@@ -4178,6 +4178,7 @@ impl PeerConn {
         }
     }
 
+    #[cfg(any(feature = "socks5", test))]
     pub(crate) fn select_tcp_proxy(
         &self,
     ) -> std::io::Result<Option<Arc<crate::tunnel::stream_proxy::ProxyEndpoint>>> {
@@ -4316,7 +4317,7 @@ impl PeerConn {
                                 occupancy_packets: snapshot
                                     .occupancy_packets
                                     .min(u64::from(u32::MAX)) as u32,
-                                capacity_packets: super::direct_nic::DIRECT_NIC_QUEUE_PACKET_CAPACITY
+                                capacity_packets: super::DIRECT_NIC_QUEUE_PACKET_CAPACITY
                                     .min(u32::MAX as usize) as u32,
                                 stall_ns: snapshot.stall_ns,
                             };
@@ -4747,11 +4748,6 @@ impl PeerConn {
             .filter(|sample| sample.is_fresh(now))
             .as_ref()
             .copied()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_latency_for_test(&self, latency_us: u32) {
-        self.latency_stats.record_latency(latency_us);
     }
 
     fn store_speed_sample(&self, sample: SpeedSample) {

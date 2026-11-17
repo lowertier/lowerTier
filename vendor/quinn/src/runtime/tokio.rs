@@ -14,9 +14,6 @@ use tokio::{
 
 use super::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPollHelper};
 
-#[cfg(target_os = "macos")]
-mod darwin_send;
-
 /// A Quinn runtime for Tokio
 #[derive(Debug)]
 pub struct TokioRuntime;
@@ -56,8 +53,6 @@ struct UdpSocket {
     // new socket, so it obtains fresh state without querying the kernel per packet.
     #[cfg(target_os = "macos")]
     connected: bool,
-    #[cfg(target_os = "macos")]
-    batch_segments: usize,
 }
 
 impl UdpSocket {
@@ -65,12 +60,6 @@ impl UdpSocket {
         Ok(Self {
             #[cfg(target_os = "macos")]
             connected: sock.peer_addr().is_ok(),
-            #[cfg(target_os = "macos")]
-            batch_segments: std::env::var("LOWTIER_DARWIN_UDP_BATCH_SEGMENTS")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|value| (1..=darwin_send::BATCH_SIZE).contains(value))
-                .unwrap_or(1),
             inner: udp::UdpSocketState::new((&sock).into())?,
             io: tokio::net::UdpSocket::from_std(sock)?,
         })
@@ -99,17 +88,6 @@ impl AsyncUdpSocket for UdpSocket {
     }
 
     fn try_send_partial(&self, transmit: &udp::Transmit) -> io::Result<usize> {
-        #[cfg(target_os = "macos")]
-        if self.connected && transmit.segment_size.is_some() {
-            use std::os::fd::AsRawFd;
-            let result = self.io.try_io(Interest::WRITABLE, || {
-                darwin_send::send(self.io.as_raw_fd(), transmit)
-            });
-            match result {
-                Err(ref error) if matches!(error.raw_os_error(), Some(22 | 40 | 45)) => {}
-                result => return result,
-            }
-        }
         if let Some(segment) = transmit.segment_size {
             if self.max_transmit_segments() == 1
                 && segment != 0
@@ -129,10 +107,6 @@ impl AsyncUdpSocket for UdpSocket {
     }
 
     fn max_batch_segments(&self) -> usize {
-        #[cfg(target_os = "macos")]
-        if self.connected {
-            return self.batch_segments;
-        }
         1
     }
 
@@ -202,7 +176,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn connected_batch_delivers_separate_datagrams_and_short_tail() {
+    async fn connected_segments_deliver_separate_datagrams_and_short_tail() {
         let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let destination = receiver.local_addr().unwrap();
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

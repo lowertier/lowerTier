@@ -1,0 +1,67 @@
+[
+  {
+    "label": "quic-on-minimal",
+    "protocol": "quic",
+    "mode": "on",
+    "client_features": "socks5",
+    "server_features": "minimal",
+    "tun_compiled": false,
+    "download_bytes": 4194304,
+    "upload_bytes": 4194304,
+    "authenticated": true,
+    "native_selections": 2,
+    "packet_selections": 0
+  },
+  {
+    "label": "h2-on-minimal",
+    "protocol": "h2",
+    "mode": "on",
+    "client_features": "socks5",
+    "server_features": "minimal",
+    "tun_compiled": false,
+    "download_bytes": 4194304,
+    "upload_bytes": 4194304,
+    "authenticated": true,
+    "native_selections": 2,
+    "packet_selections": 0
+  },
+  {
+    "label": "quic-off-socks",
+    "protocol": "quic",
+    "mode": "off",
+    "client_features": "socks5",
+    "server_features": "socks",
+    "tun_compiled": false,
+    "download_bytes": 4194304,
+    "upload_bytes": 4194304,
+    "authenticated": true,
+    "native_selections": 0,
+    "packet_selections": 2
+  },
+  {
+    "label": "h2-off-socks",
+    "protocol": "h2",
+    "mode": "off",
+    "client_features": "socks5",
+    "server_features": "socks",
+    "tun_compiled": false,
+    "download_bytes": 4194304,
+    "upload_bytes": 4194304,
+    "authenticated": true,
+    "native_selections": 0,
+    "packet_selections": 2
+  },
+  {
+    "label": "wss-off-socks",
+    "protocol": "wss",
+    "mode": "off",
+    "client_features": "socks5",
+    "server_features": "socks",
+    "tun_compiled": false,
+    "download_bytes": 4194304,
+    "upload_bytes": 4194304,
+    "authenticated": true,
+    "native_selections": 0,
+    "packet_selections": 0
+  }
+]

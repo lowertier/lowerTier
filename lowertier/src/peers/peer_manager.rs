@@ -1,3 +1,4 @@
+#[cfg(any(feature = "tun", test))]
 use super::direct_nic::{
     DirectNicBatchWriter, DirectNicEndpoint, DirectNicIngress, plan_direct_nic_delivery,
 };
@@ -30,6 +31,8 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(any(feature = "tun", test))]
+use crate::tunnel::PacketBatchSink;
 use crate::{
     common::{
         PeerId,
@@ -74,7 +77,7 @@ use crate::{
         },
     },
     tunnel::{
-        PacketBatchSink, Tunnel, TunnelConnector, TunnelError,
+        Tunnel, TunnelConnector, TunnelError,
         batch::{MAX_PACKET_BATCH_SIZE, PacketBatch},
         packet_def::{PEER_MANAGER_HEADER_SIZE, PacketType, ZCPacket},
     },
@@ -165,8 +168,10 @@ fn ordered_probe_indexes(candidates: &[(PeerId, PeerConnId, bool)], rotation: us
     indexes
 }
 
+#[cfg(any(feature = "tun", test))]
+use super::PacketRecvChan;
 use super::{
-    BoxNicPacketFilter, BoxPeerPacketFilter, PacketRecvChan, PacketRecvChanReceiver,
+    BoxNicPacketFilter, BoxPeerPacketFilter, PacketRecvChanReceiver,
     foreign_network_client::ForeignNetworkClient,
     foreign_network_manager::{ForeignNetworkManager, GlobalForeignNetworkAccessor},
     peer_conn::PeerConnId,
@@ -685,6 +690,7 @@ where
 /// Multipath packets require ordered delivery through the receive loop.
 /// Other batches require one source, a local destination, and decoded payloads.
 /// Ethernet batches also require TAP support and complete Ethernet metadata.
+#[cfg(any(feature = "tun", test))]
 pub(super) fn inspect_direct_nic_batch<F>(
     batch: &PacketBatch,
     my_peer_id: PeerId,
@@ -827,7 +833,9 @@ pub struct PeerManager {
     my_peer_id: PeerId,
 
     global_ctx: ArcGlobalCtx,
+    #[cfg(any(feature = "tun", test))]
     packet_ingress: PacketRecvChan,
+    #[cfg(any(feature = "tun", test))]
     direct_nic_writer: Arc<DirectNicBatchWriter>,
 
     tasks: Mutex<JoinSet<()>>,
@@ -1303,6 +1311,7 @@ impl PeerManager {
         let my_peer_id = rand::random();
 
         let (packet_send, packet_recv) = super::create_packet_recv_chan();
+        #[cfg(any(feature = "tun", test))]
         let packet_ingress = packet_send.clone();
         let peers = Arc::new(PeerMap::new(
             packet_send.clone(),
@@ -1462,7 +1471,9 @@ impl PeerManager {
             my_peer_id,
 
             global_ctx,
+            #[cfg(any(feature = "tun", test))]
             packet_ingress,
+            #[cfg(any(feature = "tun", test))]
             direct_nic_writer: Arc::new(DirectNicBatchWriter::default()),
 
             tasks: Mutex::new(JoinSet::new()),
@@ -2992,6 +3003,7 @@ impl PeerManager {
         }
 
         struct NicPacketProcessor {
+            #[cfg(any(feature = "tun", test))]
             nic: Arc<DirectNicBatchWriter>,
             l2_fabric: Arc<L2Fabric>,
             peers: Arc<PeerMap>,
@@ -3007,16 +3019,20 @@ impl PeerManager {
             ///
             /// A missing endpoint means that the NIC is stopped. Drop those packets.
             /// The writer applies its queue limit and preserves batch order.
-            async fn send(&self, batch: PacketBatch) {
-                let Some(endpoint) = self.nic.current_endpoint() else {
-                    return;
-                };
-                let result = match plan_direct_nic_delivery(batch) {
-                    Ok(delivery) => DirectNicBatchWriter::send_to(endpoint, delivery).await,
-                    Err(error) => Err(error),
-                };
-                if let Err(error) = result {
-                    tracing::error!(?error, "send packet batch to NIC failed");
+            /// Builds without TUN retain admission checks and discard accepted packets.
+            async fn send(&self, _batch: PacketBatch) {
+                #[cfg(any(feature = "tun", test))]
+                {
+                    let Some(endpoint) = self.nic.current_endpoint() else {
+                        return;
+                    };
+                    let result = match plan_direct_nic_delivery(_batch) {
+                        Ok(delivery) => DirectNicBatchWriter::send_to(endpoint, delivery).await,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        tracing::error!(?error, "send packet batch to NIC failed");
+                    }
                 }
             }
 
@@ -3205,6 +3221,7 @@ impl PeerManager {
             }
         }
         self.add_packet_process_pipeline(Box::new(NicPacketProcessor {
+            #[cfg(any(feature = "tun", test))]
             nic: self.direct_nic_writer.clone(),
             l2_fabric: self.l2_fabric.clone(),
             peers: self.peers.clone(),
@@ -3796,6 +3813,7 @@ impl PeerManager {
     ///
     /// Matching traffic must use the path planner.
     /// Inactive policy, missing forwarding state, and unmatched peers return false.
+    #[cfg(any(feature = "socks5", test))]
     pub(crate) fn path_applies_to(&self, dst_peer_id: PeerId) -> bool {
         if !self.paths.is_active() {
             return false;
@@ -5561,6 +5579,7 @@ impl PeerManager {
         )
     }
 
+    #[cfg(any(feature = "socks5", test))]
     pub(crate) async fn proxy_dns_exit(&self, connection: u64) -> Result<Option<PeerId>, Error> {
         // DNS has no destination address yet. Use the default IPv4 route to select its exit.
         let plan = self
@@ -6467,6 +6486,7 @@ impl PeerManager {
         &self.global_ctx
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn install_direct_nic_sink(
         &self,
         sink: std::pin::Pin<Box<dyn PacketBatchSink>>,
@@ -6493,17 +6513,23 @@ impl PeerManager {
             .install(sink, self.global_ctx.clone())
     }
 
-    pub(crate) async fn inject_packet_to_nic(
-        &self,
-        mut packet: ZCPacket,
-    ) -> Result<(), TunnelError> {
-        let endpoint = self
-            .direct_nic_writer
-            .current_endpoint()
-            .ok_or(TunnelError::Shutdown)?;
-        stamp_critical_l2_control(&mut packet);
-        let delivery = plan_direct_nic_delivery(PacketBatch::singleton(packet))?;
-        DirectNicBatchWriter::send_to(endpoint, delivery).await
+    pub(crate) async fn inject_packet_to_nic(&self, packet: ZCPacket) -> Result<(), TunnelError> {
+        #[cfg(any(feature = "tun", test))]
+        {
+            let endpoint = self
+                .direct_nic_writer
+                .current_endpoint()
+                .ok_or(TunnelError::Shutdown)?;
+            let mut packet = packet;
+            stamp_critical_l2_control(&mut packet);
+            let delivery = plan_direct_nic_delivery(PacketBatch::singleton(packet))?;
+            DirectNicBatchWriter::send_to(endpoint, delivery).await
+        }
+        #[cfg(not(any(feature = "tun", test)))]
+        {
+            drop(packet);
+            Err(TunnelError::Shutdown)
+        }
     }
 
     pub fn get_foreign_network_manager(&self) -> Arc<ForeignNetworkManager> {

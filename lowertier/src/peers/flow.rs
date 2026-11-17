@@ -415,6 +415,7 @@ pub(crate) fn classify_payload_flow(payload: &[u8], packet_type: u8) -> PacketFl
     }
 }
 
+#[cfg(any(feature = "tun", test))]
 pub(crate) fn classify_nic_packet_flow(packet: &ZCPacket, ethernet: bool) -> PacketFlow {
     if let Some(hash) = packet.flow_hash() {
         return PacketFlow {

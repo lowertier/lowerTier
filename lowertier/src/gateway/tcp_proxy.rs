@@ -258,6 +258,7 @@ pub struct TcpProxy {
     cidr_set: Arc<CidrSet>,
 
     smoltcp_stack_sender: Option<mpsc::Sender<ZCPacket>>,
+    #[cfg(feature = "smoltcp")]
     smoltcp_stack_receiver: Arc<Mutex<Option<mpsc::Receiver<ZCPacket>>>>,
     #[cfg(feature = "smoltcp")]
     smoltcp_net: Arc<Mutex<Option<Net>>>,
@@ -423,6 +424,7 @@ impl TcpProxy {
     }
 
     pub fn new(peer_manager: Arc<PeerManager>) -> Arc<Self> {
+        #[cfg(feature = "smoltcp")]
         let (smoltcp_stack_sender, smoltcp_stack_receiver) = mpsc::channel::<ZCPacket>(1000);
         let global_ctx = peer_manager.get_global_ctx();
 
@@ -439,7 +441,11 @@ impl TcpProxy {
 
             cidr_set: CidrSet::new(global_ctx),
 
+            #[cfg(feature = "smoltcp")]
             smoltcp_stack_sender: Some(smoltcp_stack_sender),
+            #[cfg(not(feature = "smoltcp"))]
+            smoltcp_stack_sender: None,
+            #[cfg(feature = "smoltcp")]
             smoltcp_stack_receiver: Arc::new(Mutex::new(Some(smoltcp_stack_receiver))),
 
             #[cfg(feature = "smoltcp")]
@@ -447,7 +453,7 @@ impl TcpProxy {
             #[cfg(feature = "smoltcp")]
             smoltcp_listener_tx: std::sync::Mutex::new(None),
 
-            enable_smoltcp: Arc::new(AtomicBool::new(true)),
+            enable_smoltcp: Arc::new(AtomicBool::new(cfg!(feature = "smoltcp"))),
             runtime_started: AtomicBool::new(false),
             runtime_lock: Mutex::new(()),
         })
@@ -882,6 +888,7 @@ impl TcpProxy {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "smoltcp")]
     pub fn get_local_ip(&self) -> Option<Ipv4Addr> {
         self.get_local_inet().map(|inet| inet.address())
     }

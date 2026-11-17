@@ -280,9 +280,8 @@ https://web.invalid:{web_port}, https://{HOST}:{web_port} {{
             }
             servers.abort_all();
             while let Some(result) = servers.join_next().await {
-                if let Err(error) = result {
-                    assert!(error.is_cancelled());
-                }
+                let Err(error) = result;
+                assert!(error.is_cancelled());
             }
         })
         .await

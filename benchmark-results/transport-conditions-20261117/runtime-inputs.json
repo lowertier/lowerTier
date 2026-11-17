@@ -1,0 +1,60 @@
+{
+  "nodes": [
+    {
+      "host": "s6916",
+      "pid": 939452,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "jpali",
+      "pid": 1938659,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "local",
+      "pid": 54694,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "jpaws",
+      "pid": 2466077,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "862jp",
+      "pid": 2816294,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "861jp",
+      "pid": 1914638,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "hattori-opwrt",
+      "pid": 327,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "yutoms-mcp",
+      "pid": 31309,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "la",
+      "pid": 377119,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "btrouter",
+      "pid": 1903,
+      "experimental_inputs": {}
+    },
+    {
+      "host": "alibj",
+      "pid": 272248,
+      "experimental_inputs": {}
+    }
+  ],
+  "failures": []
+}

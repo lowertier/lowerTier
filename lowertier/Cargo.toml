@@ -1,7 +1,6 @@
 [package]
 name = "lowertier"
 description = "A secure peer-to-peer Layer 2 VPN with routed and userspace modes."
-homepage = "https://github.com/lowertier/lowertier"
 repository = "https://github.com/lowertier/lowertier"
 version.workspace = true
 edition.workspace = true

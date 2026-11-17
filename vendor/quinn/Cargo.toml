@@ -250,9 +250,6 @@ default-features = false
 [dev-dependencies.url]
 version = "2"
 
-[build-dependencies.cfg_aliases]
-version = "0.2"
-
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.web-time]
 version = "1"
 

@@ -26,14 +26,15 @@ inline. GRO scratch storage halves after 30 seconds of sustained low utilization
 never below one full GRO message; full batches grow it immediately again. This
 does not change flow-control windows or socket-buffer limits.
 
-Connected Darwin sockets can submit up to 16 already paced segments with `sendmsg_x`.
-This path is opt-in through `LOWTIER_DARWIN_UDP_BATCH_SEGMENTS=2..16`;
-the default is one segment after repeated Mac-to-JP-AWS uploads regressed with 16.
-Each segment remains a separate UDP datagram. Partial submissions retain their
-unsent suffix in the connection's existing transmit buffer; unsupported batch
-operations fall back to individual datagrams. Packet generation still uses
-Quinn's congestion, pacing, MTU, and amplification checks. The receive `ios`
-counter counts protocol packet handling, not actual receive syscalls.
+Connected Darwin sockets send one segment at a time.
+The November 17, 2026 cleanup removes the experimental `sendmsg_x` path and its
+`LOWTIER_DARWIN_UDP_BATCH_SEGMENTS` selector.
+Repeated Mac-to-JP-AWS uploads had regressed with 16 segments.
+The retained single-segment path matches the selected default.
+Each segment remains a separate UDP datagram.
+Partial submissions retain the unsent suffix in the existing transmit buffer.
+Packet generation retains Quinn's congestion, pacing, MTU, and amplification checks.
+The receive `ios` counter counts protocol packet handling, not receive syscalls.
 
 ## QUIC migration policy
 

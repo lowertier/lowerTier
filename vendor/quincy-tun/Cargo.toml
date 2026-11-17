@@ -7,7 +7,6 @@ authors = ["quincy-rs", "tun-rs contributors"]
 license = "Apache-2.0"
 readme = "README.md"
 description = "Cross-platform async TUN library for Quincy"
-homepage = "https://github.com/quincy-rs/quincy-tun"
 repository = "https://github.com/quincy-rs/quincy-tun"
 keywords = ["tun", "tunnel", "vpn"]
 categories = ["asynchronous", "network-programming"]

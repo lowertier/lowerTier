@@ -16,9 +16,6 @@ use tokio::io::{Interest, unix::AsyncFd};
 
 pub(super) fn default_runtime() -> Option<Arc<dyn quinn::Runtime>> {
     tokio::runtime::Handle::try_current().ok()?;
-    if std::env::var_os("LOWTIER_QUIC_DISABLE_PRECISE_TIMER").is_some() {
-        return Some(Arc::new(quinn::TokioRuntime));
-    }
     Some(Arc::new(Runtime))
 }
 

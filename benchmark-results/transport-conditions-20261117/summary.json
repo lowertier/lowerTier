@@ -1,0 +1,46 @@
+{
+  "created_at": "2026-11-17T08:08:25.783177+00:00",
+  "removed_runtime_selectors": [
+    "LOWTIER_QUIC_CONGESTION",
+    "LOWTIER_QUIC_PACING_BURST_PACKETS",
+    "LOWTIER_QUIC_DISABLE_PRECISE_TIMER",
+    "LOWTIER_DARWIN_UDP_BATCH_SEGMENTS"
+  ],
+  "retained_runtime_selectors": [
+    "LOWTIER_ENABLE_TCP_LARGE_BUFFERS",
+    "LOWTIER_QUIC_STATS_INTERVAL_MS"
+  ],
+  "production_feature_checks": 8,
+  "production_feature_rust_warnings": 0,
+  "standalone_ip_test_fixture_warnings": 17,
+  "linux_linker_warning": "ignoring deprecated linker optimization setting \"1\"",
+  "library_tests_passed": 569,
+  "caddy_tests_passed": 2,
+  "quinn_runtime_tests_passed": 3,
+  "release_targets_passed": 3,
+  "no_tun_runtime_cases_passed": 5,
+  "runtime_bytes_per_case_per_direction": 4194304,
+  "multicast_refresh_runs_without_debug_assertions": true,
+  "transport_resource_limits_changed": false,
+  "application_data_replayed": false,
+  "new_multiplexer_added": false,
+  "backward_compatibility_paths_added": false,
+  "performance_gain_measured": false,
+  "source_review_complete": true,
+  "untested_platforms": [
+    "Windows",
+    "iOS",
+    "FreeBSD"
+  ],
+  "report": "docs/performance/transport-conditions-20261117.md",
+  "audit": "benchmark-results/.work/transport-conditions-20261117/audit.jsonl",
+  "limitations": [
+    "Standalone smoltcp IP-only tests retain unused fixture warnings.",
+    "Linux cross links retain one deprecated optimization warning per target.",
+    "Two public-domain probes were excluded.",
+    "Production minimal outbound H3 client runtime was not separately exercised.",
+    "Not every no-TUN NIC error branch was exercised at runtime.",
+    "The QUIC shared-carrier slow-reader stall remains unresolved.",
+    "No matched throughput, CPU, or RSS comparison was run."
+  ]
+}

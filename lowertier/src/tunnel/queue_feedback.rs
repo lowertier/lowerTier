@@ -1,7 +1,6 @@
-use std::{
-    sync::{Arc, Weak},
-    time::Duration,
-};
+use std::sync::{Arc, Weak};
+#[cfg(any(feature = "tun", test))]
+use std::time::Duration;
 
 /// One NIC flow follows its current transport without retaining the connection.
 #[derive(Debug, Default)]
@@ -56,6 +55,7 @@ impl FlowQueueFeedback {
         }
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn snapshot(&self) -> (Duration, bool) {
         let mut current = self.queue.lock();
         let Some(queue) = current.0.upgrade() else {

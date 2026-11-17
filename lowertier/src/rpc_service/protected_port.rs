@@ -82,6 +82,7 @@ fn open_gui_port_file(port: u16, create: bool) -> std::io::Result<std::fs::File>
     Ok(file)
 }
 
+#[cfg(any(feature = "gui", test))]
 pub fn protect_gui_port(port: u16) -> std::io::Result<GuiPortGuard> {
     let file = open_gui_port_file(port, true)?;
     file.try_lock()?;

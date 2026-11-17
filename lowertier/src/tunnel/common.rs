@@ -1052,9 +1052,6 @@ fn setup_socket2_ext(
         }
     }
 
-    // #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-    // socket2_socket.set_reuse_port(true)?;
-
     if bind_addr.ip().is_unspecified() {
         return Ok(());
     }

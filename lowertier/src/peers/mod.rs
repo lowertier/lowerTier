@@ -1,3 +1,4 @@
+#[cfg(any(feature = "tun", test))]
 pub(crate) mod direct_nic;
 pub(crate) mod exit_dns;
 mod graph_algo;
@@ -26,7 +27,9 @@ pub mod service_route;
 pub(crate) mod speed_probe;
 pub(crate) mod traffic_metrics;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(any(feature = "tun", test))]
+use std::sync::OnceLock;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
@@ -112,9 +115,13 @@ type BoxNicPacketFilter = Box<dyn NicPacketFilter + Send + Sync>;
 pub struct PacketRecvChan {
     sender: tokio::sync::mpsc::Sender<QueuedPacketBatch>,
     queue_credits: Arc<Semaphore>,
+    #[cfg(any(feature = "tun", test))]
     direct_nic: Arc<OnceLock<Arc<direct_nic::DirectNicIngress>>>,
 }
 
+const DIRECT_NIC_QUEUE_BATCH_CAPACITY: usize = 3;
+const DIRECT_NIC_QUEUE_PACKET_CAPACITY: usize =
+    crate::tunnel::batch::MAX_PACKET_BATCH_SIZE * DIRECT_NIC_QUEUE_BATCH_CAPACITY;
 const PACKET_QUEUE_BATCH_CAPACITY: usize = 32;
 const PACKET_QUEUE_PACKET_CAPACITY: usize = 128;
 const PACKET_QUEUE_SLOT_BYTES: usize = 4 * 1024;
@@ -163,14 +170,14 @@ impl PacketRecvChan {
         if batch.is_empty() {
             return Ok(());
         }
-        let mut batch = if let Some(direct_nic) = self.direct_nic.get() {
-            match direct_nic.try_process(batch).await {
+        let mut batch = batch;
+        #[cfg(any(feature = "tun", test))]
+        if let Some(direct_nic) = self.direct_nic.get() {
+            batch = match direct_nic.try_process(batch).await {
                 Ok(()) => return Ok(()),
                 Err(batch) => batch,
-            }
-        } else {
-            batch
-        };
+            };
+        }
         let Some(credit_count) = queue_credit_count(&mut batch) else {
             tracing::warn!(
                 packets = batch.len(),
@@ -204,6 +211,7 @@ impl PacketRecvChan {
             })
     }
 
+    #[cfg(any(feature = "tun", test))]
     fn install_direct_nic(&self, ingress: Arc<direct_nic::DirectNicIngress>) {
         let _ = self.direct_nic.set(ingress);
     }
@@ -311,11 +319,13 @@ impl PacketRecvChanReceiver {
 pub fn create_packet_recv_chan() -> (PacketRecvChan, PacketRecvChanReceiver) {
     let (sender, receiver) = tokio::sync::mpsc::channel(PACKET_QUEUE_BATCH_CAPACITY);
     let queue_credits = Arc::new(Semaphore::new(PACKET_QUEUE_CREDIT_BYTES));
+    #[cfg(any(feature = "tun", test))]
     let direct_nic = Arc::new(OnceLock::new());
     (
         PacketRecvChan {
             sender,
             queue_credits,
+            #[cfg(any(feature = "tun", test))]
             direct_nic,
         },
         PacketRecvChanReceiver {

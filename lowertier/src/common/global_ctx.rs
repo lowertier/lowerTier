@@ -1,3 +1,5 @@
+#[cfg(any(feature = "tun", test))]
+use std::time::Duration;
 use std::{
     collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
     hash::Hasher,
@@ -6,7 +8,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use arc_swap::ArcSwap;
@@ -433,6 +435,7 @@ impl TrustedKeyMapManager {
 #[derive(Default)]
 struct TunDeviceState {
     name: Option<String>,
+    #[cfg(any(feature = "tun", test))]
     writer_generation: u64,
     #[cfg(feature = "packet-tunnel")]
     packet_flow_owned: bool,
@@ -564,6 +567,7 @@ struct MulticastMembershipState {
     group_refcounts: HashMap<IpAddr, usize>,
     deadline_index: BTreeSet<(Instant, MulticastMembershipKey)>,
     next_expiry: Option<Instant>,
+    #[cfg(any(feature = "tun", test))]
     expiry_notify: Arc<tokio::sync::Notify>,
     work: MulticastMembershipWorkCounters,
 }
@@ -576,6 +580,7 @@ impl MulticastMembershipState {
             group_refcounts: HashMap::new(),
             deadline_index: BTreeSet::new(),
             next_expiry: None,
+            #[cfg(any(feature = "tun", test))]
             expiry_notify: Arc::new(tokio::sync::Notify::new()),
             work: MulticastMembershipWorkCounters::default(),
         }
@@ -609,6 +614,7 @@ impl MulticastMembershipState {
         }
     }
 
+    #[cfg(any(feature = "tun", test))]
     fn increment_group_refcount(&mut self, group: IpAddr) -> bool {
         let count = self.group_refcounts.entry(group).or_insert(0);
         self.work.group_refcount_updates += 1;
@@ -642,6 +648,7 @@ impl MulticastMembershipState {
         groups_changed
     }
 
+    #[cfg(any(feature = "tun", test))]
     fn refresh_membership_deadline(
         &mut self,
         key: MulticastMembershipKey,
@@ -662,6 +669,7 @@ impl MulticastMembershipState {
         true
     }
 
+    #[cfg(any(feature = "tun", test))]
     fn remove_membership(&mut self, key: MulticastMembershipKey) -> bool {
         let Some(entry) = self.memberships.remove(&key) else {
             return false;
@@ -671,6 +679,7 @@ impl MulticastMembershipState {
         crossed_one && !self.configured_groups.contains(&key.group)
     }
 
+    #[cfg(any(feature = "tun", test))]
     fn evict_oldest(&mut self) -> Option<(IpAddr, bool)> {
         while let Some((deadline, key)) = self.deadline_index.pop_first() {
             self.work.deadline_index_pops += 1;
@@ -693,7 +702,9 @@ impl MulticastMembershipState {
     }
 }
 
+#[cfg(any(feature = "tun", test))]
 pub(crate) const MAX_MULTICAST_MEMBERSHIPS: usize = 4096;
+#[cfg(any(feature = "tun", test))]
 pub(crate) const MULTICAST_MEMBERSHIP_TTL: Duration = Duration::from_secs(260);
 
 impl GlobalCtx {
@@ -930,15 +941,18 @@ impl GlobalCtx {
         self.control_generation.load(Ordering::Acquire)
     }
 
+    #[cfg(any(feature = "tun", test))]
     fn set_tun_device_name(&self, name: Option<String>) {
         self.tun_device.lock().unwrap().name = name;
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn set_tun_device_ready(&self, name: String) {
         self.set_tun_device_name(Some(name.clone()));
         self.issue_event(GlobalCtxEvent::TunDeviceReady(name));
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn set_tun_device_error(&self, error: String) {
         self.set_tun_device_name(None);
         self.issue_event(GlobalCtxEvent::TunDeviceError(error));
@@ -948,12 +962,14 @@ impl GlobalCtx {
         self.tun_device.lock().unwrap().name.clone()
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn begin_tun_writer(&self) -> u64 {
         let mut device = self.tun_device.lock().unwrap();
         device.writer_generation = device.writer_generation.wrapping_add(1);
         device.writer_generation
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn set_tun_writer_error(&self, generation: u64, error: String) -> bool {
         let mut device = self.tun_device.lock().unwrap();
         if device.writer_generation != generation {
@@ -1016,6 +1032,7 @@ impl GlobalCtx {
     }
 
     /// Updates a batch of reporter memberships while holding each state lock once.
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn update_multicast_memberships(
         &self,
         updates: &[(MulticastReporterKey, IpAddr, bool)],
@@ -1037,7 +1054,8 @@ impl GlobalCtx {
                 let key = MulticastMembershipKey { reporter, group };
                 if joined {
                     if state.memberships.contains_key(&key) {
-                        debug_assert!(state.refresh_membership_deadline(key, deadline));
+                        let refreshed = state.refresh_membership_deadline(key, deadline);
+                        debug_assert!(refreshed);
                     } else {
                         while state.memberships.len() >= MAX_MULTICAST_MEMBERSHIPS {
                             let Some((evicted_group, crossed_one)) = state.evict_oldest() else {
@@ -1068,6 +1086,7 @@ impl GlobalCtx {
     }
 
     /// Removes expired reporter entries and returns whether advertised groups changed.
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn expire_multicast_memberships(&self, now: Instant) -> bool {
         let (changed, expiry_notify) = {
             let mut state = self.multicast_membership_state.lock().unwrap();
@@ -1081,10 +1100,12 @@ impl GlobalCtx {
         changed
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn multicast_membership_next_expiry(&self) -> Option<Instant> {
         self.multicast_membership_state.lock().unwrap().next_expiry
     }
 
+    #[cfg(any(feature = "tun", test))]
     pub(crate) fn multicast_membership_notify(&self) -> Arc<tokio::sync::Notify> {
         let notify = self
             .multicast_membership_state
@@ -1798,6 +1819,30 @@ pub mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn repeated_multicast_reports_refresh_the_expiry_deadline() {
+        let context = get_mock_global_ctx_with_network(None);
+        let group: IpAddr = "239.1.2.3".parse().unwrap();
+        let reporter = MulticastReporterKey {
+            source_mac: [2, 0, 0, 0, 0, 1],
+            source_ip: Some("10.0.0.1".parse().unwrap()),
+            ..MulticastReporterKey::default()
+        };
+        let update = [(reporter, group, true)];
+        let now = Instant::now();
+        let refreshed = now + Duration::from_secs(10);
+        assert!(context.update_multicast_memberships(&update, now));
+        assert!(!context.update_multicast_memberships(&update, refreshed));
+        assert_eq!(
+            context.multicast_membership_next_expiry(),
+            Some(refreshed + MULTICAST_MEMBERSHIP_TTL)
+        );
+        assert!(!context.expire_multicast_memberships(now + MULTICAST_MEMBERSHIP_TTL));
+        assert!(context.get_multicast_groups().contains(&group));
+        assert!(context.expire_multicast_memberships(refreshed + MULTICAST_MEMBERSHIP_TTL));
+        assert!(!context.get_multicast_groups().contains(&group));
+    }
 
     pub fn get_mock_global_ctx_with_network(
         network_identy: Option<NetworkIdentity>,

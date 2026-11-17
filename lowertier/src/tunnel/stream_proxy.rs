@@ -3,6 +3,8 @@ use super::{http2, quic::H3ServerStream};
 use crate::common::global_ctx::{ArcGlobalCtx, ProcessMemoryPermit};
 use crate::common::stats_manager::{CounterHandle, MetricName};
 use bytes::{Buf, Bytes, BytesMut};
+#[cfg(any(feature = "socks5", test))]
+use std::time::{Duration, Instant};
 use std::{
     future::Future,
     io,
@@ -13,7 +15,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, ready},
-    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
@@ -30,14 +31,17 @@ const COPY_BYTES: usize = 32 * 1024;
 pub(super) const MAX_STREAMS: usize = 32;
 type H3Requests = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 #[derive(Clone)]
+#[cfg(any(feature = "socks5", test))]
 enum Requests {
     H3(H3Requests),
     H2(h2::client::SendRequest<http2::H2Data>),
 }
+#[cfg(any(feature = "socks5", test))]
 type ClientSend = h3::client::RequestStream<
     <h3_quinn::BidiStream<Bytes> as h3::quic::BidiStream<Bytes>>::SendStream,
     Bytes,
 >;
+#[cfg(any(feature = "socks5", test))]
 type ClientRecv = h3::client::RequestStream<
     <h3_quinn::BidiStream<Bytes> as h3::quic::BidiStream<Bytes>>::RecvStream,
     Bytes,
@@ -55,6 +59,7 @@ fn error(error: impl std::fmt::Display) -> io::Error {
 }
 
 pub struct ProxyEndpoint {
+    #[cfg(any(feature = "socks5", test))]
     requests: Option<Mutex<Requests>>,
     incoming: mpsc::Sender<IncomingProxy>,
     receiver: Mutex<Option<mpsc::Receiver<IncomingProxy>>>,
@@ -64,6 +69,7 @@ pub struct ProxyEndpoint {
     metrics: OnceLock<ProxyMetrics>,
     h2_budget: Option<Arc<http2::H2SendBudget>>,
     h2_receive: Option<Arc<http2::H2ReceiveBudget>>,
+    #[cfg(any(feature = "socks5", test))]
     auto: Mutex<AutoState>,
 }
 struct ProxyMetrics {
@@ -72,12 +78,14 @@ struct ProxyMetrics {
     opened: CounterHandle,
 }
 #[derive(Default)]
+#[cfg(any(feature = "socks5", test))]
 struct AutoState {
     failures: u32,
     retry_at: Option<Instant>,
     probing: bool,
     generation: u64,
 }
+#[cfg(any(feature = "socks5", test))]
 impl AutoState {
     fn admit(&mut self, now: Instant) -> Option<u64> {
         match self.retry_at {
@@ -99,11 +107,13 @@ impl AutoState {
         self.probing = false;
     }
 }
+#[cfg(any(feature = "socks5", test))]
 struct AutoAttempt<'a> {
     state: &'a Mutex<AutoState>,
     complete: bool,
     generation: u64,
 }
+#[cfg(any(feature = "socks5", test))]
 impl AutoAttempt<'_> {
     fn success(&mut self) {
         let mut state = self.state.lock().unwrap();
@@ -130,6 +140,7 @@ impl AutoAttempt<'_> {
         self.complete = true;
     }
 }
+#[cfg(any(feature = "socks5", test))]
 impl Drop for AutoAttempt<'_> {
     fn drop(&mut self) {
         if !self.complete {
@@ -142,7 +153,14 @@ impl Drop for AutoAttempt<'_> {
 }
 impl ProxyEndpoint {
     pub(super) fn new(requests: Option<H3Requests>, context: ArcGlobalCtx) -> Arc<Self> {
-        let endpoint = Self::create(requests.map(Requests::H3), None, None);
+        #[cfg(not(any(feature = "socks5", test)))]
+        drop(requests);
+        let endpoint = Self::create(
+            #[cfg(any(feature = "socks5", test))]
+            requests.map(Requests::H3),
+            None,
+            None,
+        );
         endpoint.bind_context(context);
         endpoint
     }
@@ -151,15 +169,23 @@ impl ProxyEndpoint {
         budget: Arc<http2::H2SendBudget>,
         receive: Arc<http2::H2ReceiveBudget>,
     ) -> Arc<Self> {
-        Self::create(requests.map(Requests::H2), Some(budget), Some(receive))
+        #[cfg(not(any(feature = "socks5", test)))]
+        drop(requests);
+        Self::create(
+            #[cfg(any(feature = "socks5", test))]
+            requests.map(Requests::H2),
+            Some(budget),
+            Some(receive),
+        )
     }
     fn create(
-        requests: Option<Requests>,
+        #[cfg(any(feature = "socks5", test))] requests: Option<Requests>,
         h2_budget: Option<Arc<http2::H2SendBudget>>,
         h2_receive: Option<Arc<http2::H2ReceiveBudget>>,
     ) -> Arc<Self> {
         let (incoming, receiver) = mpsc::channel(2);
         Arc::new(Self {
+            #[cfg(any(feature = "socks5", test))]
             requests: requests.map(Mutex::new),
             incoming,
             receiver: Mutex::new(Some(receiver)),
@@ -169,6 +195,7 @@ impl ProxyEndpoint {
             metrics: OnceLock::new(),
             h2_budget,
             h2_receive,
+            #[cfg(any(feature = "socks5", test))]
             auto: Mutex::new(AutoState::default()),
         })
     }
@@ -205,9 +232,11 @@ impl ProxyEndpoint {
             _ => "off",
         })
     }
+    #[cfg(any(feature = "socks5", test))]
     pub(crate) fn requires_capability(&self) -> bool {
         matches!(self.mode(), Ok("on"))
     }
+    #[cfg(any(feature = "socks5", test))]
     fn decision(&self, selected: &str, reason: &str) {
         tracing::debug!(
             configured = self.mode().unwrap_or("off"),
@@ -267,6 +296,7 @@ impl ProxyEndpoint {
             _h2_receive: receive,
         })
     }
+    #[cfg(any(feature = "socks5", test))]
     pub(crate) async fn connect(
         self: &Arc<Self>,
         source: SocketAddr,
@@ -517,6 +547,7 @@ impl IncomingProxy {
     }
 }
 enum SendHalf {
+    #[cfg(any(feature = "socks5", test))]
     Client(ClientSend),
     Server(ServerSend),
     H2(h2::SendStream<http2::H2Data>, Arc<http2::H2SendBudget>),
@@ -524,6 +555,7 @@ enum SendHalf {
 impl SendHalf {
     async fn data(&mut self, data: Bytes) -> io::Result<()> {
         match self {
+            #[cfg(any(feature = "socks5", test))]
             Self::Client(s) => s.send_data(data).await.map_err(error),
             Self::Server(s) => s.send_data(data).await.map_err(error),
             Self::H2(send, budget) => {
@@ -558,6 +590,7 @@ impl SendHalf {
     }
     async fn finish(&mut self) -> io::Result<()> {
         match self {
+            #[cfg(any(feature = "socks5", test))]
             Self::Client(s) => s.finish().await.map_err(error),
             Self::Server(s) => s.finish().await.map_err(error),
             Self::H2(send, budget) => send
@@ -567,6 +600,7 @@ impl SendHalf {
     }
 }
 enum RecvHalf {
+    #[cfg(any(feature = "socks5", test))]
     Client(ClientRecv),
     Server(ServerRecv),
     H2(h2::RecvStream),
@@ -574,6 +608,7 @@ enum RecvHalf {
 impl RecvHalf {
     fn poll_data(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Option<Bytes>>> {
         match self {
+            #[cfg(any(feature = "socks5", test))]
             Self::Client(s) => s.poll_recv_data(cx).map(|result| {
                 result
                     .map(|data| data.map(|mut b| b.copy_to_bytes(b.remaining())))

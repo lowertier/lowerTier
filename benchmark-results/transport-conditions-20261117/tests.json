@@ -1,0 +1,171 @@
+[
+  {
+    "label": "tests-library",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "lowertier",
+      "--lib",
+      "--",
+      "--test-threads=1",
+      "--skip",
+      "live_challenges_cloudflare_probe"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 0,
+    "timeout": false,
+    "finished_at": "2026-11-17T06:54:20.436719+00:00",
+    "test_results": [
+      {
+        "result": "ok",
+        "passed": 569,
+        "failed": 0,
+        "ignored": 2
+      }
+    ],
+    "delivery_bytes": null
+  },
+  {
+    "label": "tests-caddy",
+    "command": [
+      "env",
+      "CADDY_BIN=/Users/boyu/code/lowertier/benchmark-results/.work/caddy-l4",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "lowertier",
+      "--lib",
+      "caddy_multiplexes",
+      "--",
+      "--ignored",
+      "--test-threads=1"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 0,
+    "timeout": false,
+    "finished_at": "2026-11-17T06:54:26.418382+00:00",
+    "test_results": [
+      {
+        "result": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "delivery_bytes": null
+  },
+  {
+    "label": "tests-quinn-runtime",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "quinn",
+      "--lib",
+      "runtime::tokio::tests",
+      "--",
+      "--test-threads=1"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 0,
+    "timeout": false,
+    "finished_at": "2026-11-17T06:54:34.401937+00:00",
+    "test_results": [
+      {
+        "result": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "delivery_bytes": null
+  },
+  {
+    "label": "multicast-before-fix",
+    "command": [
+      "/Users/boyu/code/lowertier/target/debug/build/lowertier/9004ccac6a4e07d0/out/lowertier-9004ccac6a4e07d0",
+      "--exact",
+      "common::global_ctx::tests::repeated_multicast_reports_refresh_the_expiry_deadline",
+      "--nocapture"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 101,
+    "timeout": false,
+    "finished_at": "2026-11-17T06:10:25.890703+00:00",
+    "test_results": [
+      {
+        "result": "FAILED",
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      }
+    ],
+    "delivery_bytes": null
+  },
+  {
+    "label": "multicast-after-fix",
+    "command": [
+      "/Users/boyu/code/lowertier/target/debug/build/lowertier/9004ccac6a4e07d0/out/lowertier-9004ccac6a4e07d0",
+      "--exact",
+      "common::global_ctx::tests::repeated_multicast_reports_refresh_the_expiry_deadline",
+      "--nocapture"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 0,
+    "timeout": false,
+    "finished_at": "2026-11-17T06:18:49.884588+00:00",
+    "test_results": [
+      {
+        "result": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "delivery_bytes": null
+  },
+  {
+    "label": "multicast-final",
+    "command": [
+      "/Users/boyu/code/lowertier/target/debug/build/lowertier/9004ccac6a4e07d0/out/lowertier-9004ccac6a4e07d0",
+      "--exact",
+      "common::global_ctx::tests::repeated_multicast_reports_refresh_the_expiry_deadline",
+      "--nocapture"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 0,
+    "timeout": false,
+    "finished_at": "2026-11-17T06:55:23.979454+00:00",
+    "test_results": [
+      {
+        "result": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "delivery_bytes": null
+  },
+  {
+    "label": "tracker-release-bootstrap",
+    "command": [
+      "python3",
+      "script/tests/tracker-bootstrap-test.py",
+      "--work-dir",
+      "/Users/boyu/code/lowertier/benchmark-results/.work/transport-conditions-20261117/release-bootstrap"
+    ],
+    "cwd": "/Users/boyu/code/lowertier",
+    "exit_code": 0,
+    "timeout": false,
+    "finished_at": "2026-11-17T07:50:19.341303+00:00",
+    "test_results": [],
+    "delivery_bytes": 4194304
+  }
+]

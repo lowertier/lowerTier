@@ -15,9 +15,10 @@ use crate::{
 };
 use anyhow::Context;
 use chrono::{DateTime, Local};
+#[cfg(feature = "ffi-dataplane")]
+use std::net::SocketAddr;
 use std::{
     collections::VecDeque,
-    net::SocketAddr,
     sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
 };
 use tokio::{

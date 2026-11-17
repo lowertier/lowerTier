@@ -3656,11 +3656,10 @@ fn widest_path_with_preparation(
         work_stats.peak_active_outer_capacity = active_edges.capacity();
         work_stats.label_capacity = labels.capacity();
     }
+    #[cfg(not(test))]
     let mut label_count = LabelCount::default();
     #[cfg(test)]
-    {
-        label_count = 1;
-    }
+    let mut label_count: LabelCount = 1;
     let mut finalized = vec![false; graph.node_count()];
     #[cfg(test)]
     {
@@ -5480,13 +5479,7 @@ impl PeerRouteServiceImpl {
                     continue;
                 }
 
-                if self
-                    .authenticated_peers
-                    .remove(&candidate.peer_id)
-                    .is_some()
-                {
-                    auth_changed = true;
-                }
+                self.authenticated_peers.remove(&candidate.peer_id);
                 self.synced_route_info
                     .locally_authenticated_peers
                     .remove(&candidate.peer_id);

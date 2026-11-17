@@ -87,7 +87,12 @@ impl Timer {
                     tv_nsec: 0,
                 },
                 it_value: libc::timespec {
-                    tv_sec: delay.as_secs().try_into().unwrap_or(libc::time_t::MAX),
+                    tv_sec: delay.as_secs().try_into().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "QUIC deadline exceeds the timerfd range",
+                        )
+                    })?,
                     tv_nsec: delay.subsec_nanos() as _,
                 },
             };

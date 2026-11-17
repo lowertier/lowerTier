@@ -1,14 +1,17 @@
+#[cfg(any(feature = "tun", test))]
 use crate::common::global_ctx::MulticastReporterKey;
 
 pub(crate) const ETHERNET_HEADER_LEN: usize = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "tun", test))]
 pub(crate) enum NeighborTarget {
     Ipv4(std::net::Ipv4Addr),
     Ipv6(std::net::Ipv6Addr),
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(any(feature = "tun", test))]
 enum NeighborRequestKind {
     Arp {
         requester_mac: [u8; 6],
@@ -21,6 +24,7 @@ enum NeighborRequestKind {
     },
 }
 
+#[cfg(any(feature = "tun", test))]
 pub(crate) struct ValidatedNeighborRequest<'a> {
     frame: &'a [u8],
     payload_offset: usize,
@@ -28,6 +32,7 @@ pub(crate) struct ValidatedNeighborRequest<'a> {
     kind: NeighborRequestKind,
 }
 
+#[cfg(any(feature = "tun", test))]
 impl ValidatedNeighborRequest<'_> {
     pub(crate) fn target(&self) -> NeighborTarget {
         self.target
@@ -134,6 +139,7 @@ impl ValidatedNeighborRequest<'_> {
     }
 }
 
+#[cfg(any(feature = "tun", test))]
 pub(crate) fn validated_neighbor_request(frame: &[u8]) -> Option<ValidatedNeighborRequest<'_>> {
     let (ether_type, payload_offset) = ethernet_payload(frame)?;
     match ether_type {
@@ -143,15 +149,18 @@ pub(crate) fn validated_neighbor_request(frame: &[u8]) -> Option<ValidatedNeighb
     }
 }
 
+#[cfg(any(feature = "tun", test))]
 fn ethernet_payload(frame: &[u8]) -> Option<(u16, usize)> {
     let metadata = crate::tunnel::packet_def::ethernet_network_metadata(frame)?;
     Some((metadata.ether_type, metadata.payload_offset))
 }
 
+#[cfg(any(feature = "tun", test))]
 fn valid_unicast_mac(mac: &[u8; 6]) -> bool {
     *mac != [0; 6] && mac[0] & 1 == 0
 }
 
+#[cfg(any(feature = "tun", test))]
 fn validated_arp_request(
     frame: &[u8],
     payload_offset: usize,
@@ -188,6 +197,7 @@ fn validated_arp_request(
     })
 }
 
+#[cfg(any(feature = "tun", test))]
 fn solicited_node_multicast(target: std::net::Ipv6Addr) -> std::net::Ipv6Addr {
     let target = target.octets();
     let mut multicast = [0_u8; 16];
@@ -199,6 +209,7 @@ fn solicited_node_multicast(target: std::net::Ipv6Addr) -> std::net::Ipv6Addr {
     std::net::Ipv6Addr::from(multicast)
 }
 
+#[cfg(any(feature = "tun", test))]
 fn validated_ndp_request(
     frame: &[u8],
     payload_offset: usize,
@@ -456,6 +467,7 @@ pub(crate) fn arp_reply_for_known_ipv4(
     (request.target() == NeighborTarget::Ipv4(target_ipv4)).then(|| request.reply(target_peer_id))
 }
 
+#[cfg(any(feature = "tun", test))]
 fn internet_checksum(parts: &[&[u8]]) -> u16 {
     let mut sum = 0_u32;
     let mut high = None;
@@ -487,6 +499,7 @@ pub(crate) fn ndp_reply_for_known_ipv6(
     (request.target() == NeighborTarget::Ipv6(target_ipv6)).then(|| request.reply(target_peer_id))
 }
 
+#[cfg(any(feature = "tun", test))]
 const MAX_MEMBERSHIP_UPDATES_PER_FRAME: usize = 256;
 
 #[cfg(test)]
@@ -505,6 +518,7 @@ pub(crate) fn multicast_membership_updates_from_ip(packet: &[u8]) -> Vec<(std::n
         .collect()
 }
 
+#[cfg(any(feature = "tun", test))]
 pub(crate) fn multicast_membership_updates_with_reporter(
     frame: &[u8],
 ) -> Vec<(MulticastReporterKey, std::net::IpAddr, bool)> {
@@ -514,6 +528,7 @@ pub(crate) fn multicast_membership_updates_with_reporter(
     multicast_membership_updates_for_packet(packet, reporter)
 }
 
+#[cfg(any(feature = "tun", test))]
 pub(crate) fn multicast_membership_updates_from_ip_with_reporter(
     packet: &[u8],
 ) -> Vec<(MulticastReporterKey, std::net::IpAddr, bool)> {
@@ -524,6 +539,7 @@ pub(crate) fn multicast_membership_updates_from_ip_with_reporter(
     multicast_membership_updates_for_packet(packet, reporter)
 }
 
+#[cfg(any(feature = "tun", test))]
 fn ethernet_ip_payload(frame: &[u8]) -> Option<(&[u8], MulticastReporterKey)> {
     let source_mac = <[u8; 6]>::try_from(frame.get(6..12)?).ok()?;
     let mut ether_type = u16::from_be_bytes(<[u8; 2]>::try_from(frame.get(12..14)?).ok()?);
@@ -560,6 +576,7 @@ fn ethernet_ip_payload(frame: &[u8]) -> Option<(&[u8], MulticastReporterKey)> {
     ))
 }
 
+#[cfg(any(feature = "tun", test))]
 fn source_ip_from_packet(packet: &[u8]) -> Option<std::net::IpAddr> {
     match packet.first().map(|byte| byte >> 4) {
         Some(4) => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
@@ -572,6 +589,7 @@ fn source_ip_from_packet(packet: &[u8]) -> Option<std::net::IpAddr> {
     }
 }
 
+#[cfg(any(feature = "tun", test))]
 fn multicast_membership_updates_for_packet(
     packet: &[u8],
     reporter: MulticastReporterKey,
@@ -583,6 +601,7 @@ fn multicast_membership_updates_for_packet(
     }
 }
 
+#[cfg(any(feature = "tun", test))]
 fn ipv4_membership_updates(
     packet: &[u8],
     reporter: MulticastReporterKey,
@@ -679,6 +698,7 @@ fn ipv4_membership_updates(
     updates
 }
 
+#[cfg(any(feature = "tun", test))]
 fn ipv6_membership_updates(
     packet: &[u8],
     reporter: MulticastReporterKey,

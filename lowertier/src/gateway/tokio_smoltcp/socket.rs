@@ -103,12 +103,11 @@ impl TcpStream {
         };
         connect_result.map_err(map_err)?;
 
-        let local_addr = ep2sa(&local_endpoint);
         let tcp = TcpStream {
             handle,
             reactor,
             #[cfg(feature = "ffi-dataplane")]
-            local_addr,
+            local_addr: ep2sa(&local_endpoint),
         };
 
         tcp.reactor.notify();
@@ -124,13 +123,13 @@ impl TcpStream {
             let mut new_socket = reactor.get_socket::<tcp::Socket>(*new_handle);
             new_socket.listen(listener.local_addr).map_err(map_err)?;
         }
-        let (peer_addr, local_addr) = {
+        let (peer_addr, _local_endpoint) = {
             let socket = reactor.get_socket::<tcp::Socket>(*listener.handle);
             match (socket.remote_endpoint(), socket.local_endpoint()) {
                 (Some(remote_endpoint), Some(local_endpoint)) => (
                     // should be Some, because the state is Established
                     ep2sa(&remote_endpoint),
-                    ep2sa(&local_endpoint),
+                    local_endpoint,
                 ),
                 _ => return Err(io::ErrorKind::NotConnected.into()),
             }
@@ -141,7 +140,7 @@ impl TcpStream {
                 handle: replace(&mut listener.handle, new_handle),
                 reactor,
                 #[cfg(feature = "ffi-dataplane")]
-                local_addr,
+                local_addr: ep2sa(&_local_endpoint),
             },
             peer_addr,
         ))
@@ -628,13 +627,11 @@ impl UdpSocket {
             socket.bind(local_endpoint).map_err(map_err)?;
         }
 
-        let local_addr = ep2sa(&local_endpoint);
-
         Ok(UdpSocket {
             handle,
             reactor,
             #[cfg(feature = "ffi-dataplane")]
-            local_addr,
+            local_addr: ep2sa(&local_endpoint),
         })
     }
     /// Note that on multiple calls to a poll_* method in the send direction, only the Waker from the Context passed to the most recent call will be scheduled to receive a wakeup.

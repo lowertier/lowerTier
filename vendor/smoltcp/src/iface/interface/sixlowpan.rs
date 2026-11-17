@@ -296,7 +296,7 @@ impl InterfaceInner {
         meta: PacketMeta,
         packet: Packet,
         ieee_repr: Ieee802154Repr,
-        frag: &mut Fragmenter,
+        _frag: &mut Fragmenter,
     ) {
         let packet = match packet {
             #[cfg(feature = "proto-ipv4")]
@@ -306,8 +306,10 @@ impl InterfaceInner {
 
         // First we calculate the size we are going to need. If the size is bigger than the MTU,
         // then we use fragmentation.
-        let (total_size, compressed_size, uncompressed_size) =
-            Self::compressed_packet_size(&packet, &ieee_repr);
+        let sizes = Self::compressed_packet_size(&packet, &ieee_repr);
+        let total_size = sizes.0;
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        let (_, compressed_size, uncompressed_size) = sizes;
 
         let ieee_len = ieee_repr.buffer_len();
 
@@ -324,7 +326,7 @@ impl InterfaceInner {
                 // `dispatch_ieee802154_frag` requires some information about the total packet size,
                 // the link local source and destination address...
 
-                let pkt = frag;
+                let pkt = _frag;
                 if pkt.buffer.len() < total_size {
                     net_debug!(
                         "dispatch_ieee802154: dropping, \

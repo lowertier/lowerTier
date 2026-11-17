@@ -1,0 +1,1388 @@
+{
+  "baseline": [
+    {
+      "label": "check-baseline-full-ffi",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "lowertier",
+        "--features",
+        "full",
+        "-p",
+        "lowertier-ffi",
+        "--message-format=json"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T05:56:14.745470+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [
+        {
+          "message": "unused import: `IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT`",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 41
+            }
+          ]
+        },
+        {
+          "message": "unused variable: `source_hardware_addr`",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/ipv4.rs",
+              "line": 89
+            }
+          ]
+        },
+        {
+          "message": "variable does not need to be mutable",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/ipv4.rs",
+              "line": 445
+            }
+          ]
+        },
+        {
+          "message": "variable does not need to be mutable",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/ipv4.rs",
+              "line": 422
+            }
+          ]
+        },
+        {
+          "message": "unused variable: `source_hardware_addr`",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/ipv6.rs",
+              "line": 191
+            }
+          ]
+        },
+        {
+          "message": "variable does not need to be mutable",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 1265
+            }
+          ]
+        },
+        {
+          "message": "variable does not need to be mutable",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 1292
+            }
+          ]
+        },
+        {
+          "message": "variable does not need to be mutable",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 1312
+            }
+          ]
+        },
+        {
+          "message": "variable does not need to be mutable",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 1160
+            }
+          ]
+        },
+        {
+          "message": "field `hardware_addr` is never read",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 131
+            }
+          ]
+        },
+        {
+          "message": "variants `NoRoute` and `NeighborPending` are never constructed",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 1333
+            },
+            {
+              "file": "vendor/smoltcp/src/iface/interface/mod.rs",
+              "line": 1337
+            }
+          ]
+        },
+        {
+          "message": "methods `link_local_ipv6_address` and `mldv2_report_packet` are never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/interface/ipv6.rs",
+              "line": 171
+            },
+            {
+              "file": "vendor/smoltcp/src/iface/interface/ipv6.rs",
+              "line": 536
+            }
+          ]
+        },
+        {
+          "message": "variant `HopByHopIcmpv6` is never constructed",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/iface/packet.rs",
+              "line": 215
+            }
+          ]
+        },
+        {
+          "message": "type alias `Rest` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/mod.rs",
+              "line": 75
+            }
+          ]
+        },
+        {
+          "message": "constant `CUR_HOP_LIMIT` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/icmpv6.rs",
+              "line": 220
+            }
+          ]
+        },
+        {
+          "message": "constant `ROUTER_FLAGS` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/icmpv6.rs",
+              "line": 221
+            }
+          ]
+        },
+        {
+          "message": "constant `ROUTER_LT` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/icmpv6.rs",
+              "line": 222
+            }
+          ]
+        },
+        {
+          "message": "constant `REACHABLE_TM` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/icmpv6.rs",
+              "line": 223
+            }
+          ]
+        },
+        {
+          "message": "constant `NEIGH_FLAGS` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/icmpv6.rs",
+              "line": 230
+            }
+          ]
+        },
+        {
+          "message": "methods `solicited_node` and `is_solicited_node_multicast` are never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/ipv6.rs",
+              "line": 121
+            },
+            {
+              "file": "vendor/smoltcp/src/wire/ipv6.rs",
+              "line": 131
+            }
+          ]
+        },
+        {
+          "message": "method `emit_header` is never used",
+          "locations": [
+            {
+              "file": "vendor/smoltcp/src/wire/udp.rs",
+              "line": 275
+            }
+          ]
+        },
+        {
+          "message": "value assigned to `auth_changed` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/peer_route.rs",
+              "line": 5488
+            }
+          ]
+        },
+        {
+          "message": "constant `ETC_RESOLV_CONF` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/dns_server/system_config/darwin.rs",
+              "line": 13
+            }
+          ]
+        }
+      ],
+      "stderr_warnings": [
+        "warning: `package.homepage` is redundant with `package.repository`",
+        "warning: `quincy-tun` (manifest) generated 1 warning",
+        "warning: `package.homepage` is redundant with `package.repository`",
+        "warning: `lowertier` (manifest) generated 1 warning"
+      ]
+    },
+    {
+      "label": "check-baseline-minimal",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "lowertier",
+        "--no-default-features",
+        "--message-format=json"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:01:44.846367+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [
+        {
+          "message": "unused import: `net::SocketAddr`",
+          "locations": [
+            {
+              "file": "lowertier/src/launcher.rs",
+              "line": 20
+            }
+          ]
+        },
+        {
+          "message": "field `smoltcp_stack_receiver` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/gateway/tcp_proxy.rs",
+              "line": 261
+            }
+          ]
+        },
+        {
+          "message": "method `get_local_ip` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/gateway/tcp_proxy.rs",
+              "line": 885
+            }
+          ]
+        },
+        {
+          "message": "enum `NeighborTarget` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 6
+            }
+          ]
+        },
+        {
+          "message": "enum `NeighborRequestKind` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 12
+            }
+          ]
+        },
+        {
+          "message": "struct `ValidatedNeighborRequest` is never constructed",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 24
+            }
+          ]
+        },
+        {
+          "message": "methods `target`, `reply`, `copy_ethernet_header`, `arp_reply`, and `ndp_reply` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 32
+            },
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 36
+            },
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 63
+            },
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 69
+            },
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 89
+            }
+          ]
+        },
+        {
+          "message": "function `validated_neighbor_request` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 137
+            }
+          ]
+        },
+        {
+          "message": "function `ethernet_payload` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 146
+            }
+          ]
+        },
+        {
+          "message": "function `valid_unicast_mac` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 151
+            }
+          ]
+        },
+        {
+          "message": "function `validated_arp_request` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 155
+            }
+          ]
+        },
+        {
+          "message": "function `solicited_node_multicast` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 191
+            }
+          ]
+        },
+        {
+          "message": "function `validated_ndp_request` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 202
+            }
+          ]
+        },
+        {
+          "message": "function `internet_checksum` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 459
+            }
+          ]
+        },
+        {
+          "message": "constant `MAX_MEMBERSHIP_UPDATES_PER_FRAME` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 490
+            }
+          ]
+        },
+        {
+          "message": "function `multicast_membership_updates_with_reporter` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 508
+            }
+          ]
+        },
+        {
+          "message": "function `multicast_membership_updates_from_ip_with_reporter` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 517
+            }
+          ]
+        },
+        {
+          "message": "function `ethernet_ip_payload` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 527
+            }
+          ]
+        },
+        {
+          "message": "function `source_ip_from_packet` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 563
+            }
+          ]
+        },
+        {
+          "message": "function `multicast_membership_updates_for_packet` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 575
+            }
+          ]
+        },
+        {
+          "message": "function `ipv4_membership_updates` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 586
+            }
+          ]
+        },
+        {
+          "message": "function `ipv6_membership_updates` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/instance/l2_tun.rs",
+              "line": 682
+            }
+          ]
+        },
+        {
+          "message": "field `writer_generation` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 436
+            }
+          ]
+        },
+        {
+          "message": "field `expiry_notify` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 567
+            }
+          ]
+        },
+        {
+          "message": "methods `increment_group_refcount`, `refresh_membership_deadline`, `remove_membership`, and `evict_oldest` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 612
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 645
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 665
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 674
+            }
+          ]
+        },
+        {
+          "message": "constant `MAX_MULTICAST_MEMBERSHIPS` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 696
+            }
+          ]
+        },
+        {
+          "message": "constant `MULTICAST_MEMBERSHIP_TTL` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 697
+            }
+          ]
+        },
+        {
+          "message": "multiple methods are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 933
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 937
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 942
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 951
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 957
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 1019
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 1071
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 1084
+            },
+            {
+              "file": "lowertier/src/common/global_ctx.rs",
+              "line": 1088
+            }
+          ]
+        },
+        {
+          "message": "method `install_direct_nic` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/mod.rs",
+              "line": 207
+            }
+          ]
+        },
+        {
+          "message": "constant `DIRECT_NIC_QUEUE_CREDIT_BYTES` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 36
+            }
+          ]
+        },
+        {
+          "message": "associated function `new` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 64
+            }
+          ]
+        },
+        {
+          "message": "fields `batch`, `queue_guard`, and `queue_credits` are never read",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 122
+            },
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 123
+            },
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 124
+            }
+          ]
+        },
+        {
+          "message": "struct `DirectNicWriteBatch` is never constructed",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 127
+            }
+          ]
+        },
+        {
+          "message": "associated items `new` and `try_append` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 134
+            },
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 145
+            }
+          ]
+        },
+        {
+          "message": "function `collect_direct_nic_write_batch` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 299
+            }
+          ]
+        },
+        {
+          "message": "function `feed_direct_nic_write_batch` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 320
+            }
+          ]
+        },
+        {
+          "message": "function `record_direct_nic_writer_failure` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 332
+            }
+          ]
+        },
+        {
+          "message": "function `run_direct_nic_writer` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 345
+            }
+          ]
+        },
+        {
+          "message": "method `install` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/direct_nic.rs",
+              "line": 437
+            }
+          ]
+        },
+        {
+          "message": "method `resolve_proxy_domain` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/exit_dns.rs",
+              "line": 22
+            }
+          ]
+        },
+        {
+          "message": "method `select_tcp_proxy` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/peer_conn.rs",
+              "line": 4181
+            }
+          ]
+        },
+        {
+          "message": "field `packet_ingress` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/peer_manager.rs",
+              "line": 830
+            }
+          ]
+        },
+        {
+          "message": "methods `path_applies_to`, `proxy_dns_exit`, and `install_direct_nic_sink` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/peer_manager.rs",
+              "line": 3799
+            },
+            {
+              "file": "lowertier/src/peers/peer_manager.rs",
+              "line": 5564
+            },
+            {
+              "file": "lowertier/src/peers/peer_manager.rs",
+              "line": 6470
+            }
+          ]
+        },
+        {
+          "message": "function `classify_nic_packet_flow` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/peers/flow.rs",
+              "line": 418
+            }
+          ]
+        },
+        {
+          "message": "function `protect_gui_port` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/rpc_service/protected_port.rs",
+              "line": 85
+            }
+          ]
+        },
+        {
+          "message": "associated items `new`, `try_take`, and `take_or_allocate` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/packet_def.rs",
+              "line": 509
+            },
+            {
+              "file": "lowertier/src/tunnel/packet_def.rs",
+              "line": 528
+            },
+            {
+              "file": "lowertier/src/tunnel/packet_def.rs",
+              "line": 533
+            }
+          ]
+        },
+        {
+          "message": "associated functions `new_from_reusable_buf` and `new_with_payload_len` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/packet_def.rs",
+              "line": 862
+            },
+            {
+              "file": "lowertier/src/tunnel/packet_def.rs",
+              "line": 904
+            }
+          ]
+        },
+        {
+          "message": "method `snapshot` is never used",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/queue_feedback.rs",
+              "line": 59
+            }
+          ]
+        },
+        {
+          "message": "field `0` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 34
+            }
+          ]
+        },
+        {
+          "message": "field `0` is never read",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 35
+            }
+          ]
+        },
+        {
+          "message": "fields `requests` and `auto` are never read",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 58
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 67
+            }
+          ]
+        },
+        {
+          "message": "fields `failures`, `retry_at`, `probing`, and `generation` are never read",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 76
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 77
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 78
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 79
+            }
+          ]
+        },
+        {
+          "message": "methods `admit` and `failed` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 82
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 92
+            }
+          ]
+        },
+        {
+          "message": "struct `AutoAttempt` is never constructed",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 102
+            }
+          ]
+        },
+        {
+          "message": "methods `success`, `neutral`, and `failed` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 108
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 118
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 125
+            }
+          ]
+        },
+        {
+          "message": "methods `requires_capability`, `decision`, and `connect` are never used",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 208
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 211
+            },
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 270
+            }
+          ]
+        },
+        {
+          "message": "variant `Client` is never constructed",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 520
+            }
+          ]
+        },
+        {
+          "message": "variant `Client` is never constructed",
+          "locations": [
+            {
+              "file": "lowertier/src/tunnel/stream_proxy.rs",
+              "line": 570
+            }
+          ]
+        }
+      ],
+      "stderr_warnings": []
+    }
+  ],
+  "feature_checks": [
+    {
+      "label": "check-minimal",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier",
+        "--no-default-features"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:32:33.761653+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-default",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:32:51.699442+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-full-ffi",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier",
+        "--features",
+        "full",
+        "-p",
+        "lowertier-ffi"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:32:59.118514+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-tun-only",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier",
+        "--no-default-features",
+        "--features",
+        "tun"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:33:16.037263+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-socks-only",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier",
+        "--no-default-features",
+        "--features",
+        "socks5"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:50:39.044409+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-ffi-userspace",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier-ffi",
+        "--no-default-features",
+        "--features",
+        "c-abi,ffi-dataplane"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:50:44.658594+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-ffi-packet-tunnel",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier-ffi",
+        "--no-default-features",
+        "--features",
+        "c-abi,packet-tunnel"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:50:50.450593+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "check-smoltcp-media",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+        "-p",
+        "lowertier",
+        "--features",
+        "smoltcp/medium-ethernet,smoltcp/medium-ieee802154,smoltcp/proto-sixlowpan,smoltcp/multicast"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:50:56.783829+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    }
+  ],
+  "release_builds": [
+    {
+      "label": "build-release-native",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--offline",
+        "-p",
+        "lowertier",
+        "--bin",
+        "lowertier",
+        "-p",
+        "lowertier-tracker",
+        "--features",
+        "lowertier-tracker/server",
+        "--bin",
+        "lowertier-tracker"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T07:48:06.568452+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    },
+    {
+      "label": "build-release-x86_64-unknown-linux-musl",
+      "command": [
+        "env",
+        "-u",
+        "CFLAGS",
+        "-u",
+        "CXXFLAGS",
+        "-u",
+        "CPPFLAGS",
+        "CARGO_BUILD_JOBS=8",
+        "HOST_CC=/Library/Developer/CommandLineTools/usr/bin/clang",
+        "DEVELOPER_DIR=/Library/Developer/CommandLineTools",
+        "SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "cargo",
+        "zigbuild",
+        "--release",
+        "--locked",
+        "--offline",
+        "-p",
+        "lowertier",
+        "--bin",
+        "lowertier",
+        "--target",
+        "x86_64-unknown-linux-musl"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T07:52:17.629928+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": [
+        "warning: linker stderr: ignoring deprecated linker optimization setting \"1\"",
+        "warning: `lowertier` (bin \"lowertier\") generated 1 warning"
+      ]
+    },
+    {
+      "label": "build-release-aarch64-unknown-linux-musl",
+      "command": [
+        "env",
+        "-u",
+        "CFLAGS",
+        "-u",
+        "CXXFLAGS",
+        "-u",
+        "CPPFLAGS",
+        "CARGO_BUILD_JOBS=8",
+        "HOST_CC=/Library/Developer/CommandLineTools/usr/bin/clang",
+        "DEVELOPER_DIR=/Library/Developer/CommandLineTools",
+        "SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "cargo",
+        "zigbuild",
+        "--release",
+        "--locked",
+        "--offline",
+        "-p",
+        "lowertier",
+        "--bin",
+        "lowertier",
+        "--target",
+        "aarch64-unknown-linux-musl"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T07:56:34.938846+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": [
+        "warning: linker stderr: ignoring deprecated linker optimization setting \"1\"",
+        "warning: `lowertier` (bin \"lowertier\") generated 1 warning"
+      ]
+    }
+  ],
+  "standalone_vendor_tests": [
+    {
+      "label": "test-smoltcp-ip",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "vendor/smoltcp/Cargo.toml",
+        "--offline",
+        "--target-dir",
+        "target",
+        "--lib",
+        "--no-default-features",
+        "--features",
+        "std,medium-ip,proto-ipv4,proto-ipv6,proto-ipv4-fragmentation,socket-tcp,socket-udp,socket-tcp-reno,socket-tcp-cubic",
+        "--message-format=json"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:41:15.037183+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [
+        {
+          "message": "unused import: `super::*`",
+          "locations": [
+            {
+              "file": "src/iface/interface/tests/ipv4.rs",
+              "line": 1
+            }
+          ]
+        },
+        {
+          "message": "unused import: `crate::iface::Interface`",
+          "locations": [
+            {
+              "file": "src/iface/interface/tests/mod.rs",
+              "line": 17
+            }
+          ]
+        },
+        {
+          "message": "unused import: `crate::phy::Loopback`",
+          "locations": [
+            {
+              "file": "src/iface/interface/tests/mod.rs",
+              "line": 20
+            }
+          ]
+        },
+        {
+          "message": "unused import: `crate::phy::Medium`",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 611
+            }
+          ]
+        },
+        {
+          "message": "unused import: `crate::tests::setup`",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 612
+            }
+          ]
+        },
+        {
+          "message": "unused import: `rstest::*`",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 613
+            }
+          ]
+        },
+        {
+          "message": "unused import: `super::*`",
+          "locations": [
+            {
+              "file": "src/wire/mod.rs",
+              "line": 575
+            }
+          ]
+        },
+        {
+          "message": "unused import: `rstest::rstest`",
+          "locations": [
+            {
+              "file": "src/wire/mod.rs",
+              "line": 576
+            }
+          ]
+        },
+        {
+          "message": "struct `MockTxToken` is never constructed",
+          "locations": [
+            {
+              "file": "src/iface/interface/tests/mod.rs",
+              "line": 41
+            }
+          ]
+        },
+        {
+          "message": "function `parse_ipv6` is never used",
+          "locations": [
+            {
+              "file": "src/iface/interface/tests/ipv6.rs",
+              "line": 3
+            }
+          ]
+        },
+        {
+          "message": "constant `OTHER_ADDR` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 642
+            }
+          ]
+        },
+        {
+          "message": "constant `LOCAL_IP_REPR` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 680
+            }
+          ]
+        },
+        {
+          "message": "constant `REMOTE_IP_REPR` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 688
+            }
+          ]
+        },
+        {
+          "message": "constant `BAD_IP_REPR` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 696
+            }
+          ]
+        },
+        {
+          "message": "constant `LOCAL_UDP_REPR` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 704
+            }
+          ]
+        },
+        {
+          "message": "constant `REMOTE_UDP_REPR` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 709
+            }
+          ]
+        },
+        {
+          "message": "constant `PAYLOAD` is never used",
+          "locations": [
+            {
+              "file": "src/socket/udp.rs",
+              "line": 714
+            }
+          ]
+        }
+      ],
+      "stderr_warnings": []
+    },
+    {
+      "label": "test-smoltcp-media",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "vendor/smoltcp/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "target",
+        "--lib",
+        "--features",
+        "socket-tcp-reno,socket-tcp-cubic",
+        "--message-format=json"
+      ],
+      "cwd": "/Users/boyu/code/lowertier",
+      "finished_at": "2026-11-17T06:45:54.259238+00:00",
+      "exit_code": 0,
+      "timeout": false,
+      "rust_diagnostics": [],
+      "stderr_warnings": []
+    }
+  ]
+}

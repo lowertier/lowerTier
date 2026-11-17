@@ -5313,7 +5313,6 @@ dependencies = [
  "async-std",
  "bencher",
  "bytes",
- "cfg_aliases",
  "clap",
  "crc",
  "directories-next",

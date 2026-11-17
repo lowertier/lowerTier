@@ -650,7 +650,7 @@ mod tests {
             }
             if self
                 .failures
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     value.checked_sub(1)
                 })
                 .is_ok()

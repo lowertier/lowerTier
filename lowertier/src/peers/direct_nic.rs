@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    BoxPeerPacketFilter,
+    BoxPeerPacketFilter, DIRECT_NIC_QUEUE_BATCH_CAPACITY, DIRECT_NIC_QUEUE_PACKET_CAPACITY,
     flow::stamp_packet_flow,
     l2_fabric::{L2Fabric, L2IngressBatch},
     peer_manager::{PeerManager, inspect_direct_nic_batch},
@@ -29,9 +29,6 @@ use super::{
     traffic_metrics::TrafficMetricRecorder,
 };
 
-const DIRECT_NIC_QUEUE_BATCH_CAPACITY: usize = 3;
-pub(super) const DIRECT_NIC_QUEUE_PACKET_CAPACITY: usize =
-    MAX_PACKET_BATCH_SIZE * DIRECT_NIC_QUEUE_BATCH_CAPACITY;
 const DIRECT_NIC_QUEUE_SLOT_BYTES: usize = 4 * 1024;
 const DIRECT_NIC_QUEUE_CREDIT_BYTES: usize =
     DIRECT_NIC_QUEUE_PACKET_CAPACITY * DIRECT_NIC_QUEUE_SLOT_BYTES;

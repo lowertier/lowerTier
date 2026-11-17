@@ -86,7 +86,7 @@ impl InterfaceInner {
         &mut self,
         sockets: &mut SocketSet,
         meta: PacketMeta,
-        source_hardware_addr: HardwareAddress,
+        _source_hardware_addr: HardwareAddress,
         ipv4_packet: &Ipv4Packet<&'a [u8]>,
         frag: &'a mut FragmentsBuffer,
     ) -> Option<Packet<'a>> {
@@ -207,7 +207,7 @@ impl InterfaceInner {
         if self.is_unicast_v4(ipv4_repr.dst_addr) {
             self.neighbor_cache.reset_expiry_if_existing(
                 IpAddress::Ipv4(ipv4_repr.src_addr),
-                source_hardware_addr,
+                _source_hardware_addr,
                 self.now,
             );
         }
@@ -419,11 +419,13 @@ impl InterfaceInner {
         frag.ipv4.repr.payload_len = payload_len;
         frag.sent_bytes += payload_len;
 
-        let mut tx_len = ip_len;
+        let tx_len = ip_len;
         #[cfg(feature = "medium-ethernet")]
-        if matches!(caps.medium, Medium::Ethernet) {
-            tx_len += EthernetFrame::<&[u8]>::header_len();
-        }
+        let tx_len = if matches!(caps.medium, Medium::Ethernet) {
+            tx_len + EthernetFrame::<&[u8]>::header_len()
+        } else {
+            tx_len
+        };
 
         // Emit function for the Ethernet header.
         #[cfg(feature = "medium-ethernet")]
@@ -442,12 +444,14 @@ impl InterfaceInner {
             }
         };
 
-        tx_token.consume(tx_len, |mut tx_buffer| {
+        tx_token.consume(tx_len, |tx_buffer| {
             #[cfg(feature = "medium-ethernet")]
-            if matches!(self.caps.medium, Medium::Ethernet) {
+            let tx_buffer = if matches!(self.caps.medium, Medium::Ethernet) {
                 emit_ethernet(&IpRepr::Ipv4(frag.ipv4.repr), tx_buffer);
-                tx_buffer = &mut tx_buffer[EthernetFrame::<&[u8]>::header_len()..];
-            }
+                &mut tx_buffer[EthernetFrame::<&[u8]>::header_len()..]
+            } else {
+                tx_buffer
+            };
 
             let mut packet =
                 Ipv4Packet::new_unchecked(&mut tx_buffer[..frag.ipv4.repr.buffer_len()]);

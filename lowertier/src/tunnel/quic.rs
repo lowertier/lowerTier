@@ -840,38 +840,9 @@ mod tls {
             .map_err(Into::into)
     }
 }
-fn parse_pacing_burst_packets(value: Option<&str>) -> Result<std::num::NonZeroU16, TunnelError> {
-    match value {
-        None => Ok(std::num::NonZeroU16::new(64).unwrap()),
-        Some(value) => value
-            .parse::<std::num::NonZeroU16>()
-            .ok()
-            .filter(|value| value.get() <= 256)
-            .ok_or_else(|| {
-                TunnelError::InternalError(
-                    "LOWTIER_QUIC_PACING_BURST_PACKETS must be an integer from 1 through 256"
-                        .into(),
-                )
-            }),
-    }
-}
-
 pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelError> {
     let mut config = TransportConfig::default();
-    // Resolve once at connection setup; the packet path keeps only the bound.
-    // This diagnostic override varies burst injection independently of the
-    // congestion controller for matched-binary validation on different links.
-    let burst_override = std::env::var("LOWTIER_QUIC_PACING_BURST_PACKETS");
-    let burst_value = match &burst_override {
-        Ok(value) => Some(value.as_str()),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(_) => {
-            return Err(TunnelError::InternalError(
-                "invalid pacing burst encoding".into(),
-            ));
-        }
-    };
-    config.pacing_burst_size(parse_pacing_burst_packets(burst_value)?);
+    config.pacing_burst_size(std::num::NonZeroU16::new(64).unwrap());
 
     let stream_receive_window = VarInt::from_u64(
         flags
@@ -913,7 +884,7 @@ pub fn transport_config(flags: &Flags) -> Result<Arc<TransportConfig>, TunnelErr
         .send_window(QUIC_CONNECTION_SEND_WINDOW_BYTES)
         .stream_receive_window(stream_receive_window)
         .receive_window(receive_window)
-        .congestion_controller_factory(tunnel_cc::controller_factory()?);
+        .congestion_controller_factory(tunnel_cc::controller_factory());
 
     Ok(Arc::new(config))
 }
@@ -5855,7 +5826,7 @@ mod pacing_configuration_tests {
     use super::*;
 
     #[test]
-    fn burst_override_is_nonzero_bounded_and_optional() {
+    fn connection_admission_keeps_process_memory_reserve() {
         use crate::common::global_ctx::{ProcessMemoryGovernor, process_memory_limit};
         for (physical, network_extension, expected) in [
             (0, false, 48),
@@ -5884,16 +5855,6 @@ mod pacing_configuration_tests {
             assert!(governor.try_reserve_owned(governor.limit() / 4).is_some());
             drop(permits);
             assert_eq!(governor.retained(), 0);
-        }
-        assert_eq!(parse_pacing_burst_packets(None).unwrap().get(), 64);
-        for value in ["1", "32", "64", "128", "256"] {
-            assert_eq!(
-                parse_pacing_burst_packets(Some(value)).unwrap().get(),
-                value.parse::<u16>().unwrap()
-            );
-        }
-        for value in ["", "0", "-1", "257", "65536", "64 packets"] {
-            assert!(parse_pacing_burst_packets(Some(value)).is_err(), "{value}");
         }
     }
 }
